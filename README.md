@@ -1,5 +1,7 @@
 # Autonet: Decentralized Autonomous AI Network
 
+https://autonet.computer
+
 Autonet is a unified framework for decentralized AI training, inference, and governance. It combines four foundational components into a coherent system:
 
 - **Proof of Intelligence (PoI)**: Distributed AI model training with cryptoeconomic incentives
