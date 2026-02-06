@@ -337,6 +337,8 @@ class CoordinatorNode:
         """
         Verify a solution against ground truth.
 
+        Supports both supervised (accuracy-based) and self-supervised (embedding-based) tasks.
+
         Args:
             solution_cid: IPFS CID of solution
             ground_truth_cid: IPFS CID of ground truth
@@ -349,44 +351,94 @@ class CoordinatorNode:
             solution_data = self.ipfs.get_json(solution_cid)
             ground_truth_data = self.ipfs.get_json(ground_truth_cid)
 
-            # Extract metrics if available
+            # Extract metrics
             solution_metrics = solution_data.get("metrics", {})
-            solution_accuracy = solution_metrics.get("accuracy", 0.0)
+            task_type = solution_data.get("task_type", "supervised")
 
-            # Ground truth specifies accuracy_threshold, not achieved accuracy
-            accuracy_threshold = ground_truth_data.get("accuracy_threshold", 0.0)
-
-            # Simple verification: check if solution meets the threshold
-            if accuracy_threshold > 0 and solution_accuracy > 0:
-                # Score based on how solution compares to threshold
-                # Give full score if at or above threshold
-                if solution_accuracy >= accuracy_threshold:
-                    score = 100
-                else:
-                    # Partial score if below threshold
-                    score = int((solution_accuracy / accuracy_threshold) * 100)
+            # Determine verification method based on task type
+            if task_type == "jepa" or solution_metrics.get("self_supervised"):
+                # JEPA/Self-supervised verification: use embedding similarity
+                return self._verify_jepa_solution(solution_metrics, ground_truth_data)
             else:
-                # Fallback: if no threshold or no accuracy data,
-                # assume it's a valid attempt and give a passing score
-                # This handles edge cases gracefully
-                score = 80
-
-            # Consider correct if score >= 70
-            is_correct = score >= 70
-
-            logger.info(
-                f"Verification result: score={score}, "
-                f"correct={is_correct}, "
-                f"solution_acc={solution_accuracy:.3f}, "
-                f"threshold={accuracy_threshold:.3f}"
-            )
-
-            return is_correct, score
+                # Supervised verification: use accuracy
+                return self._verify_supervised_solution(solution_metrics, ground_truth_data)
 
         except Exception as e:
             logger.error(f"Error verifying solution: {e}", exc_info=True)
             # Conservative: assume incorrect on error
             return False, 0
+
+    def _verify_supervised_solution(
+        self,
+        solution_metrics: dict,
+        ground_truth_data: dict
+    ) -> tuple[bool, int]:
+        """Verify supervised (accuracy-based) solution."""
+        solution_accuracy = solution_metrics.get("accuracy", 0.0)
+        accuracy_threshold = ground_truth_data.get("accuracy_threshold", 0.0)
+
+        if accuracy_threshold > 0 and solution_accuracy > 0:
+            if solution_accuracy >= accuracy_threshold:
+                score = 100
+            else:
+                score = int((solution_accuracy / accuracy_threshold) * 100)
+        else:
+            # Fallback: give passing score
+            score = 80
+
+        is_correct = score >= 70
+
+        logger.info(
+            f"Supervised verification: score={score}, correct={is_correct}, "
+            f"solution_acc={solution_accuracy:.3f}, threshold={accuracy_threshold:.3f}"
+        )
+
+        return is_correct, score
+
+    def _verify_jepa_solution(
+        self,
+        solution_metrics: dict,
+        ground_truth_data: dict
+    ) -> tuple[bool, int]:
+        """
+        Verify JEPA (embedding-based) solution.
+
+        For JEPA, we verify by checking:
+        - cosine_similarity: how well predictions match target embeddings
+        - embedding_energy (L2 distance): lower is better
+
+        Ground truth for JEPA is the target encoder's behavior.
+        """
+        cosine_sim = solution_metrics.get("cosine_similarity", 0.0)
+        embedding_energy = solution_metrics.get("embedding_energy", float('inf'))
+        loss = solution_metrics.get("loss", float('inf'))
+
+        # Get thresholds from ground truth (or use defaults)
+        min_cosine_sim = ground_truth_data.get("min_cosine_similarity", 0.5)
+        max_energy = ground_truth_data.get("max_embedding_energy", 1.0)
+
+        # Score based on cosine similarity (main metric for JEPA)
+        # Cosine similarity ranges from -1 to 1, but we expect > 0 for trained models
+        if cosine_sim >= min_cosine_sim:
+            # Above threshold: full credit + bonus for exceeding
+            score = min(100, int(50 + cosine_sim * 50))
+        else:
+            # Below threshold: partial credit
+            score = int(cosine_sim * 100)
+
+        # Adjust based on embedding energy if available
+        if embedding_energy < max_energy:
+            score = min(100, score + 10)
+
+        is_correct = cosine_sim >= min_cosine_sim
+
+        logger.info(
+            f"JEPA verification: score={score}, correct={is_correct}, "
+            f"cosine_sim={cosine_sim:.3f} (min={min_cosine_sim}), "
+            f"energy={embedding_energy:.3f} (max={max_energy}), loss={loss:.3f}"
+        )
+
+        return is_correct, score
 
     def _compute_structural_similarity(
         self,

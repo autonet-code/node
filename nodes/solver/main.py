@@ -82,6 +82,7 @@ class SolverNode:
         node_id: str,
         project_id: int,
         deterministic_seed: Optional[int] = None,
+        task_type: str = "supervised",
     ):
         """
         Initialize SolverNode.
@@ -92,12 +93,14 @@ class SolverNode:
             node_id: Unique identifier for this node (e.g., "solver-0")
             project_id: Project ID to work on
             deterministic_seed: Seed for reproducible training
+            task_type: Type of training ("supervised" or "jepa")
         """
         self.registry = registry
         self.ipfs = ipfs
         self.node_id = node_id
         self.project_id = project_id
         self.deterministic_seed = deterministic_seed or int(time.time())
+        self.task_type = task_type  # "supervised" (CNN) or "jepa" (self-supervised)
 
         self.metrics = SolverMetrics()
         self.tasks: Dict[int, TaskInfo] = {}
@@ -278,13 +281,12 @@ class SolverNode:
         """
         Perform real ML training with checkpoint generation.
 
+        Supports both supervised (CNN) and self-supervised (JEPA) training.
+
         Returns:
             (model_update_dict, checkpoints_list)
         """
         try:
-            # Import ML module
-            from ..common.ml import train_on_task
-
             # Fetch current global model (if any) for federated learning
             global_model_cid = self.registry.get_mature_model(self.project_id)
             if global_model_cid:
@@ -292,57 +294,128 @@ class SolverNode:
             else:
                 logger.info(f"[{self.node_id}] No global model yet, training from scratch")
 
-            # Prepare task spec
-            task_spec = {
-                "task_id": task_id,
-                "epochs": 1,  # Single epoch for fast training
-            }
+            # Determine task type (default to supervised CNN)
+            task_type = getattr(self, 'task_type', 'supervised')
 
-            # Perform real training (starting from global model if available)
-            logger.info(f"[{self.node_id}] Starting real ML training for task {task_id}...")
-            weight_delta, metrics = train_on_task(
-                task_spec=task_spec,
-                ipfs_client=self.ipfs,
-                epochs=1,
-                batch_size=32,
-                learning_rate=0.01,
-                num_samples=500,  # Small subset for fast training (~5 seconds)
-                global_model_cid=global_model_cid,  # Continue from global model
-            )
-
-            # Generate checkpoints (mock for now, but based on real training)
-            checkpoints = []
-            training_steps = metrics.get("num_samples", 500) // 32  # batches
-            current_seed = self._generate_deterministic_seed(task_id, 0)
-
-            for step in range(0, training_steps, max(1, training_steps // 3)):
-                checkpoint = self._create_checkpoint(step, current_seed)
-                checkpoints.append(checkpoint)
-                current_seed = self._generate_deterministic_seed(task_id, step + 1)
-
-            # Final checkpoint
-            final_checkpoint = self._create_checkpoint(training_steps, current_seed)
-            checkpoints.append(final_checkpoint)
-
-            # Build model update with real training results
-            model_update = {
-                "task_id": task_id,
-                "weight_delta": weight_delta,  # Real weight updates for FedAvg
-                "metrics": metrics,
-                "training_steps": training_steps,
-                "checkpoint_frequency": max(1, training_steps // 3),
-                "final_seed": current_seed,
-                "solver": self.node_id,
-                "real_training": True,
-            }
-
-            logger.info(f"[{self.node_id}] Real training completed: loss={metrics['loss']:.4f}, accuracy={metrics['accuracy']:.4f}")
-            return model_update, checkpoints
+            if task_type == 'jepa':
+                return self._train_jepa(task_id, global_model_cid)
+            else:
+                return self._train_supervised(task_id, global_model_cid)
 
         except Exception as e:
             logger.error(f"[{self.node_id}] Real training failed, falling back to mock: {e}")
             # Fallback to mock training
             return self._mock_train_fallback(task_id)
+
+    def _train_supervised(self, task_id: int, global_model_cid: str = None) -> tuple:
+        """
+        Perform supervised CNN training (original behavior).
+        """
+        from ..common.ml import train_on_task
+
+        # Prepare task spec
+        task_spec = {
+            "task_id": task_id,
+            "epochs": 1,  # Single epoch for fast training
+        }
+
+        # Perform real training (starting from global model if available)
+        logger.info(f"[{self.node_id}] Starting supervised ML training for task {task_id}...")
+        weight_delta, metrics = train_on_task(
+            task_spec=task_spec,
+            ipfs_client=self.ipfs,
+            epochs=1,
+            batch_size=32,
+            learning_rate=0.01,
+            num_samples=500,  # Small subset for fast training (~5 seconds)
+            global_model_cid=global_model_cid,  # Continue from global model
+        )
+
+        # Generate checkpoints
+        checkpoints = self._generate_training_checkpoints(task_id, metrics)
+
+        # Build model update with real training results
+        model_update = {
+            "task_id": task_id,
+            "task_type": "supervised",
+            "weight_delta": weight_delta,  # Real weight updates for FedAvg
+            "metrics": metrics,
+            "training_steps": metrics.get("num_samples", 500) // 32,
+            "checkpoint_frequency": max(1, (metrics.get("num_samples", 500) // 32) // 3),
+            "final_seed": self._generate_deterministic_seed(task_id, 100),
+            "solver": self.node_id,
+            "real_training": True,
+        }
+
+        logger.info(f"[{self.node_id}] Supervised training completed: loss={metrics['loss']:.4f}, accuracy={metrics['accuracy']:.4f}")
+        return model_update, checkpoints
+
+    def _train_jepa(self, task_id: int, global_model_cid: str = None) -> tuple:
+        """
+        Perform JEPA self-supervised training.
+
+        JEPA trains by predicting masked patch embeddings - no labels needed.
+        Verification uses embedding distance instead of accuracy.
+        """
+        from ..common.ml import train_jepa_on_task
+
+        # Prepare task spec for JEPA
+        task_spec = {
+            "task_id": task_id,
+            "task_type": "jepa_pretrain",
+            "image_size": 32,  # CIFAR-10 size
+            "patch_size": 4,
+            "epochs": 2,
+        }
+
+        # Perform JEPA training
+        logger.info(f"[{self.node_id}] Starting JEPA self-supervised training for task {task_id}...")
+        weight_delta, metrics = train_jepa_on_task(
+            task_spec=task_spec,
+            ipfs_client=self.ipfs,
+            epochs=2,
+            batch_size=32,
+            learning_rate=0.001,
+            num_samples=200,  # Smaller for fast training
+            global_model_cid=global_model_cid,
+        )
+
+        # Generate checkpoints
+        checkpoints = self._generate_training_checkpoints(task_id, metrics)
+
+        # Build model update for JEPA
+        model_update = {
+            "task_id": task_id,
+            "task_type": "jepa",
+            "weight_delta": weight_delta,
+            "metrics": metrics,
+            "training_steps": metrics.get("num_samples", 200) // 32,
+            "checkpoint_frequency": max(1, (metrics.get("num_samples", 200) // 32) // 3),
+            "final_seed": self._generate_deterministic_seed(task_id, 100),
+            "solver": self.node_id,
+            "real_training": True,
+            "self_supervised": True,
+        }
+
+        logger.info(f"[{self.node_id}] JEPA training completed: loss={metrics['loss']:.4f}, cosine_sim={metrics.get('cosine_similarity', 0):.4f}")
+        return model_update, checkpoints
+
+    def _generate_training_checkpoints(self, task_id: int, metrics: dict) -> list:
+        """Generate training checkpoints from metrics."""
+        checkpoints = []
+        training_steps = metrics.get("num_samples", 500) // 32
+        current_seed = self._generate_deterministic_seed(task_id, 0)
+
+        for step in range(0, training_steps, max(1, training_steps // 3)):
+            checkpoint = self._create_checkpoint(step, current_seed)
+            checkpoints.append(checkpoint)
+            current_seed = self._generate_deterministic_seed(task_id, step + 1)
+
+        # Final checkpoint
+        final_checkpoint = self._create_checkpoint(training_steps, current_seed)
+        checkpoints.append(final_checkpoint)
+
+        return checkpoints
 
     def _mock_train_fallback(self, task_id: int) -> tuple:
         """

@@ -108,7 +108,47 @@ Self-improving distributed training with commit-reveal pattern:
 
 **Status: Fully operational** - Complete loop demonstrated with real PyTorch training
 
-### 3. Constitutional Governance
+### 3. Decentralized Training and Inference
+
+Autonet enables AI model training and inference without centralized infrastructure:
+
+**Training**: Multiple solver nodes train on local data, submit weight updates verified by coordinators, and aggregate via FedAvg. No single entity controls training data or model updates.
+
+**Model Storage**: Trained model weights are sharded across storage providers via ModelShardRegistry:
+- Merkle proofs verify shard integrity
+- Erasure coding (k data + n parity shards) ensures availability even if providers go offline
+- Staked providers are economically incentivized to maintain uptime
+
+**Inference**: Published models can be queried via `requestInference()`. Providers stake ATN and compete to serve requests.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    DISTRIBUTED WEIGHT STORAGE                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│   Model (8M params)                                                      │
+│         │                                                                │
+│         ▼                                                                │
+│   ┌─────────────┐                                                        │
+│   │ Shard Model │  4 data shards + 1 parity                             │
+│   └─────────────┘                                                        │
+│         │                                                                │
+│   ┌─────┼─────┬─────┬─────┬─────┐                                       │
+│   ▼     ▼     ▼     ▼     ▼     ▼                                       │
+│ [S0]  [S1]  [S2]  [S3]  [P0]   ← Each uploaded to IPFS                 │
+│   │     │     │     │     │                                             │
+│   ▼     ▼     ▼     ▼     ▼                                             │
+│ ┌───────────────────────────────┐                                       │
+│ │   ModelShardRegistry.sol      │  On-chain coordination               │
+│ │   - registerModel(merkleRoot) │                                       │
+│ │   - announceShard(provider)   │                                       │
+│ │   - checkAvailability()       │                                       │
+│ └───────────────────────────────┘                                       │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 4. Constitutional Governance
 
 Decisions requiring conceptual reasoning use LLM-based consensus:
 - Multi-modal language models evaluate proposals
@@ -116,7 +156,7 @@ Decisions requiring conceptual reasoning use LLM-based consensus:
 - Stake-weighted voting for economic alignment
 - High quorum (95%) for constitutional amendments
 
-### 4. Dual Token Economics
+### 5. Dual Token Economics
 
 - **ATN (Autonoma Token)**: Native token for gas, staking, rewards, and governance
 - **Project Tokens (PT)**: Project-specific tokens for investment and revenue sharing
@@ -238,6 +278,7 @@ java -jar rollup/target/autonet-rollup.jar
 | `TaskContract.sol` | Task lifecycle: proposal, checkpoints, solution commitment |
 | `ResultsRewards.sol` | Multi-coordinator Yuma voting, rewards distribution, slashing |
 | `ParticipantStaking.sol` | Role-based staking for Proposers, Solvers, Coordinators, Aggregators |
+| `ModelShardRegistry.sol` | Distributed model weight storage with Merkle proofs and erasure coding |
 | `ForcedErrorRegistry.sol` | Injects forced errors for coordinator vigilance testing |
 | `ATNToken.sol` | ERC20Votes governance token |
 | `AnchorBridge.sol` | L1/L2 checkpoint storage and token bridge |
@@ -327,6 +368,20 @@ CORE_PRINCIPLES = [
 - Global model publishing via `setMatureModel`
 - Forced error registry for coordinator vigilance testing
 - Complete Absolute Zero loop operational
+
+### Phase 2.5: Self-Supervised Learning & Distributed Weights ✅ COMPLETE
+- **JEPA (Joint Embedding Predictive Architecture)** integration
+  - Self-supervised learning without labeled data
+  - Masked patch prediction in embedding space
+  - EMA target encoder for stable training
+- **Distributed model weights via ModelShardRegistry**
+  - Layer-wise model sharding with Merkle proofs
+  - Erasure coding (data + parity shards) for fault tolerance
+  - On-chain shard availability tracking
+  - Storage provider staking and incentives
+- **End-to-end tests passing:**
+  - `test_jepa_e2e.py`: Local distributed training pipeline
+  - `test_jepa_onchain.py`: On-chain weight coordination
 
 ### Phase 3: Constitutional Governance (In Progress)
 - LLM consensus integration

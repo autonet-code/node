@@ -31,6 +31,7 @@ CONTRACT_ARTIFACTS = {
     "ATNToken": "tokens/ATNToken.sol/ATNToken.json",
     "ProjectToken": "tokens/ProjectToken.sol/ProjectToken.json",
     "ParticipantStaking": "core/ParticipantStaking.sol/ParticipantStaking.json",
+    "ModelShardRegistry": "core/ModelShardRegistry.sol/ModelShardRegistry.json",
     "Project": "core/Project.sol/Project.json",
     "TaskContract": "core/TaskContract.sol/TaskContract.json",
     "ResultsRewards": "core/ResultsRewards.sol/ResultsRewards.json",
