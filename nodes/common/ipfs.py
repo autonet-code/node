@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 class IPFSClient:
     """Client for interacting with IPFS for content-addressed storage."""
 
+    # Class-level store shared across all instances (important for multi-node tests)
+    _mock_store: Dict[str, bytes] = {}
+
     def __init__(
         self,
         gateway_url: str = "https://ipfs.io/ipfs/",
@@ -57,9 +60,10 @@ class IPFSClient:
             except Exception as e:
                 logger.error(f"Failed to add to IPFS: {e}")
 
-        # Mock mode: return a fake CID based on content hash
+        # Mock mode: store data in-memory and return a fake CID
         hash_digest = hashlib.sha256(data).hexdigest()
         mock_cid = f"Qm{hash_digest[:44]}"
+        IPFSClient._mock_store[mock_cid] = data
         logger.info(f"Mock IPFS add: {mock_cid}")
         return mock_cid
 
@@ -100,6 +104,11 @@ class IPFSClient:
                 return self.client.cat(cid)
             except Exception as e:
                 logger.error(f"Failed to get from IPFS: {e}")
+
+        # Check mock store
+        if cid in IPFSClient._mock_store:
+            logger.debug(f"Mock IPFS get: {cid}")
+            return IPFSClient._mock_store[cid]
 
         # Try HTTP gateway as fallback
         try:

@@ -285,13 +285,20 @@ class SolverNode:
             # Import ML module
             from ..common.ml import train_on_task
 
+            # Fetch current global model (if any) for federated learning
+            global_model_cid = self.registry.get_mature_model(self.project_id)
+            if global_model_cid:
+                logger.info(f"[{self.node_id}] Using global model: {global_model_cid[:20]}...")
+            else:
+                logger.info(f"[{self.node_id}] No global model yet, training from scratch")
+
             # Prepare task spec
             task_spec = {
                 "task_id": task_id,
                 "epochs": 1,  # Single epoch for fast training
             }
 
-            # Perform real training
+            # Perform real training (starting from global model if available)
             logger.info(f"[{self.node_id}] Starting real ML training for task {task_id}...")
             weight_delta, metrics = train_on_task(
                 task_spec=task_spec,
@@ -300,6 +307,7 @@ class SolverNode:
                 batch_size=32,
                 learning_rate=0.01,
                 num_samples=500,  # Small subset for fast training (~5 seconds)
+                global_model_cid=global_model_cid,  # Continue from global model
             )
 
             # Generate checkpoints (mock for now, but based on real training)
@@ -394,9 +402,10 @@ class SolverNode:
         )
 
     def _generate_deterministic_seed(self, task_id: int, step: int) -> str:
-        """Generate a deterministic seed for reproducibility."""
+        """Generate a deterministic seed for reproducibility (full 32 bytes)."""
         seed_input = f"{self.deterministic_seed}:{task_id}:{step}"
-        return hashlib.sha256(seed_input.encode()).hexdigest()[:16]
+        # Return full SHA256 hash (64 hex chars = 32 bytes when decoded)
+        return hashlib.sha256(seed_input.encode()).hexdigest()
 
     def _submit_checkpoints(self, task_id: int, checkpoints: List[TrainingCheckpoint]):
         """Submit a few checkpoints to the blockchain."""
@@ -410,7 +419,8 @@ class SolverNode:
                 # Convert hashes to bytes32
                 weights_hash = bytes.fromhex(checkpoint.weights_hash)
                 data_indices_hash = bytes.fromhex(checkpoint.data_indices_hash)
-                random_seed = checkpoint.random_seed.encode()
+                # Convert hex string to bytes (64 hex chars -> 32 bytes)
+                random_seed = bytes.fromhex(checkpoint.random_seed)
 
                 result = self.registry.submit_checkpoint(
                     task_id,

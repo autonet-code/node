@@ -179,11 +179,15 @@ class AggregatorNode:
         """
         try:
             events = self.registry.get_new_events("ResultsRewards", "RewardsDistributed")
+            if events:
+                logger.info(f"[{self.node_id}] Found {len(events)} RewardsDistributed events")
 
             for event in events:
                 task_id = event["args"]["taskId"]
                 recipient = event["args"]["recipient"]
                 reward_type = event["args"]["rewardType"]
+
+                logger.info(f"[{self.node_id}] RewardsDistributed: type={reward_type}, task={task_id}")
 
                 # Only process solver rewards (these contain the model updates we want to aggregate)
                 if reward_type != "SolverReward":
@@ -279,6 +283,9 @@ class AggregatorNode:
             "aggregator": self.my_address,
             "timestamp": int(time.time()),
         }
+
+        # Convert numpy arrays/tensors to lists for JSON serialization
+        aggregated_model = self._numpy_to_python(aggregated_model)
 
         # Upload to IPFS
         try:
@@ -435,6 +442,32 @@ class AggregatorNode:
         logger.debug(f"[{self.node_id}] Aggregated model keys: {list(aggregated.keys())}")
 
         return aggregated
+
+    def _numpy_to_python(self, obj: Any) -> Any:
+        """
+        Convert numpy arrays and torch tensors to Python lists for JSON serialization.
+
+        Args:
+            obj: Object to convert (can be dict, list, numpy array, tensor, or primitive)
+
+        Returns:
+            Object with all numpy arrays/tensors converted to lists
+        """
+        import numpy as np
+        import torch
+
+        if isinstance(obj, (np.ndarray, np.generic)):
+            return obj.tolist()
+        elif isinstance(obj, torch.Tensor):
+            return obj.cpu().numpy().tolist()
+        elif isinstance(obj, dict):
+            return {k: self._numpy_to_python(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._numpy_to_python(v) for v in obj]
+        elif isinstance(obj, tuple):
+            return tuple(self._numpy_to_python(v) for v in obj)
+        else:
+            return obj
 
     def _log_final_metrics(self):
         """Log final metrics at shutdown."""

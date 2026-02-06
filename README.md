@@ -71,11 +71,42 @@ Each node in Autonet is a sovereign "citizen-cell" that:
 
 ### 2. Absolute Zero Training Loop
 
-Self-improving distributed training:
-1. **Proposers** generate training tasks with ground-truth solutions
-2. **Solvers** perform local training on data shards
-3. **Coordinators** verify task completion quality
-4. **Aggregators** combine verified updates into improved global models
+Self-improving distributed training with commit-reveal pattern:
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         ABSOLUTE ZERO LOOP                                │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. PROPOSE      Proposer creates task with hidden ground truth          │
+│       │                                                                  │
+│       ▼                                                                  │
+│  2. TRAIN        Solver trains model, commits solution hash              │
+│       │                                                                  │
+│       ▼                                                                  │
+│  3. REVEAL GT    Proposer reveals ground truth (triggered by commit)     │
+│       │                                                                  │
+│       ▼                                                                  │
+│  4. REVEAL SOL   Solver reveals solution (triggered by GT reveal)        │
+│       │                                                                  │
+│       ▼                                                                  │
+│  5. VERIFY       Coordinators vote via Yuma consensus                    │
+│       │                                                                  │
+│       ▼                                                                  │
+│  6. REWARD       Rewards distributed to proposer, solver, coordinators   │
+│       │                                                                  │
+│       ▼                                                                  │
+│  7. AGGREGATE    Aggregator performs FedAvg on verified updates          │
+│       │                                                                  │
+│       ▼                                                                  │
+│  8. PUBLISH      Global model published on-chain via setMatureModel      │
+│       │                                                                  │
+│       └──────────────────► Loop continues with new tasks                 │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Status: Fully operational** - Complete loop demonstrated with real PyTorch training
 
 ### 3. Constitutional Governance
 
@@ -159,7 +190,32 @@ docker-compose up -d
 npm run deploy:local
 ```
 
-### Running a Node
+### Running the Multi-Node Orchestrator
+
+The easiest way to run a complete training cycle is with the orchestrator:
+
+```bash
+# Start local Hardhat node (in a separate terminal)
+npx hardhat node
+
+# Deploy contracts
+npx hardhat run scripts/deploy.js --network localhost
+
+# Run full training cycle with default configuration (1P/1S/2C/1A)
+python orchestrator.py
+
+# Run with custom configuration
+python orchestrator.py --proposers 1 --solvers 2 --coordinators 2 --aggregators 1 --rounds 3 --delay 2.0
+```
+
+The orchestrator will:
+1. Deploy all contracts
+2. Distribute ATN tokens to node accounts
+3. Create and fund a test project
+4. Spawn autonomous nodes (proposers, solvers, coordinators, aggregators)
+5. Run training cycles and display validation results
+
+### Running Individual Nodes
 
 ```bash
 # Start a solver node
@@ -178,14 +234,15 @@ java -jar rollup/target/autonet-rollup.jar
 
 | Contract | Purpose |
 |----------|---------|
-| `PoIProject.sol` | Manages AI development projects, funding, and inference services |
-| `TaskContract.sol` | Task lifecycle: proposal, claiming, solution commitment |
-| `ResultsRewards.sol` | Verification, rewards distribution, slashing |
-| `ParticipantStaking.sol` | Role-based staking for Proposers, Solvers, Coordinators |
+| `Project.sol` | Manages AI development projects, funding, model publishing, and inference services |
+| `TaskContract.sol` | Task lifecycle: proposal, checkpoints, solution commitment |
+| `ResultsRewards.sol` | Multi-coordinator Yuma voting, rewards distribution, slashing |
+| `ParticipantStaking.sol` | Role-based staking for Proposers, Solvers, Coordinators, Aggregators |
+| `ForcedErrorRegistry.sol` | Injects forced errors for coordinator vigilance testing |
 | `ATNToken.sol` | ERC20Votes governance token |
 | `AnchorBridge.sol` | L1/L2 checkpoint storage and token bridge |
 | `DisputeManager.sol` | Stake-weighted dispute resolution |
-| `Constitution.sol` | On-chain constitutional standards |
+| `AutonetDAO.sol` | On-chain governance for parameter changes |
 
 ### Node Engines
 
@@ -255,19 +312,23 @@ CORE_PRINCIPLES = [
 
 ## Development Roadmap
 
-### Phase 1: Foundation
-- Core smart contracts deployed
-- Basic node implementations
-- Local testnet demonstration
+### Phase 1: Foundation ✅ COMPLETE
+- Core smart contracts deployed (Project, Task, Staking, Rewards, DAO)
+- Basic node implementations (Proposer, Solver, Coordinator, Aggregator)
+- Local testnet demonstration with Hardhat
 - Single training cycle proof-of-concept
+- 13/13 Hardhat tests passing
 
-### Phase 2: Distributed Training
-- Full Coordinator verification logic
-- Aggregator implementation
-- Multi-node training cycles
-- IPFS integration for model storage
+### Phase 2: Distributed Training ✅ COMPLETE
+- Multi-coordinator Yuma voting consensus
+- FedAvg aggregator with real PyTorch weight aggregation
+- Multi-node training cycles with orchestrator
+- Mock IPFS integration for model storage
+- Global model publishing via `setMatureModel`
+- Forced error registry for coordinator vigilance testing
+- Complete Absolute Zero loop operational
 
-### Phase 3: Constitutional Governance
+### Phase 3: Constitutional Governance (In Progress)
 - LLM consensus integration
 - Constitutional amendment process
 - Dispute resolution system

@@ -15,6 +15,7 @@ contract Project is Ownable {
     ATNToken public immutable atnToken;
     address public governance;
     mapping(address => bool) public authorizedDisbursers;
+    mapping(address => bool) public authorizedModelSetters;
 
     uint256 public nextProjectId = 1;
 
@@ -57,6 +58,7 @@ contract Project is Ownable {
     event InferenceRequested(uint256 indexed projectId, address indexed user, uint256 requestId, string inputCid, uint256 fee);
     event RevenueWithdrawn(uint256 indexed projectId, address indexed shareholder, uint256 amount);
     event DisburserAuthorized(address indexed disburser, bool authorized);
+    event ModelSetterAuthorized(address indexed setter, bool authorized);
 
     modifier projectExists(uint256 _projectId) {
         require(projects[_projectId].founder != address(0), "Project does not exist");
@@ -85,6 +87,11 @@ contract Project is Ownable {
     function setAuthorizedDisburser(address _disburser, bool _authorized) external onlyGov {
         authorizedDisbursers[_disburser] = _authorized;
         emit DisburserAuthorized(_disburser, _authorized);
+    }
+
+    function setAuthorizedModelSetter(address _setter, bool _authorized) external onlyGov {
+        authorizedModelSetters[_setter] = _authorized;
+        emit ModelSetterAuthorized(_setter, _authorized);
     }
 
     function createProject(
@@ -159,8 +166,14 @@ contract Project is Ownable {
     }
 
     function setMatureModel(uint256 _projectId, string memory _weightsCid, uint256 _price)
-        external onlyFounderOrGov(_projectId) projectExists(_projectId)
+        external projectExists(_projectId)
     {
+        require(
+            msg.sender == projects[_projectId].founder ||
+            msg.sender == governance ||
+            authorizedModelSetters[msg.sender],
+            "Not authorized to set model"
+        );
         ProjectData storage p = projects[_projectId];
         p.matureModelWeightsCid = _weightsCid;
         p.atnPricePerInference = _price;
@@ -248,5 +261,10 @@ contract Project is Ownable {
 
     function getProjectToken(uint256 _projectId) external view returns (address) {
         return address(projects[_projectId].projectToken);
+    }
+
+    function getMatureModel(uint256 _projectId) external view returns (string memory weightsCid, uint256 price) {
+        ProjectData storage p = projects[_projectId];
+        return (p.matureModelWeightsCid, p.atnPricePerInference);
     }
 }

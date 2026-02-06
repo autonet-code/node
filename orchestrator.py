@@ -175,7 +175,7 @@ HARDHAT_ACCOUNTS = [
         "private_key": "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e",
     },
     {
-        "address": "0x14dC79964da2C08daa4968307a96B0FfD0EB0AC6",
+        "address": "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955",
         "private_key": "0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356",
     },
     {
@@ -536,6 +536,20 @@ def run_orchestrator(
     distribute_tokens(deployer_blockchain, deployer_registry, node_accounts)
     setup_project(deployer_blockchain, deployer_registry, project_id=1)
 
+    # Authorize aggregator accounts as model setters
+    aggregator_start_idx = num_proposers + num_solvers + num_coordinators
+    for i in range(num_aggregators):
+        aggregator_addr = node_accounts[aggregator_start_idx + i]["address"]
+        result = deployer_registry.send(
+            "Project", "setAuthorizedModelSetter",
+            aggregator_addr,
+            True,
+        )
+        if result.success:
+            logger.info(f"Authorized aggregator {aggregator_addr[:10]}... as model setter")
+        else:
+            logger.warning(f"Failed to authorize aggregator: {result.error}")
+
     # Step 4: Create IPFS client (mock mode for now)
     ipfs = IPFSClient()
 
@@ -552,7 +566,7 @@ def run_orchestrator(
     from nodes.coordinator.main import CoordinatorNode
     from nodes.aggregator.main import AggregatorNode
 
-    # Proposers
+    # Proposers - need to run long enough to see SolutionCommitted events and reveal ground truth
     for i in range(num_proposers):
         runner = NodeRunner(
             node_class=ProposerNode,
@@ -563,13 +577,13 @@ def run_orchestrator(
             ipfs=ipfs,
             metrics=metrics,
             project_id=1,
-            max_cycles=num_rounds,
+            max_cycles=num_rounds * 10,  # Run long enough to catch solution commits
             cycle_delay=cycle_delay,
         )
         runners.append(runner)
         account_idx += 1
 
-    # Solvers
+    # Solvers - need to train, commit, wait for ground truth reveal, then reveal solutions
     for i in range(num_solvers):
         runner = NodeRunner(
             node_class=SolverNode,
@@ -580,13 +594,13 @@ def run_orchestrator(
             ipfs=ipfs,
             metrics=metrics,
             project_id=1,
-            max_cycles=num_rounds * 2,  # More cycles since they need to poll
+            max_cycles=num_rounds * 10,  # Run long enough to complete reveal flow
             cycle_delay=cycle_delay,
         )
         runners.append(runner)
         account_idx += 1
 
-    # Coordinators
+    # Coordinators - need to run long enough to see solution reveals (after both reveals happen)
     for i in range(num_coordinators):
         runner = NodeRunner(
             node_class=CoordinatorNode,
@@ -597,13 +611,13 @@ def run_orchestrator(
             ipfs=ipfs,
             metrics=metrics,
             project_id=1,
-            max_cycles=num_rounds * 2,
+            max_cycles=num_rounds * 20,  # Run much longer to catch solution reveals
             cycle_delay=cycle_delay,
         )
         runners.append(runner)
         account_idx += 1
 
-    # Aggregators
+    # Aggregators - need to run long enough to collect rewards and aggregate
     for i in range(num_aggregators):
         runner = NodeRunner(
             node_class=AggregatorNode,
@@ -614,8 +628,8 @@ def run_orchestrator(
             ipfs=ipfs,
             metrics=metrics,
             project_id=1,
-            max_cycles=num_rounds * 3,
-            cycle_delay=cycle_delay * 2,  # Aggregator polls less frequently
+            max_cycles=num_rounds * 10,
+            cycle_delay=cycle_delay * 1.5,  # Aggregator polls frequently to catch rewards
         )
         runners.append(runner)
         account_idx += 1

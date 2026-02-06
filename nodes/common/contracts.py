@@ -362,3 +362,17 @@ class ContractRegistry:
             return cid if cid else None
         except Exception:
             return None
+
+    # --- Project ---
+
+    def get_mature_model(self, project_id: int) -> Optional[str]:
+        """Get the current global model CID for a project."""
+        try:
+            result = self.call("Project", "getMatureModel", project_id)
+            # Returns (weightsCid, price) tuple
+            if result and len(result) >= 1:
+                cid = result[0] if isinstance(result, (list, tuple)) else result
+                return cid if cid else None
+            return None
+        except Exception:
+            return None
