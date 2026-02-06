@@ -460,4 +460,512 @@ describe("Autonet - Core Contracts", function () {
       expect(await bridge.getModelCid()).to.equal("QmModelWeightsCid123456789");
     });
   });
+
+  describe("ModelShardRegistry - Distributed Model Storage", function () {
+    let shardRegistry;
+    let provider1, provider2, provider3;
+    const MIN_STORAGE_STAKE = ethers.parseEther("50");
+
+    beforeEach(async function () {
+      [owner, proposer, solver1, solver2, coord1, coord2, coord3, provider1, provider2, provider3] = await ethers.getSigners();
+
+      // Deploy ModelShardRegistry
+      const ModelShardRegistry = await ethers.getContractFactory("ModelShardRegistry");
+      shardRegistry = await ModelShardRegistry.deploy(
+        await staking.getAddress(),
+        owner.address
+      );
+      await shardRegistry.waitForDeployment();
+
+      // Distribute tokens to providers
+      const testAmount = ethers.parseEther("10000");
+      await atnToken.transfer(provider1.address, testAmount);
+      await atnToken.transfer(provider2.address, testAmount);
+      await atnToken.transfer(provider3.address, testAmount);
+
+      // Approve staking contract for providers
+      await atnToken.connect(provider1).approve(await staking.getAddress(), testAmount);
+      await atnToken.connect(provider2).approve(await staking.getAddress(), testAmount);
+      await atnToken.connect(provider3).approve(await staking.getAddress(), testAmount);
+    });
+
+    describe("Provider Registration", function () {
+      it("Should allow provider registration with sufficient stake", async function () {
+        // Stake sufficient amount
+        await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE); // Using SOLVER role for minimum stake
+
+        const capacityBytes = ethers.parseUnits("1000000", 0); // 1MB capacity
+        await expect(
+          shardRegistry.connect(provider1).registerProvider(capacityBytes)
+        ).to.emit(shardRegistry, "ProviderRegistered").withArgs(provider1.address, capacityBytes);
+
+        // Verify provider info
+        const [capacity, used, reputation, successfulVerifications, failedVerifications, active] =
+          await shardRegistry.getProviderInfo(provider1.address);
+        expect(capacity).to.equal(capacityBytes);
+        expect(used).to.equal(0);
+        expect(reputation).to.equal(500); // Starts at 50%
+        expect(successfulVerifications).to.equal(0);
+        expect(failedVerifications).to.equal(0);
+        expect(active).to.be.true;
+      });
+
+      it("Should reject provider registration without sufficient stake", async function () {
+        // Try to register without staking (stake = 0 < 50 ATN minimum)
+        await expect(
+          shardRegistry.connect(provider1).registerProvider(ethers.parseUnits("1000000", 0))
+        ).to.be.revertedWith("Insufficient stake");
+      });
+
+      it("Should reject zero capacity", async function () {
+        await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);
+
+        await expect(
+          shardRegistry.connect(provider1).registerProvider(0)
+        ).to.be.revertedWith("Capacity must be positive");
+      });
+
+      it("Should allow provider to update capacity", async function () {
+        await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);
+        await shardRegistry.connect(provider1).registerProvider(ethers.parseUnits("1000000", 0));
+
+        const newCapacity = ethers.parseUnits("2000000", 0);
+        await shardRegistry.connect(provider1).updateCapacity(newCapacity);
+
+        const [capacity] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(capacity).to.equal(newCapacity);
+      });
+
+      it("Should allow provider to deactivate", async function () {
+        await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);
+        await shardRegistry.connect(provider1).registerProvider(ethers.parseUnits("1000000", 0));
+
+        await shardRegistry.connect(provider1).deactivateProvider();
+
+        const [, , , , , active] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(active).to.be.false;
+      });
+    });
+
+    describe("Model Registration", function () {
+      it("Should allow model registration with shard manifest", async function () {
+        const modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_v1"));
+        const manifestCid = "QmManifest123456789";
+        const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes("merkle_root"));
+        const dataShards = 10;
+        const parityShards = 4;
+        const totalSize = ethers.parseUnits("100000000", 0); // 100MB
+
+        await expect(
+          shardRegistry.connect(proposer).registerModel(
+            modelHash,
+            manifestCid,
+            merkleRoot,
+            dataShards,
+            parityShards,
+            totalSize,
+            0, // StorageTier.IPFS_PUBLIC
+            1, // ShardingStrategy.TENSOR_PARALLEL
+            1  // projectId
+          )
+        ).to.emit(shardRegistry, "ModelRegistered").withArgs(modelHash, manifestCid, dataShards + parityShards, 1);
+
+        // Verify model manifest
+        const manifest = await shardRegistry.getModelManifest(modelHash);
+        expect(manifest.manifestCid).to.equal(manifestCid);
+        expect(manifest.merkleRoot).to.equal(merkleRoot);
+        expect(manifest.totalShards).to.equal(dataShards + parityShards);
+        expect(manifest.dataShards).to.equal(dataShards);
+        expect(manifest.totalSize).to.equal(totalSize);
+      });
+
+      it("Should reject duplicate model registration", async function () {
+        const modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_v1"));
+        const manifestCid = "QmManifest123456789";
+        const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes("merkle_root"));
+
+        await shardRegistry.connect(proposer).registerModel(
+          modelHash, manifestCid, merkleRoot, 10, 4,
+          ethers.parseUnits("100000000", 0), 0, 1, 1
+        );
+
+        await expect(
+          shardRegistry.connect(proposer).registerModel(
+            modelHash, manifestCid, merkleRoot, 10, 4,
+            ethers.parseUnits("100000000", 0), 0, 1, 1
+          )
+        ).to.be.revertedWith("Model already registered");
+      });
+
+      it("Should reject model with zero data shards", async function () {
+        const modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_v1"));
+
+        await expect(
+          shardRegistry.connect(proposer).registerModel(
+            modelHash, "QmManifest", ethers.keccak256(ethers.toUtf8Bytes("root")),
+            0, 4, ethers.parseUnits("100000000", 0), 0, 1, 1
+          )
+        ).to.be.revertedWith("Need at least 1 data shard");
+      });
+    });
+
+    describe("Shard Announcements", function () {
+      let modelHash;
+      const shardSize = ethers.parseUnits("10000000", 0); // 10MB per shard
+
+      beforeEach(async function () {
+        // Register model
+        modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_v1"));
+        await shardRegistry.connect(proposer).registerModel(
+          modelHash,
+          "QmManifest123",
+          ethers.keccak256(ethers.toUtf8Bytes("merkle_root")),
+          10, 4,
+          ethers.parseUnits("100000000", 0),
+          0, 1, 1
+        );
+
+        // Register providers
+        await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);
+        await staking.connect(provider2).stake(2, MIN_STORAGE_STAKE);
+        await shardRegistry.connect(provider1).registerProvider(ethers.parseUnits("50000000", 0));
+        await shardRegistry.connect(provider2).registerProvider(ethers.parseUnits("50000000", 0));
+      });
+
+      it("Should allow provider to announce shard", async function () {
+        const shardIndex = 0;
+        const shardHash = ethers.keccak256(ethers.toUtf8Bytes("shard_0"));
+
+        await expect(
+          shardRegistry.connect(provider1).announceShard(
+            modelHash, shardIndex, shardHash, shardSize, false
+          )
+        ).to.emit(shardRegistry, "ShardAnnounced").withArgs(modelHash, shardIndex, provider1.address);
+
+        // Verify provider list
+        const providers = await shardRegistry.getShardProviders(modelHash, shardIndex);
+        expect(providers.length).to.equal(1);
+        expect(providers[0]).to.equal(provider1.address);
+
+        // Verify storage used
+        const [, used] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(used).to.equal(shardSize);
+      });
+
+      it("Should allow multiple providers to announce same shard", async function () {
+        const shardIndex = 0;
+        const shardHash = ethers.keccak256(ethers.toUtf8Bytes("shard_0"));
+
+        await shardRegistry.connect(provider1).announceShard(
+          modelHash, shardIndex, shardHash, shardSize, false
+        );
+        await shardRegistry.connect(provider2).announceShard(
+          modelHash, shardIndex, shardHash, shardSize, false
+        );
+
+        const providers = await shardRegistry.getShardProviders(modelHash, shardIndex);
+        expect(providers.length).to.equal(2);
+        expect(providers).to.include(provider1.address);
+        expect(providers).to.include(provider2.address);
+      });
+
+      it("Should reject announcement with mismatched shard hash", async function () {
+        const shardIndex = 0;
+        const shardHash1 = ethers.keccak256(ethers.toUtf8Bytes("shard_0"));
+        const shardHash2 = ethers.keccak256(ethers.toUtf8Bytes("shard_0_different"));
+
+        await shardRegistry.connect(provider1).announceShard(
+          modelHash, shardIndex, shardHash1, shardSize, false
+        );
+
+        await expect(
+          shardRegistry.connect(provider2).announceShard(
+            modelHash, shardIndex, shardHash2, shardSize, false
+          )
+        ).to.be.revertedWith("Shard hash mismatch");
+      });
+
+      it("Should reject announcement if provider exceeds capacity", async function () {
+        const largeShardSize = ethers.parseUnits("100000000", 0); // 100MB - exceeds provider capacity
+
+        await expect(
+          shardRegistry.connect(provider1).announceShard(
+            modelHash, 0, ethers.keccak256(ethers.toUtf8Bytes("shard_0")), largeShardSize, false
+          )
+        ).to.be.revertedWith("Capacity exceeded");
+      });
+
+      it("Should reject duplicate announcement from same provider", async function () {
+        const shardIndex = 0;
+        const shardHash = ethers.keccak256(ethers.toUtf8Bytes("shard_0"));
+
+        await shardRegistry.connect(provider1).announceShard(
+          modelHash, shardIndex, shardHash, shardSize, false
+        );
+
+        await expect(
+          shardRegistry.connect(provider1).announceShard(
+            modelHash, shardIndex, shardHash, shardSize, false
+          )
+        ).to.be.revertedWith("Already storing this shard");
+      });
+
+      it("Should reject announcement for unregistered model", async function () {
+        const fakeModelHash = ethers.keccak256(ethers.toUtf8Bytes("fake_model"));
+
+        await expect(
+          shardRegistry.connect(provider1).announceShard(
+            fakeModelHash, 0, ethers.keccak256(ethers.toUtf8Bytes("shard")), shardSize, false
+          )
+        ).to.be.revertedWith("Model not registered");
+      });
+
+      it("Should reject announcement with invalid shard index", async function () {
+        await expect(
+          shardRegistry.connect(provider1).announceShard(
+            modelHash, 100, ethers.keccak256(ethers.toUtf8Bytes("shard")), shardSize, false
+          )
+        ).to.be.revertedWith("Invalid shard index");
+      });
+    });
+
+    describe("Shard Verification with Merkle Proofs", function () {
+      let modelHash, merkleRoot;
+
+      beforeEach(async function () {
+        // Setup model with Merkle tree
+        // For simplicity, create a small Merkle tree: 4 shards (2 data, 2 parity)
+        const shard0Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_0"));
+        const shard1Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_1"));
+        const shard2Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_2"));
+        const shard3Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_3"));
+
+        // Build Merkle tree
+        const level1_left = ethers.keccak256(ethers.concat([shard0Hash, shard1Hash]));
+        const level1_right = ethers.keccak256(ethers.concat([shard2Hash, shard3Hash]));
+        merkleRoot = ethers.keccak256(ethers.concat([level1_left, level1_right]));
+
+        modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_merkle"));
+        await shardRegistry.connect(proposer).registerModel(
+          modelHash, "QmManifest", merkleRoot, 2, 2,
+          ethers.parseUnits("40000000", 0), 0, 1, 1
+        );
+
+        // Register provider and announce shard
+        await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);
+        await shardRegistry.connect(provider1).registerProvider(ethers.parseUnits("50000000", 0));
+        await shardRegistry.connect(provider1).announceShard(
+          modelHash, 0, shard0Hash, ethers.parseUnits("10000000", 0), false
+        );
+      });
+
+      it("Should verify shard with correct Merkle proof", async function () {
+        const shardHash = ethers.keccak256(ethers.toUtf8Bytes("shard_0"));
+        const shard1Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_1"));
+        const shard2Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_2"));
+        const shard3Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_3"));
+
+        // Merkle proof for shard 0: [shard1Hash, level1_right]
+        const level1_right = ethers.keccak256(ethers.concat([shard2Hash, shard3Hash]));
+        const merkleProof = [shard1Hash, level1_right];
+
+        await expect(
+          shardRegistry.connect(owner).verifyShard(modelHash, 0, shardHash, merkleProof)
+        ).to.emit(shardRegistry, "ShardVerified").withArgs(modelHash, 0, owner.address, true);
+      });
+
+      it("Should reject verification with wrong shard hash", async function () {
+        const wrongHash = ethers.keccak256(ethers.toUtf8Bytes("wrong_shard"));
+        const shard1Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_1"));
+        const shard2Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_2"));
+        const shard3Hash = ethers.keccak256(ethers.toUtf8Bytes("shard_3"));
+        const level1_right = ethers.keccak256(ethers.concat([shard2Hash, shard3Hash]));
+        const merkleProof = [shard1Hash, level1_right];
+
+        await expect(
+          shardRegistry.connect(owner).verifyShard(modelHash, 0, wrongHash, merkleProof)
+        ).to.emit(shardRegistry, "ShardVerified").withArgs(modelHash, 0, owner.address, false);
+      });
+    });
+
+    describe("Shard Availability Check", function () {
+      let modelHash;
+
+      beforeEach(async function () {
+        modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_availability"));
+        await shardRegistry.connect(proposer).registerModel(
+          modelHash, "QmManifest", ethers.keccak256(ethers.toUtf8Bytes("root")),
+          10, 4, ethers.parseUnits("140000000", 0), 0, 1, 1
+        );
+
+        // Register providers
+        await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);
+        await staking.connect(provider2).stake(2, MIN_STORAGE_STAKE);
+        await shardRegistry.connect(provider1).registerProvider(ethers.parseUnits("100000000", 0));
+        await shardRegistry.connect(provider2).registerProvider(ethers.parseUnits("100000000", 0));
+      });
+
+      it("Should report insufficient shards when less than k available", async function () {
+        // Announce only 5 shards (need 10 for reconstruction)
+        for (let i = 0; i < 5; i++) {
+          await shardRegistry.connect(provider1).announceShard(
+            modelHash, i, ethers.keccak256(ethers.toUtf8Bytes(`shard_${i}`)),
+            ethers.parseUnits("10000000", 0), false
+          );
+        }
+
+        const [availableShards, sufficient] = await shardRegistry.checkShardAvailability(modelHash);
+        expect(availableShards).to.equal(5);
+        expect(sufficient).to.be.false;
+      });
+
+      it("Should report sufficient shards when k or more available", async function () {
+        // Announce exactly 10 data shards (k = 10)
+        for (let i = 0; i < 10; i++) {
+          await shardRegistry.connect(provider1).announceShard(
+            modelHash, i, ethers.keccak256(ethers.toUtf8Bytes(`shard_${i}`)),
+            ethers.parseUnits("10000000", 0), false
+          );
+        }
+
+        const [availableShards, sufficient] = await shardRegistry.checkShardAvailability(modelHash);
+        expect(availableShards).to.equal(10);
+        expect(sufficient).to.be.true;
+      });
+
+      it("Should report sufficient with mix of data and parity shards", async function () {
+        // Announce 8 data shards + 3 parity shards = 11 total (>= k=10)
+        for (let i = 0; i < 8; i++) {
+          await shardRegistry.connect(provider1).announceShard(
+            modelHash, i, ethers.keccak256(ethers.toUtf8Bytes(`shard_${i}`)),
+            ethers.parseUnits("10000000", 0), false
+          );
+        }
+        for (let i = 10; i < 13; i++) {
+          await shardRegistry.connect(provider2).announceShard(
+            modelHash, i, ethers.keccak256(ethers.toUtf8Bytes(`shard_${i}`)),
+            ethers.parseUnits("10000000", 0), true
+          );
+        }
+
+        const [availableShards, sufficient] = await shardRegistry.checkShardAvailability(modelHash);
+        expect(availableShards).to.equal(11);
+        expect(sufficient).to.be.true;
+      });
+    });
+
+    describe("Shard Removal", function () {
+      let modelHash;
+
+      beforeEach(async function () {
+        modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_removal"));
+        await shardRegistry.connect(proposer).registerModel(
+          modelHash, "QmManifest", ethers.keccak256(ethers.toUtf8Bytes("root")),
+          10, 4, ethers.parseUnits("140000000", 0), 0, 1, 1
+        );
+
+        await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);
+        await shardRegistry.connect(provider1).registerProvider(ethers.parseUnits("100000000", 0));
+        await shardRegistry.connect(provider1).announceShard(
+          modelHash, 0, ethers.keccak256(ethers.toUtf8Bytes("shard_0")),
+          ethers.parseUnits("10000000", 0), false
+        );
+      });
+
+      it("Should allow provider to remove shard", async function () {
+        await expect(
+          shardRegistry.connect(provider1).removeShard(modelHash, 0)
+        ).to.emit(shardRegistry, "ShardRemoved").withArgs(modelHash, 0, provider1.address);
+
+        // Verify provider list is empty
+        const providers = await shardRegistry.getShardProviders(modelHash, 0);
+        expect(providers.length).to.equal(0);
+
+        // Verify storage released
+        const [, used] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(used).to.equal(0);
+      });
+
+      it("Should reject removal by non-provider", async function () {
+        await expect(
+          shardRegistry.connect(provider2).removeShard(modelHash, 0)
+        ).to.be.revertedWith("Not storing this shard");
+      });
+
+      it("Should handle removal when multiple providers store same shard", async function () {
+        // Add second provider
+        await staking.connect(provider2).stake(2, MIN_STORAGE_STAKE);
+        await shardRegistry.connect(provider2).registerProvider(ethers.parseUnits("100000000", 0));
+        await shardRegistry.connect(provider2).announceShard(
+          modelHash, 0, ethers.keccak256(ethers.toUtf8Bytes("shard_0")),
+          ethers.parseUnits("10000000", 0), false
+        );
+
+        // Provider1 removes
+        await shardRegistry.connect(provider1).removeShard(modelHash, 0);
+
+        // Provider2 should still be listed
+        const providers = await shardRegistry.getShardProviders(modelHash, 0);
+        expect(providers.length).to.equal(1);
+        expect(providers[0]).to.equal(provider2.address);
+      });
+    });
+
+    describe("Provider Reputation Updates", function () {
+      let modelHash;
+
+      beforeEach(async function () {
+        modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_reputation"));
+        await shardRegistry.connect(proposer).registerModel(
+          modelHash, "QmManifest", ethers.keccak256(ethers.toUtf8Bytes("root")),
+          10, 4, ethers.parseUnits("140000000", 0), 0, 1, 1
+        );
+
+        await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);
+        await shardRegistry.connect(provider1).registerProvider(ethers.parseUnits("100000000", 0));
+      });
+
+      it("Should increase reputation on successful verification", async function () {
+        const [, , initialReputation] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(initialReputation).to.equal(500);
+
+        await shardRegistry.connect(owner).reportVerificationSuccess(modelHash, 0, provider1.address);
+
+        const [, , updatedReputation, successfulVerifications] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(updatedReputation).to.equal(510);
+        expect(successfulVerifications).to.equal(1);
+      });
+
+      it("Should decrease reputation on failed verification", async function () {
+        const [, , initialReputation] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(initialReputation).to.equal(500);
+
+        await shardRegistry.connect(owner).reportVerificationFailure(modelHash, 0, provider1.address);
+
+        const [, , updatedReputation, , failedVerifications] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(updatedReputation).to.equal(450);
+        expect(failedVerifications).to.equal(1);
+      });
+
+      it("Should cap reputation at maximum 1000", async function () {
+        // Report many successful verifications
+        for (let i = 0; i < 60; i++) {
+          await shardRegistry.connect(owner).reportVerificationSuccess(modelHash, 0, provider1.address);
+        }
+
+        const [, , reputation] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(reputation).to.equal(1000);
+      });
+
+      it("Should cap reputation at minimum 0", async function () {
+        // Report many failed verifications
+        for (let i = 0; i < 15; i++) {
+          await shardRegistry.connect(owner).reportVerificationFailure(modelHash, 0, provider1.address);
+        }
+
+        const [, , reputation] = await shardRegistry.getProviderInfo(provider1.address);
+        expect(reputation).to.equal(0);
+      });
+    });
+  });
 });

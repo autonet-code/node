@@ -35,8 +35,19 @@ async function main() {
   const stakingAddress = await staking.getAddress();
   console.log("   ParticipantStaking deployed to:", stakingAddress);
 
-  // 3. Deploy Project Contract
-  console.log("\n3. Deploying Project...");
+  // 3. Deploy ModelShardRegistry
+  console.log("\n3. Deploying ModelShardRegistry...");
+  const ModelShardRegistry = await hre.ethers.getContractFactory("ModelShardRegistry");
+  const shardRegistry = await ModelShardRegistry.deploy(
+    stakingAddress,
+    deployer.address // owner
+  );
+  await shardRegistry.waitForDeployment();
+  const shardRegistryAddress = await shardRegistry.getAddress();
+  console.log("   ModelShardRegistry deployed to:", shardRegistryAddress);
+
+  // 4. Deploy Project Contract
+  console.log("\n4. Deploying Project...");
   const Project = await hre.ethers.getContractFactory("Project");
   const project = await Project.deploy(
     atnAddress,
@@ -46,8 +57,8 @@ async function main() {
   const projectAddress = await project.getAddress();
   console.log("   Project deployed to:", projectAddress);
 
-  // 4. Deploy TaskContract
-  console.log("\n4. Deploying TaskContract...");
+  // 5. Deploy TaskContract
+  console.log("\n5. Deploying TaskContract...");
   const TaskContract = await hre.ethers.getContractFactory("TaskContract");
   const taskContract = await TaskContract.deploy(
     stakingAddress,
@@ -57,8 +68,8 @@ async function main() {
   const taskAddress = await taskContract.getAddress();
   console.log("   TaskContract deployed to:", taskAddress);
 
-  // 5. Deploy ResultsRewards
-  console.log("\n5. Deploying ResultsRewards...");
+  // 6. Deploy ResultsRewards
+  console.log("\n6. Deploying ResultsRewards...");
   const ResultsRewards = await hre.ethers.getContractFactory("ResultsRewards");
   const results = await ResultsRewards.deploy(
     taskAddress,
@@ -69,24 +80,24 @@ async function main() {
   const resultsAddress = await results.getAddress();
   console.log("   ResultsRewards deployed to:", resultsAddress);
 
-  // 6. Deploy AnchorBridge
-  console.log("\n6. Deploying AnchorBridge...");
+  // 7. Deploy AnchorBridge
+  console.log("\n7. Deploying AnchorBridge...");
   const AnchorBridge = await hre.ethers.getContractFactory("AnchorBridge");
   const bridge = await AnchorBridge.deploy(atnAddress);
   await bridge.waitForDeployment();
   const bridgeAddress = await bridge.getAddress();
   console.log("   AnchorBridge deployed to:", bridgeAddress);
 
-  // 7. Deploy DisputeManager
-  console.log("\n7. Deploying DisputeManager...");
+  // 8. Deploy DisputeManager
+  console.log("\n8. Deploying DisputeManager...");
   const DisputeManager = await hre.ethers.getContractFactory("DisputeManager");
   const disputes = await DisputeManager.deploy(atnAddress);
   await disputes.waitForDeployment();
   const disputesAddress = await disputes.getAddress();
   console.log("   DisputeManager deployed to:", disputesAddress);
 
-  // 8. Deploy AutonetDAO
-  console.log("\n8. Deploying AutonetDAO...");
+  // 9. Deploy AutonetDAO
+  console.log("\n9. Deploying AutonetDAO...");
   const AutonetDAO = await hre.ethers.getContractFactory("AutonetDAO");
   const dao = await AutonetDAO.deploy(
     atnAddress,
@@ -96,8 +107,8 @@ async function main() {
   const daoAddress = await dao.getAddress();
   console.log("   AutonetDAO deployed to:", daoAddress);
 
-  // 9. Deploy ForcedErrorRegistry
-  console.log("\n9. Deploying ForcedErrorRegistry...");
+  // 10. Deploy ForcedErrorRegistry
+  console.log("\n10. Deploying ForcedErrorRegistry...");
   const ForcedErrorRegistry = await hre.ethers.getContractFactory("ForcedErrorRegistry");
   const forcedErrors = await ForcedErrorRegistry.deploy(
     atnAddress,
@@ -108,8 +119,8 @@ async function main() {
   const forcedErrorsAddress = await forcedErrors.getAddress();
   console.log("   ForcedErrorRegistry deployed to:", forcedErrorsAddress);
 
-  // 10. Deploy InferenceProviderFactory (Jurisdiction Bridge)
-  console.log("\n10. Deploying InferenceProviderFactory...");
+  // 11. Deploy InferenceProviderFactory (Jurisdiction Bridge)
+  console.log("\n11. Deploying InferenceProviderFactory...");
   const InferenceProviderFactory = await hre.ethers.getContractFactory("InferenceProviderFactory");
   const inferenceFactory = await InferenceProviderFactory.deploy(
     projectAddress,
@@ -119,8 +130,8 @@ async function main() {
   const inferenceFactoryAddress = await inferenceFactory.getAddress();
   console.log("   InferenceProviderFactory deployed to:", inferenceFactoryAddress);
 
-  // 11. Configure contract relationships
-  console.log("\n11. Configuring contract relationships...");
+  // 12. Configure contract relationships
+  console.log("\n12. Configuring contract relationships...");
 
   // Set ResultsRewards in TaskContract
   await taskContract.setResultsRewardsContract(resultsAddress);
@@ -150,7 +161,7 @@ async function main() {
   await atnToken.setDaoAddress(daoAddress);
   console.log("   ATN Token DAO updated");
 
-  // 11. Print deployment summary
+  // 13. Print deployment summary
   console.log("\n" + "=".repeat(60));
   console.log("DEPLOYMENT COMPLETE");
   console.log("=".repeat(60));
@@ -159,6 +170,7 @@ Contract Addresses:
 -------------------
 ATN Token:                  ${atnAddress}
 ParticipantStaking:         ${stakingAddress}
+ModelShardRegistry:         ${shardRegistryAddress}
 Project:                    ${projectAddress}
 TaskContract:               ${taskAddress}
 ResultsRewards:             ${resultsAddress}
@@ -176,6 +188,7 @@ Save these addresses to your .env file!
   const addresses = {
     ATNToken: atnAddress,
     ParticipantStaking: stakingAddress,
+    ModelShardRegistry: shardRegistryAddress,
     Project: projectAddress,
     TaskContract: taskAddress,
     ResultsRewards: resultsAddress,
