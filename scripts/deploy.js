@@ -108,8 +108,19 @@ async function main() {
   const forcedErrorsAddress = await forcedErrors.getAddress();
   console.log("   ForcedErrorRegistry deployed to:", forcedErrorsAddress);
 
-  // 10. Configure contract relationships
-  console.log("\n10. Configuring contract relationships...");
+  // 10. Deploy InferenceProviderFactory (Jurisdiction Bridge)
+  console.log("\n10. Deploying InferenceProviderFactory...");
+  const InferenceProviderFactory = await hre.ethers.getContractFactory("InferenceProviderFactory");
+  const inferenceFactory = await InferenceProviderFactory.deploy(
+    projectAddress,
+    deployer.address // owner
+  );
+  await inferenceFactory.waitForDeployment();
+  const inferenceFactoryAddress = await inferenceFactory.getAddress();
+  console.log("   InferenceProviderFactory deployed to:", inferenceFactoryAddress);
+
+  // 11. Configure contract relationships
+  console.log("\n11. Configuring contract relationships...");
 
   // Set ResultsRewards in TaskContract
   await taskContract.setResultsRewardsContract(resultsAddress);
@@ -146,15 +157,16 @@ async function main() {
   console.log(`
 Contract Addresses:
 -------------------
-ATN Token:           ${atnAddress}
-ParticipantStaking:  ${stakingAddress}
-Project:             ${projectAddress}
-TaskContract:        ${taskAddress}
-ResultsRewards:      ${resultsAddress}
-AnchorBridge:        ${bridgeAddress}
-DisputeManager:      ${disputesAddress}
-AutonetDAO:          ${daoAddress}
-ForcedErrorRegistry: ${forcedErrorsAddress}
+ATN Token:                  ${atnAddress}
+ParticipantStaking:         ${stakingAddress}
+Project:                    ${projectAddress}
+TaskContract:               ${taskAddress}
+ResultsRewards:             ${resultsAddress}
+AnchorBridge:               ${bridgeAddress}
+DisputeManager:             ${disputesAddress}
+AutonetDAO:                 ${daoAddress}
+ForcedErrorRegistry:        ${forcedErrorsAddress}
+InferenceProviderFactory:   ${inferenceFactoryAddress}
 
 Save these addresses to your .env file!
   `);
@@ -171,6 +183,7 @@ Save these addresses to your .env file!
     DisputeManager: disputesAddress,
     AutonetDAO: daoAddress,
     ForcedErrorRegistry: forcedErrorsAddress,
+    InferenceProviderFactory: inferenceFactoryAddress,
     deployer: deployer.address,
     network: hre.network.name,
     timestamp: new Date().toISOString(),

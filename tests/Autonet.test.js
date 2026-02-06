@@ -387,4 +387,77 @@ describe("Autonet - Core Contracts", function () {
       ).to.emit(resultsRewards, "VerificationSubmitted");
     });
   });
+
+  describe("InferenceProviderBridge - Jurisdiction Integration", function () {
+    let inferenceFactory;
+    let projectId;
+
+    beforeEach(async function () {
+      // Deploy InferenceProviderFactory
+      const InferenceProviderFactory = await ethers.getContractFactory("InferenceProviderFactory");
+      inferenceFactory = await InferenceProviderFactory.deploy(
+        await project.getAddress(),
+        owner.address
+      );
+      await inferenceFactory.waitForDeployment();
+
+      // Create and deploy a project
+      await atnToken.connect(proposer).approve(await project.getAddress(), ethers.parseEther("1000"));
+      await project.connect(proposer).createProject(
+        "AI Inference Project",
+        "QmDesc",
+        ethers.parseEther("100"),
+        ethers.parseEther("0"),
+        ethers.parseEther("10"),
+        "AIP",
+        "AIP"
+      );
+      projectId = 1;
+
+      // Fund the project
+      await project.connect(proposer).fundProject(projectId, ethers.parseEther("100"), ethers.parseEther("10"));
+
+      // Set mature model (makes project DEPLOYED)
+      await project.connect(proposer).setMatureModel(
+        projectId,
+        "QmModelWeightsCid123456789",
+        ethers.parseEther("1") // 1 ATN per inference
+      );
+    });
+
+    it("Should deploy a bridge for a deployed project", async function () {
+      await expect(
+        inferenceFactory.deployBridge(projectId, proposer.address)
+      ).to.emit(inferenceFactory, "BridgeDeployed");
+
+      expect(await inferenceFactory.hasBridge(projectId)).to.be.true;
+      expect(await inferenceFactory.getBridgeCount()).to.equal(1);
+    });
+
+    it("Should not allow duplicate bridge deployment", async function () {
+      await inferenceFactory.deployBridge(projectId, proposer.address);
+
+      await expect(
+        inferenceFactory.deployBridge(projectId, proposer.address)
+      ).to.be.revertedWith("Bridge already deployed");
+    });
+
+    it("Bridge should return correct price per unit", async function () {
+      await inferenceFactory.deployBridge(projectId, proposer.address);
+
+      const bridgeAddress = await inferenceFactory.projectBridges(projectId);
+      const bridge = await ethers.getContractAt("InferenceProviderBridge", bridgeAddress);
+
+      expect(await bridge.getPricePerUnit()).to.equal(ethers.parseEther("1"));
+    });
+
+    it("Bridge should return model CID", async function () {
+      await inferenceFactory.deployBridge(projectId, proposer.address);
+
+      const bridgeAddress = await inferenceFactory.projectBridges(projectId);
+      const bridge = await ethers.getContractAt("InferenceProviderBridge", bridgeAddress);
+
+      expect(await bridge.getModelCid()).to.equal("QmModelWeightsCid123456789");
+    });
+  });
 });
