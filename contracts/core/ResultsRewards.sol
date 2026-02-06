@@ -184,7 +184,7 @@ contract ResultsRewards {
             taskVotes.length >= MIN_COORDINATORS,
             "Cannot finalize yet"
         );
-        require(taskVotes.length >= 1, "No votes submitted");
+        require(taskVotes.length >= MIN_COORDINATORS, "Insufficient coordinator votes");
 
         // Compute Yuma consensus
         (bool consensusCorrect, uint256 consensusScore, uint256 totalStake, uint256 correctStake, uint256 clippedCount) =
@@ -329,8 +329,11 @@ contract ResultsRewards {
                 if (projectContract.disburseFromBudget(projectId, coordinator, adjustedFee)) {
                     emit RewardsDistributed(_taskId, coordinator, adjustedFee, "CoordinatorFee");
                 }
+            } else {
+                // Slash coordinators who voted against consensus
+                uint256 slashAmount = taskVotes[i].stake / 10; // 10% of stake
+                staking.slash(coordinator, slashAmount, "Voted against consensus");
             }
-            // Coordinators who voted against consensus get nothing (stake at risk for slashing)
         }
 
         if (_isCorrect) {

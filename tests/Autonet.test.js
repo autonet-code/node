@@ -60,6 +60,7 @@ describe("Autonet - Core Contracts", function () {
     await resultsRewards.setProjectContract(await project.getAddress());
     await staking.setAuthorizedSlasher(await resultsRewards.getAddress(), true);
     await staking.setAuthorizedSlasher(await forcedErrorRegistry.getAddress(), true);
+    await project.setAuthorizedDisburser(await resultsRewards.getAddress(), true);
 
     // Distribute tokens for testing
     const testAmount = ethers.parseEther("10000");

@@ -26,11 +26,12 @@ class BlockchainInterface:
         self,
         rpc_url: str = "http://localhost:8545",
         private_key: Optional[str] = None,
-        chain_id: int = 1337,
+        chain_id: Optional[int] = None,
     ):
         self.rpc_url = rpc_url
         self.private_key = private_key
-        self.chain_id = chain_id
+        self._provided_chain_id = chain_id
+        self.chain_id = chain_id or 1337  # Will be auto-detected after connect
         self.web3 = None
         self.account = None
 
@@ -41,6 +42,17 @@ class BlockchainInterface:
         try:
             from web3 import Web3
             self.web3 = Web3(Web3.HTTPProvider(self.rpc_url))
+
+            # Auto-detect chain_id from the node if not explicitly provided
+            if self.web3.is_connected():
+                detected_chain_id = self.web3.eth.chain_id
+                if self._provided_chain_id and self._provided_chain_id != detected_chain_id:
+                    logger.warning(
+                        f"Provided chain_id {self._provided_chain_id} differs from "
+                        f"node chain_id {detected_chain_id}. Using node's chain_id."
+                    )
+                self.chain_id = detected_chain_id
+                logger.info(f"Chain ID: {self.chain_id}")
 
             if self.private_key:
                 self.account = self.web3.eth.account.from_key(self.private_key)
@@ -125,7 +137,8 @@ class BlockchainInterface:
             })
 
             signed = self.web3.eth.account.sign_transaction(tx, self.private_key)
-            tx_hash = self.web3.eth.send_raw_transaction(signed.rawTransaction)
+            raw = getattr(signed, 'raw_transaction', None) or signed.rawTransaction
+            tx_hash = self.web3.eth.send_raw_transaction(raw)
             receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
 
             return TransactionResult(
@@ -162,4 +175,4 @@ class BlockchainInterface:
         )
 
         event = getattr(contract.events, event_name)
-        return event.get_logs(fromBlock=from_block, toBlock=to_block)
+        return event.get_logs(from_block=from_block, to_block=to_block)

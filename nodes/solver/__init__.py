@@ -1,4 +1,4 @@
 """Autonet Solver Node"""
-from .main import SolverNode, TrainingResult
+from .main import SolverNode
 
-__all__ = ["SolverNode", "TrainingResult"]
+__all__ = ["SolverNode"]

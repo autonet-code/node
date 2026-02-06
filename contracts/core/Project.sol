@@ -14,6 +14,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 contract Project is Ownable {
     ATNToken public immutable atnToken;
     address public governance;
+    mapping(address => bool) public authorizedDisbursers;
 
     uint256 public nextProjectId = 1;
 
@@ -55,6 +56,7 @@ contract Project is Ownable {
     event InferencePriceSet(uint256 indexed projectId, uint256 price);
     event InferenceRequested(uint256 indexed projectId, address indexed user, uint256 requestId, string inputCid, uint256 fee);
     event RevenueWithdrawn(uint256 indexed projectId, address indexed shareholder, uint256 amount);
+    event DisburserAuthorized(address indexed disburser, bool authorized);
 
     modifier projectExists(uint256 _projectId) {
         require(projects[_projectId].founder != address(0), "Project does not exist");
@@ -78,6 +80,11 @@ contract Project is Ownable {
 
     function setGovernance(address _newGovernance) external onlyOwner {
         governance = _newGovernance;
+    }
+
+    function setAuthorizedDisburser(address _disburser, bool _authorized) external onlyGov {
+        authorizedDisbursers[_disburser] = _authorized;
+        emit DisburserAuthorized(_disburser, _authorized);
     }
 
     function createProject(
@@ -205,7 +212,7 @@ contract Project is Ownable {
     function disburseFromBudget(uint256 _projectId, address _recipient, uint256 _amount)
         external projectExists(_projectId) returns (bool)
     {
-        // Should be called by authorized contracts (TaskContract, ResultsRewards)
+        require(authorizedDisbursers[msg.sender] || msg.sender == governance, "Not authorized to disburse");
         ProjectData storage p = projects[_projectId];
         require(p.taskRewardBudgetATN >= _amount, "Insufficient budget");
 

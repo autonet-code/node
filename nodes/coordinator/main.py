@@ -1,379 +1,504 @@
 """
-Autonet Coordinator Node
+CoordinatorNode - Autonomous verification and voting node for Autonet.
 
-Verifies task completion by comparing solver solutions to ground truth.
-Submits verification reports to the blockchain.
-
-Implements:
-- Bittensor-style multi-coordinator voting (Yuma Consensus)
-- Gensyn-style checkpoint verification
-- Truebit-style forced error detection
+Responsibilities:
+- Stake as COORDINATOR (500 ATN)
+- Monitor SolutionRevealed events
+- Download and verify solutions against ground truth
+- Submit verification votes
+- Finalize voting when threshold reached
+- Track forced errors and bond strength
 """
 
+import time
 import logging
-import json
-import hashlib
-from typing import Dict, Any, Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
-from ..core import Node, NodeRole, DEFAULT_CONSTITUTION
-from ..common import BlockchainInterface, IPFSClient, hash_string
+from ..common.contracts import ContractRegistry
+from ..common.ipfs import IPFSClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class VerificationResult:
-    """Result of verification."""
-    task_id: int
-    solver_address: str
-    is_correct: bool
-    score: int  # 0-100
-    report_cid: str
-    details: Dict[str, Any]
-    is_forced_error: bool = False  # Did we detect a forced error?
+class CoordinatorMetrics:
+    """Metrics tracked by the coordinator node."""
+    tasks_proposed: int = 0
+    tasks_completed: int = 0
+    solutions_committed: int = 0
+    votes_submitted: int = 0
+    aggregations_done: int = 0
+    forced_errors_caught: int = 0
+    errors: int = 0
+    cycles: int = 0
+
+    # Coordinator-specific metrics
+    solutions_verified: int = 0
+    voting_finalized: int = 0
+    ema_bond_strength: float = 1.0
 
 
-@dataclass
-class CheckpointVerification:
-    """Result of checkpoint comparison."""
-    step_number: int
-    weights_match: bool
-    data_indices_match: bool
-    seed_match: bool
-    first_divergence_step: Optional[int] = None
-
-
-class CoordinatorNode(Node):
+class CoordinatorNode:
     """
-    Coordinator node that verifies task solutions.
+    Autonomous coordinator node that verifies solver solutions.
 
-    Responsibilities:
-    - Download ground truth and solver solutions from IPFS
-    - Compare solutions against ground truth
-    - Verify checkpoints for Gensyn-style dispute resolution
-    - Detect forced errors for Truebit-style incentives
-    - Submit verification votes to blockchain (multi-coordinator mode)
-    - Participate in Yuma consensus
+    Interface Requirements (for orchestrator.py):
+    - __init__(registry, ipfs, node_id, project_id)
+    - run(max_cycles, cycle_delay)
+    - stop()
+    - metrics attribute
     """
+
+    COORDINATOR_ROLE = 3
+    STAKE_AMOUNT = 500 * 10**18  # 500 ATN
+    EMA_ALPHA = 0.1  # Exponential moving average decay
+    VOTE_THRESHOLD = 2  # Minimum votes to finalize
 
     def __init__(
         self,
-        blockchain: Optional[BlockchainInterface] = None,
-        ipfs: Optional[IPFSClient] = None,
-        forced_error_detector: bool = True,
-        **kwargs,
+        registry: ContractRegistry,
+        ipfs: IPFSClient,
+        node_id: str,
+        project_id: int,
     ):
-        super().__init__(role=NodeRole.COORDINATOR, **kwargs)
-        self.blockchain = blockchain or BlockchainInterface()
-        self.ipfs = ipfs or IPFSClient()
-        self.verification_history: List[VerificationResult] = []
-        self.forced_error_detector = forced_error_detector
-        self.ema_bond_strength: float = 0.5  # Start with neutral bond
-
-    def verify_solution(
-        self,
-        task_id: int,
-        solver_address: str,
-        solution_cid: str,
-        ground_truth_cid: str,
-        known_forced_error_hash: Optional[str] = None,
-    ) -> Optional[VerificationResult]:
         """
-        Verify a solver's solution against the ground truth.
+        Initialize the coordinator node.
 
         Args:
-            task_id: The task being verified
-            solver_address: Address of the solver
-            solution_cid: IPFS CID of the solver's solution
-            ground_truth_cid: IPFS CID of the ground truth
-            known_forced_error_hash: Hash of known forced error (if this is a trap task)
-
-        Returns:
-            Verification result if successful
+            registry: ContractRegistry for blockchain interactions
+            ipfs: IPFSClient for content storage/retrieval
+            node_id: Unique identifier for this node instance
+            project_id: Project ID to coordinate for
         """
-        logger.info(f"Verifying solution for task {task_id} from {solver_address[:10]}...")
+        self.registry = registry
+        self.ipfs = ipfs
+        self.node_id = node_id
+        self.project_id = project_id
 
-        # Download solution
-        solution = self.ipfs.get_json(solution_cid)
-        if not solution:
-            logger.error(f"Failed to download solution: {solution_cid}")
-            return None
+        self.metrics = CoordinatorMetrics()
+        self._running = False
+        self._staked = False
 
-        # Download ground truth
-        ground_truth = self.ipfs.get_json(ground_truth_cid)
-        if not ground_truth:
-            logger.error(f"Failed to download ground truth: {ground_truth_cid}")
-            return None
+        # Track processed events to avoid duplicates
+        self._processed_solutions = set()
 
-        # Check for forced error first (Truebit-style)
-        is_forced_error = False
-        if self.forced_error_detector and known_forced_error_hash:
-            solution_hash = hash_string(solution_cid)
-            if solution_hash == known_forced_error_hash:
-                logger.warning(f"FORCED ERROR DETECTED for task {task_id}!")
-                is_forced_error = True
-                # This solution is deliberately wrong - we caught the trap
-
-        # Perform verification
-        is_correct, score, details = self._compare_solutions(solution, ground_truth)
-
-        # If we detected a forced error, mark as incorrect regardless of metrics
-        if is_forced_error:
-            is_correct = False
-            details["forced_error_detected"] = True
-
-        # Create verification report
-        report = {
-            "task_id": task_id,
-            "solver": solver_address,
-            "is_correct": is_correct,
-            "score": score,
-            "solution_cid": solution_cid,
-            "ground_truth_cid": ground_truth_cid,
-            "details": details,
-            "is_forced_error": is_forced_error,
-            "coordinator_bond_strength": self.ema_bond_strength,
-        }
-
-        # Upload report to IPFS
-        report_cid = self.ipfs.add_json(report)
-        if not report_cid:
-            logger.error("Failed to upload verification report")
-            return None
-
-        result = VerificationResult(
-            task_id=task_id,
-            solver_address=solver_address,
-            is_correct=is_correct,
-            score=score,
-            report_cid=report_cid,
-            details=details,
-            is_forced_error=is_forced_error,
-        )
-
-        self.verification_history.append(result)
-        logger.info(f"Verification complete: correct={is_correct}, score={score}")
-
-        return result
-
-    def verify_checkpoints(
-        self,
-        task_id: int,
-        solver_address: str,
-        solver_checkpoints: List[Dict[str, Any]],
-        reference_checkpoints: List[Dict[str, Any]],
-    ) -> CheckpointVerification:
-        """
-        Verify checkpoints between solver and reference (Gensyn-style).
-        This enables pinpointing the first divergent step in disputes.
-
-        Args:
-            task_id: The task being verified
-            solver_address: Address of the solver
-            solver_checkpoints: Checkpoints from solver
-            reference_checkpoints: Reference checkpoints (from another verifier or re-computation)
-
-        Returns:
-            CheckpointVerification result with first divergence point
-        """
-        logger.info(f"Verifying {len(solver_checkpoints)} checkpoints for task {task_id}")
-
-        first_divergence = None
-
-        for i, (solver_cp, ref_cp) in enumerate(zip(solver_checkpoints, reference_checkpoints)):
-            weights_match = solver_cp.get("weights_hash") == ref_cp.get("weights_hash")
-            data_match = solver_cp.get("data_indices_hash") == ref_cp.get("data_indices_hash")
-            seed_match = solver_cp.get("random_seed") == ref_cp.get("random_seed")
-
-            if not (weights_match and data_match and seed_match):
-                first_divergence = solver_cp.get("step_number", i)
-                logger.warning(
-                    f"Checkpoint divergence at step {first_divergence}: "
-                    f"weights={weights_match}, data={data_match}, seed={seed_match}"
-                )
-                break
-
-        return CheckpointVerification(
-            step_number=solver_checkpoints[-1].get("step_number", len(solver_checkpoints)) if solver_checkpoints else 0,
-            weights_match=first_divergence is None,
-            data_indices_match=first_divergence is None,
-            seed_match=first_divergence is None,
-            first_divergence_step=first_divergence,
-        )
-
-    def _compare_solutions(
-        self,
-        solution: Dict[str, Any],
-        ground_truth: Dict[str, Any],
-    ) -> tuple:
-        """
-        Compare a solution against ground truth.
-
-        Returns:
-            (is_correct, score, details)
-        """
-        details = {}
-
-        # Check if metrics exist
-        sol_metrics = solution.get("metrics", {})
-        gt_metrics = ground_truth.get("metrics", {})
-
-        if not sol_metrics:
-            return False, 0, {"error": "No metrics in solution"}
-
-        # Compare accuracy
-        sol_acc = sol_metrics.get("accuracy", 0)
-        gt_acc = gt_metrics.get("accuracy", 0.9)
-
-        accuracy_diff = abs(sol_acc - gt_acc)
-        is_close = accuracy_diff < 0.1
-
-        score = max(0, int(100 * (1 - accuracy_diff / gt_acc))) if gt_acc > 0 else 0
-
-        details = {
-            "solution_accuracy": sol_acc,
-            "expected_accuracy": gt_acc,
-            "accuracy_difference": accuracy_diff,
-        }
-
-        # Check for checkpoint consistency if available
-        if "checkpoint_frequency" in solution:
-            details["has_checkpoints"] = True
-            details["checkpoint_frequency"] = solution["checkpoint_frequency"]
-
-        # Check for RepOps version (determinism indicator)
-        if "repops_version" in solution:
-            details["repops_version"] = solution["repops_version"]
-            details["deterministic"] = True
-
-        is_correct = is_close and score >= 70
-
-        return is_correct, score, details
-
-    def submit_vote(self, result: VerificationResult) -> bool:
-        """
-        Submit verification vote to the blockchain (multi-coordinator mode).
-        This participates in Yuma consensus.
-
-        Args:
-            result: The verification result to submit as a vote
-
-        Returns:
-            True if successful
-        """
-        logger.info(f"Submitting vote for task {result.task_id}")
-        logger.info(f"  Vote: {'CORRECT' if result.is_correct else 'INCORRECT'}, Score: {result.score}")
-
-        # In production, call ResultsRewards.submitVote
-        # with (task_id, solver, is_correct, score, report_cid)
-
-        return True
-
-    def submit_verification(self, result: VerificationResult) -> bool:
-        """
-        Submit verification result to the blockchain (legacy single-coordinator mode).
-
-        Args:
-            result: The verification result to submit
-
-        Returns:
-            True if successful
-        """
-        logger.info(f"Submitting verification for task {result.task_id}")
-
-        # In production, call ResultsRewards.submitVerification
-        # with (task_id, solver, is_correct, score, report_cid)
-
-        return True
-
-    def report_forced_error(self, task_id: int, solution_hash: str) -> bool:
-        """
-        Report a detected forced error to claim jackpot.
-
-        Args:
-            task_id: The task with forced error
-            solution_hash: Hash of the bad solution
-
-        Returns:
-            True if successful
-        """
-        logger.info(f"Reporting forced error for task {task_id}")
-        logger.info(f"  Solution hash: {solution_hash[:20]}...")
-
-        # In production, call ForcedErrorRegistry.reportForcedError
-
-        return True
-
-    def update_bond_strength(self, aligned_with_consensus: bool):
-        """
-        Update the coordinator's EMA bond strength based on consensus alignment.
-        This affects future reward multipliers.
-        """
-        decay = 0.9
-        current_value = 1.0 if aligned_with_consensus else 0.0
-        self.ema_bond_strength = decay * self.ema_bond_strength + (1 - decay) * current_value
+        # Cache ground truths: task_id -> groundTruthCid
+        self._ground_truth_cache: dict[int, str] = {}
 
         logger.info(
-            f"Bond strength updated: {self.ema_bond_strength:.4f} "
-            f"(aligned={aligned_with_consensus})"
+            f"CoordinatorNode initialized: {node_id} for project {project_id}"
         )
 
-    def get_bond_multiplier(self) -> float:
+    def run(self, max_cycles: Optional[int] = None, cycle_delay: float = 2.0):
         """
-        Get the reward multiplier based on current bond strength.
-        Strong bonds (high consistency) get up to 1.5x rewards.
+        Main execution loop.
+
+        Args:
+            max_cycles: Maximum number of cycles to run (None = infinite)
+            cycle_delay: Delay between cycles in seconds
         """
-        base_multiplier = 1.0
-        max_bonus = 0.5  # Up to 50% bonus
-        return base_multiplier + (self.ema_bond_strength * max_bonus)
+        self._running = True
+        logger.info(f"CoordinatorNode {self.node_id} starting...")
 
+        try:
+            cycle = 0
+            while self._running and (max_cycles is None or cycle < max_cycles):
+                try:
+                    self._run_cycle()
+                    self.metrics.cycles += 1
+                    cycle += 1
 
-def main():
-    """Run the coordinator node."""
-    node = CoordinatorNode()
+                    if self._running:
+                        time.sleep(cycle_delay)
 
-    # Demo: verify a solution with multi-coordinator voting
-    result = node.verify_solution(
-        task_id=1,
-        solver_address="0x1234567890abcdef...",
-        solution_cid="QmSolution...",
-        ground_truth_cid="QmGroundTruth...",
-    )
+                except Exception as e:
+                    logger.error(f"Error in cycle {cycle}: {e}", exc_info=True)
+                    self.metrics.errors += 1
+                    time.sleep(cycle_delay)
 
-    if result:
-        # Submit as vote in multi-coordinator mode
-        node.submit_vote(result)
+        except KeyboardInterrupt:
+            logger.info("Received interrupt signal")
+        finally:
+            self._running = False
+            logger.info(
+                f"CoordinatorNode {self.node_id} stopped after {cycle} cycles"
+            )
 
-        # Show bond multiplier
-        multiplier = node.get_bond_multiplier()
-        print(f"\nVerification result: {result}")
-        print(f"Bond strength: {node.ema_bond_strength:.4f}")
-        print(f"Reward multiplier: {multiplier:.2f}x")
+    def stop(self):
+        """Stop the node gracefully."""
+        logger.info(f"Stopping CoordinatorNode {self.node_id}...")
+        self._running = False
 
-    # Demo: checkpoint verification
-    solver_checkpoints = [
-        {"step_number": 10, "weights_hash": "abc123", "data_indices_hash": "def456", "random_seed": "seed1"},
-        {"step_number": 20, "weights_hash": "abc124", "data_indices_hash": "def457", "random_seed": "seed2"},
-    ]
-    reference_checkpoints = [
-        {"step_number": 10, "weights_hash": "abc123", "data_indices_hash": "def456", "random_seed": "seed1"},
-        {"step_number": 20, "weights_hash": "abc124", "data_indices_hash": "def457", "random_seed": "seed2"},
-    ]
+    def _run_cycle(self):
+        """Execute one cycle of coordinator operations."""
+        # First cycle: stake if not already staked
+        if not self._staked:
+            self._stake()
+            return
 
-    checkpoint_result = node.verify_checkpoints(
-        task_id=1,
-        solver_address="0x1234567890abcdef...",
-        solver_checkpoints=solver_checkpoints,
-        reference_checkpoints=reference_checkpoints,
-    )
+        # Fetch and cache ground truths first (must happen before solution reveals)
+        self._fetch_ground_truths()
 
-    print(f"\nCheckpoint verification: {checkpoint_result}")
+        # Poll for new SolutionRevealed events
+        self._process_solution_reveals()
 
-    # Run for a few cycles
-    node.run(max_cycles=3)
+        # Check for forced errors
+        self._check_forced_errors()
 
+        # Update bond strength (EMA decay)
+        self._update_bond_strength()
 
-if __name__ == "__main__":
-    main()
+    def _stake(self):
+        """Approve ATN and stake as coordinator."""
+        logger.info(f"Staking {self.STAKE_AMOUNT / 10**18} ATN as COORDINATOR...")
+
+        try:
+            # Get staking contract address
+            staking_contract = self.registry.get("ParticipantStaking")
+
+            # Approve ATN transfer
+            logger.info("Approving ATN transfer...")
+            result = self.registry.approve_atn(
+                staking_contract.address,
+                self.STAKE_AMOUNT
+            )
+
+            if not result.success:
+                logger.error(f"ATN approval failed: {result.error}")
+                self.metrics.errors += 1
+                return
+
+            logger.info(f"ATN approved: {result.tx_hash}")
+
+            # Stake
+            logger.info(f"Staking as coordinator (role={self.COORDINATOR_ROLE})...")
+            result = self.registry.stake(self.COORDINATOR_ROLE, self.STAKE_AMOUNT)
+
+            if result.success:
+                logger.info(f"Staked successfully: {result.tx_hash}")
+                self._staked = True
+            else:
+                logger.error(f"Staking failed: {result.error}")
+                self.metrics.errors += 1
+
+        except Exception as e:
+            logger.error(f"Staking error: {e}", exc_info=True)
+            self.metrics.errors += 1
+
+    def _process_solution_reveals(self):
+        """Poll for and process SolutionRevealed events."""
+        try:
+            events = self.registry.get_new_events("ResultsRewards", "SolutionRevealed")
+
+            for event in events:
+                self._process_solution_reveal(event)
+
+        except Exception as e:
+            logger.error(f"Error processing solution reveals: {e}", exc_info=True)
+            self.metrics.errors += 1
+
+    def _process_solution_reveal(self, event):
+        """
+        Process a single SolutionRevealed event.
+
+        Event args should contain:
+        - taskId
+        - solver
+        - solutionCid
+        - groundTruthCid (from separate GroundTruthRevealed event)
+        """
+        try:
+            args = event.get("args", {})
+            task_id = args.get("taskId")
+            solver = args.get("solver")
+            solution_cid = args.get("solutionCid")
+
+            # Create unique key to avoid duplicate processing
+            event_key = (task_id, solver)
+            if event_key in self._processed_solutions:
+                return
+
+            logger.info(
+                f"Processing solution reveal: task={task_id}, solver={solver}"
+            )
+
+            # Check if voting is still open
+            if not self.registry.is_voting_open(task_id, solver):
+                logger.info(f"Voting closed for task {task_id}, solver {solver}")
+                self._processed_solutions.add(event_key)
+                return
+
+            # Get ground truth CID - check GroundTruthRevealed events
+            ground_truth_cid = self._get_ground_truth_cid(task_id)
+            if not ground_truth_cid:
+                logger.warning(f"Ground truth not found for task {task_id}")
+                return
+
+            # Download and verify
+            is_correct, score = self._verify_solution(
+                solution_cid,
+                ground_truth_cid
+            )
+
+            # Create verification report
+            report = {
+                "task_id": task_id,
+                "solver": solver,
+                "solution_cid": solution_cid,
+                "ground_truth_cid": ground_truth_cid,
+                "is_correct": is_correct,
+                "score": score,
+                "coordinator": self.registry.blockchain.account.address,
+                "timestamp": int(time.time()),
+                "node_id": self.node_id,
+            }
+
+            # Upload report to IPFS
+            report_cid = self.ipfs.add_json(report)
+            logger.info(f"Verification report uploaded: {report_cid}")
+
+            # Submit vote
+            result = self.registry.submit_vote(
+                task_id,
+                solver,
+                is_correct,
+                score,
+                report_cid
+            )
+
+            if result.success:
+                logger.info(
+                    f"Vote submitted for task {task_id}: "
+                    f"correct={is_correct}, score={score}"
+                )
+                self.metrics.votes_submitted += 1
+                self.metrics.solutions_verified += 1
+                self._processed_solutions.add(event_key)
+
+                # Update bond strength based on verification
+                self._update_bond_strength(success=True)
+
+                # Try to finalize voting if threshold reached
+                self._try_finalize_voting(task_id, solver)
+            else:
+                logger.error(f"Vote submission failed: {result.error}")
+                self.metrics.errors += 1
+                self._update_bond_strength(success=False)
+
+        except Exception as e:
+            logger.error(f"Error processing solution reveal: {e}", exc_info=True)
+            self.metrics.errors += 1
+
+    def _fetch_ground_truths(self):
+        """
+        Fetch new GroundTruthRevealed events and cache them.
+        Must be called each cycle BEFORE processing solution reveals.
+        """
+        try:
+            events = self.registry.get_new_events(
+                "ResultsRewards",
+                "GroundTruthRevealed"
+            )
+
+            for event in events:
+                args = event.get("args", {})
+                task_id = args.get("taskId")
+                ground_truth_cid = args.get("cid")  # Event uses 'cid', not 'groundTruthCid'
+
+                if task_id is not None and ground_truth_cid:
+                    self._ground_truth_cache[task_id] = ground_truth_cid
+                    logger.info(f"Cached ground truth for task {task_id}: {ground_truth_cid[:20]}...")
+
+        except Exception as e:
+            logger.error(f"Error fetching ground truths: {e}", exc_info=True)
+
+    def _get_ground_truth_cid(self, task_id: int) -> Optional[str]:
+        """
+        Get ground truth CID for a task from the cache.
+
+        Args:
+            task_id: Task ID to get ground truth for
+
+        Returns:
+            Ground truth CID or None if not found
+        """
+        return self._ground_truth_cache.get(task_id)
+
+    def _verify_solution(
+        self,
+        solution_cid: str,
+        ground_truth_cid: str
+    ) -> tuple[bool, int]:
+        """
+        Verify a solution against ground truth.
+
+        Args:
+            solution_cid: IPFS CID of solution
+            ground_truth_cid: IPFS CID of ground truth
+
+        Returns:
+            Tuple of (is_correct, score) where score is 0-100
+        """
+        try:
+            # Download both from IPFS
+            solution_data = self.ipfs.get_json(solution_cid)
+            ground_truth_data = self.ipfs.get_json(ground_truth_cid)
+
+            # Extract metrics if available
+            solution_metrics = solution_data.get("metrics", {})
+            ground_truth_metrics = ground_truth_data.get("metrics", {})
+
+            # Calculate score based on accuracy if available
+            solution_accuracy = solution_metrics.get("accuracy", 0.0)
+            ground_truth_accuracy = ground_truth_metrics.get("accuracy", 0.0)
+
+            # Simple verification: compare accuracy values
+            if ground_truth_accuracy > 0:
+                # Score based on how close solution is to ground truth
+                accuracy_ratio = min(
+                    solution_accuracy / ground_truth_accuracy,
+                    1.0
+                )
+                score = int(accuracy_ratio * 100)
+            else:
+                # Fallback: compare JSON structure similarity
+                score = self._compute_structural_similarity(
+                    solution_data,
+                    ground_truth_data
+                )
+
+            # Consider correct if score >= 70
+            is_correct = score >= 70
+
+            logger.info(
+                f"Verification result: score={score}, "
+                f"correct={is_correct}, "
+                f"solution_acc={solution_accuracy:.3f}, "
+                f"ground_truth_acc={ground_truth_accuracy:.3f}"
+            )
+
+            return is_correct, score
+
+        except Exception as e:
+            logger.error(f"Error verifying solution: {e}", exc_info=True)
+            # Conservative: assume incorrect on error
+            return False, 0
+
+    def _compute_structural_similarity(
+        self,
+        data1: dict,
+        data2: dict
+    ) -> int:
+        """
+        Compute structural similarity between two JSON objects.
+
+        Args:
+            data1: First JSON object
+            data2: Second JSON object
+
+        Returns:
+            Similarity score 0-100
+        """
+        try:
+            # Count matching keys at top level
+            keys1 = set(data1.keys())
+            keys2 = set(data2.keys())
+
+            if not keys1 and not keys2:
+                return 100
+
+            common_keys = keys1 & keys2
+            all_keys = keys1 | keys2
+
+            if not all_keys:
+                return 0
+
+            # Base similarity on key overlap
+            key_similarity = len(common_keys) / len(all_keys)
+
+            # Check value similarity for common keys
+            value_matches = 0
+            for key in common_keys:
+                if data1[key] == data2[key]:
+                    value_matches += 1
+
+            if common_keys:
+                value_similarity = value_matches / len(common_keys)
+            else:
+                value_similarity = 0
+
+            # Weighted average: 40% key similarity, 60% value similarity
+            overall_similarity = (
+                0.4 * key_similarity + 0.6 * value_similarity
+            )
+
+            return int(overall_similarity * 100)
+
+        except Exception as e:
+            logger.error(f"Error computing similarity: {e}")
+            return 0
+
+    def _try_finalize_voting(self, task_id: int, solver: str):
+        """
+        Try to finalize voting if threshold is reached.
+
+        Args:
+            task_id: Task ID to finalize
+            solver: Solver address
+        """
+        try:
+            vote_count = self.registry.get_vote_count(task_id, solver)
+
+            if vote_count >= self.VOTE_THRESHOLD:
+                logger.info(
+                    f"Vote threshold reached ({vote_count} >= {self.VOTE_THRESHOLD}), "
+                    f"finalizing task {task_id}..."
+                )
+
+                result = self.registry.finalize_voting(task_id, solver)
+
+                if result.success:
+                    logger.info(f"Voting finalized for task {task_id}")
+                    self.metrics.voting_finalized += 1
+                    self.metrics.tasks_completed += 1
+                else:
+                    logger.warning(f"Finalization failed: {result.error}")
+
+        except Exception as e:
+            logger.error(f"Error finalizing voting: {e}", exc_info=True)
+
+    def _check_forced_errors(self):
+        """Check for and report forced errors in solutions."""
+        try:
+            # This would typically scan for known attack patterns
+            # or anomalies in recent solutions
+            # Placeholder implementation
+            pass
+
+        except Exception as e:
+            logger.error(f"Error checking forced errors: {e}", exc_info=True)
+
+    def _update_bond_strength(self, success: Optional[bool] = None):
+        """
+        Update EMA bond strength metric.
+
+        Args:
+            success: Optional success indicator (True/False/None for decay only)
+        """
+        if success is True:
+            # Increase bond strength
+            target = 1.0
+        elif success is False:
+            # Decrease bond strength
+            target = 0.0
+        else:
+            # Natural decay towards neutral
+            return
+
+        # Update EMA
+        self.metrics.ema_bond_strength = (
+            self.EMA_ALPHA * target +
+            (1 - self.EMA_ALPHA) * self.metrics.ema_bond_strength
+        )

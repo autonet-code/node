@@ -18,8 +18,7 @@ async function main() {
   const initialSupply = hre.ethers.parseEther("1000000000"); // 1 billion
   const atnToken = await ATNToken.deploy(
     deployer.address, // initial holder
-    initialSupply,
-    deployer.address  // temporary DAO (will update)
+    initialSupply
   );
   await atnToken.waitForDeployment();
   const atnAddress = await atnToken.getAddress();
@@ -97,8 +96,20 @@ async function main() {
   const daoAddress = await dao.getAddress();
   console.log("   AutonetDAO deployed to:", daoAddress);
 
-  // 9. Configure contract relationships
-  console.log("\n9. Configuring contract relationships...");
+  // 9. Deploy ForcedErrorRegistry
+  console.log("\n9. Deploying ForcedErrorRegistry...");
+  const ForcedErrorRegistry = await hre.ethers.getContractFactory("ForcedErrorRegistry");
+  const forcedErrors = await ForcedErrorRegistry.deploy(
+    atnAddress,
+    stakingAddress,
+    deployer.address // governance
+  );
+  await forcedErrors.waitForDeployment();
+  const forcedErrorsAddress = await forcedErrors.getAddress();
+  console.log("   ForcedErrorRegistry deployed to:", forcedErrorsAddress);
+
+  // 10. Configure contract relationships
+  console.log("\n10. Configuring contract relationships...");
 
   // Set ResultsRewards in TaskContract
   await taskContract.setResultsRewardsContract(resultsAddress);
@@ -108,9 +119,17 @@ async function main() {
   await results.setProjectContract(projectAddress);
   console.log("   ResultsRewards linked to Project");
 
+  // Authorize ResultsRewards as disburser on Project
+  await project.setAuthorizedDisburser(resultsAddress, true);
+  console.log("   ResultsRewards authorized as disburser");
+
   // Authorize ResultsRewards as a slasher
   await staking.setAuthorizedSlasher(resultsAddress, true);
   console.log("   ResultsRewards authorized as slasher");
+
+  // Authorize ForcedErrorRegistry as slasher
+  await staking.setAuthorizedSlasher(forcedErrorsAddress, true);
+  console.log("   ForcedErrorRegistry authorized as slasher");
 
   // Add deployer as validator for AnchorBridge
   await bridge.addValidator(deployer.address);
@@ -120,21 +139,22 @@ async function main() {
   await atnToken.setDaoAddress(daoAddress);
   console.log("   ATN Token DAO updated");
 
-  // 10. Print deployment summary
+  // 11. Print deployment summary
   console.log("\n" + "=".repeat(60));
   console.log("DEPLOYMENT COMPLETE");
   console.log("=".repeat(60));
   console.log(`
 Contract Addresses:
 -------------------
-ATN Token:          ${atnAddress}
-ParticipantStaking: ${stakingAddress}
-Project:            ${projectAddress}
-TaskContract:       ${taskAddress}
-ResultsRewards:     ${resultsAddress}
-AnchorBridge:       ${bridgeAddress}
-DisputeManager:     ${disputesAddress}
-AutonetDAO:         ${daoAddress}
+ATN Token:           ${atnAddress}
+ParticipantStaking:  ${stakingAddress}
+Project:             ${projectAddress}
+TaskContract:        ${taskAddress}
+ResultsRewards:      ${resultsAddress}
+AnchorBridge:        ${bridgeAddress}
+DisputeManager:      ${disputesAddress}
+AutonetDAO:          ${daoAddress}
+ForcedErrorRegistry: ${forcedErrorsAddress}
 
 Save these addresses to your .env file!
   `);
@@ -150,6 +170,7 @@ Save these addresses to your .env file!
     AnchorBridge: bridgeAddress,
     DisputeManager: disputesAddress,
     AutonetDAO: daoAddress,
+    ForcedErrorRegistry: forcedErrorsAddress,
     deployer: deployer.address,
     network: hre.network.name,
     timestamp: new Date().toISOString(),

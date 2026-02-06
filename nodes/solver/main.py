@@ -1,27 +1,29 @@
 """
-Autonet Solver Node
+Autonomous Solver Node for Autonet
 
-Performs distributed AI training on assigned tasks.
-Downloads global model, trains on local data, uploads model updates.
+Discovers tasks from the blockchain, performs mock training with checkpoints,
+commits solutions, and reveals them after ground truth is revealed.
 
-Implements Gensyn-style checkpoint generation for partial verification:
-- Generates checkpoints at configurable intervals during training
-- Each checkpoint includes weights hash, data indices, and deterministic seed
-- Enables dispute resolution via checkpoint comparison
+Uses ContractRegistry for real blockchain interactions.
 """
 
 import logging
 import time
-import json
 import hashlib
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from dataclasses import dataclass, field
-
-from ..core import Node, NodeRole, DEFAULT_CONSTITUTION
-from ..common import BlockchainInterface, IPFSClient, hash_string
+from enum import Enum
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class TaskState(Enum):
+    """State of a task from solver's perspective."""
+    DISCOVERED = "discovered"
+    TRAINING = "training"
+    COMMITTED = "committed"
+    REVEALED = "revealed"
 
 
 @dataclass
@@ -32,179 +34,291 @@ class TrainingCheckpoint:
     data_indices_hash: str
     random_seed: str
     timestamp: float
-    weights_cid: Optional[str] = None  # IPFS CID of actual weights (optional)
 
 
 @dataclass
-class TrainingResult:
-    """Result from a training run."""
+class TaskInfo:
+    """Track task lifecycle from solver perspective."""
     task_id: int
-    model_update_cid: str
-    metrics: Dict[str, float]
-    training_time: float
+    state: TaskState
+    solution_cid: Optional[str] = None
+    solution_hash: Optional[bytes] = None
     checkpoints: List[TrainingCheckpoint] = field(default_factory=list)
-    checkpoint_frequency: int = 10  # Steps between checkpoints
+    discovered_at: float = field(default_factory=time.time)
 
 
-class SolverNode(Node):
+@dataclass
+class SolverMetrics:
+    """Metrics for the solver node."""
+    tasks_proposed: int = 0  # Not used by solver, but required by orchestrator
+    tasks_completed: int = 0
+    solutions_committed: int = 0
+    votes_submitted: int = 0  # Not used by solver
+    aggregations_done: int = 0  # Not used by solver
+    forced_errors_caught: int = 0
+    errors: int = 0
+    cycles: int = 0
+
+
+class SolverNode:
     """
-    Solver node that performs distributed training.
-
-    Responsibilities:
-    - Download current global model from IPFS
-    - Download task specifications
-    - Perform local training with checkpoint generation
-    - Upload model updates and checkpoints to IPFS
-    - Commit solution hash to blockchain
-    - Reveal solution after ground truth is revealed
+    Autonomous solver node that:
+    1. Stakes as SOLVER on first cycle
+    2. Discovers tasks from TaskProposed events
+    3. Performs mock training with checkpoints
+    4. Commits solutions to blockchain
+    5. Reveals solutions after ground truth is revealed
     """
+
+    SOLVER_ROLE = 2
+    SOLVER_STAKE_AMOUNT = 50 * 10**18  # 50 ATN
+    CHECKPOINT_FREQUENCY = 10
+    TOTAL_TRAINING_STEPS = 20
 
     def __init__(
         self,
-        blockchain: Optional[BlockchainInterface] = None,
-        ipfs: Optional[IPFSClient] = None,
-        checkpoint_frequency: int = 10,
+        registry,
+        ipfs,
+        node_id: str,
+        project_id: int,
         deterministic_seed: Optional[int] = None,
-        **kwargs,
     ):
-        super().__init__(role=NodeRole.SOLVER, **kwargs)
-        self.blockchain = blockchain or BlockchainInterface()
-        self.ipfs = ipfs or IPFSClient()
-        self.completed_tasks: Dict[int, TrainingResult] = {}
-        self.checkpoint_frequency = checkpoint_frequency
+        """
+        Initialize SolverNode.
+
+        Args:
+            registry: ContractRegistry instance
+            ipfs: IPFSClient instance
+            node_id: Unique identifier for this node (e.g., "solver-0")
+            project_id: Project ID to work on
+            deterministic_seed: Seed for reproducible training
+        """
+        self.registry = registry
+        self.ipfs = ipfs
+        self.node_id = node_id
+        self.project_id = project_id
         self.deterministic_seed = deterministic_seed or int(time.time())
 
-    def claim_task(self, task_id: int) -> bool:
+        self.metrics = SolverMetrics()
+        self.tasks: Dict[int, TaskInfo] = {}
+        self.processed_task_ids: Set[int] = set()
+        self.staked = False
+        self.running = False
+
+        logger.info(f"[{self.node_id}] Initialized solver node for project {project_id}")
+
+    def run(self, max_cycles: int = 10, cycle_delay: float = 2.0):
         """
-        Claim a task for training.
+        Main event loop.
 
         Args:
-            task_id: The task to claim
-
-        Returns:
-            True if successfully claimed
+            max_cycles: Maximum number of cycles to run
+            cycle_delay: Delay between cycles in seconds
         """
-        logger.info(f"Claiming task {task_id}")
-        # In production, this would verify stake and call TaskContract
-        return True
+        self.running = True
+        logger.info(f"[{self.node_id}] Starting main loop: max_cycles={max_cycles}, delay={cycle_delay}s")
 
-    def train(
-        self,
-        task_id: int,
-        task_spec_cid: str,
-        global_model_cid: Optional[str] = None,
-    ) -> Optional[TrainingResult]:
-        """
-        Perform training on a task with checkpoint generation.
+        for cycle in range(max_cycles):
+            if not self.running:
+                break
 
-        Args:
-            task_id: The task being trained
-            task_spec_cid: IPFS CID of the task specification
-            global_model_cid: IPFS CID of the current global model
+            try:
+                logger.info(f"[{self.node_id}] === Cycle {cycle + 1}/{max_cycles} ===")
 
-        Returns:
-            Training result if successful
-        """
-        logger.info(f"Starting training for task {task_id}")
+                # First cycle: stake as solver
+                if cycle == 0 and not self.staked:
+                    self._stake_as_solver()
+
+                # Discover new tasks
+                self._discover_tasks()
+
+                # Process tasks: train, commit, reveal
+                self._process_tasks()
+
+                # Check for ground truth reveals and reveal our solutions
+                self._check_and_reveal_solutions()
+
+                self.metrics.cycles += 1
+
+            except Exception as e:
+                logger.error(f"[{self.node_id}] Error in cycle {cycle + 1}: {e}", exc_info=True)
+                self.metrics.errors += 1
+
+            # Sleep before next cycle
+            if cycle < max_cycles - 1:
+                time.sleep(cycle_delay)
+
+        logger.info(f"[{self.node_id}] Main loop completed. Cycles: {self.metrics.cycles}")
+
+    def stop(self):
+        """Stop the node."""
+        logger.info(f"[{self.node_id}] Stopping...")
+        self.running = False
+
+    def _stake_as_solver(self):
+        """Approve and stake ATN as SOLVER."""
+        logger.info(f"[{self.node_id}] Staking as SOLVER...")
+
+        try:
+            # Approve ParticipantStaking to spend ATN
+            staking_contract = self.registry.get("ParticipantStaking")
+            if not staking_contract:
+                logger.error(f"[{self.node_id}] ParticipantStaking contract not found")
+                return
+
+            approve_result = self.registry.approve_atn(
+                staking_contract.address,
+                self.SOLVER_STAKE_AMOUNT
+            )
+
+            if not approve_result.success:
+                logger.error(f"[{self.node_id}] Failed to approve ATN: {approve_result.error}")
+                return
+
+            logger.info(f"[{self.node_id}] ATN approved: {approve_result.tx_hash}")
+
+            # Stake
+            stake_result = self.registry.stake(self.SOLVER_ROLE, self.SOLVER_STAKE_AMOUNT)
+
+            if stake_result.success:
+                logger.info(f"[{self.node_id}] Staked {self.SOLVER_STAKE_AMOUNT // 10**18} ATN as SOLVER: {stake_result.tx_hash}")
+                self.staked = True
+            else:
+                logger.error(f"[{self.node_id}] Failed to stake: {stake_result.error}")
+
+        except Exception as e:
+            logger.error(f"[{self.node_id}] Staking error: {e}", exc_info=True)
+            self.metrics.errors += 1
+
+    def _discover_tasks(self):
+        """Poll for TaskProposed events and discover new tasks."""
+        try:
+            events = self.registry.get_new_events("TaskContract", "TaskProposed")
+
+            for event in events:
+                task_id = event["args"]["taskId"]
+
+                # Skip if already processed
+                if task_id in self.processed_task_ids:
+                    continue
+
+                # Filter by project
+                project_id = event["args"]["projectId"]
+                if project_id != self.project_id:
+                    continue
+
+                logger.info(f"[{self.node_id}] Discovered task {task_id} for project {project_id}")
+
+                # Create task info
+                task_info = TaskInfo(
+                    task_id=task_id,
+                    state=TaskState.DISCOVERED,
+                )
+                self.tasks[task_id] = task_info
+                self.processed_task_ids.add(task_id)
+
+        except Exception as e:
+            logger.error(f"[{self.node_id}] Error discovering tasks: {e}", exc_info=True)
+            self.metrics.errors += 1
+
+    def _process_tasks(self):
+        """Process discovered tasks: train and commit solutions."""
+        for task_id, task_info in list(self.tasks.items()):
+            try:
+                if task_info.state == TaskState.DISCOVERED:
+                    self._train_and_commit(task_id, task_info)
+
+            except Exception as e:
+                logger.error(f"[{self.node_id}] Error processing task {task_id}: {e}", exc_info=True)
+                self.metrics.errors += 1
+
+    def _train_and_commit(self, task_id: int, task_info: TaskInfo):
+        """Perform mock training and commit solution."""
+        logger.info(f"[{self.node_id}] Training on task {task_id}...")
+        task_info.state = TaskState.TRAINING
+
+        # Perform mock training with checkpoints
         start_time = time.time()
-
-        # Download task specification
-        task_spec = self.ipfs.get_json(task_spec_cid)
-        if not task_spec:
-            logger.error(f"Failed to download task spec: {task_spec_cid}")
-            return None
-
-        # Download global model if provided
-        if global_model_cid:
-            model_data = self.ipfs.get_bytes(global_model_cid)
-            if not model_data:
-                logger.warning(f"Failed to download global model: {global_model_cid}")
-
-        # Perform training with checkpointing
-        logger.info("Training in progress with checkpointing...")
-        model_update, checkpoints = self._train_model_with_checkpoints(task_spec, task_id)
-
-        # Upload model update to IPFS
-        update_cid = self.ipfs.add_json(model_update)
-        if not update_cid:
-            logger.error("Failed to upload model update")
-            return None
-
-        # Upload checkpoints to IPFS (optional, for detailed verification)
-        for checkpoint in checkpoints:
-            checkpoint_data = {
-                "step_number": checkpoint.step_number,
-                "weights_hash": checkpoint.weights_hash,
-                "data_indices_hash": checkpoint.data_indices_hash,
-                "random_seed": checkpoint.random_seed,
-                "timestamp": checkpoint.timestamp,
-            }
-            checkpoint.weights_cid = self.ipfs.add_json(checkpoint_data)
-
+        model_update, checkpoints = self._mock_train(task_id)
         training_time = time.time() - start_time
-        result = TrainingResult(
-            task_id=task_id,
-            model_update_cid=update_cid,
-            metrics=model_update.get("metrics", {}),
-            training_time=training_time,
-            checkpoints=checkpoints,
-            checkpoint_frequency=self.checkpoint_frequency,
-        )
 
-        self.completed_tasks[task_id] = result
-        logger.info(f"Training completed for task {task_id} in {training_time:.2f}s")
-        logger.info(f"Generated {len(checkpoints)} checkpoints")
+        logger.info(f"[{self.node_id}] Training completed in {training_time:.2f}s with {len(checkpoints)} checkpoints")
 
-        return result
+        # Upload solution to IPFS
+        solution_cid = self.ipfs.add_json(model_update)
+        if not solution_cid:
+            logger.error(f"[{self.node_id}] Failed to upload solution to IPFS")
+            return
 
-    def _train_model_with_checkpoints(
-        self, task_spec: Dict[str, Any], task_id: int
-    ) -> tuple:
+        task_info.solution_cid = solution_cid
+        task_info.checkpoints = checkpoints
+
+        # Compute solution hash (keccak256)
+        from web3 import Web3
+        solution_hash = Web3.keccak(text=solution_cid)
+        task_info.solution_hash = solution_hash
+
+        logger.info(f"[{self.node_id}] Solution uploaded: {solution_cid}, hash: {solution_hash.hex()[:16]}...")
+
+        # Commit solution hash to blockchain
+        commit_result = self.registry.commit_solution(task_id, solution_hash)
+
+        if commit_result.success:
+            logger.info(f"[{self.node_id}] Solution committed for task {task_id}: {commit_result.tx_hash}")
+            task_info.state = TaskState.COMMITTED
+            self.metrics.solutions_committed += 1
+            self.metrics.tasks_completed += 1
+
+            # Submit a few checkpoints
+            self._submit_checkpoints(task_id, checkpoints)
+        else:
+            logger.error(f"[{self.node_id}] Failed to commit solution: {commit_result.error}")
+
+    def _mock_train(self, task_id: int) -> tuple:
         """
-        Perform actual model training with checkpoint generation.
-        In production, this would use PyTorch/TensorFlow with RepOps.
+        Perform mock training with checkpoint generation.
+
+        Returns:
+            (model_update_dict, checkpoints_list)
         """
         checkpoints = []
-        total_steps = 100  # Mock: 100 training steps
-
-        # Initialize deterministic seed for reproducibility (RepOps style)
         current_seed = self._generate_deterministic_seed(task_id, 0)
 
-        for step in range(total_steps):
-            # Simulate training step
-            time.sleep(0.01)  # Fast mock training
+        for step in range(self.TOTAL_TRAINING_STEPS):
+            # Fast mock training
+            time.sleep(0.01)
 
-            # Generate checkpoint at configured frequency
-            if step > 0 and step % self.checkpoint_frequency == 0:
+            # Generate checkpoint at frequency
+            if step > 0 and step % self.CHECKPOINT_FREQUENCY == 0:
                 checkpoint = self._create_checkpoint(step, current_seed)
                 checkpoints.append(checkpoint)
-                logger.debug(f"Created checkpoint at step {step}")
+                logger.debug(f"[{self.node_id}] Checkpoint at step {step}")
 
-            # Update seed for next step (deterministic progression)
+            # Update seed deterministically
             current_seed = self._generate_deterministic_seed(task_id, step + 1)
 
         # Final checkpoint
-        final_checkpoint = self._create_checkpoint(total_steps, current_seed)
+        final_checkpoint = self._create_checkpoint(self.TOTAL_TRAINING_STEPS, current_seed)
         checkpoints.append(final_checkpoint)
 
         # Mock training result
         model_update = {
-            "model_weights": "mock_weights_base64",
+            "task_id": task_id,
+            "model_weights": f"mock_weights_task_{task_id}",
             "metrics": {
                 "loss": 0.15,
                 "accuracy": 0.92,
             },
-            "training_steps": total_steps,
-            "checkpoint_frequency": self.checkpoint_frequency,
+            "training_steps": self.TOTAL_TRAINING_STEPS,
+            "checkpoint_frequency": self.CHECKPOINT_FREQUENCY,
             "final_seed": current_seed,
-            "repops_version": "1.0.0",  # RepOps version for reproducibility
+            "solver": self.node_id,
         }
 
         return model_update, checkpoints
 
     def _create_checkpoint(self, step: int, seed: str) -> TrainingCheckpoint:
         """Create a training checkpoint with deterministic hashes."""
-        # In production, these would be actual hashes of model weights and data indices
         weights_hash = hashlib.sha256(f"weights_step_{step}_{seed}".encode()).hexdigest()
         data_indices_hash = hashlib.sha256(f"data_indices_step_{step}_{seed}".encode()).hexdigest()
 
@@ -217,155 +331,110 @@ class SolverNode(Node):
         )
 
     def _generate_deterministic_seed(self, task_id: int, step: int) -> str:
-        """
-        Generate a deterministic seed for reproducibility (RepOps-style).
-        This ensures different solvers training the same task will get
-        identical results if they follow the protocol correctly.
-        """
+        """Generate a deterministic seed for reproducibility."""
         seed_input = f"{self.deterministic_seed}:{task_id}:{step}"
         return hashlib.sha256(seed_input.encode()).hexdigest()[:16]
 
-    def _train_model(self, task_spec: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Legacy: Perform actual model training without checkpoints.
-        In production, this would use PyTorch/TensorFlow.
-        """
-        # Mock training result
-        return {
-            "model_weights": "mock_weights_base64",
-            "metrics": {
-                "loss": 0.15,
-                "accuracy": 0.92,
-            },
-            "training_steps": 1000,
-        }
+    def _submit_checkpoints(self, task_id: int, checkpoints: List[TrainingCheckpoint]):
+        """Submit a few checkpoints to the blockchain."""
+        # Submit first 3 checkpoints (or all if fewer)
+        checkpoints_to_submit = checkpoints[:3]
 
-    def commit_solution(self, task_id: int) -> bool:
-        """
-        Commit solution hash to the blockchain.
+        for checkpoint in checkpoints_to_submit:
+            try:
+                from web3 import Web3
 
-        Args:
-            task_id: The task to commit solution for
+                # Convert hashes to bytes32
+                weights_hash = bytes.fromhex(checkpoint.weights_hash)
+                data_indices_hash = bytes.fromhex(checkpoint.data_indices_hash)
+                random_seed = checkpoint.random_seed.encode()
 
-        Returns:
-            True if successful
-        """
-        if task_id not in self.completed_tasks:
-            logger.error(f"No completed training for task {task_id}")
-            return False
+                result = self.registry.submit_checkpoint(
+                    task_id,
+                    checkpoint.step_number,
+                    weights_hash,
+                    data_indices_hash,
+                    random_seed,
+                )
 
-        result = self.completed_tasks[task_id]
-        solution_hash = hash_string(result.model_update_cid)
+                if result.success:
+                    logger.debug(f"[{self.node_id}] Submitted checkpoint step {checkpoint.step_number}: {result.tx_hash}")
+                else:
+                    logger.warning(f"[{self.node_id}] Failed to submit checkpoint: {result.error}")
 
-        logger.info(f"Committing solution hash for task {task_id}")
-        # In production, call TaskContract.commitSolution
+            except Exception as e:
+                logger.error(f"[{self.node_id}] Error submitting checkpoint: {e}", exc_info=True)
 
-        return True
+    def _check_and_reveal_solutions(self):
+        """Check for GroundTruthRevealed events and reveal our solutions."""
+        try:
+            events = self.registry.get_new_events("ResultsRewards", "GroundTruthRevealed")
 
-    def submit_checkpoints(self, task_id: int) -> bool:
-        """
-        Submit checkpoints to the blockchain for verification.
+            for event in events:
+                task_id = event["args"]["taskId"]
 
-        Args:
-            task_id: The task to submit checkpoints for
+                # Skip if not our task or already revealed
+                if task_id not in self.tasks:
+                    continue
 
-        Returns:
-            True if successful
-        """
-        if task_id not in self.completed_tasks:
-            logger.error(f"No completed training for task {task_id}")
-            return False
+                task_info = self.tasks[task_id]
+                if task_info.state == TaskState.REVEALED:
+                    continue
 
-        result = self.completed_tasks[task_id]
+                if task_info.state != TaskState.COMMITTED:
+                    logger.warning(f"[{self.node_id}] Ground truth revealed for task {task_id} but we haven't committed yet")
+                    continue
 
-        logger.info(f"Submitting {len(result.checkpoints)} checkpoints for task {task_id}")
+                logger.info(f"[{self.node_id}] Ground truth revealed for task {task_id}, revealing our solution...")
 
-        for checkpoint in result.checkpoints:
-            # In production, call TaskContract.submitCheckpoint
-            logger.debug(
-                f"Checkpoint step {checkpoint.step_number}: "
-                f"weights={checkpoint.weights_hash[:16]}..."
-            )
+                # Reveal our solution
+                reveal_result = self.registry.reveal_solution(task_id, task_info.solution_cid)
 
-        return True
+                if reveal_result.success:
+                    logger.info(f"[{self.node_id}] Solution revealed for task {task_id}: {reveal_result.tx_hash}")
+                    task_info.state = TaskState.REVEALED
+                else:
+                    logger.error(f"[{self.node_id}] Failed to reveal solution: {reveal_result.error}")
 
-    def reveal_solution(self, task_id: int) -> bool:
-        """
-        Reveal solution after ground truth is revealed.
-
-        Args:
-            task_id: The task to reveal solution for
-
-        Returns:
-            True if successful
-        """
-        if task_id not in self.completed_tasks:
-            logger.error(f"No completed training for task {task_id}")
-            return False
-
-        result = self.completed_tasks[task_id]
-        logger.info(f"Revealing solution for task {task_id}: {result.model_update_cid}")
-        # In production, call ResultsRewards.revealSolution
-
-        return True
-
-    def get_checkpoint_proof(self, task_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Get the full checkpoint proof for a completed task.
-        This can be used for dispute resolution.
-        """
-        if task_id not in self.completed_tasks:
-            return None
-
-        result = self.completed_tasks[task_id]
-        return {
-            "task_id": task_id,
-            "solver": "self",  # Would be actual address
-            "checkpoints": [
-                {
-                    "step_number": cp.step_number,
-                    "weights_hash": cp.weights_hash,
-                    "data_indices_hash": cp.data_indices_hash,
-                    "random_seed": cp.random_seed,
-                }
-                for cp in result.checkpoints
-            ],
-            "checkpoint_frequency": result.checkpoint_frequency,
-            "final_weights_hash": hash_string(result.model_update_cid),
-        }
+        except Exception as e:
+            logger.error(f"[{self.node_id}] Error checking ground truth reveals: {e}", exc_info=True)
+            self.metrics.errors += 1
 
 
 def main():
-    """Run the solver node."""
-    node = SolverNode(
-        checkpoint_frequency=10,
-        deterministic_seed=42,  # Fixed seed for reproducibility
+    """Standalone demo of SolverNode."""
+    from ..common.contracts import ContractRegistry
+    from ..common.ipfs import IPFSClient
+    from ..common.blockchain import BlockchainInterface
+
+    # Use Hardhat account #2
+    blockchain = BlockchainInterface(
+        rpc_url="http://127.0.0.1:8545",
+        private_key="0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
+        chain_id=31337,
     )
 
-    # Demo: claim and train a task with checkpointing
-    task_id = 1
-    if node.claim_task(task_id):
-        result = node.train(
-            task_id=task_id,
-            task_spec_cid="QmTaskSpec...",
-            global_model_cid="QmGlobalModel...",
-        )
+    registry = ContractRegistry(blockchain=blockchain)
+    ipfs = IPFSClient()
 
-        if result:
-            node.submit_checkpoints(task_id)
-            node.commit_solution(task_id)
+    node = SolverNode(
+        registry=registry,
+        ipfs=ipfs,
+        node_id="solver-demo",
+        project_id=1,
+        deterministic_seed=42,
+    )
 
-            # Show checkpoint proof
-            proof = node.get_checkpoint_proof(task_id)
-            print(f"\nCheckpoint Proof:")
-            print(f"  Total checkpoints: {len(proof['checkpoints'])}")
-            print(f"  Checkpoint frequency: {proof['checkpoint_frequency']}")
-            print(f"  Final hash: {proof['final_weights_hash'][:20]}...")
+    try:
+        node.run(max_cycles=5, cycle_delay=3.0)
+    except KeyboardInterrupt:
+        node.stop()
 
-            print(f"\nTraining result: {result.metrics}")
-
-    # Run for a few cycles
-    node.run(max_cycles=3)
+    print(f"\nFinal metrics:")
+    print(f"  Cycles: {node.metrics.cycles}")
+    print(f"  Tasks completed: {node.metrics.tasks_completed}")
+    print(f"  Solutions committed: {node.metrics.solutions_committed}")
+    print(f"  Errors: {node.metrics.errors}")
 
 
 if __name__ == "__main__":

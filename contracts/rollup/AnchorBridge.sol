@@ -24,6 +24,11 @@ contract AnchorBridge is Ownable {
     mapping(bytes32 => bool) public processedDeposits;
     mapping(bytes32 => bool) public processedWithdrawals;
 
+    // Checkpoint approval tracking
+    mapping(uint256 => mapping(address => bool)) public checkpointApprovals;
+    mapping(uint256 => uint256) public checkpointApprovalCount;
+    mapping(uint256 => bytes32) public pendingCheckpointRoots;
+
     event CheckpointSubmitted(uint256 indexed epoch, bytes32 root, address indexed submitter);
     event ValidatorAdded(address indexed validator);
     event ValidatorRemoved(address indexed validator);
@@ -60,12 +65,24 @@ contract AnchorBridge is Ownable {
      */
     function submitCheckpoint(uint256 epoch, bytes32 root) external {
         require(validators[msg.sender], "Not validator");
-        require(epoch > latestEpoch, "Epoch too old");
+        require(epoch >= latestEpoch, "Epoch too old");
+        require(!checkpointApprovals[epoch][msg.sender], "Already approved");
 
-        latestRoot = root;
-        latestEpoch = epoch;
+        // If first approval for this epoch, store the root
+        if (checkpointApprovalCount[epoch] == 0) {
+            pendingCheckpointRoots[epoch] = root;
+        } else {
+            require(pendingCheckpointRoots[epoch] == root, "Root mismatch");
+        }
 
-        emit CheckpointSubmitted(epoch, root, msg.sender);
+        checkpointApprovals[epoch][msg.sender] = true;
+        checkpointApprovalCount[epoch]++;
+
+        if (checkpointApprovalCount[epoch] >= requiredSignatures) {
+            latestRoot = root;
+            latestEpoch = epoch;
+            emit CheckpointSubmitted(epoch, root, msg.sender);
+        }
     }
 
     /**

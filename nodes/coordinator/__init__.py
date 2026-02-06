@@ -1,4 +1,4 @@
 """Autonet Coordinator Node"""
-from .main import CoordinatorNode, VerificationResult
+from .main import CoordinatorNode
 
-__all__ = ["CoordinatorNode", "VerificationResult"]
+__all__ = ["CoordinatorNode"]
