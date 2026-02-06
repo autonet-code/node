@@ -170,36 +170,37 @@ class AggregatorNode:
         Event signature (from ResultsRewards.sol):
         event RewardsDistributed(
             uint256 indexed taskId,
-            address indexed solver,
-            uint256 solverReward,
-            uint256 proposerReward
+            address indexed recipient,
+            uint256 amount,
+            string rewardType
         );
 
-        We extract the task, fetch its details, and collect the update CID.
+        We filter for "SolverReward" events, then extract the solution CID from the revealed solutions.
         """
         try:
             events = self.registry.get_new_events("ResultsRewards", "RewardsDistributed")
 
             for event in events:
                 task_id = event["args"]["taskId"]
-                solver = event["args"]["solver"]
+                recipient = event["args"]["recipient"]
+                reward_type = event["args"]["rewardType"]
 
-                logger.info(
-                    f"[{self.node_id}] RewardsDistributed: task={task_id}, solver={solver[:10]}..."
-                )
-
-                # Get task details to extract the solution CID
-                task = self.registry.get_task(task_id)
-                if not task:
-                    logger.warning(f"[{self.node_id}] Could not fetch task {task_id}")
+                # Only process solver rewards (these contain the model updates we want to aggregate)
+                if reward_type != "SolverReward":
                     continue
 
-                # Get solution CID from ResultsRewards
-                # In the actual contract, we'd call getSolution(taskId, solver) or similar
-                # For now, we'll get it from the revealed solution
-                solution_cid = self._get_solution_cid(task_id, solver)
+                logger.info(
+                    f"[{self.node_id}] SolverReward distributed: task={task_id}, solver={recipient[:10]}..."
+                )
+
+                # Get solution CID from ResultsRewards.revealedSolutions mapping
+                solution_cid = self._get_solution_cid(task_id, recipient)
                 if solution_cid:
                     self._collect_update(task_id, solution_cid)
+                else:
+                    logger.warning(
+                        f"[{self.node_id}] No solution CID found for task {task_id}, solver {recipient[:10]}..."
+                    )
 
         except Exception as e:
             logger.error(f"[{self.node_id}] Error polling events: {e}", exc_info=True)
@@ -209,16 +210,12 @@ class AggregatorNode:
         """
         Retrieve the solution CID for a task/solver pair.
 
-        This would call a contract method like ResultsRewards.getRevealedSolution(taskId, solver).
-        For now, we'll attempt to read from contract state directly.
+        Calls ResultsRewards.revealedSolutions(taskId, solver) which is a public mapping.
         """
         try:
-            # Try calling a method to get the revealed solution CID
-            # The actual method name depends on the contract implementation
-            # Assuming there's a public mapping: taskSolutions[taskId][solver] -> (cid, ...)
-            result = self.registry.call("ResultsRewards", "getRevealedSolution", task_id, solver)
-            if result and len(result) > 0:
-                return result[0]  # First element is typically the CID
+            cid = self.registry.get_revealed_solution(task_id, solver)
+            if cid and len(cid) > 0:
+                return cid
         except Exception as e:
             logger.debug(f"[{self.node_id}] Could not get solution CID for task {task_id}: {e}")
 
@@ -321,18 +318,88 @@ class AggregatorNode:
         """
         Perform Federated Averaging on model updates.
 
-        In production, this would:
-        - Parse model weights from each update
-        - Compute weighted average based on training samples
-        - Return the averaged weights
+        This handles both:
+        - Real PyTorch weight deltas (from real ML training)
+        - Mock training results (fallback)
 
-        For demo purposes, we average all numeric values across updates.
+        For real training, aggregates weight deltas using sample-weighted averaging.
         """
         logger.info(f"[{self.node_id}] Performing FedAvg on {len(updates)} updates")
 
         if not updates:
             return {}
 
+        # Check if we have real weight deltas
+        has_real_deltas = all("weight_delta" in u for u in updates)
+
+        if has_real_deltas:
+            logger.info(f"[{self.node_id}] Aggregating real PyTorch weight deltas")
+            return self._fedavg_real_weights(updates)
+        else:
+            logger.info(f"[{self.node_id}] Aggregating mock training results")
+            return self._fedavg_mock(updates)
+
+    def _fedavg_real_weights(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Aggregate real PyTorch weight deltas using FedAvg.
+
+        Uses sample-weighted averaging:
+        - Extract weight_delta from each update
+        - Weight by number of training samples
+        - Average across all updates
+        """
+        try:
+            from ..common.ml import aggregate_weight_deltas
+
+            # Extract weight deltas and sample counts
+            deltas = []
+            weights = []
+            for update in updates:
+                deltas.append(update["weight_delta"])
+                num_samples = update.get("metrics", {}).get("num_samples", 1)
+                weights.append(num_samples)
+
+            # Aggregate using FedAvg
+            aggregated_delta = aggregate_weight_deltas(deltas, weights)
+
+            # Build result
+            aggregated = {
+                "aggregated_weight_delta": aggregated_delta,
+                "aggregation_method": "fedavg",
+                "num_updates": len(updates),
+                "total_samples": sum(weights),
+                "real_training": True,
+            }
+
+            # Aggregate metrics
+            avg_loss = sum(u.get("metrics", {}).get("loss", 0) for u in updates) / len(updates)
+            avg_accuracy = sum(u.get("metrics", {}).get("accuracy", 0) for u in updates) / len(updates)
+
+            aggregated["aggregated_metrics"] = {
+                "avg_loss": avg_loss,
+                "avg_accuracy": avg_accuracy,
+                "total_samples": sum(weights),
+            }
+
+            logger.info(
+                f"[{self.node_id}] FedAvg complete: "
+                f"avg_loss={avg_loss:.4f}, avg_accuracy={avg_accuracy:.4f}, "
+                f"total_samples={sum(weights)}"
+            )
+
+            return aggregated
+
+        except Exception as e:
+            logger.error(f"[{self.node_id}] Error in real weight aggregation: {e}", exc_info=True)
+            # Fallback to mock aggregation
+            return self._fedavg_mock(updates)
+
+    def _fedavg_mock(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Fallback aggregation for mock training results.
+
+        Averages all numeric values across updates.
+        """
         # Initialize aggregated model with structure from first update
         aggregated = {}
 
@@ -343,8 +410,8 @@ class AggregatorNode:
 
         # For each key, aggregate values
         for key in all_keys:
-            if key == "metadata":
-                continue  # Skip metadata, we'll add our own
+            if key in ["metadata", "weight_delta"]:
+                continue  # Skip metadata and weight_delta
 
             values = [update.get(key) for update in updates if key in update]
 
@@ -361,8 +428,9 @@ class AggregatorNode:
                 aggregated[key] = values[0] if values else None
 
         # Add aggregation-specific fields
-        aggregated["aggregation_method"] = "fedavg"
+        aggregated["aggregation_method"] = "fedavg_mock"
         aggregated["num_updates"] = len(updates)
+        aggregated["real_training"] = False
 
         logger.debug(f"[{self.node_id}] Aggregated model keys: {list(aggregated.keys())}")
 

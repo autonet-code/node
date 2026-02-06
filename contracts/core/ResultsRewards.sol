@@ -326,8 +326,12 @@ contract ResultsRewards {
                 uint256 multiplier = 1000 + (bondStrength * (BOND_MULTIPLIER_MAX - 1000)) / 1e18;
                 uint256 adjustedFee = (baseCoordFee * multiplier) / 1000;
 
-                if (projectContract.disburseFromBudget(projectId, coordinator, adjustedFee)) {
-                    emit RewardsDistributed(_taskId, coordinator, adjustedFee, "CoordinatorFee");
+                try projectContract.disburseFromBudget(projectId, coordinator, adjustedFee) returns (bool success) {
+                    if (success) {
+                        emit RewardsDistributed(_taskId, coordinator, adjustedFee, "CoordinatorFee");
+                    }
+                } catch {
+                    // Continue if disbursement fails (e.g., insufficient budget)
                 }
             } else {
                 // Slash coordinators who voted against consensus
@@ -339,13 +343,21 @@ contract ResultsRewards {
         if (_isCorrect) {
             // Solver reward scaled by consensus score
             uint256 scaledSolverReward = (proposal.proposedSolverReward * _consensusScore) / 100;
-            if (projectContract.disburseFromBudget(projectId, _solver, scaledSolverReward)) {
-                emit RewardsDistributed(_taskId, _solver, scaledSolverReward, "SolverReward");
+            try projectContract.disburseFromBudget(projectId, _solver, scaledSolverReward) returns (bool success) {
+                if (success) {
+                    emit RewardsDistributed(_taskId, _solver, scaledSolverReward, "SolverReward");
+                }
+            } catch {
+                // Continue if disbursement fails
             }
 
             // Proposer reward
-            if (projectContract.disburseFromBudget(projectId, proposal.proposer, proposal.proposedLearnabilityReward)) {
-                emit RewardsDistributed(_taskId, proposal.proposer, proposal.proposedLearnabilityReward, "ProposerReward");
+            try projectContract.disburseFromBudget(projectId, proposal.proposer, proposal.proposedLearnabilityReward) returns (bool success) {
+                if (success) {
+                    emit RewardsDistributed(_taskId, proposal.proposer, proposal.proposedLearnabilityReward, "ProposerReward");
+                }
+            } catch {
+                // Continue if disbursement fails
             }
         }
 

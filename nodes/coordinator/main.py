@@ -84,6 +84,9 @@ class CoordinatorNode:
         # Track processed events to avoid duplicates
         self._processed_solutions = set()
 
+        # Track finalized tasks to avoid duplicate finalization attempts
+        self._finalized_tasks = set()
+
         # Cache ground truths: task_id -> groundTruthCid
         self._ground_truth_cache: dict[int, str] = {}
 
@@ -449,6 +452,12 @@ class CoordinatorNode:
             solver: Solver address
         """
         try:
+            # Check if we've already tried to finalize this task
+            finalize_key = (task_id, solver)
+            if finalize_key in self._finalized_tasks:
+                logger.debug(f"Task {task_id} already finalized by this node")
+                return
+
             vote_count = self.registry.get_vote_count(task_id, solver)
 
             if vote_count >= self.VOTE_THRESHOLD:
@@ -457,14 +466,21 @@ class CoordinatorNode:
                     f"finalizing task {task_id}..."
                 )
 
+                # Mark as finalized before attempting to prevent race conditions
+                self._finalized_tasks.add(finalize_key)
+
                 result = self.registry.finalize_voting(task_id, solver)
 
                 if result.success:
-                    logger.info(f"Voting finalized for task {task_id}")
+                    logger.info(f"Voting finalized for task {task_id}: {result.tx_hash}")
                     self.metrics.voting_finalized += 1
                     self.metrics.tasks_completed += 1
                 else:
-                    logger.warning(f"Finalization failed: {result.error}")
+                    # If it failed, it might be because another coordinator finalized first
+                    if "Already finalized" in str(result.error):
+                        logger.info(f"Task {task_id} already finalized by another coordinator")
+                    else:
+                        logger.warning(f"Finalization failed: {result.error}")
 
         except Exception as e:
             logger.error(f"Error finalizing voting: {e}", exc_info=True)

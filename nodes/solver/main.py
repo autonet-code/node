@@ -276,7 +276,69 @@ class SolverNode:
 
     def _mock_train(self, task_id: int) -> tuple:
         """
-        Perform mock training with checkpoint generation.
+        Perform real ML training with checkpoint generation.
+
+        Returns:
+            (model_update_dict, checkpoints_list)
+        """
+        try:
+            # Import ML module
+            from ..common.ml import train_on_task
+
+            # Prepare task spec
+            task_spec = {
+                "task_id": task_id,
+                "epochs": 1,  # Single epoch for fast training
+            }
+
+            # Perform real training
+            logger.info(f"[{self.node_id}] Starting real ML training for task {task_id}...")
+            weight_delta, metrics = train_on_task(
+                task_spec=task_spec,
+                ipfs_client=self.ipfs,
+                epochs=1,
+                batch_size=32,
+                learning_rate=0.01,
+                num_samples=500,  # Small subset for fast training (~5 seconds)
+            )
+
+            # Generate checkpoints (mock for now, but based on real training)
+            checkpoints = []
+            training_steps = metrics.get("num_samples", 500) // 32  # batches
+            current_seed = self._generate_deterministic_seed(task_id, 0)
+
+            for step in range(0, training_steps, max(1, training_steps // 3)):
+                checkpoint = self._create_checkpoint(step, current_seed)
+                checkpoints.append(checkpoint)
+                current_seed = self._generate_deterministic_seed(task_id, step + 1)
+
+            # Final checkpoint
+            final_checkpoint = self._create_checkpoint(training_steps, current_seed)
+            checkpoints.append(final_checkpoint)
+
+            # Build model update with real training results
+            model_update = {
+                "task_id": task_id,
+                "weight_delta": weight_delta,  # Real weight updates for FedAvg
+                "metrics": metrics,
+                "training_steps": training_steps,
+                "checkpoint_frequency": max(1, training_steps // 3),
+                "final_seed": current_seed,
+                "solver": self.node_id,
+                "real_training": True,
+            }
+
+            logger.info(f"[{self.node_id}] Real training completed: loss={metrics['loss']:.4f}, accuracy={metrics['accuracy']:.4f}")
+            return model_update, checkpoints
+
+        except Exception as e:
+            logger.error(f"[{self.node_id}] Real training failed, falling back to mock: {e}")
+            # Fallback to mock training
+            return self._mock_train_fallback(task_id)
+
+    def _mock_train_fallback(self, task_id: int) -> tuple:
+        """
+        Fallback mock training if real training fails.
 
         Returns:
             (model_update_dict, checkpoints_list)
@@ -313,6 +375,7 @@ class SolverNode:
             "checkpoint_frequency": self.CHECKPOINT_FREQUENCY,
             "final_seed": current_seed,
             "solver": self.node_id,
+            "real_training": False,
         }
 
         return model_update, checkpoints

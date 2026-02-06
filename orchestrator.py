@@ -453,7 +453,13 @@ def validate_coordination(metrics: NetworkMetrics) -> bool:
     voted = sum(m.votes_submitted for m in metrics.nodes.values())
     checks.append(("Votes submitted >= 2", voted >= 2, voted))
 
-    # Check 4: Low error rate
+    # Check 4: Consensus reached
+    checks.append(("Consensus reached > 0", metrics.total_consensus_reached > 0, metrics.total_consensus_reached))
+
+    # Check 5: Rewards distributed
+    checks.append(("Rewards distributed > 0", metrics.total_rewards_distributed > 0, metrics.total_rewards_distributed))
+
+    # Check 6: Low error rate
     total_nodes = len(metrics.nodes)
     failed_nodes = sum(1 for m in metrics.nodes.values() if m.errors > 0)
     error_rate = failed_nodes / max(total_nodes, 1)
@@ -653,6 +659,16 @@ def run_orchestrator(
         metrics.total_solutions_committed += m.solutions_committed
         metrics.total_votes_submitted += m.votes_submitted
         metrics.total_aggregations += m.aggregations_done
+
+    # Count on-chain consensus and rewards events
+    consensus_events = deployer_registry.get_events(
+        "ResultsRewards", "YumaConsensusReached", from_block=0, to_block="latest"
+    )
+    rewards_events = deployer_registry.get_events(
+        "ResultsRewards", "RewardsDistributed", from_block=0, to_block="latest"
+    )
+    metrics.total_consensus_reached = len(consensus_events)
+    metrics.total_rewards_distributed = len(rewards_events)
 
     logger.info(metrics.summary())
 

@@ -303,7 +303,7 @@ class ContractRegistry:
 
     def finalize_voting(self, task_id: int, solver: str) -> TransactionResult:
         """Finalize voting for a task/solver pair."""
-        return self.send("ResultsRewards", "finalizeVoting", task_id, solver)
+        return self.send("ResultsRewards", "finalizeVoting", task_id, solver, gas_limit=1000000)
 
     def is_voting_open(self, task_id: int, solver: str) -> bool:
         """Check if voting is still open."""
@@ -352,3 +352,13 @@ class ContractRegistry:
             return self.call("ATNToken", "balanceOf", address)
         except Exception:
             return 0
+
+    # --- ResultsRewards ---
+
+    def get_revealed_solution(self, task_id: int, solver: str) -> Optional[str]:
+        """Get the revealed solution CID for a task/solver pair."""
+        try:
+            cid = self.call("ResultsRewards", "revealedSolutions", task_id, solver)
+            return cid if cid else None
+        except Exception:
+            return None
