@@ -152,8 +152,8 @@ contract TaskContract {
     // TaskID => ConsensusResult
     mapping(uint256 => AutonetLib.ConsensusResult) public consensusResults;
 
-    uint256 public constant MIN_ROLLOUTS = 3;
-    uint256 public constant ROLLOUT_PERIOD_BLOCKS = 200; // ~40 minutes
+    uint256 public constant MIN_ROLLOUTS = 2;
+    uint256 public constant ROLLOUT_PERIOD_BLOCKS = 50; // ~10 minutes
 
     event ConsensusTaskProposed(
         uint256 indexed taskId,

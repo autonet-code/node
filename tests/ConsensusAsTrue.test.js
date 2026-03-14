@@ -322,10 +322,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       await taskContract.connect(solver1).submitRollout(taskId, answerA, solHash1, 90);
       await taskContract.connect(solver2).submitRollout(taskId, answerA, solHash2, 85);
 
-      // Need a 3rd to meet MIN_ROLLOUTS=3
-      await staking.connect(solver3).stake(2, SOLVER_STAKE);
-      await taskContract.connect(solver3).submitRollout(taskId, answerA, solHash2, 80);
-
+      // 2 rollouts meets MIN_ROLLOUTS=2
       expect(await taskContract.isRolloutCollectionComplete(taskId)).to.be.true;
 
       // Finalize - all agree so solvability = 100% > maxSolvability 75%
@@ -396,7 +393,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
           ethers.parseEther("5")
         );
 
-      // Only 1 rollout (MIN_ROLLOUTS = 3)
+      // Only 1 rollout (MIN_ROLLOUTS = 2)
       const answerHash = ethers.keccak256(ethers.toUtf8Bytes("answer"));
       const solHash = ethers.keccak256(ethers.toUtf8Bytes("sol"));
       await taskContract.connect(solver1).submitRollout(1, answerHash, solHash, 80);

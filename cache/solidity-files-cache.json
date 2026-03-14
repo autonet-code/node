@@ -1216,8 +1216,8 @@
       ]
     },
     "C:\\code\\autonet\\contracts\\core\\TaskContract.sol": {
-      "lastModificationDate": 1773528731606,
-      "contentHash": "724283034d34b3d7d3526f08ac759162",
+      "lastModificationDate": 1773530283612,
+      "contentHash": "8366e53c969d39acdf676b84c2879a32",
       "sourceName": "contracts/core/TaskContract.sol",
       "solcConfig": {
         "version": "0.8.20",

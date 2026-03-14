@@ -600,22 +600,52 @@ class SolverNode:
         task_type = model_update.get("task_type", "supervised")
 
         if task_type == "jepa":
-            # For JEPA: answer is embedding statistics
+            # For JEPA: answer is discretized embedding statistics
             return {
                 "type": "jepa_embedding",
-                "cosine_similarity": round(metrics.get("cosine_similarity", 0), 4),
+                "cosine_similarity_bucket": self._bucket_similarity(
+                    metrics.get("cosine_similarity", 0)
+                ),
                 "loss_bucket": self._bucket_loss(metrics.get("loss", 0)),
                 "embedding_energy_bucket": self._bucket_loss(
                     metrics.get("embedding_energy", 0)
                 ),
             }
         else:
-            # For supervised: answer is accuracy bucket + loss bucket
+            # For supervised: answer is discretized accuracy + loss
             return {
                 "type": "supervised_prediction",
-                "accuracy_bucket": round(metrics.get("accuracy", 0), 1),
+                "accuracy_bucket": self._bucket_accuracy(
+                    metrics.get("accuracy", 0)
+                ),
                 "loss_bucket": self._bucket_loss(metrics.get("loss", 0)),
             }
+
+    def _bucket_similarity(self, similarity: float) -> str:
+        """Bucket a cosine similarity value into discrete ranges for consensus."""
+        if similarity >= 0.9:
+            return "very_high"
+        elif similarity >= 0.7:
+            return "high"
+        elif similarity >= 0.5:
+            return "medium"
+        elif similarity >= 0.3:
+            return "low"
+        else:
+            return "very_low"
+
+    def _bucket_accuracy(self, accuracy: float) -> str:
+        """Bucket an accuracy value into discrete ranges for consensus."""
+        if accuracy >= 0.9:
+            return "very_high"
+        elif accuracy >= 0.7:
+            return "high"
+        elif accuracy >= 0.5:
+            return "medium"
+        elif accuracy >= 0.3:
+            return "low"
+        else:
+            return "very_low"
 
     def _bucket_loss(self, loss: float) -> str:
         """Bucket a loss value into discrete ranges for consensus matching."""
