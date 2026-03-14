@@ -365,6 +365,172 @@ contract ResultsRewards {
         taskContract.updateTaskStatus(_taskId, AutonetLib.TaskStatus.REWARDED);
     }
 
+    // ============ Consensus-as-Truth (MM-Zero) ============
+
+    /**
+     * @dev Finalize a consensus-mode task.
+     * Computes majority vote across solver rollouts, calculates difficulty score,
+     * and distributes rewards based on the difficulty curve.
+     *
+     * Anti-collusion: rewards peak when solver agreement is near the target
+     * difficulty (e.g., 50%). Easy tasks (high agreement) yield low rewards,
+     * making collusion economically irrational.
+     */
+    function finalizeConsensusTask(uint256 _taskId) external {
+        AutonetLib.TaskProposal memory proposal = taskContract.getTaskProposal(_taskId);
+        require(proposal.taskMode == AutonetLib.TaskMode.CONSENSUS_TRUTH, "Not consensus task");
+        require(proposal.status == AutonetLib.TaskStatus.CONSENSUS_COLLECTING, "Not collecting");
+        require(!rewardsProcessed[_taskId], "Already processed");
+
+        // Check collection is complete
+        require(taskContract.isRolloutCollectionComplete(_taskId), "Collection not complete");
+
+        AutonetLib.SolverRollout[] memory rollouts = taskContract.getRollouts(_taskId);
+        require(rollouts.length >= 2, "Insufficient rollouts");
+
+        AutonetLib.DifficultyTarget memory target = taskContract.getDifficultyTarget(_taskId);
+
+        // Compute majority vote
+        (bytes32 majorityAnswer, uint256 majorityCount) = _computeMajorityVote(rollouts);
+
+        // Calculate actual solvability in BPS
+        uint256 actualSolvabilityBps = (majorityCount * 10000) / rollouts.length;
+
+        // Compute difficulty score (bell curve centered on peakSolvability)
+        uint256 difficultyScore = _computeDifficultyScore(actualSolvabilityBps, target);
+
+        // Update task status
+        taskContract.updateTaskStatus(_taskId, AutonetLib.TaskStatus.CONSENSUS_FINALIZED);
+
+        // Distribute rewards
+        _processConsensusRewards(
+            _taskId,
+            proposal,
+            rollouts,
+            majorityAnswer,
+            difficultyScore,
+            actualSolvabilityBps
+        );
+
+        rewardsProcessed[_taskId] = true;
+
+        emit YumaConsensusReached(_taskId, address(0), true, difficultyScore);
+    }
+
+    /**
+     * @dev Compute the majority vote across solver rollouts.
+     * Returns the most common answer hash and its count.
+     */
+    function _computeMajorityVote(AutonetLib.SolverRollout[] memory rollouts)
+        internal pure returns (bytes32 majorityAnswer, uint256 majorityCount)
+    {
+        // Simple O(n^2) majority finding - acceptable for small rollout counts
+        for (uint256 i = 0; i < rollouts.length; i++) {
+            uint256 count = 0;
+            for (uint256 j = 0; j < rollouts.length; j++) {
+                if (rollouts[j].answerHash == rollouts[i].answerHash) {
+                    count++;
+                }
+            }
+            if (count > majorityCount) {
+                majorityCount = count;
+                majorityAnswer = rollouts[i].answerHash;
+            }
+        }
+    }
+
+    /**
+     * @dev Compute difficulty score using a quadratic bell curve.
+     *
+     * Score is maximized when actualSolvability equals peakSolvability.
+     * Falls to 0 at min/maxSolvability boundaries.
+     *
+     * Formula: score = 10000 * (1 - ((actual - peak) / halfRange)^2)
+     * where halfRange = max(peak - min, max - peak)
+     */
+    function _computeDifficultyScore(
+        uint256 _actualBps,
+        AutonetLib.DifficultyTarget memory _target
+    ) internal pure returns (uint256) {
+        // Outside acceptable range: zero reward
+        if (_actualBps < _target.minSolvability || _actualBps > _target.maxSolvability) {
+            return 0;
+        }
+
+        // Compute distance from peak
+        uint256 distance;
+        if (_actualBps >= _target.peakSolvability) {
+            distance = _actualBps - _target.peakSolvability;
+        } else {
+            distance = _target.peakSolvability - _actualBps;
+        }
+
+        // Half-range for normalization
+        uint256 halfRange = _target.maxSolvability - _target.minSolvability;
+        if (halfRange == 0) return 10000;
+
+        // Quadratic falloff: score = 10000 * (1 - (distance / halfRange)^2)
+        // Using BPS math to avoid decimals
+        uint256 normalizedDistance = (distance * 10000) / halfRange;
+        uint256 distanceSquared = (normalizedDistance * normalizedDistance) / 10000;
+
+        if (distanceSquared >= 10000) return 0;
+        return 10000 - distanceSquared;
+    }
+
+    /**
+     * @dev Process rewards for a consensus-mode task.
+     *
+     * Proposer reward: scaled by difficulty score (well-calibrated tasks pay more)
+     * Solver reward: paid to solvers who matched majority answer, scaled by difficulty
+     * No coordinator fee in consensus mode (consensus is computed on-chain)
+     */
+    function _processConsensusRewards(
+        uint256 _taskId,
+        AutonetLib.TaskProposal memory _proposal,
+        AutonetLib.SolverRollout[] memory _rollouts,
+        bytes32 _majorityAnswer,
+        uint256 _difficultyScore,
+        uint256 /* _actualSolvabilityBps */
+    ) internal {
+        uint256 projectId = _proposal.projectId;
+
+        // Proposer reward: base reward scaled by difficulty score
+        // Peak difficulty = full reward; poor calibration = reduced/zero reward
+        uint256 proposerReward = (_proposal.proposedLearnabilityReward * _difficultyScore) / 10000;
+
+        if (proposerReward > 0) {
+            try projectContract.disburseFromBudget(projectId, _proposal.proposer, proposerReward) returns (bool success) {
+                if (success) {
+                    emit RewardsDistributed(_taskId, _proposal.proposer, proposerReward, "ProposerReward");
+                }
+            } catch {}
+        }
+
+        // Solver rewards: paid to solvers who matched majority answer
+        for (uint256 i = 0; i < _rollouts.length; i++) {
+            if (_rollouts[i].answerHash == _majorityAnswer) {
+                // Base solver reward scaled by difficulty score
+                uint256 solverReward = (_proposal.proposedSolverReward * _difficultyScore) / 10000;
+
+                // Confidence bonus: solvers who were correctly confident get up to 20% extra
+                if (_rollouts[i].confidence > 50) {
+                    uint256 confidenceBonus = (solverReward * (_rollouts[i].confidence - 50)) / 500;
+                    solverReward += confidenceBonus;
+                }
+
+                if (solverReward > 0) {
+                    try projectContract.disburseFromBudget(projectId, _rollouts[i].solver, solverReward) returns (bool success) {
+                        if (success) {
+                            emit RewardsDistributed(_taskId, _rollouts[i].solver, solverReward, "SolverReward");
+                        }
+                    } catch {}
+                }
+            }
+            // Minority solvers get no reward but are not slashed
+        }
+    }
+
     // ============ Legacy Single-Coordinator Mode (for backwards compatibility) ============
 
     /**

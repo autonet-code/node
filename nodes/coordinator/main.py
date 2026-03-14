@@ -62,6 +62,7 @@ class CoordinatorNode:
         ipfs: IPFSClient,
         node_id: str,
         project_id: int,
+        task_mode: str = "ground_truth",
     ):
         """
         Initialize the coordinator node.
@@ -71,11 +72,13 @@ class CoordinatorNode:
             ipfs: IPFSClient for content storage/retrieval
             node_id: Unique identifier for this node instance
             project_id: Project ID to coordinate for
+            task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
         """
         self.registry = registry
         self.ipfs = ipfs
         self.node_id = node_id
         self.project_id = project_id
+        self.task_mode = task_mode
 
         self.metrics = CoordinatorMetrics()
         self._running = False
@@ -141,11 +144,16 @@ class CoordinatorNode:
             self._stake()
             return
 
-        # Fetch and cache ground truths first (must happen before solution reveals)
-        self._fetch_ground_truths()
+        if self.task_mode == "consensus_truth":
+            # Consensus mode: check for tasks ready for finalization
+            self._process_consensus_tasks()
+        else:
+            # Ground-truth mode: verify solutions against known answers
+            # Fetch and cache ground truths first (must happen before solution reveals)
+            self._fetch_ground_truths()
 
-        # Poll for new SolutionRevealed events
-        self._process_solution_reveals()
+            # Poll for new SolutionRevealed events
+            self._process_solution_reveals()
 
         # Check for forced errors
         self._check_forced_errors()
@@ -535,6 +543,87 @@ class CoordinatorNode:
 
         except Exception as e:
             logger.error(f"Error finalizing voting: {e}", exc_info=True)
+
+    # ============ Consensus-as-Truth (MM-Zero) Methods ============
+
+    def _process_consensus_tasks(self):
+        """
+        Process consensus-mode tasks: check for tasks with enough rollouts
+        and finalize them on-chain.
+
+        In consensus mode, the coordinator's role shifts from
+        "verify against known truth" to "tally votes and trigger
+        on-chain consensus finalization."
+        """
+        try:
+            # Look for ConsensusTaskProposed events
+            events = self.registry.get_new_events("TaskContract", "ConsensusTaskProposed")
+
+            for event in events:
+                task_id = event["args"]["taskId"]
+
+                # Skip already-finalized tasks
+                if task_id in self._finalized_tasks:
+                    continue
+
+                # Check if rollout collection is complete
+                if not self.registry.is_rollout_collection_complete(task_id):
+                    rollout_count = self.registry.get_rollout_count(task_id)
+                    logger.debug(
+                        f"Task {task_id}: {rollout_count} rollouts, "
+                        f"collection not yet complete"
+                    )
+                    continue
+
+                rollout_count = self.registry.get_rollout_count(task_id)
+                logger.info(
+                    f"Task {task_id}: {rollout_count} rollouts collected, "
+                    f"finalizing consensus..."
+                )
+
+                # Finalize on-chain (computes majority vote + distributes rewards)
+                self._finalize_consensus(task_id)
+
+        except Exception as e:
+            logger.error(f"Error processing consensus tasks: {e}", exc_info=True)
+            self.metrics.errors += 1
+
+    def _finalize_consensus(self, task_id: int):
+        """
+        Finalize a consensus-mode task on-chain.
+
+        This triggers the ResultsRewards contract to:
+        1. Compute majority vote across all solver rollouts
+        2. Calculate the actual solvability and difficulty score
+        3. Distribute difficulty-calibrated rewards
+        """
+        try:
+            finalize_key = (task_id, "consensus")
+            if finalize_key in self._finalized_tasks:
+                return
+
+            self._finalized_tasks.add(finalize_key)
+
+            result = self.registry.finalize_consensus_task(task_id)
+
+            if result.success:
+                logger.info(
+                    f"Consensus finalized for task {task_id}: {result.tx_hash}"
+                )
+                self.metrics.voting_finalized += 1
+                self.metrics.tasks_completed += 1
+                self._update_bond_strength(success=True)
+            else:
+                if "Already processed" in str(result.error):
+                    logger.info(f"Task {task_id} already finalized by another coordinator")
+                else:
+                    logger.warning(f"Consensus finalization failed: {result.error}")
+                    self.metrics.errors += 1
+                    self._update_bond_strength(success=False)
+
+        except Exception as e:
+            logger.error(f"Error finalizing consensus for task {task_id}: {e}", exc_info=True)
+            self.metrics.errors += 1
 
     def _check_forced_errors(self):
         """Check for and report forced errors in solutions."""

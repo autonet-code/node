@@ -92,7 +92,8 @@ contract TaskContract {
             proposedSolverReward: _solverReward,
             creationBlock: block.number,
             status: AutonetLib.TaskStatus.PROPOSED,
-            projectId: _projectId
+            projectId: _projectId,
+            taskMode: AutonetLib.TaskMode.GROUND_TRUTH
         });
 
         emit TaskProposed(taskId, _projectId, msg.sender, _specHash, _groundTruthHash);
@@ -138,6 +139,134 @@ contract TaskContract {
 
         t.proposal.status = AutonetLib.TaskStatus.SOLUTION_COMMITTED;
         emit SolutionCommitted(_taskId, msg.sender, _solutionHash);
+    }
+
+    // ============ Consensus-as-Truth (MM-Zero) Functions ============
+
+    // TaskID => DifficultyTarget
+    mapping(uint256 => AutonetLib.DifficultyTarget) public difficultyTargets;
+    // TaskID => SolverRollout[]
+    mapping(uint256 => AutonetLib.SolverRollout[]) private _rollouts;
+    // TaskID => Solver => has submitted rollout
+    mapping(uint256 => mapping(address => bool)) public hasSubmittedRollout;
+    // TaskID => ConsensusResult
+    mapping(uint256 => AutonetLib.ConsensusResult) public consensusResults;
+
+    uint256 public constant MIN_ROLLOUTS = 3;
+    uint256 public constant ROLLOUT_PERIOD_BLOCKS = 200; // ~40 minutes
+
+    event ConsensusTaskProposed(
+        uint256 indexed taskId,
+        uint256 indexed projectId,
+        address indexed proposer,
+        bytes32 specHash,
+        uint256 peakSolvability
+    );
+    event RolloutSubmitted(uint256 indexed taskId, address indexed solver, bytes32 answerHash, uint256 confidence);
+    event ConsensusFinalized(uint256 indexed taskId, bytes32 majorityAnswer, uint256 actualSolvability, uint256 difficultyScore);
+
+    /**
+     * @dev Propose a consensus-mode task. No ground truth needed.
+     * The Proposer specifies a difficulty target instead.
+     */
+    function proposeConsensusTask(
+        uint256 _projectId,
+        bytes32 _specHash,
+        AutonetLib.DifficultyTarget calldata _difficultyTarget,
+        uint256 _learnabilityReward,
+        uint256 _solverReward
+    ) external onlyStakedProposer returns (uint256 taskId) {
+        require(_difficultyTarget.minSolvability < _difficultyTarget.maxSolvability, "Invalid solvability range");
+        require(
+            _difficultyTarget.peakSolvability >= _difficultyTarget.minSolvability &&
+            _difficultyTarget.peakSolvability <= _difficultyTarget.maxSolvability,
+            "Peak outside range"
+        );
+        require(_difficultyTarget.maxSolvability <= 10000, "Max solvability exceeds 100%");
+
+        taskId = nextTaskId++;
+
+        Task storage t = _tasks[taskId];
+        t.id = taskId;
+        t.projectId = _projectId;
+        t.proposal = AutonetLib.TaskProposal({
+            specHash: _specHash,
+            groundTruthSolHash: bytes32(0), // No ground truth in consensus mode
+            proposer: msg.sender,
+            proposedLearnabilityReward: _learnabilityReward,
+            proposedSolverReward: _solverReward,
+            creationBlock: block.number,
+            status: AutonetLib.TaskStatus.CONSENSUS_COLLECTING,
+            projectId: _projectId,
+            taskMode: AutonetLib.TaskMode.CONSENSUS_TRUTH
+        });
+
+        difficultyTargets[taskId] = _difficultyTarget;
+
+        emit ConsensusTaskProposed(taskId, _projectId, msg.sender, _specHash, _difficultyTarget.peakSolvability);
+    }
+
+    /**
+     * @dev Submit a rollout for a consensus-mode task.
+     * Multiple solvers can submit independent rollouts.
+     */
+    function submitRollout(
+        uint256 _taskId,
+        bytes32 _answerHash,
+        bytes32 _solutionHash,
+        uint256 _confidence
+    ) external taskExists(_taskId) onlyStakedSolver {
+        Task storage t = _tasks[_taskId];
+        require(t.proposal.taskMode == AutonetLib.TaskMode.CONSENSUS_TRUTH, "Not consensus task");
+        require(t.proposal.status == AutonetLib.TaskStatus.CONSENSUS_COLLECTING, "Not collecting rollouts");
+        require(!hasSubmittedRollout[_taskId][msg.sender], "Already submitted rollout");
+        require(_confidence <= 100, "Confidence must be 0-100");
+        require(block.number <= t.proposal.creationBlock + ROLLOUT_PERIOD_BLOCKS, "Rollout period ended");
+
+        _rollouts[_taskId].push(AutonetLib.SolverRollout({
+            solver: msg.sender,
+            answerHash: _answerHash,
+            solutionHash: _solutionHash,
+            confidence: _confidence,
+            submitBlock: block.number
+        }));
+
+        hasSubmittedRollout[_taskId][msg.sender] = true;
+
+        emit RolloutSubmitted(_taskId, msg.sender, _answerHash, _confidence);
+    }
+
+    /**
+     * @dev Get all rollouts for a task.
+     */
+    function getRollouts(uint256 _taskId) external view returns (AutonetLib.SolverRollout[] memory) {
+        return _rollouts[_taskId];
+    }
+
+    /**
+     * @dev Get rollout count for a task.
+     */
+    function getRolloutCount(uint256 _taskId) external view returns (uint256) {
+        return _rollouts[_taskId].length;
+    }
+
+    /**
+     * @dev Get difficulty target for a task.
+     */
+    function getDifficultyTarget(uint256 _taskId) external view returns (AutonetLib.DifficultyTarget memory) {
+        return difficultyTargets[_taskId];
+    }
+
+    /**
+     * @dev Check if rollout collection is complete (enough rollouts or period ended).
+     */
+    function isRolloutCollectionComplete(uint256 _taskId) external view returns (bool) {
+        Task storage t = _tasks[_taskId];
+        if (t.proposal.taskMode != AutonetLib.TaskMode.CONSENSUS_TRUTH) return false;
+        if (t.proposal.status != AutonetLib.TaskStatus.CONSENSUS_COLLECTING) return false;
+
+        return _rollouts[_taskId].length >= MIN_ROLLOUTS ||
+               block.number > t.proposal.creationBlock + ROLLOUT_PERIOD_BLOCKS;
     }
 
     // ============ Gensyn-style Checkpoint Functions ============

@@ -62,6 +62,7 @@ class AggregatorNode:
         project_id: int = 1,
         aggregation_method: str = "fedavg",
         trim_ratio: float = 0.2,
+        task_mode: str = "ground_truth",
     ):
         """
         Initialize the aggregator node.
@@ -73,6 +74,7 @@ class AggregatorNode:
             project_id: Project ID to aggregate updates for
             aggregation_method: Aggregation method to use ("fedavg" or "trimmed_mean")
             trim_ratio: Ratio to trim from top/bottom for trimmed_mean (default: 0.2 = 20%)
+            task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
         """
         self.registry = registry
         self.ipfs = ipfs
@@ -80,6 +82,7 @@ class AggregatorNode:
         self.project_id = project_id
         self.aggregation_method = aggregation_method
         self.trim_ratio = trim_ratio
+        self.task_mode = task_mode
 
         self.metrics = AggregatorMetrics()
         self.project_state = ProjectAggregationState(project_id=project_id)

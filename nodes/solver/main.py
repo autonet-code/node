@@ -83,6 +83,7 @@ class SolverNode:
         project_id: int,
         deterministic_seed: Optional[int] = None,
         task_type: str = "supervised",
+        task_mode: str = "ground_truth",
     ):
         """
         Initialize SolverNode.
@@ -94,6 +95,7 @@ class SolverNode:
             project_id: Project ID to work on
             deterministic_seed: Seed for reproducible training
             task_type: Type of training ("supervised" or "jepa")
+            task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
         """
         self.registry = registry
         self.ipfs = ipfs
@@ -101,6 +103,7 @@ class SolverNode:
         self.project_id = project_id
         self.deterministic_seed = deterministic_seed or int(time.time())
         self.task_type = task_type  # "supervised" (CNN) or "jepa" (self-supervised)
+        self.task_mode = task_mode
 
         self.metrics = SolverMetrics()
         self.tasks: Dict[int, TaskInfo] = {}
@@ -194,9 +197,14 @@ class SolverNode:
             self.metrics.errors += 1
 
     def _discover_tasks(self):
-        """Poll for TaskProposed events and discover new tasks."""
+        """Poll for TaskProposed / ConsensusTaskProposed events and discover new tasks."""
         try:
-            events = self.registry.get_new_events("TaskContract", "TaskProposed")
+            if self.task_mode == "consensus_truth":
+                # Discover consensus-mode tasks
+                events = self.registry.get_new_events("TaskContract", "ConsensusTaskProposed")
+            else:
+                # Discover ground-truth-mode tasks
+                events = self.registry.get_new_events("TaskContract", "TaskProposed")
 
             for event in events:
                 task_id = event["args"]["taskId"]
@@ -225,11 +233,14 @@ class SolverNode:
             self.metrics.errors += 1
 
     def _process_tasks(self):
-        """Process discovered tasks: train and commit solutions."""
+        """Process discovered tasks: train and commit solutions or submit rollouts."""
         for task_id, task_info in list(self.tasks.items()):
             try:
                 if task_info.state == TaskState.DISCOVERED:
-                    self._train_and_commit(task_id, task_info)
+                    if self.task_mode == "consensus_truth":
+                        self._train_and_submit_rollout(task_id, task_info)
+                    else:
+                        self._train_and_commit(task_id, task_info)
 
             except Exception as e:
                 logger.error(f"[{self.node_id}] Error processing task {task_id}: {e}", exc_info=True)
@@ -510,6 +521,133 @@ class SolverNode:
 
             except Exception as e:
                 logger.error(f"[{self.node_id}] Error submitting checkpoint: {e}", exc_info=True)
+
+    # ============ Consensus-as-Truth (MM-Zero) Methods ============
+
+    def _train_and_submit_rollout(self, task_id: int, task_info: TaskInfo):
+        """
+        Train on a consensus-mode task and submit a rollout.
+
+        Unlike ground-truth mode, there's no commit-reveal pattern.
+        Multiple solvers independently train and submit answer hashes.
+        """
+        logger.info(f"[{self.node_id}] Training for consensus rollout on task {task_id}...")
+        task_info.state = TaskState.TRAINING
+
+        # Perform training (reuses existing training infrastructure)
+        start_time = time.time()
+        model_update, checkpoints = self._mock_train(task_id)
+        training_time = time.time() - start_time
+
+        logger.info(f"[{self.node_id}] Consensus training completed in {training_time:.2f}s")
+
+        # Generate an answer hash from the model's output
+        # For JEPA: answer is the embedding signature of the trained model
+        # For supervised: answer is the prediction vector on task inputs
+        import json
+        answer_data = self._generate_consensus_answer(model_update)
+        answer_json = json.dumps(answer_data, sort_keys=True)
+
+        # Compute confidence from training metrics
+        metrics = model_update.get("metrics", {})
+        confidence = self._compute_confidence(metrics)
+
+        # Upload full solution to IPFS (weight delta + answer + metrics)
+        solution_data = {
+            **model_update,
+            "answer": answer_data,
+            "confidence": confidence,
+            "task_mode": "consensus_truth",
+        }
+        solution_cid = self.ipfs.add_json(solution_data)
+        if not solution_cid:
+            logger.error(f"[{self.node_id}] Failed to upload rollout solution to IPFS")
+            return
+
+        # Compute hashes
+        from web3 import Web3
+        answer_hash = Web3.keccak(text=answer_json)
+        solution_hash = Web3.keccak(text=solution_cid)
+
+        logger.info(
+            f"[{self.node_id}] Submitting rollout: answer_hash={answer_hash.hex()[:16]}..., "
+            f"confidence={confidence}"
+        )
+
+        # Submit rollout on-chain
+        result = self.registry.submit_rollout(
+            task_id, answer_hash, solution_hash, confidence
+        )
+
+        if result.success:
+            logger.info(f"[{self.node_id}] Rollout submitted for task {task_id}: {result.tx_hash}")
+            task_info.state = TaskState.COMMITTED
+            task_info.solution_cid = solution_cid
+            self.metrics.solutions_committed += 1
+            self.metrics.tasks_completed += 1
+        else:
+            logger.error(f"[{self.node_id}] Failed to submit rollout: {result.error}")
+            self.metrics.errors += 1
+
+    def _generate_consensus_answer(self, model_update: dict) -> dict:
+        """
+        Generate an answer from the trained model for consensus voting.
+
+        The answer is a deterministic fingerprint of the model's behavior,
+        used for majority-vote consensus across solvers.
+        """
+        metrics = model_update.get("metrics", {})
+        task_type = model_update.get("task_type", "supervised")
+
+        if task_type == "jepa":
+            # For JEPA: answer is embedding statistics
+            return {
+                "type": "jepa_embedding",
+                "cosine_similarity": round(metrics.get("cosine_similarity", 0), 4),
+                "loss_bucket": self._bucket_loss(metrics.get("loss", 0)),
+                "embedding_energy_bucket": self._bucket_loss(
+                    metrics.get("embedding_energy", 0)
+                ),
+            }
+        else:
+            # For supervised: answer is accuracy bucket + loss bucket
+            return {
+                "type": "supervised_prediction",
+                "accuracy_bucket": round(metrics.get("accuracy", 0), 1),
+                "loss_bucket": self._bucket_loss(metrics.get("loss", 0)),
+            }
+
+    def _bucket_loss(self, loss: float) -> str:
+        """Bucket a loss value into discrete ranges for consensus matching."""
+        if loss < 0.1:
+            return "very_low"
+        elif loss < 0.5:
+            return "low"
+        elif loss < 1.0:
+            return "medium"
+        elif loss < 2.0:
+            return "high"
+        else:
+            return "very_high"
+
+    def _compute_confidence(self, metrics: dict) -> int:
+        """
+        Compute confidence score (0-100) from training metrics.
+
+        Higher confidence = model performed well during training.
+        """
+        task_type = metrics.get("task_type", "supervised")
+
+        if "cosine_similarity" in metrics:
+            # JEPA: confidence from cosine similarity
+            cos_sim = metrics.get("cosine_similarity", 0)
+            return min(100, max(0, int(cos_sim * 100)))
+        elif "accuracy" in metrics:
+            # Supervised: confidence from accuracy
+            acc = metrics.get("accuracy", 0)
+            return min(100, max(0, int(acc * 100)))
+        else:
+            return 50  # Default moderate confidence
 
     def _check_and_reveal_solutions(self):
         """Check for GroundTruthRevealed events and reveal our solutions."""

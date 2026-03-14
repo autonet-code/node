@@ -18,6 +18,12 @@ library AutonetLib {
         CURATOR        // Optional: task/standard curation
     }
 
+    // ============ Task Mode ============
+    enum TaskMode {
+        GROUND_TRUTH,      // Legacy: proposer commits known answer
+        CONSENSUS_TRUTH    // MM-Zero: truth emerges from solver agreement
+    }
+
     // ============ Task Lifecycle ============
     enum TaskStatus {
         PROPOSED,              // Task proposed, awaiting validation
@@ -31,7 +37,9 @@ library AutonetLib {
         VERIFIED_INCORRECT,    // Solution verified incorrect
         REWARDED,              // Rewards distributed
         ARCHIVED,              // Completed or expired
-        DISPUTED               // Under dispute resolution
+        DISPUTED,              // Under dispute resolution
+        CONSENSUS_COLLECTING,  // Collecting solver rollouts (consensus mode)
+        CONSENSUS_FINALIZED    // Consensus computed and rewards distributed
     }
 
     // ============ Project Lifecycle ============
@@ -56,13 +64,39 @@ library AutonetLib {
 
     struct TaskProposal {
         bytes32 specHash;               // Hash of task specification (IPFS CID)
-        bytes32 groundTruthSolHash;     // Hash of proposer's solution
+        bytes32 groundTruthSolHash;     // Hash of proposer's solution (zero for consensus mode)
         address proposer;
         uint256 proposedLearnabilityReward;  // r_propose
         uint256 proposedSolverReward;        // r_solve
         uint256 creationBlock;
         TaskStatus status;
         uint256 projectId;
+        TaskMode taskMode;              // GROUND_TRUTH or CONSENSUS_TRUTH
+    }
+
+    // ============ Consensus-as-Truth (MM-Zero) Structures ============
+
+    struct DifficultyTarget {
+        uint256 minSolvability;   // BPS: minimum acceptable agreement ratio (e.g., 2500 = 25%)
+        uint256 maxSolvability;   // BPS: maximum acceptable agreement ratio (e.g., 7500 = 75%)
+        uint256 peakSolvability;  // BPS: optimal difficulty for max reward (e.g., 5000 = 50%)
+    }
+
+    struct SolverRollout {
+        address solver;
+        bytes32 answerHash;       // Hash of solver's answer
+        bytes32 solutionHash;     // Hash of full solution CID (for weight delta retrieval)
+        uint256 confidence;       // Self-reported confidence 0-100
+        uint256 submitBlock;
+    }
+
+    struct ConsensusResult {
+        bytes32 majorityAnswer;   // The answer hash with most votes
+        uint256 actualSolvability; // BPS: fraction of solvers who agreed
+        uint256 difficultyScore;  // 0-10000: how well-calibrated the task was
+        uint256 totalRollouts;    // Number of solver rollouts received
+        uint256 majorityCount;    // Number agreeing with majority
+        bool finalized;
     }
 
     struct SolverSubmission {

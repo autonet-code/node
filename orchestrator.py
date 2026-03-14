@@ -248,6 +248,7 @@ class NodeRunner:
         project_id: int = 1,
         max_cycles: int = 10,
         cycle_delay: float = 2.0,
+        extra_kwargs: Optional[Dict[str, Any]] = None,
     ):
         self.node_class = node_class
         self.node_id = node_id
@@ -259,6 +260,7 @@ class NodeRunner:
         self.project_id = project_id
         self.max_cycles = max_cycles
         self.cycle_delay = cycle_delay
+        self.extra_kwargs = extra_kwargs or {}
         self.thread: Optional[threading.Thread] = None
         self.node = None
         self.error: Optional[str] = None
@@ -305,6 +307,7 @@ class NodeRunner:
                 ipfs=self.ipfs,
                 node_id=self.node_id,
                 project_id=self.project_id,
+                **self.extra_kwargs,
             )
 
             logger.info(f"[{self.node_id}] {self.role} node starting with address {self.account['address'][:10]}...")
@@ -487,6 +490,7 @@ def run_orchestrator(
     num_aggregators: int = 1,
     num_rounds: int = 5,
     cycle_delay: float = 3.0,
+    task_mode: str = "ground_truth",
 ):
     """
     Run the full multi-node orchestration.
@@ -496,12 +500,16 @@ def run_orchestrator(
     3. Spawn all nodes
     4. Run for N rounds
     5. Collect metrics and validate
+
+    Args:
+        task_mode: "ground_truth" (legacy commit-reveal) or
+                   "consensus_truth" (MM-Zero consensus-as-truth)
     """
     logger.info("=" * 70)
     logger.info("AUTONET MULTI-NODE ORCHESTRATOR")
     logger.info("=" * 70)
     logger.info(f"Configuration: {num_proposers}P / {num_solvers}S / {num_coordinators}C / {num_aggregators}A")
-    logger.info(f"Rounds: {num_rounds}, Cycle delay: {cycle_delay}s")
+    logger.info(f"Rounds: {num_rounds}, Cycle delay: {cycle_delay}s, Task mode: {task_mode}")
 
     total_nodes = num_proposers + num_solvers + num_coordinators + num_aggregators
     if total_nodes + 1 > len(HARDHAT_ACCOUNTS):
@@ -579,6 +587,7 @@ def run_orchestrator(
             project_id=1,
             max_cycles=num_rounds * 10,  # Run long enough to catch solution commits
             cycle_delay=cycle_delay,
+            extra_kwargs={"task_mode": task_mode},
         )
         runners.append(runner)
         account_idx += 1
@@ -596,6 +605,7 @@ def run_orchestrator(
             project_id=1,
             max_cycles=num_rounds * 10,  # Run long enough to complete reveal flow
             cycle_delay=cycle_delay,
+            extra_kwargs={"task_mode": task_mode},
         )
         runners.append(runner)
         account_idx += 1
@@ -613,6 +623,7 @@ def run_orchestrator(
             project_id=1,
             max_cycles=num_rounds * 20,  # Run much longer to catch solution reveals
             cycle_delay=cycle_delay,
+            extra_kwargs={"task_mode": task_mode},
         )
         runners.append(runner)
         account_idx += 1
@@ -630,6 +641,7 @@ def run_orchestrator(
             project_id=1,
             max_cycles=num_rounds * 10,
             cycle_delay=cycle_delay * 1.5,  # Aggregator polls frequently to catch rewards
+            extra_kwargs={"task_mode": task_mode},
         )
         runners.append(runner)
         account_idx += 1
@@ -718,6 +730,12 @@ if __name__ == "__main__":
     parser.add_argument("--rounds", type=int, default=5, help="Number of training rounds")
     parser.add_argument("--delay", type=float, default=3.0, help="Cycle delay in seconds")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--task-mode",
+        choices=["ground_truth", "consensus_truth"],
+        default="ground_truth",
+        help="Task verification mode: ground_truth (legacy) or consensus_truth (MM-Zero)",
+    )
 
     args = parser.parse_args()
 
@@ -731,6 +749,7 @@ if __name__ == "__main__":
         num_aggregators=args.aggregators,
         num_rounds=args.rounds,
         cycle_delay=args.delay,
+        task_mode=args.task_mode,
     )
 
     sys.exit(0 if success else 1)

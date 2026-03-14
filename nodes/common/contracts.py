@@ -354,6 +354,79 @@ class ContractRegistry:
         except Exception:
             return 0
 
+    # =========================================================================
+    # Consensus-as-Truth (MM-Zero) operations
+    # =========================================================================
+
+    def propose_consensus_task(
+        self,
+        project_id: int,
+        spec_hash: bytes,
+        difficulty_target: tuple,
+        learnability_reward: int,
+        solver_reward: int,
+    ) -> TransactionResult:
+        """Propose a consensus-mode task (no ground truth).
+
+        Args:
+            difficulty_target: Tuple of (minSolvability, maxSolvability, peakSolvability) in BPS.
+        """
+        return self.send(
+            "TaskContract", "proposeConsensusTask",
+            project_id, spec_hash, difficulty_target,
+            learnability_reward, solver_reward,
+            gas_limit=800000,
+        )
+
+    def submit_rollout(
+        self,
+        task_id: int,
+        answer_hash: bytes,
+        solution_hash: bytes,
+        confidence: int,
+    ) -> TransactionResult:
+        """Submit a solver rollout for a consensus-mode task."""
+        return self.send(
+            "TaskContract", "submitRollout",
+            task_id, answer_hash, solution_hash, confidence,
+        )
+
+    def get_rollouts(self, task_id: int) -> list:
+        """Get all rollouts for a task."""
+        try:
+            return self.call("TaskContract", "getRollouts", task_id)
+        except Exception:
+            return []
+
+    def get_rollout_count(self, task_id: int) -> int:
+        """Get rollout count for a task."""
+        try:
+            return self.call("TaskContract", "getRolloutCount", task_id)
+        except Exception:
+            return 0
+
+    def get_difficulty_target(self, task_id: int) -> Optional[tuple]:
+        """Get difficulty target for a consensus task."""
+        try:
+            return self.call("TaskContract", "getDifficultyTarget", task_id)
+        except Exception:
+            return None
+
+    def is_rollout_collection_complete(self, task_id: int) -> bool:
+        """Check if rollout collection is complete."""
+        try:
+            return self.call("TaskContract", "isRolloutCollectionComplete", task_id)
+        except Exception:
+            return False
+
+    def finalize_consensus_task(self, task_id: int) -> TransactionResult:
+        """Finalize a consensus-mode task (compute majority vote, distribute rewards)."""
+        return self.send(
+            "ResultsRewards", "finalizeConsensusTask",
+            task_id,
+            gas_limit=1500000,
+        )
+
     # --- ResultsRewards ---
 
     def get_revealed_solution(self, task_id: int, solver: str) -> Optional[str]:

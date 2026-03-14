@@ -32,7 +32,8 @@ class ProposerNode:
     Autonomous proposer node that:
     1. Stakes as PROPOSER role
     2. Creates and proposes training tasks
-    3. Reveals ground truth after solutions are committed
+    3. Reveals ground truth after solutions are committed (ground-truth mode)
+    4. Generates difficulty-calibrated tasks (consensus mode)
     """
 
     def __init__(
@@ -41,6 +42,7 @@ class ProposerNode:
         ipfs: IPFSClient,
         node_id: str,
         project_id: int,
+        task_mode: str = "ground_truth",
     ):
         """
         Initialize the proposer node.
@@ -50,11 +52,13 @@ class ProposerNode:
             ipfs: IPFSClient instance for IPFS operations
             node_id: Unique identifier for this node (e.g., "proposer-0")
             project_id: Project ID to propose tasks for
+            task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
         """
         self.registry = registry
         self.ipfs = ipfs
         self.node_id = node_id
         self.project_id = project_id
+        self.task_mode = task_mode
         self.metrics = ProposerMetrics()
         self.running = False
         self.staked = False
@@ -65,6 +69,9 @@ class ProposerNode:
 
         # Track tasks where we've revealed ground truth
         self.revealed_tasks = set()
+
+        # Track consensus tasks (task_id -> difficulty_target)
+        self.consensus_tasks = {}
 
     def stop(self):
         """Stop the node."""
@@ -94,9 +101,12 @@ class ProposerNode:
                 if not self.staked:
                     self._perform_stake()
 
-                # Main work: propose task and reveal ground truth
-                self._propose_task_cycle()
-                self._reveal_ground_truth_cycle()
+                # Main work: branch on task mode
+                if self.task_mode == "consensus_truth":
+                    self._propose_consensus_task_cycle()
+                else:
+                    self._propose_task_cycle()
+                    self._reveal_ground_truth_cycle()
 
                 # Increment cycle counter
                 cycle_count += 1
@@ -262,6 +272,98 @@ class ProposerNode:
             "labels": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
             "num_samples": 1000,
             "accuracy_threshold": 0.15,  # Low threshold - any learning above random (10%) is valid
+            "timestamp": int(time.time()),
+            "proposer": self.node_id,
+        }
+
+    # ============ Consensus-as-Truth (MM-Zero) Methods ============
+
+    def _propose_consensus_task_cycle(self):
+        """Generate and propose a consensus-mode task."""
+        try:
+            task_spec = self._generate_consensus_task_spec()
+
+            # Upload task spec to IPFS
+            self.logger.info("Uploading consensus task spec to IPFS...")
+            spec_cid = self.ipfs.add_json(task_spec)
+            self.logger.info(f"Consensus task spec CID: {spec_cid}")
+
+            # Hash the spec CID
+            spec_hash = Web3.keccak(text=spec_cid)
+
+            # Difficulty target: peak at 50% solver agreement
+            difficulty_target = (
+                2500,   # minSolvability: 25%
+                7500,   # maxSolvability: 75%
+                5000,   # peakSolvability: 50%
+            )
+
+            learnability_reward = 10 * 10**18  # 10 ATN
+            solver_reward = 5 * 10**18         # 5 ATN
+
+            self.logger.info(
+                f"Proposing consensus task for project {self.project_id} "
+                f"(spec={spec_cid[:16]}..., peak_difficulty=50%)"
+            )
+
+            result = self.registry.propose_consensus_task(
+                self.project_id,
+                spec_hash,
+                difficulty_target,
+                learnability_reward,
+                solver_reward,
+            )
+
+            if result.success:
+                task_id = self.registry.get_next_task_id() - 1
+                self.logger.info(
+                    f"Consensus task proposed! Task ID: {task_id}, TX: {result.tx_hash}"
+                )
+                self.consensus_tasks[task_id] = difficulty_target
+                self.metrics.tasks_proposed += 1
+            else:
+                self.logger.error(f"Failed to propose consensus task: {result.error}")
+                self.metrics.errors += 1
+
+        except Exception as e:
+            self.logger.error(f"Error proposing consensus task: {e}", exc_info=True)
+            self.metrics.errors += 1
+
+    def _generate_consensus_task_spec(self) -> dict:
+        """
+        Generate a consensus-mode task specification.
+
+        In production this would:
+        1. Load the current global model
+        2. Generate candidate inputs
+        3. Measure model uncertainty
+        4. Select inputs near 50% uncertainty (capability frontier)
+
+        For MVP, generates a self-supervised task spec.
+        """
+        # Try to get the current global model for frontier estimation
+        global_model_cid = None
+        try:
+            global_model_cid = self.registry.get_mature_model(self.project_id)
+        except Exception:
+            pass
+
+        return {
+            "type": "consensus_task",
+            "mode": "consensus_truth",
+            "dataset": "cifar10_subset",
+            "task_type": "jepa",
+            "batch_size": 32,
+            "num_samples": 200,
+            "model_architecture": "jepa_vit",
+            "image_size": 32,
+            "patch_size": 4,
+            "global_model_cid": global_model_cid,
+            "difficulty_target": {
+                "min_solvability": 2500,
+                "max_solvability": 7500,
+                "peak_solvability": 5000,
+            },
             "timestamp": int(time.time()),
             "proposer": self.node_id,
         }
