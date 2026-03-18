@@ -136,7 +136,7 @@ def train_on_task(
     task_spec: Dict[str, Any],
     ground_truth: Optional[Dict[str, Any]] = None,
     global_model_cid: Optional[str] = None,
-    ipfs_client = None,
+    store = None,
     epochs: int = 1,
     batch_size: int = 32,
     learning_rate: float = 0.01,
@@ -155,7 +155,7 @@ def train_on_task(
         task_spec: Task specification (contains training config)
         ground_truth: Ground truth data (optional, for verification)
         global_model_cid: CID of global model weights (None = fresh model)
-        ipfs_client: IPFSClient for loading/saving weights
+        store: BlobStore for loading/saving weights
         epochs: Number of training epochs (keep low for speed)
         batch_size: Training batch size
         learning_rate: Learning rate for SGD
@@ -174,9 +174,9 @@ def train_on_task(
 
     # Load global model weights if available
     initial_state_dict = None
-    if global_model_cid and ipfs_client:
+    if global_model_cid and store:
         try:
-            initial_state_dict = load_weights(global_model_cid, ipfs_client)
+            initial_state_dict = load_weights(global_model_cid, store)
             if initial_state_dict:
                 model.load_state_dict(initial_state_dict)
                 logger.info(f"Loaded global model from {global_model_cid}")
@@ -276,13 +276,35 @@ def _mock_training_result(task_spec: Dict[str, Any]) -> Tuple[Dict[str, Any], Di
     }
 
 
-def save_weights(state_dict: Dict[str, torch.Tensor], ipfs_client) -> Optional[str]:
+def load_weights_into_model(model: torch.nn.Module, weights_data: dict) -> torch.nn.Module:
+    """
+    Load serialized weights into a PyTorch model for inference.
+
+    Args:
+        model: An uninitialized model instance (e.g., SimpleNet())
+        weights_data: Dict from blob store containing "weights" key
+                      with {layer_name: list_of_values} format
+
+    Returns:
+        The model with loaded weights, set to eval mode
+    """
+    weights = weights_data.get("weights", weights_data.get("weight_delta", {}))
+    state_dict = {}
+    for key, values in weights.items():
+        state_dict[key] = torch.tensor(values)
+    model.load_state_dict(state_dict)
+    model.eval()
+    logger.info(f"Loaded weights into model ({len(state_dict)} layers)")
+    return model
+
+
+def save_weights(state_dict: Dict[str, torch.Tensor], store) -> Optional[str]:
     """
     Save model weights to IPFS.
 
     Args:
         state_dict: PyTorch state_dict (model weights)
-        ipfs_client: IPFSClient instance
+        store: BlobStore instance
 
     Returns:
         CID of saved weights, or None on failure
@@ -294,7 +316,7 @@ def save_weights(state_dict: Dict[str, torch.Tensor], ipfs_client) -> Optional[s
             serializable_dict[key] = tensor.cpu().numpy().tolist()
 
         # Save to IPFS
-        cid = ipfs_client.add_json({
+        cid = store.add_json({
             "weights": serializable_dict,
             "format": "pytorch_state_dict",
         })
@@ -307,20 +329,20 @@ def save_weights(state_dict: Dict[str, torch.Tensor], ipfs_client) -> Optional[s
         return None
 
 
-def load_weights(cid: str, ipfs_client) -> Optional[Dict[str, torch.Tensor]]:
+def load_weights(cid: str, store) -> Optional[Dict[str, torch.Tensor]]:
     """
     Load model weights from IPFS.
 
     Args:
         cid: IPFS CID of weights
-        ipfs_client: IPFSClient instance
+        store: BlobStore instance
 
     Returns:
         PyTorch state_dict, or None on failure
     """
     try:
         # Load from IPFS
-        data = ipfs_client.get_json(cid)
+        data = store.get_json(cid)
         if not data:
             logger.error(f"Failed to load weights from IPFS: {cid}")
             return None
@@ -337,6 +359,331 @@ def load_weights(cid: str, ipfs_client) -> Optional[Dict[str, torch.Tensor]]:
     except Exception as e:
         logger.error(f"Failed to load weights from IPFS: {e}")
         return None
+
+
+# =============================================================================
+# JEPA Self-Supervised Training
+# =============================================================================
+
+def train_jepa_on_task(
+    task_spec: Dict[str, Any],
+    global_model_cid: Optional[str] = None,
+    store = None,
+    epochs: int = 1,
+    batch_size: int = 32,
+    learning_rate: float = 0.001,
+    num_samples: int = 500,
+    image_size: int = 32,  # Smaller for CIFAR-10/MNIST
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Train a JEPA model on unlabeled images and return weight delta.
+
+    JEPA (Joint Embedding Predictive Architecture) performs self-supervised
+    learning by predicting masked patch embeddings. No labels required.
+
+    This integrates with Autonet's Absolute Zero loop:
+    - Ground truth = Target encoder embeddings on validation data
+    - Verification = Embedding distance (cosine similarity)
+    - Aggregation = Standard FedAvg on context encoder weights
+
+    Args:
+        task_spec: Task specification (contains JEPA config)
+        global_model_cid: CID of global JEPA model to continue from
+        store: BlobStore instance
+        epochs: Number of training epochs
+        batch_size: Batch size for training
+        learning_rate: Learning rate
+        num_samples: Number of samples to train on
+        image_size: Image size (32 for CIFAR, 224 for ImageNet)
+
+    Returns:
+        (weight_delta, metrics) compatible with FedAvg aggregation
+    """
+    start_time = time.time()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    try:
+        from .jepa import JEPA, JEPAConfig, JEPATrainer
+
+        # Configure JEPA for the image size
+        config = JEPAConfig(
+            image_size=image_size,
+            patch_size=4 if image_size <= 32 else 16,  # Smaller patches for small images
+            embed_dim=192 if image_size <= 32 else 384,  # Smaller model for efficiency
+            num_heads=3 if image_size <= 32 else 6,
+            encoder_depth=6 if image_size <= 32 else 12,
+            predictor_depth=3 if image_size <= 32 else 6,
+            predictor_embed_dim=96 if image_size <= 32 else 192,
+        )
+
+        # Initialize trainer
+        trainer = JEPATrainer(config=config, device=device)
+
+        # Load global model if available
+        if global_model_cid and store:
+            try:
+                global_weights = load_weights(global_model_cid, store)
+                if global_weights:
+                    trainer.load_weights(global_weights)
+                    logger.info(f"Loaded JEPA global model: {global_model_cid[:20]}...")
+            except Exception as e:
+                logger.warning(f"Failed to load global JEPA model: {e}")
+
+        # Store initial weights for delta computation
+        initial_weights = {k: v.clone() for k, v in trainer.model.state_dict().items()}
+
+        # Load training data (use CIFAR-10 for demonstration)
+        from torchvision import datasets, transforms
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,), (0.5,)) if image_size <= 32 else
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+
+        # Try CIFAR-10 for small images, ImageNet subset otherwise
+        try:
+            if image_size <= 32:
+                dataset = datasets.CIFAR10(
+                    root='./data', train=True, download=True, transform=transform
+                )
+            else:
+                # For larger images, use FakeData for demo
+                dataset = datasets.FakeData(
+                    size=num_samples,
+                    image_size=(3, image_size, image_size),
+                    transform=transforms.ToTensor(),
+                )
+        except Exception:
+            # Fallback to synthetic data
+            dataset = datasets.FakeData(
+                size=num_samples,
+                image_size=(3, image_size, image_size),
+                transform=transforms.ToTensor(),
+            )
+
+        # Subset for training
+        indices = torch.randperm(len(dataset))[:num_samples]
+        subset = torch.utils.data.Subset(dataset, indices.tolist())
+        train_loader = torch.utils.data.DataLoader(
+            subset, batch_size=batch_size, shuffle=True, num_workers=0
+        )
+
+        # Optimizer
+        optimizer = torch.optim.AdamW(
+            [
+                {'params': trainer.model.context_encoder.parameters()},
+                {'params': trainer.model.predictor.parameters()},
+            ],
+            lr=learning_rate,
+            weight_decay=0.05,
+        )
+
+        # Training loop
+        total_loss = 0.0
+        total_cosine_sim = 0.0
+        num_batches = 0
+
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            epoch_cosine_sim = 0.0
+            epoch_batches = 0
+
+            for batch in train_loader:
+                # Handle both (images, labels) and just images
+                images = batch[0] if isinstance(batch, (list, tuple)) else batch
+                images = images.to(device)
+
+                # JEPA training step
+                metrics = trainer.train_step(images, optimizer)
+
+                epoch_loss += metrics['loss']
+                epoch_cosine_sim += metrics['cosine_similarity']
+                epoch_batches += 1
+
+            avg_loss = epoch_loss / max(1, epoch_batches)
+            avg_cosine = epoch_cosine_sim / max(1, epoch_batches)
+            total_loss += avg_loss
+            total_cosine_sim += avg_cosine
+            num_batches += epoch_batches
+
+            logger.info(
+                f"JEPA Epoch {epoch+1}/{epochs}: "
+                f"Loss={avg_loss:.4f}, Cosine Sim={avg_cosine:.4f}"
+            )
+
+        training_time = time.time() - start_time
+
+        # Compute weight delta (for FedAvg)
+        final_weights = trainer.model.state_dict()
+        weight_delta = {}
+        for key in final_weights:
+            # Only include context encoder and predictor (not target encoder)
+            if 'target_encoder' not in key:
+                delta = final_weights[key] - initial_weights[key]
+                weight_delta[key] = delta.cpu().numpy().tolist()
+
+        # Compute verification metrics
+        trainer.model.eval()
+        with torch.no_grad():
+            # Sample validation batch
+            val_batch = next(iter(train_loader))
+            val_images = val_batch[0] if isinstance(val_batch, (list, tuple)) else val_batch
+            val_images = val_images.to(device)
+
+            val_metrics = trainer.evaluate(val_images)
+
+        metrics = {
+            "loss": total_loss / max(1, epochs),
+            "cosine_similarity": total_cosine_sim / max(1, epochs),
+            "embedding_energy": val_metrics['embedding_energy'],
+            "l2_distance": val_metrics['l2_distance'],
+            "training_time": training_time,
+            "epochs": epochs,
+            "num_samples": num_samples,
+            "architecture": "jepa",
+            "self_supervised": True,
+        }
+
+        logger.info(
+            f"JEPA training complete: Loss={metrics['loss']:.4f}, "
+            f"Cosine Sim={metrics['cosine_similarity']:.4f}"
+        )
+
+        return weight_delta, metrics
+
+    except Exception as e:
+        logger.error(f"JEPA training failed: {e}")
+        # Fallback to mock result
+        return _mock_jepa_result(task_spec)
+
+
+def _mock_jepa_result(task_spec: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Fallback mock JEPA training result."""
+    task_id = task_spec.get("task_id", 0)
+    return {
+        "task_id": task_id,
+        "model_type": "jepa",
+        "mock": True,
+    }, {
+        "loss": 0.15,
+        "cosine_similarity": 0.75,
+        "embedding_energy": 0.08,
+        "l2_distance": 0.05,
+        "training_time": 0.1,
+        "epochs": 1,
+        "num_samples": 500,
+        "architecture": "jepa",
+        "self_supervised": True,
+        "mock": True,
+    }
+
+
+def verify_jepa_solution(
+    solver_weights: Dict[str, Any],
+    target_encoder_weights: Dict[str, Any],
+    validation_images: torch.Tensor,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Verify a JEPA solution against the target encoder (ground truth).
+
+    In JEPA, verification compares embeddings produced by the solver's model
+    against the target encoder's embeddings. This is the Absolute Zero
+    verification adapted for self-supervised learning.
+
+    Args:
+        solver_weights: Weights from the solver's trained model
+        target_encoder_weights: Ground truth target encoder weights (from proposer)
+        validation_images: Validation images for embedding comparison
+        config: JEPA configuration
+
+    Returns:
+        Dict with verification metrics (embedding distance, cosine similarity, pass/fail)
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    try:
+        from .jepa import JEPA, JEPAConfig
+
+        # Create config matching training function's logic
+        config = config or {}
+        image_size = config.get('image_size', 32)
+
+        # Derive config parameters based on image size (matching train_jepa_on_task)
+        jepa_config = JEPAConfig(
+            image_size=image_size,
+            patch_size=config.get('patch_size', 4 if image_size <= 32 else 16),
+            embed_dim=config.get('embed_dim', 192 if image_size <= 32 else 384),
+            num_heads=config.get('num_heads', 3 if image_size <= 32 else 6),
+            encoder_depth=config.get('encoder_depth', 6 if image_size <= 32 else 12),
+            predictor_depth=config.get('predictor_depth', 3 if image_size <= 32 else 6),
+            predictor_embed_dim=config.get('predictor_embed_dim', 96 if image_size <= 32 else 192),
+        )
+
+        # Solver's model
+        solver_model = JEPA(jepa_config).to(device)
+        solver_state = {}
+        for key, value in solver_weights.items():
+            if isinstance(value, list):
+                solver_state[key] = torch.tensor(value)
+            else:
+                solver_state[key] = value
+        solver_model.load_state_dict(solver_state, strict=False)
+
+        # Target encoder (ground truth)
+        target_model = JEPA(jepa_config).to(device)
+        target_state = {}
+        for key, value in target_encoder_weights.items():
+            if isinstance(value, list):
+                target_state[key] = torch.tensor(value)
+            else:
+                target_state[key] = value
+        target_model.target_encoder.load_state_dict(target_state, strict=False)
+
+        # Compare embeddings on validation data
+        solver_model.eval()
+        target_model.eval()
+
+        with torch.no_grad():
+            validation_images = validation_images.to(device)
+
+            # Get embeddings from both models
+            solver_embeddings = solver_model.encode(validation_images)
+            target_embeddings = target_model.encode(validation_images)
+
+            # Compute similarity metrics
+            cosine_sim = nn.functional.cosine_similarity(
+                solver_embeddings.mean(dim=1),
+                target_embeddings.mean(dim=1),
+                dim=-1
+            ).mean().item()
+
+            l2_distance = nn.functional.mse_loss(
+                solver_embeddings, target_embeddings
+            ).item()
+
+        # Verification thresholds (can be configured per task)
+        min_cosine_sim = 0.5
+        max_l2_distance = 1.0
+
+        is_correct = cosine_sim >= min_cosine_sim and l2_distance <= max_l2_distance
+
+        return {
+            "is_correct": is_correct,
+            "cosine_similarity": cosine_sim,
+            "l2_distance": l2_distance,
+            "score": cosine_sim * 100,  # 0-100 score
+            "verification_type": "jepa_embedding",
+        }
+
+    except Exception as e:
+        logger.error(f"JEPA verification failed: {e}")
+        return {
+            "is_correct": False,
+            "error": str(e),
+            "verification_type": "jepa_embedding",
+        }
 
 
 def aggregate_weight_deltas(
@@ -404,7 +751,7 @@ def apply_weight_delta(
 
 def test_model(
     model_cid: str,
-    ipfs_client,
+    store,
     num_samples: int = 1000,
 ) -> Dict[str, float]:
     """
@@ -412,7 +759,7 @@ def test_model(
 
     Args:
         model_cid: CID of model weights
-        ipfs_client: IPFSClient instance
+        store: BlobStore instance
         num_samples: Number of test samples
 
     Returns:
@@ -422,7 +769,7 @@ def test_model(
 
     # Load model
     model = SimpleNet().to(device)
-    state_dict = load_weights(model_cid, ipfs_client)
+    state_dict = load_weights(model_cid, store)
     if state_dict:
         model.load_state_dict(state_dict)
     else:
@@ -467,12 +814,12 @@ if __name__ == "__main__":
     """Quick test of ML module."""
     logging.basicConfig(level=logging.INFO)
 
-    from ipfs import IPFSClient
+    from blob_store import BlobStore
 
     print("=== Testing ML Module ===")
 
-    # Initialize IPFS client
-    ipfs = IPFSClient()
+    # Initialize blob store
+    store = BlobStore()
 
     # Test model creation
     print("\n1. Creating SimpleNet...")
@@ -485,20 +832,20 @@ if __name__ == "__main__":
     task_spec = {"task_id": 1, "epochs": 1}
     weight_delta, metrics = train_on_task(
         task_spec=task_spec,
-        ipfs_client=ipfs,
+        store=store,
         epochs=1,
         num_samples=100,  # Very small for quick test
     )
     print(f"   Training metrics: {metrics}")
 
     # Test saving/loading
-    print("\n3. Testing IPFS save/load...")
+    print("\n3. Testing blob store save/load...")
     test_model = SimpleNet()
     state_dict = test_model.state_dict()
-    cid = save_weights(state_dict, ipfs)
-    print(f"   Saved to IPFS: {cid}")
+    cid = save_weights(state_dict, store)
+    print(f"   Saved to blob store: {cid}")
 
-    loaded = load_weights(cid, ipfs)
+    loaded = load_weights(cid, store)
     if loaded:
         print(f"   Loaded successfully, {len(loaded)} keys")
 

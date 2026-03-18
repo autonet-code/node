@@ -49,6 +49,15 @@ contract Project is Ownable {
 
     uint256 public nextInferenceRequestId;
 
+    struct InferenceResult {
+        address provider;
+        string outputHash;
+        uint256 timestamp;
+        bool fulfilled;
+    }
+
+    mapping(uint256 => InferenceResult) public inferenceResults;
+
     event ProjectCreated(uint256 indexed projectId, address indexed founder, string name, address projectToken);
     event ProjectFunded(uint256 indexed projectId, address indexed funder, uint256 atnAmount, uint256 ptsIssued);
     event ProjectStatusChanged(uint256 indexed projectId, AutonetLib.ProjectStatus newStatus);
@@ -56,6 +65,7 @@ contract Project is Ownable {
     event MatureModelUpdated(uint256 indexed projectId, string weightsCid);
     event InferencePriceSet(uint256 indexed projectId, uint256 price);
     event InferenceRequested(uint256 indexed projectId, address indexed user, uint256 requestId, string inputCid, uint256 fee);
+    event InferenceResultSubmitted(uint256 indexed projectId, uint256 indexed requestId, address indexed provider, string outputHash);
     event RevenueWithdrawn(uint256 indexed projectId, address indexed shareholder, uint256 amount);
     event DisburserAuthorized(address indexed disburser, bool authorized);
     event ModelSetterAuthorized(address indexed setter, bool authorized);
@@ -266,5 +276,30 @@ contract Project is Ownable {
     function getMatureModel(uint256 _projectId) external view returns (string memory weightsCid, uint256 price) {
         ProjectData storage p = projects[_projectId];
         return (p.matureModelWeightsCid, p.atnPricePerInference);
+    }
+
+    function submitInferenceResult(
+        uint256 _projectId,
+        uint256 _requestId,
+        string memory _outputHash
+    ) external projectExists(_projectId) {
+        require(!inferenceResults[_requestId].fulfilled, "Already fulfilled");
+        inferenceResults[_requestId] = InferenceResult({
+            provider: msg.sender,
+            outputHash: _outputHash,
+            timestamp: block.timestamp,
+            fulfilled: true
+        });
+        emit InferenceResultSubmitted(_projectId, _requestId, msg.sender, _outputHash);
+    }
+
+    function getInferenceResult(uint256 _requestId) external view returns (
+        address provider,
+        string memory outputHash,
+        uint256 timestamp,
+        bool fulfilled
+    ) {
+        InferenceResult storage r = inferenceResults[_requestId];
+        return (r.provider, r.outputHash, r.timestamp, r.fulfilled);
     }
 }

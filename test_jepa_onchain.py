@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from nodes.common.blockchain import BlockchainInterface
 from nodes.common.contracts import ContractRegistry
-from nodes.common.ipfs import IPFSClient
+from nodes.common.blob_store import BlobStore
 from nodes.common.jepa import JEPAConfig, JEPA
 from nodes.common.distributed_jepa import DistributedJEPA, JEPAMerkleTree
 
@@ -58,7 +58,7 @@ def load_addresses():
         return json.load(f)
 
 
-def setup_storage_providers(registry: ContractRegistry, providers: list, ipfs: IPFSClient):
+def setup_storage_providers(registry: ContractRegistry, providers: list, store: BlobStore):
     """Register multiple accounts as storage providers."""
     logger.info(f"Registering {len(providers)} storage providers...")
 
@@ -127,7 +127,7 @@ def run_onchain_test():
         addresses=addresses,
     )
 
-    ipfs = IPFSClient()
+    store = BlobStore()
 
     # =========================================================================
     # Step 1: Create and shard JEPA model
@@ -147,7 +147,7 @@ def run_onchain_test():
     model = JEPA(config)
     logger.info(f"Created JEPA model: {sum(p.numel() for p in model.parameters()):,} params")
 
-    distributor = DistributedJEPA(ipfs=ipfs, registry=deployer_registry)
+    distributor = DistributedJEPA(store=store, registry=deployer_registry)
     manifest = distributor.shard_model(
         model=model,
         config=config,
@@ -158,8 +158,8 @@ def run_onchain_test():
     logger.info(f"Model hash: {manifest.model_hash.hex()[:32]}...")
     logger.info(f"Shards: {manifest.total_shards} ({manifest.data_shards}D + {manifest.parity_shards}P)")
 
-    # Upload shards to IPFS
-    manifest = distributor.upload_shards_to_ipfs(manifest)
+    # Upload shards to blob store
+    manifest = distributor.upload_shards(manifest)
 
     # =========================================================================
     # Step 2: Register model on-chain
@@ -168,7 +168,7 @@ def run_onchain_test():
     logger.info("STEP 2: Register Model On-Chain")
     logger.info("=" * 70)
 
-    # Upload manifest to IPFS
+    # Upload manifest to blob store
     manifest_json = {
         'model_hash': manifest.model_hash.hex(),
         'config': {
@@ -180,14 +180,14 @@ def run_onchain_test():
             {
                 'index': s.shard_index,
                 'hash': s.shard_hash.hex(),
-                'cid': s.ipfs_cid,
+                'cid': s.blob_hash,
                 'size': s.size_bytes,
                 'is_parity': s.is_parity,
             }
             for s in manifest.shards
         ],
     }
-    manifest_cid = ipfs.add_json(manifest_json)
+    manifest_cid = store.add_json(manifest_json)
     logger.info(f"Manifest CID: {manifest_cid[:30]}...")
 
     # Register on ModelShardRegistry
@@ -351,7 +351,7 @@ def run_onchain_test():
 
     checks = [
         ("Model created and sharded", manifest.total_shards == 5),
-        ("Shards uploaded to IPFS", all(s.ipfs_cid for s in manifest.shards)),
+        ("Shards uploaded to blob store", all(s.blob_hash for s in manifest.shards)),
         ("Model registered on-chain", True),  # We logged success/failure above
         ("Model reassembled correctly", matching == total),
         ("Inference produces output", representations.numel() > 0),

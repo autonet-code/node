@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..common.contracts import ContractRegistry
-from ..common.ipfs import IPFSClient
+from ..common.blob_store import BlobStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class CoordinatorNode:
     Autonomous coordinator node that verifies solver solutions.
 
     Interface Requirements (for orchestrator.py):
-    - __init__(registry, ipfs, node_id, project_id)
+    - __init__(registry, store, node_id, project_id)
     - run(max_cycles, cycle_delay)
     - stop()
     - metrics attribute
@@ -59,7 +59,7 @@ class CoordinatorNode:
     def __init__(
         self,
         registry: ContractRegistry,
-        ipfs: IPFSClient,
+        store: BlobStore,
         node_id: str,
         project_id: int,
         task_mode: str = "ground_truth",
@@ -69,13 +69,13 @@ class CoordinatorNode:
 
         Args:
             registry: ContractRegistry for blockchain interactions
-            ipfs: IPFSClient for content storage/retrieval
+            store: BlobStore for content-addressed storage
             node_id: Unique identifier for this node instance
             project_id: Project ID to coordinate for
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
         """
         self.registry = registry
-        self.ipfs = ipfs
+        self.store = store
         self.node_id = node_id
         self.project_id = project_id
         self.task_mode = task_mode
@@ -267,7 +267,7 @@ class CoordinatorNode:
             }
 
             # Upload report to IPFS
-            report_cid = self.ipfs.add_json(report)
+            report_cid = self.store.add_json(report)
             logger.info(f"Verification report uploaded: {report_cid}")
 
             # Submit vote
@@ -356,8 +356,8 @@ class CoordinatorNode:
         """
         try:
             # Download both from IPFS
-            solution_data = self.ipfs.get_json(solution_cid)
-            ground_truth_data = self.ipfs.get_json(ground_truth_cid)
+            solution_data = self.store.get_json(solution_cid)
+            ground_truth_data = self.store.get_json(ground_truth_cid)
 
             # Extract metrics
             solution_metrics = solution_data.get("metrics", {})

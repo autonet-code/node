@@ -13,18 +13,6 @@ services:
     networks:
       - autonet
 
-  # IPFS node
-  ipfs:
-    image: ipfs/kubo:latest
-    ports:
-      - "4001:4001"
-      - "5001:5001"
-      - "8080:8080"
-    volumes:
-      - ipfs_data:/data/ipfs
-    networks:
-      - autonet
-
   # Proposer node
   proposer:
     build:
@@ -33,10 +21,13 @@ services:
     environment:
       - NODE_ROLE=proposer
       - CHAIN_RPC_URL=http://hardhat:8545
-      - IPFS_API_URL=http://ipfs:5001
+      - BLOB_DATA_DIR=/data/blobs
+      - BLOB_HTTP_PORT=9100
+      - PEER_URLS=http://solver:9100,http://coordinator:9100,http://aggregator:9100,http://inference:9100
     depends_on:
       - hardhat
-      - ipfs
+    volumes:
+      - blob_data:/data/blobs
     networks:
       - autonet
 
@@ -48,10 +39,13 @@ services:
     environment:
       - NODE_ROLE=solver
       - CHAIN_RPC_URL=http://hardhat:8545
-      - IPFS_API_URL=http://ipfs:5001
+      - BLOB_DATA_DIR=/data/blobs
+      - BLOB_HTTP_PORT=9100
+      - PEER_URLS=http://proposer:9100,http://coordinator:9100,http://aggregator:9100,http://inference:9100
     depends_on:
       - hardhat
-      - ipfs
+    volumes:
+      - blob_data:/data/blobs
     networks:
       - autonet
 
@@ -63,10 +57,13 @@ services:
     environment:
       - NODE_ROLE=coordinator
       - CHAIN_RPC_URL=http://hardhat:8545
-      - IPFS_API_URL=http://ipfs:5001
+      - BLOB_DATA_DIR=/data/blobs
+      - BLOB_HTTP_PORT=9100
+      - PEER_URLS=http://proposer:9100,http://solver:9100,http://aggregator:9100,http://inference:9100
     depends_on:
       - hardhat
-      - ipfs
+    volumes:
+      - blob_data:/data/blobs
     networks:
       - autonet
 
@@ -78,15 +75,38 @@ services:
     environment:
       - NODE_ROLE=aggregator
       - CHAIN_RPC_URL=http://hardhat:8545
-      - IPFS_API_URL=http://ipfs:5001
+      - BLOB_DATA_DIR=/data/blobs
+      - BLOB_HTTP_PORT=9100
+      - PEER_URLS=http://proposer:9100,http://solver:9100,http://coordinator:9100,http://inference:9100
     depends_on:
       - hardhat
-      - ipfs
+    volumes:
+      - blob_data:/data/blobs
+    networks:
+      - autonet
+
+  # Inference node
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    environment:
+      - NODE_ROLE=inference
+      - CHAIN_RPC_URL=http://hardhat:8545
+      - BLOB_DATA_DIR=/data/blobs
+      - BLOB_HTTP_PORT=9100
+      - PEER_URLS=http://proposer:9100,http://solver:9100,http://coordinator:9100,http://aggregator:9100
+    depends_on:
+      - hardhat
+    volumes:
+      - blob_data:/data/blobs
+    ports:
+      - "9100:9100"
     networks:
       - autonet
 
 volumes:
-  ipfs_data:
+  blob_data:
 
 networks:
   autonet:

@@ -2,7 +2,7 @@
 
 from .blockchain import BlockchainInterface, TransactionResult
 from .contracts import ContractRegistry, ContractHandle
-from .ipfs import IPFSClient
+from .blob_store import BlobStore
 from .crypto import hash_content, hash_string, verify_signature
 from .repops import (
     RepOpsConfig,
@@ -20,7 +20,7 @@ __all__ = [
     "TransactionResult",
     "ContractRegistry",
     "ContractHandle",
-    "IPFSClient",
+    "BlobStore",
     "hash_content",
     "hash_string",
     "verify_signature",

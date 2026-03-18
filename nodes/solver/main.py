@@ -78,7 +78,7 @@ class SolverNode:
     def __init__(
         self,
         registry,
-        ipfs,
+        store,
         node_id: str,
         project_id: int,
         deterministic_seed: Optional[int] = None,
@@ -90,7 +90,7 @@ class SolverNode:
 
         Args:
             registry: ContractRegistry instance
-            ipfs: IPFSClient instance
+            store: BlobStore instance for content-addressed storage
             node_id: Unique identifier for this node (e.g., "solver-0")
             project_id: Project ID to work on
             deterministic_seed: Seed for reproducible training
@@ -98,7 +98,7 @@ class SolverNode:
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
         """
         self.registry = registry
-        self.ipfs = ipfs
+        self.store = store
         self.node_id = node_id
         self.project_id = project_id
         self.deterministic_seed = deterministic_seed or int(time.time())
@@ -258,10 +258,10 @@ class SolverNode:
 
         logger.info(f"[{self.node_id}] Training completed in {training_time:.2f}s with {len(checkpoints)} checkpoints")
 
-        # Upload solution to IPFS
-        solution_cid = self.ipfs.add_json(model_update)
+        # Upload solution to blob store
+        solution_cid = self.store.add_json(model_update)
         if not solution_cid:
-            logger.error(f"[{self.node_id}] Failed to upload solution to IPFS")
+            logger.error(f"[{self.node_id}] Failed to upload solution")
             return
 
         task_info.solution_cid = solution_cid
@@ -334,7 +334,7 @@ class SolverNode:
         logger.info(f"[{self.node_id}] Starting supervised ML training for task {task_id}...")
         weight_delta, metrics = train_on_task(
             task_spec=task_spec,
-            ipfs_client=self.ipfs,
+            store=self.store,
             epochs=1,
             batch_size=32,
             learning_rate=0.01,
@@ -383,7 +383,7 @@ class SolverNode:
         logger.info(f"[{self.node_id}] Starting JEPA self-supervised training for task {task_id}...")
         weight_delta, metrics = train_jepa_on_task(
             task_spec=task_spec,
-            ipfs_client=self.ipfs,
+            store=self.store,
             epochs=2,
             batch_size=32,
             learning_rate=0.001,
@@ -552,16 +552,16 @@ class SolverNode:
         metrics = model_update.get("metrics", {})
         confidence = self._compute_confidence(metrics)
 
-        # Upload full solution to IPFS (weight delta + answer + metrics)
+        # Upload full solution to blob store (weight delta + answer + metrics)
         solution_data = {
             **model_update,
             "answer": answer_data,
             "confidence": confidence,
             "task_mode": "consensus_truth",
         }
-        solution_cid = self.ipfs.add_json(solution_data)
+        solution_cid = self.store.add_json(solution_data)
         if not solution_cid:
-            logger.error(f"[{self.node_id}] Failed to upload rollout solution to IPFS")
+            logger.error(f"[{self.node_id}] Failed to upload rollout solution")
             return
 
         # Compute hashes
@@ -718,7 +718,7 @@ class SolverNode:
 def main():
     """Standalone demo of SolverNode."""
     from ..common.contracts import ContractRegistry
-    from ..common.ipfs import IPFSClient
+    from ..common.blob_store import BlobStore
     from ..common.blockchain import BlockchainInterface
 
     # Use Hardhat account #2
@@ -729,11 +729,11 @@ def main():
     )
 
     registry = ContractRegistry(blockchain=blockchain)
-    ipfs = IPFSClient()
+    store = BlobStore()
 
     node = SolverNode(
         registry=registry,
-        ipfs=ipfs,
+        store=store,
         node_id="solver-demo",
         project_id=1,
         deterministic_seed=42,

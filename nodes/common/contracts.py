@@ -440,13 +440,37 @@ class ContractRegistry:
     # --- Project ---
 
     def get_mature_model(self, project_id: int) -> Optional[str]:
-        """Get the current global model CID for a project."""
+        """Get the current global model hash for a project."""
         try:
             result = self.call("Project", "getMatureModel", project_id)
             # Returns (weightsCid, price) tuple
             if result and len(result) >= 1:
                 cid = result[0] if isinstance(result, (list, tuple)) else result
                 return cid if cid else None
+            return None
+        except Exception:
+            return None
+
+    def submit_inference_result(
+        self, project_id: int, request_id: int, output_hash: str
+    ) -> "TransactionResult":
+        """Submit an inference result on-chain."""
+        return self.send(
+            "Project", "submitInferenceResult",
+            project_id, request_id, output_hash,
+        )
+
+    def get_inference_result(self, request_id: int) -> Optional[dict]:
+        """Get an inference result by request ID."""
+        try:
+            result = self.call("Project", "getInferenceResult", request_id)
+            if result:
+                return {
+                    "provider": result[0],
+                    "outputHash": result[1],
+                    "timestamp": result[2],
+                    "fulfilled": result[3],
+                }
             return None
         except Exception:
             return None

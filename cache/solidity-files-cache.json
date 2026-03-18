@@ -1376,8 +1376,8 @@
       ]
     },
     "C:\\code\\autonet\\contracts\\core\\Project.sol": {
-      "lastModificationDate": 1770347325245,
-      "contentHash": "654fb8b1388e58e15ba62b5dfaecc5d3",
+      "lastModificationDate": 1773789206542,
+      "contentHash": "2f855251a5fe0d87b648308ff41653b5",
       "sourceName": "contracts/core/Project.sol",
       "solcConfig": {
         "version": "0.8.20",

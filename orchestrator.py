@@ -34,7 +34,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from nodes.common.blockchain import BlockchainInterface
 from nodes.common.contracts import ContractRegistry
-from nodes.common.ipfs import IPFSClient
+from nodes.common.blob_store import BlobStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -243,7 +243,7 @@ class NodeRunner:
         role: str,
         account: dict,
         contract_addresses: Dict[str, str],
-        ipfs: IPFSClient,
+        store: BlobStore,
         metrics: NetworkMetrics,
         project_id: int = 1,
         max_cycles: int = 10,
@@ -255,7 +255,7 @@ class NodeRunner:
         self.role = role
         self.account = account
         self.contract_addresses = contract_addresses
-        self.ipfs = ipfs
+        self.store = store
         self.metrics = metrics
         self.project_id = project_id
         self.max_cycles = max_cycles
@@ -304,7 +304,7 @@ class NodeRunner:
             # Create the node
             self.node = self.node_class(
                 registry=registry,
-                ipfs=self.ipfs,
+                store=self.store,
                 node_id=self.node_id,
                 project_id=self.project_id,
                 **self.extra_kwargs,
@@ -488,6 +488,7 @@ def run_orchestrator(
     num_solvers: int = 3,
     num_coordinators: int = 3,
     num_aggregators: int = 1,
+    num_inference: int = 0,
     num_rounds: int = 5,
     cycle_delay: float = 3.0,
     task_mode: str = "ground_truth",
@@ -558,8 +559,11 @@ def run_orchestrator(
         else:
             logger.warning(f"Failed to authorize aggregator: {result.error}")
 
-    # Step 4: Create IPFS client (mock mode for now)
-    ipfs = IPFSClient()
+    # Step 4: Create shared blob store (all threads share one directory)
+    import tempfile
+    blob_dir = tempfile.mkdtemp(prefix="autonet-blobs-")
+    store = BlobStore(data_dir=blob_dir)
+    logger.info(f"Blob store initialized at {blob_dir}")
 
     # Step 5: Spawn nodes
     logger.info("\n--- STEP 4: Spawning nodes ---")
@@ -573,6 +577,7 @@ def run_orchestrator(
     from nodes.solver.main import SolverNode
     from nodes.coordinator.main import CoordinatorNode
     from nodes.aggregator.main import AggregatorNode
+    from nodes.inference.main import InferenceNode
 
     # Proposers - need to run long enough to see SolutionCommitted events and reveal ground truth
     for i in range(num_proposers):
@@ -582,7 +587,7 @@ def run_orchestrator(
             role="proposer",
             account=node_accounts[account_idx],
             contract_addresses=addresses,
-            ipfs=ipfs,
+            store=store,
             metrics=metrics,
             project_id=1,
             max_cycles=num_rounds * 10,  # Run long enough to catch solution commits
@@ -600,7 +605,7 @@ def run_orchestrator(
             role="solver",
             account=node_accounts[account_idx],
             contract_addresses=addresses,
-            ipfs=ipfs,
+            store=store,
             metrics=metrics,
             project_id=1,
             max_cycles=num_rounds * 10,  # Run long enough to complete reveal flow
@@ -618,7 +623,7 @@ def run_orchestrator(
             role="coordinator",
             account=node_accounts[account_idx],
             contract_addresses=addresses,
-            ipfs=ipfs,
+            store=store,
             metrics=metrics,
             project_id=1,
             max_cycles=num_rounds * 20,  # Run much longer to catch solution reveals
@@ -636,12 +641,29 @@ def run_orchestrator(
             role="aggregator",
             account=node_accounts[account_idx],
             contract_addresses=addresses,
-            ipfs=ipfs,
+            store=store,
             metrics=metrics,
             project_id=1,
             max_cycles=num_rounds * 10,
             cycle_delay=cycle_delay * 1.5,  # Aggregator polls frequently to catch rewards
             extra_kwargs={"task_mode": task_mode},
+        )
+        runners.append(runner)
+        account_idx += 1
+
+    # Inference nodes - run long to catch model publications and serve requests
+    for i in range(num_inference):
+        runner = NodeRunner(
+            node_class=InferenceNode,
+            node_id=f"inference-{i}",
+            role="inference",
+            account=node_accounts[account_idx],
+            contract_addresses=addresses,
+            store=store,
+            metrics=metrics,
+            project_id=1,
+            max_cycles=num_rounds * 15,
+            cycle_delay=cycle_delay,
         )
         runners.append(runner)
         account_idx += 1
@@ -727,6 +749,7 @@ if __name__ == "__main__":
     parser.add_argument("--solvers", type=int, default=3, help="Number of solver nodes")
     parser.add_argument("--coordinators", type=int, default=3, help="Number of coordinator nodes")
     parser.add_argument("--aggregators", type=int, default=1, help="Number of aggregator nodes")
+    parser.add_argument("--inference", type=int, default=0, help="Number of inference nodes")
     parser.add_argument("--rounds", type=int, default=5, help="Number of training rounds")
     parser.add_argument("--delay", type=float, default=3.0, help="Cycle delay in seconds")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
@@ -747,6 +770,7 @@ if __name__ == "__main__":
         num_solvers=args.solvers,
         num_coordinators=args.coordinators,
         num_aggregators=args.aggregators,
+        num_inference=args.inference,
         num_rounds=args.rounds,
         cycle_delay=args.delay,
         task_mode=args.task_mode,

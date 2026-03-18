@@ -11,7 +11,7 @@ from typing import Optional
 from web3 import Web3
 
 from ..common.contracts import ContractRegistry
-from ..common.ipfs import IPFSClient
+from ..common.blob_store import BlobStore
 
 
 @dataclass
@@ -39,7 +39,7 @@ class ProposerNode:
     def __init__(
         self,
         registry: ContractRegistry,
-        ipfs: IPFSClient,
+        store: BlobStore,
         node_id: str,
         project_id: int,
         task_mode: str = "ground_truth",
@@ -49,13 +49,13 @@ class ProposerNode:
 
         Args:
             registry: ContractRegistry instance for blockchain interactions
-            ipfs: IPFSClient instance for IPFS operations
+            store: BlobStore instance for content-addressed storage
             node_id: Unique identifier for this node (e.g., "proposer-0")
             project_id: Project ID to propose tasks for
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
         """
         self.registry = registry
-        self.ipfs = ipfs
+        self.store = store
         self.node_id = node_id
         self.project_id = project_id
         self.task_mode = task_mode
@@ -172,14 +172,14 @@ class ProposerNode:
             task_spec = self._generate_task_spec()
             ground_truth = self._generate_ground_truth()
 
-            # Upload to IPFS
-            self.logger.info("Uploading task spec to IPFS...")
-            spec_cid = self.ipfs.add_json(task_spec)
-            self.logger.info(f"Task spec CID: {spec_cid}")
+            # Upload to blob store
+            self.logger.info("Uploading task spec...")
+            spec_cid = self.store.add_json(task_spec)
+            self.logger.info(f"Task spec hash: {spec_cid}")
 
-            self.logger.info("Uploading ground truth to IPFS...")
-            ground_truth_cid = self.ipfs.add_json(ground_truth)
-            self.logger.info(f"Ground truth CID: {ground_truth_cid}")
+            self.logger.info("Uploading ground truth...")
+            ground_truth_cid = self.store.add_json(ground_truth)
+            self.logger.info(f"Ground truth hash: {ground_truth_cid}")
 
             # Hash both CIDs to bytes32 (contracts expect bytes32)
             spec_hash = Web3.keccak(text=spec_cid)
@@ -283,10 +283,10 @@ class ProposerNode:
         try:
             task_spec = self._generate_consensus_task_spec()
 
-            # Upload task spec to IPFS
-            self.logger.info("Uploading consensus task spec to IPFS...")
-            spec_cid = self.ipfs.add_json(task_spec)
-            self.logger.info(f"Consensus task spec CID: {spec_cid}")
+            # Upload task spec to blob store
+            self.logger.info("Uploading consensus task spec...")
+            spec_cid = self.store.add_json(task_spec)
+            self.logger.info(f"Consensus task spec hash: {spec_cid}")
 
             # Hash the spec CID
             spec_hash = Web3.keccak(text=spec_cid)

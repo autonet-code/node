@@ -19,7 +19,7 @@ from nodes.common.ml import (
     load_weights,
     test_model,
 )
-from nodes.common.ipfs import IPFSClient
+from nodes.common.blob_store import BlobStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,13 +31,13 @@ def main():
     print("=" * 60)
 
     # Initialize
-    ipfs = IPFSClient()
+    store = BlobStore()
 
     # Step 1: Create initial model
     print("\n[1/5] Creating initial model...")
     model = SimpleNet()
     initial_weights = model.state_dict()
-    initial_cid = save_weights(initial_weights, ipfs)
+    initial_cid = save_weights(initial_weights, store)
     print(f"    Initial model CID: {initial_cid}")
 
     # Step 2: Simulate multiple solvers training
@@ -52,7 +52,7 @@ def main():
         weight_delta, metrics = train_on_task(
             task_spec=task_spec,
             global_model_cid=initial_cid,
-            ipfs_client=ipfs,
+            store=store,
             epochs=1,
             num_samples=200,  # Small subset for fast training
             batch_size=32,
@@ -92,13 +92,13 @@ def main():
     # Step 4: Apply aggregated delta to initial model
     print("\n[4/5] Applying aggregated delta to initial model...")
     updated_weights = apply_weight_delta(initial_weights, aggregated_delta)
-    updated_cid = save_weights(updated_weights, ipfs)
+    updated_cid = save_weights(updated_weights, store)
     print(f"    Updated model CID: {updated_cid}")
 
     # Step 5: Test updated model
     print("\n[5/5] Testing updated model on test set...")
     try:
-        test_metrics = test_model(updated_cid, ipfs, num_samples=500)
+        test_metrics = test_model(updated_cid, store, num_samples=500)
         print(f"    Test loss: {test_metrics['test_loss']:.4f}")
         print(f"    Test accuracy: {test_metrics['test_accuracy']:.4f}")
         print(f"    Test samples: {test_metrics['num_samples']}")
@@ -113,7 +113,7 @@ def main():
     print(f"  - {num_solvers} solvers trained on {total_samples} total MNIST samples")
     print(f"  - Average training accuracy: {avg_accuracy:.2%}")
     print(f"  - Weight deltas aggregated using FedAvg")
-    print(f"  - Global model updated and stored in IPFS")
+    print(f"  - Global model updated and stored in blob store")
     print(f"\nNOTE: Low accuracy is expected with:")
     print(f"  - Very small training sets (200 samples per solver)")
     print(f"  - Single epoch training")

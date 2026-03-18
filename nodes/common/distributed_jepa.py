@@ -17,7 +17,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from pathlib import Path
 
 from .jepa import JEPAConfig, JEPA
-from .ipfs import IPFSClient
+from .blob_store import BlobStore
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class JEPAShardInfo:
     shard_hash: bytes  # 32 bytes
     size_bytes: int
     is_parity: bool = False
-    ipfs_cid: Optional[str] = None
+    blob_hash: Optional[str] = None
 
 
 @dataclass
@@ -123,10 +123,10 @@ class DistributedJEPA:
 
     def __init__(
         self,
-        ipfs: IPFSClient,
+        store: BlobStore,
         registry=None,  # ContractRegistry
     ):
-        self.ipfs = ipfs
+        self.store = store
         self.registry = registry
 
     def shard_model(
@@ -278,7 +278,7 @@ class DistributedJEPA:
 
         return parity_shards
 
-    def upload_shards_to_ipfs(
+    def upload_shards(
         self,
         manifest: JEPAShardManifest
     ) -> JEPAShardManifest:
@@ -301,14 +301,14 @@ class DistributedJEPA:
                 }
 
             # Upload to IPFS
-            cid = self.ipfs.add_json({
+            cid = self.store.add_json({
                 'shard_index': shard_info.shard_index,
                 'is_parity': shard_info.is_parity,
                 'layer_names': shard_info.layer_names,
                 'tensors': serialized,
             })
 
-            shard_info.ipfs_cid = cid
+            shard_info.blob_hash = cid
             logger.debug(f"Uploaded shard {i} to IPFS: {cid[:20]}...")
 
         logger.info(f"Uploaded {len(manifest.shards)} shards to IPFS")
@@ -343,14 +343,14 @@ class DistributedJEPA:
                     {
                         'index': s.shard_index,
                         'hash': s.shard_hash.hex(),
-                        'cid': s.ipfs_cid,
+                        'cid': s.blob_hash,
                         'size': s.size_bytes,
                         'is_parity': s.is_parity,
                     }
                     for s in manifest.shards
                 ],
             }
-            manifest_cid = self.ipfs.add_json(manifest_json)
+            manifest_cid = self.store.add_json(manifest_json)
 
             # Call ModelShardRegistry.registerModel
             # StorageTier.IPFS_PINNED = 1
@@ -429,12 +429,12 @@ class DistributedJEPA:
             if shard_info.is_parity:
                 continue  # Skip parity for now
 
-            if not shard_info.ipfs_cid:
+            if not shard_info.blob_hash:
                 logger.warning(f"Shard {shard_info.shard_index} has no CID")
                 continue
 
             try:
-                shard_data = self.ipfs.get_json(shard_info.ipfs_cid)
+                shard_data = self.store.get_json(shard_info.blob_hash)
                 tensors = shard_data.get('tensors', {})
 
                 for name, tensor_info in tensors.items():
@@ -491,7 +491,7 @@ class DistributedJEPA:
 
 def create_distributed_jepa_model(
     config: JEPAConfig,
-    ipfs: IPFSClient,
+    store: BlobStore,
     registry=None,
     num_shards: int = 4,
 ) -> Tuple[JEPA, JEPAShardManifest]:
@@ -499,7 +499,7 @@ def create_distributed_jepa_model(
     Convenience function to create and shard a JEPA model.
     """
     model = JEPA(config)
-    distributor = DistributedJEPA(ipfs, registry)
+    distributor = DistributedJEPA(store, registry)
 
     manifest = distributor.shard_model(
         model=model,
@@ -508,6 +508,6 @@ def create_distributed_jepa_model(
         num_parity_shards=1,
     )
 
-    manifest = distributor.upload_shards_to_ipfs(manifest)
+    manifest = distributor.upload_shards(manifest)
 
     return model, manifest

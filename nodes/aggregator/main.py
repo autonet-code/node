@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
 from ..common.contracts import ContractRegistry
-from ..common.ipfs import IPFSClient
+from ..common.blob_store import BlobStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class AggregatorNode:
     def __init__(
         self,
         registry: ContractRegistry,
-        ipfs: IPFSClient,
+        store: BlobStore,
         node_id: str,
         project_id: int = 1,
         aggregation_method: str = "fedavg",
@@ -69,7 +69,7 @@ class AggregatorNode:
 
         Args:
             registry: ContractRegistry for blockchain calls
-            ipfs: IPFSClient for IPFS operations
+            store: BlobStore for content-addressed storage
             node_id: Unique identifier for this node (e.g., "aggregator-0")
             project_id: Project ID to aggregate updates for
             aggregation_method: Aggregation method to use ("fedavg" or "trimmed_mean")
@@ -77,7 +77,7 @@ class AggregatorNode:
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
         """
         self.registry = registry
-        self.ipfs = ipfs
+        self.store = store
         self.node_id = node_id
         self.project_id = project_id
         self.aggregation_method = aggregation_method
@@ -267,7 +267,7 @@ class AggregatorNode:
         updates = []
         for cid in self.project_state.collected_updates:
             try:
-                update_data = self.ipfs.get_json(cid)
+                update_data = self.store.get_json(cid)
                 if update_data:
                     updates.append(update_data)
                     logger.debug(f"[{self.node_id}] Downloaded update {cid[:20]}...")
@@ -302,7 +302,7 @@ class AggregatorNode:
 
         # Upload to IPFS
         try:
-            new_model_cid = self.ipfs.add_json(aggregated_model)
+            new_model_cid = self.store.add_json(aggregated_model)
             if not new_model_cid:
                 logger.error(f"[{self.node_id}] Failed to upload aggregated model to IPFS")
                 self.metrics.errors += 1
@@ -721,12 +721,12 @@ def main():
     # Create blockchain and registry (assuming local Hardhat node)
     blockchain = BlockchainInterface()
     registry = ContractRegistry(blockchain)
-    ipfs = IPFSClient()
+    store = BlobStore()
 
     # Create aggregator node
     node = AggregatorNode(
         registry=registry,
-        ipfs=ipfs,
+        store=store,
         node_id="aggregator-demo",
         project_id=1,
     )
