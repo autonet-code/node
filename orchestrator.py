@@ -36,6 +36,7 @@ from nodes.common.blockchain import BlockchainInterface
 from nodes.common.contracts import ContractRegistry
 from nodes.common.blob_store import BlobStore
 from nodes.common.config import AutonetConfig, load_config
+from nodes.common.governance import GovernanceBridge, compute_service_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -489,6 +490,78 @@ def validate_coordination(metrics: NetworkMetrics) -> bool:
 # Main Orchestrator
 # =============================================================================
 
+# =============================================================================
+# Governance Helpers (epoch management, service registration)
+# =============================================================================
+
+
+def _setup_governance(registry: ContractRegistry, project_id: int, config: AutonetConfig):
+    """
+    Register the training service and start the first epoch.
+
+    Only runs if the AutonetEconomy contract is deployed. Otherwise
+    skips gracefully (simulation mode without economic layer).
+    """
+    if not registry.get("AutonetEconomy"):
+        logger.info("AutonetEconomy not deployed, skipping governance setup")
+        return
+
+    service_id = compute_service_id(project_id)
+
+    # Register service
+    project_contract = registry.get("Project")
+    if project_contract:
+        try:
+            import subprocess
+            codebase_hash = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(PROJECT_ROOT),
+                timeout=5,
+            ).decode().strip()
+        except Exception:
+            codebase_hash = "simulation"
+
+        result = registry.register_service(
+            service_id, project_contract.address, codebase_hash
+        )
+        if result.success:
+            logger.info(f"Registered training service: {service_id[:8].hex()}...")
+
+        # Activate service
+        result = registry.activate_service(service_id)
+        if result.success:
+            logger.info(f"Activated training service")
+
+    # Start first epoch with a budget
+    epoch_budget = 10_000 * 10**18  # 10k ATN
+    result = registry.start_epoch(epoch_budget)
+    if result.success:
+        epoch = registry.get_current_epoch()
+        logger.info(f"Started epoch {epoch} with budget {epoch_budget // 10**18} ATN")
+
+
+def _finalize_governance(registry: ContractRegistry):
+    """Finalize the current epoch after all nodes stop."""
+    if not registry.get("AutonetEconomy"):
+        return
+
+    try:
+        epoch = registry.get_current_epoch()
+        result = registry.finalize_epoch()
+        if result.success:
+            stats = registry.get_epoch_stats(epoch)
+            if stats:
+                logger.info(
+                    f"Epoch {epoch} finalized: "
+                    f"totalUsage={stats['totalUsage']}, "
+                    f"budget={stats['budget'] // 10**18} ATN"
+                )
+            else:
+                logger.info(f"Epoch {epoch} finalized")
+    except Exception as e:
+        logger.warning(f"Epoch finalization skipped: {e}")
+
+
 def run_orchestrator(
     num_proposers: int = 2,
     num_solvers: int = 3,
@@ -683,6 +756,9 @@ def run_orchestrator(
         runners.append(runner)
         account_idx += 1
 
+    # Step 5b: Register training service and start epoch (if economy available)
+    _setup_governance(deployer_registry, project_id=1, config=config)
+
     # Start all nodes
     logger.info(f"Starting {len(runners)} nodes...")
     for runner in runners:
@@ -712,6 +788,9 @@ def run_orchestrator(
     for runner in runners:
         if runner.thread:
             runner.thread.join(timeout=10)
+
+    # Step 6b: Finalize epoch after nodes finish (if economy available)
+    _finalize_governance(deployer_registry)
 
     # Step 7: Collect and display metrics
     logger.info("\n--- STEP 6: Results ---")

@@ -50,7 +50,6 @@ AUTONET_BLUEPRINT = {
     "consensus_contract_address": "0x0000000000000000000000000000000000000000",
     "heartbeat_interval_seconds": 60,
     "dispute_resolution_protocol": "STAKE_WEIGHTED_VOTE",
-    "ipfs_gateway": "https://ipfs.io/ipfs/",
     "chain_rpc_url": "http://localhost:8545",
     "staking_contract_address": "0x0000000000000000000000000000000000000000",
     "task_contract_address": "0x0000000000000000000000000000000000000000",
@@ -62,3 +61,31 @@ DEFAULT_CONSTITUTION = Constitution(
     principles=AUTONET_PRINCIPLES,
     operational_blueprint=AUTONET_BLUEPRINT
 )
+
+
+def constitution_from_registry(registry) -> Constitution:
+    """
+    Build a Constitution with real contract addresses from a ContractRegistry.
+
+    Fills the operational blueprint with deployed addresses so that the
+    heartbeat, staking, and governance checks reference real on-chain state.
+    """
+    blueprint = dict(AUTONET_BLUEPRINT)
+
+    for name, key in [
+        ("ParticipantStaking", "staking_contract_address"),
+        ("TaskContract", "task_contract_address"),
+        ("ResultsRewards", "results_contract_address"),
+        ("Project", "project_contract_address"),
+        ("AutonetDAO", "consensus_contract_address"),
+    ]:
+        handle = registry.get(name)
+        if handle:
+            blueprint[key] = handle.address
+
+    blueprint["chain_rpc_url"] = registry.blockchain.rpc_url
+
+    return Constitution(
+        principles=AUTONET_PRINCIPLES,
+        operational_blueprint=blueprint,
+    )

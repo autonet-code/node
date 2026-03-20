@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from ..common.config import AutonetConfig, load_config
+from ..common.governance import GovernanceBridge
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -117,6 +118,9 @@ class SolverNode:
         self.staked = False
         self.running = False
 
+        # Governance bridge for attestation and heartbeat
+        self.governance: Optional[GovernanceBridge] = None  # Set in run() after registry is available
+
         logger.info(f"[{self.node_id}] Initialized solver node for project {project_id} (task_type={self.task_type})")
 
     def run(self, max_cycles: int = 10, cycle_delay: float = 2.0):
@@ -128,6 +132,9 @@ class SolverNode:
             cycle_delay: Delay between cycles in seconds
         """
         self.running = True
+        # Initialize governance bridge now that registry is available
+        if self.governance is None:
+            self.governance = GovernanceBridge(self.registry, self.node_id, self.project_id)
         logger.info(f"[{self.node_id}] Starting main loop: max_cycles={max_cycles}, delay={cycle_delay}s")
 
         for cycle in range(max_cycles):
@@ -136,6 +143,13 @@ class SolverNode:
 
             try:
                 logger.info(f"[{self.node_id}] === Cycle {cycle + 1}/{max_cycles} ===")
+
+                # Check governance heartbeat — halt work if missed
+                if not self.governance.check_heartbeat():
+                    logger.warning(f"[{self.node_id}] Governance heartbeat missed, halting work")
+                    import time as _t
+                    _t.sleep(cycle_delay)
+                    continue
 
                 # First cycle: stake as solver
                 if cycle == 0 and not self.staked:
@@ -298,6 +312,10 @@ class SolverNode:
             task_info.state = TaskState.COMMITTED
             self.metrics.solutions_committed += 1
             self.metrics.tasks_completed += 1
+
+            # Attest training work to the economic layer
+            if self.governance:
+                self.governance.attest_task_completion(units=1)
 
             # Submit a few checkpoints
             self._submit_checkpoints(task_id, checkpoints)

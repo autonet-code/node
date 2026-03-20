@@ -39,6 +39,9 @@ CONTRACT_ARTIFACTS = {
     "AnchorBridge": "rollup/AnchorBridge.sol/AnchorBridge.json",
     "DisputeManager": "rollup/DisputeManager.sol/DisputeManager.json",
     "AutonetDAO": "governance/AutonetDAO.sol/AutonetDAO.json",
+    # Economic layer — Autonet.sol from trustless-contracts, deployed separately
+    # When deployed, its address goes into deployment-addresses.json as "AutonetEconomy"
+    "AutonetEconomy": "governance/AutonetEconomy.sol/Autonet.json",
 }
 
 
@@ -346,6 +349,117 @@ class ContractRegistry:
     def approve_atn(self, spender: str, amount: int) -> TransactionResult:
         """Approve ATN spending."""
         return self.send("ATNToken", "approve", spender, amount)
+
+    # =========================================================================
+    # Governance & Economic Layer (Autonet.sol on Jurisdiction chain)
+    # =========================================================================
+
+    # --- Service Registration ---
+
+    def register_service(
+        self, service_id: bytes, project_contract: str, codebase_hash: str
+    ) -> TransactionResult:
+        """Register a general service with the Autonet economic layer."""
+        return self.send(
+            "AutonetEconomy", "registerService",
+            service_id, project_contract, codebase_hash,
+        )
+
+    def activate_service(self, service_id: bytes) -> TransactionResult:
+        """Activate a registered service (admin only)."""
+        return self.send("AutonetEconomy", "activateService", service_id)
+
+    def get_service(self, service_id: bytes) -> Optional[Dict]:
+        """Get service info by ID."""
+        try:
+            result = self.call("AutonetEconomy", "getService", service_id)
+            if result:
+                return {
+                    "projectContract": result[0],
+                    "serviceEndpoint": result[1],
+                    "codebaseHash": result[2],
+                    "serviceType": result[3],
+                    "isActive": result[4],
+                    "totalUsageUnits": result[5],
+                    "totalRewards": result[6],
+                }
+            return None
+        except Exception:
+            return None
+
+    # --- Usage Attestation ---
+
+    def attest_usage(self, service_id: bytes, units: int) -> TransactionResult:
+        """Attest usage for a service in the current epoch."""
+        return self.send("AutonetEconomy", "attestUsage", service_id, units)
+
+    # --- Epoch Management ---
+
+    def start_epoch(self, budget: int) -> TransactionResult:
+        """Start a new epoch with the given ATN budget (admin only)."""
+        return self.send("AutonetEconomy", "startEpoch", budget, gas_limit=800000)
+
+    def finalize_epoch(self) -> TransactionResult:
+        """Finalize the current epoch and distribute rewards (admin only)."""
+        return self.send("AutonetEconomy", "finalizeCurrentEpoch", gas_limit=1500000)
+
+    def get_current_epoch(self) -> int:
+        """Get the current epoch number."""
+        try:
+            return self.call("AutonetEconomy", "currentEpoch")
+        except Exception:
+            return 0
+
+    def get_epoch_stats(self, epoch_id: int) -> Optional[Dict]:
+        """Get stats for an epoch."""
+        try:
+            result = self.call("AutonetEconomy", "getEpochStats", epoch_id)
+            if result:
+                return {
+                    "totalUsage": result[0],
+                    "budget": result[1],
+                    "finalized": result[2],
+                    "finalizedAt": result[3],
+                }
+            return None
+        except Exception:
+            return None
+
+    # --- DAO Governance (AutonetDAO) ---
+
+    def propose_governance(
+        self, description: str, calldata_hash: bytes
+    ) -> TransactionResult:
+        """Submit a governance proposal."""
+        return self.send("AutonetDAO", "propose", description, calldata_hash)
+
+    def cast_governance_vote(
+        self, proposal_id: int, support: bool
+    ) -> TransactionResult:
+        """Cast a vote on a governance proposal."""
+        return self.send("AutonetDAO", "castVote", proposal_id, support)
+
+    def execute_proposal(
+        self, proposal_id: int, target: str, data: bytes
+    ) -> TransactionResult:
+        """Execute a passed governance proposal."""
+        return self.send(
+            "AutonetDAO", "execute", proposal_id, target, data,
+            gas_limit=1000000,
+        )
+
+    def get_proposal_state(self, proposal_id: int) -> Optional[int]:
+        """Get the state of a governance proposal (enum index)."""
+        try:
+            return self.call("AutonetDAO", "getProposalState", proposal_id)
+        except Exception:
+            return None
+
+    # --- Heartbeat ---
+
+    def emit_heartbeat(self) -> TransactionResult:
+        """Emit a governance heartbeat (admin/DAO only)."""
+        return self.send("AutonetDAO", "emitHeartbeat")
 
     def get_atn_balance(self, address: str) -> int:
         """Get ATN balance."""

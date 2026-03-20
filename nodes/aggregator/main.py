@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Any
 from ..common.contracts import ContractRegistry
 from ..common.blob_store import BlobStore
 from ..common.config import AutonetConfig, load_config
+from ..common.governance import GovernanceBridge
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -95,6 +96,10 @@ class AggregatorNode:
         self.should_stop = False
 
         self.my_address = self.registry.blockchain.account.address
+
+        # Governance bridge for attestation and heartbeat
+        self.governance = GovernanceBridge(registry, node_id, project_id)
+
         logger.info(f"[{self.node_id}] Initialized with address {self.my_address[:10]}...")
         logger.info(f"[{self.node_id}] Aggregation method: {self.aggregation_method}")
 
@@ -138,6 +143,11 @@ class AggregatorNode:
         # Step 1: Stake on first cycle
         if not self.is_staked:
             self._stake()
+            return
+
+        # Check governance heartbeat — halt work if missed
+        if not self.governance.check_heartbeat():
+            logger.warning(f"[{self.node_id}] Governance heartbeat missed, halting work")
             return
 
         # Step 2: Poll for new RewardsDistributed events
@@ -343,6 +353,9 @@ class AggregatorNode:
             self.project_state.aggregation_rounds += 1
             self.project_state.last_model_cid = new_model_cid
             self.project_state.collected_updates.clear()
+
+            # Attest model aggregation work to the economic layer
+            self.governance.attest_task_completion(units=len(updates))
         else:
             logger.error(f"[{self.node_id}] Failed to publish model: {result.error}")
             self.metrics.errors += 1

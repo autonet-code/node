@@ -17,6 +17,7 @@ from typing import Optional
 
 from ..common.contracts import ContractRegistry
 from ..common.blob_store import BlobStore
+from ..common.governance import GovernanceBridge
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -93,6 +94,9 @@ class CoordinatorNode:
         # Cache ground truths: task_id -> groundTruthCid
         self._ground_truth_cache: dict[int, str] = {}
 
+        # Governance bridge for attestation and heartbeat
+        self.governance = GovernanceBridge(registry, node_id, project_id)
+
         logger.info(
             f"CoordinatorNode initialized: {node_id} for project {project_id}"
         )
@@ -142,6 +146,11 @@ class CoordinatorNode:
         # First cycle: stake if not already staked
         if not self._staked:
             self._stake()
+            return
+
+        # Check governance heartbeat — halt work if missed
+        if not self.governance.check_heartbeat():
+            logger.warning(f"[{self.node_id}] Governance heartbeat missed, halting work")
             return
 
         if self.task_mode == "consensus_truth":
@@ -534,6 +543,9 @@ class CoordinatorNode:
                     logger.info(f"Voting finalized for task {task_id}: {result.tx_hash}")
                     self.metrics.voting_finalized += 1
                     self.metrics.tasks_completed += 1
+
+                    # Attest verification work to the economic layer
+                    self.governance.attest_task_completion(units=1)
                 else:
                     # If it failed, it might be because another coordinator finalized first
                     if "Already finalized" in str(result.error):
@@ -613,6 +625,9 @@ class CoordinatorNode:
                 self.metrics.voting_finalized += 1
                 self.metrics.tasks_completed += 1
                 self._update_bond_strength(success=True)
+
+                # Attest consensus verification work
+                self.governance.attest_task_completion(units=1)
             else:
                 if "Already processed" in str(result.error):
                     logger.info(f"Task {task_id} already finalized by another coordinator")
