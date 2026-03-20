@@ -135,7 +135,7 @@ Autonet enables AI model training and inference without centralized infrastructu
 │         │                                                                │
 │   ┌─────┼─────┬─────┬─────┬─────┐                                       │
 │   ▼     ▼     ▼     ▼     ▼     ▼                                       │
-│ [S0]  [S1]  [S2]  [S3]  [P0]   ← Each uploaded to IPFS                 │
+│ [S0]  [S1]  [S2]  [S3]  [P0]   ← Each uploaded to blob store            │
 │   │     │     │     │     │                                             │
 │   ▼     ▼     ▼     ▼     ▼                                             │
 │ ┌───────────────────────────────┐                                       │
@@ -364,7 +364,7 @@ CORE_PRINCIPLES = [
 - Multi-coordinator Yuma voting consensus
 - FedAvg aggregator with real PyTorch weight aggregation
 - Multi-node training cycles with orchestrator
-- Mock IPFS integration for model storage
+- Node-native blob store for model storage
 - Global model publishing via `setMatureModel`
 - Forced error registry for coordinator vigilance testing
 - Complete Absolute Zero loop operational

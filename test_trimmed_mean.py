@@ -1,7 +1,7 @@
 """
 Test script for Trimmed Mean aggregation in Aggregator node.
 
-This script tests the trimmed mean functionality without requiring blockchain/IPFS.
+This script tests the trimmed mean functionality without requiring blockchain.
 """
 
 import logging

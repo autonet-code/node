@@ -17,9 +17,8 @@ chain_rpc_url = "http://localhost:8545"
 # Chain ID
 chain_id = 1337
 
-# IPFS endpoints
-ipfs_api_url = "http://127.0.0.1:5001"
-ipfs_gateway_url = "https://ipfs.io/ipfs/"
+# Blob store
+blob_store_dir = "./data/blobs"
 
 [contracts]
 # Contract addresses (populated after deployment)

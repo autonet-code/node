@@ -27,8 +27,8 @@ class ShardingStrategy(Enum):
 
 
 class StorageTier(Enum):
-    IPFS_PUBLIC = 0
-    IPFS_PINNED = 1
+    NODE_PUBLIC = 0
+    NODE_PINNED = 1
     FILECOIN = 2
     ARWEAVE = 3
 

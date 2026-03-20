@@ -49,27 +49,28 @@ def print_banner():
     print(banner)
 
 
-def create_mock_ipfs():
-    """Create a mock IPFS storage."""
+def create_demo_store():
+    """Create an in-memory blob store for the demo."""
     storage = {}
 
-    class MockIPFS:
+    class DemoStore:
         def add_json(self, data):
-            cid = "Qm" + hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:44]
+            content = json.dumps(data, sort_keys=True).encode()
+            cid = hashlib.sha256(content).hexdigest()
             storage[cid] = data
             return cid
 
         def get_json(self, cid):
             return storage.get(cid)
 
-    return MockIPFS()
+    return DemoStore()
 
 
 def run_demo():
     """Run the complete demo with new features."""
     print_banner()
 
-    ipfs = create_mock_ipfs()
+    store = create_demo_store()
     project_id = 1
 
     # =========================================================================
@@ -108,9 +109,9 @@ def run_demo():
         "metrics": {"accuracy": 0.88},  # For verification
     }
 
-    # Upload to IPFS
-    task_spec_cid = ipfs.add_json(task_spec)
-    ground_truth_cid = ipfs.add_json(ground_truth)
+    # Upload to blob store
+    task_spec_cid = store.add_json(task_spec)
+    ground_truth_cid = store.add_json(ground_truth)
 
     logger.info(f"Task spec uploaded: {task_spec_cid[:20]}...")
     logger.info(f"Ground truth uploaded: {ground_truth_cid[:20]}...")
@@ -136,7 +137,7 @@ def run_demo():
     time.sleep(0.5)
 
     logger.info("Downloading task specification...")
-    downloaded_spec = ipfs.get_json(task_spec_cid)
+    downloaded_spec = store.get_json(task_spec_cid)
     logger.info(f"Task: {downloaded_spec['description']}")
 
     # Generate deterministic seed (RepOps style)
@@ -186,7 +187,7 @@ def run_demo():
         "repops_version": "1.0.0",
     }
 
-    solution_cid = ipfs.add_json(training_result)
+    solution_cid = store.add_json(training_result)
     logger.info(f"Training complete! Solution uploaded: {solution_cid[:20]}...")
     logger.info(f"Generated {len(checkpoints)} checkpoints for verification")
 
@@ -215,8 +216,8 @@ def run_demo():
         {"id": "Coord-3", "stake": 600, "bond_strength": 0.78},
     ]
 
-    gt = ipfs.get_json(ground_truth_cid)
-    sol = ipfs.get_json(solution_cid)
+    gt = store.get_json(ground_truth_cid)
+    sol = store.get_json(solution_cid)
 
     print("\n  Coordinators voting on solution:")
     votes = []
@@ -380,7 +381,7 @@ def run_demo():
         },
     }
 
-    new_model_cid = ipfs.add_json(aggregated_model)
+    new_model_cid = store.add_json(aggregated_model)
     logger.info(f"Aggregation complete! New model: {new_model_cid[:20]}...")
 
     print("\nAggregation Results:")

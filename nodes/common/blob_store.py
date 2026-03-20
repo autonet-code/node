@@ -1,12 +1,11 @@
 """
 Node-Native Blob Store for Autonet
 
-Content-addressed storage backed by local disk. Replaces IPFS dependency
-with zero external infrastructure. Nodes store blobs locally and serve
-them to peers over HTTP. Content integrity is guaranteed by hash verification.
+Content-addressed storage backed by local disk. Zero external infrastructure.
+Nodes store blobs locally and serve them to peers over HTTP.
+Content integrity is guaranteed by hash verification.
 
-Drop-in replacement for IPFSClient — same interface (add_json, get_json,
-add_bytes, get_bytes).
+Interface: add_json, get_json, add_bytes, get_bytes.
 """
 
 import hashlib

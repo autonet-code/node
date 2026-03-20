@@ -449,7 +449,7 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    # This would need to be configured with actual registry and IPFS instances
+    # This would need to be configured with actual registry and blob store instances
     # For testing with orchestrator, this won't be called
     print("ProposerNode initialized. Use orchestrator to run.")
 

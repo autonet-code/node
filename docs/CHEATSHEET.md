@@ -36,8 +36,8 @@ Project.createProject(
 ```solidity
 TaskContract.proposeTask(
     projectId,
-    specHash,       // keccak256 of IPFS CID
-    gtHash,         // keccak256 of ground truth CID
+    specHash,       // keccak256 of content hash
+    gtHash,         // keccak256 of ground truth content hash
     10e18,          // r_propose
     5e18            // r_solve
 ) → taskId
@@ -73,13 +73,13 @@ node = SolverNode()
 node.run(max_cycles=10)
 ```
 
-### IPFS Operations
+### Blob Store Operations
 ```python
-from nodes.common import IPFSClient
+from nodes.common.blob_store import BlobStore
 
-ipfs = IPFSClient()
-cid = ipfs.add_json({"key": "value"})
-data = ipfs.get_json(cid)
+store = BlobStore(data_dir="/tmp/autonet-blobs")
+cid = store.add_json({"key": "value"})
+data = store.get_json(cid)
 ```
 
 ### Blockchain Operations

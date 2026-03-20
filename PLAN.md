@@ -376,7 +376,7 @@ Requirements:
 - Fast direct connections within guilds (training coordination)
 - Cross-guild communication for end-to-end inference pipeline
 
-Base: libp2p (Kademlia DHT + multiple transports). Battle-tested by IPFS,
+Base: libp2p (Kademlia DHT + multiple transports). Battle-tested by
 Ethereum, Filecoin. Provides DHT discovery, NAT hole-punching, multiplexed
 streams. Build latency-aware routing on top.
 
@@ -766,7 +766,7 @@ converge.
 |-----------|----------|-----------|
 | Epoch-based rewards | `Autonet.sol` | `startEpoch(budget)`, `attestUsage()`, `_finalizeEpoch()` — proportional distribution by measured contribution. This IS the emission mechanism, just needs a decay curve. |
 | Registry config store | `Registry.sol` | Key-value store controlled by timelock. RPB prompts live here as CID references: `"rpb.prompt.constitution" → "QmCID..."` |
-| Service registry | `Autonet.sol` | Services register with `codebaseHash` (git/IPFS CID). Training nodes register as services with pinned, verifiable code. |
+| Service registry | `Autonet.sol` | Services register with `codebaseHash` (git commit hash). Training nodes register as services with pinned, verifiable code. |
 | RepToken → ATN conversion | `Autonet.sol` | One-way governance-to-utility conversion. ATN burned on inference (`_burn`). Already an economic loop. |
 | On-chain identity | `AutonetUser.sol` | Per-wallet identity with alignment score, preferences, usage stats. Extend for training participation metrics. |
 | Timelock governance | `TimelockController` | All parameter changes flow through voting delay + voting period + execution delay. RPB prompt updates use this. |

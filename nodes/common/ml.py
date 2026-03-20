@@ -5,7 +5,7 @@ Implements real PyTorch training for federated learning with:
 - SimpleNet: Small CNN for MNIST (2 conv + 2 fc layers)
 - CUDA acceleration when available
 - Weight delta computation for FedAvg aggregation
-- IPFS integration for model storage
+- Blob store integration for model storage
 """
 
 import logging
@@ -303,14 +303,14 @@ def load_weights_into_model(model: torch.nn.Module, weights_data: dict) -> torch
 
 def save_weights(state_dict: Dict[str, torch.Tensor], store) -> Optional[str]:
     """
-    Save model weights to IPFS.
+    Save model weights to blob store.
 
     Args:
         state_dict: PyTorch state_dict (model weights)
         store: BlobStore instance
 
     Returns:
-        CID of saved weights, or None on failure
+        Content hash of saved weights, or None on failure
     """
     try:
         # Convert tensors to lists for JSON serialization
@@ -318,36 +318,36 @@ def save_weights(state_dict: Dict[str, torch.Tensor], store) -> Optional[str]:
         for key, tensor in state_dict.items():
             serializable_dict[key] = tensor.cpu().numpy().tolist()
 
-        # Save to IPFS
+        # Save to blob store
         cid = store.add_json({
             "weights": serializable_dict,
             "format": "pytorch_state_dict",
         })
 
-        logger.info(f"Saved weights to IPFS: {cid}")
+        logger.info(f"Saved weights to blob store: {cid}")
         return cid
 
     except Exception as e:
-        logger.error(f"Failed to save weights to IPFS: {e}")
+        logger.error(f"Failed to save weights: {e}")
         return None
 
 
 def load_weights(cid: str, store) -> Optional[Dict[str, torch.Tensor]]:
     """
-    Load model weights from IPFS.
+    Load model weights from blob store.
 
     Args:
-        cid: IPFS CID of weights
+        cid: Content hash of weights
         store: BlobStore instance
 
     Returns:
         PyTorch state_dict, or None on failure
     """
     try:
-        # Load from IPFS
+        # Load from blob store
         data = store.get_json(cid)
         if not data:
-            logger.error(f"Failed to load weights from IPFS: {cid}")
+            logger.error(f"Failed to load weights from blob store: {cid}")
             return None
 
         # Convert lists back to tensors
@@ -356,11 +356,11 @@ def load_weights(cid: str, store) -> Optional[Dict[str, torch.Tensor]]:
         for key, value in weights.items():
             state_dict[key] = torch.tensor(value)
 
-        logger.info(f"Loaded weights from IPFS: {cid}")
+        logger.info(f"Loaded weights from blob store: {cid}")
         return state_dict
 
     except Exception as e:
-        logger.error(f"Failed to load weights from IPFS: {e}")
+        logger.error(f"Failed to load weights: {e}")
         return None
 
 

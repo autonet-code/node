@@ -283,7 +283,7 @@ class DistributedJEPA:
         manifest: JEPAShardManifest
     ) -> JEPAShardManifest:
         """
-        Upload all shards to IPFS and update manifest with CIDs.
+        Upload all shards to blob store and update manifest with content hashes.
         """
         if not hasattr(manifest, '_shard_data'):
             raise ValueError("Manifest has no shard data - call shard_model first")
@@ -300,7 +300,7 @@ class DistributedJEPA:
                     'data': tensor.numpy().tolist(),
                 }
 
-            # Upload to IPFS
+            # Upload to blob store
             cid = self.store.add_json({
                 'shard_index': shard_info.shard_index,
                 'is_parity': shard_info.is_parity,
@@ -309,9 +309,9 @@ class DistributedJEPA:
             })
 
             shard_info.blob_hash = cid
-            logger.debug(f"Uploaded shard {i} to IPFS: {cid[:20]}...")
+            logger.debug(f"Uploaded shard {i} to blob store: {cid[:20]}...")
 
-        logger.info(f"Uploaded {len(manifest.shards)} shards to IPFS")
+        logger.info(f"Uploaded {len(manifest.shards)} shards to blob store")
         return manifest
 
     def register_model_on_chain(
@@ -329,7 +329,7 @@ class DistributedJEPA:
             return manifest.model_hash
 
         try:
-            # Upload manifest to IPFS
+            # Upload manifest to blob store
             manifest_json = {
                 'model_hash': manifest.model_hash.hex(),
                 'config': {
@@ -353,7 +353,7 @@ class DistributedJEPA:
             manifest_cid = self.store.add_json(manifest_json)
 
             # Call ModelShardRegistry.registerModel
-            # StorageTier.IPFS_PINNED = 1
+            # StorageTier.NODE_PINNED = 1
             # ShardingStrategy.LAYER_WISE = 0
             result = self.registry.send(
                 "ModelShardRegistry",
@@ -364,7 +364,7 @@ class DistributedJEPA:
                 manifest.data_shards,     # uint8 dataShards
                 manifest.parity_shards,   # uint8 parityShards
                 manifest.total_size,      # uint256 totalSize
-                1,                        # StorageTier.IPFS_PINNED
+                1,                        # StorageTier.NODE_PINNED
                 0,                        # ShardingStrategy.LAYER_WISE
                 project_id,               # uint256 projectId
             )
@@ -415,7 +415,7 @@ class DistributedJEPA:
         config: Optional[JEPAConfig] = None,
     ) -> JEPA:
         """
-        Retrieve shards from IPFS and reassemble the model.
+        Retrieve shards from blob store and reassemble the model.
 
         Handles missing shards via erasure coding reconstruction.
         """

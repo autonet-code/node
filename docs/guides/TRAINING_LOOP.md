@@ -17,7 +17,7 @@ The "Absolute Zero" loop is a self-improving training cycle where:
 **Actor**: Proposer Node (staked with 100+ ATN)
 
 ```
-Proposer                          IPFS                    Blockchain
+Proposer                       Blob Store                 Blockchain
    │                               │                          │
    │──── Upload task spec ────────▶│                          │
    │◀─── Return task_spec_cid ─────│                          │
@@ -42,7 +42,7 @@ Proposer                          IPFS                    Blockchain
 **Actor**: Solver Node (staked with 50+ ATN)
 
 ```
-Solver                            IPFS                    Blockchain
+Solver                         Blob Store                 Blockchain
    │                               │                          │
    │◀─── Listen for TaskActivated ─────────────────────────────│
    │                               │                          │
@@ -90,7 +90,7 @@ Proposer                         Blockchain               Solver
 **Actor**: Coordinator Node (staked with 500+ ATN)
 
 ```
-Coordinator                       IPFS                   Blockchain
+Coordinator                    Blob Store                 Blockchain
    │                               │                          │
    │──── Download ground truth ───▶│                          │
    │◀─── Return gt data ───────────│                          │
@@ -142,7 +142,7 @@ ResultsRewards Contract
 **Actor**: Aggregator Node (staked with 1000+ ATN)
 
 ```
-Aggregator                        IPFS                   Blockchain
+Aggregator                     Blob Store                 Blockchain
    │                               │                          │
    │◀── Query verified solutions ──────────────────────────────│
    │                               │                          │

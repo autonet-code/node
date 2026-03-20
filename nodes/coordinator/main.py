@@ -275,7 +275,7 @@ class CoordinatorNode:
                 "node_id": self.node_id,
             }
 
-            # Upload report to IPFS
+            # Upload report to blob store
             report_cid = self.store.add_json(report)
             logger.info(f"Verification report uploaded: {report_cid}")
 
@@ -357,14 +357,14 @@ class CoordinatorNode:
         Supports both supervised (accuracy-based) and self-supervised (embedding-based) tasks.
 
         Args:
-            solution_cid: IPFS CID of solution
-            ground_truth_cid: IPFS CID of ground truth
+            solution_cid: Content hash of solution
+            ground_truth_cid: Content hash of ground truth
 
         Returns:
             Tuple of (is_correct, score) where score is 0-100
         """
         try:
-            # Download both from IPFS
+            # Download both from blob store
             solution_data = self.store.get_json(solution_cid)
             ground_truth_data = self.store.get_json(ground_truth_cid)
 

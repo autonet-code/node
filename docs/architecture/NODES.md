@@ -127,11 +127,11 @@ class ProposerNode(Node):
     role = NodeRole.PROPOSER
 
     def generate_task(self, project_id, description, input_data, ground_truth):
-        # 1. Upload input data to IPFS
-        input_cid = self.ipfs.add_json(input_data)
+        # 1. Upload input data to blob store
+        input_cid = self.store.add_json(input_data)
 
         # 2. Upload ground truth (hidden until reveal)
-        ground_truth_cid = self.ipfs.add_json(ground_truth)
+        ground_truth_cid = self.store.add_json(ground_truth)
 
         # 3. Compute hashes
         spec_hash = hash(input_cid + description)
@@ -155,16 +155,16 @@ class SolverNode(Node):
 
     def train(self, task_id, task_spec_cid, global_model_cid):
         # 1. Download task spec
-        task_spec = self.ipfs.get_json(task_spec_cid)
+        task_spec = self.store.get_json(task_spec_cid)
 
         # 2. Download global model
-        model = self.ipfs.get_bytes(global_model_cid)
+        model = self.store.get_bytes(global_model_cid)
 
         # 3. Train locally
         update = self._train_model(task_spec, model)
 
-        # 4. Upload update to IPFS
-        update_cid = self.ipfs.add_json(update)
+        # 4. Upload update to blob store
+        update_cid = self.store.add_json(update)
 
         return TrainingResult(task_id, update_cid, update["metrics"])
 
@@ -186,14 +186,14 @@ class CoordinatorNode(Node):
 
     def verify_solution(self, task_id, solver, solution_cid, ground_truth_cid):
         # 1. Download both
-        solution = self.ipfs.get_json(solution_cid)
-        ground_truth = self.ipfs.get_json(ground_truth_cid)
+        solution = self.store.get_json(solution_cid)
+        ground_truth = self.store.get_json(ground_truth_cid)
 
         # 2. Compare
         is_correct, score, details = self._compare(solution, ground_truth)
 
         # 3. Upload report
-        report_cid = self.ipfs.add_json({...})
+        report_cid = self.store.add_json({...})
 
         # 4. Submit to blockchain
         ResultsRewards.submitVerification(task_id, solver, is_correct, score, report_cid)
@@ -211,16 +211,16 @@ class AggregatorNode(Node):
 
     def aggregate_updates(self, project_id, round, update_cids, current_model_cid):
         # 1. Download all updates
-        updates = [self.ipfs.get_json(cid) for cid in update_cids]
+        updates = [self.store.get_json(cid) for cid in update_cids]
 
         # 2. Download current model
-        current = self.ipfs.get_json(current_model_cid)
+        current = self.store.get_json(current_model_cid)
 
         # 3. Perform FedAvg
         new_model = self._fedavg(updates, current)
 
         # 4. Upload new model
-        new_cid = self.ipfs.add_json(new_model)
+        new_cid = self.store.add_json(new_model)
 
         # 5. Update project
         Project.setMatureModel(project_id, new_cid, ...)
@@ -247,16 +247,14 @@ class BlockchainInterface:
         ...
 ```
 
-### IPFSClient
+### BlobStore
 
 ```python
-class IPFSClient:
-    def add_json(self, data) -> str:    # Returns CID
+class BlobStore:
+    def add_json(self, data) -> str:    # Returns content hash
     def add_bytes(self, data) -> str:
-    def add_file(self, path) -> str:
     def get_json(self, cid) -> dict:
     def get_bytes(self, cid) -> bytes:
-    def pin(self, cid) -> bool:
 ```
 
 ### Crypto
@@ -295,7 +293,7 @@ log_level = "INFO"
 
 [network]
 chain_rpc_url = "http://localhost:8545"
-ipfs_api_url = "http://127.0.0.1:5001"
+blob_store_dir = "/data/autonet/blobs"
 
 [consensus]
 heartbeat_interval = 60

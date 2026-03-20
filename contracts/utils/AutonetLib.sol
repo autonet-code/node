@@ -63,7 +63,7 @@ library AutonetLib {
     // ============ Core Structures ============
 
     struct TaskProposal {
-        bytes32 specHash;               // Hash of task specification (IPFS CID)
+        bytes32 specHash;               // Hash of task specification (content hash)
         bytes32 groundTruthSolHash;     // Hash of proposer's solution (zero for consensus mode)
         address proposer;
         uint256 proposedLearnabilityReward;  // r_propose
@@ -100,7 +100,7 @@ library AutonetLib {
     }
 
     struct SolverSubmission {
-        bytes32 solutionHash;    // Hash of solution (IPFS CID)
+        bytes32 solutionHash;    // Hash of solution (content hash)
         address solver;
         uint256 submissionBlock;
         uint256 score;           // Quality score if verified

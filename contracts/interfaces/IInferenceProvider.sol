@@ -11,7 +11,7 @@ pragma solidity ^0.8.20;
  */
 interface IInferenceProvider {
     /// @notice Request inference, burning ATN as payment
-    /// @param input The inference request (model-specific encoding, typically IPFS CID)
+    /// @param input The inference request (model-specific encoding, typically content hash)
     /// @param maxCredits Maximum ATN to spend (will burn actual cost)
     /// @return requestId Unique ID for this inference request
     function requestInference(bytes calldata input, uint256 maxCredits) external returns (bytes32 requestId);

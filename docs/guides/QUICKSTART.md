@@ -26,7 +26,7 @@ pip install -r requirements.txt
 python demo.py
 ```
 
-This simulates a complete training cycle without needing blockchain/IPFS.
+This simulates a complete training cycle without needing a blockchain node.
 
 ## Local Development Setup
 
@@ -51,19 +51,7 @@ Note the deployed addresses printed to console.
 
 Copy `.env.example` to `.env` and fill in the contract addresses.
 
-### 4. Start IPFS (optional)
-
-```bash
-# If you have IPFS installed
-ipfs daemon
-
-# Or use Docker
-docker run -d -p 5001:5001 -p 8080:8080 ipfs/kubo
-```
-
-Without IPFS, nodes run in mock mode using in-memory storage.
-
-### 5. Run a node
+### 4. Run a node
 
 ```bash
 # Run a solver node
@@ -82,7 +70,6 @@ docker-compose up
 
 This starts:
 - Hardhat node (blockchain)
-- IPFS node
 - One of each node type (proposer, solver, coordinator, aggregator)
 
 ## Contract Interaction (Hardhat Console)

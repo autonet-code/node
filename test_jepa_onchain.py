@@ -200,7 +200,7 @@ def run_onchain_test():
         manifest.data_shards,           # uint8 dataShards
         manifest.parity_shards,         # uint8 parityShards
         manifest.total_size,            # uint256 totalSize
-        1,                              # StorageTier.IPFS_PINNED
+        1,                              # StorageTier.NODE_PINNED
         0,                              # ShardingStrategy.LAYER_WISE
         1,                              # projectId
         gas_limit=500000,

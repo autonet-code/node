@@ -122,7 +122,7 @@ contract ResultsRewards {
      * @param _solver The solver whose solution is being verified
      * @param _isCorrect Whether the coordinator believes the solution is correct
      * @param _score Quality score 0-100
-     * @param _reportCid IPFS CID of the detailed report
+     * @param _reportCid Content hash of the detailed report
      */
     function submitVote(
         uint256 _taskId,

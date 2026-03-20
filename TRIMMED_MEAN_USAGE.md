@@ -21,12 +21,12 @@ This ensures that up to X% of malicious nodes cannot influence the aggregated re
 ```python
 from nodes.aggregator.main import AggregatorNode
 from nodes.common.contracts import ContractRegistry
-from nodes.common.ipfs import IPFSClient
+from nodes.common.blob_store import BlobStore
 
 # Create aggregator with default FedAvg
 node = AggregatorNode(
     registry=registry,
-    ipfs=ipfs,
+    store=BlobStore(data_dir="/tmp/autonet-blobs"),
     node_id="aggregator-1",
     project_id=1,
     # aggregation_method="fedavg"  # This is the default
@@ -41,7 +41,7 @@ node.run()
 # Create aggregator with Trimmed Mean
 node = AggregatorNode(
     registry=registry,
-    ipfs=ipfs,
+    store=BlobStore(data_dir="/tmp/autonet-blobs"),
     node_id="aggregator-1",
     project_id=1,
     aggregation_method="trimmed_mean",  # Use Trimmed Mean
@@ -57,7 +57,7 @@ node.run()
 # More aggressive trimming (30%)
 node = AggregatorNode(
     registry=registry,
-    ipfs=ipfs,
+    store=BlobStore(data_dir="/tmp/autonet-blobs"),
     node_id="aggregator-1",
     project_id=1,
     aggregation_method="trimmed_mean",

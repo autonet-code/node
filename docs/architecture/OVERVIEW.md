@@ -24,11 +24,11 @@
 - Four engines: Awareness, Governance, Work, Survival
 - Specialized nodes: Proposer, Solver, Coordinator, Aggregator
 
-### Layer 3: Storage (IPFS)
+### Layer 3: Storage (Node-Native Blob Store)
 - Model weights
 - Task specifications
 - Solutions and verification reports
-- Referenced on-chain via CIDs
+- Referenced on-chain via content hashes
 
 ## Data Flow
 

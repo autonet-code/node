@@ -564,7 +564,7 @@ describe("Autonet - Core Contracts", function () {
             dataShards,
             parityShards,
             totalSize,
-            0, // StorageTier.IPFS_PUBLIC
+            0, // StorageTier.NODE_PUBLIC
             1, // ShardingStrategy.TENSOR_PARALLEL
             1  // projectId
           )

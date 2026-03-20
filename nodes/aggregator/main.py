@@ -267,9 +267,9 @@ class AggregatorNode:
         Aggregate collected updates and publish the new model.
 
         Steps:
-        1. Download all update CIDs from IPFS
+        1. Download all update CIDs from blob store
         2. Perform FedAvg aggregation
-        3. Upload aggregated model to IPFS
+        3. Upload aggregated model to blob store
         4. Call setMatureModel on-chain
         5. Clear collected updates
         """

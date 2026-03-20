@@ -169,7 +169,7 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
 
     /// @notice Submit inference result (called by authorized nodes)
     /// @param requestId The request to fulfill
-    /// @param outputCid IPFS CID of the result
+    /// @param outputCid Content hash of the result
     function submitResult(bytes32 requestId, string calldata outputCid)
         external
         onlyAuthorizedNode

@@ -25,8 +25,8 @@ contract ModelShardRegistry is Ownable {
     uint256 public constant MIN_STORAGE_STAKE = 50 * 10**18; // 50 ATN
 
     enum StorageTier {
-        IPFS_PUBLIC,      // Free, no guarantees
-        IPFS_PINNED,      // Pinned by authorized nodes
+        NODE_PUBLIC,      // Free, no guarantees
+        NODE_PINNED,      // Pinned by authorized nodes
         FILECOIN,         // Paid storage with replication
         ARWEAVE           // Permanent storage
     }
@@ -38,7 +38,7 @@ contract ModelShardRegistry is Ownable {
     }
 
     struct ModelShardManifest {
-        string manifestCid;          // IPFS CID of shard manifest JSON
+        string manifestCid;          // Content hash of shard manifest JSON
         bytes32 merkleRoot;          // Merkle root of all shard hashes
         uint8 totalShards;           // Total number of shards (data + parity)
         uint8 dataShards;            // Number of data shards (k in erasure code)
@@ -151,7 +151,7 @@ contract ModelShardRegistry is Ownable {
     /**
      * @notice Register a new sharded model with its manifest.
      * @param modelHash Unique hash identifying this model
-     * @param manifestCid IPFS CID of the shard manifest JSON
+     * @param manifestCid Content hash of the shard manifest JSON
      * @param merkleRoot Merkle root of all shard hashes
      * @param dataShards Number of data shards (k in erasure coding)
      * @param parityShards Number of parity shards (n-k in erasure coding)
