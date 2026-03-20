@@ -15,6 +15,8 @@ from typing import Optional
 from ..common.contracts import ContractRegistry
 from ..common.blob_store import BlobStore
 from ..common.ml import SimpleNet, load_weights_into_model
+from ..common.governance import GovernanceBridge
+from ..common.inference_attestor import InferenceAttestor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ class InferenceNode:
         store: BlobStore,
         node_id: str,
         project_id: int = 1,
+        config=None,
     ):
         self.registry = registry
         self.store = store
@@ -68,6 +71,14 @@ class InferenceNode:
 
         # Track processed requests to avoid duplicates
         self._processed_requests = set()
+
+        # Governance bridge and inference attestor
+        self.governance = GovernanceBridge(registry, node_id, project_id)
+        self.attestor = InferenceAttestor(
+            self.governance, store,
+            tokens_per_unit=1000,
+            flush_threshold=5000,
+        )
 
         logger.info(f"InferenceNode initialized: {node_id} for project {project_id}")
 
@@ -98,8 +109,9 @@ class InferenceNode:
         )
 
     def stop(self):
-        """Stop the node."""
+        """Stop the node and flush any pending attestations."""
         self.running = False
+        self.attestor.flush()
         logger.info(f"Stopping InferenceNode {self.node_id}...")
 
     def _run_cycle(self):
@@ -235,6 +247,16 @@ class InferenceNode:
                 self.metrics.requests_served += 1
                 self.metrics.tasks_completed += 1
                 self._processed_requests.add(request_id)
+
+                # Attest inference usage (estimate token count from tensor size)
+                input_size = tensor.numel()
+                self.attestor.record_inference(
+                    provider="native",
+                    input_tokens=input_size,
+                    output_tokens=len(predictions) * 10,
+                    model=self.model_hash or "unknown",
+                    request_id=str(request_id),
+                )
             else:
                 logger.error(
                     f"[{self.node_id}] Failed to submit result: {tx_result.error}"

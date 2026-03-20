@@ -42,6 +42,8 @@ CONTRACT_ARTIFACTS = {
     # Economic layer — Autonet.sol from trustless-contracts, deployed separately
     # When deployed, its address goes into deployment-addresses.json as "AutonetEconomy"
     "AutonetEconomy": "governance/AutonetEconomy.sol/Autonet.json",
+    # Evolution proposals — EvolutionProposal.sol from trustless-contracts
+    "EvolutionProposal": "governance/EvolutionProposal.sol/EvolutionProposal.json",
 }
 
 
@@ -422,6 +424,189 @@ class ContractRegistry:
                     "finalizedAt": result[3],
                 }
             return None
+        except Exception:
+            return None
+
+    # --- Reward Claiming ---
+
+    def claim_participant_reward(
+        self, service_id: bytes, epoch_id: int
+    ) -> TransactionResult:
+        """Claim participant reward for attested usage in a finalized epoch."""
+        return self.send(
+            "AutonetEconomy", "claimParticipantReward",
+            service_id, epoch_id,
+        )
+
+    def get_attester_usage(
+        self, epoch_id: int, service_id: bytes, attester: str
+    ) -> int:
+        """Get attester's usage for a given epoch and service."""
+        try:
+            return self.call(
+                "AutonetEconomy", "getAttesterUsage",
+                epoch_id, service_id, attester,
+            )
+        except Exception:
+            return 0
+
+    # --- Emission Configuration ---
+
+    def configure_emission(
+        self, initial_budget: int, decay_rate_bps: int, epoch_duration: int
+    ) -> TransactionResult:
+        """Configure emission decay and enable auto-epoch (admin only)."""
+        return self.send(
+            "AutonetEconomy", "configureEmission",
+            initial_budget, decay_rate_bps, epoch_duration,
+        )
+
+    def advance_epoch(self) -> TransactionResult:
+        """Advance to next epoch (permissionless, requires duration elapsed)."""
+        return self.send("AutonetEconomy", "advanceEpoch", gas_limit=1500000)
+
+    # --- Reputation Claiming (RepToken) ---
+
+    def claim_reputation(self) -> TransactionResult:
+        """Claim reputation tokens based on economic activity."""
+        return self.send("RepToken", "claimReputationFromEconomy")
+
+    # --- Capability Scorecard ---
+
+    def update_capability_score(
+        self, module_id: bytes, score: int
+    ) -> TransactionResult:
+        """Report a capability score for a training module."""
+        return self.send(
+            "CapabilityScorecard", "updateScore",
+            module_id, score,
+        )
+
+    def get_capability_scorecard(self) -> Optional[Dict]:
+        """Fetch the full capability scorecard (modules, scores, multipliers)."""
+        try:
+            result = self.call("CapabilityScorecard", "getScorecard")
+            if result:
+                modules = []
+                ids, scores, targets, multipliers = result
+                for i in range(len(ids)):
+                    modules.append({
+                        "id": ids[i],
+                        "score": scores[i],
+                        "target": targets[i],
+                        "multiplier": multipliers[i],
+                    })
+                return {"modules": modules}
+            return None
+        except Exception:
+            return None
+
+    def get_reward_multiplier(self, module_id: bytes) -> int:
+        """Get the current reward multiplier for a module (10000 = 1x)."""
+        try:
+            return self.call(
+                "CapabilityScorecard", "getRewardMultiplier", module_id
+            )
+        except Exception:
+            return 10000  # 1x default
+
+    # --- Evolution Proposals (EvolutionProposal.sol) ---
+
+    def submit_evolution_proposal(
+        self, content_cid: str, stake_amount: int
+    ) -> TransactionResult:
+        """Submit an evolution proposal with ATN stake."""
+        return self.send(
+            "EvolutionProposal", "submitProposal",
+            content_cid, stake_amount,
+        )
+
+    def begin_proposal_evaluation(self, proposal_id: int) -> TransactionResult:
+        """Begin RPB evaluation of a proposal (admin)."""
+        return self.send("EvolutionProposal", "beginEvaluation", proposal_id)
+
+    def submit_rpb_evaluation(
+        self,
+        proposal_id: int,
+        approve: bool,
+        confidence: int,
+        reason_cid: str,
+    ) -> TransactionResult:
+        """Submit an RPB evaluation for a proposal."""
+        return self.send(
+            "EvolutionProposal", "submitEvaluation",
+            proposal_id, approve, confidence, reason_cid,
+        )
+
+    def resolve_proposal_evaluation(self, proposal_id: int) -> TransactionResult:
+        """Resolve RPB evaluation (permissionless after quorum + period)."""
+        return self.send("EvolutionProposal", "resolveEvaluation", proposal_id)
+
+    def adopt_proposal(self, proposal_id: int) -> TransactionResult:
+        """Adopt a proposal after successful trial (admin)."""
+        return self.send("EvolutionProposal", "adoptProposal", proposal_id)
+
+    def reject_proposal(self, proposal_id: int) -> TransactionResult:
+        """Reject a proposal (admin)."""
+        return self.send("EvolutionProposal", "rejectProposal", proposal_id)
+
+    def get_evolution_proposal(self, proposal_id: int) -> Optional[Dict]:
+        """Get evolution proposal details."""
+        try:
+            result = self.call("EvolutionProposal", "getProposal", proposal_id)
+            if result:
+                return {
+                    "proposer": result[0],
+                    "contentCid": result[1],
+                    "stakeAmount": result[2],
+                    "status": result[3],
+                    "createdAt": result[4],
+                    "trialBudget": result[5],
+                    "evaluationCount": result[6],
+                    "evaluationScore": result[7],
+                    "daoProposalId": result[8],
+                }
+            return None
+        except Exception:
+            return None
+
+    def get_evolution_proposal_count(self) -> int:
+        """Get total number of evolution proposals."""
+        try:
+            return self.call("EvolutionProposal", "getProposalCount")
+        except Exception:
+            return 0
+
+    def get_rpb_evaluations(self, proposal_id: int) -> Optional[Dict]:
+        """Get RPB evaluations for a proposal."""
+        try:
+            result = self.call("EvolutionProposal", "getEvaluations", proposal_id)
+            if result:
+                evals = []
+                addrs, approvals, confidences, cids = result
+                for i in range(len(addrs)):
+                    evals.append({
+                        "evaluator": addrs[i],
+                        "approve": approvals[i],
+                        "confidence": confidences[i],
+                        "reasonCid": cids[i],
+                    })
+                return {"evaluations": evals}
+            return None
+        except Exception:
+            return None
+
+    def get_current_rpb_prompt(self) -> Optional[str]:
+        """Get the current RPB constitutional prompt CID."""
+        try:
+            return self.call("EvolutionProposal", "getCurrentPromptCid")
+        except Exception:
+            return None
+
+    def get_rpb_prompt_version(self, version: int) -> Optional[str]:
+        """Get a specific version of the RPB prompt."""
+        try:
+            return self.call("EvolutionProposal", "getPromptVersion", version)
         except Exception:
             return None
 

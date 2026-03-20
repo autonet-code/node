@@ -164,6 +164,11 @@ class SolverNode:
                 # Check for ground truth reveals and reveal our solutions
                 self._check_and_reveal_solutions()
 
+                # Claim rewards for previous epoch + accrue reputation
+                if self.governance:
+                    self.governance.claim_epoch_rewards()
+                    self.governance.claim_reputation()
+
                 self.metrics.cycles += 1
 
             except Exception as e:

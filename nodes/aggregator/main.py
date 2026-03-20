@@ -356,6 +356,10 @@ class AggregatorNode:
 
             # Attest model aggregation work to the economic layer
             self.governance.attest_task_completion(units=len(updates))
+
+            # Claim rewards for previous epoch + accrue reputation
+            self.governance.claim_epoch_rewards()
+            self.governance.claim_reputation()
         else:
             logger.error(f"[{self.node_id}] Failed to publish model: {result.error}")
             self.metrics.errors += 1

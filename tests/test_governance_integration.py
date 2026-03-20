@@ -26,7 +26,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 
 from nodes.common.blockchain import TransactionResult
-from nodes.common.governance import GovernanceBridge, compute_service_id
+from nodes.common.governance import (
+    GovernanceBridge,
+    compute_service_id,
+    RPBEvaluator,
+    RPBConsensus,
+    RPBRecommendation,
+    PlaceholderAIProvider,
+    AIProvider,
+)
 from nodes.core.constitution import (
     Constitution,
     AUTONET_PRINCIPLES,
@@ -58,6 +66,7 @@ class FakeContractHandle:
 def make_registry(
     has_economy: bool = True,
     has_dao: bool = True,
+    has_evolution: bool = False,
 ) -> MagicMock:
     """Build a mock ContractRegistry for governance tests."""
     registry = MagicMock()
@@ -75,6 +84,8 @@ def make_registry(
             return FakeContractHandle("ResultsRewards", "0x5555555555555555555555555555555555555555")
         if name == "Project":
             return FakeContractHandle("Project", "0x6666666666666666666666666666666666666666")
+        if name == "EvolutionProposal" and has_evolution:
+            return FakeContractHandle("EvolutionProposal", "0x7777777777777777777777777777777777777777")
         return None
 
     registry.get = MagicMock(side_effect=_get)
@@ -408,6 +419,633 @@ class TestBridgeInit:
         """Service ID is derived from project_id at init."""
         bridge = GovernanceBridge(make_registry(), "solver-0", project_id=7)
         assert bridge.service_id == compute_service_id(7)
+
+
+# =============================================================================
+# Tests: GovernanceBridge — Reward Claiming
+# =============================================================================
+
+
+class TestRewardClaiming:
+    def test_claim_rewards_success(self):
+        """Successful reward claim for previous epoch."""
+        registry = make_registry(has_economy=True)
+        registry.get_current_epoch.return_value = 3
+        registry.claim_participant_reward = MagicMock(return_value=_ok())
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_epoch_rewards()
+
+        assert result is True
+        # Should claim epoch 2 (current - 1)
+        registry.claim_participant_reward.assert_called_once_with(
+            bridge.service_id, 2
+        )
+
+    def test_claim_rewards_specific_epoch(self):
+        """Claim rewards for a specific epoch."""
+        registry = make_registry(has_economy=True)
+        registry.claim_participant_reward = MagicMock(return_value=_ok())
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_epoch_rewards(epoch_id=5)
+
+        assert result is True
+        registry.claim_participant_reward.assert_called_once_with(
+            bridge.service_id, 5
+        )
+
+    def test_claim_rewards_skipped_no_economy(self):
+        """Reward claiming is skipped when economy is not deployed."""
+        registry = make_registry(has_economy=False)
+        registry.claim_participant_reward = MagicMock()
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_epoch_rewards()
+
+        assert result is True
+        registry.claim_participant_reward.assert_not_called()
+
+    def test_claim_already_claimed_is_ok(self):
+        """AlreadyClaimed error is treated as success (idempotent)."""
+        registry = make_registry(has_economy=True)
+        registry.get_current_epoch.return_value = 3
+        registry.claim_participant_reward = MagicMock(
+            return_value=_fail("AlreadyClaimed")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_epoch_rewards()
+
+        assert result is True  # Not an error
+
+    def test_claim_nothing_to_claim_is_ok(self):
+        """NothingToClaim error is treated as success."""
+        registry = make_registry(has_economy=True)
+        registry.get_current_epoch.return_value = 3
+        registry.claim_participant_reward = MagicMock(
+            return_value=_fail("NothingToClaim")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_epoch_rewards()
+
+        assert result is True
+
+    def test_claim_failure_returns_false(self):
+        """Real claim failure returns False."""
+        registry = make_registry(has_economy=True)
+        registry.get_current_epoch.return_value = 3
+        registry.claim_participant_reward = MagicMock(
+            return_value=_fail("InsufficientFunds")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_epoch_rewards()
+
+        assert result is False
+
+    def test_claim_exception_returns_false(self):
+        """Exception during claim returns False."""
+        registry = make_registry(has_economy=True)
+        registry.get_current_epoch.return_value = 3
+        registry.claim_participant_reward = MagicMock(
+            side_effect=RuntimeError("RPC error")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_epoch_rewards()
+
+        assert result is False
+
+    def test_claim_skipped_epoch_zero(self):
+        """No claim when there's no finalized epoch."""
+        registry = make_registry(has_economy=True)
+        registry.get_current_epoch.return_value = 1
+        registry.claim_participant_reward = MagicMock()
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_epoch_rewards()
+
+        assert result is True
+        registry.claim_participant_reward.assert_not_called()
+
+
+# =============================================================================
+# Tests: GovernanceBridge — Reputation
+# =============================================================================
+
+
+class TestReputation:
+    def test_claim_reputation_success(self):
+        """Successful reputation claim."""
+        registry = make_registry(has_economy=True)
+        registry.claim_reputation = MagicMock(return_value=_ok())
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_reputation()
+
+        assert result is True
+        registry.claim_reputation.assert_called_once()
+
+    def test_claim_reputation_skipped_no_economy(self):
+        """Reputation claim skipped when economy is not deployed."""
+        registry = make_registry(has_economy=False)
+        registry.claim_reputation = MagicMock()
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_reputation()
+
+        assert result is True
+        registry.claim_reputation.assert_not_called()
+
+    def test_claim_reputation_failure_is_not_fatal(self):
+        """Reputation claim failure returns True (not fatal)."""
+        registry = make_registry(has_economy=True)
+        registry.claim_reputation = MagicMock(
+            return_value=_fail("Nothing to claim")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_reputation()
+
+        assert result is True  # Failed claim is not fatal
+
+    def test_claim_reputation_exception_returns_false(self):
+        """Exception during reputation claim returns False."""
+        registry = make_registry(has_economy=True)
+        registry.claim_reputation = MagicMock(
+            side_effect=RuntimeError("RPC error")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.claim_reputation()
+
+        assert result is False
+
+
+# =============================================================================
+# Tests: GovernanceBridge — Capability Reporting
+# =============================================================================
+
+
+class TestCapabilityReporting:
+    def test_report_score_success(self):
+        """Successful capability score report."""
+        registry = make_registry(has_economy=True)
+        registry.update_capability_score = MagicMock(return_value=_ok())
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        module_id = hashlib.sha256(b"visual_encoder").digest()
+        result = bridge.report_capability_score(module_id, 7500)
+
+        assert result is True
+        registry.update_capability_score.assert_called_once_with(module_id, 7500)
+
+    def test_report_score_skipped_no_economy(self):
+        """Score report skipped when economy is not deployed."""
+        registry = make_registry(has_economy=False)
+        registry.update_capability_score = MagicMock()
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        module_id = hashlib.sha256(b"visual_encoder").digest()
+        result = bridge.report_capability_score(module_id, 7500)
+
+        assert result is True
+        registry.update_capability_score.assert_not_called()
+
+    def test_get_scorecard_success(self):
+        """Successful scorecard fetch."""
+        registry = make_registry(has_economy=True)
+        registry.get_capability_scorecard = MagicMock(return_value={
+            "modules": [
+                {"id": b"\x01" * 32, "score": 4000, "target": 8000, "multiplier": 17500},
+                {"id": b"\x02" * 32, "score": 0, "target": 6000, "multiplier": 30000},
+            ]
+        })
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        scorecard = bridge.get_training_scorecard()
+
+        assert scorecard is not None
+        assert len(scorecard["modules"]) == 2
+        assert scorecard["modules"][0]["multiplier"] == 17500
+
+    def test_get_scorecard_returns_none_no_economy(self):
+        """Scorecard returns None when economy is not deployed."""
+        registry = make_registry(has_economy=False)
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        assert bridge.get_training_scorecard() is None
+
+    def test_get_scorecard_exception_returns_none(self):
+        """Scorecard returns None on exception."""
+        registry = make_registry(has_economy=True)
+        registry.get_capability_scorecard = MagicMock(
+            side_effect=RuntimeError("not deployed")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        assert bridge.get_training_scorecard() is None
+
+
+# =============================================================================
+# Tests: GovernanceBridge — Evolution Proposals
+# =============================================================================
+
+
+class TestEvolutionProposals:
+    def test_get_pending_proposals_success(self):
+        """Fetch proposals in Evaluating status."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=3)
+        registry.get_evolution_proposal = MagicMock(side_effect=[
+            {"status": 0, "contentCid": "cid1"},   # Proposed
+            {"status": 1, "contentCid": "cid2"},   # Evaluating
+            {"status": 2, "contentCid": "cid3"},   # Trial
+        ])
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        pending = bridge.get_pending_proposals()
+
+        assert len(pending) == 1
+        assert pending[0]["contentCid"] == "cid2"
+        assert pending[0]["id"] == 2
+
+    def test_get_pending_proposals_no_evolution(self):
+        """Returns empty list when evolution contract not deployed."""
+        registry = make_registry(has_evolution=False)
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        assert bridge.get_pending_proposals() == []
+
+    def test_get_pending_proposals_exception(self):
+        """Returns empty list on exception."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(
+            side_effect=RuntimeError("RPC error")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        assert bridge.get_pending_proposals() == []
+
+    def test_submit_rpb_evaluation_success(self):
+        """Successful RPB evaluation submission."""
+        registry = make_registry(has_evolution=True)
+        registry.submit_rpb_evaluation = MagicMock(return_value=_ok())
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
+
+        assert result is True
+        registry.submit_rpb_evaluation.assert_called_once_with(
+            1, True, 8000, "reason-cid"
+        )
+
+    def test_submit_rpb_evaluation_no_evolution(self):
+        """Evaluation skipped when evolution contract not deployed."""
+        registry = make_registry(has_evolution=False)
+        registry.submit_rpb_evaluation = MagicMock()
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
+
+        assert result is True
+        registry.submit_rpb_evaluation.assert_not_called()
+
+    def test_submit_rpb_evaluation_already_evaluated(self):
+        """AlreadyEvaluated treated as success."""
+        registry = make_registry(has_evolution=True)
+        registry.submit_rpb_evaluation = MagicMock(
+            return_value=_fail("AlreadyEvaluated")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
+
+        assert result is True
+
+    def test_submit_rpb_evaluation_failure(self):
+        """Real failure returns False."""
+        registry = make_registry(has_evolution=True)
+        registry.submit_rpb_evaluation = MagicMock(
+            return_value=_fail("InsufficientStake")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
+
+        assert result is False
+
+    def test_submit_rpb_evaluation_exception(self):
+        """Exception returns False."""
+        registry = make_registry(has_evolution=True)
+        registry.submit_rpb_evaluation = MagicMock(
+            side_effect=RuntimeError("connection lost")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
+
+        assert result is False
+
+    def test_get_rpb_prompt_success(self):
+        """Successful RPB prompt fetch."""
+        registry = make_registry(has_evolution=True)
+        registry.get_current_rpb_prompt = MagicMock(return_value="bafyrpb_prompt_v1")
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        assert bridge.get_rpb_prompt() == "bafyrpb_prompt_v1"
+
+    def test_get_rpb_prompt_no_evolution(self):
+        """Returns None when evolution contract not deployed."""
+        registry = make_registry(has_evolution=False)
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        assert bridge.get_rpb_prompt() is None
+
+    def test_get_rpb_prompt_exception(self):
+        """Returns None on exception."""
+        registry = make_registry(has_evolution=True)
+        registry.get_current_rpb_prompt = MagicMock(
+            side_effect=RuntimeError("RPC error")
+        )
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+
+        assert bridge.get_rpb_prompt() is None
+
+    def test_evolution_available_flag(self):
+        """Bridge detects evolution contract availability."""
+        bridge_with = GovernanceBridge(
+            make_registry(has_evolution=True), "n", 1
+        )
+        bridge_without = GovernanceBridge(
+            make_registry(has_evolution=False), "n", 1
+        )
+
+        assert bridge_with._evolution_available is True
+        assert bridge_without._evolution_available is False
+
+
+# =============================================================================
+# Tests: RPBRecommendation
+# =============================================================================
+
+
+class TestRPBRecommendation:
+    def test_to_json(self):
+        """Recommendation serializes to JSON."""
+        rec = RPBRecommendation(
+            approve=True,
+            confidence=8000,
+            reasoning="Aligns with constitutional principles",
+            constitutional_alignment=0.85,
+            risks=["Requires significant compute"],
+            benefits=["Improves visual encoder"],
+        )
+        import json
+        data = json.loads(rec.to_json())
+
+        assert data["approve"] is True
+        assert data["confidence"] == 8000
+        assert len(data["risks"]) == 1
+        assert data["constitutional_alignment"] == 0.85
+
+    def test_defaults(self):
+        """Recommendation has sensible defaults for optional fields."""
+        rec = RPBRecommendation(
+            approve=False,
+            confidence=3000,
+            reasoning="Too risky",
+            constitutional_alignment=0.3,
+        )
+        assert rec.risks == []
+        assert rec.benefits == []
+
+
+# =============================================================================
+# Tests: PlaceholderAIProvider
+# =============================================================================
+
+
+class TestPlaceholderAIProvider:
+    def test_returns_recommendation(self):
+        """Placeholder provider returns a valid recommendation."""
+        provider = PlaceholderAIProvider()
+        rec = provider.evaluate("system prompt", "proposal content")
+
+        assert isinstance(rec, RPBRecommendation)
+        assert rec.approve is True
+        assert rec.confidence == 5000
+        assert "Placeholder" in rec.reasoning
+
+
+# =============================================================================
+# Tests: RPBEvaluator
+# =============================================================================
+
+
+class TestRPBEvaluator:
+    def test_evaluate_pending_proposals(self):
+        """Evaluator processes pending proposals."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=2)
+        registry.get_evolution_proposal = MagicMock(side_effect=[
+            {"status": 1, "contentCid": "cid1"},   # Evaluating
+            {"status": 0, "contentCid": "cid2"},   # Proposed (not pending)
+        ])
+        registry.get_current_rpb_prompt = MagicMock(return_value="prompt-cid")
+        registry.submit_rpb_evaluation = MagicMock(return_value=_ok())
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        evaluator = RPBEvaluator(bridge)
+
+        count = evaluator.evaluate_pending_proposals()
+
+        assert count == 1
+        registry.submit_rpb_evaluation.assert_called_once()
+        args = registry.submit_rpb_evaluation.call_args
+        assert args[0][0] == 1  # proposal_id
+        assert args[0][1] is True  # approve (placeholder always approves)
+        assert args[0][2] == 5000  # confidence (placeholder default)
+
+    def test_skips_already_evaluated(self):
+        """Evaluator skips proposals it already evaluated."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=1)
+        registry.get_evolution_proposal = MagicMock(return_value={
+            "status": 1, "contentCid": "cid1"
+        })
+        registry.get_current_rpb_prompt = MagicMock(return_value="prompt-cid")
+        registry.submit_rpb_evaluation = MagicMock(return_value=_ok())
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        evaluator = RPBEvaluator(bridge)
+
+        # First call evaluates
+        assert evaluator.evaluate_pending_proposals() == 1
+        # Second call skips (already evaluated)
+        assert evaluator.evaluate_pending_proposals() == 0
+
+    def test_no_prompt_skips(self):
+        """Evaluator skips when no RPB prompt is configured."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=1)
+        registry.get_evolution_proposal = MagicMock(return_value={
+            "status": 1, "contentCid": "cid1"
+        })
+        registry.get_current_rpb_prompt = MagicMock(return_value=None)
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        evaluator = RPBEvaluator(bridge)
+
+        assert evaluator.evaluate_pending_proposals() == 0
+
+    def test_no_pending_returns_zero(self):
+        """Evaluator returns 0 when no proposals pending."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=0)
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        evaluator = RPBEvaluator(bridge)
+
+        assert evaluator.evaluate_pending_proposals() == 0
+
+    def test_custom_provider(self):
+        """Evaluator uses a custom AI provider."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=1)
+        registry.get_evolution_proposal = MagicMock(return_value={
+            "status": 1, "contentCid": "cid1"
+        })
+        registry.get_current_rpb_prompt = MagicMock(return_value="prompt-cid")
+        registry.submit_rpb_evaluation = MagicMock(return_value=_ok())
+
+        # Custom provider that always rejects
+        class RejectProvider(AIProvider):
+            def evaluate(self, system_prompt, proposal_content):
+                return RPBRecommendation(
+                    approve=False, confidence=9000,
+                    reasoning="Against principles",
+                    constitutional_alignment=0.1,
+                )
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        evaluator = RPBEvaluator(bridge, provider=RejectProvider())
+
+        count = evaluator.evaluate_pending_proposals()
+
+        assert count == 1
+        args = registry.submit_rpb_evaluation.call_args
+        assert args[0][1] is False  # reject
+        assert args[0][2] == 9000   # confidence
+
+    def test_evaluation_exception_handled(self):
+        """Evaluator handles provider exceptions gracefully."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=1)
+        registry.get_evolution_proposal = MagicMock(return_value={
+            "status": 1, "contentCid": "cid1"
+        })
+        registry.get_current_rpb_prompt = MagicMock(return_value="prompt-cid")
+
+        # Provider that throws
+        class ErrorProvider(AIProvider):
+            def evaluate(self, system_prompt, proposal_content):
+                raise RuntimeError("model unavailable")
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        evaluator = RPBEvaluator(bridge, provider=ErrorProvider())
+
+        # Should not raise
+        count = evaluator.evaluate_pending_proposals()
+        assert count == 0
+
+
+# =============================================================================
+# Tests: RPBConsensus
+# =============================================================================
+
+
+class TestRPBConsensus:
+    def test_try_resolve_success(self):
+        """Consensus resolves a proposal that reached quorum."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=1)
+        registry.get_evolution_proposal = MagicMock(return_value={
+            "status": 1, "contentCid": "cid1"
+        })
+        registry.resolve_proposal_evaluation = MagicMock(return_value=_ok())
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        consensus = RPBConsensus(bridge)
+
+        resolved = consensus.try_resolve_proposals()
+
+        assert resolved == 1
+        registry.resolve_proposal_evaluation.assert_called_once_with(1)
+
+    def test_try_resolve_quorum_not_reached(self):
+        """Expected failure (quorum not reached) is handled silently."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=1)
+        registry.get_evolution_proposal = MagicMock(return_value={
+            "status": 1, "contentCid": "cid1"
+        })
+        registry.resolve_proposal_evaluation = MagicMock(
+            return_value=_fail("QuorumNotReached")
+        )
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        consensus = RPBConsensus(bridge)
+
+        resolved = consensus.try_resolve_proposals()
+
+        assert resolved == 0
+
+    def test_try_resolve_period_active(self):
+        """Expected failure (evaluation period active) is handled."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=1)
+        registry.get_evolution_proposal = MagicMock(return_value={
+            "status": 1, "contentCid": "cid1"
+        })
+        registry.resolve_proposal_evaluation = MagicMock(
+            return_value=_fail("EvaluationPeriodActive")
+        )
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        consensus = RPBConsensus(bridge)
+
+        resolved = consensus.try_resolve_proposals()
+
+        assert resolved == 0
+
+    def test_try_resolve_no_evolution(self):
+        """Returns 0 when evolution contract not deployed."""
+        registry = make_registry(has_evolution=False)
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        consensus = RPBConsensus(bridge)
+
+        assert consensus.try_resolve_proposals() == 0
+
+    def test_try_resolve_exception(self):
+        """Exception during resolution is handled."""
+        registry = make_registry(has_evolution=True)
+        registry.get_evolution_proposal_count = MagicMock(return_value=1)
+        registry.get_evolution_proposal = MagicMock(return_value={
+            "status": 1, "contentCid": "cid1"
+        })
+        registry.resolve_proposal_evaluation = MagicMock(
+            side_effect=RuntimeError("RPC error")
+        )
+
+        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        consensus = RPBConsensus(bridge)
+
+        # Should not raise
+        resolved = consensus.try_resolve_proposals()
+        assert resolved == 0
 
 
 if __name__ == "__main__":

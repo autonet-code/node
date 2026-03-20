@@ -27,32 +27,33 @@ Track 3 (parallel): Native Model Training → Guild Formation → Inference
 
 Foundation: `Autonet.sol`, `Registry.sol`, `RepToken.sol` in trustless-contracts.
 
-| # | Story | Size | Notes |
-|---|-------|------|-------|
-| 1.1 | Deterministic decay curve on epoch budgets | M | `budget(N) = initial * decay^N`. Remove admin-set budgets. Halving or smooth exponential — pick one and ship. |
-| 1.2 | Automate epoch lifecycle (start/finalize without admin) | M | Trigger on block height or time interval. No manual `startEpoch()` |
-| 1.3 | Bridge centralized inference usage to `attestUsage()` | L | When daemon routes to Claude/GPT, attest token count on-chain. Scenario B enforcement. |
-| 1.4 | Training activity → `attestUsage()` | M | When solver completes task, attest training contribution |
-| 1.5 | Epoch rewards claimable by participants | M | Proportional to attested usage. Pull model. |
-| 1.6 | Training participation → `claimReputationFromEconomy()` | M | Solver work accrues RepToken → governance power |
-| 1.7 | Alignment pricing function (from emergent_alignment paper) | L | Semantic distance → price modifier. Aligned work subsidized, misaligned pays premium. Advisory in V1, enforced later. |
-| 1.8 | Rollup deployment on established L1 | L | Autonet as rollup anchored in Ethereum for sybil resistance |
+| # | Story | Size | Status | Notes |
+|---|-------|------|--------|-------|
+| 1.1 | Deterministic decay curve on epoch budgets | M | **DONE** | `configureEmission(initial, decayRateBps, epochDuration)` in Autonet.sol. Exponential: `budget(N) = initial * (rate/10000)^(N-1)`. Configurable retention rate (default 99%). |
+| 1.2 | Automate epoch lifecycle (start/finalize without admin) | M | **DONE** | `advanceEpoch()` permissionless after duration elapsed. Auto-triggers on `attestUsage()`. No admin needed. |
+| 1.3 | Bridge centralized inference usage to `attestUsage()` | L | **DONE** | `InferenceAttestor` in `nodes/common/inference_attestor.py`. Records per-call tokens, batches, auto-flushes to `attestUsage()`. Wired into InferenceNode. Blob store receipts for auditability. 18 tests. |
+| 1.4 | Training activity → `attestUsage()` | M | **DONE** | GovernanceBridge.attest_task_completion() wired into solver + aggregator. Per-attester tracking in epochAttesterUsage. |
+| 1.5 | Epoch rewards claimable by participants | M | **DONE** | `claimParticipantReward(serviceId, epochId)` in Autonet.sol. GovernanceBridge.claim_epoch_rewards() in nodes. Proportional to attested usage. |
+| 1.6 | Training participation → `claimReputationFromEconomy()` | M | **DONE** | GovernanceBridge.claim_reputation() calls RepToken. Wired into solver + aggregator. train → attest → earn ATN → earn RepToken → vote. |
+| 1.7 | Dynamic training pricing (capability gap → reward multiplier) | L | **DONE** | `CapabilityScorecard.sol`: per-module scores, EMA updates, reward multipliers. Autonet._finalizeEpoch() applies multipliers. Low-capability modules get 3x, saturated get 0.5x. |
+| 1.8 | Alignment pricing function (from emergent_alignment paper) | L | **DONE** | `AlignmentPricing` in `nodes/common/alignment_pricing.py`. Geometric mean of 3 pairwise similarities. Subsidized/neutral/premium tiers. Training incentives via capability gap → reward multiplier. Advisory in V1. 30 tests. |
+| 1.9 | Rollup deployment on established L1 | L | | Autonet as rollup anchored in Ethereum for sybil resistance |
 
 ### Epic 2: Governance Integration
 
 Connect fractal governance to the economic layer and node operations.
 
-| # | Story | Size | Notes |
-|---|-------|------|-------|
-| 2.1 | Evolution proposal contract (`EvolutionProposal.sol`) | L | Submit CID + stake ATN. Lifecycle: proposed → evaluating → trial → adopted/rejected |
-| 2.2 | Trial funding from network budget | M | Governance-approved allocation for testing proposals |
-| 2.3 | RPB constitutional prompt stored in Registry | S | CID reference. `Registry.editRegistry("rpb.prompt.v1", cid)` |
-| 2.4 | Node-side RPB evaluator (AI provider abstraction) | M | Load prompt + data, call Claude/GPT/local, produce structured recommendation |
-| 2.5 | Consensus on RPB recommendations (extend Yuma) | L | Multiple nodes evaluate, submit on-chain, consensus resolves |
-| 2.6 | RPB prompt governance (DAO proposal to amend prompt) | M | Timelock-protected. Higher quorum for constitutional changes. |
-| 2.7 | Draft v1 RPB constitutional prompt | M | Writing task. The actual words that go on-chain. |
-| 2.8 | Contribution spectrum rewards (compute, diagnosis, proposal, validation) | M | Different reward weights by contribution type |
-| 2.9 | Governance heartbeat enforcement in daemon | M | Work halts if governance consensus goes silent. Hard safety constraint. |
+| # | Story | Size | Status | Notes |
+|---|-------|------|--------|-------|
+| 2.1 | Evolution proposal contract (`EvolutionProposal.sol`) | L | **DONE** | `submitProposal(cid, stake)` → lifecycle Proposed→Evaluating→Trial→Adopted/Rejected. Stake refund on rejection minus 5% fee. 48 Solidity tests. |
+| 2.2 | Trial funding from network budget | M | **DONE** | `fundTrial(proposalId, budget)` transfers ATN. `recordTrialContribution()` tracks participants. `adoptProposal()` returns stake + enables reward claiming. |
+| 2.3 | RPB constitutional prompt stored in Registry | S | **DONE** | `updateRPBPrompt(cid)` timelock-protected. Versioned: `rpb.prompt.v1`, `rpb.prompt.current`, `rpb.prompt.version` in Registry. History permanent on-chain. |
+| 2.4 | Node-side RPB evaluator (AI provider abstraction) | M | **DONE** | `RPBEvaluator` class loads prompt from Registry, evaluates via `AIProvider` interface (abstract). `PlaceholderAIProvider` for dev. `RPBRecommendation` structured output. |
+| 2.5 | Consensus on RPB recommendations (extend Yuma) | L | **DONE** | `RPBConsensus` class calls permissionless `resolveEvaluation()`. Weighted confidence voting: approval = sum(approve_confidence) / sum(all_confidence). Quorum + time-gated. |
+| 2.6 | RPB prompt governance (DAO proposal to amend prompt) | M | **DONE** | `updateRPBPrompt()` restricted to `onlyTimelock`. `linkDAOProposal()` connects evolution proposals to HomebaseDAO votes. Higher quorum enforced at DAO level. |
+| 2.7 | Draft v1 RPB constitutional prompt | M | **DONE** | Universal Declaration of Human Rights in `constitution/v1_udhr.txt`. `rpb_prompt.py` handles deploy to blob store + load with evaluation framing. RPBEvaluator wired to resolve CID → content via blob store with local file fallback. |
+| 2.8 | Contribution spectrum rewards (compute, diagnosis, proposal, validation) | M | **DONE** | `ContributionWeights`: compute=1x, diagnosis=1.5x, proposal=3x, validation=1.2x. `claimTrialReward()` distributes proportional to weighted units. Configurable via `setContributionWeights()`. |
+| 2.9 | Governance heartbeat enforcement in daemon | M | **DONE** | `GovernanceBridge.check_heartbeat()` monitors `HeartbeatEmitted` events. Configurable interval (60s default). Work halts if missed. Already wired in prior session. |
 
 ### Epic 3: Agent Framework + UI
 
@@ -121,16 +122,16 @@ Aspirational. Runs alongside Track 1-2. Not blocking the product.
 
 ### Epic 7: Wire Real Training
 
-| # | Story | Size | Notes |
-|---|-------|------|-------|
-| 7.1 | Solver loads global JEPA model from blob store | M | Deserialize real weights on startup |
-| 7.2 | Replace mock training with `train_jepa_on_task()` | M | Remove fake hash generation. Real local training. |
-| 7.3 | Real weight delta computation and upload | M | `delta = new - old`, serialize, store |
-| 7.4 | CPU-only mode with reduced model/batch | S | Env var `AUTONET_DEVICE=cpu|cuda` |
-| 7.5 | Proposer generates real task specs (hyperparams, data config) | M | Replace placeholder specs |
-| 7.6 | Coordinator verifies real weight deltas | M | Cosine similarity, energy checks on real data |
-| 7.7 | Aggregator performs real FedAvg on deltas | M | Wire to real blob store data |
-| 7.8 | End-to-end real training round (multi-node test) | L | Full loop with real weights on testnet |
+| # | Story | Size | Status | Notes |
+|---|-------|------|--------|-------|
+| 7.1 | Solver loads global JEPA model from blob store | M | **DONE** | Deserialize real weights on startup |
+| 7.2 | Replace mock training with `train_jepa_on_task()` | M | **DONE** | Remove fake hash generation. Real local training. |
+| 7.3 | Real weight delta computation and upload | M | **DONE** | `delta = new - old`, serialize, store |
+| 7.4 | CPU-only mode with reduced model/batch | S | **DONE** | Env var `AUTONET_DEVICE=cpu|cuda` |
+| 7.5 | Proposer generates real task specs (hyperparams, data config) | M | **DONE** | Replace placeholder specs |
+| 7.6 | Coordinator verifies real weight deltas | M | **DONE** | Cosine similarity, energy checks on real data |
+| 7.7 | Aggregator performs real FedAvg on deltas | M | **DONE** | Wire to real blob store data |
+| 7.8 | End-to-end real training round (multi-node test) | L | **DONE** | `tests/test_e2e_real_training.py`: full pipeline (train → aggregate → infer → attest → price). Multi-round FedAvg. Blob store integrity. 7 tests. |
 
 ### Epic 8: Guild Formation
 

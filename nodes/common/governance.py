@@ -1,15 +1,20 @@
 """
 Governance integration for Autonet nodes.
 
-Provides attestation, heartbeat listening, and service registration
-that all node types share. This bridges the training loop to the
-economic layer (Autonet.sol on the jurisdiction chain).
+Provides attestation, heartbeat listening, service registration,
+reward claiming, reputation accrual, evolution proposal evaluation,
+and RPB consensus that all node types share. This bridges the
+training loop to the economic layer (Autonet.sol) and the evolution
+mechanism (EvolutionProposal.sol) on the jurisdiction chain.
 """
 
 import hashlib
+import json
 import logging
 import time
-from typing import Optional
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
 
 from .contracts import ContractRegistry
 
@@ -47,6 +52,7 @@ class GovernanceBridge:
         self._service_registered: bool = False
         self._economy_available: bool = self.registry.get("AutonetEconomy") is not None
         self._dao_available: bool = self.registry.get("AutonetDAO") is not None
+        self._evolution_available: bool = self.registry.get("EvolutionProposal") is not None
 
         self.logger = logging.getLogger(f"GovernanceBridge[{node_id}]")
 
@@ -206,3 +212,472 @@ class GovernanceBridge:
         except Exception as e:
             self.logger.warning(f"Service registration error: {e}")
             return False
+
+    # =========================================================================
+    # Reward Claiming (train → attest → earn ATN)
+    # =========================================================================
+
+    def claim_epoch_rewards(self, epoch_id: Optional[int] = None) -> bool:
+        """
+        Claim participant rewards for a finalized epoch.
+
+        Calls Autonet.sol's claimParticipantReward(serviceId, epochId).
+        The reward is proportional to this node's attested usage vs total
+        service usage in that epoch.
+
+        Args:
+            epoch_id: Specific epoch to claim. If None, claims the last
+                      finalized epoch (current - 1).
+
+        Returns:
+            True if claim succeeded (or was skipped because no economy).
+        """
+        if not self._economy_available:
+            return True
+
+        if epoch_id is None:
+            current = self._get_epoch()
+            epoch_id = current - 1 if current > 1 else 0
+
+        if epoch_id <= 0:
+            self.logger.debug("No finalized epoch to claim rewards for")
+            return True
+
+        try:
+            result = self.registry.claim_participant_reward(
+                self.service_id, epoch_id
+            )
+            if result.success:
+                self.logger.info(
+                    f"Claimed rewards for epoch {epoch_id}, "
+                    f"service={self.service_id[:8].hex()}..."
+                )
+                return True
+            else:
+                # "AlreadyClaimed" or "NothingToClaim" are expected
+                if "AlreadyClaimed" in str(result.error):
+                    self.logger.debug(f"Epoch {epoch_id} already claimed")
+                    return True
+                if "NothingToClaim" in str(result.error):
+                    self.logger.debug(f"Nothing to claim in epoch {epoch_id}")
+                    return True
+                self.logger.warning(f"Reward claim failed: {result.error}")
+                return False
+        except Exception as e:
+            self.logger.warning(f"Reward claim error: {e}")
+            return False
+
+    def claim_reputation(self) -> bool:
+        """
+        Claim reputation (RepToken) based on economic activity.
+
+        Calls RepToken.claimReputationFromEconomy(). The RepToken contract
+        reads the user's earnings from the Economy contract and mints
+        governance tokens proportional to contribution.
+
+        Returns:
+            True if claim succeeded (or was skipped).
+        """
+        if not self._economy_available:
+            return True
+
+        try:
+            result = self.registry.claim_reputation()
+            if result.success:
+                self.logger.info("Reputation claimed from economic activity")
+                return True
+            else:
+                self.logger.debug(f"Reputation claim skipped: {result.error}")
+                return True  # Not fatal — may have nothing to claim
+        except Exception as e:
+            self.logger.warning(f"Reputation claim error: {e}")
+            return False
+
+    # =========================================================================
+    # Capability Reporting
+    # =========================================================================
+
+    def report_capability_score(
+        self, module_id: bytes, score: int
+    ) -> bool:
+        """
+        Report a capability evaluation score for a training module.
+
+        Called by coordinator/aggregator after evaluating training results.
+        The CapabilityScorecard uses EMA to smooth multiple evaluations.
+
+        Args:
+            module_id: 32-byte module identifier (e.g., keccak of "visual_encoder")
+            score: Capability score in basis points (0-10000)
+
+        Returns:
+            True if report succeeded (or was skipped).
+        """
+        if not self._economy_available:
+            return True
+
+        try:
+            result = self.registry.update_capability_score(module_id, score)
+            if result.success:
+                self.logger.info(
+                    f"Reported capability score {score}/10000 for module "
+                    f"{module_id[:8].hex()}..."
+                )
+                return True
+            else:
+                self.logger.debug(f"Score report skipped: {result.error}")
+                return True
+        except Exception as e:
+            self.logger.warning(f"Capability score report error: {e}")
+            return False
+
+    def get_training_scorecard(self) -> Optional[Dict[str, Any]]:
+        """
+        Fetch the current capability scorecard.
+
+        Returns a dict with module IDs, scores, targets, and multipliers.
+        Proposers use this to create tasks targeting underserved modules.
+
+        Returns:
+            Dict with keys {modules: [{id, score, target, multiplier}, ...]},
+            or None if scorecard isn't available.
+        """
+        if not self._economy_available:
+            return None
+
+        try:
+            return self.registry.get_capability_scorecard()
+        except Exception as e:
+            self.logger.debug(f"Could not fetch scorecard: {e}")
+            return None
+
+    # =========================================================================
+    # Evolution Proposals
+    # =========================================================================
+
+    def get_pending_proposals(self) -> List[Dict[str, Any]]:
+        """
+        Fetch proposals in Evaluating status that need RPB evaluation.
+
+        Returns:
+            List of proposal dicts, or empty list if unavailable.
+        """
+        if not self._evolution_available:
+            return []
+
+        try:
+            count = self.registry.get_evolution_proposal_count()
+            pending = []
+            for i in range(1, count + 1):
+                prop = self.registry.get_evolution_proposal(i)
+                if prop and prop.get("status") == 1:  # Evaluating
+                    prop["id"] = i
+                    pending.append(prop)
+            return pending
+        except Exception as e:
+            self.logger.debug(f"Could not fetch pending proposals: {e}")
+            return []
+
+    def submit_rpb_evaluation(
+        self,
+        proposal_id: int,
+        approve: bool,
+        confidence: int,
+        reason_cid: str,
+    ) -> bool:
+        """
+        Submit an RPB evaluation for a proposal.
+
+        Called after the RPB evaluator produces a structured recommendation.
+        The node evaluates the proposal using the constitutional prompt
+        and an AI provider, then submits the result on-chain.
+
+        Args:
+            proposal_id: The proposal to evaluate
+            approve: Whether to recommend adoption
+            confidence: Confidence level (0-10000 bps)
+            reason_cid: CID pointing to structured recommendation
+
+        Returns:
+            True if submission succeeded (or was skipped).
+        """
+        if not self._evolution_available:
+            return True
+
+        try:
+            result = self.registry.submit_rpb_evaluation(
+                proposal_id, approve, confidence, reason_cid
+            )
+            if result.success:
+                self.logger.info(
+                    f"RPB evaluation submitted for proposal {proposal_id}: "
+                    f"{'approve' if approve else 'reject'} (confidence={confidence})"
+                )
+                return True
+            else:
+                if "AlreadyEvaluated" in str(result.error):
+                    self.logger.debug(f"Already evaluated proposal {proposal_id}")
+                    return True
+                self.logger.warning(f"RPB evaluation failed: {result.error}")
+                return False
+        except Exception as e:
+            self.logger.warning(f"RPB evaluation error: {e}")
+            return False
+
+    def get_rpb_prompt(self) -> Optional[str]:
+        """
+        Get the current RPB constitutional prompt CID.
+
+        Returns:
+            The prompt CID string, or None if unavailable.
+        """
+        if not self._evolution_available:
+            return None
+
+        try:
+            return self.registry.get_current_rpb_prompt()
+        except Exception as e:
+            self.logger.debug(f"Could not fetch RPB prompt: {e}")
+            return None
+
+
+# =============================================================================
+# AI Provider Abstraction (for RPB evaluation)
+# =============================================================================
+
+
+class AIProvider(ABC):
+    """
+    Abstract interface for AI providers used in RPB evaluation.
+
+    Nodes call evaluate() with the constitutional prompt and proposal data.
+    The provider returns a structured recommendation. Different providers
+    (Claude, GPT, local LLM) implement this interface.
+    """
+
+    @abstractmethod
+    def evaluate(
+        self, system_prompt: str, proposal_content: str
+    ) -> "RPBRecommendation":
+        """
+        Evaluate a proposal against the constitutional prompt.
+
+        Args:
+            system_prompt: The RPB constitutional prompt text
+            proposal_content: The proposal description + spec
+
+        Returns:
+            Structured recommendation with approve/reject, confidence, reasoning.
+        """
+        ...
+
+
+@dataclass
+class RPBRecommendation:
+    """Structured output from an RPB evaluation."""
+    approve: bool
+    confidence: int          # 0-10000 bps
+    reasoning: str           # Human-readable reasoning
+    constitutional_alignment: float  # 0.0-1.0 score against principles
+    risks: List[str] = field(default_factory=list)
+    benefits: List[str] = field(default_factory=list)
+
+    def to_json(self) -> str:
+        """Serialize to JSON for CID storage."""
+        return json.dumps({
+            "approve": self.approve,
+            "confidence": self.confidence,
+            "reasoning": self.reasoning,
+            "constitutional_alignment": self.constitutional_alignment,
+            "risks": self.risks,
+            "benefits": self.benefits,
+        })
+
+
+class PlaceholderAIProvider(AIProvider):
+    """
+    Placeholder AI provider for development/testing.
+
+    Always returns a neutral recommendation. Replace with real
+    provider (Claude, GPT, local LLM) in production.
+    """
+
+    def evaluate(
+        self, system_prompt: str, proposal_content: str
+    ) -> RPBRecommendation:
+        return RPBRecommendation(
+            approve=True,
+            confidence=5000,
+            reasoning="Placeholder evaluation — real AI provider not configured",
+            constitutional_alignment=0.5,
+            risks=["No real evaluation performed"],
+            benefits=["Proposal submitted for review"],
+        )
+
+
+# =============================================================================
+# RPB Evaluator (node-side)
+# =============================================================================
+
+
+class RPBEvaluator:
+    """
+    Node-side RPB evaluator.
+
+    Listens for new proposals, loads the constitutional prompt from Registry,
+    evaluates proposals through an AI provider, and submits structured
+    recommendations on-chain.
+
+    Usage:
+        evaluator = RPBEvaluator(governance_bridge, provider)
+        evaluator.evaluate_pending_proposals()  # Call periodically
+    """
+
+    def __init__(
+        self,
+        governance: GovernanceBridge,
+        provider: Optional[AIProvider] = None,
+        blob_store: Optional[object] = None,
+    ):
+        self.governance = governance
+        self.provider = provider or PlaceholderAIProvider()
+        self.blob_store = blob_store
+        self._evaluated_proposals: set = set()
+        self.logger = logging.getLogger(
+            f"RPBEvaluator[{governance.node_id}]"
+        )
+
+    def evaluate_pending_proposals(self) -> int:
+        """
+        Evaluate all pending proposals that this node hasn't evaluated yet.
+
+        Returns:
+            Number of proposals evaluated.
+        """
+        pending = self.governance.get_pending_proposals()
+        if not pending:
+            return 0
+
+        prompt_cid = self.governance.get_rpb_prompt()
+        if not prompt_cid:
+            self.logger.debug("No RPB prompt configured, skipping evaluation")
+            return 0
+
+        # Resolve CID to actual prompt content
+        prompt_text = self._resolve_prompt(prompt_cid)
+        if not prompt_text:
+            self.logger.warning("Could not resolve RPB prompt content, skipping evaluation")
+            return 0
+
+        evaluated = 0
+        for proposal in pending:
+            pid = proposal["id"]
+            if pid in self._evaluated_proposals:
+                continue
+
+            try:
+                recommendation = self.provider.evaluate(
+                    prompt_text, proposal.get("contentCid", "")
+                )
+
+                # In production, store recommendation as CID.
+                # For now, use the JSON directly as the reason string.
+                reason_cid = f"rpb-eval-{pid}-{self.governance.node_id}"
+
+                success = self.governance.submit_rpb_evaluation(
+                    pid,
+                    recommendation.approve,
+                    recommendation.confidence,
+                    reason_cid,
+                )
+
+                if success:
+                    self._evaluated_proposals.add(pid)
+                    evaluated += 1
+                    self.logger.info(
+                        f"Evaluated proposal {pid}: "
+                        f"{'approve' if recommendation.approve else 'reject'} "
+                        f"(confidence={recommendation.confidence})"
+                    )
+            except Exception as e:
+                self.logger.warning(f"Failed to evaluate proposal {pid}: {e}")
+
+        return evaluated
+
+    def _resolve_prompt(self, prompt_cid: str) -> Optional[str]:
+        """
+        Resolve a prompt CID to the full evaluation prompt text.
+
+        Uses rpb_prompt.load_prompt_text which tries blob store first,
+        then falls back to the local constitution/v1_udhr.txt file.
+        """
+        try:
+            from .rpb_prompt import load_prompt_text
+            return load_prompt_text(self.blob_store, prompt_cid)
+        except Exception as e:
+            self.logger.warning(f"Failed to resolve prompt {prompt_cid}: {e}")
+            return None
+
+
+# =============================================================================
+# RPB Consensus
+# =============================================================================
+
+
+class RPBConsensus:
+    """
+    Consensus mechanism for RPB evaluations.
+
+    Multiple nodes evaluate proposals independently using (potentially
+    different) AI providers. Non-deterministic LLM outputs are resolved
+    through weighted confidence voting:
+
+    1. Each evaluator submits (approve/reject, confidence, reasoning)
+    2. Approval is computed as: sum(approve_confidence) / sum(all_confidence)
+    3. If approval >= threshold, proposal is approved for trial
+    4. Resolution is permissionless (anyone calls resolveEvaluation)
+
+    This extends the Yuma consensus pattern used for training verification
+    to handle the non-deterministic nature of LLM evaluations.
+    """
+
+    def __init__(self, governance: GovernanceBridge):
+        self.governance = governance
+        self.logger = logging.getLogger(
+            f"RPBConsensus[{governance.node_id}]"
+        )
+
+    def try_resolve_proposals(self) -> int:
+        """
+        Attempt to resolve any proposals that have reached quorum.
+
+        Calls the permissionless resolveEvaluation on-chain function.
+        The contract enforces quorum and time requirements.
+
+        Returns:
+            Number of proposals resolved.
+        """
+        if not self.governance._evolution_available:
+            return 0
+
+        pending = self.governance.get_pending_proposals()
+        resolved = 0
+
+        for proposal in pending:
+            pid = proposal["id"]
+            try:
+                result = self.governance.registry.resolve_proposal_evaluation(pid)
+                if result.success:
+                    self.logger.info(f"Resolved proposal {pid}")
+                    resolved += 1
+                else:
+                    # QuorumNotReached or EvaluationPeriodActive are expected
+                    if "QuorumNotReached" not in str(result.error) and \
+                       "EvaluationPeriodActive" not in str(result.error):
+                        self.logger.debug(
+                            f"Could not resolve proposal {pid}: {result.error}"
+                        )
+            except Exception as e:
+                self.logger.debug(f"Resolution attempt for {pid} failed: {e}")
+
+        return resolved
