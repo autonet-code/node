@@ -17,7 +17,7 @@ from nodes.common.ml import (
     SimpleNet,
     save_weights,
     load_weights,
-    test_model,
+    evaluate_model,
 )
 from nodes.common.blob_store import BlobStore
 
@@ -98,7 +98,7 @@ def main():
     # Step 5: Test updated model
     print("\n[5/5] Testing updated model on test set...")
     try:
-        test_metrics = test_model(updated_cid, store, num_samples=500)
+        test_metrics = evaluate_model(updated_cid, store, num_samples=500)
         print(f"    Test loss: {test_metrics['test_loss']:.4f}")
         print(f"    Test accuracy: {test_metrics['test_accuracy']:.4f}")
         print(f"    Test samples: {test_metrics['num_samples']}")

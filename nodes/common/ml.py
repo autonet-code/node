@@ -749,7 +749,7 @@ def apply_weight_delta(
     return updated
 
 
-def test_model(
+def evaluate_model(
     model_cid: str,
     store,
     num_samples: int = 1000,

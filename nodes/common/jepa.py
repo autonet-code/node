@@ -249,6 +249,30 @@ class VisionTransformerEncoder(nn.Module):
         x = self.norm(x)
         return x
 
+    def forward_layers(
+        self,
+        x: torch.Tensor,
+        start_layer: int = 0,
+        end_layer: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Run a subset of transformer layers on pre-embedded input.
+
+        Args:
+            x: Input embeddings (B, N, embed_dim) — already patch-embedded + pos-encoded
+            start_layer: First layer index (inclusive)
+            end_layer: Last layer index (exclusive). None = all remaining layers.
+
+        Returns:
+            Transformed embeddings (B, N, embed_dim)
+        """
+        end = end_layer if end_layer is not None else len(self.blocks)
+        for block in self.blocks[start_layer:end]:
+            x = block(x)
+        if end >= len(self.blocks):
+            x = self.norm(x)
+        return x
+
 
 class JEPAPredictor(nn.Module):
     """
@@ -612,6 +636,22 @@ class JEPAMasker:
 # =============================================================================
 # Utilities
 # =============================================================================
+
+def get_1d_sincos_pos_embed(embed_dim: int, length: int) -> 'np.ndarray':
+    """
+    Generate 1D sinusoidal positional embeddings (for text sequences).
+
+    Args:
+        embed_dim: Embedding dimension
+        length: Sequence length
+
+    Returns:
+        pos_embed: (length, embed_dim)
+    """
+    import numpy as np
+    pos = np.arange(length, dtype=np.float64)
+    return get_1d_sincos_pos_embed_from_grid(embed_dim, pos)
+
 
 def get_2d_sincos_pos_embed(embed_dim: int, grid_size: int) -> 'np.ndarray':
     """
