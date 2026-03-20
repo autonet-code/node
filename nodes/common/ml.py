@@ -183,9 +183,12 @@ def train_on_task(
         except Exception as e:
             logger.warning(f"Could not load global model: {e}")
 
-    # Save initial weights for delta computation
+    # Save initial weights for delta computation (on same device as model)
     if initial_state_dict is None:
         initial_state_dict = {k: v.clone() for k, v in model.state_dict().items()}
+    else:
+        # Ensure initial weights are on the same device as the model
+        initial_state_dict = {k: v.to(device) for k, v in initial_state_dict.items()}
 
     # Get training data (subset of MNIST for fast training)
     try:

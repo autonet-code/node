@@ -2,6 +2,7 @@
 Autonomous Proposer Node
 
 Proposes training tasks with ground truth, reveals ground truth after solutions are committed.
+Task specs are generated from config and current global model state.
 """
 
 import time
@@ -12,6 +13,7 @@ from web3 import Web3
 
 from ..common.contracts import ContractRegistry
 from ..common.blob_store import BlobStore
+from ..common.config import AutonetConfig, load_config
 
 
 @dataclass
@@ -43,6 +45,7 @@ class ProposerNode:
         node_id: str,
         project_id: int,
         task_mode: str = "ground_truth",
+        config: Optional[AutonetConfig] = None,
     ):
         """
         Initialize the proposer node.
@@ -53,12 +56,14 @@ class ProposerNode:
             node_id: Unique identifier for this node (e.g., "proposer-0")
             project_id: Project ID to propose tasks for
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
+            config: AutonetConfig (loaded from yaml/env if not provided)
         """
         self.registry = registry
         self.store = store
         self.node_id = node_id
         self.project_id = project_id
         self.task_mode = task_mode
+        self.config = config or load_config()
         self.metrics = ProposerMetrics()
         self.running = False
         self.staked = False
@@ -252,29 +257,87 @@ class ProposerNode:
             self.metrics.errors += 1
 
     def _generate_task_spec(self) -> dict:
-        """Generate a task specification."""
-        # Simple MNIST-like task
-        return {
-            "type": "image_classification",
-            "dataset": "mnist_subset",
-            "batch_size": 32,
-            "num_samples": 1000,
-            "model_architecture": "simple_cnn",
-            "timestamp": int(time.time()),
-            "proposer": self.node_id,
-        }
+        """
+        Generate a task specification from config.
+
+        For supervised tasks: MNIST classification with config-driven hyperparams.
+        For JEPA tasks: self-supervised training with config-driven model/training params.
+        """
+        cfg = self.config
+        task_type = cfg.training.task_type
+
+        # Look up current global model so solvers can continue from it
+        global_model_cid = None
+        try:
+            global_model_cid = self.registry.get_mature_model(self.project_id)
+        except Exception:
+            pass
+
+        if task_type == "jepa":
+            return {
+                "type": "jepa_pretrain",
+                "task_type": "jepa",
+                "dataset": "cifar10" if cfg.model.image_size <= 32 else "imagenet_subset",
+                "image_size": cfg.model.image_size,
+                "patch_size": cfg.model.patch_size,
+                "embed_dim": cfg.model.embed_dim,
+                "num_heads": cfg.model.num_heads,
+                "encoder_depth": cfg.model.encoder_depth,
+                "predictor_depth": cfg.model.predictor_depth,
+                "predictor_embed_dim": cfg.model.predictor_embed_dim,
+                "epochs": cfg.training.epochs,
+                "batch_size": cfg.training.batch_size,
+                "learning_rate": cfg.training.learning_rate,
+                "weight_decay": cfg.training.weight_decay,
+                "num_samples": cfg.training.num_samples,
+                "optimizer": cfg.training.optimizer,
+                "global_model_cid": global_model_cid,
+                "timestamp": int(time.time()),
+                "proposer": self.node_id,
+            }
+        else:
+            return {
+                "type": "image_classification",
+                "task_type": "supervised",
+                "dataset": "mnist_subset",
+                "batch_size": cfg.training.batch_size,
+                "num_samples": cfg.training.num_samples,
+                "learning_rate": cfg.training.learning_rate,
+                "epochs": cfg.training.epochs,
+                "model_architecture": "simple_cnn",
+                "global_model_cid": global_model_cid,
+                "timestamp": int(time.time()),
+                "proposer": self.node_id,
+            }
 
     def _generate_ground_truth(self) -> dict:
-        """Generate ground truth data for the task."""
-        # In a real implementation, this would be actual training data
-        # For now, we generate a placeholder
-        return {
-            "labels": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-            "num_samples": 1000,
-            "accuracy_threshold": 0.15,  # Low threshold - any learning above random (10%) is valid
-            "timestamp": int(time.time()),
-            "proposer": self.node_id,
-        }
+        """
+        Generate ground truth data for the task.
+
+        For supervised: accuracy threshold for verification.
+        For JEPA: embedding distance thresholds for verification.
+        """
+        cfg = self.config
+        task_type = cfg.training.task_type
+
+        if task_type == "jepa":
+            return {
+                "type": "jepa_verification",
+                "min_cosine_similarity": 0.3,  # Lenient - early training won't be great
+                "max_embedding_energy": 2.0,
+                "num_samples": cfg.training.num_samples,
+                "image_size": cfg.model.image_size,
+                "timestamp": int(time.time()),
+                "proposer": self.node_id,
+            }
+        else:
+            return {
+                "labels": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+                "num_samples": cfg.training.num_samples,
+                "accuracy_threshold": 0.15,
+                "timestamp": int(time.time()),
+                "proposer": self.node_id,
+            }
 
     # ============ Consensus-as-Truth (MM-Zero) Methods ============
 
@@ -348,16 +411,26 @@ class ProposerNode:
         except Exception:
             pass
 
+        cfg = self.config
         return {
             "type": "consensus_task",
             "mode": "consensus_truth",
-            "dataset": "cifar10_subset",
-            "task_type": "jepa",
-            "batch_size": 32,
-            "num_samples": 200,
+            "task_type": cfg.training.task_type,
+            "dataset": "cifar10" if cfg.model.image_size <= 32 else "imagenet_subset",
+            "image_size": cfg.model.image_size,
+            "patch_size": cfg.model.patch_size,
+            "embed_dim": cfg.model.embed_dim,
+            "num_heads": cfg.model.num_heads,
+            "encoder_depth": cfg.model.encoder_depth,
+            "predictor_depth": cfg.model.predictor_depth,
+            "predictor_embed_dim": cfg.model.predictor_embed_dim,
+            "epochs": cfg.training.epochs,
+            "batch_size": cfg.training.batch_size,
+            "learning_rate": cfg.training.learning_rate,
+            "weight_decay": cfg.training.weight_decay,
+            "num_samples": cfg.training.num_samples,
+            "optimizer": cfg.training.optimizer,
             "model_architecture": "jepa_vit",
-            "image_size": 32,
-            "patch_size": 4,
             "global_model_cid": global_model_cid,
             "difficulty_target": {
                 "min_solvability": 2500,

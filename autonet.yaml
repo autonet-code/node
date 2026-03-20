@@ -1,0 +1,57 @@
+# Autonet Node Configuration
+# Override any value with AUTONET_* environment variables.
+# See nodes/common/config.py for the full mapping.
+
+# Device selection: "auto", "cpu", or "cuda"
+device: auto
+
+# Directory for training datasets (MNIST, CIFAR-10)
+data_dir: ./data
+
+log_level: INFO
+
+# Uncomment to set a fixed random seed for reproducibility
+# seed: 42
+
+blockchain:
+  rpc_url: http://127.0.0.1:8545
+  chain_id: 31337
+  # private_key: 0x...  # set per-node or via AUTONET_PRIVATE_KEY
+
+blob_store:
+  data_dir: ~/.autonet/blobs
+  peer_urls: []
+  server_port: 9100
+
+model:
+  architecture: jepa          # simplenet | jepa | vl_jepa
+  image_size: 32              # 32 for CIFAR-10, 224 for ImageNet-scale
+  patch_size: 4               # 4 for 32px images, 16 for 224px
+  embed_dim: 192              # 192 small, 384 medium, 768 large
+  num_heads: 3                # must divide embed_dim
+  encoder_depth: 6
+  predictor_depth: 3
+  predictor_embed_dim: 96
+
+training:
+  epochs: 2
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.05
+  num_samples: 500
+  optimizer: adamw            # sgd | adamw
+  task_type: jepa             # supervised | jepa
+
+staking:
+  proposer: 100
+  solver: 50
+  coordinator: 500
+  aggregator: 1000
+
+node:
+  max_cycles: 10
+  cycle_delay: 3.0
+  task_mode: ground_truth     # ground_truth | consensus_truth
+  aggregation_method: fedavg  # fedavg | trimmed_mean
+  trim_ratio: 0.2
+  min_updates_for_aggregation: 2

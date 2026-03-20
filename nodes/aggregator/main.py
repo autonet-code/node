@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Any
 
 from ..common.contracts import ContractRegistry
 from ..common.blob_store import BlobStore
+from ..common.config import AutonetConfig, load_config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,8 +52,6 @@ class AggregatorNode:
     """
 
     AGGREGATOR_ROLE = 4
-    STAKE_AMOUNT = 1000 * 10**18  # 1000 ATN
-    MIN_UPDATES_FOR_AGGREGATION = 2
 
     def __init__(
         self,
@@ -63,6 +62,7 @@ class AggregatorNode:
         aggregation_method: str = "fedavg",
         trim_ratio: float = 0.2,
         task_mode: str = "ground_truth",
+        config: Optional[AutonetConfig] = None,
     ):
         """
         Initialize the aggregator node.
@@ -75,14 +75,19 @@ class AggregatorNode:
             aggregation_method: Aggregation method to use ("fedavg" or "trimmed_mean")
             trim_ratio: Ratio to trim from top/bottom for trimmed_mean (default: 0.2 = 20%)
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
+            config: AutonetConfig (loaded from yaml/env if not provided)
         """
         self.registry = registry
         self.store = store
         self.node_id = node_id
         self.project_id = project_id
-        self.aggregation_method = aggregation_method
-        self.trim_ratio = trim_ratio
+        self.config = config or load_config()
+        self.aggregation_method = self.config.node.aggregation_method
+        self.trim_ratio = self.config.node.trim_ratio
         self.task_mode = task_mode
+
+        self.stake_amount = self.config.staking.aggregator * 10**18
+        self.min_updates = self.config.node.min_updates_for_aggregation
 
         self.metrics = AggregatorMetrics()
         self.project_state = ProjectAggregationState(project_id=project_id)
@@ -139,12 +144,12 @@ class AggregatorNode:
         self._poll_rewards_distributed()
 
         # Step 3: Check if we have enough updates to aggregate
-        if len(self.project_state.collected_updates) >= self.MIN_UPDATES_FOR_AGGREGATION:
+        if len(self.project_state.collected_updates) >= self.min_updates:
             self._aggregate_and_publish()
 
     def _stake(self):
         """Stake as AGGREGATOR role."""
-        logger.info(f"[{self.node_id}] Staking {self.STAKE_AMOUNT / 10**18} ATN as AGGREGATOR")
+        logger.info(f"[{self.node_id}] Staking {self.stake_amount / 10**18} ATN as AGGREGATOR")
 
         # First approve ATN spending
         staking_contract = self.registry.get("ParticipantStaking")
@@ -155,7 +160,7 @@ class AggregatorNode:
 
         approve_result = self.registry.approve_atn(
             staking_contract.address,
-            self.STAKE_AMOUNT
+            self.stake_amount
         )
         if not approve_result.success:
             logger.error(f"[{self.node_id}] ATN approval failed: {approve_result.error}")
@@ -165,7 +170,7 @@ class AggregatorNode:
         logger.info(f"[{self.node_id}] ATN approved for staking")
 
         # Stake
-        stake_result = self.registry.stake(self.AGGREGATOR_ROLE, self.STAKE_AMOUNT)
+        stake_result = self.registry.stake(self.AGGREGATOR_ROLE, self.stake_amount)
         if stake_result.success:
             self.is_staked = True
             logger.info(f"[{self.node_id}] Successfully staked as AGGREGATOR")
@@ -297,20 +302,28 @@ class AggregatorNode:
             "timestamp": int(time.time()),
         }
 
+        # If we have real aggregated deltas, apply them to the current global model
+        # to produce a new full model checkpoint (not just the delta)
+        if aggregated_model.get("real_training") and "aggregated_weight_delta" in aggregated_model:
+            try:
+                aggregated_model = self._apply_delta_to_global(aggregated_model)
+            except Exception as e:
+                logger.warning(f"[{self.node_id}] Could not apply delta to global model: {e}")
+
         # Convert numpy arrays/tensors to lists for JSON serialization
         aggregated_model = self._numpy_to_python(aggregated_model)
 
-        # Upload to IPFS
+        # Upload to blob store
         try:
             new_model_cid = self.store.add_json(aggregated_model)
             if not new_model_cid:
-                logger.error(f"[{self.node_id}] Failed to upload aggregated model to IPFS")
+                logger.error(f"[{self.node_id}] Failed to upload aggregated model")
                 self.metrics.errors += 1
                 return
 
             logger.info(f"[{self.node_id}] Aggregated model uploaded: {new_model_cid[:20]}...")
         except Exception as e:
-            logger.error(f"[{self.node_id}] Error uploading to IPFS: {e}")
+            logger.error(f"[{self.node_id}] Error uploading model: {e}")
             self.metrics.errors += 1
             return
 
@@ -702,6 +715,57 @@ class AggregatorNode:
             return tuple(self._numpy_to_python(v) for v in obj)
         else:
             return obj
+
+    def _apply_delta_to_global(self, aggregated_model: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Apply the aggregated weight delta to the current global model weights.
+
+        Loads the current mature model from blob store, adds the delta,
+        and stores the resulting full weights in the aggregated_model dict.
+        This way the published model CID contains a complete, loadable model.
+        """
+        from ..common.ml import apply_weight_delta, load_weights, save_weights
+        import torch
+
+        delta = aggregated_model["aggregated_weight_delta"]
+
+        # Load current global model
+        global_model_cid = None
+        try:
+            global_model_cid = self.registry.get_mature_model(self.project_id)
+        except Exception:
+            pass
+
+        if global_model_cid:
+            base_data = self.store.get_json(global_model_cid)
+            if base_data and "weights" in base_data:
+                base_weights = {k: torch.tensor(v) for k, v in base_data["weights"].items()}
+            else:
+                base_weights = None
+        else:
+            base_weights = None
+
+        if base_weights:
+            # Convert delta values to tensors
+            delta_tensors = {}
+            for k, v in delta.items():
+                delta_tensors[k] = torch.tensor(v) if not isinstance(v, torch.Tensor) else v
+
+            # Apply delta: new_weights = base_weights + delta
+            new_weights = apply_weight_delta(base_weights, delta_tensors)
+            logger.info(f"[{self.node_id}] Applied delta to global model ({len(new_weights)} params)")
+        else:
+            # No base model — the delta IS the model weights (first round)
+            new_weights = {}
+            for k, v in delta.items():
+                new_weights[k] = torch.tensor(v) if not isinstance(v, torch.Tensor) else v
+            logger.info(f"[{self.node_id}] No base model, using delta as initial weights")
+
+        # Store the full weights in the model for publication
+        aggregated_model["weights"] = {k: v.tolist() for k, v in new_weights.items()}
+        aggregated_model["format"] = "pytorch_state_dict"
+
+        return aggregated_model
 
     def _log_final_metrics(self):
         """Log final metrics at shutdown."""

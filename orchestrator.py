@@ -35,6 +35,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from nodes.common.blockchain import BlockchainInterface
 from nodes.common.contracts import ContractRegistry
 from nodes.common.blob_store import BlobStore
+from nodes.common.config import AutonetConfig, load_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -249,6 +250,7 @@ class NodeRunner:
         max_cycles: int = 10,
         cycle_delay: float = 2.0,
         extra_kwargs: Optional[Dict[str, Any]] = None,
+        config: Optional[AutonetConfig] = None,
     ):
         self.node_class = node_class
         self.node_id = node_id
@@ -261,6 +263,7 @@ class NodeRunner:
         self.max_cycles = max_cycles
         self.cycle_delay = cycle_delay
         self.extra_kwargs = extra_kwargs or {}
+        self.config = config
         self.thread: Optional[threading.Thread] = None
         self.node = None
         self.error: Optional[str] = None
@@ -301,13 +304,16 @@ class NodeRunner:
                 addresses=self.contract_addresses,
             )
 
-            # Create the node
+            # Create the node (pass config if available)
+            kwargs = dict(self.extra_kwargs)
+            if self.config is not None:
+                kwargs["config"] = self.config
             self.node = self.node_class(
                 registry=registry,
                 store=self.store,
                 node_id=self.node_id,
                 project_id=self.project_id,
-                **self.extra_kwargs,
+                **kwargs,
             )
 
             logger.info(f"[{self.node_id}] {self.role} node starting with address {self.account['address'][:10]}...")
@@ -506,11 +512,15 @@ def run_orchestrator(
         task_mode: "ground_truth" (legacy commit-reveal) or
                    "consensus_truth" (MM-Zero consensus-as-truth)
     """
+    # Load shared config
+    config = load_config()
+
     logger.info("=" * 70)
     logger.info("AUTONET MULTI-NODE ORCHESTRATOR")
     logger.info("=" * 70)
     logger.info(f"Configuration: {num_proposers}P / {num_solvers}S / {num_coordinators}C / {num_aggregators}A")
     logger.info(f"Rounds: {num_rounds}, Cycle delay: {cycle_delay}s, Task mode: {task_mode}")
+    logger.info(f"Model: {config.model.architecture}, Device: {config.resolve_device()}, Task type: {config.training.task_type}")
 
     total_nodes = num_proposers + num_solvers + num_coordinators + num_aggregators
     if total_nodes + 1 > len(HARDHAT_ACCOUNTS):
@@ -590,9 +600,10 @@ def run_orchestrator(
             store=store,
             metrics=metrics,
             project_id=1,
-            max_cycles=num_rounds * 10,  # Run long enough to catch solution commits
+            max_cycles=num_rounds * 10,
             cycle_delay=cycle_delay,
             extra_kwargs={"task_mode": task_mode},
+            config=config,
         )
         runners.append(runner)
         account_idx += 1
@@ -608,9 +619,10 @@ def run_orchestrator(
             store=store,
             metrics=metrics,
             project_id=1,
-            max_cycles=num_rounds * 10,  # Run long enough to complete reveal flow
+            max_cycles=num_rounds * 10,
             cycle_delay=cycle_delay,
             extra_kwargs={"task_mode": task_mode},
+            config=config,
         )
         runners.append(runner)
         account_idx += 1
@@ -626,9 +638,10 @@ def run_orchestrator(
             store=store,
             metrics=metrics,
             project_id=1,
-            max_cycles=num_rounds * 20,  # Run much longer to catch solution reveals
+            max_cycles=num_rounds * 20,
             cycle_delay=cycle_delay,
             extra_kwargs={"task_mode": task_mode},
+            config=config,
         )
         runners.append(runner)
         account_idx += 1
@@ -645,8 +658,9 @@ def run_orchestrator(
             metrics=metrics,
             project_id=1,
             max_cycles=num_rounds * 10,
-            cycle_delay=cycle_delay * 1.5,  # Aggregator polls frequently to catch rewards
+            cycle_delay=cycle_delay * 1.5,
             extra_kwargs={"task_mode": task_mode},
+            config=config,
         )
         runners.append(runner)
         account_idx += 1
@@ -664,6 +678,7 @@ def run_orchestrator(
             project_id=1,
             max_cycles=num_rounds * 15,
             cycle_delay=cycle_delay,
+            config=config,
         )
         runners.append(runner)
         account_idx += 1
