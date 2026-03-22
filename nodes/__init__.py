@@ -5,6 +5,8 @@ This package provides the node implementations for the Autonet distributed
 AI training and inference network.
 """
 
+__version__ = "0.1.0"
+
 from .core import (
     Node,
     NodeRole,

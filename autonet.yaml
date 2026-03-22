@@ -55,3 +55,45 @@ node:
   aggregation_method: fedavg  # fedavg | trimmed_mean
   trim_ratio: 0.2
   min_updates_for_aggregation: 2
+
+p2p:
+  listen_port: 0              # 0 = random port
+  listen_host: 0.0.0.0
+  bootstrap_peers: []         # multiaddr strings: /ip4/x.x.x.x/tcp/PORT/p2p/PEER_ID
+  enable_quic: false
+  enable_upnp: false
+  capability_advertise_interval: 60   # seconds
+  ping_interval: 30                   # seconds
+
+guild:
+  # guild_id: 1              # Guild this node belongs to (omit if not in a guild)
+  auto_join: false            # Auto-join recommended guild on startup
+  module_ids: []              # Module IDs this node can train (hex strings)
+  aggregation_level: flat     # flat (legacy) | guild | network
+  min_guild_updates: 2        # Min updates before guild-level aggregation
+  reputation_weight: 0.3      # Weight of guild reputation in network aggregation
+  member_count_weight: 0.7    # Weight of member count in network aggregation
+
+capture:
+  enabled_sources: []           # screen | audio (empty = capture disabled)
+  fps_cap: 2                    # Max frames per second for training data
+  resolution: [224, 224]        # Capture resize target [width, height]
+  screen_monitor: 1             # mss monitor index (1 = primary)
+
+privacy:
+  exclude_apps: []              # Window titles to skip (e.g. ["1Password", "KeePass"])
+  blur_regions: []              # [{x: 0, y: 0, w: 100, h: 100}] screen regions to always blur
+  scrub_pii: true               # Redact emails, phone numbers, credit card numbers
+
+resources:
+  max_cpu_percent: 80.0         # Pause training when CPU usage exceeds this
+  max_memory_mb: 4096           # Pause training when memory exceeds this (MB)
+  active_hours_start: 0         # Hour (0-23) when node becomes active (0 = always)
+  active_hours_end: 24          # Hour (0-24) when node goes idle (24 = always)
+  check_interval: 10.0          # Seconds between resource checks
+
+update:
+  check_interval: 3600          # Seconds between update checks
+  update_source: git            # git | http | blob_store
+  update_url: ""                # URL for http update source
+  auto_apply: false             # Automatically apply updates

@@ -79,40 +79,40 @@ ATN (`c:\code\atn`) is the most developed component. Integrate with governance.
 
 Nodes need to talk to each other. Blockchain for consensus, P2P for data.
 
-| # | Story | Size | Notes |
-|---|-------|------|-------|
-| 4.1 | libp2p integration: DHT discovery + NAT traversal | L | Kademlia for node discovery. Hole-punching for home routers. |
-| 4.2 | Latency-aware peer selection | M | Measure RTT to peers. Route inference through lowest-latency path. |
-| 4.3 | Weight delta transfer over P2P (not just blob store) | M | Direct solver → aggregator for speed. Blob store as fallback/persistence. |
-| 4.4 | Activation relay for pipeline-parallel inference | L | Forward activations between module hosts. Needs low latency. |
-| 4.5 | Guild-local gossip (intra-jurisdiction coordination) | M | Fast coordination within a training guild |
-| 4.6 | Cross-guild routing for inference pipeline | M | End-to-end path through modules hosted by different guilds |
-| 4.7 | Node capability advertisement via DHT | S | Announce: GPU, roles, bandwidth, modules hosted |
+| # | Story | Size | Status | Notes |
+|---|-------|------|--------|-------|
+| 4.1 | libp2p integration: DHT discovery + NAT traversal | L | **DONE** | `AutonetHost` wraps py-libp2p. TCP + optional QUIC transport, Noise encryption, UPnP NAT traversal. Bootstrap peer support. 4 lifecycle tests. |
+| 4.2 | Latency-aware peer selection | M | **DONE** | `PeerLatencyTracker` using libp2p PingService. EMA-smoothed RTT (alpha=0.3). `select_fastest_peers()`, `select_peers_for_route()`. 3 tests. |
+| 4.3 | Weight delta transfer over P2P (not just blob store) | M | **DONE** | Protocol `/autonet/weights/1.0.0`. Length-prefixed framing with SHA-256 integrity check. Chunked writes for Noise layer compatibility (65KB limit). 1 integration test. |
+| 4.4 | Activation relay for pipeline-parallel inference | L | **DONE** | Protocol `/autonet/activations/1.0.0`. Framed: `[total_len][meta_len][metadata_json][tensor_bytes]`. Handles 300KB+ tensors via chunked I/O. 1 integration test. |
+| 4.5 | Guild-local gossip (intra-jurisdiction coordination) | M | **DONE** | GossipSub (lazy init). `GuildMembership` abstraction. `join_guild()`, `publish_guild_message()`, `leave_guild()`. Topic: `/autonet/guild/{id}`. 2 tests. |
+| 4.6 | Cross-guild routing for inference pipeline | M | **DONE** | `select_peers_for_route(module_ids)` picks lowest-latency peer per module across guilds. `get_guild_for_module()` lookup. 1 test. |
+| 4.7 | Node capability advertisement via DHT | S | **DONE** | `NodeCapability` dataclass with JSON serialization. Protocol `/autonet/capability/1.0.0`. `advertise_capability()` pushes to connected peers. `find_capable_peers(role, min_gpu, module_id)`. 3 tests. |
 
 ### Epic 5: Data Pipeline
 
 User activity → local training data → weight deltas.
 
-| # | Story | Size | Notes |
-|---|-------|------|-------|
-| 5.1 | Screen/app capture service in daemon | L | Capture frames from selected sources. Similar to OBS source model. |
-| 5.2 | Browser extension for text extraction | L | Plain text from web pages. Separate deliverable. |
-| 5.3 | Local data preprocessing (frames → JEPA training batches) | M | Extract patches, normalize, create training batches from captures |
-| 5.4 | Audio capture (optional modality) | M | Microphone or system audio. Future modality for the model. |
-| 5.5 | Data source configuration persistence | S | Remember which apps/screens the user chose to share |
-| 5.6 | Privacy controls: exclude list, blur regions, scrub PII | M | User safety. Don't accidentally train on passwords. |
+| # | Story | Size | Status | Notes |
+|---|-------|------|--------|-------|
+| 5.1 | Screen/app capture service in daemon | L | **DONE** | `CaptureSource` ABC + `ScreenCaptureSource` (mss) + `AudioCaptureSource` in `nodes/common/capture.py`. `CaptureManager` with FPS-capped round-robin. Frame dataclass with image_data bytes. 22 tests. |
+| 5.2 | Browser extension for text extraction | L | **DONE** | Expanded ATN's Agent CDP Relay extension: `training-capture.js` content script extracts page text on load/mutation/SPA-navigation. Service worker forwards `training_frame` messages through relay's new `/training` WebSocket endpoint. Autonet's `BrowserCaptureSource` connects to relay, receives text frames with PII scrubbing via `scrub_text()`. Wired into `CaptureManager.create_sources_from_config()` as `"browser"` source type. Config: `browser_relay_url`, `browser_exclude_patterns`, `browser_scrub_pii`. Privacy filter extended to check `url` metadata. 22 tests. |
+| 5.3 | Local data preprocessing (frames → JEPA training batches) | M | **DONE** | `FramePreprocessor` in `nodes/common/preprocessing.py`. PNG→PIL→Resize→Normalize (ImageNet stats)→[B,C,H,W] tensors. `extract_patches()` utility. `TrainingBatch` dataclass. Handles RGBA/grayscale conversion. 14 tests. |
+| 5.4 | Audio capture (optional modality) | M | **DONE** | `AudioCaptureSource` stub in `nodes/common/capture.py`. Modality="audio", start/stop lifecycle, yields no frames until real audio backend wired. 4 tests. |
+| 5.5 | Data source configuration persistence | S | **DONE** | `CaptureConfig` dataclass in `nodes/common/config.py`. YAML persistence in `autonet.yaml` (sources list with type/name/enabled, fps_cap, buffer_size). `load_config()`/`save_config()`. |
+| 5.6 | Privacy controls: exclude list, blur regions, scrub PII | M | **DONE** | `PrivacyFilter` in `nodes/common/privacy.py`. App exclusion (case-insensitive source_id + window_title), blur regions (PIL GaussianBlur), PII scrubbing (email/phone/CC/SSN regex). `scrub_text()` standalone. `PrivacyConfig` dataclass. 16 tests. |
 
 ### Epic 6: Node Packaging
 
 Get the thing installable.
 
-| # | Story | Size | Notes |
-|---|-------|------|-------|
-| 6.1 | Solver node as daemon background service | L | Starts on boot, respects resource limits, survives restarts |
-| 6.2 | Resource limit configuration (CPU%, memory, active hours) | M | Don't eat the user's machine |
-| 6.3 | Environment config (YAML: RPC, blob store, device, model) | S | Replace all hardcoded values |
-| 6.4 | Single installer bundling ATN + autonet node | L | Platform-specific (Windows, Mac, Linux) |
-| 6.5 | Auto-update mechanism for node software | M | Evolution may require node code changes |
+| # | Story | Size | Status | Notes |
+|---|-------|------|--------|-------|
+| 6.1 | Solver node as daemon background service | L | **DONE** | `AutonetService` in `nodes/service.py`. Signal-based lifecycle (SIGTERM/SIGINT), main loop with resource + update checks. `nodes/__main__.py` entry point (`python -m nodes`). `ServiceState` enum. `__version__ = "0.1.0"`. 6 tests. |
+| 6.2 | Resource limit configuration (CPU%, memory, active hours) | M | **DONE** | `ResourceMonitor` in `nodes/common/resource_monitor.py`. psutil CPU/memory, torch.cuda GPU. Active hours (normal + overnight ranges). Rate-limited checks. `ResourceConfig` dataclass. 7 tests. |
+| 6.3 | Environment config (YAML: RPC, blob store, device, model) | S | **DONE** | `AutonetConfig` with all subsystem configs in `nodes/common/config.py`. `autonet.yaml` with capture, privacy, resources, update, guild sections. `load_config()`/`save_config()`. |
+| 6.4 | Single installer bundling ATN + autonet node | L | | Platform-specific (Windows, Mac, Linux) |
+| 6.5 | Auto-update mechanism for node software | M | **DONE** | `AutonetUpdater` in `nodes/common/updater.py`. Git (fetch+rev-parse), HTTP (version.json+SHA-256), blob_store sources. `UpdateInfo` with has_update property. `UpdateConfig` dataclass. 6 tests. |
 
 ---
 
@@ -137,24 +137,24 @@ Aspirational. Runs alongside Track 1-2. Not blocking the product.
 
 Jurisdictions that specialize in training specific model modules.
 
-| # | Story | Size | Notes |
-|---|-------|------|-------|
-| 8.1 | Guild creation contract (jurisdiction + module assignment) | L | A guild owns training responsibility for a module range |
-| 8.2 | Intra-guild aggregation (guild aggregates member deltas) | M | Jurisdiction-level FedAvg before network-level |
-| 8.3 | Network-level aggregation across guilds | M | Combine guild-level module updates into unified model |
-| 8.4 | Guild reputation and competition metrics | M | Which guild trains the best module? Reward accordingly. |
-| 8.5 | Guild membership and specialization matching | M | Route users to guilds based on hardware, data type, interest |
+| # | Story | Size | Status | Notes |
+|---|-------|------|--------|-------|
+| 8.1 | Guild creation contract (jurisdiction + module assignment) | L | **DONE** | `GuildRegistry.sol` in `contracts/governance/`. `createGuild(name, moduleIds[])`, `joinGuild()`, `leaveGuild()`, `setGuildAggregator()`. Module exclusivity (one guild per module). ATN staking for creators/members. 35 Hardhat tests. |
+| 8.2 | Intra-guild aggregation (guild aggregates member deltas) | M | **DONE** | `_cycle_guild_aggregation()` in aggregator. Filters updates by guild membership, runs FedAvg/trimmed_mean on guild-only deltas. Config: `guild.aggregation_level = "guild"`. Reports guild metrics after aggregation. |
+| 8.3 | Network-level aggregation across guilds | M | **DONE** | `_cycle_network_aggregation()` in aggregator. Collects guild-level aggregates, weights by member count + reputation via `GuildManager.get_guild_weights_for_aggregation()`. Config: `guild.aggregation_level = "network"`. Falls back to flat when no guild aggregates. |
+| 8.4 | Guild reputation and competition metrics | M | **DONE** | EMA-smoothed reputation in `GuildRegistry.sol` (same pattern as CapabilityScorecard). `recordGuildMetrics()`, `getGuildRanking()`, `getGuildRewardMultiplier()`. Linear 0.5x-1.5x multiplier. Reporter access control. |
+| 8.5 | Guild membership and specialization matching | M | **DONE** | `GuildManager` in `nodes/common/guild_manager.py`. `recommend_guild(capabilities)` scores by module overlap + reputation. `auto_join()`, `monitor_guild_health()`, `report_guild_metrics()`. `GuildConfig` in config.py, guild section in autonet.yaml. 39 Python tests. |
 
 ### Epic 9: Native Inference
 
 When the model becomes useful, serve it.
 
-| # | Story | Size | Notes |
-|---|-------|------|-------|
-| 9.1 | Inference request routing through module pipeline | L | User request → route through guild-hosted modules → K-vector → local decode |
-| 9.2 | Protocol-level token burn on native inference | M | The ideal: trustless enforcement. `_burn()` on request. |
-| 9.3 | Intelligence tiers (more modules = deeper model = higher price) | M | Tier 1: encoder only. Tier 3: full pipeline + decode. |
-| 9.4 | Decode trust verification (deterministic output matching) | M | Prevent decode nodes from substituting semantics |
+| # | Story | Size | Status | Notes |
+|---|-------|------|--------|-------|
+| 9.1 | Inference request routing through module pipeline | L | **DONE** | `InferencePipeline` in `nodes/common/inference_pipeline.py`. `plan_route()` maps tier→modules→guild peers. `execute()` runs local/stub. `InferenceRequest`/`InferenceResult`/`ModuleRoute` dataclasses. `PipelineStats` with avg_latency/success_rate. 8 tests. |
+| 9.2 | Protocol-level token burn on native inference | M | **DONE** | `burnForInference(amount, tier)` in Autonet.sol. `_burn()` on caller, per-tier tracking via `tierInferenceBurned` mapping. `InferenceBurned` event. `getTierBurnStats()` view. Rejects tier 0/4+, zero amount. 11 Hardhat tests. |
+| 9.3 | Intelligence tiers (more modules = deeper model = higher price) | M | **DONE** | `InferenceTier` IntEnum (1-3) in `nodes/common/intelligence_tiers.py`. `TIER_MODULES`: T1=encoder, T2=encoder+reasoning (4), T3=full pipeline (5). `TierPricing` with base_cost + per_token. `InferenceTierManager` with compute_cost, recommend_tier. 10 tests. |
+| 9.4 | Decode trust verification (deterministic output matching) | M | **DONE** | `DecodeVerifier` in `nodes/common/decode_verifier.py`. `DecodeOutput` with auto SHA-256 hash of token IDs. Majority voting with configurable agreement_threshold. `VerificationResult` enum (VERIFIED/MISMATCH/INSUFFICIENT/ERROR). Mixed plan hash detection. 7 tests. |
 
 ---
 
@@ -188,7 +188,7 @@ Explicitly deferred (described in PLAN.md for future reference):
 
 - Cross-jurisdiction model sharing
 - Differential privacy on weight deltas
-- Intelligence tier pricing
+- Intelligence tier pricing enforcement (advisory pricing implemented, on-chain enforcement deferred)
 - EMA blending with KL divergence monitoring
 - Inter-autonet cooperation (blockchain-level interop)
 - Native model self-evaluation (RPB Phase 3)

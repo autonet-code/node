@@ -82,6 +82,69 @@ class StakingConfig:
 
 
 @dataclass
+class P2PConfig:
+    """P2P networking configuration."""
+    listen_port: int = 0           # 0 = random port
+    listen_host: str = "0.0.0.0"
+    bootstrap_peers: list = field(default_factory=list)  # multiaddr strings
+    enable_quic: bool = False
+    enable_upnp: bool = False
+    capability_advertise_interval: int = 60  # seconds
+    ping_interval: int = 30                  # seconds
+
+
+@dataclass
+class CaptureConfig:
+    """Data capture configuration (Epic 5)."""
+    enabled_sources: list = field(default_factory=list)  # ["screen", "audio", "browser"]
+    fps_cap: int = 2                     # Max frames per second
+    resolution: list = field(default_factory=lambda: [224, 224])  # [width, height]
+    screen_monitor: int = 1              # mss monitor index (1 = primary)
+    browser_relay_url: str = "ws://127.0.0.1:9222/training"  # CDP relay training endpoint
+    browser_exclude_patterns: list = field(default_factory=list)  # URL patterns to skip
+    browser_scrub_pii: bool = True       # Scrub PII from browser-captured text
+
+
+@dataclass
+class PrivacyConfig:
+    """Privacy controls for captured data (Epic 5)."""
+    exclude_apps: list = field(default_factory=list)   # Window titles to skip
+    blur_regions: list = field(default_factory=list)    # [{"x": 0, "y": 0, "w": 100, "h": 100}]
+    scrub_pii: bool = True               # Redact emails, phones, credit cards
+
+
+@dataclass
+class ResourceConfig:
+    """Resource limits for the node (Epic 6)."""
+    max_cpu_percent: float = 80.0        # Pause training above this
+    max_memory_mb: int = 4096            # Pause training above this
+    active_hours_start: int = 0          # 0-23 hour (0 = always active)
+    active_hours_end: int = 24           # 0-24 hour (24 = always active)
+    check_interval: float = 10.0         # Seconds between checks
+
+
+@dataclass
+class UpdateConfig:
+    """Auto-update configuration (Epic 6)."""
+    check_interval: int = 3600           # Seconds between update checks
+    update_source: str = "git"           # "git", "http", or "blob_store"
+    update_url: str = ""                 # URL for http source
+    auto_apply: bool = False             # Auto-apply updates
+
+
+@dataclass
+class GuildConfig:
+    """Guild formation configuration."""
+    guild_id: Optional[int] = None           # Guild this node belongs to (None = not in a guild)
+    auto_join: bool = False                  # Auto-join recommended guild on startup
+    module_ids: list = field(default_factory=list)  # Module IDs this node can train
+    aggregation_level: str = "flat"          # "flat" (legacy), "guild", or "network"
+    min_guild_updates: int = 2               # Min updates before guild-level aggregation
+    reputation_weight: float = 0.3           # Weight of guild reputation in network aggregation
+    member_count_weight: float = 0.7         # Weight of member count in network aggregation
+
+
+@dataclass
 class NodeConfig:
     """Per-node runtime config."""
     max_cycles: int = 10
@@ -106,6 +169,12 @@ class AutonetConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     staking: StakingConfig = field(default_factory=StakingConfig)
     node: NodeConfig = field(default_factory=NodeConfig)
+    p2p: P2PConfig = field(default_factory=P2PConfig)
+    guild: GuildConfig = field(default_factory=GuildConfig)
+    capture: CaptureConfig = field(default_factory=CaptureConfig)
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+    resources: ResourceConfig = field(default_factory=ResourceConfig)
+    update: UpdateConfig = field(default_factory=UpdateConfig)
 
     def resolve_device(self) -> str:
         """Resolve 'auto' to actual device."""
@@ -204,6 +273,12 @@ def _dict_to_config(raw: dict) -> AutonetConfig:
         "training": (TrainingConfig, cfg.training),
         "staking": (StakingConfig, cfg.staking),
         "node": (NodeConfig, cfg.node),
+        "p2p": (P2PConfig, cfg.p2p),
+        "guild": (GuildConfig, cfg.guild),
+        "capture": (CaptureConfig, cfg.capture),
+        "privacy": (PrivacyConfig, cfg.privacy),
+        "resources": (ResourceConfig, cfg.resources),
+        "update": (UpdateConfig, cfg.update),
     }
 
     for section, (cls, instance) in sub_map.items():

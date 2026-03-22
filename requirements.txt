@@ -13,14 +13,21 @@ psutil>=5.9.0
 python-dotenv>=1.0.0
 pyyaml>=6.0
 toml>=0.10.0
+mss>=9.0.0
 
 # Optional: ML frameworks (uncomment as needed)
 # torch>=2.0.0
 # numpy>=1.24.0
 # scipy>=1.10.0
 
+# P2P networking
+libp2p>=0.6.0
+trio>=0.22.0
+miniupnpc>=2.0
+
 # Development
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
+pytest-trio>=0.8.0
 black>=23.0.0
 mypy>=1.0.0

@@ -14,6 +14,7 @@ from ..common.contracts import ContractRegistry
 from ..common.blob_store import BlobStore
 from ..common.config import AutonetConfig, load_config
 from ..common.governance import GovernanceBridge
+from ..common.guild_manager import GuildManager, GuildInfo
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ class AggregatorMetrics:
     solutions_committed: int = 0
     votes_submitted: int = 0
     aggregations_done: int = 0
+    guild_aggregations_done: int = 0
+    network_aggregations_done: int = 0
     forced_errors_caught: int = 0
     errors: int = 0
     cycles: int = 0
@@ -39,6 +42,12 @@ class ProjectAggregationState:
     collected_updates: List[str] = field(default_factory=list)
     aggregation_rounds: int = 0
     last_model_cid: Optional[str] = None
+    # Guild-level tracking: guild_id -> list of update CIDs from that guild
+    guild_updates: Dict[int, List[str]] = field(default_factory=dict)
+    # Network-level tracking: guild_id -> guild-level aggregated CID
+    guild_aggregated_cids: Dict[int, str] = field(default_factory=dict)
+    # Mapping: update CID -> solver address (for guild membership filtering)
+    update_solvers: Dict[str, str] = field(default_factory=dict)
 
 
 class AggregatorNode:
@@ -100,8 +109,13 @@ class AggregatorNode:
         # Governance bridge for attestation and heartbeat
         self.governance = GovernanceBridge(registry, node_id, project_id)
 
+        # Guild manager for guild-aware aggregation
+        self.guild_manager = GuildManager(registry, node_id, self.config)
+        self.aggregation_level = self.config.guild.aggregation_level
+
         logger.info(f"[{self.node_id}] Initialized with address {self.my_address[:10]}...")
         logger.info(f"[{self.node_id}] Aggregation method: {self.aggregation_method}")
+        logger.info(f"[{self.node_id}] Aggregation level: {self.aggregation_level}")
 
     def stop(self):
         """Signal the node to stop running."""
@@ -153,9 +167,15 @@ class AggregatorNode:
         # Step 2: Poll for new RewardsDistributed events
         self._poll_rewards_distributed()
 
-        # Step 3: Check if we have enough updates to aggregate
-        if len(self.project_state.collected_updates) >= self.min_updates:
-            self._aggregate_and_publish()
+        # Step 3: Aggregate based on configured level
+        if self.aggregation_level == "guild":
+            self._cycle_guild_aggregation()
+        elif self.aggregation_level == "network":
+            self._cycle_network_aggregation()
+        else:
+            # Flat (legacy) aggregation
+            if len(self.project_state.collected_updates) >= self.min_updates:
+                self._aggregate_and_publish()
 
     def _stake(self):
         """Stake as AGGREGATOR role."""
@@ -225,7 +245,7 @@ class AggregatorNode:
                 # Get solution CID from ResultsRewards.revealedSolutions mapping
                 solution_cid = self._get_solution_cid(task_id, recipient)
                 if solution_cid:
-                    self._collect_update(task_id, solution_cid)
+                    self._collect_update(task_id, solution_cid, solver=recipient)
                 else:
                     logger.warning(
                         f"[{self.node_id}] No solution CID found for task {task_id}, solver {recipient[:10]}..."
@@ -250,13 +270,18 @@ class AggregatorNode:
 
         return None
 
-    def _collect_update(self, task_id: int, update_cid: str):
+    def _collect_update(self, task_id: int, update_cid: str, solver: Optional[str] = None):
         """Collect a verified update CID."""
         if update_cid in self.project_state.collected_updates:
             logger.debug(f"[{self.node_id}] Update {update_cid[:20]}... already collected")
             return
 
         self.project_state.collected_updates.append(update_cid)
+
+        # Track solver address for guild-level filtering
+        if solver:
+            self.project_state.update_solvers[update_cid] = solver
+
         logger.info(
             f"[{self.node_id}] Collected update {update_cid[:20]}... "
             f"(total: {len(self.project_state.collected_updates)})"
@@ -784,11 +809,340 @@ class AggregatorNode:
 
         return aggregated_model
 
+    # =========================================================================
+    # Story 8.2: Guild-Level Aggregation
+    # =========================================================================
+
+    def _cycle_guild_aggregation(self):
+        """
+        Guild-level aggregation cycle.
+
+        Only aggregates updates from solvers that are members of this node's guild.
+        Produces a guild-level model update that can be consumed by a network
+        aggregator (Story 8.3).
+        """
+        guild_id = self.guild_manager.guild_id
+        if guild_id is None:
+            logger.warning(f"[{self.node_id}] Guild aggregation configured but no guild_id set")
+            # Fall back to flat aggregation
+            if len(self.project_state.collected_updates) >= self.min_updates:
+                self._aggregate_and_publish()
+            return
+
+        # Filter updates to only those from guild members
+        guild_updates = []
+        for cid in self.project_state.collected_updates:
+            solver = self.project_state.update_solvers.get(cid)
+            if solver and self.guild_manager.is_member_of_guild(solver, guild_id):
+                guild_updates.append(cid)
+
+        min_guild_updates = self.config.guild.min_guild_updates
+        if len(guild_updates) < min_guild_updates:
+            return
+
+        logger.info(
+            f"[{self.node_id}] Guild aggregation: {len(guild_updates)} updates "
+            f"from guild {guild_id} (of {len(self.project_state.collected_updates)} total)"
+        )
+
+        # Download guild member updates
+        updates = []
+        for cid in guild_updates:
+            try:
+                update_data = self.store.get_json(cid)
+                if update_data:
+                    updates.append(update_data)
+            except Exception as e:
+                logger.error(f"[{self.node_id}] Error downloading {cid}: {e}")
+
+        if not updates:
+            return
+
+        # Aggregate using configured method
+        if self.aggregation_method == "trimmed_mean":
+            aggregated = self._trimmed_mean_aggregate(updates)
+        else:
+            aggregated = self._fedavg(updates)
+
+        # Add guild-level metadata
+        aggregated["metadata"] = {
+            "project_id": self.project_id,
+            "guild_id": guild_id,
+            "aggregation_level": "guild",
+            "aggregation_round": self.project_state.aggregation_rounds + 1,
+            "updates_count": len(updates),
+            "aggregator": self.my_address,
+            "timestamp": int(time.time()),
+        }
+
+        # Convert for serialization
+        aggregated = self._numpy_to_python(aggregated)
+
+        # Upload guild-level aggregate
+        try:
+            guild_cid = self.store.add_json(aggregated)
+            if not guild_cid:
+                logger.error(f"[{self.node_id}] Failed to upload guild aggregate")
+                self.metrics.errors += 1
+                return
+
+            logger.info(
+                f"[{self.node_id}] Guild {guild_id} aggregate uploaded: {guild_cid[:20]}..."
+            )
+
+            # Track this guild's aggregate for network-level consumption
+            self.project_state.guild_aggregated_cids[guild_id] = guild_cid
+
+            # Remove processed updates from collected pool
+            for cid in guild_updates:
+                if cid in self.project_state.collected_updates:
+                    self.project_state.collected_updates.remove(cid)
+                self.project_state.update_solvers.pop(cid, None)
+
+            self.metrics.guild_aggregations_done += 1
+            self.metrics.aggregations_done += 1
+            self.project_state.aggregation_rounds += 1
+
+            # Attest work
+            self.governance.attest_task_completion(units=len(updates))
+
+            # Report guild metrics if we have improvement data
+            if aggregated.get("aggregated_metrics"):
+                avg_accuracy = aggregated["aggregated_metrics"].get("avg_accuracy", 0)
+                # Convert accuracy to basis points (0-10000)
+                improvement_bps = int(min(avg_accuracy * 10000, 10000))
+                for mod_id in (self.guild_manager.get_guild(guild_id) or GuildInfo(0, "", "", "", [], 0, 0, True)).module_ids:
+                    self.guild_manager.report_guild_metrics(mod_id, improvement_bps)
+
+        except Exception as e:
+            logger.error(f"[{self.node_id}] Guild aggregation error: {e}", exc_info=True)
+            self.metrics.errors += 1
+
+    # =========================================================================
+    # Story 8.3: Network-Level Aggregation Across Guilds
+    # =========================================================================
+
+    def _cycle_network_aggregation(self):
+        """
+        Network-level aggregation cycle.
+
+        Collects guild-level aggregated updates and combines them using
+        reputation-weighted averaging. The network aggregator does NOT see
+        individual solver updates — only guild-level aggregates.
+        """
+        guild_cids = self.project_state.guild_aggregated_cids
+
+        # Also check flat collected_updates — in case guilds aren't fully
+        # set up yet, we can still aggregate what we have
+        if not guild_cids and len(self.project_state.collected_updates) >= self.min_updates:
+            # Fallback: flat aggregation when no guild aggregates available
+            self._aggregate_and_publish()
+            return
+
+        if len(guild_cids) < 1:
+            return
+
+        logger.info(
+            f"[{self.node_id}] Network aggregation: {len(guild_cids)} guild aggregates"
+        )
+
+        # Get guild weights from GuildManager
+        guild_weights = self.guild_manager.get_guild_weights_for_aggregation()
+
+        # Download guild aggregates
+        guild_updates = []
+        weights = []
+        guild_ids_processed = []
+
+        for gid, cid in guild_cids.items():
+            try:
+                data = self.store.get_json(cid)
+                if data:
+                    guild_updates.append(data)
+                    weights.append(guild_weights.get(gid, 1.0 / len(guild_cids)))
+                    guild_ids_processed.append(gid)
+            except Exception as e:
+                logger.error(f"[{self.node_id}] Error downloading guild {gid} aggregate: {e}")
+
+        if not guild_updates:
+            return
+
+        # Normalize weights
+        total_weight = sum(weights)
+        if total_weight > 0:
+            weights = [w / total_weight for w in weights]
+
+        # Perform weighted aggregation across guild updates
+        aggregated = self._weighted_guild_aggregate(guild_updates, weights)
+
+        aggregated["metadata"] = {
+            "project_id": self.project_id,
+            "aggregation_level": "network",
+            "aggregation_round": self.project_state.aggregation_rounds + 1,
+            "guild_count": len(guild_updates),
+            "guild_ids": guild_ids_processed,
+            "guild_weights": {str(gid): w for gid, w in zip(guild_ids_processed, weights)},
+            "aggregator": self.my_address,
+            "timestamp": int(time.time()),
+        }
+
+        # Apply to global model if real training
+        if aggregated.get("real_training") and "aggregated_weight_delta" in aggregated:
+            try:
+                aggregated = self._apply_delta_to_global(aggregated)
+            except Exception as e:
+                logger.warning(f"[{self.node_id}] Could not apply delta to global model: {e}")
+
+        aggregated = self._numpy_to_python(aggregated)
+
+        # Upload and publish
+        try:
+            new_model_cid = self.store.add_json(aggregated)
+            if not new_model_cid:
+                logger.error(f"[{self.node_id}] Failed to upload network aggregate")
+                self.metrics.errors += 1
+                return
+
+            logger.info(f"[{self.node_id}] Network aggregate uploaded: {new_model_cid[:20]}...")
+
+            # Publish on-chain
+            result = self.registry.set_mature_model(
+                self.project_id,
+                new_model_cid,
+                price=0,
+            )
+
+            if result.success:
+                logger.info(
+                    f"[{self.node_id}] Published network-aggregated model: {new_model_cid[:20]}..."
+                )
+                self.metrics.network_aggregations_done += 1
+                self.metrics.aggregations_done += 1
+                self.project_state.aggregation_rounds += 1
+                self.project_state.last_model_cid = new_model_cid
+                self.project_state.guild_aggregated_cids.clear()
+
+                self.governance.attest_task_completion(units=len(guild_updates))
+                self.governance.claim_epoch_rewards()
+                self.governance.claim_reputation()
+            else:
+                logger.error(f"[{self.node_id}] Failed to publish model: {result.error}")
+                self.metrics.errors += 1
+
+        except Exception as e:
+            logger.error(f"[{self.node_id}] Network aggregation error: {e}", exc_info=True)
+            self.metrics.errors += 1
+
+    def _weighted_guild_aggregate(
+        self, guild_updates: List[Dict[str, Any]], weights: List[float]
+    ) -> Dict[str, Any]:
+        """
+        Weighted aggregation of guild-level updates.
+
+        Each guild's contribution is weighted by its reputation and member count.
+        For real weight deltas, this performs a weighted average of parameters.
+        For mock updates, averages numeric values with weights.
+        """
+        has_real_deltas = all(
+            "aggregated_weight_delta" in u or "weight_delta" in u
+            for u in guild_updates
+        )
+
+        if has_real_deltas:
+            return self._weighted_guild_aggregate_real(guild_updates, weights)
+        else:
+            return self._weighted_guild_aggregate_mock(guild_updates, weights)
+
+    def _weighted_guild_aggregate_real(
+        self, guild_updates: List[Dict[str, Any]], weights: List[float]
+    ) -> Dict[str, Any]:
+        """Weighted aggregation of real weight deltas from guilds."""
+        try:
+            import numpy as np
+
+            # Extract deltas (guild aggregates use "aggregated_weight_delta")
+            deltas = []
+            for update in guild_updates:
+                delta = update.get("aggregated_weight_delta") or update.get("weight_delta")
+                deltas.append(delta)
+
+            # Get parameter keys from first delta
+            param_keys = list(deltas[0].keys())
+            aggregated_delta = {}
+
+            for key in param_keys:
+                param_values = []
+                for delta in deltas:
+                    value = delta[key]
+                    if isinstance(value, list):
+                        param_values.append(np.array(value))
+                    elif isinstance(value, np.ndarray):
+                        param_values.append(value)
+                    else:
+                        param_values.append(np.array(value))
+
+                # Weighted average
+                result = np.zeros_like(param_values[0], dtype=np.float64)
+                for val, w in zip(param_values, weights):
+                    result += val * w
+                aggregated_delta[key] = result.tolist()
+
+            return {
+                "aggregated_weight_delta": aggregated_delta,
+                "aggregation_method": f"{self.aggregation_method}_guild_weighted",
+                "num_updates": len(guild_updates),
+                "real_training": True,
+            }
+
+        except Exception as e:
+            logger.error(f"[{self.node_id}] Weighted real aggregation error: {e}", exc_info=True)
+            return self._weighted_guild_aggregate_mock(guild_updates, weights)
+
+    def _weighted_guild_aggregate_mock(
+        self, guild_updates: List[Dict[str, Any]], weights: List[float]
+    ) -> Dict[str, Any]:
+        """Weighted aggregation of mock guild updates."""
+        aggregated = {}
+        all_keys = set()
+        for update in guild_updates:
+            all_keys.update(update.keys())
+
+        for key in all_keys:
+            if key in ("metadata", "weight_delta", "aggregated_weight_delta"):
+                continue
+
+            values = []
+            value_weights = []
+            for update, w in zip(guild_updates, weights):
+                if key in update and isinstance(update[key], (int, float)):
+                    values.append(update[key])
+                    value_weights.append(w)
+
+            if values:
+                total_w = sum(value_weights)
+                if total_w > 0:
+                    aggregated[key] = sum(v * w for v, w in zip(values, value_weights)) / total_w
+                else:
+                    aggregated[key] = sum(values) / len(values)
+            else:
+                # Non-numeric: take first value
+                for update in guild_updates:
+                    if key in update:
+                        aggregated[key] = update[key]
+                        break
+
+        aggregated["aggregation_method"] = f"{self.aggregation_method}_guild_weighted_mock"
+        aggregated["num_updates"] = len(guild_updates)
+        aggregated["real_training"] = False
+        return aggregated
+
     def _log_final_metrics(self):
         """Log final metrics at shutdown."""
         logger.info(f"[{self.node_id}] Final metrics:")
         logger.info(f"  Cycles: {self.metrics.cycles}")
         logger.info(f"  Aggregations: {self.metrics.aggregations_done}")
+        logger.info(f"  Guild aggregations: {self.metrics.guild_aggregations_done}")
+        logger.info(f"  Network aggregations: {self.metrics.network_aggregations_done}")
         logger.info(f"  Errors: {self.metrics.errors}")
         logger.info(f"  Aggregation rounds: {self.project_state.aggregation_rounds}")
         if self.project_state.last_model_cid:
