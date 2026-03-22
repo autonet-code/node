@@ -184,12 +184,31 @@ class AutonetBridge:
     def get_status(self) -> dict[str, Any]:
         """Get current autonet status for WS response."""
         # Update resource metrics if service is running
-        if self._service and self.state.status == AutonetStatus.RUNNING:
+        if self._service and self.state.status in (
+            AutonetStatus.RUNNING, AutonetStatus.PAUSED
+        ):
             try:
                 svc_status = self._service.status()
-                self.state.cycles_completed = svc_status.get("cycles_completed", 0)
-                self.state.uptime_seconds = svc_status.get("uptime_seconds", 0.0)
-                self.state.errors = svc_status.get("errors", 0)
+                self.state.cycles_completed = svc_status.cycles_completed
+                self.state.uptime_seconds = svc_status.uptime_seconds
+                self.state.errors = svc_status.errors
+                # Sync state (service may have paused itself due to resources)
+                if svc_status.state.value == "paused":
+                    self.state.status = AutonetStatus.PAUSED
+                elif svc_status.state.value == "running":
+                    self.state.status = AutonetStatus.RUNNING
+                # Pull resource snapshot if available
+                if self._service._resource_monitor:
+                    snap = self._service._resource_monitor.last_snapshot
+                    if snap:
+                        self.state.cpu_percent = snap.cpu_percent
+                        self.state.memory_mb = snap.memory_mb
+                        self.state.gpu_memory_mb = snap.gpu_memory_mb
+                        try:
+                            import torch
+                            self.state.gpu_available = torch.cuda.is_available()
+                        except ImportError:
+                            self.state.gpu_available = False
             except Exception:
                 pass  # Service might be between cycles
 
