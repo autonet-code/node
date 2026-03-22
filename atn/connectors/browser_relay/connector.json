@@ -1,0 +1,7 @@
+{
+  "id": "browser_relay",
+  "name": "Browser Control",
+  "description": "Control Chrome via CDP relay — navigate, click, type, screenshot, eval JS, observe DOM changes. Requires Chrome with the Agent CDP Relay extension.",
+  "mode": "local",
+  "entry": "server.py"
+}

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "atn": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": ["/c", "python", "-m", "atn.mcp_server"],
+      "cwd": "C:\\code\\autonet"
+    }
+  }
+}

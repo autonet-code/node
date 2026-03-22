@@ -1,0 +1,7 @@
+{
+  "id": "google_calendar",
+  "name": "Google Calendar & Tasks",
+  "description": "Read and manage Google Calendar events and Google Tasks. Requires OAuth2 setup.",
+  "mode": "local",
+  "entry": "server.py"
+}

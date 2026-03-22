@@ -1,0 +1,265 @@
+"""Orchestrator conversation persistence.
+
+Stores the conversation history between the user and the orchestrator so that
+context carries across invocations.  Each "session" is a linear sequence of
+turns (user message + orchestrator response).
+
+Disk layout:
+    data_dir/conversations/
+        active.jsonl          Current conversation (append-only)
+        <session_id>.jsonl    Archived conversations
+
+Each line in a JSONL file is one turn:
+    {"role": "user", "content": "...", "timestamp": "..."}
+    {"role": "assistant", "content": "...", "timestamp": "...", "execution_id": "..."}
+
+The sliding window works by counting turns from the front. When the estimated
+token count exceeds the budget, the oldest turns are dropped at read time —
+the JSONL on disk keeps everything.  This means archived conversations are
+always complete.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import shutil
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+log = logging.getLogger(__name__)
+
+# Rough token estimation: ~4 chars per token for English text.
+_CHARS_PER_TOKEN = 4
+
+# Default context budget for conversation history (in tokens).
+# Leave room for system prompt (~2k) + new user message + tool calls.
+# Sonnet has 200k context.  We reserve 150k for history.
+DEFAULT_HISTORY_TOKEN_BUDGET = 150_000
+
+
+@dataclass
+class ConversationTurn:
+    """One turn in the conversation."""
+    role: str                   # "user" or "assistant"
+    content: str                # message text
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    execution_id: str | None = None   # links assistant turns to execution records
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp.isoformat(),
+        }
+        if self.execution_id:
+            d["execution_id"] = self.execution_id
+        return d
+
+    @staticmethod
+    def from_dict(d: dict[str, Any]) -> ConversationTurn:
+        return ConversationTurn(
+            role=d["role"],
+            content=d["content"],
+            timestamp=datetime.fromisoformat(d["timestamp"]) if d.get("timestamp") else datetime.now(timezone.utc),
+            execution_id=d.get("execution_id"),
+        )
+
+
+class ConversationStore:
+    """Manages orchestrator conversation history with JSONL persistence.
+
+    The "active" conversation is the current ongoing session.  When the user
+    resets, the active conversation is archived (moved to <session_id>.jsonl)
+    and a fresh active.jsonl is started.
+
+    The in-memory buffer is the source of truth during runtime.  It's appended
+    to disk after each turn for crash safety.
+    """
+
+    def __init__(self, data_dir: Path, *, history_token_budget: int = DEFAULT_HISTORY_TOKEN_BUDGET) -> None:
+        self._dir = data_dir / "conversations"
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._active_path = self._dir / "active.jsonl"
+        self._budget = history_token_budget
+
+        # In-memory buffer of the active conversation
+        self._turns: list[ConversationTurn] = []
+
+        # Load active conversation from disk if it exists
+        self._hydrate()
+
+    # ------------------------------------------------------------------
+    # Read
+    # ------------------------------------------------------------------
+
+    def get_turns(self) -> list[ConversationTurn]:
+        """Return all turns in the active conversation."""
+        return list(self._turns)
+
+    def get_history_for_prompt(self) -> str:
+        """Build a conversation history string that fits within the token budget.
+
+        Returns a formatted string of previous turns, newest last, trimmed
+        from the front (oldest) if the total exceeds the budget.  Returns
+        empty string if no history.
+        """
+        if not self._turns:
+            return ""
+
+        # Build formatted turns
+        formatted: list[str] = []
+        _ROLE_PREFIX = {"user": "User", "assistant": "Orchestrator", "system": "System"}
+        for turn in self._turns:
+            prefix = _ROLE_PREFIX.get(turn.role, turn.role.title())
+            formatted.append(f"{prefix}: {turn.content}")
+
+        # Estimate total tokens
+        total_chars = sum(len(f) for f in formatted)
+        budget_chars = self._budget * _CHARS_PER_TOKEN
+
+        if total_chars <= budget_chars:
+            return "\n\n".join(formatted)
+
+        # Sliding window: drop oldest turns until we fit
+        start = 0
+        while start < len(formatted) and total_chars > budget_chars:
+            total_chars -= len(formatted[start])
+            start += 1
+
+        if start >= len(formatted):
+            return ""
+
+        # Prepend a note that earlier context was trimmed
+        trimmed = formatted[start:]
+        return "[Earlier conversation trimmed]\n\n" + "\n\n".join(trimmed)
+
+    def turn_count(self) -> int:
+        """Number of turns in the active conversation."""
+        return len(self._turns)
+
+    # ------------------------------------------------------------------
+    # Write
+    # ------------------------------------------------------------------
+
+    def add_user_turn(self, content: str) -> ConversationTurn:
+        """Record a user message."""
+        turn = ConversationTurn(role="user", content=content)
+        self._turns.append(turn)
+        self._persist_turn(turn)
+        return turn
+
+    def add_assistant_turn(self, content: str, execution_id: str | None = None) -> ConversationTurn:
+        """Record an orchestrator response."""
+        turn = ConversationTurn(role="assistant", content=content, execution_id=execution_id)
+        self._turns.append(turn)
+        self._persist_turn(turn)
+        return turn
+
+    def add_system_turn(self, content: str) -> ConversationTurn:
+        """Record a system-generated message (e.g. status briefing)."""
+        turn = ConversationTurn(role="system", content=content)
+        self._turns.append(turn)
+        self._persist_turn(turn)
+        return turn
+
+    # ------------------------------------------------------------------
+    # Session management
+    # ------------------------------------------------------------------
+
+    def reset(self) -> str | None:
+        """Archive the current conversation and start fresh.
+
+        Returns the archived session ID, or None if there was nothing to archive.
+        """
+        if not self._turns:
+            return None
+
+        session_id = uuid4().hex[:12]
+        archive_path = self._dir / f"{session_id}.jsonl"
+
+        # Move active file to archive
+        if self._active_path.exists():
+            try:
+                shutil.move(str(self._active_path), str(archive_path))
+            except Exception:
+                log.exception("Failed to archive conversation to %s", archive_path)
+                # Fall back: copy then delete
+                try:
+                    shutil.copy2(str(self._active_path), str(archive_path))
+                    self._active_path.unlink(missing_ok=True)
+                except Exception:
+                    log.exception("Failed to archive conversation (fallback)")
+
+        self._turns.clear()
+        log.info("Conversation reset (archived as %s, %d turns)", session_id, len(self._turns))
+        return session_id
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """List archived conversation sessions.
+
+        Returns a list of {session_id, turn_count, started_at, ended_at} dicts,
+        sorted newest first.
+        """
+        sessions: list[dict[str, Any]] = []
+        for path in sorted(self._dir.glob("*.jsonl"), reverse=True):
+            if path.name == "active.jsonl":
+                continue
+            session_id = path.stem
+            turns = self._load_jsonl(path)
+            if not turns:
+                continue
+            sessions.append({
+                "session_id": session_id,
+                "turn_count": len(turns),
+                "started_at": turns[0].timestamp.isoformat(),
+                "ended_at": turns[-1].timestamp.isoformat(),
+                "first_message": turns[0].content[:200] if turns else "",
+            })
+        return sessions
+
+    def get_session(self, session_id: str) -> list[ConversationTurn]:
+        """Load an archived conversation by session ID."""
+        path = self._dir / f"{session_id}.jsonl"
+        if not path.exists():
+            return []
+        return self._load_jsonl(path)
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def _persist_turn(self, turn: ConversationTurn) -> None:
+        """Append one turn to the active JSONL file."""
+        try:
+            with open(self._active_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(turn.to_dict(), default=str) + "\n")
+        except Exception:
+            log.exception("Failed to persist conversation turn")
+
+    def _hydrate(self) -> None:
+        """Load the active conversation from disk into memory."""
+        if not self._active_path.exists():
+            return
+        self._turns = self._load_jsonl(self._active_path)
+        if self._turns:
+            log.info("Hydrated active conversation: %d turns", len(self._turns))
+
+    @staticmethod
+    def _load_jsonl(path: Path) -> list[ConversationTurn]:
+        """Load turns from a JSONL file."""
+        turns: list[ConversationTurn] = []
+        try:
+            for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    turns.append(ConversationTurn.from_dict(json.loads(line)))
+                except Exception:
+                    log.warning("Corrupt turn at line %d in %s, skipping", line_no, path)
+        except Exception:
+            log.exception("Failed to read conversation file %s", path)
+        return turns

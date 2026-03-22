@@ -1,0 +1,7 @@
+{
+  "id": "voice",
+  "name": "Voice / TTS",
+  "description": "Text-to-speech — speak aloud, announce, play beeps. Supports local Piper TTS and ElevenLabs cloud.",
+  "mode": "local",
+  "entry": "server.py"
+}

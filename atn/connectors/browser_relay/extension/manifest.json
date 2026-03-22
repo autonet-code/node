@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Agent CDP Relay",
+  "version": "2.2",
+  "description": "Bridges AI agent frameworks to your real Chrome profile via chrome.debugger, with training data capture for Autonet",
+  "permissions": ["debugger", "tabs", "storage"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["keep-alive.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["training-capture.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Agent CDP Relay"
+  }
+}

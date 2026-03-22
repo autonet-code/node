@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { width: 260px; padding: 12px; font-family: system-ui; font-size: 13px; }
+    .status { padding: 6px 10px; border-radius: 6px; margin-bottom: 8px; font-weight: 600; }
+    .connected { background: #d4edda; color: #155724; }
+    .disconnected { background: #f8d7da; color: #721c24; }
+    .info { color: #555; font-size: 12px; margin-top: 4px; }
+    h3 { margin: 0 0 8px 0; }
+  </style>
+</head>
+<body>
+  <h3>Agent CDP Relay</h3>
+  <div id="status" class="status disconnected">Checking...</div>
+  <div class="info" id="info"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

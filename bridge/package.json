@@ -1,0 +1,10 @@
+{
+  "name": "atn-claude-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.70",
+    "zod": "^4.3.6"
+  }
+}

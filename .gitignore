@@ -1,0 +1,26 @@
+FUNDING_LEADS.md
+CLAUDE.md
+rpb_gemini.txt
+rpb_speaker_notes.md
+share.md
+artefacts/
+node_modules/
+__pycache__/
+*.pyc
+.claude-workers/
+artifacts/
+training_run*.log
+deployment-addresses.json
+# ATN runtime
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+test_data_*/
+*.running.json
+latest.txt
+bun.lockb
+bun.lock
+/agents/
+*.log
+PLAN.md
