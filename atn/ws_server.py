@@ -481,6 +481,32 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        # Earnings dashboard (Story 3.5)
+        if msg_type == "autonet_earnings":
+            try:
+                result = await self.runtime.autonet.get_earnings()
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "autonet_claim_reward":
+            epoch_id = msg.get("epoch_id")
+            service_id = msg.get("service_id", "")
+            private_key = msg.get("private_key", "")
+            if epoch_id is None or not service_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'epoch_id' or 'service_id'"}
+            if not private_key:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'private_key'"}
+            try:
+                result = await self.runtime.autonet.claim_reward(
+                    epoch_id=int(epoch_id),
+                    service_id=service_id,
+                    private_key=private_key,
+                )
+                return {"msg_id": msg_id, "ok": result.get("status") != "error", "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         # Data capture & privacy (Story 3.4)
         if msg_type == "autonet_capture_config":
             try:

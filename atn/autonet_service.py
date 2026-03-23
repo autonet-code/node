@@ -456,6 +456,193 @@ class AutonetBridge:
         return None
 
     # ------------------------------------------------------------------
+    # Earnings dashboard (Story 3.5)
+    # ------------------------------------------------------------------
+
+    async def get_earnings(self) -> dict[str, Any]:
+        """Get the user's ATN earnings summary.
+
+        Returns local training metrics and, if wallet+contract are
+        available, on-chain epoch reward data.
+        """
+        # Local training stats (always available)
+        local = {
+            "cycles_completed": self.state.cycles_completed,
+            "uptime_seconds": self.state.uptime_seconds,
+            "status": self.state.status.value,
+        }
+
+        # On-chain earnings (requires wallet + contract)
+        on_chain: dict[str, Any] = {
+            "available": False,
+            "balance": "0",
+            "total_burned": "0",
+            "current_epoch": 0,
+            "claimable_rewards": [],
+        }
+
+        if (self.state.wallet_connected
+                and self.state.rpc_url
+                and self._get_autonet_contract_address()):
+            try:
+                on_chain = await self._fetch_on_chain_earnings()
+            except Exception as e:
+                log.debug("Failed to fetch on-chain earnings: %s", e)
+
+        return {
+            "local": local,
+            "on_chain": on_chain,
+        }
+
+    async def _fetch_on_chain_earnings(self) -> dict[str, Any]:
+        """Fetch earnings data from the Autonet contract."""
+        from web3 import Web3
+
+        w3 = Web3(Web3.HTTPProvider(self.state.rpc_url))
+        if not w3.is_connected():
+            return {"available": False, "error": "RPC not reachable"}
+
+        autonet_address = self._get_autonet_contract_address()
+        abi = self._load_contract_abi("Autonet")
+        if not autonet_address or not abi:
+            return {"available": False, "error": "Contract not configured"}
+
+        contract = w3.eth.contract(
+            address=Web3.to_checksum_address(autonet_address),
+            abi=abi,
+        )
+
+        wallet = Web3.to_checksum_address(self.state.wallet_address)
+
+        # Fetch key data points
+        balance = contract.functions.balanceOf(wallet).call()
+        current_epoch = contract.functions.currentEpoch().call()
+        total_burned = contract.functions.totalInferenceBurned().call()
+        user_burned = contract.functions.userInferenceBurned(wallet).call()
+
+        # Check user contract
+        user_contract = contract.functions.getUserContract(wallet).call()
+        has_user_contract = user_contract != "0x" + "0" * 40
+
+        # Scan recent epochs for claimable rewards
+        claimable: list[dict[str, Any]] = []
+        scan_start = max(1, current_epoch - 10)  # Last 10 epochs
+        for epoch_id in range(scan_start, current_epoch + 1):
+            try:
+                epoch_stats = contract.functions.getEpochStats(epoch_id).call()
+                total_usage, budget, finalized, _ = epoch_stats
+                if not finalized or budget == 0:
+                    continue
+
+                # Check all services for this user's attested usage
+                service_ids = contract.functions.getAllServiceIds().call()
+                for sid in service_ids:
+                    attester_usage = contract.functions.getAttesterUsage(
+                        epoch_id, sid, wallet
+                    ).call()
+                    if attester_usage == 0:
+                        continue
+
+                    # Check if already claimed
+                    already_claimed = contract.functions.hasClaimedReward(
+                        sid, epoch_id, wallet
+                    ).call()
+                    if already_claimed:
+                        continue
+
+                    # Estimate reward
+                    epoch_reward = contract.functions.getServiceEpochReward(
+                        sid, epoch_id
+                    ).call()
+                    reward_total, claimed_amount, _ = epoch_reward
+                    if reward_total == 0:
+                        continue
+
+                    service_epoch_usage = contract.functions.epochUsage(
+                        epoch_id, sid
+                    ).call() if hasattr(contract.functions, 'epochUsage') else total_usage
+
+                    estimated = (attester_usage * reward_total) // service_epoch_usage if service_epoch_usage > 0 else 0
+
+                    claimable.append({
+                        "epoch": epoch_id,
+                        "service_id": sid.hex() if isinstance(sid, bytes) else str(sid),
+                        "attested_units": attester_usage,
+                        "estimated_reward_wei": str(estimated),
+                        "estimated_reward": str(estimated / 10**18) if estimated > 0 else "0",
+                    })
+            except Exception:
+                continue  # Skip epochs with errors
+
+        return {
+            "available": True,
+            "balance": str(balance),
+            "balance_formatted": f"{balance / 10**18:.4f}",
+            "current_epoch": current_epoch,
+            "total_burned": str(total_burned),
+            "user_burned": str(user_burned),
+            "has_user_contract": has_user_contract,
+            "user_contract": user_contract if has_user_contract else "",
+            "claimable_rewards": claimable,
+        }
+
+    async def claim_reward(self, epoch_id: int, service_id: str,
+                           private_key: str) -> dict[str, Any]:
+        """Claim participant reward for an epoch."""
+        if not self.state.wallet_connected:
+            return {"status": "error", "error": "Wallet not connected"}
+        if not private_key:
+            return {"status": "error", "error": "Private key required"}
+
+        try:
+            from web3 import Web3
+            from eth_account import Account
+
+            w3 = Web3(Web3.HTTPProvider(self.state.rpc_url))
+            account = Account.from_key(private_key)
+            autonet_address = self._get_autonet_contract_address()
+            abi = self._load_contract_abi("Autonet")
+
+            if not autonet_address or not abi:
+                return {"status": "error", "error": "Contract not configured"}
+
+            contract = w3.eth.contract(
+                address=Web3.to_checksum_address(autonet_address),
+                abi=abi,
+            )
+
+            sid_bytes = bytes.fromhex(service_id) if isinstance(service_id, str) else service_id
+
+            nonce = w3.eth.get_transaction_count(account.address)
+            tx = contract.functions.claimParticipantReward(
+                sid_bytes, epoch_id
+            ).build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": 500_000,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": self.state.chain_id or w3.eth.chain_id,
+            })
+
+            signed = account.sign_transaction(tx)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            if receipt.status == 1:
+                log.info("Reward claimed: epoch=%d, tx=%s", epoch_id, tx_hash.hex())
+                return {
+                    "status": "claimed",
+                    "tx_hash": tx_hash.hex(),
+                    "epoch": epoch_id,
+                }
+            else:
+                return {"status": "error", "error": "Transaction reverted"}
+
+        except Exception as e:
+            log.exception("Failed to claim reward")
+            return {"status": "error", "error": str(e)}
+
+    # ------------------------------------------------------------------
     # Data capture & privacy (Story 3.4)
     # ------------------------------------------------------------------
 
