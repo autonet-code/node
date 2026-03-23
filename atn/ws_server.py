@@ -507,6 +507,21 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        # Proposals & governance (Stories 3.6 / 3.7)
+        if msg_type == "autonet_proposals":
+            try:
+                result = await self.runtime.autonet.get_proposals()
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "autonet_governance":
+            try:
+                result = await self.runtime.autonet.get_governance()
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         # Data capture & privacy (Story 3.4)
         if msg_type == "autonet_capture_config":
             try:

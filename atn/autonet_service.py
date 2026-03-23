@@ -643,6 +643,135 @@ class AutonetBridge:
             return {"status": "error", "error": str(e)}
 
     # ------------------------------------------------------------------
+    # Proposals & governance (Stories 3.6 / 3.7)
+    # ------------------------------------------------------------------
+
+    async def get_proposals(self) -> dict[str, Any]:
+        """List evolution proposals from the EvolutionProposal contract."""
+        if not self.state.wallet_connected or not self.state.rpc_url:
+            return {"available": False, "proposals": []}
+
+        try:
+            from web3 import Web3
+
+            w3 = Web3(Web3.HTTPProvider(self.state.rpc_url))
+            if not w3.is_connected():
+                return {"available": False, "proposals": []}
+
+            ep_address = self._get_contract_address("evolution_proposal")
+            abi = self._load_contract_abi("EvolutionProposal")
+            if not ep_address or not abi:
+                return {"available": False, "proposals": []}
+
+            contract = w3.eth.contract(
+                address=Web3.to_checksum_address(ep_address), abi=abi,
+            )
+
+            count = contract.functions.getProposalCount().call()
+            proposals: list[dict[str, Any]] = []
+
+            for i in range(min(count, 50)):  # Cap at 50 most recent
+                pid = count - i  # Newest first
+                try:
+                    result = contract.functions.getProposal(pid).call()
+                    proposer, content_cid, stake, status, created_at, trial_budget, eval_count, eval_score, dao_id = result
+                    status_names = ["proposed", "evaluating", "trial", "adopted", "rejected"]
+                    proposals.append({
+                        "id": pid,
+                        "proposer": proposer,
+                        "content_cid": content_cid,
+                        "stake": str(stake),
+                        "status": status_names[status] if status < len(status_names) else "unknown",
+                        "created_at": created_at,
+                        "trial_budget": str(trial_budget),
+                        "evaluation_count": eval_count,
+                        "evaluation_score": eval_score,
+                        "dao_proposal_id": dao_id,
+                    })
+                except Exception:
+                    continue
+
+            return {"available": True, "proposals": proposals}
+
+        except ImportError:
+            return {"available": False, "error": "web3 not installed"}
+        except Exception as e:
+            log.debug("Failed to fetch proposals: %s", e)
+            return {"available": False, "proposals": []}
+
+    async def get_governance(self) -> dict[str, Any]:
+        """Get governance overview from AutonetDAO."""
+        if not self.state.wallet_connected or not self.state.rpc_url:
+            return {"available": False, "proposals": []}
+
+        try:
+            from web3 import Web3
+
+            w3 = Web3(Web3.HTTPProvider(self.state.rpc_url))
+            if not w3.is_connected():
+                return {"available": False, "proposals": []}
+
+            dao_address = self._get_contract_address("dao")
+            abi = self._load_contract_abi("AutonetDAO")
+            if not dao_address or not abi:
+                return {"available": False, "proposals": []}
+
+            contract = w3.eth.contract(
+                address=Web3.to_checksum_address(dao_address), abi=abi,
+            )
+
+            next_id = contract.functions.nextProposalId().call()
+            proposals: list[dict[str, Any]] = []
+
+            for pid in range(max(1, next_id - 20), next_id):
+                try:
+                    p = contract.functions.proposals(pid).call()
+                    state = contract.functions.getProposalState(pid).call()
+                    state_names = ["pending", "active", "canceled", "defeated",
+                                   "succeeded", "queued", "expired", "executed"]
+                    proposals.append({
+                        "id": p[0],
+                        "proposer": p[1],
+                        "description": p[2],
+                        "start_block": p[3],
+                        "end_block": p[4],
+                        "for_votes": str(p[5]),
+                        "against_votes": str(p[6]),
+                        "executed": p[7],
+                        "canceled": p[8],
+                        "state": state_names[state] if state < len(state_names) else "unknown",
+                    })
+                except Exception:
+                    continue
+
+            return {"available": True, "proposals": proposals}
+
+        except ImportError:
+            return {"available": False, "error": "web3 not installed"}
+        except Exception as e:
+            log.debug("Failed to fetch governance: %s", e)
+            return {"available": False, "proposals": []}
+
+    def _get_contract_address(self, name: str) -> str | None:
+        """Get a named contract address from config.
+
+        Checks blockchain config for known names:
+        autonet, evolution_proposal, dao
+        """
+        if name == "autonet":
+            return self._get_autonet_contract_address()
+
+        if self._autonet_config and hasattr(self._autonet_config, "blockchain"):
+            bc = self._autonet_config.blockchain
+            attr_name = f"{name}_contract"
+            addr = getattr(bc, attr_name, None)
+            if addr:
+                return addr
+
+        contract_addr = getattr(self.config, f"{name}_contract", None)
+        return contract_addr
+
+    # ------------------------------------------------------------------
     # Data capture & privacy (Story 3.4)
     # ------------------------------------------------------------------
 
