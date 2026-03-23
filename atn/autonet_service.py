@@ -772,6 +772,81 @@ class AutonetBridge:
         return contract_addr
 
     # ------------------------------------------------------------------
+    # Alignment dashboard (Story 3.8)
+    # ------------------------------------------------------------------
+
+    def get_alignment(self, user_profile=None) -> dict[str, Any]:
+        """Get alignment status between user standards and network behavior.
+
+        Shows how well the node's training activity reflects the user's
+        stated standards and values.  Without live training data, returns
+        the structural alignment (standards exist, training active, etc.).
+        """
+        standards: list[dict[str, Any]] = []
+        if user_profile:
+            profile = user_profile.get_profile()
+            standards = profile.standards or []
+
+        # Alignment indicators
+        has_standards = len(standards) > 0
+        is_training = self.state.status.value == "running"
+        has_wallet = self.state.wallet_connected
+        has_user_contract = bool(self._user_contract_address)
+        standards_published = bool(self._published_standards_hash)
+
+        # Compute an alignment score (0-100)
+        # Each factor contributes to overall alignment readiness
+        score = 0
+        factors: list[dict[str, Any]] = []
+
+        if has_standards:
+            score += 25
+            factors.append({"name": "Standards defined", "met": True,
+                           "description": f"{len(standards)} standards in your profile"})
+        else:
+            factors.append({"name": "Standards defined", "met": False,
+                           "description": "Complete onboarding to define your standards"})
+
+        if standards_published:
+            score += 25
+            factors.append({"name": "Standards published", "met": True,
+                           "description": "Your standards hash is recorded on-chain"})
+        elif has_wallet:
+            factors.append({"name": "Standards published", "met": False,
+                           "description": "Publish your standards to establish on-chain identity"})
+        else:
+            factors.append({"name": "Standards published", "met": False,
+                           "description": "Connect wallet first, then publish standards"})
+
+        if is_training:
+            score += 25
+            factors.append({"name": "Training active", "met": True,
+                           "description": f"{self.state.cycles_completed} cycles completed"})
+        else:
+            factors.append({"name": "Training active", "met": False,
+                           "description": "Start training to contribute to the network"})
+
+        if has_user_contract:
+            score += 25
+            factors.append({"name": "Node registered", "met": True,
+                           "description": "Your node has an on-chain identity"})
+        elif has_wallet:
+            factors.append({"name": "Node registered", "met": False,
+                           "description": "Publish standards to register your node"})
+        else:
+            factors.append({"name": "Node registered", "met": False,
+                           "description": "Connect wallet to register on-chain"})
+
+        return {
+            "score": score,
+            "factors": factors,
+            "standards_count": len(standards),
+            "training_active": is_training,
+            "wallet_connected": has_wallet,
+            "node_registered": has_user_contract,
+        }
+
+    # ------------------------------------------------------------------
     # Data capture & privacy (Story 3.4)
     # ------------------------------------------------------------------
 

@@ -522,6 +522,16 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        # Alignment dashboard (Story 3.8)
+        if msg_type == "autonet_alignment":
+            try:
+                result = self.runtime.autonet.get_alignment(
+                    user_profile=self.runtime.user_profile,
+                )
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         # Data capture & privacy (Story 3.4)
         if msg_type == "autonet_capture_config":
             try:
