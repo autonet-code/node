@@ -24,12 +24,18 @@ class StepType(Enum):
     COLLECT = "collect"         # await result of prior async message step
 
 
+class AgentMode(Enum):
+    PIPELINE = "pipeline"       # deterministic step sequence
+    COGNITIVE = "cognitive"     # autonomous LLM session
+
+
 class AgentStatus(Enum):
     REGISTERED = "registered"   # defined but not active
     ACTIVE = "active"           # armed — scheduler + inbox triggers honoured
     RUNNING = "running"         # at least one execution in progress
     STOPPED = "stopped"         # manually deactivated
     ERROR = "error"             # last execution failed
+    COMPLETED = "completed"     # one-shot agent finished (parent decides removal)
 
 
 class ExecutionStatus(Enum):
@@ -91,11 +97,39 @@ class StepDefinition:
 
 
 @dataclass
+class HeartbeatConfig:
+    """Intrinsic heartbeat — Runtime pings parent on interval while agent is active."""
+    interval: str = "5m"                    # ping frequency: "30s", "5m", "1h"
+    on_complete: str = "notify_parent"      # "notify_parent" | "self_deactivate"
+
+
+@dataclass
 class AgentDefinition:
-    """Blueprint for an agent — its step pipeline, scheduling, concurrency."""
+    """Blueprint for an agent — pipeline or cognitive, with hierarchy and heartbeat."""
     id: str
     name: str
-    steps: list[StepDefinition]
+
+    # --- Execution mode ---
+    mode: AgentMode = AgentMode.PIPELINE
+    # PIPELINE: execute steps[] sequentially (original behavior)
+    # COGNITIVE: autonomous LLM session (replaces delegates)
+
+    # --- Pipeline mode fields (ignored in COGNITIVE mode) ---
+    steps: list[StepDefinition] = field(default_factory=list)
+
+    # --- Cognitive mode fields (ignored in PIPELINE mode) ---
+    provider: str | list[str] = ""          # provider name or fallback chain
+    cognitive_model: str = ""               # model override (e.g. "claude-opus-4-6")
+    system_prompt: str = ""                 # inline text or file reference
+    agent_type: str = "general"             # explore, implement, research, debug, review
+    max_turns: int = 50                     # per-session turn limit
+    tools: list[str] = field(default_factory=list)
+    # Tool surface: "sdk_builtin" (file/bash/web from bridge),
+    #               "atn_core" (create_agent/post_message/get_snapshot/get_output),
+    #               "atn_full" (all orchestrator tools),
+    #               "connectors" (MCP connectors)
+
+    # --- Common fields ---
     concurrency: int = 1                    # 1 = singleton
     schedule: str | None = None             # e.g. "30s", "5m", "1h"
     output_schema: dict | None = None       # expected shape of final output
@@ -106,13 +140,25 @@ class AgentDefinition:
     connector_ids: list[str] = field(default_factory=list)
     # MCP connectors this agent uses.  Matched against ConnectorManager specs.
 
+    # --- Hierarchy ---
+    parent_id: str | None = None            # None = root (orchestrator) or user-created
+    created_by: str = ""                    # agent_id of creator
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # --- Heartbeat ---
+    heartbeat: HeartbeatConfig | None = None
+    # If set, Runtime sends periodic status pings to parent_id.
+    # On completion, sends a completion signal to parent.
+
     @property
     def model(self) -> str | None:
-        """Derive the model name from cognitive steps for display purposes.
+        """Derive the model name for display purposes.
 
-        Returns None if no cognitive steps, the model string if one,
-        or a comma-separated list if multiple distinct models are used.
+        For cognitive mode, returns cognitive_model directly.
+        For pipeline mode, derives from cognitive steps.
         """
+        if self.mode == AgentMode.COGNITIVE:
+            return self.cognitive_model or None
         models: list[str] = []
         for s in self.steps:
             if s.type == StepType.COGNITIVE:
@@ -122,6 +168,14 @@ class AgentDefinition:
         if not models:
             return None
         return ", ".join(models)
+
+    @property
+    def is_cognitive(self) -> bool:
+        return self.mode == AgentMode.COGNITIVE
+
+    @property
+    def is_pipeline(self) -> bool:
+        return self.mode == AgentMode.PIPELINE
 
     @staticmethod
     def generate_id() -> str:

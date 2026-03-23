@@ -38,7 +38,7 @@ from typing import Any
 
 import yaml
 
-from .models import AgentDefinition, StepDefinition, StepType
+from .models import AgentDefinition, AgentMode, HeartbeatConfig, StepDefinition, StepType
 
 log = logging.getLogger(__name__)
 
@@ -94,20 +94,35 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
     if not name or not isinstance(name, str):
         errors.append(LoadError(file, "missing or invalid 'name'"))
 
-    steps_raw = raw.get("steps")
-    if not isinstance(steps_raw, list) or len(steps_raw) == 0:
-        errors.append(LoadError(file, "'steps' must be a non-empty list"))
+    # --- Agent mode (defaults to pipeline for backward compat) ---
+    mode_str = raw.get("mode", "pipeline")
+    try:
+        mode = AgentMode(mode_str)
+    except ValueError:
+        errors.append(LoadError(file, f"invalid 'mode': '{mode_str}' (valid: pipeline, cognitive)"))
         return None, errors
 
-    # Parse steps
+    # --- Steps (required for pipeline, empty for cognitive) ---
     steps: list[StepDefinition] = []
-    for i, s in enumerate(steps_raw):
-        if not isinstance(s, dict):
-            errors.append(LoadError(file, f"step[{i}]: must be a mapping"))
-            continue
-        step = _validate_step(s, i, errors, file)
-        if step:
-            steps.append(step)
+    steps_raw = raw.get("steps")
+    if mode == AgentMode.PIPELINE:
+        if not isinstance(steps_raw, list) or len(steps_raw) == 0:
+            errors.append(LoadError(file, "'steps' must be a non-empty list for pipeline agents"))
+            return None, errors
+        for i, s in enumerate(steps_raw):
+            if not isinstance(s, dict):
+                errors.append(LoadError(file, f"step[{i}]: must be a mapping"))
+                continue
+            step = _validate_step(s, i, errors, file)
+            if step:
+                steps.append(step)
+    elif steps_raw:
+        # Cognitive agents may have steps too (ignored in cognitive execution but valid in YAML)
+        for i, s in enumerate(steps_raw):
+            if isinstance(s, dict):
+                step = _validate_step(s, i, errors, file)
+                if step:
+                    steps.append(step)
 
     if errors:
         return None, errors
@@ -145,16 +160,69 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
             return None, errors
         connector_ids = [str(c) for c in connector_ids_raw]
 
+    # --- Hierarchy ---
+    parent_id = raw.get("parent_id")
+    if parent_id is not None and not isinstance(parent_id, str):
+        errors.append(LoadError(file, "'parent_id' must be a string"))
+        return None, errors
+
+    created_by = str(raw.get("created_by", ""))
+
+    # --- Heartbeat ---
+    heartbeat: HeartbeatConfig | None = None
+    heartbeat_raw = raw.get("heartbeat")
+    if heartbeat_raw is not None:
+        if isinstance(heartbeat_raw, dict):
+            heartbeat = HeartbeatConfig(
+                interval=str(heartbeat_raw.get("interval", "5m")),
+                on_complete=str(heartbeat_raw.get("on_complete", "notify_parent")),
+            )
+        elif isinstance(heartbeat_raw, str):
+            # Shorthand: heartbeat: 5m
+            heartbeat = HeartbeatConfig(interval=heartbeat_raw)
+        else:
+            errors.append(LoadError(file, "'heartbeat' must be a mapping or interval string"))
+            return None, errors
+
+    # --- Cognitive mode fields ---
+    provider = raw.get("provider", "")
+    if isinstance(provider, list):
+        provider = [str(p) for p in provider]
+    elif provider:
+        provider = str(provider)
+
+    cognitive_model = str(raw.get("cognitive_model", raw.get("model", "")))
+    system_prompt = str(raw.get("system_prompt", ""))
+    agent_type = str(raw.get("agent_type", "general"))
+    max_turns = raw.get("max_turns", 50)
+    if not isinstance(max_turns, int) or max_turns < 1:
+        max_turns = 50
+
+    tools_raw = raw.get("tools")
+    tools: list[str] = []
+    if isinstance(tools_raw, list):
+        tools = [str(t) for t in tools_raw]
+
     return AgentDefinition(
         id=agent_id,
         name=name,
+        mode=mode,
         steps=steps,
+        provider=provider,
+        cognitive_model=cognitive_model,
+        system_prompt=system_prompt,
+        agent_type=agent_type,
+        max_turns=max_turns,
+        tools=tools,
         concurrency=concurrency,
         schedule=schedule,
         output_schema=raw.get("output_schema"),
         description=raw.get("description", ""),
         budgets=budgets,
         connector_ids=connector_ids,
+        parent_id=parent_id,
+        created_by=created_by,
+        heartbeat=heartbeat,
     ), errors
 
 
@@ -238,6 +306,8 @@ def save_agent(defn: AgentDefinition, directory: Path) -> Path:
         "id": defn.id,
         "name": defn.name,
     }
+    if defn.mode != AgentMode.PIPELINE:
+        data["mode"] = defn.mode.value
     if defn.description:
         data["description"] = defn.description
     if defn.schedule:
@@ -251,14 +321,44 @@ def save_agent(defn: AgentDefinition, directory: Path) -> Path:
     if defn.connector_ids:
         data["connector_ids"] = defn.connector_ids
 
-    data["steps"] = []
-    for i, s in enumerate(defn.steps):
-        config = _externalize_step_files(s, i, agent_dir)
-        data["steps"].append({
-            "name": s.name,
-            "type": s.type.value,
-            "config": config,
-        })
+    # Hierarchy
+    if defn.parent_id:
+        data["parent_id"] = defn.parent_id
+    if defn.created_by:
+        data["created_by"] = defn.created_by
+
+    # Heartbeat
+    if defn.heartbeat:
+        hb: dict[str, str] = {"interval": defn.heartbeat.interval}
+        if defn.heartbeat.on_complete != "notify_parent":
+            hb["on_complete"] = defn.heartbeat.on_complete
+        data["heartbeat"] = hb
+
+    # Cognitive mode fields
+    if defn.is_cognitive:
+        if defn.provider:
+            data["provider"] = defn.provider
+        if defn.cognitive_model:
+            data["cognitive_model"] = defn.cognitive_model
+        if defn.system_prompt:
+            data["system_prompt"] = defn.system_prompt
+        if defn.agent_type != "general":
+            data["agent_type"] = defn.agent_type
+        if defn.max_turns != 50:
+            data["max_turns"] = defn.max_turns
+        if defn.tools:
+            data["tools"] = defn.tools
+
+    # Steps (pipeline mode, or hybrid)
+    if defn.steps:
+        data["steps"] = []
+        for i, s in enumerate(defn.steps):
+            config = _externalize_step_files(s, i, agent_dir)
+            data["steps"].append({
+                "name": s.name,
+                "type": s.type.value,
+                "config": config,
+            })
 
     path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False), encoding="utf-8")
     log.info("Saved agent '%s' to %s", defn.id, path)
