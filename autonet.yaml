@@ -1,112 +1,93 @@
-# Autonet Node Configuration
-# Override any value with AUTONET_* environment variables.
-# See nodes/common/config.py for the full mapping.
-
-# Device selection: "auto", "cpu", or "cuda"
 device: auto
-
-# Directory for training datasets (MNIST, CIFAR-10)
 data_dir: ./data
-
 log_level: INFO
-
-# Uncomment to set a fixed random seed for reproducibility
-# seed: 42
-
+orchestrator:
+  model: claude-opus-4-6
 blockchain:
   rpc_url: https://node.shadownet.etherlink.com
   chain_id: 127823
-  # private_key: 0x...  # set per-node or via AUTONET_PRIVATE_KEY
   contracts:
-    ATNToken: "0x6e82D6678790820Ef81669046e921b1D2947A08f"
-    ParticipantStaking: "0x8B08279cf510BfeB6acE6BA5282BF0e4F6eBD8EE"
-    ModelShardRegistry: "0x7De3B8a6bc4eB7f098018Da030f93718eeaf7885"
-    Project: "0xC309f344e652E023b15BAF578089Aa90a9F5AF9B"
-    TaskContract: "0x8fEb5be0367F596bC6357538e346472eBf76D365"
-    ResultsRewards: "0x1ef4e0A6DaC1CFD23E31427b2Ecdd2A6A0F0f542"
-    AnchorBridge: "0x2005556109607F5b11BaCAd05270E7DE32260B4D"
-    DisputeManager: "0xB1Cf18A50bA3fffD578D2b2B08Ea2D03A8Aa2a3b"
-    AutonetDAO: "0xD0271E6d7710F0bF59Dc8720306224Cc6ddf503f"
-    ForcedErrorRegistry: "0x290Fc505782E6b70A4c57A3cECc6Ad109466520e"
-    InferenceProviderFactory: "0xf8246D4E4668EaC14aA508Daa02EFb60099699BF"
-    Autonet: "0x97EB727426f593B2E2bC64F1604b5E7fE2eF676b"
-
+    ATNToken: '0x6e82D6678790820Ef81669046e921b1D2947A08f'
+    ParticipantStaking: '0x8B08279cf510BfeB6acE6BA5282BF0e4F6eBD8EE'
+    ModelShardRegistry: '0x7De3B8a6bc4eB7f098018Da030f93718eeaf7885'
+    Project: '0xC309f344e652E023b15BAF578089Aa90a9F5AF9B'
+    TaskContract: '0x8fEb5be0367F596bC6357538e346472eBf76D365'
+    ResultsRewards: '0x1ef4e0A6DaC1CFD23E31427b2Ecdd2A6A0F0f542'
+    AnchorBridge: '0x2005556109607F5b11BaCAd05270E7DE32260B4D'
+    DisputeManager: '0xB1Cf18A50bA3fffD578D2b2B08Ea2D03A8Aa2a3b'
+    AutonetDAO: '0xD0271E6d7710F0bF59Dc8720306224Cc6ddf503f'
+    ForcedErrorRegistry: '0x290Fc505782E6b70A4c57A3cECc6Ad109466520e'
+    InferenceProviderFactory: '0xf8246D4E4668EaC14aA508Daa02EFb60099699BF'
+    Autonet: '0x97EB727426f593B2E2bC64F1604b5E7fE2eF676b'
 blob_store:
   data_dir: ~/.autonet/blobs
   peer_urls: []
   server_port: 9100
-
 model:
-  architecture: jepa          # simplenet | jepa | vl_jepa
-  image_size: 32              # 32 for CIFAR-10, 224 for ImageNet-scale
-  patch_size: 4               # 4 for 32px images, 16 for 224px
-  embed_dim: 192              # 192 small, 384 medium, 768 large
-  num_heads: 3                # must divide embed_dim
+  architecture: jepa
+  image_size: 32
+  patch_size: 4
+  embed_dim: 192
+  num_heads: 3
   encoder_depth: 6
   predictor_depth: 3
   predictor_embed_dim: 96
-
 training:
   epochs: 2
   batch_size: 32
   learning_rate: 0.001
   weight_decay: 0.05
   num_samples: 500
-  optimizer: adamw            # sgd | adamw
-  task_type: jepa             # supervised | jepa
-
+  optimizer: adamw
+  task_type: jepa
 staking:
   proposer: 100
   solver: 50
   coordinator: 500
   aggregator: 1000
-
 node:
   max_cycles: 10
   cycle_delay: 3.0
-  task_mode: ground_truth     # ground_truth | consensus_truth
-  aggregation_method: fedavg  # fedavg | trimmed_mean
+  task_mode: ground_truth
+  aggregation_method: fedavg
   trim_ratio: 0.2
   min_updates_for_aggregation: 2
-
 p2p:
-  listen_port: 0              # 0 = random port
+  listen_port: 0
   listen_host: 0.0.0.0
-  bootstrap_peers: []         # multiaddr strings: /ip4/x.x.x.x/tcp/PORT/p2p/PEER_ID
+  bootstrap_peers: []
   enable_quic: false
   enable_upnp: false
-  capability_advertise_interval: 60   # seconds
-  ping_interval: 30                   # seconds
-
+  capability_advertise_interval: 60
+  ping_interval: 30
 guild:
-  # guild_id: 1              # Guild this node belongs to (omit if not in a guild)
-  auto_join: false            # Auto-join recommended guild on startup
-  module_ids: []              # Module IDs this node can train (hex strings)
-  aggregation_level: flat     # flat (legacy) | guild | network
-  min_guild_updates: 2        # Min updates before guild-level aggregation
-  reputation_weight: 0.3      # Weight of guild reputation in network aggregation
-  member_count_weight: 0.7    # Weight of member count in network aggregation
-
+  auto_join: false
+  module_ids: []
+  aggregation_level: flat
+  min_guild_updates: 2
+  reputation_weight: 0.3
+  member_count_weight: 0.7
 capture:
-  enabled_sources: []           # screen | audio (empty = capture disabled)
-  fps_cap: 2                    # Max frames per second for training data
-  resolution: [224, 224]        # Capture resize target [width, height]
-  screen_monitor: 1             # mss monitor index (1 = primary)
-
+  enabled_sources: []
+  fps_cap: 2
+  resolution:
+  - 224
+  - 224
+  screen_monitor: 1
+  browser_scrub_pii: true
+  browser_exclude_patterns: []
 privacy:
-  exclude_apps: []              # Window titles to skip (e.g. ["1Password", "KeePass"])
-  blur_regions: []              # [{x: 0, y: 0, w: 100, h: 100}] screen regions to always blur
-  scrub_pii: true               # Redact emails, phone numbers, credit card numbers
-
+  exclude_apps: []
+  blur_regions: []
+  scrub_pii: false
 resources:
-  max_cpu_percent: 80.0         # Pause training when CPU usage exceeds this
-  max_memory_mb: 4096           # Pause training when memory exceeds this (MB)
-  active_hours_start: 0         # Hour (0-23) when node becomes active (0 = always)
-  active_hours_end: 24          # Hour (0-24) when node goes idle (24 = always)
-  check_interval: 10.0          # Seconds between resource checks
-
+  max_cpu_percent: 80.0
+  max_memory_mb: 4096
+  active_hours_start: 0
+  active_hours_end: 24
+  check_interval: 10.0
 update:
-  check_interval: 3600          # Seconds between update checks
-  update_source: git            # git | http | blob_store
-  update_url: ""                # URL for http update source
-  auto_apply: false             # Automatically apply updates
+  check_interval: 3600
+  update_source: git
+  update_url: ''
+  auto_apply: false
