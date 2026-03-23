@@ -153,15 +153,15 @@ class CognitiveStepExecutor(StepExecutor):
         # --- Build streaming callback ---
         on_chunk, on_thinking = _make_event_emitters(context, step_index, step_name)
 
-        # --- Check for bridge orchestrate shortcut ---
-        # When the orchestrator runs through the BridgeProvider, delegate the
-        # entire multi-turn tool loop to the bridge (SDK handles it natively).
+        # --- Check for provider-native orchestrate shortcut ---
+        # When the provider supports multi-turn orchestration natively
+        # (e.g. BridgeProvider via the Claude Agent SDK), delegate the
+        # entire multi-turn tool loop to the provider.
         # On failure, fall back to the generic multi-turn loop (possibly with
         # a different provider from the fallback chain).
-        from ..providers.bridge import BridgeProvider
         use_bridge_orchestrate = (
             tool_executor_set == "orchestrator"
-            and isinstance(provider, BridgeProvider)
+            and getattr(provider, 'supports_orchestrate', False)
             and context.runtime is not None
         )
 
@@ -409,11 +409,11 @@ async def _bridge_orchestrate(
     result: StepResult,
     on_chunk: Any,
 ) -> StepResult:
-    """Run the orchestrator through BridgeProvider.send_orchestrate().
+    """Run the orchestrator through a provider's native send_orchestrate().
 
-    The bridge handles the entire multi-turn tool loop natively via the
-    Claude Agent SDK.  Tool calls are relayed back to Python for execution
-    against the Runtime.
+    The provider handles the entire multi-turn tool loop natively (e.g. the
+    BridgeProvider delegates to the Claude Agent SDK).  Tool calls are
+    relayed back to Python for execution against the Runtime.
     """
     from ..orchestrator.tools import execute_tool, get_tool_definitions_for_bridge
 

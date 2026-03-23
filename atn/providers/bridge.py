@@ -82,6 +82,10 @@ class BridgeProvider(Provider):
     def name(self) -> str:
         return "claude_max"
 
+    @property
+    def supports_orchestrate(self) -> bool:
+        return True
+
     async def send(
         self,
         *,

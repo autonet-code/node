@@ -102,6 +102,54 @@ class Provider(ABC):
             Transient failures (429, 503) should be retried internally.
         """
 
+    @property
+    def supports_orchestrate(self) -> bool:
+        """Whether this provider supports multi-turn orchestration.
+
+        Providers that implement ``send_orchestrate()`` (a bidirectional
+        multi-turn tool loop managed by the provider itself) should override
+        this to return True.  The cognitive step executor uses this flag to
+        decide whether to delegate orchestration to the provider or run its
+        own generic multi-turn loop.
+        """
+        return False
+
+    async def send_orchestrate(
+        self,
+        *,
+        message: str,
+        system: str = "",
+        model: str = "",
+        tools: list[dict[str, Any]],
+        max_turns: int = 20,
+        tool_executor: Any = None,
+        on_chunk: Any = None,
+        session_id: str = "",
+    ) -> ProviderResponse:
+        """Multi-turn orchestration with tool relay.
+
+        Providers that set ``supports_orchestrate = True`` must implement
+        this method.  The default raises NotImplementedError.
+
+        The method handles a bidirectional conversation: the provider calls
+        the LLM, relays tool calls to ``tool_executor``, feeds results back,
+        and loops until end_turn or max_turns.
+
+        Args:
+            message:        User message text.
+            system:         System prompt.
+            model:          Model override.
+            tools:          Tool definitions (name, description, input_schema).
+            max_turns:      Max LLM turns for the multi-turn loop.
+            tool_executor:  async (name, input) -> result dict.
+            on_chunk:       Optional async callback for streaming text deltas.
+            session_id:     Session ID to resume (enables prompt caching).
+        """
+        raise NotImplementedError(
+            f"Provider '{self.name}' does not implement send_orchestrate(). "
+            f"Set supports_orchestrate = True only if this method is implemented."
+        )
+
     async def send_stream(
         self,
         *,
