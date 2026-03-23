@@ -427,24 +427,42 @@ class AutonetBridge:
 
     def _get_autonet_contract_address(self) -> str | None:
         """Get the deployed Autonet contract address from config."""
-        # Check autonet config first
-        if self._autonet_config and hasattr(self._autonet_config, "blockchain"):
-            addr = getattr(self._autonet_config.blockchain, "autonet_contract", None)
-            if addr:
-                return addr
-        # Check ATN config
-        contract_addr = getattr(self.config, "contract_address", None)
-        return contract_addr
+        return self._get_contract_address("autonet")
+
+    def _load_deployment_addresses(self) -> dict[str, str]:
+        """Load contract addresses from deployment-addresses.json."""
+        from pathlib import Path
+        candidates = [
+            Path("deployment-addresses.json"),
+            Path(__file__).parent.parent / "deployment-addresses.json",
+        ]
+        for path in candidates:
+            if path.exists():
+                try:
+                    with open(path) as f:
+                        return json.load(f)
+                except Exception:
+                    continue
+        return {}
 
     def _load_contract_abi(self, contract_name: str) -> list | None:
         """Load a contract ABI from the artifacts directory."""
         from pathlib import Path
 
-        # Look in standard Hardhat artifacts location
-        candidates = [
-            Path("artifacts/contracts/economic") / f"{contract_name}.sol" / f"{contract_name}.json",
-            Path("artifacts") / f"{contract_name}.json",
-        ]
+        base = Path(__file__).parent.parent / "artifacts" / "contracts"
+        base2 = Path("artifacts") / "contracts"
+
+        # Search all subdirectories under artifacts/contracts/
+        subdirs = ["economic", "governance", "core", "tokens", "bridge",
+                    "rollup", "utils", "interfaces", "mocks"]
+        candidates = []
+        for sd in subdirs:
+            candidates.append(base / sd / f"{contract_name}.sol" / f"{contract_name}.json")
+            candidates.append(base2 / sd / f"{contract_name}.sol" / f"{contract_name}.json")
+        # Also check flat locations
+        candidates.append(base.parent / f"{contract_name}.json")
+        candidates.append(Path("artifacts") / f"{contract_name}.json")
+
         for path in candidates:
             if path.exists():
                 try:
@@ -753,21 +771,53 @@ class AutonetBridge:
             return {"available": False, "proposals": []}
 
     def _get_contract_address(self, name: str) -> str | None:
-        """Get a named contract address from config.
+        """Get a named contract address from config or deployment-addresses.json.
 
-        Checks blockchain config for known names:
-        autonet, evolution_proposal, dao
+        Name mapping:
+          autonet → ATNToken (main Autonet entry-point uses ATN Token)
+          dao → AutonetDAO
+          evolution_proposal → (not yet deployed separately)
+          staking → ParticipantStaking
+          Any key from deployment-addresses.json
         """
-        if name == "autonet":
-            return self._get_autonet_contract_address()
+        # Mapping from logical names to deployment-addresses.json keys
+        name_map = {
+            "autonet": "ATNToken",
+            "dao": "AutonetDAO",
+            "staking": "ParticipantStaking",
+            "shard_registry": "ModelShardRegistry",
+            "project": "Project",
+            "task": "TaskContract",
+            "results": "ResultsRewards",
+            "bridge": "AnchorBridge",
+            "disputes": "DisputeManager",
+            "forced_errors": "ForcedErrorRegistry",
+            "inference_factory": "InferenceProviderFactory",
+        }
 
+        # 1. Check autonet YAML config (blockchain.contracts section)
         if self._autonet_config and hasattr(self._autonet_config, "blockchain"):
             bc = self._autonet_config.blockchain
+            # Check direct attribute
             attr_name = f"{name}_contract"
             addr = getattr(bc, attr_name, None)
             if addr:
                 return addr
+            # Check contracts dict if it exists
+            contracts = getattr(bc, "contracts", None)
+            if contracts:
+                json_key = name_map.get(name, name)
+                if json_key in contracts:
+                    return contracts[json_key]
 
+        # 2. Check deployment-addresses.json
+        addresses = self._load_deployment_addresses()
+        if addresses:
+            json_key = name_map.get(name, name)
+            if json_key in addresses:
+                return addresses[json_key]
+
+        # 3. Check ATN config
         contract_addr = getattr(self.config, f"{name}_contract", None)
         return contract_addr
 
