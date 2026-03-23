@@ -112,6 +112,9 @@ class Runtime:
         self._delegate_tasks: dict[str, asyncio.Task] = {}
         # Completed delegate results — stored until collected
         self._delegate_results: dict[str, dict[str, Any]] = {}
+        # Delegate output directory — per-delegate text logs
+        self._delegate_output_dir = self._config.data_dir / "delegates"
+        self._delegate_output_dir.mkdir(parents=True, exist_ok=True)
         # Events for signalling delegate completion to delegate_collect
         self._delegate_done: dict[str, asyncio.Event] = {}
 
@@ -165,10 +168,15 @@ class Runtime:
         if recovered:
             log.warning("Recovered %d crashed execution(s) from previous run", len(recovered))
 
-        # Delegates are ephemeral — clear the registry on startup.
+        # Delegates are ephemeral — clear the registry and output logs on startup.
         # The execution log retains historical records if needed.
         self.delegate_registry.clear()
         self.delegate_registry.save()
+        for f in self._delegate_output_dir.glob("*.log"):
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
         # Auto-detect bridge and Ollama (async probes)
         await self._auto_detect_providers()
@@ -1907,6 +1915,29 @@ class Runtime:
         self._clear_bridge_session()
         self._inject_status_briefing()
         log.info("Conversation reset")
+
+    # ------------------------------------------------------------------
+    # Delegate output persistence
+    # ------------------------------------------------------------------
+
+    def append_delegate_output(self, agent_id: str, text: str) -> None:
+        """Append a text chunk to the delegate's persistent output log."""
+        path = self._delegate_output_dir / f"{agent_id}.log"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text)
+
+    def get_delegate_output(self, agent_id: str) -> str:
+        """Read the full accumulated output for a delegate."""
+        path = self._delegate_output_dir / f"{agent_id}.log"
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        return ""
+
+    def clear_delegate_output(self, agent_id: str) -> None:
+        """Remove a delegate's output log (cleanup after collection)."""
+        path = self._delegate_output_dir / f"{agent_id}.log"
+        if path.exists():
+            path.unlink()
 
     def _clear_bridge_session(self) -> None:
         """Clear the bridge provider's session ID so the next orchestration

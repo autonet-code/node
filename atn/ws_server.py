@@ -325,6 +325,13 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": result["error"]}
             return {"msg_id": msg_id, "ok": True, "result": result}
 
+        if msg_type == "get_delegate_output":
+            agent_id = msg.get("agent_id", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id'"}
+            text = self.runtime.get_delegate_output(agent_id)
+            return {"msg_id": msg_id, "ok": True, "result": {"agent_id": agent_id, "text": text}}
+
         if msg_type == "session_context":
             agent_id = msg.get("agent_id")  # None = orchestrator
             result = await self.runtime.get_session_context(agent_id)

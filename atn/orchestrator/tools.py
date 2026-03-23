@@ -1312,8 +1312,9 @@ async def _run_delegate_session(
                 return {"error": f"Unknown connector tool: {name}"}
             return await execute_tool(name, tool_input, runtime)
 
-        # Stream text deltas as events for UI visibility
+        # Stream text deltas as events for UI visibility + persist to disk
         async def _on_delegate_chunk(text: str) -> None:
+            runtime.append_delegate_output(agent_id, text)
             await runtime.events.emit(Event(
                 type=EventType.STEP_OUTPUT,
                 source=agent_id,
