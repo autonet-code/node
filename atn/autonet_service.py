@@ -782,7 +782,7 @@ class AutonetBridge:
         """
         # Mapping from logical names to deployment-addresses.json keys
         name_map = {
-            "autonet": "ATNToken",
+            "autonet": "Autonet",
             "dao": "AutonetDAO",
             "staking": "ParticipantStaking",
             "shard_registry": "ModelShardRegistry",

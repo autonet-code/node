@@ -29,6 +29,7 @@ blockchain:
     AutonetDAO: "0xD0271E6d7710F0bF59Dc8720306224Cc6ddf503f"
     ForcedErrorRegistry: "0x290Fc505782E6b70A4c57A3cECc6Ad109466520e"
     InferenceProviderFactory: "0xf8246D4E4668EaC14aA508Daa02EFb60099699BF"
+    Autonet: "0x97EB727426f593B2E2bC64F1604b5E7fE2eF676b"
 
 blob_store:
   data_dir: ~/.autonet/blobs
