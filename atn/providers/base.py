@@ -15,9 +15,13 @@ Tool calls returned by the LLM:
 """
 from __future__ import annotations
 
+import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -106,13 +110,12 @@ class Provider(ABC):
     def supports_orchestrate(self) -> bool:
         """Whether this provider supports multi-turn orchestration.
 
-        Providers that implement ``send_orchestrate()`` (a bidirectional
-        multi-turn tool loop managed by the provider itself) should override
-        this to return True.  The cognitive step executor uses this flag to
-        decide whether to delegate orchestration to the provider or run its
-        own generic multi-turn loop.
+        Returns True by default — the base class provides a generic
+        implementation of ``send_orchestrate()`` that uses ``send_stream()``
+        in a multi-turn loop.  Providers like BridgeProvider override this
+        with a native implementation (e.g. Claude Agent SDK subprocess).
         """
-        return False
+        return True
 
     async def send_orchestrate(
         self,
@@ -128,12 +131,14 @@ class Provider(ABC):
     ) -> ProviderResponse:
         """Multi-turn orchestration with tool relay.
 
-        Providers that set ``supports_orchestrate = True`` must implement
-        this method.  The default raises NotImplementedError.
+        Generic implementation that uses ``send_stream()`` in a loop.
+        Each turn: call the LLM, execute any tool calls via ``tool_executor``,
+        feed results back, and repeat until end_turn or max_turns.
 
-        The method handles a bidirectional conversation: the provider calls
-        the LLM, relays tool calls to ``tool_executor``, feeds results back,
-        and loops until end_turn or max_turns.
+        Providers with native multi-turn support (e.g. BridgeProvider) override
+        this entirely.  Other providers (Anthropic direct, OpenAI, Ollama) use
+        this base implementation — it works with any provider that has a working
+        ``send_stream()`` and returns canonical ``ProviderResponse`` objects.
 
         Args:
             message:        User message text.
@@ -143,12 +148,81 @@ class Provider(ABC):
             max_turns:      Max LLM turns for the multi-turn loop.
             tool_executor:  async (name, input) -> result dict.
             on_chunk:       Optional async callback for streaming text deltas.
-            session_id:     Session ID to resume (enables prompt caching).
+            session_id:     Session ID to resume (ignored by generic impl).
         """
-        raise NotImplementedError(
-            f"Provider '{self.name}' does not implement send_orchestrate(). "
-            f"Set supports_orchestrate = True only if this method is implemented."
-        )
+        # Convert tool dicts to ToolDefinition objects for send_stream()
+        tool_defs: list[ToolDefinition] | None = None
+        if tools:
+            tool_defs = [
+                ToolDefinition(
+                    name=t["name"],
+                    description=t.get("description", ""),
+                    input_schema=t.get("input_schema", {"type": "object", "properties": {}}),
+                )
+                for t in tools
+            ]
+
+        messages: list[dict[str, Any]] = [{"role": "user", "content": message}]
+        cumulative_usage = Usage()
+
+        for turn in range(max_turns):
+            response = await self.send_stream(
+                messages=messages,
+                system=system,
+                model=model,
+                max_tokens=16384,
+                tools=tool_defs,
+                temperature=0.0,
+                on_chunk=on_chunk,
+            )
+
+            # Accumulate usage across turns
+            cumulative_usage.input_tokens += response.usage.input_tokens
+            cumulative_usage.output_tokens += response.usage.output_tokens
+            cumulative_usage.cache_read_tokens += response.usage.cache_read_tokens
+            cumulative_usage.cache_creation_tokens += response.usage.cache_creation_tokens
+
+            # No tool calls or not a tool_use stop — we're done
+            if not response.tool_calls or response.stop_reason != "tool_use":
+                response.usage = cumulative_usage
+                return response
+
+            # No executor — return as-is (tool calls visible but not executed)
+            if tool_executor is None:
+                response.usage = cumulative_usage
+                return response
+
+            # Execute tool calls and build continuation messages
+            assistant_content: list[dict[str, Any]] = []
+            if response.text:
+                assistant_content.append({"type": "text", "text": response.text})
+            for tc in response.tool_calls:
+                assistant_content.append({
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.name,
+                    "input": tc.input,
+                })
+            messages.append({"role": "assistant", "content": assistant_content})
+
+            tool_result_content: list[dict[str, Any]] = []
+            for tc in response.tool_calls:
+                log.info("Orchestrate tool %s (turn %d/%d)", tc.name, turn + 1, max_turns)
+                try:
+                    result = await tool_executor(tc.name, tc.input)
+                except Exception as exc:
+                    log.warning("Tool %s failed: %s", tc.name, exc)
+                    result = {"error": str(exc)}
+                tool_result_content.append({
+                    "type": "tool_result",
+                    "tool_use_id": tc.id,
+                    "content": json.dumps(result, default=str),
+                })
+            messages.append({"role": "user", "content": tool_result_content})
+
+        # Exhausted max_turns — return last response with accumulated usage
+        response.usage = cumulative_usage
+        return response
 
     async def send_stream(
         self,

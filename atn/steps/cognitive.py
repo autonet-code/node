@@ -153,149 +153,68 @@ class CognitiveStepExecutor(StepExecutor):
         # --- Build streaming callback ---
         on_chunk, on_thinking = _make_event_emitters(context, step_index, step_name)
 
-        # --- Check for provider-native orchestrate shortcut ---
-        # When the provider supports multi-turn orchestration natively
-        # (e.g. BridgeProvider via the Claude Agent SDK), delegate the
-        # entire multi-turn tool loop to the provider.
-        # On failure, fall back to the generic multi-turn loop (possibly with
-        # a different provider from the fallback chain).
-        use_bridge_orchestrate = (
+        # --- Orchestrate path ---
+        # When tool_executors == "orchestrator", delegate the entire
+        # multi-turn tool loop to the provider's send_orchestrate().
+        # Every provider supports this: BridgeProvider uses the Claude Agent
+        # SDK natively; other providers use the generic base-class loop
+        # that drives send_stream() with tool execution.
+        use_orchestrate = (
             tool_executor_set == "orchestrator"
-            and getattr(provider, 'supports_orchestrate', False)
+            and provider.supports_orchestrate
             and context.runtime is not None
         )
 
-        if use_bridge_orchestrate:
-            bridge_result = await _bridge_orchestrate(
+        if use_orchestrate:
+            orch_result = await _orchestrate(
                 provider, step, context, result, on_chunk,
             )
-            if bridge_result.status != ExecutionStatus.FAILED:
-                return bridge_result
-            # Bridge failed — try fallback providers via generic loop
+            if orch_result.status != ExecutionStatus.FAILED:
+                return orch_result
+            # Primary provider failed — try fallback chain
             log.warning(
-                "Bridge orchestrate failed for %s: %s — trying fallback providers",
-                context.agent_id, bridge_result.error,
+                "Orchestrate failed for %s via '%s': %s — trying fallbacks",
+                context.agent_id, provider_name, orch_result.error,
             )
-            fallback_provider = self._pick_fallback(fallback_providers, exclude={provider_name})
-            if fallback_provider:
-                provider = fallback_provider
-                log.info("Falling back to provider '%s' for %s", provider.name, context.agent_id)
+            already_tried = {provider_name}
+            fallback_provider = self._pick_fallback(fallback_providers, exclude=already_tried)
+            while fallback_provider:
+                log.info("Falling back to provider '%s' for %s", fallback_provider.name, context.agent_id)
+                already_tried.add(fallback_provider.name)
                 # Reset result for retry
                 result.status = ExecutionStatus.RUNNING
                 result.error = None
-            else:
-                return bridge_result  # no fallback available
-
-        # --- LLM call (single or multi-turn) ---
-        try:
-            cumulative_usage = Usage()
-            turn_history: list[dict[str, Any]] = []
-            final_response: ProviderResponse | None = None
-
-            for turn in range(max_turns):
-                if context.cancel_event.is_set():
-                    result.status = ExecutionStatus.KILLED
-                    result.completed_at = datetime.now(timezone.utc)
-                    return result
-
-                # When using a fallback provider, use its default model instead
-                # of the configured model (which belongs to the primary provider).
-                model = "" if is_fallback else step.config.get("model", "")
-                response = await provider.send_stream(
-                    messages=messages,
-                    system=_resolve_text(step.config.get("system", ""), context.work_dir),
-                    model=model,
-                    max_tokens=step.config.get("max_tokens", 1024),
-                    tools=tools,
-                    temperature=step.config.get("temperature", 0.0),
-                    on_chunk=on_chunk,
-                    on_thinking=on_thinking,
+                orch_result = await _orchestrate(
+                    fallback_provider, step, context, result, on_chunk,
+                    use_default_model=True,
                 )
+                if orch_result.status != ExecutionStatus.FAILED:
+                    orch_result.output = orch_result.output or {}
+                    orch_result.output["fallback_provider"] = fallback_provider.name
+                    return orch_result
+                log.warning(
+                    "Fallback '%s' also failed: %s",
+                    fallback_provider.name, orch_result.error,
+                )
+                fallback_provider = self._pick_fallback(fallback_providers, exclude=already_tried)
+            return orch_result  # all providers exhausted
 
-                # Accumulate usage across turns
-                cumulative_usage.input_tokens += response.usage.input_tokens
-                cumulative_usage.output_tokens += response.usage.output_tokens
-                cumulative_usage.cache_read_tokens += response.usage.cache_read_tokens
-                cumulative_usage.cache_creation_tokens += response.usage.cache_creation_tokens
-
-                final_response = response
-
-                # Record this turn
-                turn_record: dict[str, Any] = {
-                    "turn": turn + 1,
-                    "text": response.text,
-                    "stop_reason": response.stop_reason,
-                }
-                if response.tool_calls:
-                    turn_record["tool_calls"] = [
-                        {"id": tc.id, "name": tc.name, "input": tc.input}
-                        for tc in response.tool_calls
-                    ]
-
-                # Single-turn or end_turn — done
-                if not response.tool_calls or response.stop_reason != "tool_use":
-                    turn_history.append(turn_record)
-                    break
-
-                # Multi-turn with tool calls — execute tools and continue
-                has_connectors = bool(context.connectors and context.connector_ids)
-                if tool_exec_fn is None and not has_connectors:
-                    # No executor configured — return tool calls as-is (Phase 1 behavior)
-                    turn_history.append(turn_record)
-                    break
-
-                # Execute each tool call
-                tool_results: list[dict[str, Any]] = []
-                for tc in response.tool_calls:
-                    log.info(
-                        "Executing tool %s for agent %s (turn %d)",
-                        tc.name, context.agent_id, turn + 1,
-                    )
-                    tr = await _route_tool_call(
-                        tc.name, tc.input, context,
-                        orchestrator_exec_fn=tool_exec_fn,
-                    )
-                    tool_results.append({
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "result": tr,
-                    })
-
-                turn_record["tool_results"] = tool_results
-                turn_history.append(turn_record)
-
-                # Build assistant message with tool_use content blocks
-                assistant_content: list[dict[str, Any]] = []
-                if response.text:
-                    assistant_content.append({"type": "text", "text": response.text})
-                for tc in response.tool_calls:
-                    assistant_content.append({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.input,
-                    })
-                messages.append({"role": "assistant", "content": assistant_content})
-
-                # Build tool_result messages
-                tool_result_content: list[dict[str, Any]] = []
-                for tr in tool_results:
-                    tool_result_content.append({
-                        "type": "tool_result",
-                        "tool_use_id": tr["tool_call_id"],
-                        "content": json.dumps(tr["result"], default=str),
-                    })
-                messages.append({"role": "user", "content": tool_result_content})
-
-            # --- Format output ---
-            if final_response is None:
-                result.status = ExecutionStatus.FAILED
-                result.error = "No response from provider"
-                result.completed_at = datetime.now(timezone.utc)
-                return result
+        # --- Simple LLM call (single-turn or multi-turn without orchestrator) ---
+        try:
+            model = "" if is_fallback else step.config.get("model", "")
+            response = await provider.send_stream(
+                messages=messages,
+                system=_resolve_text(step.config.get("system", ""), context.work_dir),
+                model=model,
+                max_tokens=step.config.get("max_tokens", 1024),
+                tools=tools,
+                temperature=step.config.get("temperature", 0.0),
+                on_chunk=on_chunk,
+                on_thinking=on_thinking,
+            )
 
             result.status = ExecutionStatus.COMPLETED
-            result.output = _format_output(final_response, cumulative_usage, turn_history)
+            result.output = _format_output(response, response.usage, [])
             result.completed_at = datetime.now(timezone.utc)
 
         except (ProviderError, Exception) as exc:
@@ -312,66 +231,22 @@ class CognitiveStepExecutor(StepExecutor):
                     provider.name, context.agent_id, error_msg, fallback_provider.name,
                 )
                 already_tried.add(fallback_provider.name)
-                provider = fallback_provider
-                messages = [{"role": "user", "content": user_content}]  # reset conversation
                 try:
-                    cumulative_usage = Usage()
-                    turn_history = []
-                    final_response = None
-                    for turn in range(max_turns):
-                        if context.cancel_event.is_set():
-                            result.status = ExecutionStatus.KILLED
-                            result.completed_at = datetime.now(timezone.utc)
-                            return result
-                        response = await provider.send_stream(
-                            messages=messages,
-                            system=_resolve_text(step.config.get("system", ""), context.work_dir),
-                            model="",  # use fallback provider's default model
-                            max_tokens=step.config.get("max_tokens", 1024),
-                            tools=tools,
-                            temperature=step.config.get("temperature", 0.0),
-                            on_chunk=on_chunk,
-                            on_thinking=on_thinking,
-                        )
-                        cumulative_usage.input_tokens += response.usage.input_tokens
-                        cumulative_usage.output_tokens += response.usage.output_tokens
-                        cumulative_usage.cache_read_tokens += response.usage.cache_read_tokens
-                        cumulative_usage.cache_creation_tokens += response.usage.cache_creation_tokens
-                        final_response = response
-                        turn_record = {"turn": turn + 1, "text": response.text, "stop_reason": response.stop_reason}
-                        if response.tool_calls:
-                            turn_record["tool_calls"] = [{"id": tc.id, "name": tc.name, "input": tc.input} for tc in response.tool_calls]
-                        if not response.tool_calls or response.stop_reason != "tool_use":
-                            turn_history.append(turn_record)
-                            break
-                        has_connectors = bool(context.connectors and context.connector_ids)
-                        if tool_exec_fn is None and not has_connectors:
-                            turn_history.append(turn_record)
-                            break
-                        tool_results = []
-                        for tc in response.tool_calls:
-                            log.info("Executing tool %s for agent %s (turn %d)", tc.name, context.agent_id, turn + 1)
-                            tr = await _route_tool_call(tc.name, tc.input, context, orchestrator_exec_fn=tool_exec_fn)
-                            tool_results.append({"tool_call_id": tc.id, "name": tc.name, "result": tr})
-                        turn_record["tool_results"] = tool_results
-                        turn_history.append(turn_record)
-                        assistant_content = []
-                        if response.text:
-                            assistant_content.append({"type": "text", "text": response.text})
-                        for tc in response.tool_calls:
-                            assistant_content.append({"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input})
-                        messages.append({"role": "assistant", "content": assistant_content})
-                        tool_result_content = []
-                        for tr in tool_results:
-                            tool_result_content.append({"type": "tool_result", "tool_use_id": tr["tool_call_id"], "content": json.dumps(tr["result"], default=str)})
-                        messages.append({"role": "user", "content": tool_result_content})
-
-                    if final_response is not None:
-                        result.status = ExecutionStatus.COMPLETED
-                        result.output = _format_output(final_response, cumulative_usage, turn_history)
-                        result.output["fallback_provider"] = provider.name
-                        result.completed_at = datetime.now(timezone.utc)
-                        break  # success
+                    response = await fallback_provider.send_stream(
+                        messages=[{"role": "user", "content": user_content}],
+                        system=_resolve_text(step.config.get("system", ""), context.work_dir),
+                        model="",  # use fallback's default
+                        max_tokens=step.config.get("max_tokens", 1024),
+                        tools=tools,
+                        temperature=step.config.get("temperature", 0.0),
+                        on_chunk=on_chunk,
+                        on_thinking=on_thinking,
+                    )
+                    result.status = ExecutionStatus.COMPLETED
+                    result.output = _format_output(response, response.usage, [])
+                    result.output["fallback_provider"] = fallback_provider.name
+                    result.completed_at = datetime.now(timezone.utc)
+                    break
                 except (ProviderError, Exception) as fallback_exc:
                     error_msg = str(fallback_exc)
                     if not isinstance(fallback_exc, ProviderError):
@@ -383,51 +258,47 @@ class CognitiveStepExecutor(StepExecutor):
                 result.error = error_msg
                 result.completed_at = datetime.now(timezone.utc)
 
-        # Record assistant turn in conversation history (orchestrator)
-        if (result.status == ExecutionStatus.COMPLETED
-                and tool_executor_set == "orchestrator"
-                and context.runtime is not None
-                and hasattr(context.runtime, "conversation")
-                and result.output):
-            text = result.output.get("text", "")
-            if text:
-                context.runtime.conversation.add_assistant_turn(
-                    text, execution_id=context.execution_id,
-                )
-
         return result
 
 
 # ---------------------------------------------------------------------------
-# Bridge orchestrate — delegates multi-turn to SDK
+# Orchestrate — delegates multi-turn tool loop to the provider
 # ---------------------------------------------------------------------------
 
-async def _bridge_orchestrate(
+async def _orchestrate(
     provider: Any,
     step: StepDefinition,
     context: StepContext,
     result: StepResult,
     on_chunk: Any,
+    *,
+    use_default_model: bool = False,
 ) -> StepResult:
-    """Run the orchestrator through a provider's native send_orchestrate().
+    """Run the orchestrator through the provider's send_orchestrate().
 
-    The provider handles the entire multi-turn tool loop natively (e.g. the
-    BridgeProvider delegates to the Claude Agent SDK).  Tool calls are
-    relayed back to Python for execution against the Runtime.
+    Works with ANY provider:
+    - BridgeProvider: delegates to the Claude Agent SDK subprocess, which
+      manages the multi-turn loop natively.
+    - Other providers (Anthropic, OpenAI, Ollama): use the generic base-class
+      implementation that drives send_stream() in a multi-turn loop.
+
+    Bridge-specific features (session resumption, interrupt hooks) are
+    activated when the provider has the relevant attributes.
     """
     from ..orchestrator.tools import execute_tool, get_tool_definitions_for_bridge
 
-    try:
-        # If we have an active SDK session (session_id), the SDK handles
-        # conversation continuity via resume — skip history prepending.
-        # If session_id is empty (fresh start or daemon restart), prepend
-        # conversation history so the model gets context from active.jsonl.
-        has_session = bool(provider._session_id)
-        user_content = _build_user_message(step.config, context, skip_history=has_session)
-        system = _resolve_text(step.config.get("system", ""), context.work_dir)
-        # Create a tool executor that routes to connectors or orchestrator tools
-        runtime = context.runtime
+    runtime = context.runtime
 
+    # Bridge providers have a _session_id for SDK session resumption.
+    # When an active session exists, the SDK handles conversation continuity
+    # via resume — skip history prepending in the user message.
+    session_id = getattr(provider, '_session_id', "") or ""
+    has_session = bool(session_id)
+    user_content = _build_user_message(step.config, context, skip_history=has_session)
+    system = _resolve_text(step.config.get("system", ""), context.work_dir)
+
+    try:
+        # Create a tool executor that routes to connectors or orchestrator tools
         async def _tool_executor(name: str, input: dict) -> dict:
             return await _route_tool_call(
                 name, input, context,
@@ -435,32 +306,33 @@ async def _bridge_orchestrate(
             )
 
         # Build tool list: orchestrator tools + connector tools
-        bridge_tools = get_tool_definitions_for_bridge()
+        orch_tools = get_tool_definitions_for_bridge()
         if context.connectors and context.connector_ids:
             connector_tools = context.connectors.get_all_tools(context.connector_ids)
-            bridge_tools.extend(
+            orch_tools.extend(
                 {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                 for t in connector_tools
             )
 
-        # Register an interrupt hook so kill_execution() can interrupt the bridge
-        if runtime is not None:
+        # Register an interrupt hook if the provider supports it
+        # (BridgeProvider has an .interrupt() method for kill_execution())
+        has_interrupt = hasattr(provider, 'interrupt')
+        if has_interrupt and runtime is not None:
             runtime.register_interrupt_hook(
                 context.execution_id,
                 provider.interrupt,
             )
 
-        # If we got here via fallback, use provider's default model
-        bridge_model = step.config.get("model", "")
+        model = "" if use_default_model else step.config.get("model", "")
         response = await provider.send_orchestrate(
             message=user_content,
             system=system,
-            model=bridge_model,
-            tools=bridge_tools,
+            model=model,
+            tools=orch_tools,
             max_turns=step.config.get("max_turns", 20),
             tool_executor=_tool_executor,
             on_chunk=on_chunk,
-            session_id=provider._session_id,
+            session_id=session_id,
         )
 
         if response.stop_reason == "interrupted":
@@ -478,7 +350,7 @@ async def _bridge_orchestrate(
                 "cache_read_tokens": response.usage.cache_read_tokens,
                 "cache_creation_tokens": response.usage.cache_creation_tokens,
             },
-            "mode": "bridge_orchestrate",
+            "mode": "orchestrate",
         }
         if response.thinking:
             output["thinking"] = response.thinking
@@ -500,11 +372,11 @@ async def _bridge_orchestrate(
         result.status = ExecutionStatus.FAILED
         result.error = f"Unexpected error: {exc}"
         result.completed_at = datetime.now(timezone.utc)
-        log.exception("Bridge orchestrate failed for agent %s", context.agent_id)
+        log.exception("Orchestrate failed for agent %s via %s", context.agent_id, provider.name)
 
     finally:
         # Unregister the interrupt hook now that orchestration is done
-        if runtime is not None:
+        if has_interrupt and runtime is not None:
             runtime.unregister_interrupt_hook(context.execution_id)
 
     return result
