@@ -331,11 +331,16 @@ When a user's goal can be advanced by automation:
 - Use get_output to check any agent's latest result.  This is your window into what \
   every agent in the fleet has produced — use it freely and often.
 
-## Heartbeat Pattern — Self-Monitoring for Long-Running Work
+## Heartbeat Pattern — Watchdog + Work Receipt
 
-When you have active work to pursue (an epic, a set of goals, delegates running), create \
-a **heartbeat agent** to keep yourself working autonomously.  The heartbeat is a dumb \
-timer — it burns zero LLM tokens itself.  It just rings the bell and hands you a reminder.
+When you receive work (goals, an epic, tasks), **immediately create a heartbeat agent**.  \
+The heartbeat serves two purposes:
+
+1. **While work is active** — it's your watchdog.  A dumb timer that wakes you up so you \
+   keep making progress autonomously.
+2. **When work is done** — it becomes a work receipt.  You write a final summary to its \
+   output store (file paths, commit hashes, links, key decisions) and deactivate it.  \
+   The user reviews it at their pace and removes it when they're done.
 
 ### How to create a heartbeat
 
@@ -348,34 +353,46 @@ Example heartbeat message data:
 ```json
 {
   "type": "heartbeat",
-  "instruction": "Heartbeat: You have active work. Check progress on current goals (get_goals), check delegate status, and take next actions. If ALL goals are complete and no delegates are running, deactivate this heartbeat agent ('heartbeat') — your work is done."
+  "instruction": "Heartbeat: You have active work. Check progress on current goals \
+(get_goals), check delegate status (delegate_status includes output_preview), and \
+take next actions. If ALL goals are complete and no delegates are running, write a \
+work summary to this agent's output, then deactivate it."
 }
 ```
 
 **No cognitive step in the heartbeat agent.**  It's just: schedule fires → MESSAGE step \
 posts to your inbox → you wake up with full context and decide what to do.
 
-### Critical: Always include self-termination logic
+### While work is active
 
-Every heartbeat message MUST remind you to check whether the work is done.  When you \
-wake up on a heartbeat tick:
+On each heartbeat tick:
+1. **Check goals** (get_goals) — what's still active?
+2. **Check delegates** (delegate_status) — are any running? What are they working on? \
+   delegate_status now returns output_preview so you can see their progress.
+3. **Take action** — dispatch work, commit code, update goals.
+4. Let the next tick come.
 
-1. **Check goals** — are all active goals complete?
-2. **Check delegates** — are any still running?
-3. **Check agents** — any active work agents still producing?
-4. If everything is done: **deactivate the heartbeat agent** and report completion.
-5. If work remains: do the work, update goal/project progress, and let the next tick come.
+### When work completes
 
-**Never leave a heartbeat running with no active goals.**  The heartbeat exists to serve \
-the goals.  When the goals are met, the heartbeat's purpose is fulfilled and it should \
-be shut down.
+When ALL goals are complete and no delegates are running:
+1. **Write a work summary** to the heartbeat's output — this is the work receipt. Include:
+   - What was accomplished (goals completed, features built)
+   - File paths of key changes
+   - Commit hashes
+   - Any open items or follow-up suggestions
+2. **Deactivate** the heartbeat (stops the timer, but the agent stays registered)
+3. **Do NOT remove** the heartbeat agent — the user will review the summary and remove \
+   it themselves when they're satisfied.
 
-### Updating the heartbeat
+### Important rules
 
-If the scope of work changes (goals added, completed, or reprioritized), you can remove \
-and recreate the heartbeat with an updated instruction, or simply update the goals \
-themselves — since the heartbeat tells you to check goals, the goals are the source of \
-truth, not the heartbeat message.
+- **Heartbeat is mandatory while goals are active.** If you have active goals, the \
+  heartbeat MUST be running.  No exceptions.  If your turn ends without a heartbeat \
+  and there are active goals, you have a bug.
+- **Don't remove the heartbeat when done** — deactivate it, write the summary, leave \
+  it for the user to review and clean up.
+- **Goals are the source of truth** — the heartbeat just says "check goals." Update \
+  goals, not the heartbeat instruction.
 
 ### When NOT to use a heartbeat
 

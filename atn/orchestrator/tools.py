@@ -532,7 +532,8 @@ _TOOLS: list[ToolDefinition] = [
         description=(
             "Check the status of a running delegate sub-agent. "
             "Returns status (pending/running/completed/failed/killed) and the "
-            "result if completed."
+            "result if completed. Also includes output_preview (last 2000 chars "
+            "of the delegate's text stream) so you can see what it's working on."
         ),
         input_schema={
             "type": "object",
@@ -1504,12 +1505,27 @@ async def _delegate_status(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     if node is None:
         return {"error": f"Unknown delegate: {agent_id}"}
 
-    return {
+    info: dict[str, Any] = {
         "agent_id": agent_id,
         "status": node.status.value,
         "title": node.title,
         "agent_type": node.agent_type,
     }
+
+    # Include current output text (persisted stream) — gives visibility into
+    # what the delegate is doing while it's still running.
+    output_text = runtime.get_delegate_output(agent_id)
+    if output_text:
+        # Return last 2000 chars to keep response size reasonable
+        info["output_preview"] = output_text[-2000:] if len(output_text) > 2000 else output_text
+        info["output_length"] = len(output_text)
+
+    if node.tokens_used:
+        info["tokens_used"] = node.tokens_used
+    if node.error:
+        info["error"] = node.error
+
+    return info
 
 
 async def _delegate_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
