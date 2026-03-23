@@ -67,7 +67,8 @@ class BridgeProvider(Provider):
         # Cumulative session stats — updated after each orchestrate response.
         # These track the SDK's view of the session, not our own bookkeeping.
         self._session_id: str = ""
-        self._num_turns: int = 0
+        self._sdk_num_turns: int = 0
+        self._cumulative_turns: int = 0
         self._total_cost_usd: float = 0.0
         self._context_window: int = 0
         self._max_output_tokens: int = 0
@@ -465,7 +466,8 @@ class BridgeProvider(Provider):
             # Update cumulative session stats from bridge context data
             ctx = final_resp.get("context", {})
             if ctx:
-                self._num_turns = ctx.get("num_turns", self._num_turns)
+                self._sdk_num_turns = ctx.get("num_turns", self._sdk_num_turns)
+                self._cumulative_turns += 1
                 self._total_cost_usd = ctx.get("total_cost_usd", self._total_cost_usd)
                 self._context_window = ctx.get("context_window", self._context_window)
                 self._max_output_tokens = ctx.get("max_output_tokens", self._max_output_tokens)
@@ -550,7 +552,7 @@ class BridgeProvider(Provider):
 
         return {
             "session_id": self._session_id,
-            "num_turns": self._num_turns,
+            "num_turns": self._cumulative_turns,
             "total_cost_usd": self._total_cost_usd,
             "context_window": self._context_window,
             "max_output_tokens": self._max_output_tokens,

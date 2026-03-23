@@ -159,6 +159,17 @@ class DelegateRegistry:
 
         return node
 
+    def remove(self, agent_id: str) -> bool:
+        """Remove a delegate and all its descendants from the registry."""
+        if agent_id not in self._nodes:
+            return False
+        # Remove descendants first (children, grandchildren, ...)
+        for desc in self.get_descendants(agent_id):
+            self._nodes.pop(desc.agent_id, None)
+        self._nodes.pop(agent_id, None)
+        log.info("Delegate removed: %s", agent_id)
+        return True
+
     # ------------------------------------------------------------------
     # Tree queries
     # ------------------------------------------------------------------

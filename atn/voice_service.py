@@ -115,6 +115,25 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Strip emojis so TTS doesn't read them as words
+    text = re.sub(
+        r'[\U0001F600-\U0001F64F'   # emoticons
+        r'\U0001F300-\U0001F5FF'     # misc symbols & pictographs
+        r'\U0001F680-\U0001F6FF'     # transport & map symbols
+        r'\U0001F1E0-\U0001F1FF'     # flags
+        r'\U0001F900-\U0001F9FF'     # supplemental symbols
+        r'\U0001FA00-\U0001FA6F'     # chess symbols, extended-A
+        r'\U0001FA70-\U0001FAFF'     # symbols extended-A continued
+        r'\U00002702-\U000027B0'     # dingbats
+        r'\U0000FE00-\U0000FE0F'     # variation selectors
+        r'\U0000200D'                # zero-width joiner
+        r'\U000023F0-\U000023FA'     # misc technical
+        r'\U00002600-\U000026FF'     # misc symbols
+        r'\U0000203C\U00002049'      # exclamation marks
+        r'\U000020E3'                # combining enclosing keycap
+        r'\U00002934\U00002935'      # arrows
+        r'\U000025AA-\U000025FE'     # geometric shapes
+        r']+', '', text)
     # Collapse Windows and Unix paths to basename
     text = re.sub(r'[A-Z]:\\(?:[^\\\s]+\\)*([^\\\s]+)', r'\1', text)
     text = re.sub(r'(?<!\w)/(?:[^/\s]+/)+([^/\s]+)', r'\1', text)
@@ -1177,6 +1196,15 @@ class VoiceService:
 
     def _on_record_start(self) -> None:
         self._kill_all_audio()
+        # Signal to UI that recording has started
+        try:
+            self._ptt_event_loop.run_until_complete(self.events.emit(Event(
+                type=EventType.VOICE_RECORDING,
+                source="voice",
+                data={"recording": True},
+            )))
+        except Exception as exc:
+            log.debug("[PTT] Failed to emit recording start event: %s", exc)
 
     def _kill_all_audio(self) -> None:
         if self.mixer:
@@ -1198,9 +1226,19 @@ class VoiceService:
     def _ptt_loop(self) -> None:
         """Background thread: wait for PTT, record, transcribe, route."""
         loop = asyncio.new_event_loop()
+        self._ptt_event_loop = loop
         while self._running:
             try:
                 audio = self.recorder.wait_and_record()
+                # Signal recording stopped
+                try:
+                    loop.run_until_complete(self.events.emit(Event(
+                        type=EventType.VOICE_RECORDING,
+                        source="voice",
+                        data={"recording": False},
+                    )))
+                except Exception:
+                    pass
                 if audio is None or len(audio) < self.recorder.sr * 0.3:
                     continue
 
@@ -1231,11 +1269,16 @@ class VoiceService:
 
     async def _send_to_orchestrator(self, text: str) -> None:
         from .orchestrator import ORCHESTRATOR_ID
-        self.runtime.inbox.post(
-            ORCHESTRATOR_ID,
+        from .models import InboxMessage, MessageType, MessagePriority
+
+        self.runtime.inbox.post(InboxMessage(
+            id=InboxMessage.generate_id(),
             source="voice",
-            content=text,
-        )
+            target=ORCHESTRATOR_ID,
+            type=MessageType.TRIGGER,
+            priority=MessagePriority.NORMAL,
+            data={"type": "voice_input", "instruction": text},
+        ))
 
     async def _send_to_delegate(self, agent_id: str, text: str) -> None:
         delivered = await self.runtime.send_delegate_message(agent_id, text)

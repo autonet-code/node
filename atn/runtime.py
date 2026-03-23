@@ -165,11 +165,10 @@ class Runtime:
         if recovered:
             log.warning("Recovered %d crashed execution(s) from previous run", len(recovered))
 
-        # Load delegate registry and clean up orphans from previous run
-        self.delegate_registry.load()
-        orphans = self.delegate_registry.cleanup_orphans()
-        if orphans:
-            self.delegate_registry.save()
+        # Delegates are ephemeral — clear the registry on startup.
+        # The execution log retains historical records if needed.
+        self.delegate_registry.clear()
+        self.delegate_registry.save()
 
         # Auto-detect bridge and Ollama (async probes)
         await self._auto_detect_providers()
@@ -1904,7 +1903,8 @@ class Runtime:
         provider = self._get_bridge_provider()
         if provider is not None:
             provider._session_id = ""
-            provider._num_turns = 0
+            provider._sdk_num_turns = 0
+            provider._cumulative_turns = 0
             provider._total_cost_usd = 0.0
             provider._cumulative_input_tokens = 0
             provider._cumulative_output_tokens = 0

@@ -617,6 +617,10 @@ def _build_user_message(
                 # Prefer data.instruction (the user's actual text)
                 instruction = m.data.get("instruction", "") if isinstance(m.data, dict) else ""
                 if instruction:
+                    # Tag voice-sourced messages so the LLM knows the input
+                    # was speech-to-text (may contain transcription artifacts)
+                    if m.source == "voice":
+                        instruction = f"🎤 [Voice Input] {instruction}"
                     parts.append(instruction)
                 elif m.data:
                     parts.append(_to_str(m.data))

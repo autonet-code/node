@@ -759,6 +759,16 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
             }
           }
 
+          // Fallback: if SDK didn't populate contextWindow, derive from model name
+          if (contextWindow === 0 && resolvedModel) {
+            const m = resolvedModel.toLowerCase()
+            if (m.includes("claude")) {
+              // All Claude 3+ models have 200k context
+              contextWindow = 200_000
+              maxOutputTokens = maxOutputTokens || (m.includes("opus") ? 32_000 : 16_000)
+            }
+          }
+
           log("orchestrate.result", {
             textLen: text.length,
             thinkingBlocks: thinking.length,
