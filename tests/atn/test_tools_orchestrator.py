@@ -1,0 +1,208 @@
+"""Tests for orchestrator tools — delegate, message passing, agent CRUD.
+
+Mocks the Runtime to avoid LLM calls. Focuses on tool executor logic.
+"""
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from atn.agent_registry import DelegateRegistry, DelegateStatus
+from atn.events import EventBus, EventType
+from atn.models import (
+    AgentDefinition,
+    AgentStatus,
+    InboxMessage,
+    MessagePriority,
+    MessageType,
+    StepDefinition,
+    StepType,
+)
+from atn.providers.base import ProviderResponse, ToolCall, Usage
+
+
+def _make_mock_runtime(bus: EventBus, tmp_path: Path) -> MagicMock:
+    """Create a mock runtime with delegate infrastructure."""
+    mock = MagicMock()
+    mock.events = bus
+    mock.delegate_registry = DelegateRegistry(store_path=tmp_path / "delegates.json")
+    mock._config = MagicMock()
+    mock._config.orchestrator.model = "sonnet"
+    mock.connectors = MagicMock()
+    mock.connectors._sessions = {}
+    mock.register_interrupt_hook = MagicMock()
+    mock.unregister_interrupt_hook = MagicMock()
+    mock._delegate_providers = {}
+    mock._delegate_tasks = {}
+    mock._delegate_results = {}
+    mock._delegate_done = {}
+    mock.send_delegate_message = AsyncMock(return_value=True)
+    return mock
+
+
+class TestDelegateSpawnAndCollect:
+    """Tests for _delegate and _delegate_collect tool executors."""
+
+    @pytest.mark.asyncio
+    async def test_delegate_spawns_and_collects(self, tmp_path):
+        bus = EventBus()
+        events = []
+
+        async def capture(e):
+            events.append(e)
+
+        bus.subscribe(None, capture)
+        rt = _make_mock_runtime(bus, tmp_path)
+
+        mock_response = ProviderResponse(
+            text="Found 3 files.",
+            usage=Usage(input_tokens=500, output_tokens=200),
+            stop_reason="end_turn",
+            model="sonnet",
+        )
+        mock_provider = AsyncMock()
+        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.close = AsyncMock()
+        mock_provider.interrupt = AsyncMock()
+
+        with patch("atn.providers.bridge.BridgeProvider", return_value=mock_provider):
+            from atn.orchestrator.tools import _delegate, _delegate_collect
+
+            result = await _delegate(rt, {
+                "prompt": "Search for auth code",
+                "agent_type": "explore",
+                "title": "Auth search",
+            })
+            assert result["status"] == "spawned"
+            assert result["agent_type"] == "explore"
+            agent_id = result["agent_id"]
+
+            collect = await _delegate_collect(rt, {"agent_id": agent_id})
+
+        assert collect["status"] == "completed"
+        assert "Found 3 files" in collect["result"]
+        assert collect["usage"]["input_tokens"] == 500
+
+        event_types = [e.type for e in events]
+        assert EventType.DELEGATE_SPAWNED in event_types
+        assert EventType.DELEGATE_COMPLETED in event_types
+
+    @pytest.mark.asyncio
+    async def test_delegate_failure_captured(self, tmp_path):
+        bus = EventBus()
+        rt = _make_mock_runtime(bus, tmp_path)
+
+        mock_provider = AsyncMock()
+        mock_provider.send_orchestrate = AsyncMock(side_effect=RuntimeError("crash"))
+        mock_provider.close = AsyncMock()
+
+        with patch("atn.providers.bridge.BridgeProvider", return_value=mock_provider):
+            from atn.orchestrator.tools import _delegate, _delegate_collect
+
+            spawn = await _delegate(rt, {"prompt": "Will fail", "agent_type": "implement"})
+            assert spawn["status"] == "spawned"
+
+            collect = await _delegate_collect(rt, {"agent_id": spawn["agent_id"]})
+
+        assert collect["status"] == "failed"
+        assert "crash" in collect["error"]
+        node = rt.delegate_registry.get_node(spawn["agent_id"])
+        assert node.status == DelegateStatus.FAILED
+
+
+class TestDelegateStatus:
+    """Tests for the _delegate_status tool executor."""
+
+    @pytest.mark.asyncio
+    async def test_status_while_running(self, tmp_path):
+        bus = EventBus()
+        rt = _make_mock_runtime(bus, tmp_path)
+
+        proceed = asyncio.Event()
+        mock_response = ProviderResponse(
+            text="Done.", usage=Usage(input_tokens=10, output_tokens=5),
+            stop_reason="end_turn", model="sonnet",
+        )
+
+        async def slow_orchestrate(**kwargs):
+            await proceed.wait()
+            return mock_response
+
+        mock_provider = AsyncMock()
+        mock_provider.send_orchestrate = slow_orchestrate
+        mock_provider.close = AsyncMock()
+        mock_provider.interrupt = AsyncMock()
+
+        with patch("atn.providers.bridge.BridgeProvider", return_value=mock_provider):
+            from atn.orchestrator.tools import _delegate, _delegate_status, _delegate_collect
+
+            spawn = await _delegate(rt, {"prompt": "Slow task", "agent_type": "implement"})
+            await asyncio.sleep(0.05)
+
+            status = await _delegate_status(rt, {"agent_id": spawn["agent_id"]})
+            assert status["status"] == "running"
+
+            proceed.set()
+            collect = await _delegate_collect(rt, {"agent_id": spawn["agent_id"]})
+            assert collect["status"] == "completed"
+
+
+class TestMessageTool:
+    """Tests for post_message tool executor."""
+
+    @pytest.mark.asyncio
+    async def test_post_message_to_known_agent(self, tmp_path):
+        bus = EventBus()
+        rt = _make_mock_runtime(bus, tmp_path)
+        # get_agent must return truthy for the target
+        rt.get_agent = MagicMock(return_value=MagicMock())
+        from atn.inbox import InboxManager
+        rt.inbox = InboxManager()
+
+        from atn.orchestrator.tools import _post_message
+
+        result = await _post_message(rt, {
+            "target": "orch",
+            "message": "I found something important",
+            "priority": "normal",
+        })
+        assert "message_id" in result
+        assert result["target"] == "orch"
+
+    @pytest.mark.asyncio
+    async def test_post_message_to_unknown_agent(self, tmp_path):
+        bus = EventBus()
+        rt = _make_mock_runtime(bus, tmp_path)
+        rt.get_agent = MagicMock(return_value=None)
+
+        from atn.orchestrator.tools import _post_message
+
+        result = await _post_message(rt, {
+            "target": "nonexistent",
+            "message": "hello",
+        })
+        assert "error" in result
+
+
+class TestGetSnapshotTool:
+    """Tests for the get_snapshot tool executor."""
+
+    @pytest.mark.asyncio
+    async def test_get_snapshot_returns_dict(self, tmp_path):
+        bus = EventBus()
+        rt = _make_mock_runtime(bus, tmp_path)
+
+        # Mock snapshot method
+        rt.snapshot = MagicMock(return_value={
+            "agents": [],
+            "delegates": {"nodes": [], "active_count": 0, "total_count": 0},
+            "status": "running",
+        })
+
+        from atn.orchestrator.tools import _get_snapshot
+
+        result = await _get_snapshot(rt, {})
+        assert isinstance(result, dict)
