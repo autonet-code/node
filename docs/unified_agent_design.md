@@ -289,6 +289,16 @@ Today, the orchestrator's system prompt tells it to manually create a heartbeat 
 - **Wasteful:** Creates a real agent just to send a timer message
 - **Not universal:** Only the orchestrator knows this pattern
 
+### How it relates to the innate wake-up
+
+The completion callback (Section 8) handles the **event-driven** case — "child finished, wake parent." The heartbeat handles the **periodic** case — "I'm still alive, here's my status." Together they cover all supervision needs:
+
+- **Child completes** → completion callback injects result into parent's turn (immediate)
+- **Child is still running** → heartbeat pings parent with status (periodic)
+- **Parent wants to check in** → pulls child's output store (on-demand)
+
+The heartbeat is NOT the mechanism for collecting results. It's a liveness signal.
+
 ### Intrinsic heartbeat design
 
 Every agent with `heartbeat` config gets automatic periodic pinging, managed by the Runtime:
@@ -410,14 +420,118 @@ This already exists in `DelegateRegistry.generate_child_id` — it moves to Runt
 
 ## 8. Communication Patterns <a id="communication-patterns"></a>
 
-### Unified inbox (no change needed)
+### The Core Pattern: Result Bubbling as Tool Returns (Innate Wake-Up)
 
-Every agent already has an inbox via `InboxManager`. Pipeline agents use it. The orchestrator uses it. The only agents that *don't* use it are delegates — because they're not in the inbox system at all.
+**This is the most important communication pattern in the unified model.**
+
+In the current delegate system, the parent polls (`delegate_status`) or blocks (`delegate_collect`). Neither is natural. In the unified model, a child's completion **wakes the parent automatically** by returning into the parent's active tool-use turn.
+
+This is the pattern from the user's Chevin project (c:\code\chevin), and it's how the system should work:
+
+When a parent spawns a child via `create_agent` (the unified `delegate`), the call returns immediately with an `agent_id`. But under the hood, the Runtime registers a **completion callback** tied to the parent:
+
+```python
+async def _spawn_cognitive_child(self, parent_id: str, defn: AgentDefinition):
+    """Spawn a child agent. The parent's tool call returns immediately.
+    When the child completes, the result is injected into the parent's
+    active session as a tool return or inbox message."""
+
+    agent_id = defn.id
+    self._completion_callbacks[agent_id] = parent_id
+
+    # Register, activate, trigger — the child starts working
+    await self.register_agent(defn)
+    await self.activate_agent(agent_id)
+    await self.trigger_run(agent_id, source=f"agent:{parent_id}")
+
+    return agent_id  # Parent gets this immediately
+```
+
+When the child completes:
+
+```python
+async def _on_agent_completed(self, agent_id: str, result: str):
+    parent_id = self._completion_callbacks.pop(agent_id, None)
+    if not parent_id:
+        return
+
+    # Option A: If parent has an active bridge session, inject directly
+    provider = self._active_providers.get(parent_id)
+    if provider and hasattr(provider, 'send_user_message'):
+        await provider.send_user_message(
+            f"[Child agent '{agent_id}' completed]\n\n{result}"
+        )
+        return
+
+    # Option B: Parent is not currently running — post to inbox
+    # The next time the parent wakes (heartbeat, schedule, user message),
+    # it will see this in its inbox
+    self.inbox.post(InboxMessage(
+        source=agent_id,
+        target=parent_id,
+        type=MessageType.WORK,
+        priority=MessagePriority.HIGH,
+        data={
+            "type": "child_completed",
+            "child_id": agent_id,
+            "result_preview": result[:2000],
+        }
+    ))
+```
+
+**Two paths, one outcome:**
+- **Parent is running** → result injected into the parent's active LLM turn. The parent sees it as a message in its conversation: "Child agent 'research-auth' completed" with the result. The parent can immediately act on it — no polling, no blocking.
+- **Parent is not running** → result posted to parent's inbox as a HIGH priority WORK message. The heartbeat (or any other trigger) wakes the parent, which sees the completion in its inbox on the next turn.
+
+This means: **agents wake each other up innately**. No separate heartbeat agent needed just for collection. The heartbeat's job is only to keep the parent alive for periodic check-ins — the actual work notifications come through completion callbacks.
+
+### Fractal Context Propagation
+
+Every cognitive agent gets the infrastructure to spawn its own children. This is fractality:
+
+```python
+def _resolve_tools_for_agent(self, defn: AgentDefinition) -> list[dict]:
+    tools = []
+
+    if "atn_core" in defn.tools:
+        # The agent gets create_agent (scoped: children only),
+        # post_message, get_snapshot, get_output
+        tools.extend(self._get_scoped_tools(defn.id))
+
+    if "connectors" in defn.tools:
+        tools.extend(self.connectors.get_all_tools(defn.connector_ids))
+
+    return tools
+
+def _get_scoped_tools(self, agent_id: str) -> list[dict]:
+    """Tools scoped to this agent's position in the hierarchy."""
+    return [
+        # create_agent — but children get parent_id=agent_id automatically
+        {
+            "name": "create_agent",
+            "description": "Create a child agent to work on a subtask.",
+            # Parent ID is injected by the Runtime — the agent can't
+            # create siblings or agents above itself
+        },
+        # post_message — can message any agent (parent, siblings, children)
+        {"name": "post_message", ...},
+        # get_snapshot — see the full system state
+        {"name": "get_snapshot", ...},
+        # get_output — read any agent's last result
+        {"name": "get_output", ...},
+    ]
+```
+
+The key: when agent `orch.1` calls `create_agent`, the Runtime automatically sets `parent_id="orch.1"` on the new agent. The child gets `orch.1.1` as its ID. And that child, if it has `atn_core` tools, can spawn `orch.1.1.1`. Same API at every level. Same completion callbacks. Same heartbeat protocol.
+
+### Unified inbox
+
+Every agent has an inbox via `InboxManager`. Pipeline agents use it. The orchestrator uses it. The only agents that *don't* use it are delegates — because they're not in the inbox system at all.
 
 In the unified model, cognitive-mode agents get inboxes. Messages delivered while a cognitive session is running are:
 
-1. **Queued in the inbox** (for the next wake-up if the session ends)
-2. **Injected into the active session** via `BridgeProvider.send_user_message()` (for real-time delivery)
+1. **Injected into the active session** via `BridgeProvider.send_user_message()` (real-time delivery)
+2. **Queued in the inbox** (if the session has ended, picked up on next wake-up)
 
 This is already implemented for delegates via `delegate_message` → `runtime.send_delegate_message`. In the unified model, `post_message` just works for any agent — the Runtime checks if there's an active bridge session and injects the message if so.
 
@@ -431,13 +545,14 @@ Currently `delegate_message` is a separate tool. In the unified model, `post_mes
 
 ```python
 async def post_message(target_id, content, priority="normal"):
-    # 1. Post to inbox (standard path)
-    inbox.post(InboxMessage(...))
-
-    # 2. If target has an active cognitive session, inject directly
+    # 1. If target has an active cognitive session, inject directly
     provider = runtime._active_providers.get(target_id)
     if provider and hasattr(provider, 'send_user_message'):
         await provider.send_user_message(content)
+        return  # Delivered in real-time
+
+    # 2. Otherwise, post to inbox (picked up on next wake-up)
+    inbox.post(InboxMessage(...))
 ```
 
 ### The working thread IS the record
