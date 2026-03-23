@@ -1885,6 +1885,17 @@ class Runtime:
         # Clear session so the new model starts a fresh SDK session
         self._clear_bridge_session()
 
+        # Also update the BridgeProvider's default model so it matches.
+        # The step config passes the model explicitly, but this ensures
+        # consistency if anything falls back to provider._model.
+        from .providers.bridge import BridgeProvider
+        from .steps.cognitive import CognitiveStepExecutor
+        cognitive = self._executors.get(StepType.COGNITIVE)
+        if isinstance(cognitive, CognitiveStepExecutor):
+            provider = cognitive._providers.get("claude_max")
+            if isinstance(provider, BridgeProvider):
+                provider._model = model
+
         log.info("Orchestrator model changed to '%s'", model)
         return defn.id
 

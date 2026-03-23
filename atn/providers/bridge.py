@@ -552,6 +552,7 @@ class BridgeProvider(Provider):
 
         return {
             "session_id": self._session_id,
+            "active_model": self._model,
             "num_turns": self._cumulative_turns,
             "total_cost_usd": self._total_cost_usd,
             "context_window": self._context_window,
