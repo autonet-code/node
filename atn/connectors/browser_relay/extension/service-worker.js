@@ -1,9 +1,9 @@
 /**
- * Agent CDP Relay -- Chrome Extension Service Worker
+ * Autonet -- Chrome Extension Service Worker
  *
- * Connects to a local Python relay server via WebSocket.
+ * Connects to a local Autonet daemon via WebSocket.
  * Translates CDP protocol commands into chrome.debugger API calls,
- * allowing external tools (Browser Use) to control the real browser profile.
+ * allowing AI agents to control the real browser profile.
  *
  * Keep-alive: A content script (keep-alive.js) maintains a persistent port
  * connection that prevents Chrome from suspending this service worker.
@@ -62,7 +62,7 @@ function connect() {
     ws = new WebSocket(RELAY_URL);
 
     ws.onopen = () => {
-      console.log("[AgentRelay] Connected to relay");
+      console.log("[Autonet] Connected to daemon");
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -74,12 +74,12 @@ function connect() {
         const msg = JSON.parse(event.data);
         await handleMessage(msg);
       } catch (e) {
-        console.error("[AgentRelay] Error handling message:", e);
+        console.error("[Autonet] Error handling message:", e);
       }
     };
 
     ws.onclose = () => {
-      console.log("[AgentRelay] Disconnected from relay");
+      console.log("[Autonet] Disconnected from daemon");
       ws = null;
       scheduleReconnect();
     };
@@ -89,7 +89,7 @@ function connect() {
       ws = null;
     };
   } catch (e) {
-    console.error("[AgentRelay] Connection failed:", e);
+    console.error("[Autonet] Connection failed:", e);
     scheduleReconnect();
   }
 }
@@ -157,7 +157,7 @@ async function handleTrainingConfig(msg) {
   try {
     await chrome.storage.local.set({ trainingCapture: captureConfig });
   } catch (e) {
-    console.warn("[AgentRelay] Failed to save training config:", e.message);
+    console.warn("[Autonet] Failed to save training config:", e.message);
   }
 
   send({ type: "training_config_response", id: msg.id, result: captureConfig });
@@ -310,7 +310,7 @@ async function handleBrowserCommand(id, method, params) {
         try {
           await autoAttachTab(tab.id);
         } catch (e) {
-          console.warn("[AgentRelay] Auto-attach failed for new target:", e);
+          console.warn("[Autonet] Auto-attach failed for new target:", e);
         }
       }
       break;
@@ -329,7 +329,7 @@ async function handleBrowserCommand(id, method, params) {
         id,
         result: {
           protocolVersion: "1.3",
-          product: "Chrome (via Agent CDP Relay)",
+          product: "Chrome (via Autonet)",
           userAgent: navigator.userAgent,
           jsVersion: "",
         },
@@ -435,7 +435,7 @@ async function markTab(tabId) {
       })()`,
     });
   } catch (e) {
-    console.warn("[AgentRelay] markTab failed:", e.message);
+    console.warn("[Autonet] markTab failed:", e.message);
   }
 }
 
@@ -502,7 +502,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     try {
       await autoAttachTab(tab.id);
     } catch (e) {
-      console.warn("[AgentRelay] Auto-attach on tab created failed:", e);
+      console.warn("[Autonet] Auto-attach on tab created failed:", e);
     }
   }
 });

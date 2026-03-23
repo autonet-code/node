@@ -519,6 +519,10 @@ _TOOLS: list[ToolDefinition] = [
                     "type": "string",
                     "description": "Short human-readable label for this delegation (shown in UI).",
                 },
+                "model": {
+                    "type": "string",
+                    "description": "Model to use for this delegate (e.g. 'opus', 'sonnet'). Defaults to the orchestrator's own model.",
+                },
             },
             "required": ["prompt"],
         },
@@ -1265,6 +1269,8 @@ async def _run_delegate_session(
     prompt: str,
     system_prompt: str,
     delegate_tools: list[dict[str, Any]],
+    *,
+    model: str = "",
 ) -> None:
     """Background coroutine that runs a delegate's bridge session.
 
@@ -1277,7 +1283,8 @@ async def _run_delegate_session(
     sub_provider: BridgeProvider | None = None
 
     try:
-        sub_provider = BridgeProvider(model=runtime._config.orchestrator.model or "sonnet")
+        delegate_model = model or runtime._config.orchestrator.model or "sonnet"
+        sub_provider = BridgeProvider(model=delegate_model)
 
         # Make provider accessible for mid-session message injection
         runtime._delegate_providers[agent_id] = sub_provider
@@ -1425,6 +1432,7 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
 
     agent_type = input.get("agent_type", "implement")
     title = input.get("title", "") or f"{agent_type}: {prompt[:60]}"
+    model = input.get("model", "")  # optional model override
 
     registry: DelegateRegistry = runtime.delegate_registry
 
@@ -1457,7 +1465,7 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         for cid, session in runtime.connectors._sessions.items():
             if session and session.tools:
                 delegate_tools.extend(
-                    {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+                    {"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("inputSchema", t.get("input_schema", {}))}
                     for t in session.tools
                 )
 
@@ -1466,7 +1474,7 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
 
     # Launch as background task — returns immediately
     task = asyncio.create_task(
-        _run_delegate_session(runtime, agent_id, title, prompt, system_prompt, delegate_tools),
+        _run_delegate_session(runtime, agent_id, title, prompt, system_prompt, delegate_tools, model=model),
         name=f"delegate:{agent_id}",
     )
     runtime._delegate_tasks[agent_id] = task

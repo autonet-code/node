@@ -1,23 +1,26 @@
 async function checkStatus() {
   const el = document.getElementById("status");
+  const statusText = document.getElementById("status-text");
   const info = document.getElementById("info");
 
   try {
     const resp = await fetch("http://127.0.0.1:9222/json/version");
     if (resp.ok) {
       const data = await resp.json();
-      el.textContent = "Connected to relay";
+      statusText.textContent = "Connected to daemon";
       el.className = "status connected";
-      info.textContent = `Extension WS: ${data.extensionConnected ? "yes" : "waiting..."}`;
+      info.textContent = data.extensionConnected
+        ? "Extension WebSocket active"
+        : "Extension WebSocket connecting...";
     } else {
-      el.textContent = "Relay not responding";
+      statusText.textContent = "Daemon not responding";
       el.className = "status disconnected";
-      info.textContent = "Start relay: python relay.py";
+      info.textContent = "Start the daemon: pip install autonet-daemon && atn-daemon";
     }
   } catch (e) {
-    el.textContent = "Relay not running";
+    statusText.textContent = "Daemon not running";
     el.className = "status disconnected";
-    info.textContent = "Start relay: python relay.py";
+    info.textContent = "Start the daemon: pip install autonet-daemon && atn-daemon";
   }
 }
 
