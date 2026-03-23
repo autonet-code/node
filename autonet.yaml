@@ -14,9 +14,21 @@ log_level: INFO
 # seed: 42
 
 blockchain:
-  rpc_url: http://127.0.0.1:8545
-  chain_id: 31337
+  rpc_url: https://node.shadownet.etherlink.com
+  chain_id: 127823
   # private_key: 0x...  # set per-node or via AUTONET_PRIVATE_KEY
+  contracts:
+    ATNToken: "0x6e82D6678790820Ef81669046e921b1D2947A08f"
+    ParticipantStaking: "0x8B08279cf510BfeB6acE6BA5282BF0e4F6eBD8EE"
+    ModelShardRegistry: "0x7De3B8a6bc4eB7f098018Da030f93718eeaf7885"
+    Project: "0xC309f344e652E023b15BAF578089Aa90a9F5AF9B"
+    TaskContract: "0x8fEb5be0367F596bC6357538e346472eBf76D365"
+    ResultsRewards: "0x1ef4e0A6DaC1CFD23E31427b2Ecdd2A6A0F0f542"
+    AnchorBridge: "0x2005556109607F5b11BaCAd05270E7DE32260B4D"
+    DisputeManager: "0xB1Cf18A50bA3fffD578D2b2B08Ea2D03A8Aa2a3b"
+    AutonetDAO: "0xD0271E6d7710F0bF59Dc8720306224Cc6ddf503f"
+    ForcedErrorRegistry: "0x290Fc505782E6b70A4c57A3cECc6Ad109466520e"
+    InferenceProviderFactory: "0xf8246D4E4668EaC14aA508Daa02EFb60099699BF"
 
 blob_store:
   data_dir: ~/.autonet/blobs

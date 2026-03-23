@@ -24,6 +24,12 @@ module.exports = {
       url: process.env.SEPOLIA_RPC_URL || "",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
+    shadownet: {
+      url: "https://node.shadownet.etherlink.com",
+      chainId: 127823,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      timeout: 180000,
+    },
   },
   paths: {
     sources: "./contracts",

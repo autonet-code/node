@@ -4,6 +4,7 @@ rpb_gemini.txt
 rpb_speaker_notes.md
 share.md
 artefacts/
+.env
 node_modules/
 __pycache__/
 *.pyc
