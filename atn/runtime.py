@@ -120,7 +120,7 @@ class Runtime:
 
         # Autonet network service (optional — works without it)
         from .autonet_service import AutonetBridge
-        self.autonet = AutonetBridge(self._config.autonet)
+        self.autonet = AutonetBridge(self._config.autonet, event_bus=self.events)
 
         # Agent registry
         self._agents: dict[str, AgentDefinition] = {}

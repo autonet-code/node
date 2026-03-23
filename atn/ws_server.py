@@ -441,10 +441,12 @@ class WebSocketBridge:
             if not address:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'address' field"}
             result = self.runtime.autonet.connect_wallet(address)
+            await self.runtime.autonet._emit("AUTONET_WALLET", {"action": "connected", "address": address})
             return {"msg_id": msg_id, "ok": True, "result": result}
 
         if msg_type == "autonet_wallet_disconnect":
             result = self.runtime.autonet.disconnect_wallet()
+            await self.runtime.autonet._emit("AUTONET_WALLET", {"action": "disconnected"})
             return {"msg_id": msg_id, "ok": True, "result": result}
 
         if msg_type == "autonet_set_chain":
@@ -453,6 +455,7 @@ class WebSocketBridge:
             if not rpc_url:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'rpc_url' field"}
             result = self.runtime.autonet.set_chain(rpc_url, chain_id)
+            await self.runtime.autonet._emit("AUTONET_STATUS", {"action": "chain_changed", **result})
             return {"msg_id": msg_id, "ok": True, "result": result}
 
         # New conversation: reset conversation history without changing model

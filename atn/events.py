@@ -63,6 +63,12 @@ class EventType(Enum):
     VOICE_RECORDING = "voice.recording"
     VOICE_TRANSCRIBED = "voice.transcribed"
 
+    # Autonet network service
+    AUTONET_STARTED = "autonet.started"
+    AUTONET_STOPPED = "autonet.stopped"
+    AUTONET_STATUS = "autonet.status"
+    AUTONET_WALLET = "autonet.wallet"
+
 
 @dataclass(frozen=True, slots=True)
 class Event:

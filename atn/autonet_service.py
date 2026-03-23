@@ -22,6 +22,7 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .config import AutonetConfig
+    from .events import EventBus
 
 log = logging.getLogger(__name__)
 
@@ -82,9 +83,10 @@ class AutonetBridge:
     task so it doesn't block the ATN event loop.
     """
 
-    def __init__(self, config: AutonetConfig) -> None:
+    def __init__(self, config: AutonetConfig, event_bus: EventBus | None = None) -> None:
         self.config = config
         self.state = AutonetState()
+        self._events = event_bus
         self._service = None      # Will hold nodes.service.AutonetService
         self._task: asyncio.Task | None = None
         self._autonet_config = None  # Will hold nodes.common.config.AutonetConfig
@@ -97,6 +99,19 @@ class AutonetBridge:
             self.state.rpc_url = config.rpc_url
         if config.chain_id:
             self.state.chain_id = config.chain_id
+
+    async def _emit(self, event_type_name: str, data: dict[str, Any] | None = None) -> None:
+        """Emit an event if the event bus is available."""
+        if not self._events:
+            return
+        from .events import Event, EventType
+        et = getattr(EventType, event_type_name, None)
+        if et:
+            await self._events.emit(Event(
+                type=et,
+                source="autonet",
+                data=data or self.state.to_dict(),
+            ))
 
     async def start(self) -> dict[str, Any]:
         """Start the autonet training service.
@@ -131,6 +146,7 @@ class AutonetBridge:
 
             self.state.status = AutonetStatus.RUNNING
             log.info("Autonet service started")
+            await self._emit("AUTONET_STARTED")
             return {"status": "started"}
 
         except ImportError as e:
@@ -175,6 +191,7 @@ class AutonetBridge:
 
             self.state.status = AutonetStatus.STOPPED
             log.info("Autonet service stopped")
+            await self._emit("AUTONET_STOPPED")
             return {"status": "stopped"}
         except Exception as e:
             self.state.status = AutonetStatus.ERROR
