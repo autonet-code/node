@@ -40,6 +40,91 @@ These systems are wired together with duct tape: the orchestrator tools file (`o
 
 ---
 
+## 1.5. Non-Negotiable Requirements <a id="non-negotiables"></a>
+
+Two requirements are **hard constraints** on the design. Everything else is negotiable.
+
+### Requirement 1: Fractality
+
+Every agent — root orchestrator, sub-agent, sub-sub-agent — has the **exact same interface**. Same definition schema, same tool surface (scoped by role, not by level), same ability to spawn children, same lifecycle.
+
+**Reference implementation:** The Chevin framework (`c:\code\chevin`) achieves this cleanly. Every agent at every level gets the same MCP tool setup — including `delegate` to spawn further children. The hierarchy is just IDs (`root.1`, `root.1.1`, `root.1.1.1`). A sub-sub-agent at depth 4 works identically to the root orchestrator. The only thing that varies is the system prompt (which describes the agent's specific role).
+
+**What this means concretely:**
+- A cognitive sub-agent spawned by the orchestrator can itself spawn sub-sub-agents using the same `delegate`/`create_agent` tool
+- Those sub-sub-agents can spawn further children, to arbitrary depth
+- The tool surface at each level includes agent management tools — not just the "core 3" (delegate, post_message, get_snapshot), but the full set appropriate to the agent's role
+- The `parent_id` chain is the only thing that distinguishes levels — not different agent types, registries, or execution models
+- Registration, lifecycle, persistence, communication all work identically at every level
+
+**Chevin's limitation we must surpass:** In Chevin, delegation is **synchronous** — the parent blocks waiting for the child to finish. This is the part that needed refactoring. Our design must support async delegation where the parent continues working while children execute in parallel.
+
+### Requirement 2: Innate Wake-Up on Completion
+
+When a child agent finishes its work, it **automatically wakes its parent**. No polling. No heartbeat needed for "is my child done?" The completion event flows up the hierarchy as an inbox message that triggers the parent's next turn.
+
+**How it works:**
+1. Child agent completes (cognitive session ends, or pipeline finishes)
+2. Runtime automatically posts a HIGH-priority WORK message to the parent's inbox:
+   ```python
+   InboxMessage(
+       source=child_id,
+       target=parent_id,
+       type=MessageType.WORK,
+       priority=MessagePriority.HIGH,
+       data={
+           "type": "child_completed",
+           "child_id": child_id,
+           "status": "completed",  # or "failed"
+           "result_preview": first_500_chars,
+       }
+   )
+   ```
+3. Parent's inbox watcher triggers a new turn — the parent wakes up and processes the result
+4. If the parent is mid-session (running a cognitive turn), the message is **injected** into the active session via `send_user_message()` — so the parent sees it immediately without waiting for its current turn to end
+
+**This replaces:**
+- Manual `delegate_collect()` (blocking poll)
+- Manual `delegate_status()` checks on heartbeat ticks
+- The heartbeat pattern for monitoring child completion
+
+**The heartbeat remains useful for:** periodic liveness signals to the parent while long-running work is in progress (not for completion notification — that's automatic).
+
+**The cascade:** This composes fractally. When `orch.1.2.3` completes, it wakes `orch.1.2`. When `orch.1.2` finishes processing that result and completes its own work, it wakes `orch.1`. When `orch.1` completes, it wakes `orch` (the orchestrator). The orchestrator processes the result and may report to the user. Completion signals ripple up the tree automatically.
+
+### UI Reference: Sidekick-Web Thread Navigation
+
+The Sidekick-Web app (`c:\code\chevin`) implemented proven UX patterns for fractal agent navigation that should be carried into the unified design:
+
+**Agent Tree Sidebar** (`chevin/widgets/agent_tree_sidebar.dart`):
+- Hierarchical list with depth-based indentation (calculated from dot-notation IDs)
+- Pulsing green dot for running agents, gray checkmark for completed, red X for errors
+- Activity count per agent, task title display
+- Pop-out button to open agent in separate browser window (position persisted in localStorage)
+
+**Delegation Items in Chat Feed** (`chevin/chevin_chat.dart`):
+- When an agent delegates, a 🚀 item appears inline in the activity feed
+- Items carry `linkedAgentId` — clicking navigates into that sub-agent's thread
+- Rendered as `InkWell` with ↗ icon, underlined in primary color
+
+**Depth Navigation with Zoom Transitions**:
+- Clicking a delegation item → `selectAgent(childId)` → feed switches to child's activity
+- **Direction-aware animation** (400ms, easeInOut):
+  - Zooming IN (parent→child): outgoing scales to 1.08 + fades, incoming scales from 0.92 + fades in
+  - Zooming OUT (child→parent): reversed scaling
+  - Creates a parallax "depth" effect that makes the hierarchy feel spatial
+
+**Pop-Out Windows** (`screens/sub_agent_popup_screen.dart`):
+- Sub-agents can open in separate browser windows via `window.open()`
+- **BroadcastChannel sync** between windows — completion events propagate to main window
+- Docking button returns agent to main window
+
+**Layout modes**: Docked sidebar → Maximized (tree sidebar + chat area, max-width 860px) → Popped out window
+
+These patterns should inform the Windows UI: delegation items in the orchestrator's conversation should be clickable to open/navigate to the child agent's window. The agent tree sidebar should show the full hierarchy with real-time status.
+
+---
+
 ## 2. The Real Problems <a id="the-real-problems"></a>
 
 Previous analyses identified the obvious structural duplication. Here are the **hard problems** they understate or miss:
