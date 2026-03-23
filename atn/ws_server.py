@@ -458,6 +458,29 @@ class WebSocketBridge:
             await self.runtime.autonet._emit("AUTONET_STATUS", {"action": "chain_changed", **result})
             return {"msg_id": msg_id, "ok": True, "result": result}
 
+        # Standards publication (Story 3.2)
+        if msg_type == "autonet_standards":
+            try:
+                result = self.runtime.autonet.get_standards(
+                    user_profile=self.runtime.user_profile,
+                )
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "autonet_publish_standards":
+            private_key = msg.get("private_key", "")
+            if not private_key:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'private_key' field"}
+            try:
+                result = await self.runtime.autonet.publish_standards(
+                    user_profile=self.runtime.user_profile,
+                    private_key=private_key,
+                )
+                return {"msg_id": msg_id, "ok": result.get("status") != "error", "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         # Data capture & privacy (Story 3.4)
         if msg_type == "autonet_capture_config":
             try:

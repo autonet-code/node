@@ -15,6 +15,8 @@ The bridge exposes status and control methods consumed by WS handlers.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -90,6 +92,10 @@ class AutonetBridge:
         self._service = None      # Will hold nodes.service.AutonetService
         self._task: asyncio.Task | None = None
         self._autonet_config = None  # Will hold nodes.common.config.AutonetConfig
+        # Standards publication state (Story 3.2)
+        self._published_standards_hash: str = ""
+        self._published_tx_hash: str = ""
+        self._user_contract_address: str = ""
 
         # Apply config values to state
         if config.wallet_address:
@@ -258,6 +264,196 @@ class AutonetBridge:
             self._autonet_config.blockchain.chain_id = chain_id
         log.info("Chain updated: %s (chain_id=%d)", rpc_url, chain_id)
         return {"status": "updated", "rpc_url": rpc_url, "chain_id": chain_id}
+
+    # ------------------------------------------------------------------
+    # Standards publication (Story 3.2)
+    # ------------------------------------------------------------------
+
+    def get_standards(self, user_profile=None) -> dict[str, Any]:
+        """Get current standards and on-chain publication status.
+
+        Standards are derived from the user profile (populated during
+        onboarding or conversation).  The hash can optionally be
+        published on-chain via `publish_standards()`.
+
+        Args:
+            user_profile: UserProfile instance (from runtime.user_profile)
+        """
+        standards: list[dict[str, Any]] = []
+        if user_profile:
+            profile = user_profile.get_profile()
+            standards = profile.standards or []
+
+        # Compute the hash that would go on-chain
+        standards_hash = self._compute_standards_hash(standards)
+
+        return {
+            "standards": standards,
+            "standards_hash": standards_hash,
+            "on_chain": {
+                "published": self.state.wallet_connected and bool(self._published_standards_hash),
+                "tx_hash": self._published_tx_hash,
+                "published_hash": self._published_standards_hash,
+                "matches_current": self._published_standards_hash == standards_hash,
+                "user_contract": self._user_contract_address,
+            },
+        }
+
+    async def publish_standards(self, user_profile=None, private_key: str = "") -> dict[str, Any]:
+        """Publish standards hash on-chain by creating a user contract.
+
+        Requires:
+          - Wallet connected (address set)
+          - RPC URL configured
+          - Private key (passed from client-side wallet, NOT stored)
+          - Standards exist in user profile
+
+        Args:
+            user_profile: UserProfile instance
+            private_key: Hex private key for signing the transaction
+        """
+        if not self.state.wallet_connected:
+            return {"status": "error", "error": "Wallet not connected"}
+        if not self.state.rpc_url:
+            return {"status": "error", "error": "No RPC URL configured"}
+        if not private_key:
+            return {"status": "error", "error": "Private key required for signing"}
+
+        # Get standards
+        standards: list[dict[str, Any]] = []
+        if user_profile:
+            profile = user_profile.get_profile()
+            standards = profile.standards or []
+
+        if not standards:
+            return {"status": "error", "error": "No standards defined. Complete onboarding first."}
+
+        standards_hash = self._compute_standards_hash(standards)
+        standards_hash_bytes = bytes.fromhex(standards_hash)
+
+        try:
+            from web3 import Web3
+            from eth_account import Account
+
+            w3 = Web3(Web3.HTTPProvider(self.state.rpc_url))
+            if not w3.is_connected():
+                return {"status": "error", "error": f"Cannot connect to {self.state.rpc_url}"}
+
+            account = Account.from_key(private_key)
+            if account.address.lower() != self.state.wallet_address.lower():
+                return {"status": "error", "error": "Private key does not match connected wallet"}
+
+            # Load the Autonet contract ABI
+            autonet_address = self._get_autonet_contract_address()
+            if not autonet_address:
+                return {"status": "error", "error": "Autonet contract address not configured"}
+
+            abi = self._load_contract_abi("Autonet")
+            if not abi:
+                return {"status": "error", "error": "Autonet contract ABI not found"}
+
+            contract = w3.eth.contract(
+                address=Web3.to_checksum_address(autonet_address),
+                abi=abi,
+            )
+
+            # Build and send createUserContract transaction
+            nonce = w3.eth.get_transaction_count(account.address)
+            tx = contract.functions.createUserContract(
+                standards_hash_bytes
+            ).build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": 2_000_000,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": self.state.chain_id or w3.eth.chain_id,
+            })
+
+            signed = account.sign_transaction(tx)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            if receipt.status == 1:
+                # Parse UserContractCreated event to get user contract address
+                user_contract_addr = ""
+                try:
+                    logs = contract.events.UserContractCreated().process_receipt(receipt)
+                    if logs:
+                        user_contract_addr = logs[0]["args"]["userContract"]
+                except Exception:
+                    pass
+
+                self._published_standards_hash = standards_hash
+                self._published_tx_hash = tx_hash.hex()
+                self._user_contract_address = user_contract_addr
+
+                log.info("Standards published on-chain: tx=%s, user_contract=%s",
+                         self._published_tx_hash, user_contract_addr)
+
+                await self._emit("AUTONET_STATUS", {
+                    "action": "standards_published",
+                    "tx_hash": self._published_tx_hash,
+                    "standards_hash": standards_hash,
+                    "user_contract": user_contract_addr,
+                })
+
+                return {
+                    "status": "published",
+                    "tx_hash": self._published_tx_hash,
+                    "standards_hash": standards_hash,
+                    "user_contract": user_contract_addr,
+                }
+            else:
+                return {"status": "error", "error": "Transaction reverted"}
+
+        except ImportError:
+            return {"status": "error", "error": "web3 package not installed. Install with: pip install web3"}
+        except Exception as e:
+            log.exception("Failed to publish standards")
+            return {"status": "error", "error": str(e)}
+
+    @staticmethod
+    def _compute_standards_hash(standards: list[dict[str, Any]]) -> str:
+        """Compute a deterministic bytes32 hash of the standards list.
+
+        The hash is a keccak256 of the JSON-serialized standards,
+        matching the Solidity bytes32 format.
+        """
+        if not standards:
+            return "0" * 64
+        # Canonical JSON: sorted keys, no whitespace
+        canonical = json.dumps(standards, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def _get_autonet_contract_address(self) -> str | None:
+        """Get the deployed Autonet contract address from config."""
+        # Check autonet config first
+        if self._autonet_config and hasattr(self._autonet_config, "blockchain"):
+            addr = getattr(self._autonet_config.blockchain, "autonet_contract", None)
+            if addr:
+                return addr
+        # Check ATN config
+        contract_addr = getattr(self.config, "contract_address", None)
+        return contract_addr
+
+    def _load_contract_abi(self, contract_name: str) -> list | None:
+        """Load a contract ABI from the artifacts directory."""
+        from pathlib import Path
+
+        # Look in standard Hardhat artifacts location
+        candidates = [
+            Path("artifacts/contracts/economic") / f"{contract_name}.sol" / f"{contract_name}.json",
+            Path("artifacts") / f"{contract_name}.json",
+        ]
+        for path in candidates:
+            if path.exists():
+                try:
+                    with open(path) as f:
+                        artifact = json.load(f)
+                    return artifact.get("abi", [])
+                except Exception:
+                    continue
+        return None
 
     # ------------------------------------------------------------------
     # Data capture & privacy (Story 3.4)
