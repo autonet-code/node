@@ -258,3 +258,154 @@ class AutonetBridge:
             self._autonet_config.blockchain.chain_id = chain_id
         log.info("Chain updated: %s (chain_id=%d)", rpc_url, chain_id)
         return {"status": "updated", "rpc_url": rpc_url, "chain_id": chain_id}
+
+    # ------------------------------------------------------------------
+    # Data capture & privacy (Story 3.4)
+    # ------------------------------------------------------------------
+
+    def get_capture_config(self) -> dict[str, Any]:
+        """Get the current capture and privacy configuration."""
+        cfg = self._autonet_config or self._load_autonet_config_readonly()
+        return {
+            "capture": {
+                "enabled_sources": list(cfg.capture.enabled_sources),
+                "fps_cap": cfg.capture.fps_cap,
+                "resolution": list(cfg.capture.resolution),
+                "screen_monitor": cfg.capture.screen_monitor,
+                "browser_scrub_pii": cfg.capture.browser_scrub_pii,
+                "browser_exclude_patterns": list(cfg.capture.browser_exclude_patterns),
+            },
+            "privacy": {
+                "exclude_apps": list(cfg.privacy.exclude_apps),
+                "blur_regions": list(cfg.privacy.blur_regions),
+                "scrub_pii": cfg.privacy.scrub_pii,
+            },
+        }
+
+    def set_capture_config(self, capture: dict[str, Any] | None = None,
+                           privacy: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Update capture and/or privacy configuration."""
+        cfg = self._autonet_config or self._load_autonet_config_readonly()
+
+        if capture:
+            if "enabled_sources" in capture:
+                cfg.capture.enabled_sources = list(capture["enabled_sources"])
+            if "fps_cap" in capture:
+                cfg.capture.fps_cap = int(capture["fps_cap"])
+            if "resolution" in capture:
+                cfg.capture.resolution = list(capture["resolution"])
+            if "screen_monitor" in capture:
+                cfg.capture.screen_monitor = int(capture["screen_monitor"])
+            if "browser_scrub_pii" in capture:
+                cfg.capture.browser_scrub_pii = bool(capture["browser_scrub_pii"])
+            if "browser_exclude_patterns" in capture:
+                cfg.capture.browser_exclude_patterns = list(capture["browser_exclude_patterns"])
+
+        if privacy:
+            if "exclude_apps" in privacy:
+                cfg.privacy.exclude_apps = list(privacy["exclude_apps"])
+            if "blur_regions" in privacy:
+                cfg.privacy.blur_regions = list(privacy["blur_regions"])
+            if "scrub_pii" in privacy:
+                cfg.privacy.scrub_pii = bool(privacy["scrub_pii"])
+
+        self._autonet_config = cfg
+        self._save_autonet_config(cfg)
+        log.info("Capture/privacy config updated")
+        return self.get_capture_config()
+
+    def enumerate_sources(self) -> dict[str, Any]:
+        """Enumerate available capture sources (screens, browsers).
+
+        Returns a list of available sources the user can select from.
+        """
+        sources: list[dict[str, Any]] = []
+
+        # Enumerate screens via mss
+        try:
+            import mss
+            with mss.mss() as sct:
+                for i, mon in enumerate(sct.monitors):
+                    if i == 0:
+                        continue  # monitor 0 is the "all monitors" virtual screen
+                    sources.append({
+                        "type": "screen",
+                        "id": f"screen_{i}",
+                        "name": f"Screen {i}",
+                        "monitor_index": i,
+                        "width": mon["width"],
+                        "height": mon["height"],
+                        "left": mon["left"],
+                        "top": mon["top"],
+                    })
+        except ImportError:
+            log.debug("mss not available — screen enumeration disabled")
+        except Exception as e:
+            log.debug("Screen enumeration failed: %s", e)
+
+        # Browser source (always available if the relay is configured)
+        sources.append({
+            "type": "browser",
+            "id": "browser",
+            "name": "Browser Activity",
+            "description": "Captures browsing activity via CDP relay",
+        })
+
+        return {"sources": sources}
+
+    def _load_autonet_config_readonly(self):
+        """Load autonet config without storing it (for read-only access)."""
+        from nodes.common.config import load_config as load_autonet_config
+        config_path = self.config.config_path or None
+        return load_autonet_config(config_path)
+
+    def _save_autonet_config(self, cfg) -> None:
+        """Save autonet config back to YAML file."""
+        try:
+            import yaml
+            from pathlib import Path
+
+            # Find the config file path
+            config_path = self.config.config_path
+            if not config_path:
+                import os
+                config_path = os.environ.get("AUTONET_CONFIG")
+            if not config_path:
+                candidates = [
+                    Path("autonet.yaml"),
+                    Path.home() / ".autonet" / "config.yaml",
+                ]
+                for c in candidates:
+                    if c.exists():
+                        config_path = str(c)
+                        break
+
+            if not config_path:
+                log.warning("No config file found to save to")
+                return
+
+            # Read existing YAML, update capture/privacy sections, write back
+            path = Path(config_path)
+            with open(path) as f:
+                raw = yaml.safe_load(f) or {}
+
+            raw["capture"] = {
+                "enabled_sources": cfg.capture.enabled_sources,
+                "fps_cap": cfg.capture.fps_cap,
+                "resolution": cfg.capture.resolution,
+                "screen_monitor": cfg.capture.screen_monitor,
+                "browser_scrub_pii": cfg.capture.browser_scrub_pii,
+                "browser_exclude_patterns": cfg.capture.browser_exclude_patterns,
+            }
+            raw["privacy"] = {
+                "exclude_apps": cfg.privacy.exclude_apps,
+                "blur_regions": cfg.privacy.blur_regions,
+                "scrub_pii": cfg.privacy.scrub_pii,
+            }
+
+            with open(path, "w") as f:
+                yaml.dump(raw, f, default_flow_style=False, sort_keys=False)
+
+            log.info("Saved config to %s", config_path)
+        except Exception as e:
+            log.warning("Failed to save config: %s", e)

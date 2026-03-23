@@ -458,6 +458,31 @@ class WebSocketBridge:
             await self.runtime.autonet._emit("AUTONET_STATUS", {"action": "chain_changed", **result})
             return {"msg_id": msg_id, "ok": True, "result": result}
 
+        # Data capture & privacy (Story 3.4)
+        if msg_type == "autonet_capture_config":
+            try:
+                result = self.runtime.autonet.get_capture_config()
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "autonet_set_capture_config":
+            try:
+                result = self.runtime.autonet.set_capture_config(
+                    capture=msg.get("capture"),
+                    privacy=msg.get("privacy"),
+                )
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "autonet_enumerate_sources":
+            try:
+                result = self.runtime.autonet.enumerate_sources()
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         # New conversation: reset conversation history without changing model
         if msg_type == "new_conversation":
             await self.runtime.new_conversation()
