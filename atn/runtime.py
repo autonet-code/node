@@ -150,9 +150,9 @@ class Runtime:
             StepType.COGNITIVE: cognitive,
         }
 
-        # Scheduler
+        # Scheduler — idle-based: timer counts from when agent becomes idle
         self._schedule_table: dict[str, float] = {}             # agent_id -> seconds
-        self._last_scheduled: dict[str, datetime] = {}
+        self._last_idle: dict[str, datetime] = {}               # agent_id -> when it became idle
 
         # Background loops
         self._running = False
@@ -172,15 +172,11 @@ class Runtime:
             log.warning("Recovered %d crashed execution(s) from previous run", len(recovered))
 
         # Delegate registry tracks cognitive sub-agents for UI/snapshot.
-        # On startup, mark orphaned (RUNNING/PENDING) entries as KILLED,
-        # then clean up their output logs.
+        # On startup, mark orphaned (RUNNING/PENDING) entries as KILLED.
+        # Delegate output logs are preserved so the Activity tab can show
+        # the working thread after restart (both completed and crashed agents).
         self.delegate_registry.cleanup_orphans()
         self.delegate_registry.save()
-        for f in self._delegate_output_dir.glob("*.log"):
-            try:
-                f.unlink()
-            except OSError:
-                pass
 
         # Auto-detect bridge and Ollama (async probes)
         await self._auto_detect_providers()
@@ -289,6 +285,13 @@ class Runtime:
         self._running_count[defn.id] = 0
         if defn.schedule:
             self._schedule_table[defn.id] = self._parse_interval(defn.schedule)
+            # Initialize idle timestamp to now so the heartbeat doesn't fire immediately
+            self._last_idle[defn.id] = datetime.now(timezone.utc)
+        # Hydrate execution history from JSONL so get_latest/get_history
+        # work immediately for ALL agents (pipeline and cognitive alike).
+        n = self.execution_log.hydrate(defn.id)
+        if n:
+            log.debug("Hydrated %d execution record(s) for %s", n, defn.id)
         await self.events.emit(Event(
             type=EventType.AGENT_REGISTERED,
             source="runtime",
@@ -306,7 +309,7 @@ class Runtime:
         self._status.pop(agent_id, None)
         self._running_count.pop(agent_id, None)
         self._schedule_table.pop(agent_id, None)
-        self._last_scheduled.pop(agent_id, None)
+        self._last_idle.pop(agent_id, None)
         self.inbox.remove_agent(agent_id)
         self.output_store.remove(agent_id)
         self.execution_log.remove_agent(agent_id)
@@ -585,6 +588,8 @@ class Runtime:
             self._interrupt_hooks.pop(record.execution_id, None)
 
             if self._running_count.get(defn.id, 0) == 0:
+                # Mark agent as idle for heartbeat scheduling
+                self._last_idle[defn.id] = datetime.now(timezone.utc)
                 if record.status == ExecutionStatus.FAILED:
                     self._status[defn.id] = AgentStatus.ERROR
                 elif self._status.get(defn.id) == AgentStatus.RUNNING:
@@ -818,6 +823,8 @@ class Runtime:
             self._active_providers.pop(defn.id, None)
 
             if self._running_count.get(defn.id, 0) == 0:
+                # Mark agent as idle for heartbeat scheduling
+                self._last_idle[defn.id] = datetime.now(timezone.utc)
                 if record.status == ExecutionStatus.FAILED:
                     self._status[defn.id] = AgentStatus.ERROR
                 elif self._status.get(defn.id) == AgentStatus.RUNNING:
@@ -928,6 +935,9 @@ class Runtime:
                 self._status[agent_id] = AgentStatus.ACTIVE
             else:
                 self._status[agent_id] = AgentStatus.COMPLETED
+
+        # Mark agent as idle (for heartbeat scheduling)
+        self._last_idle[agent_id] = datetime.now(timezone.utc)
 
         # Clean up completion callback
         self._completion_callbacks.pop(agent_id, None)
@@ -1175,9 +1185,13 @@ class Runtime:
                 for agent_id, interval in list(self._schedule_table.items()):
                     if self._status.get(agent_id) != AgentStatus.ACTIVE:
                         continue
-                    last = self._last_scheduled.get(agent_id)
-                    if last is None or (now - last).total_seconds() >= interval:
-                        self._last_scheduled[agent_id] = now
+                    # Skip agents that are currently executing (idle-based heartbeat)
+                    if self._running_count.get(agent_id, 0) > 0:
+                        continue
+                    # Timer counts from when agent became idle, not from last trigger
+                    last_idle = self._last_idle.get(agent_id)
+                    if last_idle is None or (now - last_idle).total_seconds() >= interval:
+                        self._last_idle[agent_id] = now  # reset so it doesn't re-fire
                         self.inbox.post(InboxMessage(
                             id=InboxMessage.generate_id(),
                             source="scheduler",
