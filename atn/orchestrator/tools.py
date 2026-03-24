@@ -1143,11 +1143,32 @@ async def _get_conversation(runtime: Runtime, input: dict[str, Any]) -> dict[str
         turns = runtime.conversation.get_session(session_id)
         if not turns:
             return {"error": f"Session '{session_id}' not found."}
-    else:
-        turns = runtime.conversation.get_turns()
+        return {
+            "turns": [t.to_dict() for t in turns],
+            "count": len(turns),
+            "total": len(turns),
+        }
+
+    limit = input.get("limit")
+    offset = input.get("offset")
+
+    if limit is not None:
+        limit = min(int(limit), 200)
+        offset = int(offset) if offset is not None else 0
+        turns, total = runtime.conversation.get_turns_page(limit=limit, offset=offset)
+        return {
+            "turns": [t.to_dict() for t in turns],
+            "count": len(turns),
+            "total": total,
+            "offset": offset,
+            "has_more": (offset + len(turns)) < total,
+        }
+
+    turns = runtime.conversation.get_turns()
     return {
         "turns": [t.to_dict() for t in turns],
         "count": len(turns),
+        "total": len(turns),
     }
 
 

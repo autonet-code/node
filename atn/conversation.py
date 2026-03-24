@@ -99,6 +99,27 @@ class ConversationStore:
         """Return all turns in the active conversation."""
         return list(self._turns)
 
+    def get_turns_page(self, limit: int = 50, offset: int | None = None) -> tuple[list[ConversationTurn], int]:
+        """Return a page of turns from the end (most recent first).
+
+        Args:
+            limit: Max number of turns to return.
+            offset: Number of turns to skip from the end (0 = most recent).
+                    None means start from the end.
+
+        Returns:
+            (turns_oldest_first, total_count)
+        """
+        total = len(self._turns)
+        if offset is None:
+            offset = 0
+        # offset=0 means the latest `limit` turns
+        end = total - offset
+        start = max(0, end - limit)
+        if end <= 0:
+            return [], total
+        return list(self._turns[start:end]), total
+
     def get_history_for_prompt(self) -> str:
         """Build a conversation history string that fits within the token budget.
 

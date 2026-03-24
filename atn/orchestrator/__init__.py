@@ -470,6 +470,11 @@ def create_orchestrator_agent(
     }
     raw_model = config.model or "claude-sonnet-4-6"
     model = _MODEL_ALIASES.get(raw_model, raw_model)
+    import logging as _log
+    _log.getLogger("atn.orchestrator").info(
+        "create_orchestrator_agent: config.model=%r → raw_model=%r → model=%r",
+        config.model, raw_model, model,
+    )
 
     # Provider fallback chain: primary first, then alternatives.
     # The cognitive step will try each in order if the previous one fails.
