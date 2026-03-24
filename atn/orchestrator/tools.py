@@ -656,6 +656,24 @@ _TOOLS: list[ToolDefinition] = [
             "required": ["agent_id"],
         },
     ),
+    ToolDefinition(
+        name="get_latest_thought",
+        description=(
+            "Get just the LAST conversation turn for an agent, with its timestamp. "
+            "A lightweight way to check what an agent is currently doing without "
+            "reading its full output."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "The agent_id to check.",
+                },
+            },
+            "required": ["agent_id"],
+        },
+    ),
 ]
 
 
@@ -1577,6 +1595,9 @@ async def _reject_task(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
 # Any cognitive agent can spawn children, manage them, and read their output.
 _DELEGATE_TOOL_NAMES = {
     "delegate",       # fractal recursion (spawn child cognitive agents)
+    "delegate_status",    # check sub-agent status with timestamps
+    "delegate_collect",   # wait for sub-agent result
+    "get_latest_thought", # lightweight check on agent activity
     "create_agent",   # create pipeline or cognitive agents
     "trigger_run",    # trigger agent execution
     "get_output",     # read child agent output
@@ -1688,6 +1709,8 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
 
 async def _delegate_status(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Check the status of a delegate sub-agent via the unified agent registry."""
+    from datetime import datetime, timezone
+
     agent_id = input.get("agent_id", "")
     if not agent_id:
         return {"error": "Missing 'agent_id'."}
@@ -1702,6 +1725,17 @@ async def _delegate_status(runtime: Runtime, input: dict[str, Any]) -> dict[str,
             "title": defn.name,
             "agent_type": defn.agent_type,
         }
+
+        # Expose timestamps from DelegateRegistry
+        node = runtime.delegate_registry.get_node(agent_id)
+        if node:
+            info["started_at"] = node.created_at.isoformat()
+            if node.completed_at:
+                info["completed_at"] = node.completed_at.isoformat()
+            elif node.status in (DelegateStatus.PENDING, DelegateStatus.RUNNING):
+                elapsed = (datetime.now(timezone.utc) - node.created_at).total_seconds()
+                info["running_duration"] = f"{elapsed:.1f}s"
+
         # Include current output text
         output_text = runtime.get_delegate_output(agent_id)
         if output_text:
@@ -1847,6 +1881,43 @@ def _agent_status_to_delegate(status: AgentStatus | None) -> str:
     return mapping.get(status, status.value)
 
 
+async def _get_latest_thought(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Return the last conversation turn for an agent, with timestamp."""
+    agent_id = input.get("agent_id", "")
+    if not agent_id:
+        return {"error": "Missing 'agent_id'."}
+
+    defn = runtime.get_agent(agent_id)
+    if defn is None:
+        return {"error": f"Unknown agent: {agent_id}"}
+
+    store = runtime.get_agent_conversation_store(agent_id)
+    turns, total = store.get_turns_page(limit=1, offset=0)
+    if not turns:
+        return {"agent_id": agent_id, "thought": None, "total_turns": 0}
+
+    turn = turns[-1]
+    content = turn.content
+    if len(content) > 500:
+        content = content[:500] + "…"
+
+    # Find the execution_id — from the turn itself or the latest execution
+    execution_id = turn.execution_id
+    if not execution_id:
+        rec = runtime.execution_log.get_latest(agent_id)
+        if rec:
+            execution_id = rec.execution_id
+
+    return {
+        "agent_id": agent_id,
+        "role": turn.role,
+        "content": content,
+        "timestamp": turn.timestamp.isoformat(),
+        "execution_id": execution_id,
+        "total_turns": total,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Registry: name -> (ToolDefinition, executor)
 # ---------------------------------------------------------------------------
@@ -1889,6 +1960,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "delegate_status": _delegate_status,
     "delegate_message": _delegate_message,
     "delegate_collect": _delegate_collect,
+    "get_latest_thought": _get_latest_thought,
     # Conversation management (UI-facing, not in orchestrator's tool list)
     "reset_conversation": _reset_conversation,
     "get_conversation": _get_conversation,

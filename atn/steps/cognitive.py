@@ -474,6 +474,10 @@ def _build_user_message(
     """
     prompt_template = _resolve_text(config.get("prompt", ""), context.work_dir)
 
+    # Inject current UTC time so every cognitive agent knows what time it is
+    now = datetime.now(timezone.utc)
+    time_line = f"Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')} ({now.strftime('%A, %B %d, %Y')})"
+
     if prompt_template:
         # Substitute {prev} and {prev_N} placeholders
         prev = context.previous_outputs[-1] if context.previous_outputs else ""
@@ -509,11 +513,11 @@ def _build_user_message(
                     inbox_text = history + "\n\nUser: " + inbox_text
             text = text.replace("{inbox}", inbox_text)
 
-        return text
+        return f"[{time_line}]\n\n{text}"
 
     # No explicit prompt — use last step's output as the message
     if context.previous_outputs:
-        return _to_str(context.previous_outputs[-1])
+        return f"[{time_line}]\n\n{_to_str(context.previous_outputs[-1])}"
 
     # No previous output and no template — try inbox messages
     if context.inbox_messages:
@@ -521,10 +525,10 @@ def _build_user_message(
             {"source": m.source, "type": m.type.value, "data": m.data}
             for m in context.inbox_messages
         ]
-        return _to_str(inbox_data)
+        return f"[{time_line}]\n\n{_to_str(inbox_data)}"
 
     # Nothing available — fall back to a generic message
-    return config.get("default_prompt", "Proceed with the task.")
+    return f"[{time_line}]\n\n{config.get('default_prompt', 'Proceed with the task.')}"
 
 
 def _to_str(val: Any) -> str:

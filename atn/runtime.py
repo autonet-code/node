@@ -2542,7 +2542,8 @@ class Runtime:
         if orch_defn and orch_defn.steps:
             model = orch_defn.steps[0].config.get("model", "")
 
-        lines = []
+        now = datetime.now(timezone.utc)
+        lines = [f"Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')} ({now.strftime('%A, %B %d, %Y')})"]
         if model:
             lines.append(f"Model: {model}")
         if agents:

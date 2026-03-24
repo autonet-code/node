@@ -104,9 +104,7 @@ async def run_server() -> None:
             await rt.register_agent(defn)
             if defn.schedule:
                 await rt.activate_agent(defn.id)
-        # Hydrate execution history from JSONL so get_latest/get_history work immediately
-        for defn in agents:
-            rt.execution_log.hydrate(defn.id)
+        # Note: execution history is hydrated automatically in register_agent()
         if agents:
             log.info("Loaded %d agent(s) from %s", len(agents), config.agents_dir)
         if errors:
