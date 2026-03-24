@@ -705,6 +705,46 @@ class Runtime:
             if not existing or existing[-1].role != "user" or existing[-1].content != user_message:
                 agent_convo.add_user_turn(user_message)
 
+            # Session continuity: if this agent has previous conversation turns
+            # (from prior executions), include them in the system prompt so it
+            # resumes with full awareness of its prior work.  We exclude the
+            # current user message (just recorded above) since it will be sent
+            # to the bridge as the user input.
+            prior_turns = agent_convo.get_turns()
+            # Drop the last turn if it matches our current user_message
+            if prior_turns and prior_turns[-1].role == "user" and prior_turns[-1].content == user_message:
+                prior_turns = prior_turns[:-1]
+            if prior_turns:
+                _ROLE_PREFIX = {"user": "User", "assistant": "Agent", "system": "System"}
+                history_parts = []
+                for turn in prior_turns:
+                    prefix = _ROLE_PREFIX.get(turn.role, turn.role.title())
+                    history_parts.append(f"{prefix}: {turn.content}")
+
+                # Sliding window: keep history under ~100k tokens (~400k chars)
+                # to leave room for system prompt + new turn + tool output.
+                _HISTORY_CHAR_BUDGET = 400_000
+                total_chars = sum(len(p) for p in history_parts)
+                start = 0
+                while start < len(history_parts) and total_chars > _HISTORY_CHAR_BUDGET:
+                    total_chars -= len(history_parts[start])
+                    start += 1
+                if start > 0 and start < len(history_parts):
+                    history_parts = history_parts[start:]
+                    history_parts.insert(0, "[Earlier conversation trimmed]")
+                elif start >= len(history_parts):
+                    history_parts = []
+
+                if history_parts:
+                    conversation_history = "\n\n".join(history_parts)
+                    system_prompt += (
+                        "\n\n## Previous Conversation\n"
+                        "You have had previous interactions. Here is your conversation history. "
+                        "Continue from where you left off. You are the SAME agent — "
+                        "remember everything you did and were told.\n\n"
+                        + conversation_history
+                    )
+
             # Tool executor — routes tools back through the orchestrator tool system.
             # Passes caller_id so tools like delegate/create_agent know which
             # agent is invoking them (fractality: sub-agents spawn sub-sub-agents).
@@ -2449,8 +2489,13 @@ class Runtime:
         )
         self.inbox.post(msg)
 
-        # Trigger if active
+        # Trigger execution — re-activate completed agents so they can resume
         status = self.get_status(agent_id)
+        if status in (AgentStatus.COMPLETED, AgentStatus.ERROR):
+            # Re-activate so trigger_run proceeds
+            self._status[agent_id] = AgentStatus.ACTIVE
+            log.info("Re-activated %s agent %s for follow-up message", status.value, agent_id)
+            status = AgentStatus.ACTIVE
         if status == AgentStatus.ACTIVE:
             eid = await self.trigger_run(agent_id, source="user")
             return {"status": "triggered", "agent_id": agent_id, "execution_id": eid}
