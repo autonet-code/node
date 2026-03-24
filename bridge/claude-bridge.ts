@@ -719,6 +719,24 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
           log("orchestrate.interrupted")
         }
 
+        // Detect compaction status
+        if (message.type === "system" && (message as any).subtype === "status") {
+          const status = (message as any).status
+          log("orchestrate.status", { status })
+          emitEvent({ type: "status", status: status ?? "idle" })
+        }
+
+        // Detect compaction boundary
+        if (message.type === "system" && (message as any).subtype === "compact_boundary") {
+          const meta = (message as any).compact_metadata ?? {}
+          log("orchestrate.compact_boundary", meta)
+          emitEvent({
+            type: "compaction",
+            trigger: meta.trigger ?? "auto",
+            pre_tokens: meta.pre_tokens ?? 0,
+          })
+        }
+
         if (message.type === "assistant") {
           if (!resolvedModel && (message as any).message?.model) {
             resolvedModel = (message as any).message.model

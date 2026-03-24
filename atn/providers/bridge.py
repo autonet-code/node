@@ -83,6 +83,8 @@ class BridgeProvider(Provider):
         self._cumulative_cache_read: int = 0
         self._cumulative_cache_creation: int = 0
         self._last_input_tokens: int = 0
+        self._compaction_count: int = 0
+        self._last_compaction_pre_tokens: int = 0
 
     @property
     def name(self) -> str:
@@ -411,6 +413,38 @@ class BridgeProvider(Provider):
                                 "is_error": event.get("is_error", False),
                             },
                         ))
+                    elif event.get("type") == "compaction":
+                        self._compaction_count += 1
+                        self._last_compaction_pre_tokens = event.get("pre_tokens", 0)
+                        logger.info(
+                            "Context compaction #%d (trigger=%s, pre_tokens=%d)",
+                            self._compaction_count,
+                            event.get("trigger", "auto"),
+                            self._last_compaction_pre_tokens,
+                        )
+                        if self.event_bus:
+                            await self.event_bus.emit(Event(
+                                type=EventType.CUSTOM,
+                                source=self.source_agent_id,
+                                data={
+                                    "type": "context_compaction",
+                                    "agent_id": self.source_agent_id,
+                                    "compaction_count": self._compaction_count,
+                                    "trigger": event.get("trigger", "auto"),
+                                    "pre_tokens": self._last_compaction_pre_tokens,
+                                },
+                            ))
+                    elif event.get("type") == "status":
+                        status = event.get("status", "idle")
+                        if status == "compacting" and self.event_bus:
+                            await self.event_bus.emit(Event(
+                                type=EventType.CUSTOM,
+                                source=self.source_agent_id,
+                                data={
+                                    "type": "context_compacting",
+                                    "agent_id": self.source_agent_id,
+                                },
+                            ))
 
             stream_task = asyncio.create_task(_stream_events())
 
@@ -597,6 +631,7 @@ class BridgeProvider(Provider):
             "cumulative_cache_read": self._cumulative_cache_read,
             "cumulative_cache_creation": self._cumulative_cache_creation,
             "context_used_pct": pct,
+            "compaction_count": self._compaction_count,
         }
 
     async def get_session_context(self) -> dict[str, Any]:
