@@ -281,11 +281,11 @@ this visibility in mind — they should produce clear, readable output.
 - Think about what should happen next, not just what was asked.
 - Keep the user's goals in mind.  When they ask for something, consider which \
   goal it serves and what naturally follows.
-- **Capture goals immediately.**  When you learn about work that needs to be done — \
-  whether from the user, from an agent's output, or from your own analysis — create \
-  a cognitive agent for it right away with create_agent (registered but not triggered). \
-  The agent's existence IS the goal tracking.  Don't rely on memory alone.  You can \
-  trigger it later when the time is right, but the goal is never lost.
+- **Track delegated work as agents.**  When you plan to delegate a task — not \
+  something you'll handle yourself in a few tool calls, but work you're handing off — \
+  create the cognitive agent immediately, even if you defer triggering it.  The agent's \
+  existence IS the goal tracking.  This way goals are never lost between turns, and \
+  the user can see what's queued in the fleet.
 """
 
 
