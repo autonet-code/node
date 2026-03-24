@@ -324,6 +324,19 @@ class Runtime:
         self.inbox.remove_agent(agent_id)
         self.output_store.remove(agent_id)
         self.execution_log.remove_agent(agent_id)
+        # Clean up persistent files
+        self._agent_conversations.pop(agent_id, None)
+        import shutil
+        agent_data_dir = self._config.data_dir / "agents" / agent_id
+        if agent_data_dir.exists():
+            shutil.rmtree(agent_data_dir, ignore_errors=True)
+        delegate_log = self._delegate_output_dir / f"{agent_id}.log"
+        if delegate_log.exists():
+            delegate_log.unlink(missing_ok=True)
+        # Remove agent YAML definition if saved by loader
+        agent_yaml = self._config.agents_dir / f"{agent_id}.yaml"
+        if agent_yaml.exists():
+            agent_yaml.unlink(missing_ok=True)
         await self.events.emit(Event(
             type=EventType.AGENT_UNREGISTERED,
             source="runtime",
@@ -1061,7 +1074,7 @@ class Runtime:
                 "child_name": defn.name,
                 "status": status_str,
                 "output_preview": result_preview[:500],
-                "result_preview": result_preview,
+                "result_preview": result_preview[:500],
                 "error": record.error,
                 "instruction": (
                     f"Your child agent '{defn.name}' has {status_str}. "
