@@ -1,7 +1,8 @@
 """Tests for the delegate sub-agent system.
 
 Tests the DelegateRegistry, event types, and delegate tool executor
-with a mocked bridge provider.
+with a mocked bridge provider.  Phase 3: delegates are cognitive agents
+executed through the unified Runtime._execute_cognitive_agent() path.
 """
 from __future__ import annotations
 
@@ -200,111 +201,29 @@ def test_delegate_event_types():
 
 
 # ---------------------------------------------------------------------------
-# Delegate tool integration test (mocked bridge)
+# Delegate tool integration tests (mocked bridge, real Runtime)
 # ---------------------------------------------------------------------------
 
-def _make_mock_runtime(bus, tmp_path):
-    """Create a mock runtime with delegate infrastructure.
+def _make_runtime(bus, tmp_path):
+    """Create a real Runtime for delegate tool testing."""
+    from atn.config import ATNConfig
+    from atn.runtime import Runtime
 
-    Phase 2: The delegate tool now creates a cognitive AgentDefinition and
-    triggers it through the Runtime.  We mock register_agent, activate_agent,
-    trigger_run as AsyncMocks.  trigger_run kicks off a background task that
-    calls _run_delegate_session (via the old path) or the cognitive agent
-    execution.  For these tests we wire trigger_run to launch the old-style
-    delegate session so the existing test assertions still work.
-    """
-    import asyncio
-    from atn.models import AgentMode
+    data_dir = tmp_path / "data"
+    agents_dir = tmp_path / "agents"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    agents_dir.mkdir(parents=True, exist_ok=True)
 
-    mock_runtime = MagicMock()
-    mock_runtime.events = bus
-    mock_runtime.delegate_registry = DelegateRegistry(
-        store_path=tmp_path / "delegates.json",
-    )
-    mock_runtime._config = MagicMock()
-    mock_runtime._config.orchestrator.model = "sonnet"
-    mock_runtime._config.data_dir = tmp_path
-    mock_runtime.connectors = MagicMock()
-    mock_runtime.connectors._sessions = {}
-    mock_runtime.register_interrupt_hook = MagicMock()
-    mock_runtime.unregister_interrupt_hook = MagicMock()
-    # Real dicts/events for the async delegate lifecycle
-    mock_runtime._delegate_providers = {}
-    mock_runtime._delegate_tasks = {}
-    mock_runtime._delegate_results = {}
-    mock_runtime._delegate_done = {}
-    mock_runtime._active_providers = {}
-    mock_runtime._completion_callbacks = {}
-    mock_runtime._child_counters = {}
-    mock_runtime.send_delegate_message = AsyncMock(return_value=True)
+    config = ATNConfig(data_dir=data_dir, agents_dir=agents_dir)
+    config.autonet.enabled = False
+    config.voice.enabled = False
 
-    # Phase 2: _delegate now calls runtime.generate_child_id, register_agent,
-    # activate_agent, trigger_run, inbox.post as async operations.
-    # generate_child_id — use real counter logic
-    def _gen_child_id(parent_id: str) -> str:
-        count = mock_runtime._child_counters.get(parent_id, 0) + 1
-        mock_runtime._child_counters[parent_id] = count
-        return f"{parent_id}.{count}"
-    mock_runtime.generate_child_id = _gen_child_id
-
-    # Track registered agents
-    mock_runtime._agents = {}
-    mock_runtime._status = {}
-
-    mock_runtime.register_agent = AsyncMock(side_effect=lambda defn: defn.id)
-    mock_runtime.activate_agent = AsyncMock()
-    mock_runtime.get_agent = lambda aid: mock_runtime._agents.get(aid)
-    mock_runtime.get_status = lambda aid: mock_runtime._status.get(aid)
-    mock_runtime.inbox = MagicMock()
-    mock_runtime.inbox.post = MagicMock()
-    mock_runtime.output_store = MagicMock()
-    mock_runtime.output_store.read = MagicMock(return_value=None)
-
-    # Delegate output dir — for append_delegate_output / get_delegate_output
-    delegate_dir = tmp_path / "delegates"
-    delegate_dir.mkdir(parents=True, exist_ok=True)
-    mock_runtime._delegate_output_dir = delegate_dir
-    def _append(aid, text):
-        p = delegate_dir / f"{aid}.log"
-        with open(p, "a") as f:
-            f.write(text)
-    def _get_output(aid):
-        p = delegate_dir / f"{aid}.log"
-        return p.read_text() if p.exists() else ""
-    mock_runtime.append_delegate_output = _append
-    mock_runtime.get_delegate_output = _get_output
-
-    # trigger_run — launch the old-style delegate session as a background task
-    # so existing test assertions (background task, delegate_collect) still work.
-    async def _mock_trigger_run(agent_id: str, source: str = "user") -> str:
-        from atn.orchestrator.tools import _run_delegate_session, _get_delegate_tools
-        from atn.delegate_prompts import build_delegate_prompt
-
-        node = mock_runtime.delegate_registry.get_node(agent_id)
-        if node is None:
-            return "err"
-        system_prompt = build_delegate_prompt(node.agent_type, agent_id, node.parent_id)
-        tools = _get_delegate_tools()
-
-        mock_runtime._delegate_done[agent_id] = asyncio.Event()
-        task = asyncio.create_task(
-            _run_delegate_session(
-                mock_runtime, agent_id, node.title, node.prompt,
-                system_prompt, tools,
-            ),
-            name=f"delegate:{agent_id}",
-        )
-        mock_runtime._delegate_tasks[agent_id] = task
-        return f"eid-{agent_id}"
-    mock_runtime.trigger_run = _mock_trigger_run
-
-    return mock_runtime
+    return Runtime(bus, data_dir=data_dir, config=config)
 
 
 @pytest.mark.asyncio
 async def test_delegate_tool_executor(tmp_path: Path):
-    """Test the delegate executor spawns a background task and returns immediately."""
-    import asyncio
+    """Test the delegate executor spawns a cognitive agent and returns immediately."""
     from atn.events import EventBus
     from atn.providers.base import ProviderResponse, Usage
 
@@ -315,7 +234,7 @@ async def test_delegate_tool_executor(tmp_path: Path):
         events_captured.append(e)
 
     bus.subscribe(None, _capture)
-    mock_runtime = _make_mock_runtime(bus, tmp_path)
+    rt = _make_runtime(bus, tmp_path)
 
     # Mock BridgeProvider
     mock_response = ProviderResponse(
@@ -330,14 +249,11 @@ async def test_delegate_tool_executor(tmp_path: Path):
     mock_provider.close = AsyncMock()
     mock_provider.interrupt = AsyncMock()
 
-    with patch(
-        "atn.providers.bridge.BridgeProvider",
-        return_value=mock_provider,
-    ):
+    with patch("atn.runtime.BridgeProvider", return_value=mock_provider):
         from atn.orchestrator.tools import _delegate, _delegate_collect
 
         # delegate() returns immediately with "spawned"
-        spawn_result = await _delegate(mock_runtime, {
+        spawn_result = await _delegate(rt, {
             "prompt": "Explore the auth system",
             "agent_type": "explore",
             "title": "Auth exploration",
@@ -347,30 +263,27 @@ async def test_delegate_tool_executor(tmp_path: Path):
         assert spawn_result["agent_id"] == "orch.1"
         assert spawn_result["agent_type"] == "explore"
 
-        # Background task is running
-        assert "orch.1" in mock_runtime._delegate_tasks
+        # Agent is registered in the unified registry as cognitive
+        defn = rt.get_agent("orch.1")
+        assert defn is not None
+        assert defn.mode.value == "cognitive"
+        assert defn.parent_id == "orch"
 
-        # Collect the result (blocks until background task finishes)
-        collect_result = await _delegate_collect(mock_runtime, {"agent_id": "orch.1"})
+        # Collect the result (blocks until execution finishes)
+        collect_result = await _delegate_collect(rt, {"agent_id": "orch.1"})
 
     assert collect_result["status"] == "completed"
     assert "explored the codebase" in collect_result["result"]
     assert collect_result["usage"]["input_tokens"] == 1000
 
-    # Verify registry was updated
-    node = mock_runtime.delegate_registry.get_node("orch.1")
+    # Verify delegate registry was synced for UI
+    node = rt.delegate_registry.get_node("orch.1")
     assert node is not None
     assert node.status == DelegateStatus.COMPLETED
 
     # Verify events were emitted
     event_types = [e.type for e in events_captured]
     assert EventType.DELEGATE_SPAWNED in event_types
-    assert EventType.DELEGATE_RUNNING in event_types
-    assert EventType.DELEGATE_COMPLETED in event_types
-
-    # Verify interrupt hook was registered and unregistered
-    mock_runtime.register_interrupt_hook.assert_called_once()
-    mock_runtime.unregister_interrupt_hook.assert_called_once()
 
     # Verify bridge was closed
     mock_provider.close.assert_called_once()
@@ -394,7 +307,7 @@ async def test_delegate_tool_failure(tmp_path: Path):
         events_captured.append(e)
 
     bus.subscribe(None, _capture)
-    mock_runtime = _make_mock_runtime(bus, tmp_path)
+    rt = _make_runtime(bus, tmp_path)
 
     # Mock BridgeProvider that raises
     mock_provider = AsyncMock()
@@ -403,13 +316,10 @@ async def test_delegate_tool_failure(tmp_path: Path):
     )
     mock_provider.close = AsyncMock()
 
-    with patch(
-        "atn.providers.bridge.BridgeProvider",
-        return_value=mock_provider,
-    ):
+    with patch("atn.runtime.BridgeProvider", return_value=mock_provider):
         from atn.orchestrator.tools import _delegate, _delegate_collect
 
-        spawn_result = await _delegate(mock_runtime, {
+        spawn_result = await _delegate(rt, {
             "prompt": "This will fail",
             "agent_type": "implement",
         })
@@ -417,18 +327,18 @@ async def test_delegate_tool_failure(tmp_path: Path):
         assert spawn_result["status"] == "spawned"
 
         # Collect — should get the failure result
-        collect_result = await _delegate_collect(mock_runtime, {"agent_id": "orch.1"})
+        collect_result = await _delegate_collect(rt, {"agent_id": "orch.1"})
 
     assert collect_result["status"] == "failed"
     assert "crashed" in collect_result["error"]
 
-    # Verify registry reflects failure
-    node = mock_runtime.delegate_registry.get_node("orch.1")
+    # Verify delegate registry reflects failure
+    node = rt.delegate_registry.get_node("orch.1")
     assert node.status == DelegateStatus.FAILED
 
     # Verify failure event
     event_types = [e.type for e in events_captured]
-    assert EventType.DELEGATE_FAILED in event_types
+    assert EventType.EXECUTION_FAILED in event_types
 
 
 @pytest.mark.asyncio
@@ -438,7 +348,7 @@ async def test_delegate_status_tool(tmp_path: Path):
     from atn.providers.base import ProviderResponse, Usage
 
     bus = EventBus()
-    mock_runtime = _make_mock_runtime(bus, tmp_path)
+    rt = _make_runtime(bus, tmp_path)
 
     # Create a delegate that we can control with an event
     proceed = asyncio.Event()
@@ -456,13 +366,10 @@ async def test_delegate_status_tool(tmp_path: Path):
     mock_provider.close = AsyncMock()
     mock_provider.interrupt = AsyncMock()
 
-    with patch(
-        "atn.providers.bridge.BridgeProvider",
-        return_value=mock_provider,
-    ):
+    with patch("atn.runtime.BridgeProvider", return_value=mock_provider):
         from atn.orchestrator.tools import _delegate, _delegate_status, _delegate_collect
 
-        spawn = await _delegate(mock_runtime, {
+        spawn = await _delegate(rt, {
             "prompt": "Do something", "agent_type": "implement",
         })
         agent_id = spawn["agent_id"]
@@ -471,10 +378,10 @@ async def test_delegate_status_tool(tmp_path: Path):
         await asyncio.sleep(0.05)
 
         # Status should show running
-        status = await _delegate_status(mock_runtime, {"agent_id": agent_id})
+        status = await _delegate_status(rt, {"agent_id": agent_id})
         assert status["status"] == "running"
 
         # Let it finish
         proceed.set()
-        result = await _delegate_collect(mock_runtime, {"agent_id": agent_id})
+        result = await _delegate_collect(rt, {"agent_id": agent_id})
         assert result["status"] == "completed"

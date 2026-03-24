@@ -107,12 +107,6 @@ class Runtime:
         self.delegate_registry = DelegateRegistry(
             store_path=self._config.data_dir / "delegates.json",
         )
-        # Active delegate providers — for mid-session message injection
-        self._delegate_providers: dict[str, BridgeProvider] = {}
-        # Background tasks for running delegates
-        self._delegate_tasks: dict[str, asyncio.Task] = {}
-        # Completed delegate results — stored until collected
-        self._delegate_results: dict[str, dict[str, Any]] = {}
         # Delegate output directory — per-delegate text logs
         self._delegate_output_dir = self._config.data_dir / "delegates"
         self._delegate_output_dir.mkdir(parents=True, exist_ok=True)
@@ -177,9 +171,10 @@ class Runtime:
         if recovered:
             log.warning("Recovered %d crashed execution(s) from previous run", len(recovered))
 
-        # Delegates are ephemeral — clear the registry and output logs on startup.
-        # The execution log retains historical records if needed.
-        self.delegate_registry.clear()
+        # Delegate registry tracks cognitive sub-agents for UI/snapshot.
+        # On startup, mark orphaned (RUNNING/PENDING) entries as KILLED,
+        # then clean up their output logs.
+        self.delegate_registry.cleanup_orphans()
         self.delegate_registry.save()
         for f in self._delegate_output_dir.glob("*.log"):
             try:
@@ -842,19 +837,6 @@ class Runtime:
             if done_event:
                 done_event.set()
 
-            # Store result for delegate_collect compatibility
-            result_status = "completed" if record.status == ExecutionStatus.COMPLETED else (
-                "interrupted" if record.status == ExecutionStatus.KILLED else "failed"
-            )
-            self._delegate_results[defn.id] = {
-                "agent_id": defn.id,
-                "status": result_status,
-                "result": record.output.get("result", "") if isinstance(record.output, dict) else "",
-                "error": record.error,
-            }
-            if isinstance(record.output, dict) and "usage" in record.output:
-                self._delegate_results[defn.id]["usage"] = record.output["usage"]
-
             # Innate wake-up: notify parent on completion
             await self._on_agent_completed(defn.id, record)
 
@@ -998,10 +980,6 @@ class Runtime:
         parent_provider = self._active_providers.get(resolved_parent)
         if parent_provider is None:
             parent_provider = self._active_providers.get(parent_id)
-        if parent_provider is None:
-            parent_provider = self._delegate_providers.get(resolved_parent)
-        if parent_provider is None:
-            parent_provider = self._delegate_providers.get(parent_id)
         if parent_provider is not None:
             inject_text = (
                 f"[CHILD COMPLETED] Agent '{defn.name}' ({agent_id}) "
@@ -1078,24 +1056,24 @@ class Runtime:
     # ------------------------------------------------------------------
 
     async def send_delegate_message(self, agent_id: str, content: str) -> bool:
-        """Inject a user message into a running delegate's session.
+        """Inject a user message into a running cognitive agent's session.
 
-        Returns True if the message was delivered, False if the delegate
-        isn't running or the agent_id is unknown.
+        Returns True if the message was delivered, False if the agent
+        isn't running or has no active bridge session.
         """
-        provider = self._delegate_providers.get(agent_id)
+        provider = self._active_providers.get(agent_id)
         if provider is None:
             return False
         await provider.send_user_message(content)
         return True
 
     async def interrupt_delegate(self, agent_id: str) -> bool:
-        """Interrupt a running delegate's session.
+        """Interrupt a running cognitive agent's session.
 
         Calls bridge.interrupt() which tells the Claude SDK to wind down
         gracefully.  Returns True if the interrupt was sent.
         """
-        provider = self._delegate_providers.get(agent_id)
+        provider = self._active_providers.get(agent_id)
         if provider is None:
             return False
         await provider.interrupt()
@@ -1126,7 +1104,7 @@ class Runtime:
         """Resolve a BridgeProvider for the given agent.
 
         If agent_id is None or "orchestrator", returns the orchestrator's
-        bridge provider.  Otherwise looks up the delegate's provider.
+        bridge provider.  Otherwise looks up the agent's active provider.
         Returns None if not found or not a BridgeProvider.
         """
         from .providers.bridge import BridgeProvider
@@ -1138,9 +1116,8 @@ class Runtime:
             provider = cognitive._providers.get("claude_max")
             return provider if isinstance(provider, BridgeProvider) else None
         else:
-            provider = self._delegate_providers.get(agent_id)
-            from .providers.bridge import BridgeProvider as BP
-            return provider if isinstance(provider, BP) else None
+            provider = self._active_providers.get(agent_id)
+            return provider if isinstance(provider, BridgeProvider) else None
 
     def get_session_stats(self, agent_id: str | None = None) -> dict[str, Any]:
         """Return session stats for the orchestrator or a delegate.

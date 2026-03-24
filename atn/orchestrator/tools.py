@@ -17,6 +17,7 @@ from ..models import (
     AgentDefinition,
     AgentMode,
     AgentStatus,
+    ExecutionStatus,
     InboxMessage,
     MessagePriority,
     MessageType,
@@ -1390,175 +1391,12 @@ def _get_delegate_tools() -> list[dict[str, Any]]:
     ]
 
 
-async def _run_delegate_session(
-    runtime: Runtime,
-    agent_id: str,
-    title: str,
-    prompt: str,
-    system_prompt: str,
-    delegate_tools: list[dict[str, Any]],
-    *,
-    model: str = "",
-) -> None:
-    """Background coroutine that runs a delegate's bridge session.
-
-    Stores the result in runtime._delegate_results and signals the
-    done event when finished.
-    """
-    from ..providers.bridge import BridgeProvider
-
-    registry: DelegateRegistry = runtime.delegate_registry
-    sub_provider: BridgeProvider | None = None
-
-    try:
-        delegate_model = model or runtime._config.orchestrator.model or "sonnet"
-        sub_provider = BridgeProvider(model=delegate_model)
-
-        # Make provider accessible for mid-session message injection
-        runtime._delegate_providers[agent_id] = sub_provider
-
-        # Register interrupt hook so killing the orchestrator cascades
-        runtime.register_interrupt_hook(f"delegate:{agent_id}", sub_provider.interrupt)
-
-        # Update status
-        registry.update_status(agent_id, DelegateStatus.RUNNING)
-        await runtime.events.emit(Event(
-            type=EventType.DELEGATE_RUNNING,
-            source=agent_id,
-            data={"agent_id": agent_id, "title": title},
-        ))
-
-        # Tool executor for the sub-agent — routes delegate calls back here
-        # (fractal), other tools to the normal executor.
-        async def _sub_tool_executor(name: str, tool_input: dict) -> dict:
-            if name.startswith("mcp_"):
-                for cid, session in runtime.connectors._sessions.items():
-                    prefix = f"mcp_{cid}_"
-                    if name.startswith(prefix):
-                        real_name = name[len(prefix):]
-                        return await runtime.connectors.call_tool(cid, real_name, tool_input)
-                return {"error": f"Unknown connector tool: {name}"}
-            return await execute_tool(name, tool_input, runtime)
-
-        # Stream text deltas as events for UI visibility + persist to disk
-        async def _on_delegate_chunk(text: str) -> None:
-            runtime.append_delegate_output(agent_id, text)
-            await runtime.events.emit(Event(
-                type=EventType.STEP_OUTPUT,
-                source=agent_id,
-                data={
-                    "agent_id": agent_id,
-                    "channel": "text",
-                    "content": text,
-                    "delegate": True,
-                },
-            ))
-
-        # Run the sub-agent
-        response = await sub_provider.send_orchestrate(
-            message=prompt,
-            system=system_prompt,
-            tools=delegate_tools,
-            max_turns=50,
-            tool_executor=_sub_tool_executor,
-            on_chunk=_on_delegate_chunk,
-        )
-
-        # Determine outcome
-        result_text = response.text or ""
-        total_tokens = (
-            response.usage.input_tokens
-            + response.usage.output_tokens
-            + response.usage.cache_read_tokens
-            + response.usage.cache_creation_tokens
-        )
-
-        if response.stop_reason == "interrupted":
-            registry.update_status(
-                agent_id, DelegateStatus.KILLED,
-                result_preview=result_text[:500],
-                tokens_used=total_tokens,
-            )
-            await runtime.events.emit(Event(
-                type=EventType.DELEGATE_KILLED,
-                source=agent_id,
-                data={"agent_id": agent_id, "title": title},
-            ))
-            runtime._delegate_results[agent_id] = {
-                "agent_id": agent_id,
-                "status": "interrupted",
-                "result": result_text,
-            }
-        else:
-            registry.update_status(
-                agent_id, DelegateStatus.COMPLETED,
-                result_preview=result_text[:500],
-                tokens_used=total_tokens,
-            )
-            await runtime.events.emit(Event(
-                type=EventType.DELEGATE_COMPLETED,
-                source=agent_id,
-                data={
-                    "agent_id": agent_id,
-                    "title": title,
-                    "result_preview": result_text[:200],
-                    "tokens_used": total_tokens,
-                },
-            ))
-            runtime._delegate_results[agent_id] = {
-                "agent_id": agent_id,
-                "status": "completed",
-                "result": result_text,
-                "usage": {
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                    "cache_read_tokens": response.usage.cache_read_tokens,
-                    "cache_creation_tokens": response.usage.cache_creation_tokens,
-                },
-            }
-
-    except Exception as exc:
-        error_msg = str(exc)
-        registry.update_status(
-            agent_id, DelegateStatus.FAILED,
-            error=error_msg,
-        )
-        await runtime.events.emit(Event(
-            type=EventType.DELEGATE_FAILED,
-            source=agent_id,
-            data={"agent_id": agent_id, "title": title, "error": error_msg},
-        ))
-        log.exception("Delegate %s failed", agent_id)
-        runtime._delegate_results[agent_id] = {
-            "agent_id": agent_id,
-            "status": "failed",
-            "error": error_msg,
-        }
-
-    finally:
-        # Clean up: remove provider reference, unregister hook, kill subprocess
-        runtime._delegate_providers.pop(agent_id, None)
-        runtime._delegate_tasks.pop(agent_id, None)
-        runtime.unregister_interrupt_hook(f"delegate:{agent_id}")
-        if sub_provider is not None:
-            try:
-                await sub_provider.close()
-            except Exception:
-                pass
-        # Signal completion for anyone awaiting via delegate_collect
-        done_event = runtime._delegate_done.get(agent_id)
-        if done_event:
-            done_event.set()
-        # Persist registry
-        registry.save()
-
-
 async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Spawn an autonomous sub-agent in the background.  Returns immediately.
+    """Spawn an autonomous cognitive sub-agent in the background.  Returns immediately.
 
-    Phase 2: Creates a cognitive-mode AgentDefinition and triggers it through
-    the unified Runtime pipeline, while maintaining backward compatibility
-    with the delegate tool names.
+    Creates a cognitive-mode AgentDefinition, registers it in the unified agent
+    registry, and triggers execution via _execute_cognitive_agent().  The innate
+    wake-up mechanism notifies the parent when the child completes.
     """
     prompt = input.get("prompt", "")
     if not prompt:
@@ -1572,10 +1410,10 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     # This allows sub-agents to spawn their own children with correct parent_id.
     parent_id = input.get("_caller_id") or "orch"
 
-    # Generate hierarchical ID using Runtime (unified with DelegateRegistry)
+    # Generate hierarchical ID
     agent_id = runtime.generate_child_id(parent_id)
 
-    # Also register in DelegateRegistry for backward compat (snapshot, UI)
+    # Register in DelegateRegistry for snapshot/UI observability
     registry: DelegateRegistry = runtime.delegate_registry
     node = registry.register(
         agent_id=agent_id,
@@ -1603,7 +1441,7 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         description=prompt,
     )
 
-    # Register and activate through the Runtime
+    # Register and activate through the unified Runtime
     await runtime.register_agent(defn)
     await runtime.activate_agent(agent_id)
 
@@ -1613,7 +1451,7 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     # Create done event for delegate_collect
     runtime._delegate_done[agent_id] = asyncio.Event()
 
-    # Emit spawn event (backward compat)
+    # Emit spawn event
     await runtime.events.emit(Event(
         type=EventType.DELEGATE_SPAWNED,
         source=agent_id,
@@ -1621,17 +1459,16 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     ))
 
     # Post the prompt as a work message to trigger execution
-    from ..models import InboxMessage as IM, MessageType as MT, MessagePriority as MP
-    runtime.inbox.post(IM(
-        id=IM.generate_id(),
+    runtime.inbox.post(InboxMessage(
+        id=InboxMessage.generate_id(),
         source=parent_id,
         target=agent_id,
-        type=MT.WORK,
-        priority=MP.HIGH,
+        type=MessageType.WORK,
+        priority=MessagePriority.HIGH,
         data={"instruction": prompt},
     ))
 
-    # Trigger the run
+    # Trigger the run — dispatches to _execute_cognitive_agent()
     eid = await runtime.trigger_run(agent_id, source=f"agent:{parent_id}")
 
     # Update delegate registry status
@@ -1647,26 +1484,18 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _delegate_status(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Check the status of a delegate sub-agent.
-
-    Phase 2: Checks both unified agent registry and legacy delegate registry.
-    """
+    """Check the status of a delegate sub-agent via the unified agent registry."""
     agent_id = input.get("agent_id", "")
     if not agent_id:
         return {"error": "Missing 'agent_id'."}
 
-    # Check if result is already available
-    result = runtime._delegate_results.get(agent_id)
-    if result:
-        return result
-
-    # Phase 2: Check unified agent registry first
+    # Check unified agent registry
     defn = runtime.get_agent(agent_id)
     if defn and defn.mode == AgentMode.COGNITIVE:
         status = runtime.get_status(agent_id)
         info: dict[str, Any] = {
             "agent_id": agent_id,
-            "status": status.value if status else "unknown",
+            "status": _agent_status_to_delegate(status),
             "title": defn.name,
             "agent_type": defn.agent_type,
         }
@@ -1680,39 +1509,15 @@ async def _delegate_status(runtime: Runtime, input: dict[str, Any]) -> dict[str,
         if stored and isinstance(stored.data, dict):
             if stored.data.get("usage"):
                 info["tokens_used"] = sum(stored.data["usage"].values())
+            if stored.data.get("result"):
+                info["result"] = stored.data["result"]
         return info
 
-    # Fallback: Check legacy delegate registry
-    node = runtime.delegate_registry.get_node(agent_id)
-    if node is None:
-        return {"error": f"Unknown delegate: {agent_id}"}
-
-    info = {
-        "agent_id": agent_id,
-        "status": node.status.value,
-        "title": node.title,
-        "agent_type": node.agent_type,
-    }
-
-    # Include current output text (persisted stream)
-    output_text = runtime.get_delegate_output(agent_id)
-    if output_text:
-        info["output_preview"] = output_text[-2000:] if len(output_text) > 2000 else output_text
-        info["output_length"] = len(output_text)
-
-    if node.tokens_used:
-        info["tokens_used"] = node.tokens_used
-    if node.error:
-        info["error"] = node.error
-
-    return info
+    return {"error": f"Unknown delegate: {agent_id}"}
 
 
 async def _delegate_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Send a message to a running delegate sub-agent.
-
-    Phase 2: Also checks _active_providers for cognitive-mode agents.
-    """
+    """Send a message to a running cognitive sub-agent."""
     agent_id = input.get("agent_id", "")
     content = input.get("content", "")
     if not agent_id:
@@ -1720,19 +1525,14 @@ async def _delegate_message(runtime: Runtime, input: dict[str, Any]) -> dict[str
     if not content:
         return {"error": "Missing 'content'."}
 
-    # Try active cognitive providers first (Phase 2)
+    # Try active bridge session (direct injection for immediate delivery)
     provider = runtime._active_providers.get(agent_id)
     if provider is not None:
         await provider.send_user_message(content)
         return {"status": "delivered", "agent_id": agent_id}
 
-    # Fall back to legacy delegate providers
-    delivered = await runtime.send_delegate_message(agent_id, content)
-    if delivered:
-        return {"status": "delivered", "agent_id": agent_id}
-
-    # Final fallback: post to inbox for unified agents that may not have
-    # an active bridge session right now (e.g. between scheduled runs)
+    # Fallback: post to inbox for agents not actively running
+    # (e.g. between scheduled runs or not yet started)
     defn = runtime.get_agent(agent_id)
     if defn is not None:
         runtime.inbox.post(InboxMessage(
@@ -1749,48 +1549,99 @@ async def _delegate_message(runtime: Runtime, input: dict[str, Any]) -> dict[str
 
 
 async def _delegate_collect(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Wait for a delegate to finish, then return its result."""
+    """Wait for a cognitive sub-agent to finish, then return its result.
+
+    Reads from the unified output store and execution records rather than
+    a separate delegate results dict.
+    """
     agent_id = input.get("agent_id", "")
     if not agent_id:
         return {"error": "Missing 'agent_id'."}
 
-    # Already finished?
-    result = runtime._delegate_results.get(agent_id)
-    if result:
-        # Clean up the stored result and done event
-        runtime._delegate_results.pop(agent_id, None)
-        runtime._delegate_done.pop(agent_id, None)
-        return result
-
-    # Unknown delegate?
+    # Check if agent is known
+    defn = runtime.get_agent(agent_id)
     done_event = runtime._delegate_done.get(agent_id)
-    if done_event is None:
-        node = runtime.delegate_registry.get_node(agent_id)
-        if node is None:
-            return {"error": f"Unknown delegate: {agent_id}"}
-        # Already finished but result was already collected
-        return {
-            "agent_id": agent_id,
-            "status": node.status.value,
-            "result": node.result_preview or "",
-            "note": "Result was already collected.",
-        }
+
+    if defn is None and done_event is None:
+        return {"error": f"Unknown delegate: {agent_id}"}
+
+    # Already finished? Check agent status.
+    status = runtime.get_status(agent_id)
+    if status in (AgentStatus.COMPLETED, AgentStatus.ERROR, AgentStatus.STOPPED):
+        runtime._delegate_done.pop(agent_id, None)
+        return _build_collect_result(runtime, agent_id)
 
     # Wait for completion
-    await done_event.wait()
+    if done_event is not None:
+        await done_event.wait()
+        runtime._delegate_done.pop(agent_id, None)
+        return _build_collect_result(runtime, agent_id)
 
-    result = runtime._delegate_results.pop(agent_id, None)
-    runtime._delegate_done.pop(agent_id, None)
-    if result:
+    # No done event — already collected or unknown state
+    return _build_collect_result(runtime, agent_id)
+
+
+def _build_collect_result(runtime: "Runtime", agent_id: str) -> dict[str, Any]:
+    """Build a collect result from the output store and execution records."""
+    # Try output store first (populated on successful completion)
+    stored = runtime.output_store.read(agent_id)
+    if stored and isinstance(stored.data, dict):
+        result: dict[str, Any] = {
+            "agent_id": agent_id,
+            "status": "completed",
+            "result": stored.data.get("result", ""),
+        }
+        if stored.data.get("usage"):
+            result["usage"] = stored.data["usage"]
         return result
 
-    # Fallback — shouldn't happen but be safe
+    # Fall back to execution log for failures/interrupts
+    status = runtime.get_status(agent_id)
+    rec = runtime.execution_log.get_latest(agent_id)
+    if rec is not None:
+        result_text = ""
+        if isinstance(rec.output, dict):
+            result_text = rec.output.get("result", "")
+        status_str = (
+            "completed" if rec.status == ExecutionStatus.COMPLETED
+            else "interrupted" if rec.status == ExecutionStatus.KILLED
+            else "failed"
+        )
+        result = {
+            "agent_id": agent_id,
+            "status": status_str,
+            "result": result_text,
+        }
+        if rec.error:
+            result["error"] = rec.error
+        if isinstance(rec.output, dict) and rec.output.get("usage"):
+            result["usage"] = rec.output["usage"]
+        return result
+
+    # Last resort: delegate registry (backward compat)
     node = runtime.delegate_registry.get_node(agent_id)
+    delegate_status = _agent_status_to_delegate(status)
     return {
         "agent_id": agent_id,
-        "status": node.status.value if node else "unknown",
-        "error": "No result available.",
+        "status": delegate_status,
+        "result": node.result_preview if node else "",
+        "error": node.error if node else None,
     }
+
+
+def _agent_status_to_delegate(status: AgentStatus | None) -> str:
+    """Map AgentStatus to the delegate status string convention."""
+    if status is None:
+        return "unknown"
+    mapping = {
+        AgentStatus.REGISTERED: "pending",
+        AgentStatus.ACTIVE: "running",
+        AgentStatus.RUNNING: "running",
+        AgentStatus.STOPPED: "interrupted",
+        AgentStatus.ERROR: "failed",
+        AgentStatus.COMPLETED: "completed",
+    }
+    return mapping.get(status, status.value)
 
 
 # ---------------------------------------------------------------------------
