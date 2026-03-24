@@ -664,6 +664,8 @@ class Runtime:
                 model_name = defn.cognitive_model or self._config.orchestrator.model or "sonnet"
 
             sub_provider = BridgeProvider(model=model_name)
+            sub_provider.event_bus = self.events
+            sub_provider.source_agent_id = defn.id
 
             # Track active provider for message injection
             self._active_providers[defn.id] = sub_provider

@@ -314,6 +314,11 @@ async def _orchestrate(
                 for t in connector_tools
             )
 
+        # Wire up EventBus for tool use events (BridgeProvider only)
+        if hasattr(provider, 'event_bus') and context.event_bus:
+            provider.event_bus = context.event_bus
+            provider.source_agent_id = context.agent_id
+
         # Register an interrupt hook if the provider supports it
         # (BridgeProvider has an .interrupt() method for kill_execution())
         has_interrupt = hasattr(provider, 'interrupt')

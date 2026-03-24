@@ -56,6 +56,10 @@ class EventType(Enum):
     DELEGATE_FAILED = "delegate.failed"
     DELEGATE_KILLED = "delegate.killed"
 
+    # Agent tool use (from bridge subprocess)
+    AGENT_TOOL_USE_START = "agent.tool_use_start"
+    AGENT_TOOL_USE_RESULT = "agent.tool_use_result"
+
     # Voice service
     VOICE_STARTED = "voice.started"
     VOICE_STOPPED = "voice.stopped"

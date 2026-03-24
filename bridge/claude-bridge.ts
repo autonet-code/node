@@ -148,6 +148,7 @@ const pendingToolCalls = new Map<string, {
 
 function relayToolCall(name: string, input: unknown): Promise<any> {
   const callId = randomUUID().slice(0, 12)
+  emitEvent({ type: "tool_use_start", tool_use_id: callId, tool_name: name, input })
   return new Promise((resolve, reject) => {
     pendingToolCalls.set(callId, { resolve, reject })
     const msg = JSON.stringify({
@@ -166,6 +167,8 @@ function handleToolResult(callId: string, result: any): void {
   if (pending) {
     pendingToolCalls.delete(callId)
     pending.resolve(result)
+    const isError = result != null && typeof result === "object" && !!result.error
+    emitEvent({ type: "tool_use_result", tool_use_id: callId, is_error: isError })
     log("tool_result received", { callId })
   } else {
     log("tool_result for unknown call_id", { callId })

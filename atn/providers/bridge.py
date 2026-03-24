@@ -32,6 +32,7 @@ from .base import (
     ToolDefinition,
     Usage,
 )
+from ..events import Event, EventBus, EventType
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,11 @@ class BridgeProvider(Provider):
         self._lock = asyncio.Lock()
         self._stderr_task: asyncio.Task | None = None
         self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        # Optional EventBus for emitting tool use events.
+        # Set by the caller (e.g. runtime) after construction.
+        self.event_bus: EventBus | None = None
+        self.source_agent_id: str = ""
 
         # Cumulative session stats — updated after each orchestrate response.
         # These track the SDK's view of the session, not our own bookkeeping.
@@ -369,23 +375,44 @@ class BridgeProvider(Provider):
 
             # Start streaming events to on_chunk concurrently
             stream_task: asyncio.Task | None = None
-            if on_chunk:
-                async def _stream_events() -> None:
-                    while True:
-                        try:
-                            event = await asyncio.wait_for(
-                                self._event_queue.get(), timeout=300,
-                            )
-                        except asyncio.TimeoutError:
-                            break
-                        if event.get("type") == "done":
-                            break
-                        if event.get("type") == "text_delta":
-                            text = event.get("text", "")
-                            if text:
-                                await on_chunk(text)
 
-                stream_task = asyncio.create_task(_stream_events())
+            async def _stream_events() -> None:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(
+                            self._event_queue.get(), timeout=300,
+                        )
+                    except asyncio.TimeoutError:
+                        break
+                    if event.get("type") == "done":
+                        break
+                    if event.get("type") == "text_delta":
+                        text = event.get("text", "")
+                        if text and on_chunk:
+                            await on_chunk(text)
+                    elif event.get("type") == "tool_use_start" and self.event_bus:
+                        await self.event_bus.emit(Event(
+                            type=EventType.AGENT_TOOL_USE_START,
+                            source=self.source_agent_id,
+                            data={
+                                "agent_id": self.source_agent_id,
+                                "tool_use_id": event.get("tool_use_id", ""),
+                                "tool_name": event.get("tool_name", ""),
+                                "input": event.get("input", {}),
+                            },
+                        ))
+                    elif event.get("type") == "tool_use_result" and self.event_bus:
+                        await self.event_bus.emit(Event(
+                            type=EventType.AGENT_TOOL_USE_RESULT,
+                            source=self.source_agent_id,
+                            data={
+                                "agent_id": self.source_agent_id,
+                                "tool_use_id": event.get("tool_use_id", ""),
+                                "is_error": event.get("is_error", False),
+                            },
+                        ))
+
+            stream_task = asyncio.create_task(_stream_events())
 
             # Read stdout lines: may be tool_call or final response
             try:
