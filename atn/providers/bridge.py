@@ -332,12 +332,15 @@ class BridgeProvider(Provider):
             self._request_id += 1
             request_id = f"req-{self._request_id}"
 
+            effective_model = model or self._model
+            if model:
+                self._model = model  # Keep session_stats in sync
             request: dict[str, Any] = {
                 "id": request_id,
                 "type": "orchestrate",
                 "message": message,
                 "system_prompt": system,
-                "model": model or self._model,
+                "model": effective_model,
                 "tools": tools,
                 "max_turns": max_turns,
             }

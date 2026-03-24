@@ -1351,9 +1351,10 @@ class Runtime:
             else:
                 primary_provider = raw_provider
                 fallback_providers = []
+            orch_model = step_cfg.get("model", "")
             orch_info = {
                 "provider": primary_provider,
-                "model": step_cfg.get("model", ""),
+                "model": orch_model,
                 "available_models": self._get_available_models(primary_provider),
                 "fallback_providers": fallback_providers,
             }
@@ -2050,8 +2051,14 @@ class Runtime:
             if provider_id == "claude_max":
                 pconfig = self._config.providers.get("claude_max")
                 bridge_script = pconfig.extra.get("bridge_script", "") if pconfig else ""
+                # Use orchestrator model if no provider-level default is set
+                default_model = (
+                    (pconfig.default_model if pconfig else "")
+                    or self._config.orchestrator.model
+                    or "claude-sonnet-4-6"
+                )
                 provider = BridgeProvider(
-                    model=pconfig.default_model if pconfig else "sonnet",
+                    model=default_model,
                     bridge_script=bridge_script if bridge_script else None,
                 )
             elif provider_id == "anthropic":
