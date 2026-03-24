@@ -305,14 +305,85 @@ class OpenAICompatibleProvider(Provider):
 # ---------------------------------------------------------------------------
 
 def _to_openai_messages(messages: list[dict[str, Any]], system: str) -> list[dict[str, Any]]:
-    """Convert canonical messages to OpenAI format."""
+    """Convert canonical messages to OpenAI format.
+
+    Handles translation of Anthropic-style content blocks (tool_use, tool_result)
+    into OpenAI's format (assistant tool_calls array + role:"tool" messages).
+    """
+    import json as _json
+
     oai: list[dict[str, Any]] = []
 
     if system:
         oai.append({"role": "system", "content": system})
 
     for msg in messages:
-        oai.append({"role": msg["role"], "content": msg["content"]})
+        role = msg["role"]
+        content = msg["content"]
+
+        # If content is a plain string, pass through directly
+        if isinstance(content, str):
+            oai.append({"role": role, "content": content})
+            continue
+
+        # Content is a list of blocks — need to translate
+        if not isinstance(content, list):
+            oai.append({"role": role, "content": content})
+            continue
+
+        if role == "assistant":
+            # Translate Anthropic-style assistant content blocks
+            # Extract text parts and tool_use blocks separately
+            text_parts: list[str] = []
+            tool_calls_oai: list[dict[str, Any]] = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        tool_calls_oai.append({
+                            "id": block.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": block.get("name", ""),
+                                "arguments": _json.dumps(block.get("input", {}), default=str),
+                            },
+                        })
+
+            assistant_msg: dict[str, Any] = {"role": "assistant"}
+            if text_parts:
+                assistant_msg["content"] = "\n".join(text_parts)
+            else:
+                assistant_msg["content"] = None
+            if tool_calls_oai:
+                assistant_msg["tool_calls"] = tool_calls_oai
+            oai.append(assistant_msg)
+
+        elif role == "user":
+            # Translate Anthropic-style tool_result blocks to OpenAI tool messages
+            has_tool_results = any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in content
+            )
+            if has_tool_results:
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        oai.append({
+                            "role": "tool",
+                            "tool_call_id": block.get("tool_use_id", ""),
+                            "content": block.get("content", ""),
+                        })
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        oai.append({"role": "user", "content": block.get("text", "")})
+            else:
+                # Regular user content blocks — join text
+                text = " ".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b)
+                    for b in content
+                )
+                oai.append({"role": "user", "content": text})
+        else:
+            oai.append({"role": role, "content": content})
 
     return oai
 
