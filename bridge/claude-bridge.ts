@@ -658,6 +658,12 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
       settingSources: [],
     }
 
+    // Enable 1M context window for Sonnet models (reduces compaction frequency)
+    if (model && model.toLowerCase().includes("sonnet")) {
+      sdkOptions.betas = ["context-1m-2025-08-07"]
+      log("request.orchestrate.beta", { betas: sdkOptions.betas })
+    }
+
     // System prompt — passed as SDK option so it gets server-side caching.
     // Falls back to legacy inline system field for backward compat.
     const sysPrompt = req.system_prompt || req.system
@@ -784,8 +790,8 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
           if (contextWindow === 0 && resolvedModel) {
             const m = resolvedModel.toLowerCase()
             if (m.includes("claude")) {
-              // All Claude 3+ models have 200k context
-              contextWindow = 200_000
+              // Sonnet with 1M beta gets 1M, otherwise 200k
+              contextWindow = m.includes("sonnet") ? 1_000_000 : 200_000
               maxOutputTokens = maxOutputTokens || (m.includes("opus") ? 32_000 : 16_000)
             }
           }
