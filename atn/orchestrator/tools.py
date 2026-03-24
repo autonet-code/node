@@ -194,6 +194,15 @@ _TOOLS: list[ToolDefinition] = [
                     "items": {"type": "string"},
                     "description": "MCP connector IDs this agent should use. Use list_connectors to see available connectors.",
                 },
+                "expose_as_tool": {
+                    "type": "boolean",
+                    "description": "If true, this pipeline agent is callable as a tool via use_tool/list_tools. Default: false.",
+                    "default": False,
+                },
+                "tool_input_schema": {
+                    "type": "object",
+                    "description": "Custom JSON Schema for the tool's input. If omitted, derived from the first step's expected input.",
+                },
             },
             "required": ["id", "name"],
         },
@@ -323,7 +332,7 @@ _TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="list_connectors",
-        description="List available MCP connectors and their status. Shows name, description, mode, and running state for each connector.",
+        description="List available MCP connectors and their status. For a unified view of all tools (connectors + pipeline agents), use list_tools instead.",
         input_schema={
             "type": "object",
             "properties": {},
@@ -420,6 +429,52 @@ _TOOLS: list[ToolDefinition] = [
             "required": ["connector_id"],
         },
     ),
+    # ------------------------------------------------------------------
+    # Unified tools (connectors + pipeline-agent-tools)
+    # ------------------------------------------------------------------
+    ToolDefinition(
+        name="list_tools",
+        description=(
+            "List all available tools — both MCP connectors and pipeline agents exposed as tools. "
+            "Each tool has a name, description, category (connector/pipeline), and input schema. "
+            "Use use_tool to call any tool by name."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["connector", "pipeline"],
+                    "description": "Filter by category. Omit to list all tools.",
+                },
+                "include_operations": {
+                    "type": "boolean",
+                    "description": "Include per-tool operations (connector MCP tools, pipeline steps). Default: false.",
+                    "default": False,
+                },
+            },
+        },
+    ),
+    ToolDefinition(
+        name="use_tool",
+        description=(
+            "Call any tool by its unified name — works for both MCP connectors and pipeline-agent tools. "
+            "Connector tools are named 'mcp_<connector>_<tool>'. Pipeline tools are named 'pipeline_<agent_id>'. "
+            "Use list_tools to discover available tools and their input schemas."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The tool's unified name (from list_tools)."},
+                "arguments": {
+                    "type": "object",
+                    "description": "Tool arguments (see list_tools for the schema).",
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["name"],
+        },
+    ),
     ToolDefinition(
         name="get_history",
         description="Get execution history summaries for an agent. Returns lightweight records (no full step output) for browsing previous runs.",
@@ -437,36 +492,37 @@ _TOOLS: list[ToolDefinition] = [
     # ------------------------------------------------------------------
     ToolDefinition(
         name="get_goals",
-        description="Get the user's goals with status, timeframe, and description.",
+        description="Get the user's goals — each goal is a cognitive agent. Lists all agents with their task_prompt (goal statement) and status.",
         input_schema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "status": {"type": "string", "enum": ["active", "completed", "paused", "abandoned"], "description": "Filter by status."},
+            },
         },
     ),
     ToolDefinition(
         name="add_goal",
-        description="Add a new goal for the user.",
+        description="Add a new goal by creating a cognitive agent. The goal title becomes the agent name and the description becomes its task_prompt.",
         input_schema={
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "Short goal title."},
-                "timeframe": {"type": "string", "enum": ["short", "medium", "long"], "description": "Timeframe: short (1-3 months), medium (this year), long (5+ years)."},
-                "description": {"type": "string", "description": "What success looks like."},
-                "motivation": {"type": "string", "description": "Why this matters."},
+                "title": {"type": "string", "description": "Short goal title (becomes agent name)."},
+                "description": {"type": "string", "description": "What success looks like (becomes agent task_prompt)."},
+                "model": {"type": "string", "description": "Model for the goal agent. Defaults to sonnet."},
             },
-            "required": ["title", "timeframe", "description"],
+            "required": ["title", "description"],
         },
     ),
     ToolDefinition(
         name="update_goal",
-        description="Update an existing goal's status or other fields.",
+        description="Update an existing goal (agent) — change its task_prompt, name, or status.",
         input_schema={
             "type": "object",
             "properties": {
-                "goal_id": {"type": "string", "description": "The goal's ID."},
+                "goal_id": {"type": "string", "description": "The agent ID representing this goal."},
                 "status": {"type": "string", "enum": ["active", "completed", "paused", "abandoned"], "description": "New status."},
-                "title": {"type": "string"},
-                "description": {"type": "string"},
+                "title": {"type": "string", "description": "Updated goal title (agent name)."},
+                "description": {"type": "string", "description": "Updated goal description (agent task_prompt)."},
             },
             "required": ["goal_id"],
         },
@@ -778,6 +834,11 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
             ]
     if defn.connector_ids:
         result["connector_ids"] = defn.connector_ids
+    if defn.expose_as_tool:
+        result["expose_as_tool"] = True
+        result["tool_name"] = f"pipeline_{defn.id}"
+        if defn.tool_input_schema:
+            result["tool_input_schema"] = defn.tool_input_schema
     return result
 
 
@@ -954,6 +1015,8 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             connector_ids=input.get("connector_ids", []),
             parent_id=parent_id,
             created_by=caller_id or "",
+            expose_as_tool=bool(input.get("expose_as_tool", False)),
+            tool_input_schema=input.get("tool_input_schema"),
         )
 
         try:
@@ -1159,6 +1222,10 @@ async def _get_snapshot(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 
 
 async def _list_connectors(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """List connectors.  Delegates to the unified tool registry for connector category.
+
+    Kept for backward compatibility — prefer list_tools for a unified view.
+    """
     available = runtime.connectors.list_available()
     running = set(runtime.connectors.list_running())
     bundled = _get_bundled_ids()
@@ -1189,7 +1256,18 @@ async def _list_connectors(runtime: Runtime, input: dict[str, Any]) -> dict[str,
                 ]
                 info["tool_count"] = len(session.tools)
         connectors.append(info)
-    return {"connectors": connectors}
+
+    # Include pipeline-agent-tools count for discoverability
+    from ..tool_registry import ToolCategory
+    pipeline_tools = runtime.tool_registry.list_all(category=ToolCategory.PIPELINE)
+
+    result: dict[str, Any] = {"connectors": connectors}
+    if pipeline_tools:
+        result["hint"] = (
+            f"There are also {len(pipeline_tools)} pipeline agent(s) exposed as tools. "
+            "Use list_tools to see all tools (connectors + pipelines) in a unified view."
+        )
+    return result
 
 
 def _get_bundled_ids() -> set[str]:
@@ -1317,6 +1395,39 @@ async def _use_connector(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     # Call the tool
     result = await runtime.connectors.call_tool(connector_id, tool_name, arguments)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Unified tools (connectors + pipeline-agent-tools)
+# ---------------------------------------------------------------------------
+
+async def _list_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    from ..tool_registry import ToolCategory
+    category_str = input.get("category")
+    category: ToolCategory | None = None
+    if category_str:
+        try:
+            category = ToolCategory(category_str)
+        except ValueError:
+            return {"error": f"Invalid category: '{category_str}'. Use 'connector' or 'pipeline'."}
+
+    include_ops = bool(input.get("include_operations", False))
+    tools = runtime.tool_registry.list_all(
+        category=category,
+        include_operations=include_ops,
+    )
+    return {"tools": tools, "count": len(tools)}
+
+
+async def _use_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    name = input.get("name", "")
+    if not name:
+        return {"error": "Missing required field: 'name'"}
+    arguments = input.get("arguments", {})
+    caller_id = input.get("_caller_id")
+    return await runtime.tool_registry.call_tool(
+        name, arguments, caller_id=caller_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1450,27 +1561,102 @@ async def _get_history(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
 # ---------------------------------------------------------------------------
 
 async def _get_goals(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    profile = runtime.user_profile.get_profile()
-    return {"goals": profile.goals}
+    """Goals are agents — list all non-orchestrator agents as goals."""
+    from ..orchestrator import ORCHESTRATOR_ID
+    status_filter = input.get("status")
+    _STATUS_MAP = {
+        "active": (AgentStatus.ACTIVE, AgentStatus.RUNNING),
+        "completed": (AgentStatus.COMPLETED,),
+        "paused": (AgentStatus.INACTIVE,),
+        "abandoned": (AgentStatus.FAILED,),
+    }
+    goals: list[dict[str, Any]] = []
+    for defn, agent_status in runtime.list_agents():
+        if defn.id == ORCHESTRATOR_ID:
+            continue
+        # Map agent status to goal status
+        if agent_status in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
+            goal_status = "active"
+        elif agent_status == AgentStatus.COMPLETED:
+            goal_status = "completed"
+        elif agent_status == AgentStatus.INACTIVE:
+            goal_status = "paused"
+        elif agent_status == AgentStatus.FAILED:
+            goal_status = "abandoned"
+        else:
+            goal_status = agent_status.value
+        if status_filter and goal_status != status_filter:
+            continue
+        goals.append({
+            "id": defn.id,
+            "title": defn.name,
+            "description": defn.task_prompt or defn.description,
+            "status": goal_status,
+            "agent_status": agent_status.value,
+            "model": defn.model,
+        })
+    return {"goals": goals}
 
 
 async def _add_goal(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    goal = runtime.user_profile.add_goal({
-        "title": input["title"],
-        "timeframe": input.get("timeframe", "medium"),
-        "description": input.get("description", ""),
-        "motivation": input.get("motivation", ""),
+    """Add a goal by creating a cognitive agent."""
+    title = input["title"]
+    description = input["description"]
+    model = input.get("model", "")
+
+    # Generate a unique agent ID from the title
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40]
+    agent_id = f"goal-{slug}"
+
+    # Ensure uniqueness
+    if runtime.get_agent(agent_id) is not None:
+        agent_id = f"{agent_id}-{__import__('uuid').uuid4().hex[:6]}"
+
+    result = await _create_agent(runtime, {
+        "id": agent_id,
+        "name": title,
+        "mode": "cognitive",
+        "prompt": description,
+        "description": f"Goal: {description}",
+        "model": model or runtime._config.orchestrator.model or "claude-sonnet-4-6",
     })
-    return {"goal": goal, "status": "added"}
+    if "error" in result:
+        return result
+    return {"goal_id": result["agent_id"], "title": title, "description": description, "status": "added"}
 
 
 async def _update_goal(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Update a goal by updating the underlying agent."""
     goal_id = input["goal_id"]
-    updates = {k: v for k, v in input.items() if k != "goal_id" and v is not None}
-    result = runtime.user_profile.update_goal(goal_id, updates)
-    if result is None:
+    defn = runtime.get_agent(goal_id)
+    if defn is None:
         return {"error": f"Goal '{goal_id}' not found."}
-    return {"goal": result, "status": "updated"}
+
+    update_input: dict[str, Any] = {"agent_id": goal_id}
+
+    if "title" in input and input["title"] is not None:
+        update_input["name"] = input["title"]
+    if "description" in input and input["description"] is not None:
+        defn.task_prompt = input["description"]
+        defn.description = f"Goal: {input['description']}"
+
+    # Map goal status to agent operations
+    status = input.get("status")
+    if status == "active":
+        await runtime.activate_agent(goal_id)
+    elif status == "paused":
+        await runtime.deactivate_agent(goal_id)
+    elif status == "completed":
+        await runtime.deactivate_agent(goal_id)
+    elif status == "abandoned":
+        await runtime.deactivate_agent(goal_id)
+
+    result = await _update_agent(runtime, update_input)
+    if "error" in result:
+        return result
+
+    return {"goal_id": goal_id, "status": "updated", "changed": result.get("changed", [])}
 
 
 async def _get_projects(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -1588,11 +1774,14 @@ async def _list_tasks(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
 
 
 async def _get_user_profile(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    from ..orchestrator import ORCHESTRATOR_ID
     p = runtime.user_profile.get_profile()
+    # Count goals from agent registry (non-orchestrator agents)
+    goal_count = sum(1 for defn, _ in runtime.list_agents() if defn.id != ORCHESTRATOR_ID)
     return {
         "onboarding_status": p.onboarding_status.value,
         "summary": p.summary,
-        "goal_count": len(p.goals),
+        "goal_count": goal_count,
         "project_count": len(p.projects),
         "strengths": p.strengths,
         "weaknesses": p.weaknesses,
@@ -1982,6 +2171,9 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "get_connector_tools": _get_connector_tools,
     "use_connector": _use_connector,
     "remove_connector": _remove_connector,
+    # Unified tools
+    "list_tools": _list_tools,
+    "use_tool": _use_tool,
     "get_history": _get_history,
     # Planning & goal tools
     "get_goals": _get_goals,

@@ -2,7 +2,8 @@
 
 The planning loop periodically triggers the orchestrator with a work message
 containing a context block built from this module.  The orchestrator then
-reviews goals, proposes tasks, and allocates unused credit budget.
+reviews goals (which are agents), proposes tasks, and allocates unused
+credit budget.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ PLANNING_REVIEW_INSTRUCTION = """\
 This is an automated planning review.  Review the user's goals, projects, and \
 credit budget below.  Then:
 
-1. **Assess goal progress** — Which goals have active agents or tasks?  Which are \
+1. **Assess goal progress** — Each goal is an agent.  Which are active?  Which are \
 stalled?  Update statuses if needed (use update_goal).
 
 2. **Check credit budget** — If utilization is low and auto_allocate is enabled, \
@@ -54,13 +55,13 @@ def build_planning_context(
     """
     lines: list[str] = [PLANNING_REVIEW_INSTRUCTION, ""]
 
-    # Goals
-    lines.append("## Current Goals")
+    # Goals (each goal is an agent)
+    lines.append("## Current Goals (Agents)")
     if goals:
         for g in goals:
             status = g.get("status", "active")
-            tf = g.get("timeframe", "")
-            lines.append(f"- [{status}] {g.get('title', '?')} ({tf}): {g.get('description', '')}")
+            agent_id = g.get("id", "?")
+            lines.append(f"- [{status}] {g.get('title', '?')} (agent: {agent_id}): {g.get('description', '')}")
     else:
         lines.append("- No goals defined yet.")
     lines.append("")

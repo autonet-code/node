@@ -413,12 +413,24 @@ class WebSocketBridge:
 
         # User profile
         if msg_type == "get_profile":
+            from .orchestrator import ORCHESTRATOR_ID as _ORCH_ID
             p = self.runtime.user_profile.get_profile()
+            # Goals are now agents — build from registry
+            agent_goals = []
+            for defn, status in self.runtime.list_agents():
+                if defn.id == _ORCH_ID:
+                    continue
+                agent_goals.append({
+                    "id": defn.id,
+                    "title": defn.name,
+                    "description": defn.task_prompt or defn.description,
+                    "status": status.value,
+                })
             return {"msg_id": msg_id, "ok": True, "result": {
                 "onboarding_status": p.onboarding_status.value,
                 "summary": p.summary,
                 "standards": p.standards,
-                "goals": p.goals,
+                "goals": agent_goals,
                 "projects": p.projects,
                 "strengths": p.strengths,
                 "weaknesses": p.weaknesses,

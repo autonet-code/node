@@ -204,6 +204,13 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
     if isinstance(tools_raw, list):
         tools = [str(t) for t in tools_raw]
 
+    # --- Tool exposure ---
+    expose_as_tool = bool(raw.get("expose_as_tool", False))
+    tool_input_schema = raw.get("tool_input_schema")
+    if tool_input_schema is not None and not isinstance(tool_input_schema, dict):
+        errors.append(LoadError(file, "'tool_input_schema' must be a mapping (JSON Schema object)"))
+        return None, errors
+
     return AgentDefinition(
         id=agent_id,
         name=name,
@@ -225,6 +232,8 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         parent_id=parent_id,
         created_by=created_by,
         heartbeat=heartbeat,
+        expose_as_tool=expose_as_tool,
+        tool_input_schema=tool_input_schema,
     ), errors
 
 
@@ -322,6 +331,12 @@ def save_agent(defn: AgentDefinition, directory: Path) -> Path:
         data["output_schema"] = defn.output_schema
     if defn.connector_ids:
         data["connector_ids"] = defn.connector_ids
+
+    # Tool exposure
+    if defn.expose_as_tool:
+        data["expose_as_tool"] = True
+    if defn.tool_input_schema:
+        data["tool_input_schema"] = defn.tool_input_schema
 
     # Hierarchy
     if defn.parent_id:

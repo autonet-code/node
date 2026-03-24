@@ -289,6 +289,10 @@ class Runtime:
         # Child ID counters (mirrors DelegateRegistry logic at Runtime level)
         self._child_counters: dict[str, int] = {}
 
+        # Unified tool registry (connectors + pipeline-agent-tools)
+        from .tool_registry import ToolRegistry
+        self.tool_registry = ToolRegistry(self)
+
         # Voice service (lazy — started only if voice config is enabled)
         self.voice = None  # type: Any  # VoiceService | None
 
@@ -1580,12 +1584,30 @@ class Runtime:
 
         profile = self.user_profile.get_profile()
 
-        # Build active agents summary
+        # Build goals from agent registry — agents ARE goals
+        goals: list[dict[str, Any]] = []
         active_agents: list[dict[str, Any]] = []
         for aid, defn in self._agents.items():
             if aid == ORCHESTRATOR_ID:
                 continue
             status = self._status.get(aid)
+            # Every non-orchestrator agent is a goal
+            if status in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
+                goal_status = "active"
+            elif status == AgentStatus.COMPLETED:
+                goal_status = "completed"
+            elif status == AgentStatus.INACTIVE:
+                goal_status = "paused"
+            elif status == AgentStatus.FAILED:
+                goal_status = "abandoned"
+            else:
+                goal_status = status.value if status else "unknown"
+            goals.append({
+                "id": aid,
+                "title": defn.name,
+                "description": defn.task_prompt or defn.description,
+                "status": goal_status,
+            })
             if status in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
                 active_agents.append({
                     "id": aid,
@@ -1604,7 +1626,7 @@ class Runtime:
         calendar_available = self.credential_store.exists("google_calendar")
 
         context = build_planning_context(
-            goals=profile.goals,
+            goals=goals,
             projects=profile.projects,
             strengths=profile.strengths,
             weaknesses=profile.weaknesses,
@@ -2576,44 +2598,40 @@ class Runtime:
     async def setup_orchestrator(self, **kwargs: Any) -> str:
         """Create and register the orchestrator agent from config.
 
-        If the user hasn't completed onboarding, the orchestrator uses the
-        onboarding system prompt.  Otherwise it uses the default fleet-management
-        prompt with user context injected.
+        Always uses the fleet-management prompt, optionally enriched with
+        user profile context if available.
 
         Returns the orchestrator agent ID.
         """
         from .orchestrator import build_system_prompt_with_context, create_orchestrator_agent
 
-        # Build system prompt based on onboarding state
-        needs_onboarding = self.user_profile.needs_onboarding()
-        if needs_onboarding:
-            system_prompt = build_system_prompt_with_context(
-                data_dir=self._config.data_dir, onboarding=True,
-            )
-        else:
-            profile = self.user_profile.get_profile()
-            # Build lightweight profile/goals summaries for prompt injection
-            profile_parts: list[str] = []
-            if profile.summary:
-                profile_parts.append(profile.summary)
-            if profile.strengths:
-                profile_parts.append("Strengths: " + ", ".join(profile.strengths))
-            if profile.weaknesses:
-                profile_parts.append("Weaknesses: " + ", ".join(profile.weaknesses))
-            profile_summary = "\n".join(profile_parts)
+        # Build system prompt with whatever profile context is available
+        profile = self.user_profile.get_profile()
+        profile_parts: list[str] = []
+        if profile.summary:
+            profile_parts.append(profile.summary)
+        if profile.strengths:
+            profile_parts.append("Strengths: " + ", ".join(profile.strengths))
+        if profile.weaknesses:
+            profile_parts.append("Weaknesses: " + ", ".join(profile.weaknesses))
+        profile_summary = "\n".join(profile_parts)
 
-            goals_lines: list[str] = []
-            for g in profile.goals:
-                status = g.get("status", "active")
-                tf = g.get("timeframe", "")
-                goals_lines.append(f"- [{status}] {g.get('title', '?')} ({tf}): {g.get('description', '')}")
-            goals_summary = "\n".join(goals_lines) if goals_lines else ""
+        # Goals are now agents — build summary from agent registry
+        goals_lines: list[str] = []
+        from .orchestrator import ORCHESTRATOR_ID as _ORCH_ID
+        for aid, defn in self._agents.items():
+            if aid == _ORCH_ID:
+                continue
+            status = self._status.get(aid)
+            goal_status = status.value if status else "unknown"
+            goals_lines.append(f"- [{goal_status}] {defn.name} (agent: {aid}): {defn.task_prompt or defn.description}")
+        goals_summary = "\n".join(goals_lines) if goals_lines else ""
 
-            system_prompt = build_system_prompt_with_context(
-                profile_summary=profile_summary,
-                goals_summary=goals_summary,
-                data_dir=self._config.data_dir,
-            )
+        system_prompt = build_system_prompt_with_context(
+            profile_summary=profile_summary,
+            goals_summary=goals_summary,
+            data_dir=self._config.data_dir,
+        )
 
         if "system_prompt" not in kwargs:
             kwargs["system_prompt"] = system_prompt
@@ -2621,8 +2639,8 @@ class Runtime:
         defn = create_orchestrator_agent(self._config.orchestrator, **kwargs)
         await self.register_agent(defn)
         await self.activate_agent(defn.id)
-        log.info("Orchestrator registered and activated (provider=%s, onboarding=%s)",
-                 defn.steps[0].config.get("provider", "?"), needs_onboarding)
+        log.info("Orchestrator registered and activated (provider=%s)",
+                 defn.steps[0].config.get("provider", "?"))
 
         # Inject status briefing if this is a fresh conversation
         if self.conversation.turn_count() == 0:

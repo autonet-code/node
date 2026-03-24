@@ -1,11 +1,12 @@
 """User profile persistence.
 
-Stores the user's onboarding state, goals, projects, strengths, weaknesses,
+Stores the user's onboarding state, projects, strengths, weaknesses,
 and summary.  JSON file at ``data_dir/profile.json``.
 
-The profile is the foundation for the goal-oriented planning loop: the
-orchestrator reads it to understand what the user wants, and updates it as
-goals evolve.
+Goals are tracked as agents in the agent registry — creating an agent IS
+setting a goal.  The profile keeps: summary, strengths, weaknesses,
+standards, jurisdiction_id, projects.  Legacy goals data may exist in
+profile.json but is no longer written or read for planning.
 """
 from __future__ import annotations
 
@@ -87,13 +88,9 @@ class UserProfileStore:
         p.strengths = results.get("strengths", [])
         p.weaknesses = results.get("weaknesses", [])
 
-        # Goals — assign IDs if missing
-        for g in results.get("goals", []):
-            if "id" not in g:
-                g["id"] = uuid4().hex[:8]
-            if "status" not in g:
-                g["status"] = "active"
-        p.goals = results.get("goals", [])
+        # Goals are now tracked as agents, not in the profile.
+        # Onboarding goals are returned to the caller to be created as agents.
+        # We no longer write them to profile.goals.
 
         # Projects — assign IDs if missing
         for proj in results.get("projects", []):
@@ -104,7 +101,7 @@ class UserProfileStore:
         p.projects = results.get("projects", [])
 
         self.save()
-        log.info("Onboarding completed: %d goals, %d projects", len(p.goals), len(p.projects))
+        log.info("Onboarding completed: %d projects", len(p.projects))
 
     def skip_onboarding(self) -> None:
         """Mark onboarding as completed with empty data."""
@@ -181,7 +178,6 @@ class UserProfileStore:
         return {
             "onboarding_status": p.onboarding_status.value,
             "summary": p.summary,
-            "goal_count": len(p.goals),
             "project_count": len(p.projects),
             "jurisdiction_id": p.jurisdiction_id,
         }

@@ -141,6 +141,12 @@ class AgentDefinition:
     connector_ids: list[str] = field(default_factory=list)
     # MCP connectors this agent uses.  Matched against ConnectorManager specs.
 
+    # --- Tool exposure ---
+    expose_as_tool: bool = False            # if True, pipeline is callable as a tool
+    tool_input_schema: dict[str, Any] | None = None
+    # Custom input schema for when this agent is exposed as a tool.
+    # If None and expose_as_tool=True, derived from the first step's expected input.
+
     # --- Hierarchy ---
     parent_id: str | None = None            # None = root (orchestrator) or user-created
     created_by: str = ""                    # agent_id of creator
