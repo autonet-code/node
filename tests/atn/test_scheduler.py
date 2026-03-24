@@ -118,7 +118,7 @@ async def test():
     # ===== Test 5: Unregister clears the schedule table =====
     await rt.unregister_agent("tick")
     assert "tick" not in rt._schedule_table
-    assert "tick" not in rt._last_scheduled
+    assert "tick" not in rt._last_idle
     print("Test 5 PASS: Unregister clears schedule table entries")
 
     # ===== Test 6: Agent without schedule has no schedule entry =====

@@ -712,7 +712,7 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         }
     # Next trigger countdown (from scheduler state)
     if defn.schedule and status == AgentStatus.ACTIVE:
-        last = runtime._last_scheduled.get(agent_id)
+        last = runtime._last_idle.get(agent_id)
         interval_s = runtime._schedule_table.get(agent_id, 0)
         if last and interval_s > 0:
             from datetime import datetime, timezone
