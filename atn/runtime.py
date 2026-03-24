@@ -24,6 +24,7 @@ from .events import Event, EventBus, EventType
 from .inbox import InboxManager
 from .models import (
     AgentDefinition,
+    AgentMode,
     AgentStatus,
     ExecutionRecord,
     ExecutionStatus,
@@ -117,6 +118,14 @@ class Runtime:
         self._delegate_output_dir.mkdir(parents=True, exist_ok=True)
         # Events for signalling delegate completion to delegate_collect
         self._delegate_done: dict[str, asyncio.Event] = {}
+
+        # --- Phase 2: Cognitive mode execution ---
+        # Active bridge providers for cognitive agents (agent_id -> BridgeProvider)
+        self._active_providers: dict[str, BridgeProvider] = {}
+        # Completion callbacks: child_id -> parent_id
+        self._completion_callbacks: dict[str, str] = {}
+        # Child ID counters (mirrors DelegateRegistry logic at Runtime level)
+        self._child_counters: dict[str, int] = {}
 
         # Voice service (lazy — started only if voice config is enabled)
         self.voice = None  # type: Any  # VoiceService | None
@@ -375,14 +384,19 @@ class Runtime:
         self._status[agent_id] = AgentStatus.RUNNING
         self.execution_log.record(record)
 
-        task = asyncio.create_task(self._execute_pipeline(defn, record, cancel))
+        # Dispatch based on agent mode
+        if defn.mode == AgentMode.COGNITIVE:
+            task = asyncio.create_task(self._execute_cognitive_agent(defn, record, cancel))
+        else:
+            task = asyncio.create_task(self._execute_pipeline(defn, record, cancel))
         self._tasks[eid] = task
 
         await self.events.emit(Event(
             type=EventType.EXECUTION_STARTED,
             source=agent_id,
             data={"agent_id": agent_id, "execution_id": eid,
-                  "trigger_source": source, "total_steps": len(defn.steps)},
+                  "trigger_source": source, "total_steps": len(defn.steps),
+                  "mode": defn.mode.value},
         ))
         return eid
 
@@ -600,6 +614,420 @@ class Runtime:
                     "error": record.error,
                 },
             ))
+
+    # ==================================================================
+    # Cognitive mode execution (Phase 2)
+    # ==================================================================
+
+    async def _execute_cognitive_agent(
+        self,
+        defn: AgentDefinition,
+        record: ExecutionRecord,
+        cancel: asyncio.Event,
+    ) -> None:
+        """Run a cognitive-mode agent via BridgeProvider.send_orchestrate().
+
+        This is the unified replacement for the old delegate session logic.
+        Cognitive agents get a bridge subprocess, system prompt, tool surface,
+        and run autonomously until completion or cancellation.
+        """
+        from .delegate_prompts import build_delegate_prompt
+        from .orchestrator.tools import execute_tool, _get_delegate_tools
+
+        sub_provider: BridgeProvider | None = None
+
+        try:
+            # Resolve model — defn.provider or fallback
+            if defn.provider:
+                model_name = defn.provider if isinstance(defn.provider, str) else defn.provider[0]
+            else:
+                model_name = defn.cognitive_model or self._config.orchestrator.model or "sonnet"
+
+            sub_provider = BridgeProvider(model=model_name)
+
+            # Track active provider for message injection
+            self._active_providers[defn.id] = sub_provider
+
+            # Register interrupt hook so killing cascades
+            self.register_interrupt_hook(record.execution_id, sub_provider.interrupt)
+
+            # Build system prompt
+            if defn.system_prompt:
+                system_prompt = defn.system_prompt
+            else:
+                system_prompt = build_delegate_prompt(
+                    defn.agent_type, defn.id, defn.parent_id,
+                )
+
+            # Resolve tool surface
+            delegate_tools = _get_delegate_tools()
+            if self.connectors:
+                for cid, session in self.connectors._sessions.items():
+                    if session and session.tools:
+                        delegate_tools.extend(
+                            {"name": t["name"], "description": t.get("description", ""),
+                             "input_schema": t.get("inputSchema", t.get("input_schema", {}))}
+                            for t in session.tools
+                        )
+
+            # Drain inbox for the initial prompt
+            all_messages = self.inbox.drain(defn.id)
+            work_messages = [
+                m for m in all_messages
+                if m.type != MessageType.TRIGGER or m.data
+            ]
+
+            # Build the user message — use inbox data if available
+            prompt_parts: list[str] = []
+            for msg in work_messages:
+                if msg.data:
+                    instruction = msg.data.get("instruction", "")
+                    if instruction:
+                        prompt_parts.append(instruction)
+                    else:
+                        prompt_parts.append(str(msg.data))
+            if not prompt_parts:
+                prompt_parts.append(defn.description or defn.name)
+            user_message = "\n\n".join(prompt_parts)
+
+            # Tool executor — routes tools back through the orchestrator tool system.
+            # Passes caller_id so tools like delegate/create_agent know which
+            # agent is invoking them (fractality: sub-agents spawn sub-sub-agents).
+            async def _tool_executor(name: str, tool_input: dict) -> dict:
+                if name.startswith("mcp_"):
+                    for cid, session in self.connectors._sessions.items():
+                        prefix = f"mcp_{cid}_"
+                        if name.startswith(prefix):
+                            real_name = name[len(prefix):]
+                            return await self.connectors.call_tool(cid, real_name, tool_input)
+                    return {"error": f"Unknown connector tool: {name}"}
+                return await execute_tool(name, tool_input, self, caller_id=defn.id)
+
+            # Stream output to disk
+            async def _on_chunk(text: str) -> None:
+                self.append_delegate_output(defn.id, text)
+                await self.events.emit(Event(
+                    type=EventType.STEP_OUTPUT,
+                    source=defn.id,
+                    data={
+                        "agent_id": defn.id,
+                        "channel": "text",
+                        "content": text,
+                        "cognitive": True,
+                    },
+                ))
+
+            # Run the agent
+            response = await sub_provider.send_orchestrate(
+                message=user_message,
+                system=system_prompt,
+                tools=delegate_tools,
+                max_turns=defn.max_turns,
+                tool_executor=_tool_executor,
+                on_chunk=_on_chunk,
+            )
+
+            # Process result
+            result_text = response.text or ""
+            total_tokens = (
+                response.usage.input_tokens
+                + response.usage.output_tokens
+                + response.usage.cache_read_tokens
+                + response.usage.cache_creation_tokens
+            )
+
+            # Update execution record
+            if response.stop_reason == "interrupted" or cancel.is_set():
+                record.status = ExecutionStatus.KILLED
+                record.error = "Interrupted"
+            else:
+                record.status = ExecutionStatus.COMPLETED
+
+            record.output = {
+                "result": result_text,
+                "tokens_used": total_tokens,
+                "usage": {
+                    "input_tokens": response.usage.input_tokens,
+                    "output_tokens": response.usage.output_tokens,
+                    "cache_read_tokens": response.usage.cache_read_tokens,
+                    "cache_creation_tokens": response.usage.cache_creation_tokens,
+                },
+            }
+
+            # Track token usage
+            provider_key = "claude_max"
+            if provider_key not in record.token_usage:
+                record.token_usage[provider_key] = TokenUsage(provider=provider_key)
+            record.token_usage[provider_key].input_tokens += response.usage.input_tokens
+            record.token_usage[provider_key].output_tokens += response.usage.output_tokens
+            record.token_usage[provider_key].cache_read_tokens += response.usage.cache_read_tokens
+            record.token_usage[provider_key].cache_creation_tokens += response.usage.cache_creation_tokens
+
+        except asyncio.CancelledError:
+            record.status = ExecutionStatus.KILLED
+            record.error = "Force-cancelled by kill switch"
+
+        except Exception as exc:
+            record.status = ExecutionStatus.FAILED
+            record.error = str(exc)
+            log.exception("Cognitive agent error for %s", defn.id)
+
+        finally:
+            record.completed_at = datetime.now(timezone.utc)
+            self.execution_log.record(record)
+            self.execution_log.persist(record)
+
+            # Update output store on success
+            if record.status == ExecutionStatus.COMPLETED:
+                self.output_store.write(AgentOutput(
+                    agent_id=defn.id,
+                    data=record.output,
+                    status=record.status,
+                    execution_id=record.execution_id,
+                ))
+
+            # Sync delegate registry (backward compat with delegate tools)
+            result_text = ""
+            total_tokens = 0
+            if isinstance(record.output, dict):
+                result_text = record.output.get("result", "")
+                total_tokens = record.output.get("tokens_used", 0)
+            delegate_node = self.delegate_registry.get_node(defn.id)
+            if delegate_node is not None:
+                from .agent_registry import DelegateStatus
+                if record.status == ExecutionStatus.COMPLETED:
+                    self.delegate_registry.update_status(
+                        defn.id, DelegateStatus.COMPLETED,
+                        result_preview=result_text[:500],
+                        tokens_used=total_tokens,
+                    )
+                elif record.status == ExecutionStatus.KILLED:
+                    self.delegate_registry.update_status(
+                        defn.id, DelegateStatus.KILLED,
+                        result_preview=result_text[:500],
+                        tokens_used=total_tokens,
+                    )
+                else:
+                    self.delegate_registry.update_status(
+                        defn.id, DelegateStatus.FAILED,
+                        error=record.error,
+                    )
+                self.delegate_registry.save()
+
+            # Bookkeeping
+            self._running_count[defn.id] = max(0, self._running_count.get(defn.id, 1) - 1)
+            self._executions.pop(record.execution_id, None)
+            self._tasks.pop(record.execution_id, None)
+            self._cancels.pop(record.execution_id, None)
+            self._interrupt_hooks.pop(record.execution_id, None)
+            self._active_providers.pop(defn.id, None)
+
+            if self._running_count.get(defn.id, 0) == 0:
+                if record.status == ExecutionStatus.FAILED:
+                    self._status[defn.id] = AgentStatus.ERROR
+                elif self._status.get(defn.id) == AgentStatus.RUNNING:
+                    # Temporary — _on_agent_completed will set the final
+                    # status (COMPLETED for one-shots, ACTIVE for scheduled).
+                    self._status[defn.id] = AgentStatus.ACTIVE
+
+            # Clean up bridge subprocess
+            if sub_provider is not None:
+                try:
+                    await sub_provider.close()
+                except Exception:
+                    pass
+
+            # Signal delegate_done for collect waiters
+            done_event = self._delegate_done.get(defn.id)
+            if done_event:
+                done_event.set()
+
+            # Store result for delegate_collect compatibility
+            result_status = "completed" if record.status == ExecutionStatus.COMPLETED else (
+                "interrupted" if record.status == ExecutionStatus.KILLED else "failed"
+            )
+            self._delegate_results[defn.id] = {
+                "agent_id": defn.id,
+                "status": result_status,
+                "result": record.output.get("result", "") if isinstance(record.output, dict) else "",
+                "error": record.error,
+            }
+            if isinstance(record.output, dict) and "usage" in record.output:
+                self._delegate_results[defn.id]["usage"] = record.output["usage"]
+
+            # Innate wake-up: notify parent on completion
+            await self._on_agent_completed(defn.id, record)
+
+            # Final execution event
+            etype = {
+                ExecutionStatus.COMPLETED: EventType.EXECUTION_COMPLETED,
+                ExecutionStatus.FAILED: EventType.EXECUTION_FAILED,
+                ExecutionStatus.KILLED: EventType.EXECUTION_KILLED,
+            }.get(record.status, EventType.EXECUTION_FAILED)
+
+            await self.events.emit(Event(
+                type=etype,
+                source=defn.id,
+                data={
+                    "agent_id": defn.id,
+                    "execution_id": record.execution_id,
+                    "status": record.status.value,
+                    "mode": "cognitive",
+                    "output_preview": _preview(record.output) if record.output else None,
+                    "error": record.error,
+                },
+            ))
+
+    # ------------------------------------------------------------------
+    # Hierarchy support
+    # ------------------------------------------------------------------
+
+    def _resolve_parent_agent_id(self, parent_id: str) -> str:
+        """Resolve parent_id to actual agent registry ID.
+
+        The delegate convention uses "orch" as shorthand for the orchestrator,
+        but the Runtime registry uses the full ORCHESTRATOR_ID.
+        """
+        if parent_id in self._agents:
+            return parent_id
+        from .orchestrator import ORCHESTRATOR_ID
+        if parent_id == "orch" and ORCHESTRATOR_ID in self._agents:
+            return ORCHESTRATOR_ID
+        return parent_id
+
+    def get_children(self, agent_id: str) -> list[AgentDefinition]:
+        """Return all agents whose parent_id matches agent_id.
+
+        Also matches agents parented to "orch" when querying "orchestrator".
+        """
+        from .orchestrator import ORCHESTRATOR_ID
+        children = []
+        for defn in self._agents.values():
+            if defn.parent_id == agent_id:
+                children.append(defn)
+            elif (agent_id == ORCHESTRATOR_ID
+                  and defn.parent_id == "orch"):
+                children.append(defn)
+        return children
+
+    def get_descendants(self, agent_id: str) -> list[AgentDefinition]:
+        """All descendants (children, grandchildren, ...) via BFS."""
+        descendants: list[AgentDefinition] = []
+        queue = [agent_id]
+        while queue:
+            current = queue.pop(0)
+            children = self.get_children(current)
+            for child in children:
+                descendants.append(child)
+                queue.append(child.id)
+        return descendants
+
+    # ------------------------------------------------------------------
+    # Innate wake-up: child completion -> parent inbox message
+    # ------------------------------------------------------------------
+
+    async def _on_agent_completed(self, agent_id: str, record: ExecutionRecord) -> None:
+        """Handle cognitive agent completion.
+
+        - Sets agent status: COMPLETED for one-shots, ACTIVE for scheduled
+          (only on success; errors are already set to ERROR by the caller).
+        - Posts a HIGH-priority WORK message to the parent's inbox with the
+          child's result preview.
+        - If the parent has an active bridge session, injects via
+          send_user_message() for immediate attention.
+        """
+        defn = self._agents.get(agent_id)
+        if not defn:
+            return
+
+        # Set final status only on success — errors are already handled
+        if record.status == ExecutionStatus.COMPLETED:
+            if defn.schedule:
+                self._status[agent_id] = AgentStatus.ACTIVE
+            else:
+                self._status[agent_id] = AgentStatus.COMPLETED
+
+        # Clean up completion callback
+        self._completion_callbacks.pop(agent_id, None)
+
+        parent_id = defn.parent_id
+        if not parent_id:
+            return
+
+        # Resolve "orch" -> "orchestrator" mapping
+        resolved_parent = self._resolve_parent_agent_id(parent_id)
+
+        # Only notify if parent is still registered
+        if resolved_parent not in self._agents:
+            return
+
+        # Build result preview
+        result_preview = ""
+        if isinstance(record.output, dict):
+            result_preview = str(record.output.get("result", ""))[:2000]
+        elif record.output is not None:
+            result_preview = str(record.output)[:2000]
+
+        # Post HIGH-priority WORK message to parent's inbox
+        status_str = record.status.value
+        msg = InboxMessage(
+            id=InboxMessage.generate_id(),
+            source=agent_id,
+            target=resolved_parent,
+            type=MessageType.WORK,
+            priority=MessagePriority.HIGH,
+            data={
+                "type": "child_completed",
+                "child_id": agent_id,
+                "child_name": defn.name,
+                "status": status_str,
+                "output_preview": result_preview[:500],
+                "result_preview": result_preview,
+                "error": record.error,
+                "instruction": (
+                    f"Your child agent '{defn.name}' has {status_str}. "
+                    f"Check its output with get_output('{agent_id}')."
+                ),
+            },
+        )
+        self.inbox.post(msg)
+        log.info("Innate wake-up: posted child_completed for %s -> parent %s", agent_id, resolved_parent)
+
+        # If parent has an active bridge session, inject directly
+        # Check both parent_id (shorthand like "orch") and resolved_parent
+        parent_provider = self._active_providers.get(resolved_parent)
+        if parent_provider is None:
+            parent_provider = self._active_providers.get(parent_id)
+        if parent_provider is None:
+            parent_provider = self._delegate_providers.get(resolved_parent)
+        if parent_provider is None:
+            parent_provider = self._delegate_providers.get(parent_id)
+        if parent_provider is not None:
+            inject_text = (
+                f"[CHILD COMPLETED] Agent '{defn.name}' ({agent_id}) "
+                f"finished with status: {record.status.value}.\n"
+                f"Result preview: {result_preview[:500]}"
+            )
+            if record.error:
+                inject_text += f"\nError: {record.error}"
+            try:
+                await parent_provider.send_user_message(inject_text)
+                log.info("Injected child_completed message into parent %s bridge session", resolved_parent)
+            except Exception as exc:
+                log.warning("Failed to inject into parent %s session: %s", resolved_parent, exc)
+
+    # ------------------------------------------------------------------
+    # Child ID generation (unified with DelegateRegistry)
+    # ------------------------------------------------------------------
+
+    def generate_child_id(self, parent_id: str) -> str:
+        """Generate the next hierarchical child ID for a parent.
+
+        Example: "orch" -> "orch.1", then "orch.2", etc.
+        """
+        count = self._child_counters.get(parent_id, 0) + 1
+        self._child_counters[parent_id] = count
+        return f"{parent_id}.{count}"
 
     # ==================================================================
     # Kill switches

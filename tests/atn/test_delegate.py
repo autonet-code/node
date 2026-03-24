@@ -204,8 +204,17 @@ def test_delegate_event_types():
 # ---------------------------------------------------------------------------
 
 def _make_mock_runtime(bus, tmp_path):
-    """Create a mock runtime with delegate infrastructure."""
+    """Create a mock runtime with delegate infrastructure.
+
+    Phase 2: The delegate tool now creates a cognitive AgentDefinition and
+    triggers it through the Runtime.  We mock register_agent, activate_agent,
+    trigger_run as AsyncMocks.  trigger_run kicks off a background task that
+    calls _run_delegate_session (via the old path) or the cognitive agent
+    execution.  For these tests we wire trigger_run to launch the old-style
+    delegate session so the existing test assertions still work.
+    """
     import asyncio
+    from atn.models import AgentMode
 
     mock_runtime = MagicMock()
     mock_runtime.events = bus
@@ -214,6 +223,7 @@ def _make_mock_runtime(bus, tmp_path):
     )
     mock_runtime._config = MagicMock()
     mock_runtime._config.orchestrator.model = "sonnet"
+    mock_runtime._config.data_dir = tmp_path
     mock_runtime.connectors = MagicMock()
     mock_runtime.connectors._sessions = {}
     mock_runtime.register_interrupt_hook = MagicMock()
@@ -223,7 +233,71 @@ def _make_mock_runtime(bus, tmp_path):
     mock_runtime._delegate_tasks = {}
     mock_runtime._delegate_results = {}
     mock_runtime._delegate_done = {}
+    mock_runtime._active_providers = {}
+    mock_runtime._completion_callbacks = {}
+    mock_runtime._child_counters = {}
     mock_runtime.send_delegate_message = AsyncMock(return_value=True)
+
+    # Phase 2: _delegate now calls runtime.generate_child_id, register_agent,
+    # activate_agent, trigger_run, inbox.post as async operations.
+    # generate_child_id — use real counter logic
+    def _gen_child_id(parent_id: str) -> str:
+        count = mock_runtime._child_counters.get(parent_id, 0) + 1
+        mock_runtime._child_counters[parent_id] = count
+        return f"{parent_id}.{count}"
+    mock_runtime.generate_child_id = _gen_child_id
+
+    # Track registered agents
+    mock_runtime._agents = {}
+    mock_runtime._status = {}
+
+    mock_runtime.register_agent = AsyncMock(side_effect=lambda defn: defn.id)
+    mock_runtime.activate_agent = AsyncMock()
+    mock_runtime.get_agent = lambda aid: mock_runtime._agents.get(aid)
+    mock_runtime.get_status = lambda aid: mock_runtime._status.get(aid)
+    mock_runtime.inbox = MagicMock()
+    mock_runtime.inbox.post = MagicMock()
+    mock_runtime.output_store = MagicMock()
+    mock_runtime.output_store.read = MagicMock(return_value=None)
+
+    # Delegate output dir — for append_delegate_output / get_delegate_output
+    delegate_dir = tmp_path / "delegates"
+    delegate_dir.mkdir(parents=True, exist_ok=True)
+    mock_runtime._delegate_output_dir = delegate_dir
+    def _append(aid, text):
+        p = delegate_dir / f"{aid}.log"
+        with open(p, "a") as f:
+            f.write(text)
+    def _get_output(aid):
+        p = delegate_dir / f"{aid}.log"
+        return p.read_text() if p.exists() else ""
+    mock_runtime.append_delegate_output = _append
+    mock_runtime.get_delegate_output = _get_output
+
+    # trigger_run — launch the old-style delegate session as a background task
+    # so existing test assertions (background task, delegate_collect) still work.
+    async def _mock_trigger_run(agent_id: str, source: str = "user") -> str:
+        from atn.orchestrator.tools import _run_delegate_session, _get_delegate_tools
+        from atn.delegate_prompts import build_delegate_prompt
+
+        node = mock_runtime.delegate_registry.get_node(agent_id)
+        if node is None:
+            return "err"
+        system_prompt = build_delegate_prompt(node.agent_type, agent_id, node.parent_id)
+        tools = _get_delegate_tools()
+
+        mock_runtime._delegate_done[agent_id] = asyncio.Event()
+        task = asyncio.create_task(
+            _run_delegate_session(
+                mock_runtime, agent_id, node.title, node.prompt,
+                system_prompt, tools,
+            ),
+            name=f"delegate:{agent_id}",
+        )
+        mock_runtime._delegate_tasks[agent_id] = task
+        return f"eid-{agent_id}"
+    mock_runtime.trigger_run = _mock_trigger_run
+
     return mock_runtime
 
 

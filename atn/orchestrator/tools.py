@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ..models import (
     AgentDefinition,
+    AgentMode,
+    AgentStatus,
     InboxMessage,
     MessagePriority,
     MessageType,
@@ -68,10 +70,10 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="create_agent",
         description=(
-            "Create and register a new agent. The agent is created in REGISTERED state. "
-            "Call activate_agent afterwards to enable scheduling and inbox triggers. "
-            "Step types: 'script' (shell command), 'cognitive' (LLM reasoning), "
-            "'message' (post to inbox), 'pull' (read output store), 'collect' (await result)."
+            "Create and register a new agent. Supports two modes: "
+            "'pipeline' (default) with deterministic steps, or 'cognitive' for autonomous LLM sessions. "
+            "Pipeline agents are created in REGISTERED state — call activate_agent afterwards. "
+            "Cognitive agents with a prompt are automatically activated and triggered immediately."
         ),
         input_schema={
             "type": "object",
@@ -79,9 +81,15 @@ _TOOLS: list[ToolDefinition] = [
                 "id": {"type": "string", "description": "Unique agent ID (short, lowercase, no spaces)."},
                 "name": {"type": "string", "description": "Human-readable agent name."},
                 "description": {"type": "string", "description": "What this agent does."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["pipeline", "cognitive"],
+                    "description": "Agent mode. 'pipeline' (default) for step sequences, 'cognitive' for autonomous LLM sessions.",
+                    "default": "pipeline",
+                },
                 "steps": {
                     "type": "array",
-                    "description": "Ordered list of steps in the agent's pipeline.",
+                    "description": "Ordered list of steps (required for pipeline mode, ignored for cognitive).",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -105,6 +113,38 @@ _TOOLS: list[ToolDefinition] = [
                         "required": ["name", "type", "config"],
                     },
                 },
+                "prompt": {
+                    "type": "string",
+                    "description": "Task prompt for cognitive agents. The agent will work on this autonomously.",
+                },
+                "agent_type": {
+                    "type": "string",
+                    "enum": ["general", "explore", "implement", "research", "debug", "review"],
+                    "description": "Cognitive agent type — determines system prompt focus.",
+                    "default": "general",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model override for cognitive agents (e.g. 'sonnet', 'opus').",
+                },
+                "system_prompt": {
+                    "type": "string",
+                    "description": "Custom system prompt for cognitive agents. If omitted, a default is generated from agent_type.",
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "Max LLM turns for cognitive agents. Default: 50.",
+                    "default": 50,
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tool surface for cognitive agents. e.g. ['sdk_builtin', 'atn_core'].",
+                },
+                "parent_id": {
+                    "type": "string",
+                    "description": "Parent agent ID for hierarchy. Auto-set when called by a child agent.",
+                },
                 "concurrency": {
                     "type": "integer",
                     "description": "Max parallel executions. Default: 1 (singleton).",
@@ -125,7 +165,7 @@ _TOOLS: list[ToolDefinition] = [
                     "description": "MCP connector IDs this agent should use. Use list_connectors to see available connectors.",
                 },
             },
-            "required": ["id", "name", "steps"],
+            "required": ["id", "name"],
         },
     ),
     ToolDefinition(
@@ -620,25 +660,47 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     if defn is None:
         return {"error": f"Agent '{agent_id}' not found."}
     status = runtime.get_status(agent_id)
-    result = {
+    result: dict[str, Any] = {
         "id": defn.id,
         "name": defn.name,
         "description": defn.description,
+        "mode": defn.mode.value,
         "model": defn.model,
         "status": status.value if status else "unknown",
         "schedule": defn.schedule,
         "concurrency": defn.concurrency,
         "budgets": defn.budgets,
         "path": str(runtime._config.agents_dir / defn.id),
-        "steps": [
+    }
+    if defn.is_pipeline:
+        result["steps"] = [
             {
                 "name": s.name,
                 "type": s.type.value,
                 "config": s.config,
             }
             for s in defn.steps
-        ],
-    }
+        ]
+    if defn.is_cognitive:
+        result["agent_type"] = defn.agent_type
+        result["max_turns"] = defn.max_turns
+        result["tools"] = defn.tools
+        if defn.parent_id:
+            result["parent_id"] = defn.parent_id
+        if defn.created_by:
+            result["created_by"] = defn.created_by
+        # Include output preview for running/completed cognitive agents
+        output_text = runtime.get_delegate_output(agent_id)
+        if output_text:
+            result["output_preview"] = output_text[-2000:] if len(output_text) > 2000 else output_text
+            result["output_length"] = len(output_text)
+        # Children
+        children = runtime.get_children(agent_id)
+        if children:
+            result["children"] = [
+                {"id": c.id, "name": c.name, "status": (runtime.get_status(c.id) or AgentStatus.REGISTERED).value}
+                for c in children
+            ]
     if defn.connector_ids:
         result["connector_ids"] = defn.connector_ids
     return result
@@ -646,43 +708,104 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
 
 async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     log.info("create_agent input: %s", json.dumps(input, default=str)[:2000])
-    # Parse steps
-    steps: list[StepDefinition] = []
-    for s in input.get("steps", []):
+
+    mode_str = input.get("mode", "pipeline")
+    caller_id = input.pop("_caller_id", None)
+
+    if mode_str == "cognitive":
+        # --- Cognitive mode: autonomous LLM session ---
+        prompt = input.get("prompt", "")
+        agent_type = input.get("agent_type", "general")
+        model = input.get("model", "")
+        parent_id = input.get("parent_id") or caller_id or None
+
+        defn = AgentDefinition(
+            id=input["id"],
+            name=input["name"],
+            mode=AgentMode.COGNITIVE,
+            provider=model or runtime._config.orchestrator.model or "sonnet",
+            cognitive_model=model or runtime._config.orchestrator.model or "sonnet",
+            system_prompt=input.get("system_prompt", ""),
+            agent_type=agent_type,
+            max_turns=input.get("max_turns", 50),
+            tools=input.get("tools", ["sdk_builtin", "atn_core"]),
+            concurrency=input.get("concurrency", 1),
+            schedule=input.get("schedule"),
+            description=input.get("description", ""),
+            budgets=input.get("budgets", {}),
+            connector_ids=input.get("connector_ids", []),
+            parent_id=parent_id,
+            created_by=caller_id or "",
+        )
+
         try:
-            step_type = StepType(s["type"])
-        except ValueError:
-            return {"error": f"Invalid step type: {s['type']}. Must be one of: script, cognitive, message, pull, collect."}
-        steps.append(StepDefinition(
-            type=step_type,
-            config=s.get("config", {}),
-            name=s.get("name"),
-        ))
+            aid = await runtime.register_agent(defn)
+            try:
+                save_agent(defn, runtime._config.agents_dir)
+            except Exception as exc:
+                log.warning("Agent registered but YAML save failed: %s", exc)
 
-    if not steps:
-        return {"error": "Agent must have at least one step."}
+            # If a prompt is provided, auto-activate and trigger immediately
+            if prompt:
+                await runtime.activate_agent(aid)
+                # Post the prompt as a work message
+                runtime.inbox.post(InboxMessage(
+                    id=InboxMessage.generate_id(),
+                    source=caller_id or "user",
+                    target=aid,
+                    type=MessageType.WORK,
+                    priority=MessagePriority.HIGH,
+                    data={"instruction": prompt},
+                ))
+                eid = await runtime.trigger_run(aid, source=f"agent:{caller_id}" if caller_id else "user")
+                return {"agent_id": aid, "status": "running", "execution_id": eid}
 
-    defn = AgentDefinition(
-        id=input["id"],
-        name=input["name"],
-        steps=steps,
-        concurrency=input.get("concurrency", 1),
-        schedule=input.get("schedule"),
-        description=input.get("description", ""),
-        budgets=input.get("budgets", {}),
-        connector_ids=input.get("connector_ids", []),
-    )
-
-    try:
-        aid = await runtime.register_agent(defn)
-        # Persist to YAML so the agent survives server restarts
-        try:
-            save_agent(defn, runtime._config.agents_dir)
+            return {"agent_id": aid, "status": "registered"}
         except Exception as exc:
-            log.warning("Agent registered but YAML save failed: %s", exc)
-        return {"agent_id": aid, "status": "registered"}
-    except Exception as exc:
-        return {"error": str(exc)}
+            return {"error": str(exc)}
+
+    else:
+        # --- Pipeline mode: deterministic step sequence ---
+        steps: list[StepDefinition] = []
+        for s in input.get("steps", []):
+            try:
+                step_type = StepType(s["type"])
+            except ValueError:
+                return {"error": f"Invalid step type: {s['type']}. Must be one of: script, cognitive, message, pull, collect."}
+            steps.append(StepDefinition(
+                type=step_type,
+                config=s.get("config", {}),
+                name=s.get("name"),
+            ))
+
+        if not steps:
+            return {"error": "Agent must have at least one step."}
+
+        parent_id = input.get("parent_id") or caller_id or None
+
+        defn = AgentDefinition(
+            id=input["id"],
+            name=input["name"],
+            steps=steps,
+            concurrency=input.get("concurrency", 1),
+            schedule=input.get("schedule"),
+            description=input.get("description", ""),
+            budgets=input.get("budgets", {}),
+            connector_ids=input.get("connector_ids", []),
+            parent_id=parent_id,
+            created_by=caller_id or "",
+        )
+
+        try:
+            aid = await runtime.register_agent(defn)
+            # Persist to YAML so the agent survives server restarts
+            try:
+                save_agent(defn, runtime._config.agents_dir)
+            except Exception as exc:
+                log.warning("Agent registered but YAML save failed: %s", exc)
+            return {"agent_id": aid, "status": "registered"}
+        except Exception as exc:
+            return {"error": str(exc)}
 
 
 async def _remove_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -1246,9 +1369,13 @@ async def _reject_task(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
 # Delegate executor — spawns autonomous sub-agents
 # ---------------------------------------------------------------------------
 
-# Sub-agents get a scoped subset of tools, not the full orchestrator toolset.
+# Sub-agents get a scoped subset of tools — enough for fractal recursion.
+# Any cognitive agent can spawn children, manage them, and read their output.
 _DELEGATE_TOOL_NAMES = {
-    "delegate",       # fractal recursion
+    "delegate",       # fractal recursion (spawn child cognitive agents)
+    "create_agent",   # create pipeline or cognitive agents
+    "trigger_run",    # trigger agent execution
+    "get_output",     # read child agent output
     "post_message",   # communicate with other agents
     "get_snapshot",   # see system state
 }
@@ -1427,7 +1554,12 @@ async def _run_delegate_session(
 
 
 async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Spawn an autonomous sub-agent in the background.  Returns immediately."""
+    """Spawn an autonomous sub-agent in the background.  Returns immediately.
+
+    Phase 2: Creates a cognitive-mode AgentDefinition and triggers it through
+    the unified Runtime pipeline, while maintaining backward compatibility
+    with the delegate tool names.
+    """
     prompt = input.get("prompt", "")
     if not prompt:
         return {"error": "Missing 'prompt' — describe the task for the sub-agent."}
@@ -1436,13 +1568,15 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     title = input.get("title", "") or f"{agent_type}: {prompt[:60]}"
     model = input.get("model", "")  # optional model override
 
+    # Fractality: use caller context if available, otherwise default to "orch".
+    # This allows sub-agents to spawn their own children with correct parent_id.
+    parent_id = input.get("_caller_id") or "orch"
+
+    # Generate hierarchical ID using Runtime (unified with DelegateRegistry)
+    agent_id = runtime.generate_child_id(parent_id)
+
+    # Also register in DelegateRegistry for backward compat (snapshot, UI)
     registry: DelegateRegistry = runtime.delegate_registry
-
-    # Generate hierarchical ID
-    parent_id = "orch"
-    agent_id = registry.generate_child_id(parent_id)
-
-    # Register
     node = registry.register(
         agent_id=agent_id,
         parent_id=parent_id,
@@ -1451,46 +1585,72 @@ async def _delegate(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         title=title,
     )
 
-    # Emit spawn event
+    # Build system prompt
+    system_prompt = build_delegate_prompt(agent_type, agent_id, parent_id)
+
+    # Create a cognitive-mode AgentDefinition
+    defn = AgentDefinition(
+        id=agent_id,
+        name=title,
+        mode=AgentMode.COGNITIVE,
+        provider=model or runtime._config.orchestrator.model or "sonnet",
+        cognitive_model=model or runtime._config.orchestrator.model or "sonnet",
+        system_prompt=system_prompt,
+        agent_type=agent_type,
+        tools=["sdk_builtin", "atn_core"],
+        parent_id=parent_id,
+        created_by=parent_id,
+        description=prompt,
+    )
+
+    # Register and activate through the Runtime
+    await runtime.register_agent(defn)
+    await runtime.activate_agent(agent_id)
+
+    # Register completion callback
+    runtime._completion_callbacks[agent_id] = parent_id
+
+    # Create done event for delegate_collect
+    runtime._delegate_done[agent_id] = asyncio.Event()
+
+    # Emit spawn event (backward compat)
     await runtime.events.emit(Event(
         type=EventType.DELEGATE_SPAWNED,
         source=agent_id,
         data=node.to_dict(),
     ))
 
-    # Build system prompt
-    system_prompt = build_delegate_prompt(agent_type, agent_id, parent_id)
+    # Post the prompt as a work message to trigger execution
+    from ..models import InboxMessage as IM, MessageType as MT, MessagePriority as MP
+    runtime.inbox.post(IM(
+        id=IM.generate_id(),
+        source=parent_id,
+        target=agent_id,
+        type=MT.WORK,
+        priority=MP.HIGH,
+        data={"instruction": prompt},
+    ))
 
-    # Build tool list (scoped subset + connector tools)
-    delegate_tools = _get_delegate_tools()
-    if runtime.connectors:
-        for cid, session in runtime.connectors._sessions.items():
-            if session and session.tools:
-                delegate_tools.extend(
-                    {"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("inputSchema", t.get("input_schema", {}))}
-                    for t in session.tools
-                )
+    # Trigger the run
+    eid = await runtime.trigger_run(agent_id, source=f"agent:{parent_id}")
 
-    # Create done event for delegate_collect
-    runtime._delegate_done[agent_id] = asyncio.Event()
-
-    # Launch as background task — returns immediately
-    task = asyncio.create_task(
-        _run_delegate_session(runtime, agent_id, title, prompt, system_prompt, delegate_tools, model=model),
-        name=f"delegate:{agent_id}",
-    )
-    runtime._delegate_tasks[agent_id] = task
+    # Update delegate registry status
+    registry.update_status(agent_id, DelegateStatus.RUNNING)
 
     return {
         "agent_id": agent_id,
         "status": "spawned",
         "title": title,
         "agent_type": agent_type,
+        "execution_id": eid,
     }
 
 
 async def _delegate_status(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Check the status of a delegate sub-agent."""
+    """Check the status of a delegate sub-agent.
+
+    Phase 2: Checks both unified agent registry and legacy delegate registry.
+    """
     agent_id = input.get("agent_id", "")
     if not agent_id:
         return {"error": "Missing 'agent_id'."}
@@ -1500,23 +1660,43 @@ async def _delegate_status(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     if result:
         return result
 
-    # Check registry for status
+    # Phase 2: Check unified agent registry first
+    defn = runtime.get_agent(agent_id)
+    if defn and defn.mode == AgentMode.COGNITIVE:
+        status = runtime.get_status(agent_id)
+        info: dict[str, Any] = {
+            "agent_id": agent_id,
+            "status": status.value if status else "unknown",
+            "title": defn.name,
+            "agent_type": defn.agent_type,
+        }
+        # Include current output text
+        output_text = runtime.get_delegate_output(agent_id)
+        if output_text:
+            info["output_preview"] = output_text[-2000:] if len(output_text) > 2000 else output_text
+            info["output_length"] = len(output_text)
+        # Include output store data if completed
+        stored = runtime.output_store.read(agent_id)
+        if stored and isinstance(stored.data, dict):
+            if stored.data.get("usage"):
+                info["tokens_used"] = sum(stored.data["usage"].values())
+        return info
+
+    # Fallback: Check legacy delegate registry
     node = runtime.delegate_registry.get_node(agent_id)
     if node is None:
         return {"error": f"Unknown delegate: {agent_id}"}
 
-    info: dict[str, Any] = {
+    info = {
         "agent_id": agent_id,
         "status": node.status.value,
         "title": node.title,
         "agent_type": node.agent_type,
     }
 
-    # Include current output text (persisted stream) — gives visibility into
-    # what the delegate is doing while it's still running.
+    # Include current output text (persisted stream)
     output_text = runtime.get_delegate_output(agent_id)
     if output_text:
-        # Return last 2000 chars to keep response size reasonable
         info["output_preview"] = output_text[-2000:] if len(output_text) > 2000 else output_text
         info["output_length"] = len(output_text)
 
@@ -1529,7 +1709,10 @@ async def _delegate_status(runtime: Runtime, input: dict[str, Any]) -> dict[str,
 
 
 async def _delegate_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Send a message to a running delegate sub-agent."""
+    """Send a message to a running delegate sub-agent.
+
+    Phase 2: Also checks _active_providers for cognitive-mode agents.
+    """
     agent_id = input.get("agent_id", "")
     content = input.get("content", "")
     if not agent_id:
@@ -1537,11 +1720,32 @@ async def _delegate_message(runtime: Runtime, input: dict[str, Any]) -> dict[str
     if not content:
         return {"error": "Missing 'content'."}
 
-    delivered = await runtime.send_delegate_message(agent_id, content)
-    if not delivered:
-        return {"error": f"Delegate '{agent_id}' is not running."}
+    # Try active cognitive providers first (Phase 2)
+    provider = runtime._active_providers.get(agent_id)
+    if provider is not None:
+        await provider.send_user_message(content)
+        return {"status": "delivered", "agent_id": agent_id}
 
-    return {"status": "delivered", "agent_id": agent_id}
+    # Fall back to legacy delegate providers
+    delivered = await runtime.send_delegate_message(agent_id, content)
+    if delivered:
+        return {"status": "delivered", "agent_id": agent_id}
+
+    # Final fallback: post to inbox for unified agents that may not have
+    # an active bridge session right now (e.g. between scheduled runs)
+    defn = runtime.get_agent(agent_id)
+    if defn is not None:
+        runtime.inbox.post(InboxMessage(
+            id=InboxMessage.generate_id(),
+            source="orch",
+            target=agent_id,
+            type=MessageType.WORK,
+            priority=MessagePriority.HIGH,
+            data={"instruction": content},
+        ))
+        return {"status": "queued", "agent_id": agent_id, "note": "Agent not actively running; message queued in inbox."}
+
+    return {"error": f"Delegate '{agent_id}' is not running."}
 
 
 async def _delegate_collect(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -1670,11 +1874,21 @@ async def execute_tool(
     name: str,
     input: dict[str, Any],
     runtime: Runtime,
+    *,
+    caller_id: str | None = None,
 ) -> dict[str, Any]:
-    """Execute a tool by name.  Returns the result dict."""
+    """Execute a tool by name.  Returns the result dict.
+
+    ``caller_id`` identifies the agent invoking the tool (used by delegate/
+    create_agent to set parent_id for fractality).  When None, the caller is
+    assumed to be the orchestrator.
+    """
     executor = _EXECUTORS.get(name)
     if executor is None:
         return {"error": f"Unknown tool: {name}"}
+    # Inject caller context so tools that need it can derive parent_id
+    if caller_id is not None:
+        input = {**input, "_caller_id": caller_id}
     try:
         return await executor(runtime, input)
     except Exception as exc:
