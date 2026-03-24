@@ -676,7 +676,8 @@ class Runtime:
             else:
                 model_name = defn.cognitive_model or self._config.orchestrator.model or "sonnet"
 
-            sub_provider = BridgeProvider(model=model_name)
+            # Pick the right provider based on model name
+            sub_provider = self._resolve_provider_for_model(model_name, defn.id)
             sub_provider.event_bus = self.events
             sub_provider.source_agent_id = defn.id
 
@@ -1209,6 +1210,47 @@ class Runtime:
     # ------------------------------------------------------------------
     # Context inspection
     # ------------------------------------------------------------------
+
+    def _resolve_provider_for_model(self, model_name: str, agent_id: str) -> "Provider":
+        """Create the right provider instance for a given model name.
+
+        - gemini-*  → OpenAICompatibleProvider via Gemini endpoint
+        - gpt-*     → OpenAICompatibleProvider via OpenAI endpoint
+        - Otherwise → BridgeProvider (Claude Agent SDK)
+        """
+        from .providers.bridge import BridgeProvider
+        from .providers.openai_compat import OpenAICompatibleProvider
+
+        model_lower = model_name.lower()
+
+        if model_lower.startswith("gemini"):
+            defaults = self._PROVIDER_DEFAULTS.get("gemini", {})
+            api_key = self._resolve_api_key("gemini")
+            if not api_key:
+                log.warning("No Gemini API key found, falling back to BridgeProvider")
+                return BridgeProvider(model=model_name)
+            return OpenAICompatibleProvider(
+                name=f"gemini-{agent_id}",
+                base_url=defaults.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai"),
+                api_key=api_key,
+                default_model=model_name,
+            )
+
+        if model_lower.startswith("gpt") or model_lower.startswith("o1") or model_lower.startswith("o3"):
+            defaults = self._PROVIDER_DEFAULTS.get("openai", {})
+            api_key = self._resolve_api_key("openai")
+            if not api_key:
+                log.warning("No OpenAI API key found, falling back to BridgeProvider")
+                return BridgeProvider(model=model_name)
+            return OpenAICompatibleProvider(
+                name=f"openai-{agent_id}",
+                base_url=defaults.get("base_url", "https://api.openai.com/v1"),
+                api_key=api_key,
+                default_model=model_name,
+            )
+
+        # Default: Claude via bridge
+        return BridgeProvider(model=model_name)
 
     def _get_bridge_provider(self, agent_id: str | None = None) -> Any:
         """Resolve a BridgeProvider for the given agent.
