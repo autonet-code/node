@@ -73,6 +73,9 @@ class EventType(Enum):
     AUTONET_STATUS = "autonet.status"
     AUTONET_WALLET = "autonet.wallet"
 
+    # Generic / custom events
+    CUSTOM = "custom"
+
 
 @dataclass(frozen=True, slots=True)
 class Event:
