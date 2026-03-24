@@ -728,8 +728,16 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
             "interval": defn.heartbeat.interval,
             "on_complete": defn.heartbeat.on_complete,
         }
-    # Next trigger countdown (from scheduler or heartbeat state)
-    _trigger_interval_s = runtime._schedule_table.get(agent_id) or runtime._heartbeat_table.get(agent_id, 0)
+    # Next trigger countdown — heartbeat and schedule are mutually exclusive.
+    # Use heartbeat_table if agent has heartbeat config, otherwise schedule_table.
+    if defn.heartbeat and agent_id in runtime._heartbeat_table:
+        _trigger_interval_s = runtime._heartbeat_table[agent_id]
+        result["scheduling_source"] = "heartbeat"
+    elif agent_id in runtime._schedule_table:
+        _trigger_interval_s = runtime._schedule_table[agent_id]
+        result["scheduling_source"] = "schedule"
+    else:
+        _trigger_interval_s = 0
     if _trigger_interval_s > 0 and status in (AgentStatus.ACTIVE,):
         last = runtime._last_idle.get(agent_id)
         if last:
@@ -803,13 +811,14 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         defn.provider = input["model"]
         changed.append("model")
 
-    # Schedule update
+    # Schedule update — mutually exclusive with heartbeat
     if "schedule" in input:
         old_schedule = defn.schedule
         defn.schedule = input["schedule"]
-        # Update scheduler table
         if defn.schedule:
             runtime._schedule_table[agent_id] = runtime._parse_interval(defn.schedule)
+            # Clear heartbeat — they are mutually exclusive
+            runtime._heartbeat_table.pop(agent_id, None)
         elif agent_id in runtime._schedule_table:
             del runtime._schedule_table[agent_id]
         changed.append("schedule")
@@ -830,16 +839,15 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         hb = input["heartbeat"]
         if hb is None:
             defn.heartbeat = None
-            # Remove from heartbeat scheduler table
             runtime._heartbeat_table.pop(agent_id, None)
         else:
             defn.heartbeat = HeartbeatConfig(
                 interval=hb.get("interval", "5m"),
                 on_complete=hb.get("on_complete", "notify_parent"),
             )
-            # Update heartbeat scheduler table
             runtime._heartbeat_table[agent_id] = runtime._parse_interval(defn.heartbeat.interval)
-            # Initialize idle timestamp if not present
+            # Clear legacy schedule — they are mutually exclusive
+            runtime._schedule_table.pop(agent_id, None)
             if agent_id not in runtime._last_idle:
                 from datetime import datetime, timezone
                 runtime._last_idle[agent_id] = datetime.now(timezone.utc)

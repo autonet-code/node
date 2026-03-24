@@ -286,13 +286,16 @@ class Runtime:
         self._agents[defn.id] = defn
         self._status[defn.id] = AgentStatus.REGISTERED
         self._running_count[defn.id] = 0
-        if defn.schedule:
-            self._schedule_table[defn.id] = self._parse_interval(defn.schedule)
-            # Initialize idle timestamp to now so the heartbeat doesn't fire immediately
-            self._last_idle[defn.id] = datetime.now(timezone.utc)
+        # Heartbeat and legacy schedule are mutually exclusive.
+        # Heartbeat takes precedence when both are present.
         if defn.heartbeat:
             self._heartbeat_table[defn.id] = self._parse_interval(defn.heartbeat.interval)
+            self._schedule_table.pop(defn.id, None)
             self._last_idle.setdefault(defn.id, datetime.now(timezone.utc))
+        elif defn.schedule:
+            self._schedule_table[defn.id] = self._parse_interval(defn.schedule)
+            self._heartbeat_table.pop(defn.id, None)
+            self._last_idle[defn.id] = datetime.now(timezone.utc)
         # Hydrate execution history from JSONL so get_latest/get_history
         # work immediately for ALL agents (pipeline and cognitive alike).
         n = self.execution_log.hydrate(defn.id)
@@ -645,6 +648,15 @@ class Runtime:
         sub_provider: BridgeProvider | None = None
 
         try:
+            # Clean up any stale provider from a previous execution
+            stale_provider = self._active_providers.pop(defn.id, None)
+            if stale_provider is not None:
+                log.info("Cleaning up stale provider for agent %s before new execution", defn.id)
+                try:
+                    await stale_provider.close()
+                except Exception:
+                    pass
+
             # Resolve model — defn.provider or fallback
             if defn.provider:
                 model_name = defn.provider if isinstance(defn.provider, str) else defn.provider[0]
@@ -2492,6 +2504,14 @@ class Runtime:
         # Trigger execution — re-activate completed agents so they can resume
         status = self.get_status(agent_id)
         if status in (AgentStatus.COMPLETED, AgentStatus.ERROR):
+            # Close any stale provider left over from the previous execution
+            old_provider = self._active_providers.pop(agent_id, None)
+            if old_provider is not None:
+                try:
+                    await old_provider.close()
+                except Exception:
+                    pass
+
             # Re-activate so trigger_run proceeds
             self._status[agent_id] = AgentStatus.ACTIVE
             log.info("Re-activated %s agent %s for follow-up message", status.value, agent_id)
