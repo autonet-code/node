@@ -57,6 +57,172 @@ from .user_profile import UserProfileStore
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Shell tools for non-bridge providers (Gemini, OpenAI, Ollama)
+# BridgeProvider (Claude SDK) has these built-in; generic providers don't.
+# ---------------------------------------------------------------------------
+
+_SHELL_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "bash",
+        "description": "Execute a shell command and return stdout+stderr. Use for running scripts, git, npm, pip, etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The shell command to execute"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default 120)", "default": 120},
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Read the contents of a file. Returns the text content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute path to the file"},
+                "offset": {"type": "integer", "description": "Line number to start from (1-based)"},
+                "limit": {"type": "integer", "description": "Max lines to read"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": "Write content to a file (creates or overwrites).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute path to the file"},
+                "content": {"type": "string", "description": "The content to write"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "list_directory",
+        "description": "List files and directories at the given path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Directory path to list"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "search_files",
+        "description": "Search for a regex pattern in files. Returns matching lines with file paths and line numbers.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                "path": {"type": "string", "description": "Directory to search in"},
+                "glob": {"type": "string", "description": "File glob pattern (e.g. '*.py')"},
+            },
+            "required": ["pattern"],
+        },
+    },
+]
+
+
+async def _exec_bash(inp: dict) -> dict:
+    """Execute a shell command."""
+    import subprocess
+    cmd = inp.get("command", "")
+    timeout = inp.get("timeout", 120)
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            timeout=timeout, cwd=str(Path.cwd()),
+        )
+        output = result.stdout
+        if result.stderr:
+            output += ("\n" if output else "") + result.stderr
+        return {"output": output[:50000], "exit_code": result.returncode}
+    except subprocess.TimeoutExpired:
+        return {"error": f"Command timed out after {timeout}s"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _exec_read_file(inp: dict) -> dict:
+    """Read a file."""
+    try:
+        p = Path(inp["path"])
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+        text = p.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines(keepends=True)
+        offset = max(0, inp.get("offset", 1) - 1)
+        limit = inp.get("limit", len(lines))
+        selected = lines[offset:offset + limit]
+        numbered = [f"{i + offset + 1}\t{line}" for i, line in enumerate(selected)]
+        return {"content": "".join(numbered)[:100000]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _exec_write_file(inp: dict) -> dict:
+    """Write a file."""
+    try:
+        p = Path(inp["path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(inp["content"], encoding="utf-8")
+        return {"status": "ok", "path": str(p), "bytes": len(inp["content"])}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _exec_list_dir(inp: dict) -> dict:
+    """List directory."""
+    try:
+        p = Path(inp["path"])
+        if not p.is_dir():
+            return {"error": f"Not a directory: {p}"}
+        entries = []
+        for item in sorted(p.iterdir()):
+            kind = "dir" if item.is_dir() else "file"
+            size = item.stat().st_size if item.is_file() else 0
+            entries.append({"name": item.name, "type": kind, "size": size})
+        return {"entries": entries[:500]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _exec_search_files(inp: dict) -> dict:
+    """Search files with grep."""
+    import subprocess
+    pattern = inp.get("pattern", "")
+    path = inp.get("path", str(Path.cwd()))
+    glob_pat = inp.get("glob", "")
+    cmd = ["rg", "-n", "--max-count", "50", pattern, path]
+    if glob_pat:
+        cmd.extend(["--glob", glob_pat])
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return {"matches": result.stdout[:50000]}
+    except FileNotFoundError:
+        # rg not available, fall back to grep
+        cmd = ["grep", "-rn", pattern, path]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return {"matches": result.stdout[:50000]}
+        except Exception as e:
+            return {"error": str(e)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+_SHELL_TOOL_EXECUTORS: dict[str, Any] = {
+    "bash": _exec_bash,
+    "read_file": _exec_read_file,
+    "write_file": _exec_write_file,
+    "list_directory": _exec_list_dir,
+    "search_files": _exec_search_files,
+}
+
 
 class Runtime:
 
@@ -697,6 +863,14 @@ class Runtime:
 
             # Resolve tool surface
             delegate_tools = _get_delegate_tools()
+
+            # For non-bridge providers (Gemini, OpenAI, Ollama), add shell/file
+            # tools since they don't come from an SDK.  BridgeProvider (Claude)
+            # already provides Bash, Read, Write, etc. via the Agent SDK.
+            from .providers.bridge import BridgeProvider as _BP
+            if not isinstance(sub_provider, _BP):
+                delegate_tools.extend(_SHELL_TOOLS)
+
             if self.connectors:
                 for cid, session in self.connectors._sessions.items():
                     if session and session.tools:
@@ -777,6 +951,9 @@ class Runtime:
             # Passes caller_id so tools like delegate/create_agent know which
             # agent is invoking them (fractality: sub-agents spawn sub-sub-agents).
             async def _tool_executor(name: str, tool_input: dict) -> dict:
+                # Shell tools (for non-bridge providers)
+                if name in _SHELL_TOOL_EXECUTORS:
+                    return await _SHELL_TOOL_EXECUTORS[name](tool_input)
                 if name.startswith("mcp_"):
                     for cid, session in self.connectors._sessions.items():
                         prefix = f"mcp_{cid}_"
