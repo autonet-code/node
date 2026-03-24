@@ -302,6 +302,7 @@ class Runtime:
             type=EventType.AGENT_REGISTERED,
             source="runtime",
             data={"agent_id": defn.id, "name": defn.name,
+                  "mode": defn.mode.value,
                   "steps": len(defn.steps), "schedule": defn.schedule},
         ))
         return defn.id
@@ -1373,6 +1374,7 @@ class Runtime:
                 "name": defn.name,
                 "description": defn.description,
                 "model": defn.model,
+                "mode": defn.mode.value,
                 "status": self._status[aid].value,
                 "schedule": defn.schedule,
                 "concurrency": defn.concurrency,

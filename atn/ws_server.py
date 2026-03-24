@@ -301,6 +301,19 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": f"Delegate '{agent_id}' is not running"}
             return {"msg_id": msg_id, "ok": True, "result": {"status": "injected", "agent_id": agent_id}}
 
+        # Send message to a cognitive agent (universal chat)
+        if msg_type == "send_agent_message":
+            agent_id = msg.get("agent_id", "")
+            content = msg.get("content", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
+            if not content:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'content' field"}
+            result = await self.runtime.send_agent_message(agent_id, content)
+            if result.get("error"):
+                return {"msg_id": msg_id, "ok": False, "error": result["error"]}
+            return {"msg_id": msg_id, "ok": True, "result": result}
+
         # Interrupt — gracefully stop a running LLM session mid-turn
         if msg_type == "interrupt_orchestrator":
             sent = await self.runtime.interrupt_orchestrator()
@@ -785,9 +798,7 @@ async def _init_and_serve(
             await rt.register_agent(defn)
             if defn.schedule:
                 await rt.activate_agent(defn.id)
-        # Hydrate execution history from JSONL so get_latest/get_history work immediately
-        for defn in agents:
-            rt.execution_log.hydrate(defn.id)
+        # Note: execution history is hydrated automatically in register_agent()
         if agents:
             log.info("Loaded %d agent(s)", len(agents))
 
