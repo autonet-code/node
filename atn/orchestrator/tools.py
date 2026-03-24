@@ -772,6 +772,10 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         changed.append("description")
     if "system_prompt" in input:
         defn.system_prompt = input["system_prompt"]
+        # Also sync to the cognitive step config so the LLM sees the update
+        for step in defn.steps:
+            if step.type == StepType.COGNITIVE and "system" in step.config:
+                step.config["system"] = input["system_prompt"]
         changed.append("system_prompt")
     if "max_turns" in input:
         defn.max_turns = input["max_turns"]

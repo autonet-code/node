@@ -498,10 +498,13 @@ def create_orchestrator_agent(
         "tool_executors": "orchestrator",
     }
 
+    built_prompt = step_config["system"]
+
     return AgentDefinition(
         id=ORCHESTRATOR_ID,
         name="Orchestrator",
         description="Meta-agent that manages the fleet via multi-turn tool use.",
+        system_prompt=built_prompt,
         steps=[
             StepDefinition(
                 type=StepType.COGNITIVE,
