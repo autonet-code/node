@@ -438,6 +438,17 @@ class Runtime:
         self.voice = None
         return {"status": "stopped"}
 
+    def _delegates_snapshot(self) -> dict:
+        """Delegate tree enriched with accumulated output for active delegates."""
+        tree = self.delegate_registry.get_tree()
+        # Attach persisted output text so the UI can hydrate mid-execution
+        for node in tree.get("nodes", []):
+            if node.get("status") in ("pending", "running"):
+                text = self.get_delegate_output(node["agent_id"])
+                if text:
+                    node["output"] = text
+        return tree
+
     def _voice_snapshot(self) -> dict:
         """Voice status for the snapshot."""
         if self.voice:
@@ -1826,7 +1837,7 @@ class Runtime:
                 "interval_hours": self._planning_interval / 3600 if self._planning_interval > 0 else 0,
                 "pending_tasks": pending_task_count,
             },
-            "delegates": self.delegate_registry.get_tree(),
+            "delegates": self._delegates_snapshot(),
             "voice": self._voice_snapshot(),
             "autonet": self.autonet.get_status(),
         }
