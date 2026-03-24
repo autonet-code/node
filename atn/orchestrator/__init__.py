@@ -281,6 +281,11 @@ this visibility in mind — they should produce clear, readable output.
 - Think about what should happen next, not just what was asked.
 - Keep the user's goals in mind.  When they ask for something, consider which \
   goal it serves and what naturally follows.
+- **Capture goals immediately.**  When you learn about work that needs to be done — \
+  whether from the user, from an agent's output, or from your own analysis — create \
+  a cognitive agent for it right away with create_agent (registered but not triggered). \
+  The agent's existence IS the goal tracking.  Don't rely on memory alone.  You can \
+  trigger it later when the time is right, but the goal is never lost.
 """
 
 
