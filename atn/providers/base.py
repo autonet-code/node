@@ -72,6 +72,13 @@ class ProviderResponse:
 class Provider(ABC):
     """Abstract LLM provider interface."""
 
+    # Attributes set by the runtime when the provider is used for cognitive agents.
+    event_bus: Any = None
+    source_agent_id: str = ""
+
+    async def close(self) -> None:
+        """Clean up resources.  Default is a no-op."""
+
     @property
     @abstractmethod
     def name(self) -> str:
@@ -104,6 +111,14 @@ class Provider(ABC):
         Raises:
             ProviderError for non-transient failures.
             Transient failures (429, 503) should be retried internally.
+        """
+
+    async def interrupt(self) -> None:
+        """Interrupt any running generation.
+
+        Default is a no-op.  BridgeProvider overrides this to signal
+        the Claude SDK subprocess.  Other providers can override if
+        they have a cancellation mechanism.
         """
 
     @property
