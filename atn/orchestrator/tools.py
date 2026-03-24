@@ -1104,11 +1104,19 @@ async def _kill_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
 
 async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     target = input["target"]
-    if runtime.get_agent(target) is None:
+    defn = runtime.get_agent(target)
+    if defn is None:
         return {"error": f"Agent '{target}' not found."}
 
     msg_type = MessageType(input.get("message_type") or input.get("type", "trigger"))
     priority = MessagePriority(input.get("priority", "normal"))
+    instruction = (input.get("data") or {}).get("instruction", "")
+
+    # For cognitive agents with an instruction, persist the message in
+    # the agent's conversation store so it appears in its chat thread.
+    if defn.mode == AgentMode.COGNITIVE and instruction:
+        store = runtime.get_agent_conversation_store(target)
+        store.add_user_turn(instruction)
 
     msg = InboxMessage(
         id=InboxMessage.generate_id(),
@@ -1119,7 +1127,31 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         data=input.get("data", {}),
     )
     runtime.inbox.post(msg)
-    return {"message_id": msg.id, "target": target, "type": msg_type.value}
+
+    # Auto-trigger completed/errored cognitive agents so they resume
+    # without requiring a separate trigger_run call.
+    status = runtime.get_status(target)
+    execution_id = None
+    if defn.mode == AgentMode.COGNITIVE and status in (
+        AgentStatus.COMPLETED, AgentStatus.ERROR
+    ):
+        # Clean up stale provider from previous execution
+        old_provider = runtime._active_providers.pop(target, None)
+        if old_provider is not None:
+            try:
+                await old_provider.close()
+            except Exception:
+                pass
+        runtime._status[target] = AgentStatus.ACTIVE
+        execution_id = await runtime.trigger_run(target, source="orchestrator")
+
+    result: dict[str, Any] = {
+        "message_id": msg.id, "target": target, "type": msg_type.value,
+    }
+    if execution_id:
+        result["execution_id"] = execution_id
+        result["status"] = "triggered"
+    return result
 
 
 async def _get_snapshot(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
