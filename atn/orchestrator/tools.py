@@ -710,17 +710,17 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
             "interval": defn.heartbeat.interval,
             "on_complete": defn.heartbeat.on_complete,
         }
-    # Next trigger countdown (from scheduler state)
-    if defn.schedule and status == AgentStatus.ACTIVE:
+    # Next trigger countdown (from scheduler or heartbeat state)
+    _trigger_interval_s = runtime._schedule_table.get(agent_id) or runtime._heartbeat_table.get(agent_id, 0)
+    if _trigger_interval_s > 0 and status in (AgentStatus.ACTIVE,):
         last = runtime._last_idle.get(agent_id)
-        interval_s = runtime._schedule_table.get(agent_id, 0)
-        if last and interval_s > 0:
+        if last:
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
             elapsed = (now - last).total_seconds()
-            remaining = max(0, interval_s - elapsed)
+            remaining = max(0, _trigger_interval_s - elapsed)
             result["next_trigger_in_s"] = round(remaining, 1)
-            result["schedule_interval_s"] = round(interval_s, 1)
+            result["schedule_interval_s"] = round(_trigger_interval_s, 1)
     if defn.is_pipeline:
         result["steps"] = [
             {
@@ -798,14 +798,33 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 
     # Heartbeat update
     if "heartbeat" in input:
+        caller_id = input.get("_caller_id")
+        # Access control: an agent cannot edit its own heartbeat
+        if caller_id and caller_id == agent_id:
+            return {"error": "An agent cannot edit its own heartbeat."}
+        # Access control: an agent can only edit heartbeat for its direct descendants
+        if caller_id and caller_id != agent_id:
+            target_defn = runtime.get_agent(agent_id)
+            if target_defn and target_defn.parent_id != caller_id:
+                # Allow if caller is user (no _caller_id) but block agent cross-editing
+                return {"error": f"Agent '{caller_id}' can only update heartbeat for its direct children."}
+
         hb = input["heartbeat"]
         if hb is None:
             defn.heartbeat = None
+            # Remove from heartbeat scheduler table
+            runtime._heartbeat_table.pop(agent_id, None)
         else:
             defn.heartbeat = HeartbeatConfig(
                 interval=hb.get("interval", "5m"),
                 on_complete=hb.get("on_complete", "notify_parent"),
             )
+            # Update heartbeat scheduler table
+            runtime._heartbeat_table[agent_id] = runtime._parse_interval(defn.heartbeat.interval)
+            # Initialize idle timestamp if not present
+            if agent_id not in runtime._last_idle:
+                from datetime import datetime, timezone
+                runtime._last_idle[agent_id] = datetime.now(timezone.utc)
         changed.append("heartbeat")
 
     if not changed:
@@ -1284,6 +1303,55 @@ async def _get_conversation(runtime: Runtime, input: dict[str, Any]) -> dict[str
         "count": len(turns),
         "total": len(turns),
     }
+
+
+async def _get_agent_conversation(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Get conversation history for a cognitive agent."""
+    agent_id = input.get("agent_id", "")
+    if not agent_id:
+        return {"error": "Missing 'agent_id'"}
+    defn = runtime.get_agent(agent_id)
+    if defn is None:
+        return {"error": f"Agent '{agent_id}' not found"}
+    if defn.mode != AgentMode.COGNITIVE:
+        return {"error": f"Agent '{agent_id}' is not a cognitive agent"}
+
+    store = runtime.get_agent_conversation_store(agent_id)
+
+    limit = input.get("limit")
+    offset = input.get("offset")
+
+    if limit is not None:
+        limit = min(int(limit), 200)
+        offset = int(offset) if offset is not None else 0
+        turns, total = store.get_turns_page(limit=limit, offset=offset)
+        return {
+            "agent_id": agent_id,
+            "turns": [t.to_dict() for t in turns],
+            "count": len(turns),
+            "total": total,
+            "offset": offset,
+            "has_more": (offset + len(turns)) < total,
+        }
+
+    turns = store.get_turns()
+    return {
+        "agent_id": agent_id,
+        "turns": [t.to_dict() for t in turns],
+        "count": len(turns),
+        "total": len(turns),
+    }
+
+
+async def _send_agent_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Send a user message to a cognitive agent."""
+    agent_id = input.get("agent_id", "")
+    content = input.get("content", "")
+    if not agent_id:
+        return {"error": "Missing 'agent_id'"}
+    if not content:
+        return {"error": "Missing 'content'"}
+    return await runtime.send_agent_message(agent_id, content)
 
 
 async def _list_conversations(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -1825,6 +1893,9 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "reset_conversation": _reset_conversation,
     "get_conversation": _get_conversation,
     "list_conversations": _list_conversations,
+    # Agent conversation (UI-facing — universal chat for cognitive agents)
+    "get_agent_conversation": _get_agent_conversation,
+    "send_agent_message": _send_agent_message,
     # Task management (UI-facing, not in orchestrator's tool list)
     "approve_task": _approve_task,
     "reject_task": _reject_task,

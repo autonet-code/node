@@ -112,6 +112,8 @@ class Runtime:
         self._delegate_output_dir.mkdir(parents=True, exist_ok=True)
         # Events for signalling delegate completion to delegate_collect
         self._delegate_done: dict[str, asyncio.Event] = {}
+        # Per-agent conversation stores (agent_id -> ConversationStore)
+        self._agent_conversations: dict[str, ConversationStore] = {}
 
         # --- Phase 2: Cognitive mode execution ---
         # Active bridge providers for cognitive agents (agent_id -> BridgeProvider)
@@ -152,6 +154,7 @@ class Runtime:
 
         # Scheduler — idle-based: timer counts from when agent becomes idle
         self._schedule_table: dict[str, float] = {}             # agent_id -> seconds
+        self._heartbeat_table: dict[str, float] = {}            # agent_id -> heartbeat seconds
         self._last_idle: dict[str, datetime] = {}               # agent_id -> when it became idle
 
         # Background loops
@@ -287,6 +290,9 @@ class Runtime:
             self._schedule_table[defn.id] = self._parse_interval(defn.schedule)
             # Initialize idle timestamp to now so the heartbeat doesn't fire immediately
             self._last_idle[defn.id] = datetime.now(timezone.utc)
+        if defn.heartbeat:
+            self._heartbeat_table[defn.id] = self._parse_interval(defn.heartbeat.interval)
+            self._last_idle.setdefault(defn.id, datetime.now(timezone.utc))
         # Hydrate execution history from JSONL so get_latest/get_history
         # work immediately for ALL agents (pipeline and cognitive alike).
         n = self.execution_log.hydrate(defn.id)
@@ -309,6 +315,7 @@ class Runtime:
         self._status.pop(agent_id, None)
         self._running_count.pop(agent_id, None)
         self._schedule_table.pop(agent_id, None)
+        self._heartbeat_table.pop(agent_id, None)
         self._last_idle.pop(agent_id, None)
         self.inbox.remove_agent(agent_id)
         self.output_store.remove(agent_id)
@@ -690,6 +697,13 @@ class Runtime:
                 prompt_parts.append(defn.description or defn.name)
             user_message = "\n\n".join(prompt_parts)
 
+            # Record user turn in agent conversation store
+            agent_convo = self.get_agent_conversation_store(defn.id)
+            # Only add user turn if it wasn't already recorded (e.g. by send_agent_message)
+            existing = agent_convo.get_turns()
+            if not existing or existing[-1].role != "user" or existing[-1].content != user_message:
+                agent_convo.add_user_turn(user_message)
+
             # Tool executor — routes tools back through the orchestrator tool system.
             # Passes caller_id so tools like delegate/create_agent know which
             # agent is invoking them (fractality: sub-agents spawn sub-sub-agents).
@@ -785,6 +799,24 @@ class Runtime:
                     status=record.status,
                     execution_id=record.execution_id,
                 ))
+
+            # Record assistant turn in agent conversation store
+            _convo_text = ""
+            if isinstance(record.output, dict):
+                _convo_text = record.output.get("result", "")
+            elif record.output:
+                _convo_text = str(record.output)
+            if record.error:
+                _convo_text = (
+                    f"{_convo_text}\n\nError: {record.error}"
+                    if _convo_text else f"Error: {record.error}"
+                )
+            if _convo_text:
+                try:
+                    _convo_store = self.get_agent_conversation_store(defn.id)
+                    _convo_store.add_assistant_turn(_convo_text, execution_id=record.execution_id)
+                except Exception:
+                    log.warning("Failed to record assistant turn for %s", defn.id)
 
             # Sync delegate registry (backward compat with delegate tools)
             result_text = ""
@@ -931,7 +963,7 @@ class Runtime:
 
         # Set final status only on success — errors are already handled
         if record.status == ExecutionStatus.COMPLETED:
-            if defn.schedule:
+            if defn.schedule or defn.heartbeat:
                 self._status[agent_id] = AgentStatus.ACTIVE
             else:
                 self._status[agent_id] = AgentStatus.COMPLETED
@@ -1182,16 +1214,16 @@ class Runtime:
         while self._running:
             try:
                 now = datetime.now(timezone.utc)
+
+                # --- Schedule-based triggers (pipeline agents) ---
                 for agent_id, interval in list(self._schedule_table.items()):
                     if self._status.get(agent_id) != AgentStatus.ACTIVE:
                         continue
-                    # Skip agents that are currently executing (idle-based heartbeat)
                     if self._running_count.get(agent_id, 0) > 0:
                         continue
-                    # Timer counts from when agent became idle, not from last trigger
                     last_idle = self._last_idle.get(agent_id)
                     if last_idle is None or (now - last_idle).total_seconds() >= interval:
-                        self._last_idle[agent_id] = now  # reset so it doesn't re-fire
+                        self._last_idle[agent_id] = now
                         self.inbox.post(InboxMessage(
                             id=InboxMessage.generate_id(),
                             source="scheduler",
@@ -1203,6 +1235,36 @@ class Runtime:
                             type=EventType.SCHEDULE_TRIGGERED,
                             source="scheduler",
                             data={"agent_id": agent_id, "interval_s": interval},
+                        ))
+
+                # --- Heartbeat-based triggers (cognitive agents) ---
+                for agent_id, interval in list(self._heartbeat_table.items()):
+                    # Skip if already handled by schedule table above
+                    if agent_id in self._schedule_table:
+                        continue
+                    status = self._status.get(agent_id)
+                    if status not in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
+                        continue
+                    # Never fire while agent has running executions
+                    if self._running_count.get(agent_id, 0) > 0:
+                        continue
+                    last_idle = self._last_idle.get(agent_id)
+                    if last_idle is None or (now - last_idle).total_seconds() >= interval:
+                        self._last_idle[agent_id] = now
+                        # Heartbeat posts a WORK message to the agent's own inbox
+                        self.inbox.post(InboxMessage(
+                            id=InboxMessage.generate_id(),
+                            source="heartbeat",
+                            target=agent_id,
+                            type=MessageType.WORK,
+                            priority=MessagePriority.HIGH,
+                            data={"heartbeat": True, "interval": interval},
+                        ))
+                        await self.events.emit(Event(
+                            type=EventType.SCHEDULE_TRIGGERED,
+                            source="heartbeat",
+                            data={"agent_id": agent_id, "interval_s": interval,
+                                  "type": "heartbeat"},
                         ))
 
                 # Planning review — post a work message to the orchestrator
@@ -2341,6 +2403,57 @@ class Runtime:
         self._clear_bridge_session()
         self._inject_status_briefing()
         log.info("Conversation reset")
+
+    # ------------------------------------------------------------------
+    # Per-agent conversation stores
+    # ------------------------------------------------------------------
+
+    def get_agent_conversation_store(self, agent_id: str) -> ConversationStore:
+        """Get or create a ConversationStore for a cognitive agent."""
+        if agent_id not in self._agent_conversations:
+            store_dir = self._config.data_dir / "agents" / agent_id
+            store_dir.mkdir(parents=True, exist_ok=True)
+            self._agent_conversations[agent_id] = ConversationStore(store_dir)
+        return self._agent_conversations[agent_id]
+
+    async def send_agent_message(self, agent_id: str, text: str) -> dict:
+        """Send a user message to a cognitive agent.
+
+        If the agent is currently running, injects into the active session.
+        Otherwise, posts a WORK message to trigger a new execution.
+        Records the user turn in the agent's conversation store.
+        """
+        defn = self.get_agent(agent_id)
+        if defn is None:
+            return {"error": f"Agent '{agent_id}' not found"}
+        if defn.mode != AgentMode.COGNITIVE:
+            return {"error": f"Agent '{agent_id}' is not a cognitive agent"}
+
+        # Record user turn
+        store = self.get_agent_conversation_store(agent_id)
+        store.add_user_turn(text)
+
+        # Try mid-session injection first
+        if await self.send_delegate_message(agent_id, text):
+            return {"status": "injected", "agent_id": agent_id}
+
+        # Not running — post to inbox to trigger execution
+        msg = InboxMessage(
+            type=MessageType.WORK,
+            source="user",
+            target=agent_id,
+            priority=MessagePriority.HIGH,
+            data={"instruction": text},
+        )
+        self.inbox.post(msg)
+
+        # Trigger if active
+        status = self.get_status(agent_id)
+        if status == AgentStatus.ACTIVE:
+            eid = await self.trigger_run(agent_id, source="user")
+            return {"status": "triggered", "agent_id": agent_id, "execution_id": eid}
+
+        return {"status": "queued", "agent_id": agent_id}
 
     # ------------------------------------------------------------------
     # Delegate output persistence
