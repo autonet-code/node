@@ -193,6 +193,7 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
 
     cognitive_model = str(raw.get("cognitive_model", raw.get("model", "")))
     system_prompt = str(raw.get("system_prompt", ""))
+    task_prompt = str(raw.get("task_prompt", ""))
     agent_type = str(raw.get("agent_type", "general"))
     max_turns = raw.get("max_turns", 50)
     if not isinstance(max_turns, int) or max_turns < 1:
@@ -211,6 +212,7 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         provider=provider,
         cognitive_model=cognitive_model,
         system_prompt=system_prompt,
+        task_prompt=task_prompt,
         agent_type=agent_type,
         max_turns=max_turns,
         tools=tools,
@@ -342,6 +344,8 @@ def save_agent(defn: AgentDefinition, directory: Path) -> Path:
             data["cognitive_model"] = defn.cognitive_model
         if defn.system_prompt:
             data["system_prompt"] = defn.system_prompt
+        if defn.task_prompt:
+            data["task_prompt"] = defn.task_prompt
         if defn.agent_type != "general":
             data["agent_type"] = defn.agent_type
         if defn.max_turns != 50:

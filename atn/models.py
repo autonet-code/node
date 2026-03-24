@@ -121,6 +121,7 @@ class AgentDefinition:
     provider: str | list[str] = ""          # provider name or fallback chain
     cognitive_model: str = ""               # model override (e.g. "claude-opus-4-6")
     system_prompt: str = ""                 # inline text or file reference
+    task_prompt: str = ""                   # the initial work assignment / prompt
     agent_type: str = "general"             # explore, implement, research, debug, review
     max_turns: int = 50                     # per-session turn limit
     tools: list[str] = field(default_factory=list)

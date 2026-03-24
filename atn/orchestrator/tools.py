@@ -18,6 +18,7 @@ from ..models import (
     AgentMode,
     AgentStatus,
     ExecutionStatus,
+    HeartbeatConfig,
     InboxMessage,
     MessagePriority,
     MessageType,
@@ -64,6 +65,34 @@ _TOOLS: list[ToolDefinition] = [
             "type": "object",
             "properties": {
                 "agent_id": {"type": "string", "description": "The agent's unique ID."},
+            },
+            "required": ["agent_id"],
+        },
+    ),
+    ToolDefinition(
+        name="update_agent",
+        description=(
+            "Update a registered agent's configuration. Can modify system_prompt, schedule, "
+            "heartbeat, description, name, max_turns, or model. Changes are persisted to YAML."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "The agent to update."},
+                "system_prompt": {"type": "string", "description": "New system prompt (cognitive agents)."},
+                "schedule": {"type": ["string", "null"], "description": "New schedule interval (e.g. '5m', '1h') or null to remove."},
+                "heartbeat": {
+                    "type": ["object", "null"],
+                    "description": "Heartbeat config or null to remove.",
+                    "properties": {
+                        "interval": {"type": "string"},
+                        "on_complete": {"type": "string", "enum": ["notify_parent", "self_deactivate"]},
+                    },
+                },
+                "description": {"type": "string"},
+                "name": {"type": "string"},
+                "max_turns": {"type": "integer"},
+                "model": {"type": "string", "description": "Model override (e.g. 'claude-opus-4-6')."},
             },
             "required": ["agent_id"],
         },
@@ -672,7 +701,26 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         "concurrency": defn.concurrency,
         "budgets": defn.budgets,
         "path": str(runtime._config.agents_dir / defn.id),
+        "system_prompt": defn.system_prompt or "",
+        "task_prompt": defn.task_prompt or "",
     }
+    # Heartbeat config
+    if defn.heartbeat:
+        result["heartbeat"] = {
+            "interval": defn.heartbeat.interval,
+            "on_complete": defn.heartbeat.on_complete,
+        }
+    # Next trigger countdown (from scheduler state)
+    if defn.schedule and status == AgentStatus.ACTIVE:
+        last = runtime._last_scheduled.get(agent_id)
+        interval_s = runtime._schedule_table.get(agent_id, 0)
+        if last and interval_s > 0:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            elapsed = (now - last).total_seconds()
+            remaining = max(0, interval_s - elapsed)
+            result["next_trigger_in_s"] = round(remaining, 1)
+            result["schedule_interval_s"] = round(interval_s, 1)
     if defn.is_pipeline:
         result["steps"] = [
             {
@@ -707,6 +755,67 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Update a registered agent's configuration fields."""
+    agent_id = input["agent_id"]
+    defn = runtime.get_agent(agent_id)
+    if defn is None:
+        return {"error": f"Agent '{agent_id}' not found."}
+
+    changed: list[str] = []
+
+    if "name" in input:
+        defn.name = input["name"]
+        changed.append("name")
+    if "description" in input:
+        defn.description = input["description"]
+        changed.append("description")
+    if "system_prompt" in input:
+        defn.system_prompt = input["system_prompt"]
+        changed.append("system_prompt")
+    if "max_turns" in input:
+        defn.max_turns = input["max_turns"]
+        changed.append("max_turns")
+    if "model" in input:
+        defn.cognitive_model = input["model"]
+        defn.provider = input["model"]
+        changed.append("model")
+
+    # Schedule update
+    if "schedule" in input:
+        old_schedule = defn.schedule
+        defn.schedule = input["schedule"]
+        # Update scheduler table
+        if defn.schedule:
+            runtime._schedule_table[agent_id] = runtime._parse_interval(defn.schedule)
+        elif agent_id in runtime._schedule_table:
+            del runtime._schedule_table[agent_id]
+        changed.append("schedule")
+
+    # Heartbeat update
+    if "heartbeat" in input:
+        hb = input["heartbeat"]
+        if hb is None:
+            defn.heartbeat = None
+        else:
+            defn.heartbeat = HeartbeatConfig(
+                interval=hb.get("interval", "5m"),
+                on_complete=hb.get("on_complete", "notify_parent"),
+            )
+        changed.append("heartbeat")
+
+    if not changed:
+        return {"agent_id": agent_id, "status": "no_changes"}
+
+    # Persist to YAML
+    try:
+        save_agent(defn, runtime._config.agents_dir)
+    except Exception as exc:
+        log.warning("Agent updated in memory but YAML save failed: %s", exc)
+
+    return {"agent_id": agent_id, "status": "updated", "changed": changed}
+
+
 async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     log.info("create_agent input: %s", json.dumps(input, default=str)[:2000])
 
@@ -727,6 +836,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             provider=model or runtime._config.orchestrator.model or "sonnet",
             cognitive_model=model or runtime._config.orchestrator.model or "sonnet",
             system_prompt=input.get("system_prompt", ""),
+            task_prompt=prompt,
             agent_type=agent_type,
             max_turns=input.get("max_turns", 50),
             tools=input.get("tools", ["sdk_builtin", "atn_core"]),
@@ -1672,6 +1782,7 @@ def _agent_status_to_delegate(status: AgentStatus | None) -> str:
 _EXECUTORS: dict[str, ToolExecutor] = {
     "list_agents": _list_agents,
     "get_agent": _get_agent,
+    "update_agent": _update_agent,
     "create_agent": _create_agent,
     "remove_agent": _remove_agent,
     "activate_agent": _activate_agent,
