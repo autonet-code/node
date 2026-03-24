@@ -2495,6 +2495,7 @@ class Runtime:
 
         # Not running — post to inbox to trigger execution
         msg = InboxMessage(
+            id=InboxMessage.generate_id(),
             type=MessageType.WORK,
             source="user",
             target=agent_id,
