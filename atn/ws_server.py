@@ -632,7 +632,10 @@ class WebSocketBridge:
             if instruction:
                 self.runtime.conversation.add_user_turn(instruction)
 
-        result = await execute_tool(msg_type, args, self.runtime)
+        # Use caller_id from message if provided (e.g. UI acting on behalf of
+        # a specific agent), otherwise default to the orchestrator.
+        caller_id = msg.get("caller_id", "orchestrator")
+        result = await execute_tool(msg_type, args, self.runtime, caller_id=caller_id)
 
         # Tools signal errors by returning {"error": "..."} with a truthy value.
         # Some tools include "error": None as a data field — that's not an error.

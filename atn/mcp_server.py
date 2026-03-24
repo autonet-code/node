@@ -71,7 +71,7 @@ def create_server() -> tuple[Server, dict[str, Any]]:
                 text=json.dumps({"error": "Runtime not started"}),
             )]
 
-        result = await execute_tool(name, arguments, rt)
+        result = await execute_tool(name, arguments, rt, caller_id="orchestrator")
         return [types.TextContent(
             type="text",
             text=json.dumps(result, indent=2, default=str),
