@@ -1607,9 +1607,9 @@ class Runtime:
                 goal_status = "active"
             elif status == AgentStatus.COMPLETED:
                 goal_status = "completed"
-            elif status == AgentStatus.INACTIVE:
+            elif status == AgentStatus.STOPPED:
                 goal_status = "paused"
-            elif status == AgentStatus.FAILED:
+            elif status == AgentStatus.ERROR:
                 goal_status = "abandoned"
             else:
                 goal_status = status.value if status else "unknown"
