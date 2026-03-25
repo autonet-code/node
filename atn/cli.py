@@ -268,7 +268,20 @@ async def _input_loop(runtime: Runtime) -> None:
     loop = asyncio.get_event_loop()
     while True:
         try:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
+            # Race between stdin input and shutdown signal
+            read_task = asyncio.ensure_future(
+                loop.run_in_executor(None, sys.stdin.readline)
+            )
+            shutdown_task = asyncio.ensure_future(runtime._shutdown_event.wait())
+            done, pending = await asyncio.wait(
+                [read_task, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for p in pending:
+                p.cancel()
+            if shutdown_task in done:
+                break
+            line = read_task.result()
             if not line:
                 break
             keep_going = await _handle_command(line, runtime)
@@ -386,7 +399,8 @@ async def run_cli() -> None:
         console.print("\n[bold red]Shutting down...[/]")
         if ws_bridge:
             await ws_bridge.stop()
-        await runtime.stop()
+        if not runtime._shutdown_event.is_set():
+            await runtime.stop()
         console.print("[dim]Bye.[/]")
 
 

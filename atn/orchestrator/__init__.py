@@ -1,15 +1,16 @@
 """Orchestrator — the meta-agent that manages the fleet.
 
-The orchestrator is an AgentDefinition with a single multi-turn cognitive step
-configured with orchestrator tools.  It's registered in the Runtime like any
-other agent and wakes on inbox messages (user input, alert escalations).
+The orchestrator is a cognitive-mode AgentDefinition — identical to any other
+cognitive agent, just with a full tool surface and its own system prompt.
+It's registered in the Runtime like any other agent and wakes on inbox
+messages (user input, alert escalations).
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from ..config import OrchestratorConfig
-from ..models import AgentDefinition, StepDefinition, StepType
+from ..models import AgentDefinition, AgentMode
 
 ORCHESTRATOR_ID = "orchestrator"
 
@@ -294,9 +295,9 @@ These are hard-won lessons.  Follow them.
 - **You ARE the orchestrator.**  Never tell the user you're "just Claude Code" or \
   a different system.  You are the ATN orchestrator daemon, running from c:\\code\\autonet.
 - **The daemon IS you.**  When the user says "restart the daemon," they mean restart \
-  YOU.  You cannot restart yourself — the user has to do it.
-- **The ATN daemon runs from c:\\code\\autonet.**  The legacy c:\\code\\atn repo is \
-  pre-unification — don't sync framework changes there.  But you work across ALL \
+  YOU.  You can restart yourself using the restart_daemon tool — it performs a clean \
+  shutdown and spawns a new process.  Your conversation memory and all agent state persists.
+- **The ATN daemon runs from c:\\code\\autonet.**  You work across ALL \
   of the user's repos as needed (c:\\code\\werule_new, c:\\code\\trustless_new, etc.).
 - **Check delegate_status sparingly.**  Each check burns your tokens.  The advantage \
   of delegation is that agents work independently.  Check only when you need to make \
@@ -365,6 +366,11 @@ def create_orchestrator_agent(
 ) -> AgentDefinition:
     """Build the orchestrator AgentDefinition.
 
+    The orchestrator is a **cognitive-mode** agent — identical in structure
+    to any child cognitive agent.  The differences are configuration-level:
+    full tool surface ("atn_full"), provider fallback chain, and the fleet
+    management system prompt.
+
     Args:
         config: Orchestrator config from ATNConfig (provider, model).
         system_prompt: Override the default system prompt.
@@ -393,7 +399,6 @@ def create_orchestrator_agent(
     )
 
     # Provider fallback chain: primary first, then alternatives.
-    # The cognitive step will try each in order if the previous one fails.
     # Providers that aren't configured are silently skipped at runtime.
     # Ollama is excluded — local models can't reliably handle 20+ tools,
     # multi-turn planning, and the complex reasoning the orchestrator needs.
@@ -403,30 +408,17 @@ def create_orchestrator_agent(
         if p not in provider_chain:
             provider_chain.append(p)
 
-    step_config = {
-        "provider": provider_chain,
-        "model": model,
-        "system": system_prompt or _DEFAULT_SYSTEM_PROMPT,
-        "prompt": "{inbox}",
-        "max_tokens": 4096,
-        "temperature": 0.0,
-        "max_turns": max_turns,
-        "tool_executors": "orchestrator",
-    }
-
-    built_prompt = step_config["system"]
+    built_prompt = system_prompt or _DEFAULT_SYSTEM_PROMPT
 
     return AgentDefinition(
         id=ORCHESTRATOR_ID,
         name="Orchestrator",
+        mode=AgentMode.COGNITIVE,
         description="Meta-agent that manages the fleet via multi-turn tool use.",
         system_prompt=built_prompt,
-        steps=[
-            StepDefinition(
-                type=StepType.COGNITIVE,
-                config=step_config,
-                name="orchestrate",
-            ),
-        ],
+        provider=provider_chain,
+        cognitive_model=model,
+        max_turns=max_turns,
+        tools=["atn_full"],
         concurrency=1,
     )

@@ -396,7 +396,15 @@ class Runtime:
             await self.autonet.stop()
         # Stop all MCP connectors
         await self.connectors.stop_all()
-        # Close providers that hold resources (e.g. bridge subprocess)
+        # Close active cognitive-mode providers (e.g. bridge subprocess)
+        for provider in list(self._active_providers.values()):
+            if hasattr(provider, "close"):
+                try:
+                    await provider.close()
+                except Exception:
+                    pass
+        self._active_providers.clear()
+        # Close pipeline-registered providers (cognitive step executor)
         cognitive = self._executors.get(StepType.COGNITIVE)
         if isinstance(cognitive, CognitiveStepExecutor):
             for provider in cognitive._providers.values():
@@ -832,8 +840,31 @@ class Runtime:
                 await self._notify_parent_of_failure(defn.id, record)
 
     # ==================================================================
-    # Cognitive mode execution (Phase 2)
+    # Cognitive mode execution — ONE path for ALL cognitive agents
     # ==================================================================
+
+    async def route_tool_call(
+        self, name: str, tool_input: dict, agent_id: str,
+    ) -> dict:
+        """Universal tool router for all cognitive agents.
+
+        Handles shell tools (non-bridge providers), MCP connector tools,
+        and ATN framework tools.  Passes caller_id for fractality.
+        """
+        from .orchestrator.tools import execute_tool
+
+        # Shell tools (for non-bridge providers)
+        if name in _SHELL_TOOL_EXECUTORS:
+            return await _SHELL_TOOL_EXECUTORS[name](tool_input)
+        # Connector tools (mcp_{connector_id}_{tool_name})
+        if name.startswith("mcp_") and self.connectors:
+            parsed = self.connectors.parse_tool_name(name)
+            if parsed:
+                cid, tool_name = parsed
+                return await self.connectors.call_tool(cid, tool_name, tool_input)
+            return {"error": f"Unknown connector tool: {name}"}
+        # Framework tools
+        return await execute_tool(name, tool_input, self, caller_id=agent_id)
 
     async def _execute_cognitive_agent(
         self,
@@ -841,45 +872,58 @@ class Runtime:
         record: ExecutionRecord,
         cancel: asyncio.Event,
     ) -> None:
-        """Run a cognitive-mode agent via BridgeProvider.send_orchestrate().
+        """Run a cognitive-mode agent via provider.send_orchestrate().
 
-        This is the unified replacement for the old delegate session logic.
-        Cognitive agents get a bridge subprocess, system prompt, tool surface,
-        and run autonomously until completion or cancellation.
+        This is THE execution path for ALL cognitive agents — orchestrator
+        and children alike.  Differences are driven by configuration:
+
+        - Tool surface: defn.tools (["atn_full"] for orchestrator, ["atn_core"] for children)
+        - Provider lifecycle: orchestrator reuses its provider across turns;
+          children create ephemeral instances per execution.
+        - Conversation: orchestrator records to runtime.conversation (the chat UI);
+          children record to per-agent ConversationStore.
+        - Session resume: orchestrator uses BridgeProvider._session_id;
+          children append history to system prompt.
         """
         from .delegate_prompts import build_delegate_prompt
-        from .orchestrator.tools import execute_tool, _get_delegate_tools
+        from .orchestrator import ORCHESTRATOR_ID
+        from .orchestrator.tools import _get_delegate_tools, get_tool_definitions_for_bridge
 
-        sub_provider: BridgeProvider | None = None
+        is_orchestrator = defn.id == ORCHESTRATOR_ID
+        sub_provider = None
+        owns_provider = True  # whether we should close the provider in finally
 
         try:
-            # Clean up any stale provider from a previous execution
-            stale_provider = self._active_providers.pop(defn.id, None)
-            if stale_provider is not None:
-                log.info("Cleaning up stale provider for agent %s before new execution", defn.id)
-                try:
-                    await stale_provider.close()
-                except Exception:
-                    pass
-
-            # Resolve model — defn.provider or fallback
-            if defn.provider:
-                model_name = defn.provider if isinstance(defn.provider, str) else defn.provider[0]
+            # --- Provider lifecycle ---
+            if is_orchestrator:
+                # Orchestrator: reuse existing provider if available (session resume)
+                sub_provider = self._active_providers.get(defn.id)
+                if sub_provider is None:
+                    sub_provider = self._resolve_provider_with_fallback(defn)
+                    owns_provider = True
+                else:
+                    owns_provider = False  # reusing existing, don't close
             else:
-                model_name = defn.cognitive_model or self._config.orchestrator.model or "sonnet"
+                # Child agents: clean up stale, create fresh
+                stale_provider = self._active_providers.pop(defn.id, None)
+                if stale_provider is not None:
+                    log.info("Cleaning up stale provider for agent %s", defn.id)
+                    try:
+                        await stale_provider.close()
+                    except Exception:
+                        pass
+                sub_provider = self._resolve_provider_with_fallback(defn)
 
-            # Pick the right provider based on model name
-            sub_provider = self._resolve_provider_for_model(model_name, defn.id)
             sub_provider.event_bus = self.events
             sub_provider.source_agent_id = defn.id
 
-            # Track active provider for message injection
+            # Track active provider for message injection / interrupt
             self._active_providers[defn.id] = sub_provider
 
             # Register interrupt hook so killing cascades
             self.register_interrupt_hook(record.execution_id, sub_provider.interrupt)
 
-            # Build system prompt
+            # --- System prompt ---
             if defn.system_prompt:
                 system_prompt = defn.system_prompt
             else:
@@ -887,38 +931,45 @@ class Runtime:
                     defn.agent_type, defn.id, defn.parent_id,
                 )
 
-            # Resolve tool surface
-            delegate_tools = _get_delegate_tools()
+            # --- Tool surface (configurable, not hardcoded per path) ---
+            if "atn_full" in (defn.tools or []):
+                # Full orchestrator tool surface
+                agent_tools = get_tool_definitions_for_bridge()
+            else:
+                # Scoped delegate tools
+                agent_tools = _get_delegate_tools()
 
-            # For non-bridge providers (Gemini, OpenAI, Ollama), add shell/file
-            # tools since they don't come from an SDK.  BridgeProvider (Claude)
-            # already provides Bash, Read, Write, etc. via the Agent SDK.
+            # For non-bridge providers, add shell/file tools
             from .providers.bridge import BridgeProvider as _BP
             if not isinstance(sub_provider, _BP):
-                delegate_tools.extend(_SHELL_TOOLS)
+                agent_tools.extend(_SHELL_TOOLS)
 
+            # Add connector tools
             if self.connectors:
                 for cid, session in self.connectors._sessions.items():
                     if session and session.tools:
-                        delegate_tools.extend(
+                        agent_tools.extend(
                             {"name": t["name"], "description": t.get("description", ""),
                              "input_schema": t.get("inputSchema", t.get("input_schema", {}))}
                             for t in session.tools
                         )
 
-            # Drain inbox for the initial prompt
+            # --- Drain inbox ---
             all_messages = self.inbox.drain(defn.id)
             work_messages = [
                 m for m in all_messages
                 if m.type != MessageType.TRIGGER or m.data
             ]
 
-            # Build the user message — use inbox data if available
+            # --- Build user message ---
             prompt_parts: list[str] = []
             for msg in work_messages:
                 if msg.data:
                     instruction = msg.data.get("instruction", "")
                     if instruction:
+                        # Tag voice-sourced messages
+                        if msg.source == "voice":
+                            instruction = f"🎤 [Voice Input] {instruction}"
                         prompt_parts.append(instruction)
                     else:
                         prompt_parts.append(str(msg.data))
@@ -926,70 +977,44 @@ class Runtime:
                 prompt_parts.append(defn.description or defn.name)
             user_message = "\n\n".join(prompt_parts)
 
-            # Record user turn in agent conversation store
-            agent_convo = self.get_agent_conversation_store(defn.id)
-            # Only add user turn if it wasn't already recorded (e.g. by send_agent_message)
-            existing = agent_convo.get_turns()
-            if not existing or existing[-1].role != "user" or existing[-1].content != user_message:
-                agent_convo.add_user_turn(user_message)
+            # --- Session resume (orchestrator) or history injection (children) ---
+            session_id = ""
+            if is_orchestrator:
+                # Bridge providers support SDK session resume via session_id
+                session_id = getattr(sub_provider, '_session_id', "") or ""
+                if not session_id:
+                    # No active SDK session — prepend conversation history
+                    # for non-bridge providers
+                    history = self.conversation.get_history_for_prompt()
+                    if history:
+                        user_message = history + "\n\nUser: " + user_message
+                # Record user turn in the global conversation store
+                self.conversation.add_user_turn(user_message)
+            else:
+                # Child agents: record user turn in per-agent conversation store
+                agent_convo = self.get_agent_conversation_store(defn.id)
+                existing = agent_convo.get_turns()
+                if not existing or existing[-1].role != "user" or existing[-1].content != user_message:
+                    agent_convo.add_user_turn(user_message)
 
-            # Session continuity: if this agent has previous conversation turns
-            # (from prior executions), include them in the system prompt so it
-            # resumes with full awareness of its prior work.  We exclude the
-            # current user message (just recorded above) since it will be sent
-            # to the bridge as the user input.
-            prior_turns = agent_convo.get_turns()
-            # Drop the last turn if it matches our current user_message
-            if prior_turns and prior_turns[-1].role == "user" and prior_turns[-1].content == user_message:
-                prior_turns = prior_turns[:-1]
-            if prior_turns:
-                _ROLE_PREFIX = {"user": "User", "assistant": "Agent", "system": "System"}
-                history_parts = []
-                for turn in prior_turns:
-                    prefix = _ROLE_PREFIX.get(turn.role, turn.role.title())
-                    history_parts.append(f"{prefix}: {turn.content}")
+                # Append conversation history to system prompt for session continuity
+                prior_turns = agent_convo.get_turns()
+                if prior_turns and prior_turns[-1].role == "user" and prior_turns[-1].content == user_message:
+                    prior_turns = prior_turns[:-1]
+                if prior_turns:
+                    system_prompt = self._append_history_to_prompt(system_prompt, prior_turns)
 
-                # Sliding window: keep history under ~100k tokens (~400k chars)
-                # to leave room for system prompt + new turn + tool output.
-                _HISTORY_CHAR_BUDGET = 400_000
-                total_chars = sum(len(p) for p in history_parts)
-                start = 0
-                while start < len(history_parts) and total_chars > _HISTORY_CHAR_BUDGET:
-                    total_chars -= len(history_parts[start])
-                    start += 1
-                if start > 0 and start < len(history_parts):
-                    history_parts = history_parts[start:]
-                    history_parts.insert(0, "[Earlier conversation trimmed]")
-                elif start >= len(history_parts):
-                    history_parts = []
+            # --- Inject UTC time ---
+            from datetime import timezone as _tz
+            now = datetime.now(_tz.utc)
+            time_line = f"Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')} ({now.strftime('%A, %B %d, %Y')})"
+            user_message = f"[{time_line}]\n\n{user_message}"
 
-                if history_parts:
-                    conversation_history = "\n\n".join(history_parts)
-                    system_prompt += (
-                        "\n\n## Previous Conversation\n"
-                        "You have had previous interactions. Here is your conversation history. "
-                        "Continue from where you left off. You are the SAME agent — "
-                        "remember everything you did and were told.\n\n"
-                        + conversation_history
-                    )
-
-            # Tool executor — routes tools back through the orchestrator tool system.
-            # Passes caller_id so tools like delegate/create_agent know which
-            # agent is invoking them (fractality: sub-agents spawn sub-sub-agents).
+            # --- Tool executor (unified for all agents) ---
             async def _tool_executor(name: str, tool_input: dict) -> dict:
-                # Shell tools (for non-bridge providers)
-                if name in _SHELL_TOOL_EXECUTORS:
-                    return await _SHELL_TOOL_EXECUTORS[name](tool_input)
-                if name.startswith("mcp_"):
-                    for cid, session in self.connectors._sessions.items():
-                        prefix = f"mcp_{cid}_"
-                        if name.startswith(prefix):
-                            real_name = name[len(prefix):]
-                            return await self.connectors.call_tool(cid, real_name, tool_input)
-                    return {"error": f"Unknown connector tool: {name}"}
-                return await execute_tool(name, tool_input, self, caller_id=defn.id)
+                return await self.route_tool_call(name, tool_input, defn.id)
 
-            # Stream output to disk
+            # --- Streaming callback ---
             async def _on_chunk(text: str) -> None:
                 self.append_delegate_output(defn.id, text)
                 await self.events.emit(Event(
@@ -1003,17 +1028,21 @@ class Runtime:
                     },
                 ))
 
-            # Run the agent
-            response = await sub_provider.send_orchestrate(
-                message=user_message,
-                system=system_prompt,
-                tools=delegate_tools,
-                max_turns=defn.max_turns,
-                tool_executor=_tool_executor,
-                on_chunk=_on_chunk,
-            )
+            # --- Run the agent ---
+            send_kwargs: dict[str, Any] = {
+                "message": user_message,
+                "system": system_prompt,
+                "tools": agent_tools,
+                "max_turns": defn.max_turns,
+                "tool_executor": _tool_executor,
+                "on_chunk": _on_chunk,
+            }
+            if session_id:
+                send_kwargs["session_id"] = session_id
 
-            # Process result
+            response = await sub_provider.send_orchestrate(**send_kwargs)
+
+            # --- Process result ---
             result_text = response.text or ""
             total_tokens = (
                 response.usage.input_tokens
@@ -1022,7 +1051,6 @@ class Runtime:
                 + response.usage.cache_creation_tokens
             )
 
-            # Update execution record
             if response.stop_reason == "interrupted" or cancel.is_set():
                 record.status = ExecutionStatus.KILLED
                 record.error = "Interrupted"
@@ -1041,13 +1069,19 @@ class Runtime:
             }
 
             # Track token usage
-            provider_key = "claude_max"
+            provider_key = getattr(sub_provider, 'name', 'claude_max')
             if provider_key not in record.token_usage:
                 record.token_usage[provider_key] = TokenUsage(provider=provider_key)
             record.token_usage[provider_key].input_tokens += response.usage.input_tokens
             record.token_usage[provider_key].output_tokens += response.usage.output_tokens
             record.token_usage[provider_key].cache_read_tokens += response.usage.cache_read_tokens
             record.token_usage[provider_key].cache_creation_tokens += response.usage.cache_creation_tokens
+
+            # Orchestrator: record assistant turn in global conversation store
+            if is_orchestrator and result_text:
+                self.conversation.add_assistant_turn(
+                    result_text, execution_id=record.execution_id,
+                )
 
         except asyncio.CancelledError:
             record.status = ExecutionStatus.KILLED
@@ -1072,25 +1106,26 @@ class Runtime:
                     execution_id=record.execution_id,
                 ))
 
-            # Record assistant turn in agent conversation store
-            _convo_text = ""
-            if isinstance(record.output, dict):
-                _convo_text = record.output.get("result", "")
-            elif record.output:
-                _convo_text = str(record.output)
-            if record.error:
-                _convo_text = (
-                    f"{_convo_text}\n\nError: {record.error}"
-                    if _convo_text else f"Error: {record.error}"
-                )
-            if _convo_text:
-                try:
-                    _convo_store = self.get_agent_conversation_store(defn.id)
-                    _convo_store.add_assistant_turn(_convo_text, execution_id=record.execution_id)
-                except Exception:
-                    log.warning("Failed to record assistant turn for %s", defn.id)
+            # Record assistant turn in per-agent conversation store (children)
+            if not is_orchestrator:
+                _convo_text = ""
+                if isinstance(record.output, dict):
+                    _convo_text = record.output.get("result", "")
+                elif record.output:
+                    _convo_text = str(record.output)
+                if record.error:
+                    _convo_text = (
+                        f"{_convo_text}\n\nError: {record.error}"
+                        if _convo_text else f"Error: {record.error}"
+                    )
+                if _convo_text:
+                    try:
+                        _convo_store = self.get_agent_conversation_store(defn.id)
+                        _convo_store.add_assistant_turn(_convo_text, execution_id=record.execution_id)
+                    except Exception:
+                        log.warning("Failed to record assistant turn for %s", defn.id)
 
-            # Sync delegate registry (backward compat with delegate tools)
+            # Sync delegate registry (for UI observability)
             result_text = ""
             total_tokens = 0
             if isinstance(record.output, dict):
@@ -1124,24 +1159,22 @@ class Runtime:
             self._tasks.pop(record.execution_id, None)
             self._cancels.pop(record.execution_id, None)
             self._interrupt_hooks.pop(record.execution_id, None)
-            self._active_providers.pop(defn.id, None)
 
-            if self._running_count.get(defn.id, 0) == 0:
-                # Mark agent as idle for heartbeat scheduling
-                self._last_idle[defn.id] = datetime.now(timezone.utc)
-                if record.status == ExecutionStatus.FAILED:
-                    self._status[defn.id] = AgentStatus.ERROR
-                elif self._status.get(defn.id) == AgentStatus.RUNNING:
-                    # Temporary — _on_agent_completed will set the final
-                    # status (COMPLETED for one-shots, ACTIVE for scheduled).
-                    self._status[defn.id] = AgentStatus.ACTIVE
-
-            # Clean up bridge subprocess
-            if sub_provider is not None:
+            # Provider lifecycle: orchestrator keeps its provider; children clean up
+            if owns_provider and sub_provider is not None:
+                self._active_providers.pop(defn.id, None)
                 try:
                     await sub_provider.close()
                 except Exception:
                     pass
+            # Orchestrator provider stays in _active_providers for session resume
+
+            if self._running_count.get(defn.id, 0) == 0:
+                self._last_idle[defn.id] = datetime.now(timezone.utc)
+                if record.status == ExecutionStatus.FAILED:
+                    self._status[defn.id] = AgentStatus.ERROR
+                elif self._status.get(defn.id) == AgentStatus.RUNNING:
+                    self._status[defn.id] = AgentStatus.ACTIVE
 
             # Signal delegate_done for collect waiters
             done_event = self._delegate_done.get(defn.id)
@@ -1174,6 +1207,133 @@ class Runtime:
                     "error": record.error,
                 },
             ))
+
+    def _resolve_provider_with_fallback(self, defn: AgentDefinition) -> Any:
+        """Resolve a provider for a cognitive agent, trying fallback chain.
+
+        If defn.provider is a list of provider names (e.g. ["claude_max", "anthropic"]),
+        tries each in order using defn.cognitive_model.
+        If defn.provider is a string, it may be a provider name OR a model name
+        (for children that specify "gemini-2.5-flash" directly).
+        """
+        providers = defn.provider
+        model = defn.cognitive_model or self._config.orchestrator.model or "claude-sonnet-4-6"
+
+        if isinstance(providers, list):
+            # Provider fallback chain — try each provider name in order
+            for provider_name in providers:
+                try:
+                    return self._resolve_provider_by_name(provider_name, model, defn.id)
+                except Exception:
+                    log.info("Provider '%s' not available for %s, trying next", provider_name, defn.id)
+            # All failed — try the first one and let it raise
+            first = providers[0] if providers else "claude_max"
+            return self._resolve_provider_by_name(first, model, defn.id)
+        elif providers:
+            # Single string — could be a provider name ("claude_max") or
+            # a model name ("gemini-2.5-flash") for backward compat with children
+            if providers in self._KNOWN_PROVIDERS or providers in self._custom_providers:
+                return self._resolve_provider_by_name(providers, model, defn.id)
+            # Treat as model name (legacy child agent path)
+            return self._resolve_provider_for_model(providers, defn.id)
+        else:
+            return self._resolve_provider_for_model(model, defn.id)
+
+    def _resolve_provider_by_name(self, provider_name: str, model: str, agent_id: str) -> Any:
+        """Create a provider instance by provider name + model.
+
+        Maps provider names (claude_max, anthropic, gemini, openai, ollama)
+        to the correct provider class with the given model.
+        """
+        from .providers.bridge import BridgeProvider
+        from .providers.openai_compat import OpenAICompatibleProvider
+
+        if provider_name == "claude_max":
+            return BridgeProvider(model=model)
+
+        if provider_name == "anthropic":
+            api_key = self._resolve_api_key("anthropic")
+            if not api_key:
+                raise ProviderError("No Anthropic API key configured")
+            return AnthropicProvider(api_key=api_key, default_model=model, base_url="")
+
+        if provider_name == "gemini":
+            api_key = self._resolve_api_key("gemini")
+            if not api_key:
+                raise ProviderError("No Gemini API key configured")
+            defaults = self._PROVIDER_DEFAULTS.get("gemini", {})
+            return OpenAICompatibleProvider(
+                name=f"gemini-{agent_id}",
+                base_url=defaults.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai"),
+                api_key=api_key,
+                default_model=model,
+            )
+
+        if provider_name == "openai":
+            api_key = self._resolve_api_key("openai")
+            if not api_key:
+                raise ProviderError("No OpenAI API key configured")
+            return OpenAICompatibleProvider(
+                name=f"openai-{agent_id}",
+                base_url="https://api.openai.com/v1",
+                api_key=api_key,
+                default_model=model,
+            )
+
+        if provider_name == "ollama":
+            defaults = self._PROVIDER_DEFAULTS.get("ollama", {})
+            pconfig = self._config.providers.get("ollama")
+            return OllamaProvider(
+                base_url=(pconfig.base_url if pconfig else "") or defaults.get("base_url", "http://localhost:11434"),
+                default_model=model,
+            )
+
+        # Custom provider
+        if provider_name in self._custom_providers:
+            pconfig = self._config.providers.get(provider_name)
+            if pconfig and pconfig.base_url:
+                api_key = self._resolve_api_key(provider_name)
+                return OpenAICompatibleProvider(
+                    name=provider_name,
+                    base_url=pconfig.base_url,
+                    api_key=api_key,
+                    default_model=model,
+                )
+
+        raise ProviderError(f"Unknown provider: {provider_name}")
+
+    @staticmethod
+    def _append_history_to_prompt(system_prompt: str, prior_turns: list) -> str:
+        """Append conversation history to system prompt for session continuity."""
+        _ROLE_PREFIX = {"user": "User", "assistant": "Agent", "system": "System"}
+        history_parts = []
+        for turn in prior_turns:
+            prefix = _ROLE_PREFIX.get(turn.role, turn.role.title())
+            history_parts.append(f"{prefix}: {turn.content}")
+
+        # Sliding window: keep under ~100k tokens (~400k chars)
+        _HISTORY_CHAR_BUDGET = 400_000
+        total_chars = sum(len(p) for p in history_parts)
+        start = 0
+        while start < len(history_parts) and total_chars > _HISTORY_CHAR_BUDGET:
+            total_chars -= len(history_parts[start])
+            start += 1
+        if start > 0 and start < len(history_parts):
+            history_parts = history_parts[start:]
+            history_parts.insert(0, "[Earlier conversation trimmed]")
+        elif start >= len(history_parts):
+            history_parts = []
+
+        if history_parts:
+            conversation_history = "\n\n".join(history_parts)
+            system_prompt += (
+                "\n\n## Previous Conversation\n"
+                "You have had previous interactions. Here is your conversation history. "
+                "Continue from where you left off. You are the SAME agent — "
+                "remember everything you did and were told.\n\n"
+                + conversation_history
+            )
+        return system_prompt
 
     # ------------------------------------------------------------------
     # Hierarchy support
@@ -1463,19 +1623,11 @@ class Runtime:
     async def interrupt_orchestrator(self) -> bool:
         """Interrupt the running orchestrator session.
 
-        Finds the orchestrator's bridge provider and calls interrupt().
+        Finds the orchestrator's active provider and calls interrupt().
         Returns True if the interrupt was sent.
         """
-        from .providers.bridge import BridgeProvider
-        from .steps.cognitive import CognitiveStepExecutor
-        cognitive = self._executors.get(StepType.COGNITIVE)
-        if not isinstance(cognitive, CognitiveStepExecutor):
-            return False
-        provider = cognitive._providers.get("claude_max")
-        if not isinstance(provider, BridgeProvider):
-            return False
-        await provider.interrupt()
-        return True
+        from .orchestrator import ORCHESTRATOR_ID
+        return await self.interrupt_delegate(ORCHESTRATOR_ID)
 
     # ------------------------------------------------------------------
     # Context inspection
@@ -1525,21 +1677,15 @@ class Runtime:
     def _get_bridge_provider(self, agent_id: str | None = None) -> Any:
         """Resolve a BridgeProvider for the given agent.
 
-        If agent_id is None or "orchestrator", returns the orchestrator's
-        bridge provider.  Otherwise looks up the agent's active provider.
+        Looks up the agent's active provider in _active_providers.
+        If agent_id is None, defaults to the orchestrator.
         Returns None if not found or not a BridgeProvider.
         """
+        from .orchestrator import ORCHESTRATOR_ID
         from .providers.bridge import BridgeProvider
-        if agent_id is None or agent_id == "orchestrator":
-            from .steps.cognitive import CognitiveStepExecutor
-            cognitive = self._executors.get(StepType.COGNITIVE)
-            if not isinstance(cognitive, CognitiveStepExecutor):
-                return None
-            provider = cognitive._providers.get("claude_max")
-            return provider if isinstance(provider, BridgeProvider) else None
-        else:
-            provider = self._active_providers.get(agent_id)
-            return provider if isinstance(provider, BridgeProvider) else None
+        target = agent_id or ORCHESTRATOR_ID
+        provider = self._active_providers.get(target)
+        return provider if isinstance(provider, BridgeProvider) else None
 
     def get_session_stats(self, agent_id: str | None = None) -> dict[str, Any]:
         """Return session stats for the orchestrator or a delegate.
@@ -1812,8 +1958,7 @@ class Runtime:
         orch_defn = self._agents.get(ORCHESTRATOR_ID)
         orch_info = None
         if orch_defn:
-            step_cfg = orch_defn.steps[0].config if orch_defn.steps else {}
-            raw_provider = step_cfg.get("provider", "")
+            raw_provider = orch_defn.provider or ""
             # Provider may be a string or a fallback chain list
             if isinstance(raw_provider, list):
                 primary_provider = raw_provider[0] if raw_provider else ""
@@ -1821,7 +1966,7 @@ class Runtime:
             else:
                 primary_provider = raw_provider
                 fallback_providers = []
-            orch_model = step_cfg.get("model", "")
+            orch_model = orch_defn.cognitive_model or ""
             orch_info = {
                 "provider": primary_provider,
                 "model": orch_model,
@@ -2750,8 +2895,7 @@ class Runtime:
         defn = create_orchestrator_agent(self._config.orchestrator, **kwargs)
         await self.register_agent(defn)
         await self.activate_agent(defn.id)
-        log.info("Orchestrator registered and activated (provider=%s)",
-                 defn.steps[0].config.get("provider", "?"))
+        log.info("Orchestrator registered and activated (provider=%s)", defn.provider)
 
         # Inject status briefing if this is a fresh conversation
         if self.conversation.turn_count() == 0:
@@ -2769,9 +2913,7 @@ class Runtime:
 
         # Validate
         orch_defn = self._agents.get(ORCHESTRATOR_ID)
-        raw_provider = ""
-        if orch_defn and orch_defn.steps:
-            raw_provider = orch_defn.steps[0].config.get("provider", "")
+        raw_provider = orch_defn.provider if orch_defn else ""
         primary_provider = raw_provider[0] if isinstance(raw_provider, list) else raw_provider
         available = self._get_available_models(primary_provider)
         available_ids = [m["id"] for m in available]
@@ -2797,17 +2939,6 @@ class Runtime:
 
         # Clear session so the new model starts a fresh SDK session
         self._clear_bridge_session()
-
-        # Also update the BridgeProvider's default model so it matches.
-        # The step config passes the model explicitly, but this ensures
-        # consistency if anything falls back to provider._model.
-        from .providers.bridge import BridgeProvider
-        from .steps.cognitive import CognitiveStepExecutor
-        cognitive = self._executors.get(StepType.COGNITIVE)
-        if isinstance(cognitive, CognitiveStepExecutor):
-            provider = cognitive._providers.get("claude_max")
-            if isinstance(provider, BridgeProvider):
-                provider._model = model
 
         log.info("Orchestrator model changed to '%s'", model)
         return defn.id
@@ -2967,9 +3098,7 @@ class Runtime:
 
         # Build the briefing
         orch_defn = self._agents.get(ORCHESTRATOR_ID)
-        model = ""
-        if orch_defn and orch_defn.steps:
-            model = orch_defn.steps[0].config.get("model", "")
+        model = orch_defn.cognitive_model if orch_defn else ""
 
         now = datetime.now(timezone.utc)
         lines = [f"Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')} ({now.strftime('%A, %B %d, %Y')})"]

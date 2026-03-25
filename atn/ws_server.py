@@ -594,22 +594,31 @@ class WebSocketBridge:
             await self.runtime.new_conversation()
             return {"msg_id": msg_id, "ok": True, "result": {"status": "Conversation reset"}}
 
-        # Special case: inject user message into running orchestrator session
+        # Special case: inject user message into running orchestrator session.
+        # If the bridge process isn't running (e.g. after a daemon restart),
+        # fall through to the normal post_message path which will trigger
+        # a new execution.
         if msg_type == "orchestrator_message":
             content = msg.get("content", "")
             if not content:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'content' field"}
+            from .orchestrator import ORCHESTRATOR_ID
             from .providers.bridge import BridgeProvider
-            from .steps.cognitive import CognitiveStepExecutor
-            from .models import StepType
-            cognitive = self.runtime._executors.get(StepType.COGNITIVE)
-            if not isinstance(cognitive, CognitiveStepExecutor):
-                return {"msg_id": msg_id, "ok": False, "error": "No cognitive executor"}
-            provider = cognitive._providers.get("claude_max")
-            if not isinstance(provider, BridgeProvider):
-                return {"msg_id": msg_id, "ok": False, "error": "No bridge provider"}
-            await provider.send_user_message(content)
-            return {"msg_id": msg_id, "ok": True, "result": {"status": "injected"}}
+            provider = self.runtime._active_providers.get(ORCHESTRATOR_ID)
+            if isinstance(provider, BridgeProvider) and provider._process and provider._process.returncode is None:
+                await provider.send_user_message(content)
+                return {"msg_id": msg_id, "ok": True, "result": {"status": "injected"}}
+            # Bridge not running — convert to post_message so it triggers an execution
+            msg_type = "post_message"
+            msg = {
+                "msg_id": msg_id,
+                "type": "post_message",
+                "target": "orchestrator",
+                "message_type": "work",
+                "priority": "high",
+                "data": {"instruction": content},
+                "source": "user",
+            }
 
         # Strip protocol fields, pass only tool arguments.
         # Note: "type" is the routing field but also a valid arg for some tools
@@ -663,7 +672,7 @@ class WebSocketBridge:
 
         # Broadcast to all connected clients, drop failures silently
         stale: list[ServerConnection] = []
-        for ws in self._clients:
+        for ws in list(self._clients):
             try:
                 await ws.send(payload)
             except websockets.ConnectionClosed:

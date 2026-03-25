@@ -598,7 +598,7 @@ async def _route_tool_call(
 
     # Fall back to orchestrator tool executor
     if orchestrator_exec_fn and context.runtime:
-        return await orchestrator_exec_fn(name, input, context.runtime)
+        return await orchestrator_exec_fn(name, input, context.runtime, caller_id=context.agent_id)
 
     return {"error": f"Unknown tool: {name}"}
 

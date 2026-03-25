@@ -80,7 +80,7 @@ TOOL_SOUND_MAP = {
     "WebFetch": "web", "WebSearch": "web", "TodoWrite": "todo",
     "NotebookEdit": "edit",
     # Orchestrator tools
-    "create_agent": "agent", "delegate": "agent",
+    "create_agent": "agent",
     "trigger_run": "execute", "get_execution": "read",
     "use_connector": "execute",
 }
@@ -783,9 +783,10 @@ def _tool_narration(name: str, inp: dict) -> str:
         return f"Searching for {inp.get('pattern', '')[:40]}"
     if name == "Glob":
         return f"Finding files matching {inp.get('pattern', '')[:40]}"
-    if name == "delegate":
-        return f"Delegating: {inp.get('title', inp.get('prompt', '')[:40])}"
     if name == "create_agent":
+        mode = inp.get("mode", "pipeline")
+        if mode == "cognitive" and inp.get("prompt"):
+            return f"Spawning agent: {inp.get('name', inp.get('prompt', '')[:40])}"
         return f"Creating agent: {inp.get('name', inp.get('id', ''))}"
     if name == "trigger_run":
         return f"Triggering {inp.get('agent_id', '')}"

@@ -229,16 +229,19 @@ class BridgeProvider(Provider):
                     event = await asyncio.wait_for(self._event_queue.get(), timeout=120)
                 except asyncio.TimeoutError:
                     break
-                if event.get("type") == "done":
-                    break
-                if event.get("type") == "text_delta" and on_chunk:
-                    text = event.get("text", "")
-                    if text:
-                        await on_chunk(text)
-                elif event.get("type") == "thinking" and on_thinking:
-                    text = event.get("text", "")
-                    if text:
-                        await on_thinking(text)
+                try:
+                    if event.get("type") == "done":
+                        break
+                    if event.get("type") == "text_delta" and on_chunk:
+                        text = event.get("text", "")
+                        if text:
+                            await on_chunk(text)
+                    elif event.get("type") == "thinking" and on_thinking:
+                        text = event.get("text", "")
+                        if text:
+                            await on_thinking(text)
+                except Exception:
+                    log.exception("Error processing stream event: %s", event)
 
         async def _get_response() -> dict[str, Any]:
             """Send request and get the final JSON response."""
@@ -386,65 +389,68 @@ class BridgeProvider(Provider):
                         )
                     except asyncio.TimeoutError:
                         break
-                    if event.get("type") == "done":
-                        break
-                    if event.get("type") == "text_delta":
-                        text = event.get("text", "")
-                        if text and on_chunk:
-                            await on_chunk(text)
-                    elif event.get("type") == "tool_use_start" and self.event_bus:
-                        await self.event_bus.emit(Event(
-                            type=EventType.AGENT_TOOL_USE_START,
-                            source=self.source_agent_id,
-                            data={
-                                "agent_id": self.source_agent_id,
-                                "tool_use_id": event.get("tool_use_id", ""),
-                                "tool_name": event.get("tool_name", ""),
-                                "input": event.get("input", {}),
-                            },
-                        ))
-                    elif event.get("type") == "tool_use_result" and self.event_bus:
-                        await self.event_bus.emit(Event(
-                            type=EventType.AGENT_TOOL_USE_RESULT,
-                            source=self.source_agent_id,
-                            data={
-                                "agent_id": self.source_agent_id,
-                                "tool_use_id": event.get("tool_use_id", ""),
-                                "is_error": event.get("is_error", False),
-                            },
-                        ))
-                    elif event.get("type") == "compaction":
-                        self._compaction_count += 1
-                        self._last_compaction_pre_tokens = event.get("pre_tokens", 0)
-                        logger.info(
-                            "Context compaction #%d (trigger=%s, pre_tokens=%d)",
-                            self._compaction_count,
-                            event.get("trigger", "auto"),
-                            self._last_compaction_pre_tokens,
-                        )
-                        if self.event_bus:
+                    try:
+                        if event.get("type") == "done":
+                            break
+                        if event.get("type") == "text_delta":
+                            text = event.get("text", "")
+                            if text and on_chunk:
+                                await on_chunk(text)
+                        elif event.get("type") == "tool_use_start" and self.event_bus:
                             await self.event_bus.emit(Event(
-                                type=EventType.CUSTOM,
+                                type=EventType.AGENT_TOOL_USE_START,
                                 source=self.source_agent_id,
                                 data={
-                                    "type": "context_compaction",
                                     "agent_id": self.source_agent_id,
-                                    "compaction_count": self._compaction_count,
-                                    "trigger": event.get("trigger", "auto"),
-                                    "pre_tokens": self._last_compaction_pre_tokens,
+                                    "tool_use_id": event.get("tool_use_id", ""),
+                                    "tool_name": event.get("tool_name", ""),
+                                    "input": event.get("input", {}),
                                 },
                             ))
-                    elif event.get("type") == "status":
-                        status = event.get("status", "idle")
-                        if status == "compacting" and self.event_bus:
+                        elif event.get("type") == "tool_use_result" and self.event_bus:
                             await self.event_bus.emit(Event(
-                                type=EventType.CUSTOM,
+                                type=EventType.AGENT_TOOL_USE_RESULT,
                                 source=self.source_agent_id,
                                 data={
-                                    "type": "context_compacting",
                                     "agent_id": self.source_agent_id,
+                                    "tool_use_id": event.get("tool_use_id", ""),
+                                    "is_error": event.get("is_error", False),
                                 },
                             ))
+                        elif event.get("type") == "compaction":
+                            self._compaction_count += 1
+                            self._last_compaction_pre_tokens = event.get("pre_tokens", 0)
+                            log.info(
+                                "Context compaction #%d (trigger=%s, pre_tokens=%d)",
+                                self._compaction_count,
+                                event.get("trigger", "auto"),
+                                self._last_compaction_pre_tokens,
+                            )
+                            if self.event_bus:
+                                await self.event_bus.emit(Event(
+                                    type=EventType.CUSTOM,
+                                    source=self.source_agent_id,
+                                    data={
+                                        "type": "context_compaction",
+                                        "agent_id": self.source_agent_id,
+                                        "compaction_count": self._compaction_count,
+                                        "trigger": event.get("trigger", "auto"),
+                                        "pre_tokens": self._last_compaction_pre_tokens,
+                                    },
+                                ))
+                        elif event.get("type") == "status":
+                            status = event.get("status", "idle")
+                            if status == "compacting" and self.event_bus:
+                                await self.event_bus.emit(Event(
+                                    type=EventType.CUSTOM,
+                                    source=self.source_agent_id,
+                                    data={
+                                        "type": "context_compacting",
+                                        "agent_id": self.source_agent_id,
+                                    },
+                                ))
+                    except Exception:
+                        log.exception("Error processing stream event: %s", event)
 
             stream_task = asyncio.create_task(_stream_events())
 
