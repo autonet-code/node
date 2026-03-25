@@ -49,6 +49,14 @@ class ScriptStepExecutor(StepExecutor):
         env["EXECUTION_ID"] = context.execution_id
         env["STEP_INDEX"] = str(step_index)
 
+        # Expose inbox message data so scripts can read tool inputs
+        if context.inbox_messages:
+            import json as _json
+            # For tool-exposed pipelines, the first inbox message carries the tool arguments
+            first_msg = context.inbox_messages[0]
+            msg_data = getattr(first_msg, "data", None) or {}
+            env["ATN_INBOX_DATA"] = _json.dumps(msg_data) if isinstance(msg_data, dict) else str(msg_data)
+
         # Feed previous step output as stdin
         stdin_data: bytes | None = None
         if context.previous_outputs:
@@ -99,7 +107,7 @@ class ScriptStepExecutor(StepExecutor):
                 "exit_code": process.returncode,
             }
 
-            if process.returncode == 0:
+            if process.returncode == 0 or step.config.get("allow_failure"):
                 result.status = ExecutionStatus.COMPLETED
             else:
                 result.status = ExecutionStatus.FAILED
