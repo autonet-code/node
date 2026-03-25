@@ -1777,6 +1777,15 @@ class Runtime:
             }
             if defn.connector_ids:
                 agent_info["connector_ids"] = defn.connector_ids
+            # Hierarchy info for UI agent cards
+            if defn.parent_id:
+                agent_info["parent_id"] = self._resolve_parent_agent_id(defn.parent_id)
+            children_count = sum(
+                1 for d in self._agents.values()
+                if d.parent_id and self._resolve_parent_agent_id(d.parent_id) == aid
+            )
+            if children_count:
+                agent_info["children_count"] = children_count
             agents[aid] = agent_info
         executions = {}
         for eid, rec in self._executions.items():
