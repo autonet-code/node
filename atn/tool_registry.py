@@ -272,7 +272,7 @@ class ToolRegistry:
             priority=MessagePriority.NORMAL,
             data=arguments,
         )
-        rt.inbox.deliver(msg)
+        rt.inbox.post(msg)
 
         # Trigger the pipeline run
         eid = await rt.trigger_run(tool.agent_id, source=f"tool:{caller_id or 'direct'}")
@@ -326,7 +326,7 @@ class ToolRegistry:
                     "output": record.output if record.status == ExecutionStatus.COMPLETED else None,
                 },
             )
-            rt.inbox.deliver(notify_msg)
+            rt.inbox.post(notify_msg)
 
         return result
 
