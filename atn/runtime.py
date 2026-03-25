@@ -240,12 +240,17 @@ class Runtime:
 
         # Planning tasks (in-memory, persisted to JSON)
         self.planning_tasks: list[PlanningTask] = []
+
+        # Shutdown event — signaled when stop() is called, allows input loop to exit
+        self._shutdown_event: asyncio.Event = asyncio.Event()
         self._planning_tasks_path = self._config.data_dir / "planning_tasks.json"
         self._load_planning_tasks()
 
         # Planning loop interval (seconds).  0 = disabled.
         self._planning_interval: float = 21600.0  # 6 hours
-        self._last_planning_review: datetime | None = None
+        # Set to "now" so the first review waits for the full interval
+        # instead of firing immediately at startup (before bridge is ready).
+        self._last_planning_review: datetime | None = datetime.now(timezone.utc)
 
         # MCP connectors — start with bundled specs, overlay user config
         from .connectors import get_bundled_specs
@@ -311,9 +316,9 @@ class Runtime:
         self._running_count: dict[str, int] = {}                # agent_id -> count
         self._interrupt_hooks: dict[str, Callable] = {}         # eid -> async callable
 
-        # Step executors
+        # Step executors — assign _executors BEFORE _setup_providers so that
+        # any code path during provider registration can safely access it.
         cognitive = CognitiveStepExecutor()
-        self._setup_providers(cognitive)
         self._executors: dict[StepType, StepExecutor] = {
             StepType.SCRIPT: ScriptStepExecutor(),
             StepType.MESSAGE: MessageStepExecutor(),
@@ -321,6 +326,7 @@ class Runtime:
             StepType.COLLECT: CollectStepExecutor(),
             StepType.COGNITIVE: cognitive,
         }
+        self._setup_providers(cognitive)
 
         # Scheduler — idle-based: timer counts from when agent becomes idle
         self._schedule_table: dict[str, float] = {}             # agent_id -> seconds
@@ -372,6 +378,7 @@ class Runtime:
 
     async def stop(self) -> None:
         self._running = False
+        self._shutdown_event.set()
         await self.kill_all()
         # Stop voice service
         if self.voice is not None:
@@ -2026,6 +2033,8 @@ class Runtime:
 
         # Also register API-key providers that are in the credential store
         # but not in config.yaml (configured via the UI).
+        # NOTE: Cannot use _hot_register_provider here because self._executors
+        # hasn't been assigned yet.  Register directly on the cognitive instance.
         for pid in ("anthropic", "gemini", "openai"):
             if pid in self._config.providers:
                 continue  # already handled above
@@ -2033,7 +2042,18 @@ class Runtime:
             if not api_key:
                 continue
             try:
-                self._hot_register_provider(pid, api_key)
+                if pid == "anthropic":
+                    provider = AnthropicProvider(api_key=api_key, default_model="", base_url="")
+                else:
+                    defaults = self._PROVIDER_DEFAULTS.get(pid, {})
+                    provider = OpenAICompatibleProvider(
+                        name=pid,
+                        base_url=defaults.get("base_url", ""),
+                        api_key=api_key,
+                        default_model=defaults.get("default_model", ""),
+                    )
+                cognitive.register_provider(provider)
+                log.info("Registered credential-store provider: %s", pid)
             except Exception as exc:
                 log.warning("Failed to register credential-store provider '%s': %s", pid, exc)
 

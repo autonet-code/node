@@ -88,22 +88,11 @@ class DelegateRegistry:
 
     def __init__(self, store_path: Path | None = None) -> None:
         self._nodes: dict[str, DelegateNode] = {}
-        self._child_counters: dict[str, int] = {}  # parent_id -> next child number
         self._store_path = store_path
 
     # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
-
-    def generate_child_id(self, parent_id: str) -> str:
-        """Generate the next hierarchical child ID for a parent.
-
-        Example: "orch" -> "orch.1", then "orch.2", etc.
-                 "orch.1" -> "orch.1.1", "orch.1.2", etc.
-        """
-        count = self._child_counters.get(parent_id, 0) + 1
-        self._child_counters[parent_id] = count
-        return f"{parent_id}.{count}"
 
     def register(
         self,
@@ -230,7 +219,6 @@ class DelegateRegistry:
     def clear(self) -> None:
         """Remove all delegate records."""
         self._nodes.clear()
-        self._child_counters.clear()
 
     # ------------------------------------------------------------------
     # Persistence
@@ -259,19 +247,6 @@ class DelegateRegistry:
             for nd in raw.get("nodes", []):
                 node = DelegateNode.from_dict(nd)
                 self._nodes[node.agent_id] = node
-            # Rebuild child counters from loaded data
-            for node in self._nodes.values():
-                if node.parent_id:
-                    # Parse the child number from the agent_id
-                    parts = node.agent_id.rsplit(".", 1)
-                    if len(parts) == 2:
-                        try:
-                            child_num = int(parts[1])
-                            current = self._child_counters.get(node.parent_id, 0)
-                            if child_num > current:
-                                self._child_counters[node.parent_id] = child_num
-                        except ValueError:
-                            pass
             log.info("Loaded %d delegate records", len(self._nodes))
         except Exception:
             log.exception("Failed to load delegate registry from %s", self._store_path)
