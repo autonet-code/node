@@ -820,6 +820,10 @@ class Runtime:
                 },
             ))
 
+            # Propagate failure to parent agent
+            if record.status == ExecutionStatus.FAILED:
+                await self._notify_parent_of_failure(defn.id, record)
+
     # ==================================================================
     # Cognitive mode execution (Phase 2)
     # ==================================================================
@@ -1140,6 +1144,10 @@ class Runtime:
             # Innate wake-up: notify parent on completion
             await self._on_agent_completed(defn.id, record)
 
+            # Propagate failure to parent agent
+            if record.status == ExecutionStatus.FAILED:
+                await self._notify_parent_of_failure(defn.id, record)
+
             # Final execution event
             etype = {
                 ExecutionStatus.COMPLETED: EventType.EXECUTION_COMPLETED,
@@ -1203,6 +1211,69 @@ class Runtime:
                 descendants.append(child)
                 queue.append(child.id)
         return descendants
+
+    # ------------------------------------------------------------------
+    # Failure propagation: notify parent of child errors
+    # ------------------------------------------------------------------
+
+    async def _notify_parent_of_failure(
+        self, agent_id: str, record: ExecutionRecord
+    ) -> None:
+        """Post an ALERT to the parent agent when a child execution fails.
+
+        This ensures supervisor agents can react autonomously to errors
+        in their child agents rather than having to poll for status.
+        """
+        if record.status != ExecutionStatus.FAILED:
+            return
+
+        defn = self._agents.get(agent_id)
+        if not defn or not defn.parent_id:
+            return
+
+        resolved_parent = self._resolve_parent_agent_id(defn.parent_id)
+        if resolved_parent not in self._agents:
+            return
+
+        msg = InboxMessage(
+            id=InboxMessage.generate_id(),
+            source=agent_id,
+            target=resolved_parent,
+            type=MessageType.ALERT,
+            priority=MessagePriority.HIGH,
+            data={
+                "type": "child_error",
+                "child_agent": agent_id,
+                "child_name": defn.name,
+                "error": record.error or "Unknown error",
+                "execution_id": record.execution_id,
+                "instruction": (
+                    f"Your child agent '{defn.name}' ({agent_id}) failed: "
+                    f"{record.error or 'Unknown error'}. "
+                    f"Investigate and decide whether to retry, fix, or escalate."
+                ),
+            },
+        )
+        self.inbox.post(msg)
+        log.info(
+            "Failure propagation: posted child_error ALERT for %s -> parent %s",
+            agent_id, resolved_parent,
+        )
+
+        # If parent has an active bridge session, inject directly
+        parent_provider = self._active_providers.get(resolved_parent)
+        if parent_provider is None:
+            parent_provider = self._active_providers.get(defn.parent_id)
+        if parent_provider is not None:
+            inject_text = (
+                f"[CHILD FAILED] Agent '{defn.name}' ({agent_id}) "
+                f"failed with error: {record.error or 'Unknown error'}"
+            )
+            try:
+                await parent_provider.send_user_message(inject_text)
+                log.info("Injected failure alert into parent %s bridge session", resolved_parent)
+            except Exception:
+                log.debug("Could not inject failure into parent bridge (may not support send_user_message)")
 
     # ------------------------------------------------------------------
     # Innate wake-up: child completion -> parent inbox message
