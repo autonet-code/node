@@ -142,6 +142,47 @@ def _resolve_env(value: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# .env loading (no external dependency)
+# ---------------------------------------------------------------------------
+
+def _load_dotenv(env_path: Path | None = None) -> int:
+    """Load key=value pairs from a .env file into os.environ.
+
+    Skips blank lines and comments (#).  Strips optional quotes around
+    values.  Does NOT override variables that are already set.
+
+    Returns the number of variables loaded.
+    """
+    if env_path is None:
+        env_path = _DEFAULT_DIR / ".env"
+    if not env_path.is_file():
+        return 0
+
+    loaded = 0
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            # Strip surrounding quotes (single or double)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = value
+                loaded += 1
+    except Exception:
+        log.warning("Failed to load .env from %s", env_path, exc_info=True)
+    if loaded:
+        log.info("Loaded %d env variable(s) from %s", loaded, env_path)
+    return loaded
+
+
+# ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
 
@@ -157,6 +198,9 @@ def load_config(path: Path | None = None) -> ATNConfig:
     """
     if path is None:
         path = _DEFAULT_DIR / "config.yaml"
+
+    # Load ~/.atn/.env before config so ${VAR} interpolation can use .env values
+    _load_dotenv()
 
     config = ATNConfig()
 
