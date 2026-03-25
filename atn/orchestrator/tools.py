@@ -1921,7 +1921,7 @@ async def _delegate_message(runtime: Runtime, input: dict[str, Any]) -> dict[str
     if defn is not None:
         runtime.inbox.post(InboxMessage(
             id=InboxMessage.generate_id(),
-            source="orch",
+            source="orchestrator",
             target=agent_id,
             type=MessageType.WORK,
             priority=MessagePriority.HIGH,
