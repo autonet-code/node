@@ -327,10 +327,6 @@ class Runtime:
         self._heartbeat_table: dict[str, float] = {}            # agent_id -> heartbeat seconds
         self._last_idle: dict[str, datetime] = {}               # agent_id -> when it became idle
 
-        # Orchestrator watchdog — ping idle orchestrator when children are active
-        self._watchdog_interval: float = 600.0  # 10 minutes
-        self._last_watchdog_ping: datetime | None = None
-
         # Background loops
         self._running = False
         self._scheduler_task: asyncio.Task | None = None
@@ -1656,11 +1652,6 @@ class Runtime:
                         self._last_planning_review = now
                         await self._post_planning_review()
 
-                # --- Orchestrator watchdog ---
-                # If the orchestrator is idle (ACTIVE, not RUNNING) but has
-                # active child agents, ping it so it can check on them.
-                await self._orchestrator_watchdog(now)
-
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
@@ -1736,59 +1727,6 @@ class Runtime:
             data={"type": "planning_review", "instruction": context},
         ))
         log.info("Planning review posted to orchestrator inbox")
-
-    async def _orchestrator_watchdog(self, now: datetime) -> None:
-        """Ping the orchestrator if it's idle but has active child agents.
-
-        This prevents the orchestrator from going silent when children are
-        still working.  Only fires every ``_watchdog_interval`` seconds.
-        """
-        from .orchestrator import ORCHESTRATOR_ID
-
-        if ORCHESTRATOR_ID not in self._agents:
-            return
-
-        # Respect interval
-        if (self._last_watchdog_ping is not None
-                and (now - self._last_watchdog_ping).total_seconds() < self._watchdog_interval):
-            return
-
-        orch_status = self._status.get(ORCHESTRATOR_ID)
-        # Only ping if idle (ACTIVE) — not if already RUNNING or in ERROR
-        if orch_status != AgentStatus.ACTIVE:
-            return
-
-        # Check if there are active child agents
-        active_children = [
-            d for d in self._agents.values()
-            if d.parent_id
-            and self._resolve_parent_agent_id(d.parent_id) == ORCHESTRATOR_ID
-            and self._status.get(d.id) in (AgentStatus.ACTIVE, AgentStatus.RUNNING)
-        ]
-        if not active_children:
-            return
-
-        self._last_watchdog_ping = now
-        child_names = ", ".join(d.name for d in active_children[:5])
-        self.inbox.post(InboxMessage(
-            id=InboxMessage.generate_id(),
-            source="watchdog",
-            target=ORCHESTRATOR_ID,
-            type=MessageType.WORK,
-            priority=MessagePriority.HIGH,
-            data={
-                "type": "watchdog_ping",
-                "active_children": [d.id for d in active_children],
-                "instruction": (
-                    f"Watchdog: you have {len(active_children)} active child agent(s) "
-                    f"({child_names}). Check their status and collect results if ready."
-                ),
-            },
-        ))
-        log.info(
-            "Watchdog: pinged orchestrator — %d active children",
-            len(active_children),
-        )
 
     # ==================================================================
     # Inbox watcher loop
