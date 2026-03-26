@@ -582,6 +582,389 @@ def _mock_jepa_result(task_spec: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
     }
 
 
+def train_vljepa_on_task(
+    task_spec: Dict[str, Any],
+    global_model_cid: Optional[str] = None,
+    store=None,
+    text_data_source=None,
+    visual_data_source=None,
+    epochs: int = 1,
+    learning_rate: float = 1e-3,
+    modalities: Optional[list] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Unified training function for text, visual, or multimodal JEPA.
+
+    Supports three modality configurations:
+    - text-only: trains TextJEPA on agent framework conversations/executions
+    - visual-only: trains JEPA on screen capture / browser frames
+    - multimodal: trains VL-JEPA on paired text+visual data
+
+    Integrates with Autonet's Absolute Zero loop:
+    - Weight deltas compatible with FedAvg aggregation
+    - Metrics compatible with Yuma consensus verification
+    - Same commit-reveal pipeline regardless of modality
+
+    Args:
+        task_spec: Task specification (may contain modality config)
+        global_model_cid: CID of global model to continue from
+        store: BlobStore instance
+        text_data_source: TextTrainingDataSource (or iterable yielding
+            {token_ids, attention_mask} dicts)
+        visual_data_source: Iterable yielding image tensors (B, C, H, W)
+        epochs: Number of training epochs
+        learning_rate: Learning rate
+        modalities: List of active modalities, e.g. ["text"], ["visual"],
+            ["text", "visual"]. Auto-detected from data sources if None.
+
+    Returns:
+        (weight_delta, metrics) compatible with FedAvg aggregation
+    """
+    start_time = time.time()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Determine modalities
+    if modalities is None:
+        modalities = []
+        if text_data_source is not None:
+            modalities.append("text")
+        if visual_data_source is not None:
+            modalities.append("visual")
+    if not modalities:
+        modalities = task_spec.get("modalities", ["text"])
+
+    has_text = "text" in modalities
+    has_visual = "visual" in modalities
+
+    try:
+        # -----------------------------------------------------------
+        # TEXT-ONLY: Use TextJEPA
+        # -----------------------------------------------------------
+        if has_text and not has_visual:
+            from .text_jepa import TextJEPA, TextJEPAConfig, TextJEPATrainer
+
+            config = TextJEPAConfig(
+                vocab_size=task_spec.get("vocab_size", 260),
+                max_seq_length=task_spec.get("max_seq_length", 2048),
+                embed_dim=task_spec.get("embed_dim", 384),
+                num_heads=task_spec.get("num_heads", 6),
+                encoder_depth=task_spec.get("encoder_depth", 6),
+                predictor_depth=task_spec.get("predictor_depth", 3),
+                predictor_embed_dim=task_spec.get("predictor_embed_dim", 192),
+            )
+
+            trainer = TextJEPATrainer(config, device=device)
+
+            if global_model_cid and store:
+                try:
+                    global_weights = load_weights(global_model_cid, store)
+                    if global_weights:
+                        trainer.load_weights(global_weights)
+                        logger.info("Loaded global TextJEPA model: %s...", global_model_cid[:20])
+                except Exception as e:
+                    logger.warning("Failed to load global TextJEPA model: %s", e)
+
+            initial_weights = {k: v.clone() for k, v in trainer.model.state_dict().items()}
+
+            optimizer = torch.optim.AdamW(
+                [
+                    {"params": trainer.model.context_encoder.parameters()},
+                    {"params": trainer.model.predictor.parameters()},
+                ],
+                lr=learning_rate,
+                weight_decay=0.05,
+            )
+
+            total_loss = 0.0
+            total_cosine = 0.0
+            num_batches = 0
+
+            for epoch in range(epochs):
+                if hasattr(text_data_source, "reload"):
+                    text_data_source.reload()
+
+                for batch in text_data_source:
+                    metrics = trainer.train_step(batch, optimizer)
+                    total_loss += metrics["loss"]
+                    total_cosine += metrics["cosine_similarity"]
+                    num_batches += 1
+
+                if num_batches > 0:
+                    logger.info(
+                        "TextJEPA Epoch %d/%d: Loss=%.4f, CosSim=%.4f",
+                        epoch + 1, epochs,
+                        total_loss / num_batches,
+                        total_cosine / num_batches,
+                    )
+
+            training_time = time.time() - start_time
+
+            # Weight delta (exclude target encoder)
+            final_weights = trainer.model.state_dict()
+            weight_delta = {}
+            for key in final_weights:
+                if "target_encoder" not in key:
+                    delta = final_weights[key] - initial_weights[key]
+                    weight_delta[key] = delta.cpu().numpy().tolist()
+
+            # Validation metrics
+            val_metrics = {}
+            if num_batches > 0:
+                trainer.model.eval()
+                try:
+                    val_batch = next(iter(text_data_source))
+                    val_metrics = trainer.evaluate(val_batch)
+                except StopIteration:
+                    pass
+
+            result_metrics = {
+                "loss": total_loss / max(1, num_batches),
+                "cosine_similarity": total_cosine / max(1, num_batches),
+                "embedding_energy": val_metrics.get("embedding_energy", 0.0),
+                "l2_distance": val_metrics.get("l2_distance", 0.0),
+                "training_time": training_time,
+                "epochs": epochs,
+                "num_batches": num_batches,
+                "architecture": "text_jepa",
+                "modalities": ["text"],
+                "self_supervised": True,
+            }
+
+            return weight_delta, result_metrics
+
+        # -----------------------------------------------------------
+        # VISUAL-ONLY: Use existing JEPA (vision)
+        # -----------------------------------------------------------
+        elif has_visual and not has_text:
+            from .jepa import JEPA, JEPAConfig, JEPATrainer
+
+            image_size = task_spec.get("image_size", 224)
+            config = JEPAConfig(
+                image_size=image_size,
+                patch_size=task_spec.get("patch_size", 4 if image_size <= 32 else 16),
+                embed_dim=task_spec.get("embed_dim", 192 if image_size <= 32 else 384),
+                num_heads=task_spec.get("num_heads", 3 if image_size <= 32 else 6),
+                encoder_depth=task_spec.get("encoder_depth", 6 if image_size <= 32 else 12),
+                predictor_depth=task_spec.get("predictor_depth", 3 if image_size <= 32 else 6),
+                predictor_embed_dim=task_spec.get("predictor_embed_dim", 96 if image_size <= 32 else 192),
+            )
+
+            trainer = JEPATrainer(config=config, device=device)
+
+            if global_model_cid and store:
+                try:
+                    global_weights = load_weights(global_model_cid, store)
+                    if global_weights:
+                        trainer.load_weights(global_weights)
+                        logger.info("Loaded global JEPA model: %s...", global_model_cid[:20])
+                except Exception as e:
+                    logger.warning("Failed to load global JEPA model: %s", e)
+
+            initial_weights = {k: v.clone() for k, v in trainer.model.state_dict().items()}
+
+            optimizer = torch.optim.AdamW(
+                [
+                    {"params": trainer.model.context_encoder.parameters()},
+                    {"params": trainer.model.predictor.parameters()},
+                ],
+                lr=learning_rate,
+                weight_decay=0.05,
+            )
+
+            total_loss = 0.0
+            total_cosine = 0.0
+            num_batches = 0
+
+            for epoch in range(epochs):
+                for batch in visual_data_source:
+                    images = batch[0] if isinstance(batch, (list, tuple)) else batch
+                    images = images.to(device)
+                    metrics = trainer.train_step(images, optimizer)
+                    total_loss += metrics["loss"]
+                    total_cosine += metrics["cosine_similarity"]
+                    num_batches += 1
+
+                if num_batches > 0:
+                    logger.info(
+                        "JEPA (visual) Epoch %d/%d: Loss=%.4f, CosSim=%.4f",
+                        epoch + 1, epochs,
+                        total_loss / num_batches,
+                        total_cosine / num_batches,
+                    )
+
+            training_time = time.time() - start_time
+
+            final_weights = trainer.model.state_dict()
+            weight_delta = {}
+            for key in final_weights:
+                if "target_encoder" not in key:
+                    delta = final_weights[key] - initial_weights[key]
+                    weight_delta[key] = delta.cpu().numpy().tolist()
+
+            result_metrics = {
+                "loss": total_loss / max(1, num_batches),
+                "cosine_similarity": total_cosine / max(1, num_batches),
+                "training_time": training_time,
+                "epochs": epochs,
+                "num_batches": num_batches,
+                "architecture": "jepa",
+                "modalities": ["visual"],
+                "self_supervised": True,
+            }
+
+            return weight_delta, result_metrics
+
+        # -----------------------------------------------------------
+        # MULTIMODAL: Use VL-JEPA
+        # -----------------------------------------------------------
+        else:
+            from .vl_jepa import VLJEPA, VLJEPAConfig
+
+            image_size = task_spec.get("image_size", 224)
+            config = VLJEPAConfig(
+                image_size=image_size,
+                patch_size=task_spec.get("patch_size", 16),
+                embed_dim=task_spec.get("embed_dim", 384),
+                num_heads=task_spec.get("num_heads", 6),
+                encoder_depth=task_spec.get("encoder_depth", 12),
+                vocab_size=task_spec.get("vocab_size", 260),
+                max_seq_length=task_spec.get("max_seq_length", 512),
+                text_encoder_depth=task_spec.get("text_encoder_depth", 6),
+                fusion_depth=task_spec.get("fusion_depth", 6),
+            )
+
+            model = VLJEPA(config).to(device)
+
+            if global_model_cid and store:
+                try:
+                    global_weights = load_weights(global_model_cid, store)
+                    if global_weights:
+                        state = {}
+                        for key, value in global_weights.items():
+                            state[key] = torch.tensor(value) if isinstance(value, list) else value
+                        model.load_state_dict(state, strict=False)
+                        logger.info("Loaded global VL-JEPA model: %s...", global_model_cid[:20])
+                except Exception as e:
+                    logger.warning("Failed to load global VL-JEPA model: %s", e)
+
+            initial_weights = {k: v.clone() for k, v in model.state_dict().items()}
+
+            # Optimize all trainable components (not target encoder, not decoder)
+            trainable_params = [
+                {"params": model.visual_encoder.parameters()},
+                {"params": model.text_encoder.parameters()},
+                {"params": model.cross_modal_fusion.parameters()},
+                {"params": model.semantic_predictor.parameters()},
+            ]
+            optimizer = torch.optim.AdamW(
+                trainable_params,
+                lr=learning_rate,
+                weight_decay=0.05,
+            )
+
+            total_loss = 0.0
+            num_batches = 0
+
+            # Interleave text and visual batches
+            text_iter = iter(text_data_source) if text_data_source else iter([])
+            visual_iter = iter(visual_data_source) if visual_data_source else iter([])
+
+            for epoch in range(epochs):
+                if hasattr(text_data_source, "reload") and text_data_source is not None:
+                    text_data_source.reload()
+                text_iter = iter(text_data_source) if text_data_source else iter([])
+                visual_iter = iter(visual_data_source) if visual_data_source else iter([])
+
+                # Train on paired batches until both exhausted
+                text_done = text_data_source is None
+                visual_done = visual_data_source is None
+
+                while not (text_done and visual_done):
+                    # Get text batch
+                    token_ids = None
+                    attention_mask = None
+                    try:
+                        text_batch = next(text_iter)
+                        token_ids = text_batch["token_ids"].to(device)
+                        attention_mask = text_batch["attention_mask"].to(device)
+                    except StopIteration:
+                        text_done = True
+
+                    # Get visual batch
+                    images = None
+                    try:
+                        vis_batch = next(visual_iter)
+                        images = vis_batch[0] if isinstance(vis_batch, (list, tuple)) else vis_batch
+                        images = images.to(device)
+                    except StopIteration:
+                        visual_done = True
+
+                    if token_ids is None and images is None:
+                        break
+
+                    B = token_ids.shape[0] if token_ids is not None else images.shape[0]
+
+                    # Fill in missing modality with zeros
+                    if token_ids is None:
+                        S = config.max_seq_length
+                        token_ids = torch.zeros(B, S, dtype=torch.long, device=device)
+                        attention_mask = torch.zeros(B, S, dtype=torch.bool, device=device)
+                    if images is None:
+                        images = torch.zeros(B, 3, image_size, image_size, device=device)
+
+                    # Match batch sizes (take minimum)
+                    min_B = min(token_ids.shape[0], images.shape[0])
+                    token_ids = token_ids[:min_B]
+                    attention_mask = attention_mask[:min_B]
+                    images = images[:min_B]
+
+                    # VL-JEPA self-supervised loss
+                    model.train()
+                    outputs = model.self_supervised_loss(images, token_ids, attention_mask)
+                    loss = outputs["loss"]
+
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    model.update_target_encoder()
+
+                    total_loss += loss.item()
+                    num_batches += 1
+
+                if num_batches > 0:
+                    logger.info(
+                        "VL-JEPA Epoch %d/%d: Loss=%.4f",
+                        epoch + 1, epochs,
+                        total_loss / num_batches,
+                    )
+
+            training_time = time.time() - start_time
+
+            # Weight delta (exclude target encoder and decoder — decoder is local)
+            final_weights = model.state_dict()
+            weight_delta = {}
+            for key in final_weights:
+                if "target_encoder" not in key and "text_decoder" not in key:
+                    delta = final_weights[key] - initial_weights[key]
+                    weight_delta[key] = delta.cpu().numpy().tolist()
+
+            result_metrics = {
+                "loss": total_loss / max(1, num_batches),
+                "training_time": training_time,
+                "epochs": epochs,
+                "num_batches": num_batches,
+                "architecture": "vl_jepa",
+                "modalities": modalities,
+                "self_supervised": True,
+            }
+
+            return weight_delta, result_metrics
+
+    except Exception as e:
+        logger.error("VL-JEPA training failed: %s", e)
+        return _mock_jepa_result(task_spec)
+
+
 def verify_jepa_solution(
     solver_weights: Dict[str, Any],
     target_encoder_weights: Dict[str, Any],
