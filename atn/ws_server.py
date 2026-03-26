@@ -389,6 +389,29 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": True, "result": {"backend": backend}}
             return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
 
+        if msg_type == "voice_set_voice_focus":
+            agent_id = msg.get("agent_id", "orchestrator")
+            if self.runtime.voice:
+                self.runtime.voice.set_voice_focus(agent_id)
+                return {"msg_id": msg_id, "ok": True, "result": {"voice_focus": agent_id}}
+            return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
+
+        if msg_type == "voice_set_tools_focus":
+            agent_id = msg.get("agent_id", "orchestrator")
+            if self.runtime.voice:
+                self.runtime.voice.set_tools_focus(agent_id)
+                return {"msg_id": msg_id, "ok": True, "result": {"tools_focus": agent_id}}
+            return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
+
+        if msg_type == "voice_set_announcements":
+            categories = msg.get("categories", [])
+            if not isinstance(categories, list):
+                return {"msg_id": msg_id, "ok": False, "error": "'categories' must be a list"}
+            if self.runtime.voice:
+                self.runtime.voice.set_announcements(categories)
+                return {"msg_id": msg_id, "ok": True, "result": {"announcements": categories}}
+            return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
+
         if msg_type == "voice_devices":
             try:
                 from .voice_service import get_device_list
@@ -605,7 +628,8 @@ class WebSocketBridge:
             from .orchestrator import ORCHESTRATOR_ID
             from .providers.bridge import BridgeProvider
             provider = self.runtime._active_providers.get(ORCHESTRATOR_ID)
-            if isinstance(provider, BridgeProvider) and provider._process and provider._process.returncode is None:
+            orch_is_running = self.runtime._running_count.get(ORCHESTRATOR_ID, 0) > 0
+            if orch_is_running and isinstance(provider, BridgeProvider) and provider._process and provider._process.returncode is None:
                 await provider.send_user_message(content)
                 return {"msg_id": msg_id, "ok": True, "result": {"status": "injected"}}
             # Bridge not running — convert to post_message so it triggers an execution
@@ -820,7 +844,7 @@ async def _init_and_serve(
         agents, errors = load_agents_dir(config.agents_dir)
         for defn in agents:
             await rt.register_agent(defn)
-            if defn.schedule:
+            if defn.schedule or defn.heartbeat:
                 await rt.activate_agent(defn.id)
         # Note: execution history is hydrated automatically in register_agent()
         if agents:

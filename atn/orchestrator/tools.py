@@ -758,7 +758,7 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         result["scheduling_source"] = "schedule"
     else:
         _trigger_interval_s = 0
-    if _trigger_interval_s > 0 and status in (AgentStatus.ACTIVE,):
+    if _trigger_interval_s > 0 and status in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
         last = runtime._last_idle.get(agent_id)
         if last:
             from datetime import datetime, timezone
@@ -871,9 +871,14 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             runtime._heartbeat_table[agent_id] = runtime._parse_interval(defn.heartbeat.interval)
             # Clear legacy schedule — they are mutually exclusive
             runtime._schedule_table.pop(agent_id, None)
-            if agent_id not in runtime._last_idle:
-                from datetime import datetime, timezone
-                runtime._last_idle[agent_id] = datetime.now(timezone.utc)
+            # Always reset the idle timer so the countdown starts fresh
+            from datetime import datetime, timezone
+            runtime._last_idle[agent_id] = datetime.now(timezone.utc)
+            # Auto-activate if agent is idle (REGISTERED/COMPLETED) so
+            # the scheduler and countdown will work immediately.
+            cur_status = runtime._status.get(agent_id)
+            if cur_status in (AgentStatus.REGISTERED, AgentStatus.COMPLETED):
+                runtime._status[agent_id] = AgentStatus.ACTIVE
         changed.append("heartbeat")
 
     if not changed:
@@ -1202,18 +1207,23 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     # (e.g. after a daemon restart), COMPLETED/ERROR means "finished a
     # previous execution".  All three indicate the agent needs a new
     # execution to process the incoming message.
+    from . import ORCHESTRATOR_ID
     status = runtime.get_status(target)
     execution_id = None
     if defn.mode == AgentMode.COGNITIVE and status in (
         AgentStatus.ACTIVE, AgentStatus.COMPLETED, AgentStatus.ERROR
     ):
-        # Clean up stale provider from previous execution
-        old_provider = runtime._active_providers.pop(target, None)
-        if old_provider is not None:
-            try:
-                await old_provider.close()
-            except Exception:
-                pass
+        # Clean up stale provider from previous execution.
+        # Skip the orchestrator — its provider is intentionally kept alive
+        # across turns so that _session_id enables SDK session resume
+        # (avoids re-sending the full conversation history every turn).
+        if target != ORCHESTRATOR_ID:
+            old_provider = runtime._active_providers.pop(target, None)
+            if old_provider is not None:
+                try:
+                    await old_provider.close()
+                except Exception:
+                    pass
         runtime._status[target] = AgentStatus.ACTIVE
         execution_id = await runtime.trigger_run(target, source="orchestrator")
 

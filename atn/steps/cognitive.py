@@ -362,6 +362,23 @@ async def _orchestrate(
         result.output = output
         result.completed_at = datetime.now(timezone.utc)
 
+        # Emit usage event for non-bridge providers (bridge emits per-turn internally)
+        if context.event_bus and not hasattr(provider, 'event_bus'):
+            await context.event_bus.emit(Event(
+                type=EventType.STEP_OUTPUT,
+                source=context.agent_id,
+                data={
+                    "agent_id": context.agent_id,
+                    "channel": "usage",
+                    "usage": {
+                        "input_tokens": response.usage.input_tokens,
+                        "output_tokens": response.usage.output_tokens,
+                        "cache_read_tokens": response.usage.cache_read_tokens,
+                        "cache_creation_tokens": response.usage.cache_creation_tokens,
+                    },
+                },
+            ))
+
         # Record assistant turn in conversation history
         if response.text and runtime is not None and hasattr(runtime, "conversation"):
             runtime.conversation.add_assistant_turn(

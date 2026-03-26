@@ -266,7 +266,72 @@ class ConversationStore:
             return
         self._turns = self._load_jsonl(self._active_path)
         if self._turns:
-            log.info("Hydrated active conversation: %d turns", len(self._turns))
+            dirty = self._sanitize_turns()
+            log.info("Hydrated active conversation: %d turns%s",
+                     len(self._turns), " (sanitized)" if dirty else "")
+
+    def _sanitize_turns(self) -> bool:
+        """Fix user turns that were corrupted by history-prepending.
+
+        Prior to the fix, the execution engine stored the full prompt
+        (including ``System: ...``, ``User: ...``, ``Orchestrator: ...``
+        history) as a single user turn.  This strips those back to just
+        the actual user message and removes exact duplicates.
+        """
+        dirty = False
+        cleaned: list[ConversationTurn] = []
+        for turn in self._turns:
+            content = turn.content
+            # Detect history-embedded user turns: content has role prefixes
+            # like "System: ...\nUser: ...\nOrchestrator: ..." baked in.
+            if turn.role == "user" and "\nUser: " in content and (
+                content.startswith("System: ")
+                or content.startswith("User: ")
+                or "\nOrchestrator: " in content
+            ):
+                # Extract the last "User: ..." segment as the real message.
+                parts = content.split("\nUser: ")
+                raw = parts[-1].strip()
+                if raw:
+                    turn = ConversationTurn(
+                        role="user", content=raw,
+                        timestamp=turn.timestamp,
+                        execution_id=turn.execution_id,
+                    )
+                    dirty = True
+            # Strip leading "[Current time: ...]\n\n" injected by the engine
+            if turn.role == "user" and turn.content.startswith("[Current time:"):
+                newline_idx = turn.content.find("\n\n")
+                if newline_idx != -1:
+                    turn = ConversationTurn(
+                        role=turn.role,
+                        content=turn.content[newline_idx + 2:],
+                        timestamp=turn.timestamp,
+                        execution_id=turn.execution_id,
+                    )
+                    dirty = True
+            # Deduplicate consecutive identical turns
+            if cleaned and cleaned[-1].role == turn.role and cleaned[-1].content == turn.content:
+                dirty = True
+                continue
+            cleaned.append(turn)
+        if dirty:
+            self._turns = cleaned
+            self._rewrite_active()
+        return dirty
+
+    def _rewrite_active(self) -> None:
+        """Rewrite the active JSONL from the in-memory turns."""
+        tmp = self._active_path.with_suffix(".jsonl.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                for turn in self._turns:
+                    f.write(json.dumps(turn.to_dict(), ensure_ascii=False) + "\n")
+            tmp.replace(self._active_path)
+        except Exception:
+            log.exception("Failed to rewrite sanitized conversation")
+            if tmp.exists():
+                tmp.unlink()
 
     @staticmethod
     def _load_jsonl(path: Path) -> list[ConversationTurn]:

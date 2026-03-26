@@ -825,8 +825,9 @@ class VoiceService:
         self.runtime = runtime
         self.config = config or VoiceConfig()
 
-        # Focus — which agent_id the user is listening to
-        self.focused_agent: str = "orchestrator"
+        # Focus — which agent_id the user is listening to (per channel)
+        self.voice_focus: str = "orchestrator"   # agent whose TTS plays on "voice"
+        self.tools_focus: str = "orchestrator"   # agent whose narration plays on "tools"
 
         # Audio
         self.mixer: AudioMixer | None = None
@@ -843,6 +844,13 @@ class VoiceService:
         # PTT thread
         self._ptt_thread: threading.Thread | None = None
         self._ptt_available = False
+
+        # Announcement cache: pre-rendered audio clips keyed by text
+        self._announcement_cache: dict[str, tuple[Any, int]] = {}
+        self._cache_lock = threading.Lock()
+
+        # Main event loop reference (set in start())
+        self._main_loop: asyncio.AbstractEventLoop | None = None
 
         # State
         self._running = False
@@ -948,9 +956,20 @@ class VoiceService:
         self.events.subscribe(EventType.DELEGATE_COMPLETED, self._on_delegate_completed)
         self.events.subscribe(EventType.DELEGATE_FAILED, self._on_delegate_failed)
         self.events.subscribe(EventType.EXECUTION_COMPLETED, self._on_execution_completed)
+        self.events.subscribe(EventType.EXECUTION_STARTED, self._on_execution_started)
+        self.events.subscribe(EventType.AGENT_REGISTERED, self._on_agent_registered)
+
+        # Capture the main event loop for cross-thread scheduling
+        self._main_loop = asyncio.get_running_loop()
 
         # Startup chime
         self.mixer.play("effects", make_startup_chime())
+
+        # Pre-render announcement verbs in background
+        threading.Thread(
+            target=self._warmup_announcement_cache, daemon=True,
+            name="voice-cache-warmup",
+        ).start()
 
         log.info(
             "Voice service started (backend=%s, ptt=%s, backends_available=%s)",
@@ -979,6 +998,8 @@ class VoiceService:
         self.events.unsubscribe(EventType.DELEGATE_COMPLETED, self._on_delegate_completed)
         self.events.unsubscribe(EventType.DELEGATE_FAILED, self._on_delegate_failed)
         self.events.unsubscribe(EventType.EXECUTION_COMPLETED, self._on_execution_completed)
+        self.events.unsubscribe(EventType.EXECUTION_STARTED, self._on_execution_started)
+        self.events.unsubscribe(EventType.AGENT_REGISTERED, self._on_agent_registered)
 
         # Stop TTS worker
         self._tts_q.put(None)
@@ -999,18 +1020,104 @@ class VoiceService:
     # Focus management
     # ------------------------------------------------------------------
 
-    def set_focus(self, agent_id: str) -> None:
-        """Set which agent the user is listening to."""
-        old = self.focused_agent
-        self.focused_agent = agent_id
+    def set_voice_focus(self, agent_id: str) -> None:
+        """Set which agent's responses/thoughts play on the voice channel."""
+        old = self.voice_focus
+        self.voice_focus = agent_id
         if old != agent_id and self.mixer:
             self.mixer.channels["voice"].clear()
             self.mixer.channels["voice"].fade_reset()
         log.info("Voice focus: %s -> %s", old, agent_id)
 
+    def set_tools_focus(self, agent_id: str) -> None:
+        """Set which agent's tool narration plays on the tools channel."""
+        old = self.tools_focus
+        self.tools_focus = agent_id
+        if old != agent_id and self.mixer:
+            while not self._narrate_q.empty():
+                try:
+                    self._narrate_q.get_nowait()
+                except queue.Empty:
+                    break
+            self.mixer.channels["tools"].clear()
+            self.mixer.channels["tools"].fade_reset()
+        log.info("Tools focus: %s -> %s", old, agent_id)
+
+    def set_focus(self, agent_id: str) -> None:
+        """Set both voice and tools focus to the same agent (backward compat)."""
+        self.set_voice_focus(agent_id)
+        self.set_tools_focus(agent_id)
+
     def set_voice_enabled(self, enabled: bool) -> None:
         """Enable or disable TTS (tones still play)."""
         self._voice_enabled = enabled
+
+    def set_announcements(self, categories: list[str]) -> None:
+        """Set which announcement categories are active."""
+        self.config.announcements = list(categories)
+
+    # ------------------------------------------------------------------
+    # Announcement cache
+    # ------------------------------------------------------------------
+
+    def _cache_verb(self, verb: str) -> None:
+        """Render and cache a verb clip."""
+        try:
+            audio, sr = generate_kokoro(verb, voice="am_michael")
+            with self._cache_lock:
+                self._announcement_cache[f"_verb_{verb}"] = (audio, sr)
+        except Exception:
+            try:
+                audio, sr = generate_edge(verb)
+                with self._cache_lock:
+                    self._announcement_cache[f"_verb_{verb}"] = (audio, sr)
+            except Exception:
+                log.debug("Failed to cache verb: %s", verb)
+
+    def _cache_name(self, name: str) -> None:
+        """Render and cache an agent name clip."""
+        key = f"_name_{name}"
+        with self._cache_lock:
+            if key in self._announcement_cache:
+                return  # Already cached
+        try:
+            audio, sr = generate_kokoro(name, voice="am_michael")
+            with self._cache_lock:
+                self._announcement_cache[key] = (audio, sr)
+        except Exception:
+            try:
+                audio, sr = generate_edge(name)
+                with self._cache_lock:
+                    self._announcement_cache[key] = (audio, sr)
+            except Exception:
+                log.debug("Failed to cache name: %s", name)
+
+    def _warmup_announcement_cache(self) -> None:
+        """Pre-render announcement verb clips on startup."""
+        for verb in ["running", "completed", "failed", "created", "spawning"]:
+            self._cache_verb(verb)
+        log.info("Announcement verb cache warmed up")
+
+    def _play_cached_announcement(self, name: str, verb: str) -> None:
+        """Play a cached name + verb announcement on the tools channel."""
+        name_key = f"_name_{name}"
+        verb_key = f"_verb_{verb}"
+        with self._cache_lock:
+            name_clip = self._announcement_cache.get(name_key)
+            verb_clip = self._announcement_cache.get(verb_key)
+        if name_clip and verb_clip:
+            name_audio = name_clip[0]
+            verb_audio = verb_clip[0]
+            if name_clip[1] != self.mixer.sr:
+                name_audio = _resample(name_audio, name_clip[1], self.mixer.sr)
+            if verb_clip[1] != self.mixer.sr:
+                verb_audio = _resample(verb_audio, verb_clip[1], self.mixer.sr)
+            gap = _np.zeros(int(self.mixer.sr * 0.08), dtype=_np.float32)
+            combined = _np.concatenate([name_audio, gap, verb_audio])
+            self.mixer.play("tools", combined)
+        else:
+            # Fallback: use narrate queue (renders from scratch)
+            self._narrate_q.put(f"{name} {verb}")
 
     # ------------------------------------------------------------------
     # TTS
@@ -1140,7 +1247,7 @@ class VoiceService:
         if channel == "tool_call":
             tool_name = data.get("tool_name", "")
             tool_input = data.get("tool_input", {})
-            if source == self.focused_agent or source == "orchestrator":
+            if source == self.tools_focus or source == "orchestrator":
                 if self.mixer:
                     self.mixer.play("effects", make_tool_tone(tool_name))
                 if self.config.narrate_tools:
@@ -1158,7 +1265,7 @@ class VoiceService:
             if not content:
                 return
             agent_id = data.get("agent_id", source)
-            if agent_id != self.focused_agent:
+            if agent_id != self.voice_focus:
                 return
             last = self._last_spoken_text.get(agent_id, "")
             if content == last:
@@ -1169,27 +1276,67 @@ class VoiceService:
     async def _on_delegate_spawned(self, event: Event) -> None:
         if self.mixer:
             self.mixer.play("effects", make_delegate_spawn_tone())
+        if "delegate_lifecycle" not in self.config.announcements:
+            return
         title = event.data.get("title", "")
-        agent_type = event.data.get("agent_type", "")
         if title and self._voice_enabled:
-            self._narrate_q.put(f"Spawning {agent_type}: {title}")
+            self._play_cached_announcement(title, "spawning")
 
     async def _on_delegate_completed(self, event: Event) -> None:
         if self.mixer:
             self.mixer.play("effects", make_result_chime())
         agent_id = event.data.get("agent_id", "")
-        if agent_id == self.focused_agent:
+        # Focused agent always gets result preview spoken
+        if agent_id == self.voice_focus:
             preview = event.data.get("result_preview", "")
             if preview:
                 self._speak(preview, is_final=True)
+        # Announcement for non-focused delegates
+        elif "agent_completed" in self.config.announcements and self._voice_enabled:
+            title = event.data.get("title", agent_id)
+            self._play_cached_announcement(title, "completed")
 
     async def _on_delegate_failed(self, event: Event) -> None:
         if self.mixer:
             self.mixer.play("effects", _make_failure_tone())
+        if "delegate_lifecycle" not in self.config.announcements:
+            return
+        agent_id = event.data.get("agent_id", "")
+        if agent_id and self._voice_enabled:
+            title = event.data.get("title", agent_id)
+            self._play_cached_announcement(title, "failed")
 
     async def _on_execution_completed(self, event: Event) -> None:
         if self.mixer:
             self.mixer.play("effects", make_result_chime())
+        if "agent_completed" not in self.config.announcements:
+            return
+        agent_id = event.data.get("agent_id", event.source)
+        if agent_id and agent_id != "orchestrator" and self._voice_enabled:
+            self._play_cached_announcement(agent_id, "completed")
+
+    async def _on_execution_started(self, event: Event) -> None:
+        """Announce when an agent execution starts."""
+        if "agent_runs" not in self.config.announcements:
+            return
+        agent_id = event.data.get("agent_id", event.source)
+        if agent_id == "orchestrator":
+            return  # Don't announce orchestrator runs (too noisy)
+        if self._voice_enabled:
+            self._play_cached_announcement(agent_id, "running")
+
+    async def _on_agent_registered(self, event: Event) -> None:
+        """Cache agent name and announce when a new agent is created."""
+        agent_id = event.data.get("agent_id", "")
+        if agent_id and agent_id != "orchestrator":
+            # Cache name clip in background (don't block event handler)
+            threading.Thread(
+                target=self._cache_name, args=(agent_id,), daemon=True,
+            ).start()
+        if "agent_created" not in self.config.announcements:
+            return
+        if agent_id and agent_id != "orchestrator" and self._voice_enabled:
+            self._play_cached_announcement(agent_id, "created")
 
     # ------------------------------------------------------------------
     # Push-to-talk loop
@@ -1199,7 +1346,7 @@ class VoiceService:
         self._kill_all_audio()
         # Signal to UI that recording has started
         try:
-            self._ptt_event_loop.run_until_complete(self.events.emit(Event(
+            self._run_on_main_loop(self.events.emit(Event(
                 type=EventType.VOICE_RECORDING,
                 source="voice",
                 data={"recording": True},
@@ -1224,16 +1371,19 @@ class VoiceService:
             except queue.Empty:
                 break
 
+    def _run_on_main_loop(self, coro) -> None:
+        """Schedule a coroutine on the main event loop and wait for it."""
+        future = asyncio.run_coroutine_threadsafe(coro, self._main_loop)
+        future.result(timeout=60)
+
     def _ptt_loop(self) -> None:
         """Background thread: wait for PTT, record, transcribe, route."""
-        loop = asyncio.new_event_loop()
-        self._ptt_event_loop = loop
         while self._running:
             try:
                 audio = self.recorder.wait_and_record()
                 # Signal recording stopped
                 try:
-                    loop.run_until_complete(self.events.emit(Event(
+                    self._run_on_main_loop(self.events.emit(Event(
                         type=EventType.VOICE_RECORDING,
                         source="voice",
                         data={"recording": False},
@@ -1249,19 +1399,19 @@ class VoiceService:
 
                 log.info("[PTT] Transcribed: %s", text[:80])
 
-                loop.run_until_complete(self.events.emit(Event(
+                self._run_on_main_loop(self.events.emit(Event(
                     type=EventType.VOICE_TRANSCRIBED,
                     source="voice",
-                    data={"text": text, "target": self.focused_agent},
+                    data={"text": text, "target": self.voice_focus},
                 )))
 
-                if self.focused_agent == "orchestrator":
-                    loop.run_until_complete(
+                if self.voice_focus == "orchestrator":
+                    self._run_on_main_loop(
                         self._send_to_orchestrator(text)
                     )
                 else:
-                    loop.run_until_complete(
-                        self._send_to_delegate(self.focused_agent, text)
+                    self._run_on_main_loop(
+                        self._send_to_delegate(self.voice_focus, text)
                     )
 
             except Exception as exc:
@@ -1270,16 +1420,16 @@ class VoiceService:
 
     async def _send_to_orchestrator(self, text: str) -> None:
         from .orchestrator import ORCHESTRATOR_ID
-        from .models import InboxMessage, MessageType, MessagePriority
 
-        self.runtime.inbox.post(InboxMessage(
-            id=InboxMessage.generate_id(),
-            source="voice",
-            target=ORCHESTRATOR_ID,
-            type=MessageType.TRIGGER,
-            priority=MessagePriority.NORMAL,
-            data={"type": "voice_input", "instruction": text},
-        ))
+        # Use send_agent_message which handles all cases correctly:
+        # - Records user turn in conversation store
+        # - Injects mid-session if orchestrator is running (via bridge)
+        # - Re-activates COMPLETED/ERROR agents and triggers new execution
+        # Previously this did a raw inbox.post() which relied on the inbox
+        # watcher loop — but that loop skips COMPLETED agents, so voice
+        # messages were silently dropped after the first orchestrator turn.
+        tagged = f"🎤 [Voice Input] {text}"
+        await self.runtime.send_agent_message(ORCHESTRATOR_ID, tagged)
 
     async def _send_to_delegate(self, agent_id: str, text: str) -> None:
         delivered = await self.runtime.send_delegate_message(agent_id, text)
@@ -1299,10 +1449,13 @@ class VoiceService:
             "running": self._running,
             "backend": self.config.backend,
             "voice_enabled": self._voice_enabled,
-            "focused_agent": self.focused_agent,
+            "voice_focus": self.voice_focus,
+            "tools_focus": self.tools_focus,
+            "focused_agent": self.voice_focus,  # backward compat
             "ptt_available": self._ptt_available,
             "ptt_keys": self.config.ptt_keys,
             "narrate_tools": self.config.narrate_tools,
+            "announcements": self.config.announcements,
             "available_backends": _available_backends() if self._running else [],
             "playing": self.mixer.is_playing() if self.mixer else False,
         }

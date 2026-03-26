@@ -102,7 +102,7 @@ async def run_server() -> None:
         agents, errors = load_agents_dir(config.agents_dir)
         for defn in agents:
             await rt.register_agent(defn)
-            if defn.schedule:
+            if defn.schedule or defn.heartbeat:
                 await rt.activate_agent(defn.id)
         # Note: execution history is hydrated automatically in register_agent()
         if agents:

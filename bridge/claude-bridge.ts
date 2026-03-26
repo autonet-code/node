@@ -757,7 +757,33 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
                 thinking.push(thinkText)
                 emitEvent({ type: "thinking", text: thinkText })
               }
+            } else if (block.type === "tool_use") {
+              // Emit tool_use_start for SDK built-in tool calls (Read, Write, Bash, etc.)
+              // These are handled internally by the SDK and don't go through relayToolCall.
+              emitEvent({
+                type: "tool_use_start",
+                tool_use_id: (block as any).id || "",
+                tool_name: (block as any).name || "",
+                input: (block as any).input || {},
+              })
             }
+          }
+        }
+
+        // Tool use summary — SDK reports a text summary after tool calls complete.
+        // The message has: { summary, preceding_tool_use_ids, uuid, session_id }
+        if (message.type === "tool_use_summary") {
+          const summaryMsg = message as any
+          const toolUseIds: string[] = summaryMsg.preceding_tool_use_ids || []
+          const summary: string = summaryMsg.summary || ""
+          for (const toolUseId of toolUseIds) {
+            emitEvent({
+              type: "tool_use_result",
+              tool_use_id: toolUseId,
+              tool_name: "",  // not available in summary message
+              is_error: false,
+              result_preview: summary.slice(0, 500),
+            })
           }
         }
 

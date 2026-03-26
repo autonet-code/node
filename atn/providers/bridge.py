@@ -397,26 +397,61 @@ class BridgeProvider(Provider):
                             if text and on_chunk:
                                 await on_chunk(text)
                         elif event.get("type") == "tool_use_start" and self.event_bus:
+                            tool_name = event.get("tool_name", "")
+                            tool_input = event.get("input", {})
+                            log.debug("AGENT_TOOL_USE_START: tool=%s agent=%s",
+                                      tool_name, self.source_agent_id)
                             await self.event_bus.emit(Event(
                                 type=EventType.AGENT_TOOL_USE_START,
                                 source=self.source_agent_id,
                                 data={
                                     "agent_id": self.source_agent_id,
                                     "tool_use_id": event.get("tool_use_id", ""),
-                                    "tool_name": event.get("tool_name", ""),
-                                    "input": event.get("input", {}),
+                                    "tool_name": tool_name,
+                                    "input": tool_input,
                                 },
                             ))
-                        elif event.get("type") == "tool_use_result" and self.event_bus:
+                            # Also emit STEP_OUTPUT with channel=tool_call
+                            # so the voice service can play tones and narrate.
                             await self.event_bus.emit(Event(
-                                type=EventType.AGENT_TOOL_USE_RESULT,
+                                type=EventType.STEP_OUTPUT,
                                 source=self.source_agent_id,
                                 data={
                                     "agent_id": self.source_agent_id,
-                                    "tool_use_id": event.get("tool_use_id", ""),
-                                    "is_error": event.get("is_error", False),
+                                    "channel": "tool_call",
+                                    "tool_name": tool_name,
+                                    "tool_input": tool_input,
                                 },
                             ))
+                        elif event.get("type") == "thinking" and self.event_bus:
+                            text = event.get("text", "")
+                            if text:
+                                await self.event_bus.emit(Event(
+                                    type=EventType.STEP_OUTPUT,
+                                    source=self.source_agent_id,
+                                    data={
+                                        "agent_id": self.source_agent_id,
+                                        "channel": "thinking",
+                                        "content": text[:2000],
+                                    },
+                                ))
+                        elif event.get("type") == "tool_use_result":
+                            # For ATN MCP-relayed tools, the enriched result is emitted
+                            # from the Python tool executor below.  For SDK built-in tools
+                            # (Read, Write, Bash, etc.), we emit from the stderr event.
+                            tool_use_id = event.get("tool_use_id", "")
+                            if tool_use_id and self.event_bus:
+                                await self.event_bus.emit(Event(
+                                    type=EventType.AGENT_TOOL_USE_RESULT,
+                                    source=self.source_agent_id,
+                                    data={
+                                        "agent_id": self.source_agent_id,
+                                        "tool_use_id": tool_use_id,
+                                        "tool_name": event.get("tool_name", ""),
+                                        "is_error": event.get("is_error", False),
+                                        "result_preview": event.get("result_preview", ""),
+                                    },
+                                ))
                         elif event.get("type") == "compaction":
                             self._compaction_count += 1
                             self._last_compaction_pre_tokens = event.get("pre_tokens", 0)
@@ -479,11 +514,28 @@ class BridgeProvider(Provider):
                         tool_input = msg.get("input", {})
                         log.info("Orchestrate tool_call: %s (call_id=%s)", tool_name, call_id)
 
+                        is_error = False
                         try:
                             result = await tool_executor(tool_name, tool_input)
                         except Exception as exc:
                             log.exception("Tool execution error: %s", tool_name)
                             result = {"error": f"Tool '{tool_name}' failed: {exc}"}
+                            is_error = True
+
+                        # Emit enriched tool result event with preview
+                        if self.event_bus:
+                            result_str = str(result)
+                            await self.event_bus.emit(Event(
+                                type=EventType.AGENT_TOOL_USE_RESULT,
+                                source=self.source_agent_id,
+                                data={
+                                    "agent_id": self.source_agent_id,
+                                    "tool_use_id": call_id,
+                                    "tool_name": tool_name,
+                                    "is_error": is_error,
+                                    "result_preview": result_str[:500],
+                                },
+                            ))
 
                         # Send tool_result back to bridge
                         result_msg = json.dumps({
@@ -552,6 +604,30 @@ class BridgeProvider(Provider):
             self._cumulative_output_tokens += usage.output_tokens
             self._cumulative_cache_read += usage.cache_read_tokens
             self._cumulative_cache_creation += usage.cache_creation_tokens
+
+            # Emit per-turn usage event for live frontend display
+            if self.event_bus:
+                await self.event_bus.emit(Event(
+                    type=EventType.STEP_OUTPUT,
+                    source=self.source_agent_id,
+                    data={
+                        "agent_id": self.source_agent_id,
+                        "channel": "usage",
+                        "usage": {
+                            "input_tokens": usage.input_tokens,
+                            "output_tokens": usage.output_tokens,
+                            "cache_read_tokens": usage.cache_read_tokens,
+                            "cache_creation_tokens": usage.cache_creation_tokens,
+                        },
+                        "cumulative": {
+                            "input_tokens": self._cumulative_input_tokens,
+                            "output_tokens": self._cumulative_output_tokens,
+                            "cache_read_tokens": self._cumulative_cache_read,
+                            "cache_creation_tokens": self._cumulative_cache_creation,
+                            "total_cost_usd": self._total_cost_usd,
+                        },
+                    },
+                ))
 
             return ProviderResponse(
                 text=final_resp.get("text", ""),
@@ -742,6 +818,9 @@ class BridgeProvider(Provider):
                 payload = text[len(_EVENT_PREFIX):]
                 try:
                     event = json.loads(payload)
+                    etype = event.get("type", "")
+                    if etype not in ("text_delta",):
+                        log.info("bridge stderr event: type=%s", etype)
                     await self._event_queue.put(event)
                 except json.JSONDecodeError:
                     log.debug("bridge: bad event JSON: %s", payload[:200])

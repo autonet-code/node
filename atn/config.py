@@ -77,6 +77,9 @@ class VoiceConfig:
     tools_volume: float = 0.55
     effects_volume: float = 0.35
     narrate_tools: bool = True
+    announcements: list[str] = field(default_factory=lambda: [
+        "agent_runs", "agent_created", "agent_completed", "delegate_lifecycle"
+    ])
     output_device: str | None = None
     input_device: str | None = None
     kokoro_model_dir: str | None = None   # directory containing kokoro-v1.0.onnx
@@ -246,6 +249,9 @@ def load_config(path: Path | None = None) -> ATNConfig:
             tools_volume=voice_raw.get("tools_volume", 0.55),
             effects_volume=voice_raw.get("effects_volume", 0.35),
             narrate_tools=voice_raw.get("narrate_tools", True),
+            announcements=voice_raw.get("announcements", [
+                "agent_runs", "agent_created", "agent_completed", "delegate_lifecycle"
+            ]),
             output_device=voice_raw.get("output_device"),
             input_device=voice_raw.get("input_device"),
             kokoro_model_dir=voice_raw.get("kokoro_model_dir"),

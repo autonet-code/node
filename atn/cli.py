@@ -329,9 +329,9 @@ async def _load_agents(runtime: Runtime, config: ATNConfig) -> int:
     elif not errors:
         console.print(f"  [dim]No agent files in {config.agents_dir}[/]")
 
-    # Auto-activate agents that have schedules
+    # Auto-activate agents that have schedules or heartbeats
     for defn in agents:
-        if defn.schedule:
+        if defn.schedule or defn.heartbeat:
             await runtime.activate_agent(defn.id)
 
     return len(agents)
