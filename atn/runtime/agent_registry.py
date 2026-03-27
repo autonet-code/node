@@ -77,7 +77,11 @@ class AgentRegistry:
             source="runtime",
             data={"agent_id": defn.id, "name": defn.name,
                   "mode": defn.mode.value,
-                  "steps": len(defn.steps), "schedule": defn.schedule},
+                  "steps": len(defn.steps), "schedule": defn.schedule,
+                  "description": defn.description,
+                  "model": defn.model,
+                  "parent_id": defn.parent_id,
+                  "concurrency": defn.concurrency},
         ))
         return defn.id
 
