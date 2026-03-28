@@ -287,6 +287,7 @@ class AgentRegistry:
                 "instruction": (
                     f"Your child agent '{defn.name}' has {status_str}. "
                     f"Check its output with get_output('{agent_id}')."
+                    + (f"\n\nResult summary:\n{result_preview}" if result_preview else "")
                 ),
             },
         )
