@@ -857,3 +857,79 @@ class RPBConsensus:
                 self.logger.debug(f"Resolution attempt for {pid} failed: {e}")
 
         return resolved
+
+
+# =============================================================================
+# Three-Tier Constitutional Evaluator
+# =============================================================================
+
+
+class ThreeTierConstitutionalEvaluator:
+    """
+    Convenience wrapper that combines ConstitutionalGeometry (Tiers 1+2) with
+    the existing LLM-based RPBEvaluator (Tier 3).
+
+    Used by GovernanceEngine to evaluate individual node instructions before
+    they are queued for execution, and by RPBEvaluator for on-chain proposals.
+
+    Quick usage (per-instruction compliance check):
+        evaluator = ThreeTierConstitutionalEvaluator(geometry=geometry)
+        verdict, conf = evaluator.check_action(action_text, encode_fn)
+        if verdict == Verdict.VIOLATION:
+            reject instruction
+
+    The LLM path (Tier 3) is only invoked when Tiers 1+2 return UNCERTAIN,
+    preserving the O(1) fast path for the overwhelming majority of decisions.
+    """
+
+    def __init__(
+        self,
+        geometry: Optional["ConstitutionalGeometry"] = None,  # type: ignore[name-defined]
+        provider: Optional[AIProvider] = None,
+    ):
+        self._geometry = geometry
+        self._provider = provider or PlaceholderAIProvider()
+        self.logger = logging.getLogger("ThreeTierConstitutionalEvaluator")
+
+    def check_action(
+        self,
+        action_text: str,
+        encode_fn: Optional[object],
+        justification: str = "",
+    ) -> Tuple[str, float]:
+        """
+        Evaluate a proposed action for constitutional compliance.
+
+        Returns:
+            (verdict_str, confidence) where verdict_str is one of:
+            "compliant", "uncertain", "violation"
+        """
+        from .constitutional_geometry import Verdict
+
+        # Tier 1+2 via geometry
+        if self._geometry is not None and encode_fn is not None:
+            try:
+                embedding = encode_fn(action_text)
+                result = self._geometry.evaluate(embedding)
+                if not result.drift_warning and result.verdict != Verdict.UNCERTAIN:
+                    return result.verdict.value, result.overall_confidence
+            except Exception as e:
+                self.logger.debug(f"Geometric evaluation failed: {e}")
+
+        # Tier 3: LLM evaluation
+        try:
+            prompt = (
+                "You are evaluating whether a proposed action complies with the "
+                "RPB constitutional principles (Human Dignity, Freedom of Thought, "
+                "Democratic Governance, Transparency, Privacy, Non-Discrimination, "
+                "Cultural Respect). Respond with COMPLIANT or VIOLATION and a "
+                "brief reason."
+            )
+            recommendation = self._provider.evaluate(prompt, action_text)
+            verdict = "compliant" if recommendation.approve else "violation"
+            confidence = recommendation.confidence / 10_000.0
+            return verdict, confidence
+        except Exception as e:
+            self.logger.warning(f"Tier 3 LLM evaluation failed: {e}")
+            # Fail open (uncertain) — never block on evaluator failure
+            return "uncertain", 0.0

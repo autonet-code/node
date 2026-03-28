@@ -14,6 +14,13 @@ from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from enum import Enum
 
+# TYPE_CHECKING import avoids circular dependencies at runtime;
+# ThreeTierConstitutionalEvaluator and ConstitutionalGeometry are optional.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from nodes.common.governance import ThreeTierConstitutionalEvaluator
+    from nodes.common.constitutional_geometry import ConstitutionalGeometry
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,7 +91,8 @@ class AwarenessEngine(BaseEngine):
 class GovernanceEngine(BaseEngine):
     """
     The node's duty to participate in collective decision-making.
-    Validates instructions against constitutional principles.
+    Validates instructions against constitutional principles via the 3-tier
+    constitutional evaluation pipeline (geometric → bottleneck → LLM).
     """
 
     def __init__(self, node: "Node"):
@@ -92,14 +100,83 @@ class GovernanceEngine(BaseEngine):
         self.pending_instructions: List[Instruction] = []
         self.validated_instructions: List[Instruction] = []
 
+        # Optional 3-tier evaluator (wired at node startup when JEPA model available)
+        self._constitutional_evaluator: Optional["ThreeTierConstitutionalEvaluator"] = None
+        self._encode_fn: Optional[Any] = None  # text → embedding callable
+
+        # Calibration: recent embeddings buffer for drift monitoring
+        # Holds at most _drift_buffer_size embeddings
+        self._drift_buffer: List[Any] = []
+        self._drift_buffer_size: int = 64
+        self._drift_check_interval: int = 16  # check every N new embeddings
+
+    def wire_constitutional_evaluator(
+        self,
+        evaluator: "ThreeTierConstitutionalEvaluator",
+        encode_fn: Any,
+    ) -> None:
+        """
+        Wire the 3-tier constitutional evaluator into the engine.
+
+        Called by the node startup sequence after the JEPA model is loaded.
+
+        Args:
+            evaluator:  ThreeTierConstitutionalEvaluator instance
+            encode_fn:  Callable[[str], Tensor] — text → embedding (from TextEncoder)
+        """
+        self._constitutional_evaluator = evaluator
+        self._encode_fn = encode_fn
+        self.logger.info("3-tier constitutional evaluator wired")
+
     def tick(self) -> None:
         self.check_for_proposals()
+        self.run_drift_calibration()
         self.process_pending_instructions()
 
     def check_for_proposals(self) -> None:
         """Check for new proposals from the consensus network."""
-        # In production, this would poll the blockchain or P2P network
+        # In production: poll blockchain or P2P for new evolution proposals
         pass
+
+    def run_drift_calibration(self) -> None:
+        """
+        Run embedding drift detection using buffered recent embeddings.
+
+        Called every tick. When the buffer is full, updates DriftMonitor
+        statistics. If drift is detected, logs a warning so operators can
+        trigger recalibration (by calling geometry.calibrate() again with
+        the updated model's encode_fn).
+        """
+        if (
+            self._constitutional_evaluator is None
+            or self._encode_fn is None
+            or not self._drift_buffer
+        ):
+            return
+
+        evaluator = self._constitutional_evaluator
+        geometry = getattr(evaluator, "_geometry", None)
+        if geometry is None or not geometry.drift_monitor.is_calibrated:
+            return
+
+        if len(self._drift_buffer) < self._drift_check_interval:
+            return
+
+        try:
+            import torch
+            stacked = torch.stack(self._drift_buffer[-self._drift_check_interval:])
+            drift = geometry.update_drift_stats(stacked)
+            if drift:
+                self.logger.warning(
+                    "Embedding drift detected during governance tick — "
+                    "constitutional geometry recalibration required. "
+                    "Call geometry.calibrate(encode_fn, reference_embeddings) "
+                    "after model weight update."
+                )
+            # Keep buffer bounded
+            self._drift_buffer = self._drift_buffer[-self._drift_buffer_size:]
+        except Exception as e:
+            self.logger.debug(f"Drift calibration step failed: {e}")
 
     def process_pending_instructions(self) -> None:
         """Validate pending instructions against constitutional principles."""
@@ -110,19 +187,71 @@ class GovernanceEngine(BaseEngine):
                 self.node.work.queue_instruction(instruction)
             else:
                 instruction.status = InstructionStatus.REJECTED
-                self.logger.warning(f"Rejected instruction {instruction.id}: violates principles")
+                self.logger.warning(
+                    f"Rejected instruction {instruction.id}: violates constitutional principles"
+                )
 
             self.pending_instructions.remove(instruction)
 
     def validate_instruction(self, instruction: Instruction) -> bool:
         """
-        The node's "Right of Adherence" - validate against constitution.
-        In production, this would use an LLM for semantic analysis.
+        Validate an instruction against the RPB constitution (3-tier pipeline).
+
+        Fast path: geometric evaluation (Tier 1) handles ~80-90% of cases in O(1).
+        Medium path: concept bottleneck (Tier 2) for nuanced cases.
+        Slow path: LLM evaluation (Tier 3) for uncertain/adversarial cases.
+
+        Falls back to the existing constitution.validate_action() check if no
+        constitutional evaluator is wired.
         """
+        # Try 3-tier evaluator first
+        if self._constitutional_evaluator is not None:
+            action_text = f"{instruction.action}: {instruction.proof_of_adherence}"
+            verdict, confidence = self._constitutional_evaluator.check_action(
+                action_text, self._encode_fn, instruction.proof_of_adherence
+            )
+
+            if verdict == "violation":
+                self.logger.warning(
+                    f"Instruction {instruction.id} rejected by constitutional evaluator: "
+                    f"verdict=violation, confidence={confidence:.3f}"
+                )
+                return False
+
+            if verdict == "compliant":
+                self.logger.debug(
+                    f"Instruction {instruction.id} approved: "
+                    f"verdict=compliant, confidence={confidence:.3f}"
+                )
+                # Buffer embedding for drift monitoring
+                self._buffer_embedding(action_text)
+                return True
+
+            # verdict == "uncertain": fall through to constitution check
+            self.logger.debug(
+                f"Constitutional evaluator uncertain for {instruction.id} "
+                f"(confidence={confidence:.3f}) — falling back to constitution"
+            )
+
+        # Fallback: existing constitution.validate_action()
         return self.node.constitution.validate_action(
             instruction.action,
-            instruction.proof_of_adherence
+            instruction.proof_of_adherence,
         )
+
+    def _buffer_embedding(self, text: str) -> None:
+        """Buffer an embedding for drift monitoring (best-effort)."""
+        if self._encode_fn is None:
+            return
+        try:
+            emb = self._encode_fn(text)
+            if emb is not None:
+                import torch
+                if emb.dim() > 1:
+                    emb = emb.mean(dim=0)
+                self._drift_buffer.append(emb.detach())
+        except Exception:
+            pass  # Non-critical
 
     def submit_instruction(self, instruction: Instruction) -> None:
         """Add an instruction to the pending queue."""
@@ -161,6 +290,18 @@ class WorkEngine(BaseEngine):
         self.current_task = instruction
 
         try:
+            # Defense-in-depth: re-check compliance at execution time.
+            # GovernanceEngine validates before queueing; this catches any
+            # instructions that bypass the governance queue (e.g., injected
+            # directly during testing or via buggy code paths).
+            if not self._compliance_check(instruction):
+                instruction.status = InstructionStatus.REJECTED
+                self.logger.warning(
+                    f"WorkEngine compliance check rejected {instruction.id} "
+                    f"at execution time — should have been caught by GovernanceEngine"
+                )
+                return
+
             self._execute_instruction(instruction)
             instruction.status = InstructionStatus.EXECUTED
             self.logger.info(f"Executed: {instruction.action}")
@@ -169,6 +310,31 @@ class WorkEngine(BaseEngine):
             self.logger.error(f"Failed to execute {instruction.id}: {e}")
         finally:
             self.current_task = None
+
+    def _compliance_check(self, instruction: Instruction) -> bool:
+        """
+        Lightweight compliance check before instruction execution.
+
+        Delegates to GovernanceEngine's constitutional evaluator when available.
+        Fails open (returns True) if no evaluator is configured — execution
+        is never blocked by evaluator unavailability alone, since GovernanceEngine
+        already validated the instruction on entry.
+        """
+        gov = self.node.governance
+        evaluator = getattr(gov, "_constitutional_evaluator", None)
+        encode_fn = getattr(gov, "_encode_fn", None)
+
+        if evaluator is None:
+            return True  # No evaluator: trust GovernanceEngine's prior check
+
+        action_text = f"{instruction.action}: {instruction.proof_of_adherence}"
+        verdict, confidence = evaluator.check_action(action_text, encode_fn)
+
+        if verdict == "violation" and confidence >= 0.85:
+            # Only hard-reject on high-confidence violations to avoid false positives
+            return False
+
+        return True
 
     def _execute_instruction(self, instruction: Instruction) -> None:
         """Execute an instruction based on its action type."""
