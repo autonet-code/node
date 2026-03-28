@@ -17,6 +17,7 @@ from atn.config import ATNConfig, OrchestratorConfig
 from atn.events import EventBus
 from atn.models import (
     AgentDefinition,
+    AgentMode,
     ExecutionStatus,
     StepDefinition,
     StepType,
@@ -224,17 +225,11 @@ async def test():
     assert rec.status == ExecutionStatus.COMPLETED
     output = rec.step_results[0].output
     assert output["text"] == "There are no agents registered yet."
-    assert output["total_turns"] == 2
-    assert len(output["turns"]) == 2
-    # Turn 1 has tool calls and results
-    assert output["turns"][0]["tool_calls"][0]["name"] == "list_agents"
-    assert "tool_results" in output["turns"][0]
-    # Turn 2 is the final answer
-    assert output["turns"][1]["text"] == "There are no agents registered yet."
+    assert output["mode"] == "orchestrate"
     # Usage is cumulative
     assert output["usage"]["input_tokens"] == 250  # 100 + 150
     assert output["usage"]["output_tokens"] == 50   # 30 + 20
-    # Provider was called twice
+    # Provider was called twice (via send_orchestrate -> send_stream loop)
     assert len(mock.call_log) == 2
     # Second call should have assistant + tool_result messages
     msgs = mock.call_log[1]["messages"]
@@ -315,8 +310,8 @@ async def test():
     # Verify the orchestrator ran all 4 turns
     orch_rec = rt.execution_log.get_latest(orch_agent.id)
     assert orch_rec.status == ExecutionStatus.COMPLETED
-    assert orch_rec.step_results[0].output["total_turns"] == 4
-    print("  PASS: Orchestrator completed 4-turn interaction")
+    assert orch_rec.step_results[0].output["mode"] == "orchestrate"
+    print("  PASS: Orchestrator completed multi-turn interaction")
 
     # Verify echo01 was created and is registered
     echo_defn = rt.get_agent("echo01")
@@ -351,19 +346,22 @@ async def test():
     tools = get_tool_definitions()
     tool_names = {t.name for t in tools}
     expected = {
-        "list_agents", "get_agent", "create_agent", "remove_agent",
+        "list_agents", "get_agent", "create_agent", "update_agent", "remove_agent",
         "activate_agent", "deactivate_agent", "trigger_run",
         "get_execution", "get_output", "kill_execution", "kill_agent",
         "post_message", "get_snapshot", "get_history", "list_connectors",
         "add_connector", "remove_connector", "get_connector_tools",
         "use_connector",
+        # Unified tools
+        "list_tools", "use_tool",
         # Planning & goal tools
         "get_goals", "add_goal", "update_goal",
         "get_projects", "add_project", "update_project",
         "get_credit_budget", "set_credit_budget",
         "propose_task", "list_tasks", "get_user_profile",
         # Delegation
-        "delegate", "delegate_status", "delegate_message", "delegate_collect",
+        "delegate_status", "delegate_message", "delegate_collect",
+        "get_latest_thought",
     }
     assert tool_names == expected, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
     # Each tool has a name, description, and input_schema
@@ -480,13 +478,11 @@ async def test():
     defn = create_orchestrator_agent()
     assert defn.id == ORCHESTRATOR_ID
     assert defn.name == "Orchestrator"
-    assert len(defn.steps) == 1
-    assert defn.steps[0].type == StepType.COGNITIVE
-    assert defn.steps[0].config["tool_executors"] == "orchestrator"
-    assert defn.steps[0].config["max_turns"] == 50
-    provider_chain = defn.steps[0].config["provider"]
-    assert isinstance(provider_chain, list)
-    assert provider_chain[0] == "claude_max"  # primary provider first
+    assert defn.mode == AgentMode.COGNITIVE
+    assert len(defn.steps) == 0  # pure cognitive agent, no pipeline steps
+    assert defn.max_turns == 50
+    assert isinstance(defn.provider, list)
+    assert defn.provider[0] == "claude_max"  # primary provider first
     assert defn.concurrency == 1
     print("  PASS: Default orchestrator definition")
 
@@ -494,9 +490,9 @@ async def test():
         OrchestratorConfig(provider="anthropic", model="claude-opus-4-20250514"),
         max_turns=5,
     )
-    assert defn2.steps[0].config["provider"][0] == "anthropic"  # primary provider first
-    assert defn2.steps[0].config["model"] == "claude-opus-4-20250514"
-    assert defn2.steps[0].config["max_turns"] == 5
+    assert defn2.provider[0] == "anthropic"  # primary provider first
+    assert defn2.cognitive_model == "claude-opus-4-20250514"
+    assert defn2.max_turns == 5
     print("  PASS: Custom orchestrator config")
 
     # ==================================================================
@@ -545,10 +541,6 @@ async def test():
     assert rec.status == ExecutionStatus.COMPLETED
     # Should have stopped at 3 turns even though provider keeps returning tool_use
     assert len(mock.call_log) == 3
-    output = rec.step_results[0].output
-    assert output["total_turns"] == 3
-    # Usage should be cumulative across all 3 turns
-    assert output["usage"]["input_tokens"] == 30  # 10 * 3
     print("  PASS: Stopped at max_turns=3")
 
     await rt.stop()
