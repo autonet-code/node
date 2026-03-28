@@ -120,7 +120,7 @@ class TestCognitiveAgentExecution:
             eid = await rt.trigger_run("cog-1", source="test")
             assert eid is not None
             # Wait for execution
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.05)  # mocked provider completes instantly
 
         # Check agent reached COMPLETED status
         assert rt.get_status("cog-1") == AgentStatus.COMPLETED
@@ -156,7 +156,7 @@ class TestCognitiveAgentExecution:
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             eid = await rt.trigger_run("cog-fail", source="test")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.05)  # mocked provider completes instantly
 
         assert rt.get_status("cog-fail") == AgentStatus.ERROR
 
@@ -184,7 +184,7 @@ class TestCognitiveAgentExecution:
         await rt.activate_agent("pipe-agent")
         eid = await rt.trigger_run("pipe-agent")
         assert eid is not None
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(0.5)  # real echo subprocess
 
         event_types = [e.type for e in captured_events]
         assert EventType.EXECUTION_COMPLETED in event_types
@@ -226,7 +226,7 @@ class TestCognitiveAgentExecution:
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             eid = await rt.trigger_run("cog-track", source="test")
             await proceed.wait()
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.05)  # yield for event loop cleanup
 
         assert provider_captured["during"] is True
         # After completion, cleaned up
@@ -275,7 +275,7 @@ class TestInnateWakeUp:
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             eid = await rt.trigger_run("child-1", source="test")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.05)  # mocked provider completes instantly
 
         # Parent should have a HIGH-priority WORK message in its inbox
         msgs = rt.inbox.peek("parent-1")
@@ -312,7 +312,7 @@ class TestInnateWakeUp:
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             await rt.trigger_run("orphan", source="test")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.05)  # mocked provider completes instantly
 
         # No messages should be posted (no parent to notify)
         # Check all registered agents' inboxes
@@ -362,7 +362,7 @@ class TestInnateWakeUp:
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             await rt.trigger_run("child-2", source="test")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.05)  # mocked provider completes instantly
 
         # Parent bridge should have had send_user_message called
         parent_bridge.send_user_message.assert_called_once()
@@ -442,7 +442,7 @@ class TestDelegateToolsUnified:
             from atn.orchestrator.tools import _create_agent, _delegate_status, _delegate_collect
 
             spawn = await _create_agent(rt, {"mode": "cognitive", "prompt": "Slow task", "_caller_id": "orch"})
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)  # yield to event loop
 
             status = await _delegate_status(rt, {"agent_id": spawn["agent_id"]})
             assert status["status"] == "running"
@@ -476,7 +476,7 @@ class TestDelegateToolsUnified:
 
             spawn = await _create_agent(rt, {"mode": "cognitive", "prompt": "Working", "_caller_id": "orch"})
             agent_id = spawn["agent_id"]
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)  # yield to event loop
 
             msg_result = await _delegate_message(rt, {
                 "agent_id": agent_id,
@@ -513,7 +513,7 @@ class TestCompletionCallbacks:
             # Completion callbacks may be tracked via delegate registry or done events
             assert agent_id in rt._delegate_done or agent_id in getattr(rt, '_completion_callbacks', {})
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.05)  # mocked provider completes instantly
 
 
 class TestDelegateRegistryBackwardCompat:

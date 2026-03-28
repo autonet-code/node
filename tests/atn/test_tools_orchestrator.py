@@ -68,16 +68,17 @@ class TestDelegateSpawnAndCollect:
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
-        with patch("atn.runtime.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _delegate, _delegate_collect
+        with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
+            from atn.orchestrator.tools import _create_agent, _delegate_collect
 
-            result = await _delegate(rt, {
+            result = await _create_agent(rt, {
+                "mode": "cognitive",
                 "prompt": "Search for auth code",
                 "agent_type": "explore",
-                "title": "Auth search",
+                "name": "Auth search",
+                "_caller_id": "orch",
             })
-            assert result["status"] == "spawned"
-            assert result["agent_type"] == "explore"
+            assert result["status"] == "running"
             agent_id = result["agent_id"]
 
             collect = await _delegate_collect(rt, {"agent_id": agent_id})
@@ -99,11 +100,15 @@ class TestDelegateSpawnAndCollect:
         mock_provider.send_orchestrate = AsyncMock(side_effect=RuntimeError("crash"))
         mock_provider.close = AsyncMock()
 
-        with patch("atn.runtime.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _delegate, _delegate_collect
+        with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
+            from atn.orchestrator.tools import _create_agent, _delegate_collect
 
-            spawn = await _delegate(rt, {"prompt": "Will fail", "agent_type": "implement"})
-            assert spawn["status"] == "spawned"
+            spawn = await _create_agent(rt, {
+                "mode": "cognitive",
+                "prompt": "Will fail", "agent_type": "implement",
+                "_caller_id": "orch",
+            })
+            assert spawn["status"] == "running"
 
             collect = await _delegate_collect(rt, {"agent_id": spawn["agent_id"]})
 
@@ -136,10 +141,14 @@ class TestDelegateStatus:
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
-        with patch("atn.runtime.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _delegate, _delegate_status, _delegate_collect
+        with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
+            from atn.orchestrator.tools import _create_agent, _delegate_status, _delegate_collect
 
-            spawn = await _delegate(rt, {"prompt": "Slow task", "agent_type": "implement"})
+            spawn = await _create_agent(rt, {
+                "mode": "cognitive",
+                "prompt": "Slow task", "agent_type": "implement",
+                "_caller_id": "orch",
+            })
             await asyncio.sleep(0.05)
 
             status = await _delegate_status(rt, {"agent_id": spawn["agent_id"]})

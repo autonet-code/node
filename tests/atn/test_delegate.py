@@ -24,13 +24,26 @@ from atn.events import EventBus, EventType
 # ---------------------------------------------------------------------------
 
 class TestDelegateRegistry:
-    def test_generate_child_id(self):
-        reg = DelegateRegistry()
-        assert reg.generate_child_id("orch") == "orch.1"
-        assert reg.generate_child_id("orch") == "orch.2"
-        assert reg.generate_child_id("orch.1") == "orch.1.1"
-        assert reg.generate_child_id("orch.1") == "orch.1.2"
-        assert reg.generate_child_id("orch") == "orch.3"
+    def test_generate_child_id(self, tmp_path):
+        """generate_child_id is now on AgentRegistry (via Runtime)."""
+        from atn.config import ATNConfig
+        from atn.runtime import Runtime
+        from atn.events import EventBus
+
+        data_dir = tmp_path / "data"
+        agents_dir = tmp_path / "agents"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        config = ATNConfig(data_dir=data_dir, agents_dir=agents_dir)
+        config.autonet.enabled = False
+        config.voice.enabled = False
+        rt = Runtime(EventBus(), data_dir=data_dir, config=config)
+
+        assert rt.generate_child_id("orch") == "orch.1"
+        assert rt.generate_child_id("orch") == "orch.2"
+        assert rt.generate_child_id("orch.1") == "orch.1.1"
+        assert rt.generate_child_id("orch.1") == "orch.1.2"
+        assert rt.generate_child_id("orch") == "orch.3"
 
     def test_register_and_get(self):
         reg = DelegateRegistry()
@@ -140,9 +153,8 @@ class TestDelegateRegistry:
         node2 = reg2.get_node("orch.2")
         assert node2 is not None
 
-        # Child counters should be rebuilt correctly
-        next_id = reg2.generate_child_id("orch")
-        assert next_id == "orch.3"
+        # Verify all nodes loaded correctly
+        assert len(reg2.get_children("orch")) == 2
 
     def test_to_dict_from_dict_roundtrip(self):
         node = DelegateNode(
@@ -249,35 +261,37 @@ async def test_delegate_tool_executor(tmp_path: Path):
     mock_provider.close = AsyncMock()
     mock_provider.interrupt = AsyncMock()
 
-    with patch("atn.runtime.BridgeProvider", return_value=mock_provider):
-        from atn.orchestrator.tools import _delegate, _delegate_collect
+    with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
+        from atn.orchestrator.tools import _create_agent, _delegate_collect
 
-        # delegate() returns immediately with "spawned"
-        spawn_result = await _delegate(rt, {
+        # create_agent with mode=cognitive and prompt auto-activates and triggers
+        spawn_result = await _create_agent(rt, {
+            "mode": "cognitive",
             "prompt": "Explore the auth system",
             "agent_type": "explore",
-            "title": "Auth exploration",
+            "name": "Auth exploration",
+            "_caller_id": "orch",
         })
 
-        assert spawn_result["status"] == "spawned"
-        assert spawn_result["agent_id"] == "orch.1"
-        assert spawn_result["agent_type"] == "explore"
+        assert spawn_result["status"] == "running"
+        agent_id = spawn_result["agent_id"]
+        assert agent_id == "orch.1"
 
         # Agent is registered in the unified registry as cognitive
-        defn = rt.get_agent("orch.1")
+        defn = rt.get_agent(agent_id)
         assert defn is not None
         assert defn.mode.value == "cognitive"
         assert defn.parent_id == "orch"
 
         # Collect the result (blocks until execution finishes)
-        collect_result = await _delegate_collect(rt, {"agent_id": "orch.1"})
+        collect_result = await _delegate_collect(rt, {"agent_id": agent_id})
 
     assert collect_result["status"] == "completed"
     assert "explored the codebase" in collect_result["result"]
     assert collect_result["usage"]["input_tokens"] == 1000
 
     # Verify delegate registry was synced for UI
-    node = rt.delegate_registry.get_node("orch.1")
+    node = rt.delegate_registry.get_node(agent_id)
     assert node is not None
     assert node.status == DelegateStatus.COMPLETED
 
@@ -290,7 +304,7 @@ async def test_delegate_tool_executor(tmp_path: Path):
 
     # Verify send_orchestrate was called with correct args
     call_args = mock_provider.send_orchestrate.call_args
-    assert call_args.kwargs["message"] == "Explore the auth system"
+    assert "Explore the auth system" in call_args.kwargs["message"]
     assert "explore" in call_args.kwargs["system"].lower() or "Exploration" in call_args.kwargs["system"]
     assert call_args.kwargs["max_turns"] == 50
 
@@ -316,24 +330,27 @@ async def test_delegate_tool_failure(tmp_path: Path):
     )
     mock_provider.close = AsyncMock()
 
-    with patch("atn.runtime.BridgeProvider", return_value=mock_provider):
-        from atn.orchestrator.tools import _delegate, _delegate_collect
+    with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
+        from atn.orchestrator.tools import _create_agent, _delegate_collect
 
-        spawn_result = await _delegate(rt, {
+        spawn_result = await _create_agent(rt, {
+            "mode": "cognitive",
             "prompt": "This will fail",
             "agent_type": "implement",
+            "_caller_id": "orch",
         })
 
-        assert spawn_result["status"] == "spawned"
+        assert spawn_result["status"] == "running"
+        agent_id = spawn_result["agent_id"]
 
         # Collect — should get the failure result
-        collect_result = await _delegate_collect(rt, {"agent_id": "orch.1"})
+        collect_result = await _delegate_collect(rt, {"agent_id": agent_id})
 
     assert collect_result["status"] == "failed"
     assert "crashed" in collect_result["error"]
 
     # Verify delegate registry reflects failure
-    node = rt.delegate_registry.get_node("orch.1")
+    node = rt.delegate_registry.get_node(agent_id)
     assert node.status == DelegateStatus.FAILED
 
     # Verify failure event
@@ -366,11 +383,13 @@ async def test_delegate_status_tool(tmp_path: Path):
     mock_provider.close = AsyncMock()
     mock_provider.interrupt = AsyncMock()
 
-    with patch("atn.runtime.BridgeProvider", return_value=mock_provider):
-        from atn.orchestrator.tools import _delegate, _delegate_status, _delegate_collect
+    with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
+        from atn.orchestrator.tools import _create_agent, _delegate_status, _delegate_collect
 
-        spawn = await _delegate(rt, {
+        spawn = await _create_agent(rt, {
+            "mode": "cognitive",
             "prompt": "Do something", "agent_type": "implement",
+            "_caller_id": "orch",
         })
         agent_id = spawn["agent_id"]
 

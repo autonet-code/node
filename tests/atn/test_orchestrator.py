@@ -116,7 +116,7 @@ async def test():
     await rt.register_agent(agent)
     await rt.activate_agent(agent.id)
     eid = await rt.trigger_run(agent.id)
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.05)  # mocked provider completes instantly
 
     rec = rt.execution_log.get_latest(agent.id)
     assert rec.status == ExecutionStatus.COMPLETED, f"Expected COMPLETED, got {rec.status}"
@@ -160,7 +160,7 @@ async def test():
     await rt.register_agent(agent)
     await rt.activate_agent(agent.id)
     await rt.trigger_run(agent.id)
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.05)  # mocked provider completes instantly
 
     rec = rt.execution_log.get_latest(agent.id)
     assert rec.status == ExecutionStatus.COMPLETED
@@ -219,7 +219,7 @@ async def test():
     await rt.register_agent(agent)
     await rt.activate_agent(agent.id)
     await rt.trigger_run(agent.id)
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.05)  # mocked provider completes instantly
 
     rec = rt.execution_log.get_latest(agent.id)
     assert rec.status == ExecutionStatus.COMPLETED
@@ -304,8 +304,8 @@ async def test():
     await rt.register_agent(orch_agent)
     await rt.activate_agent(orch_agent.id)
     await rt.trigger_run(orch_agent.id)
-    # Wait for orchestrator to finish (it triggers echo01 inside)
-    await asyncio.sleep(2)
+    # Wait for orchestrator to finish (it triggers echo01 inside — real subprocess)
+    await asyncio.sleep(0.5)
 
     # Verify the orchestrator ran all 4 turns
     orch_rec = rt.execution_log.get_latest(orch_agent.id)
@@ -329,8 +329,8 @@ async def test():
         f"Expected ACTIVE-ish, got {echo_status}"
     print("  PASS: echo01 was activated")
 
-    # Wait for echo01 to finish
-    await asyncio.sleep(2)
+    # Wait for echo01 subprocess to finish
+    await asyncio.sleep(0.5)
     echo_rec = rt.execution_log.get_latest("echo01")
     assert echo_rec is not None, "echo01 should have an execution record"
     assert echo_rec.status == ExecutionStatus.COMPLETED
@@ -416,7 +416,7 @@ async def test():
     result = await execute_tool("trigger_run", {"agent_id": "test01"}, rt)
     assert "execution_id" in result
     assert result["status"] == "started"
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)  # real echo subprocess
     print("  PASS: trigger_run starts execution")
 
     # get_execution
@@ -535,7 +535,7 @@ async def test():
     await rt.register_agent(agent)
     await rt.activate_agent(agent.id)
     await rt.trigger_run(agent.id)
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.05)  # mocked provider completes instantly
 
     rec = rt.execution_log.get_latest(agent.id)
     assert rec.status == ExecutionStatus.COMPLETED

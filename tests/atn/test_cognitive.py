@@ -113,7 +113,7 @@ async def test_unit():
     assert rec.step_results[0].output["usage"]["input_tokens"] == 10
     assert len(mock.calls) == 1
     assert mock.calls[0]["system"] == "You are a helpful assistant."
-    assert mock.calls[0]["messages"][0]["content"] == "What is 2+2?"
+    assert "What is 2+2?" in mock.calls[0]["messages"][0]["content"]
     print("Test 1 PASS: Basic cognitive step works")
 
     # ===== Test 2: Prompt template with {prev} =====
