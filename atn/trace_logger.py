@@ -20,7 +20,7 @@ Each completed cognitive execution produces a JSON trace file:
         }
     }
 
-See C:\\code\\research\\AGENT_TRACE_TRAINING.md for the full specification.
+See docs/AGENT_TRACE_TRAINING.md for the full specification.
 
 Phase B Step 1 — Agent Trace Collection.
 """

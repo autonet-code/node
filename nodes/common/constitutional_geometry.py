@@ -2,7 +2,7 @@
 Constitutional Geometry: Embedding-Space Constitutional Evaluation
 
 Implements the 3-tier evaluation architecture from the constitutional
-geometry survey (C:\code\research\surveys\constitutional_geometry_survey.md):
+geometry survey:
 
   Tier 1 — Geometric pre-filter (O(1))
     Cosine similarity against principle direction vectors in JEPA embedding

@@ -35,6 +35,7 @@ from ..delegate_prompts import build_delegate_prompt
 from ..events import Event, EventType
 from ..loader import delete_agent_dir, save_agent
 from ..providers.base import ToolDefinition
+from ..runtime.provider_manager import get_model_tier, get_tier_label
 
 if TYPE_CHECKING:
     from ..runtime import Runtime
@@ -919,12 +920,24 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         if not system_prompt and prompt and parent_id:
             system_prompt = build_delegate_prompt(agent_type, agent_id, parent_id)
 
+        effective_model = model or runtime._config.orchestrator.model or "sonnet"
+        model_tier = get_model_tier(effective_model)
+
+        # Warn if model tier seems low for agent_type
+        tier_warning = None
+        if agent_type in ("general",) and model_tier < 3:
+            tier_warning = (
+                f"Model '{effective_model}' is tier {model_tier} ({get_tier_label(model_tier)}). "
+                f"Agent type '{agent_type}' works best with tier 3+ (autonomous) models."
+            )
+            log.warning("Low capability tier for agent: %s", tier_warning)
+
         defn = AgentDefinition(
             id=agent_id,
             name=input.get("name", "") or input.get("id", agent_id),
             mode=AgentMode.COGNITIVE,
-            provider=model or runtime._config.orchestrator.model or "sonnet",
-            cognitive_model=model or runtime._config.orchestrator.model or "sonnet",
+            provider=effective_model,
+            cognitive_model=effective_model,
             system_prompt=system_prompt,
             task_prompt=prompt,
             agent_type=agent_type,
@@ -984,9 +997,17 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
                         data=node.to_dict(),
                     ))
 
-                return {"agent_id": aid, "status": "running", "execution_id": eid}
+                result = {"agent_id": aid, "status": "running", "execution_id": eid,
+                         "capability_tier": model_tier, "tier_label": get_tier_label(model_tier)}
+                if tier_warning:
+                    result["tier_warning"] = tier_warning
+                return result
 
-            return {"agent_id": aid, "status": "registered"}
+            result = {"agent_id": aid, "status": "registered",
+                      "capability_tier": model_tier, "tier_label": get_tier_label(model_tier)}
+            if tier_warning:
+                result["tier_warning"] = tier_warning
+            return result
         except Exception as exc:
             return {"error": str(exc)}
 

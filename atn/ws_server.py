@@ -43,6 +43,7 @@ from websockets.asyncio.server import Server as WSServer, ServerConnection
 from .events import Event, EventBus, EventType
 from .orchestrator.tools import execute_tool
 from .runtime import Runtime
+from .runtime.provider_manager import get_model_tier, get_tier_label
 
 log = logging.getLogger(__name__)
 
@@ -162,9 +163,12 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'model' field"}
             try:
                 await self.runtime.set_orchestrator_model(model)
+                tier = get_model_tier(model)
                 return {"msg_id": msg_id, "ok": True, "result": {
                     "model": model,
                     "status": "Model changed",
+                    "capability_tier": tier,
+                    "tier_label": get_tier_label(tier),
                 }}
             except ValueError as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}

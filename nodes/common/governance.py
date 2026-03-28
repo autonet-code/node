@@ -40,7 +40,7 @@ from .contracts import ContractRegistry
 logger = logging.getLogger(__name__)
 
 # Quorum requirement for constitutional amendments (EvolutionProposal.sol parameter).
-# 95% per the RPB specification (C:\code\rpb\README.md: "requiring 95% quorum").
+# 95% per the RPB specification ("requiring 95% quorum").
 CONSTITUTIONAL_QUORUM_BPS: int = 9500  # 95% in basis points
 
 
