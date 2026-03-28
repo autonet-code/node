@@ -41,7 +41,7 @@ class DelegateNode:
     status: DelegateStatus = DelegateStatus.PENDING
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
-    result_preview: str = ""    # First 500 chars of the result
+    result_preview: str = ""    # First 2000 chars of the result
     error: str | None = None
     tokens_used: int = 0
     tool_calls: int = 0
@@ -136,7 +136,7 @@ class DelegateRegistry:
 
         node.status = status
         if result_preview:
-            node.result_preview = result_preview[:500]
+            node.result_preview = result_preview[:2000]
         if error is not None:
             node.error = error
         if tokens_used:

@@ -281,8 +281,8 @@ class AgentRegistry:
                 "child_id": agent_id,
                 "child_name": defn.name,
                 "status": status_str,
-                "output_preview": result_preview[:500],
-                "result_preview": result_preview[:500],
+                "output_preview": result_preview[:2000],
+                "result_preview": result_preview[:2000],
                 "error": record.error,
                 "instruction": (
                     f"Your child agent '{defn.name}' has {status_str}. "
@@ -300,7 +300,7 @@ class AgentRegistry:
             inject_text = (
                 f"[CHILD COMPLETED] Agent '{defn.name}' ({agent_id}) "
                 f"finished with status: {record.status.value}.\n"
-                f"Result preview: {result_preview[:500]}"
+                f"Result preview: {result_preview[:2000]}"
             )
             if record.error:
                 inject_text += f"\nError: {record.error}"

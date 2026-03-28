@@ -168,9 +168,9 @@ class TestDelegateRegistryStatusUpdates:
     def test_result_preview_truncated(self):
         reg = DelegateRegistry()
         reg.register("a.1", "a", "implement", "Task", "T")
-        long_preview = "x" * 1000
+        long_preview = "x" * 3000
         node = reg.update_status("a.1", DelegateStatus.COMPLETED, result_preview=long_preview)
-        assert len(node.result_preview) == 500
+        assert len(node.result_preview) == 2000
 
 
 class TestDelegateRegistryTreeQueries:
