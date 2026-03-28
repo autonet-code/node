@@ -168,6 +168,29 @@ class ConversationStore:
         """Number of turns in the active conversation."""
         return len(self._turns)
 
+    def export_trace_turns(self) -> list[dict[str, Any]]:
+        """Export the active conversation as structured trace turns.
+
+        Converts the stored conversation history to the trace format used by
+        TraceLogger and VL-JEPA training:
+
+            [
+                {"role": "user",      "content": "...", "tool_calls": [], "timestamp": "..."},
+                {"role": "assistant", "content": "...", "tool_calls": [], "timestamp": "..."},
+            ]
+
+        Returns an empty list if there are no turns.
+        """
+        return [
+            {
+                "role": turn.role,
+                "content": turn.content,
+                "tool_calls": [],
+                "timestamp": turn.timestamp.isoformat(),
+            }
+            for turn in self._turns
+        ]
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------

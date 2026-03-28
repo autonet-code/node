@@ -202,6 +202,26 @@ class Runtime:
             data_dir=str(self._config.data_dir),
         )
 
+        # Trace logger (Phase B Step 1 — Agent Trace Collection)
+        from ..trace_logger import TraceLogger, TraceLoggingConfig as _TLConfig
+        _tl_cfg = self._config.trace_logging
+        _trace_dir = (
+            Path(_tl_cfg.trace_dir).expanduser()
+            if _tl_cfg.trace_dir
+            else self._config.data_dir / "traces"
+        )
+        self.trace_logger = TraceLogger(
+            config=_TLConfig(
+                enabled=_tl_cfg.enabled,
+                trace_dir=str(_trace_dir),
+                include_user_data=_tl_cfg.include_user_data,
+                min_turns=_tl_cfg.min_turns,
+            ),
+            trace_dir=_trace_dir,
+        )
+        # Wire trace_logger into the execution engine
+        self.engine.trace_logger = self.trace_logger
+
         # Tool registry
         from ..tool_registry import ToolRegistry
         self.tool_registry = ToolRegistry(self)
@@ -259,6 +279,9 @@ class Runtime:
         # Start autonet service if configured
         if self._config.autonet.enabled:
             await self.autonet.start()
+
+        # Attach trace logger to event bus (subscribes to AGENT_TOOL_USE_* events)
+        self.trace_logger.attach(self.events)
 
         await self.events.emit(Event(
             type=EventType.RUNTIME_STARTED,

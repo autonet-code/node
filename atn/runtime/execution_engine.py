@@ -234,6 +234,9 @@ class ExecutionEngine:
         # Events for signalling delegate completion
         self._delegate_done: dict[str, asyncio.Event] = {}
 
+        # Trace logger (set by Runtime after construction; may be None)
+        self.trace_logger: Any = None
+
     # ------------------------------------------------------------------
     # Trigger
     # ------------------------------------------------------------------
@@ -668,6 +671,17 @@ class ExecutionEngine:
                     },
                 ))
 
+            # --- Trace logging: record execution start ---
+            if self.trace_logger is not None:
+                self.trace_logger.begin_execution(
+                    agent_id=defn.id,
+                    execution_id=record.execution_id,
+                    agent_type=defn.agent_type or ("orchestrator" if is_orchestrator else "cognitive"),
+                    system_prompt=system_prompt,
+                    # Store the raw user message before history prepending for cleaner traces
+                    user_message="\n\n".join(prompt_parts) if prompt_parts else (defn.description or defn.name),
+                )
+
             # --- Run the agent ---
             send_kwargs: dict[str, Any] = {
                 "message": user_message,
@@ -740,6 +754,22 @@ class ExecutionEngine:
                     status=record.status,
                     execution_id=record.execution_id,
                 ))
+
+            # --- Trace logging: finalise trace ---
+            if self.trace_logger is not None:
+                _trace_result = ""
+                if isinstance(record.output, dict):
+                    _trace_result = record.output.get("result", "")
+                elif record.output:
+                    _trace_result = str(record.output)
+                self.trace_logger.end_execution(
+                    agent_id=defn.id,
+                    execution_id=record.execution_id,
+                    result_text=_trace_result,
+                    status=record.status.value,
+                    error=record.error,
+                    completed_at=record.completed_at,
+                )
 
             # Record assistant turn (children)
             if not is_orchestrator:

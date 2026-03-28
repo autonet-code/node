@@ -6,6 +6,25 @@ reward claiming, reputation accrual, evolution proposal evaluation,
 and RPB consensus that all node types share. This bridges the
 training loop to the economic layer (Autonet.sol) and the evolution
 mechanism (EvolutionProposal.sol) on the jurisdiction chain.
+
+3-Tier Constitutional Evaluation (Phase C Step 6)
+--------------------------------------------------
+Actions and proposals are evaluated through a tiered pipeline:
+
+  Tier 1 — Geometric pre-filter (O(1), ~80-90% of cases)
+    ConstitutionalGeometry.evaluate() checks cosine similarity against
+    7 RPB principle direction vectors in JEPA embedding space.
+
+  Tier 2 — Concept bottleneck classifier (lightweight MLP)
+    Handles nuanced cases where Tier 1 is uncertain. Each bottleneck
+    neuron corresponds to one RPB principle (interpretable).
+
+  Tier 3 — Full LLM evaluation with multi-node Yuma consensus
+    The existing RPBEvaluator/AIProvider chain. Used for high-stakes
+    and adversarial-seeming inputs (Verdict.UNCERTAIN from Tiers 1+2).
+
+Evolution proposals require 95% quorum (CONSTITUTIONAL_QUORUM_BPS)
+for constitutional amendments (parameter changes).
 """
 
 import hashlib
@@ -14,11 +33,15 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from .contracts import ContractRegistry
 
 logger = logging.getLogger(__name__)
+
+# Quorum requirement for constitutional amendments (EvolutionProposal.sol parameter).
+# 95% per the RPB specification (C:\code\rpb\README.md: "requiring 95% quorum").
+CONSTITUTIONAL_QUORUM_BPS: int = 9500  # 95% in basis points
 
 
 def compute_service_id(project_id: int) -> bytes:
@@ -424,6 +447,58 @@ class GovernanceBridge:
             self.logger.warning(f"RPB evaluation error: {e}")
             return False
 
+    def submit_evolution_proposal(
+        self,
+        content_cid: str,
+        stake_amount: int,
+        is_constitutional_amendment: bool = False,
+    ) -> Optional[int]:
+        """
+        Submit an evolution proposal to EvolutionProposal.sol.
+
+        Constitutional amendments (parameter changes that affect the RPB
+        constitution) require a 95% quorum enforced at the contract level.
+        This method records the intent; the on-chain admin must call
+        EvolutionProposal.setApprovalThreshold(9500) before evaluation
+        to enforce the higher bar.
+
+        Args:
+            content_cid:                CID pointing to proposal description + spec
+            stake_amount:               ATN to stake (must meet contract's minStake)
+            is_constitutional_amendment: If True, flags this proposal as requiring
+                                         the 95% constitutional quorum (9500 bps)
+
+        Returns:
+            Proposal ID on success, None on failure.
+        """
+        if not self._evolution_available:
+            self.logger.debug("EvolutionProposal not deployed, skipping submission")
+            return None
+
+        try:
+            result = self.registry.submit_evolution_proposal(content_cid, stake_amount)
+            if result.success:
+                proposal_id = result.data.get("proposal_id")
+                quorum_note = (
+                    f" [CONSTITUTIONAL AMENDMENT — 95% quorum required "
+                    f"({CONSTITUTIONAL_QUORUM_BPS} bps)]"
+                    if is_constitutional_amendment
+                    else ""
+                )
+                self.logger.info(
+                    f"Evolution proposal submitted: id={proposal_id}, "
+                    f"stake={stake_amount}{quorum_note}"
+                )
+                return proposal_id
+            else:
+                self.logger.warning(
+                    f"Evolution proposal submission failed: {result.error}"
+                )
+                return None
+        except Exception as e:
+            self.logger.warning(f"Evolution proposal submission error: {e}")
+            return None
+
     def get_rpb_prompt(self) -> Optional[str]:
         """
         Get the current RPB constitutional prompt CID.
@@ -525,8 +600,14 @@ class RPBEvaluator:
     Node-side RPB evaluator.
 
     Listens for new proposals, loads the constitutional prompt from Registry,
-    evaluates proposals through an AI provider, and submits structured
+    evaluates proposals through the 3-tier pipeline, and submits structured
     recommendations on-chain.
+
+    Tier routing:
+      - Tier 1+2 (geometric/bottleneck): used when an embedding of the proposal
+        content is available (e.g., encoded via the node's TextEncoder)
+      - Tier 3 (LLM): always used when Tier 1+2 returns UNCERTAIN, and always
+        used when no geometry evaluator is configured
 
     Usage:
         evaluator = RPBEvaluator(governance_bridge, provider)
@@ -538,10 +619,14 @@ class RPBEvaluator:
         governance: GovernanceBridge,
         provider: Optional[AIProvider] = None,
         blob_store: Optional[object] = None,
+        geometry: Optional["ConstitutionalGeometry"] = None,  # type: ignore[name-defined]
+        encode_fn: Optional[object] = None,
     ):
         self.governance = governance
         self.provider = provider or PlaceholderAIProvider()
         self.blob_store = blob_store
+        self._geometry = geometry    # ConstitutionalGeometry instance (optional)
+        self._encode_fn = encode_fn  # Callable[[str], Tensor]: text → embedding
         self._evaluated_proposals: set = set()
         self.logger = logging.getLogger(
             f"RPBEvaluator[{governance.node_id}]"
@@ -551,6 +636,10 @@ class RPBEvaluator:
         """
         Evaluate all pending proposals that this node hasn't evaluated yet.
 
+        Routes each proposal through the 3-tier constitutional pipeline:
+          - Tier 1+2: fast geometric/bottleneck evaluation (if geometry configured)
+          - Tier 3:   full LLM evaluation via AIProvider (always available fallback)
+
         Returns:
             Number of proposals evaluated.
         """
@@ -559,15 +648,9 @@ class RPBEvaluator:
             return 0
 
         prompt_cid = self.governance.get_rpb_prompt()
-        if not prompt_cid:
-            self.logger.debug("No RPB prompt configured, skipping evaluation")
-            return 0
-
-        # Resolve CID to actual prompt content
-        prompt_text = self._resolve_prompt(prompt_cid)
-        if not prompt_text:
-            self.logger.warning("Could not resolve RPB prompt content, skipping evaluation")
-            return 0
+        prompt_text: Optional[str] = None
+        if prompt_cid:
+            prompt_text = self._resolve_prompt(prompt_cid)
 
         evaluated = 0
         for proposal in pending:
@@ -576,14 +659,13 @@ class RPBEvaluator:
                 continue
 
             try:
-                recommendation = self.provider.evaluate(
-                    prompt_text, proposal.get("contentCid", "")
+                recommendation = self._evaluate_proposal_tiered(
+                    proposal, prompt_text
                 )
+                if recommendation is None:
+                    continue
 
-                # In production, store recommendation as CID.
-                # For now, use the JSON directly as the reason string.
                 reason_cid = f"rpb-eval-{pid}-{self.governance.node_id}"
-
                 success = self.governance.submit_rpb_evaluation(
                     pid,
                     recommendation.approve,
@@ -603,6 +685,100 @@ class RPBEvaluator:
                 self.logger.warning(f"Failed to evaluate proposal {pid}: {e}")
 
         return evaluated
+
+    def _evaluate_proposal_tiered(
+        self,
+        proposal: Dict[str, Any],
+        prompt_text: Optional[str],
+    ) -> Optional[RPBRecommendation]:
+        """
+        Route a proposal through the 3-tier constitutional pipeline.
+
+        Tries Tier 1+2 (geometric) first when available. Falls through to
+        Tier 3 (LLM) when:
+          - Geometry evaluator is not configured
+          - Proposal embedding is unavailable
+          - Tier 1+2 returns Verdict.UNCERTAIN
+          - drift_warning is set (geometry may be unreliable)
+        """
+        content_cid = proposal.get("contentCid", "")
+
+        # Attempt Tier 1+2 if geometry + encoder are available
+        if self._geometry is not None and self._encode_fn is not None and content_cid:
+            tier_result = self._run_geometric_tiers(content_cid)
+            if tier_result is not None:
+                return tier_result
+
+        # Tier 3: full LLM evaluation
+        if not prompt_text:
+            self.logger.debug(
+                f"Proposal {proposal.get('id')}: no RPB prompt resolved — "
+                f"using PlaceholderAIProvider"
+            )
+        llm_prompt = prompt_text or "Evaluate the following proposal."
+        return self.provider.evaluate(llm_prompt, content_cid)
+
+    def _run_geometric_tiers(
+        self, content_cid: str
+    ) -> Optional[RPBRecommendation]:
+        """
+        Try Tier 1+2 for a proposal. Returns None if LLM fallback is needed.
+        """
+        from .constitutional_geometry import Verdict
+
+        try:
+            embedding = self._encode_fn(content_cid)
+        except Exception as e:
+            self.logger.debug(f"Could not encode proposal content: {e}")
+            return None
+
+        result = self._geometry.evaluate(embedding)
+
+        # Always use LLM if drift detected (geometric results may be wrong)
+        if result.drift_warning:
+            self.logger.info(
+                "Embedding drift detected — skipping Tier 1+2, using LLM (Tier 3)"
+            )
+            return None
+
+        if result.verdict == Verdict.UNCERTAIN:
+            return None  # Tier 1+2 inconclusive → LLM
+
+        # Convert geometric result to RPBRecommendation
+        approve = result.verdict == Verdict.COMPLIANT
+        # Scale 0-1 confidence to 0-10000 bps
+        confidence_bps = int(result.overall_confidence * 10_000)
+
+        weakest_note = ""
+        if result.weakest_principle and not approve:
+            weakest_note = (
+                f" Weakest principle: {result.weakest_principle.value}."
+            )
+
+        self.logger.info(
+            f"Geometric Tier {result.tier_used} decision: "
+            f"{'approve' if approve else 'reject'} "
+            f"(conf={confidence_bps} bps){weakest_note}"
+        )
+
+        return RPBRecommendation(
+            approve=approve,
+            confidence=confidence_bps,
+            reasoning=result.explanation + weakest_note,
+            constitutional_alignment=result.overall_confidence,
+            risks=(
+                []
+                if approve
+                else [
+                    f"Potential violation of {result.weakest_principle.value}"
+                    if result.weakest_principle
+                    else "Constitutional concern detected"
+                ]
+            ),
+            benefits=(
+                ["Geometric constitutional evaluation: compliant"] if approve else []
+            ),
+        )
 
     def _resolve_prompt(self, prompt_cid: str) -> Optional[str]:
         """

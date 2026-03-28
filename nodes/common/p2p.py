@@ -95,6 +95,36 @@ async def _read_framed(stream) -> bytes:
     return b"".join(parts)
 
 
+async def _write_frame_no_close(stream, data: bytes):
+    """Write a length-prefixed frame without closing the stream (for request-response)."""
+    header = struct.pack(">I", len(data))
+    await stream.write(header)
+    offset = 0
+    while offset < len(data):
+        chunk = data[offset:offset + _MAX_WRITE_CHUNK]
+        await stream.write(chunk)
+        offset += len(chunk)
+
+
+async def _read_frame_no_close(stream) -> bytes:
+    """Read a length-prefixed frame without closing the stream (for request-response)."""
+    header = await stream.read(4)
+    if len(header) < 4:
+        raise ValueError("Truncated frame header")
+    length = struct.unpack(">I", header)[0]
+    if length == 0:
+        return b""
+    parts = []
+    remaining = length
+    while remaining > 0:
+        chunk = await stream.read(min(remaining, _MAX_WRITE_CHUNK))
+        if not chunk:
+            break
+        parts.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(parts)
+
+
 # =============================================================================
 # Protocol IDs
 # =============================================================================
@@ -102,6 +132,8 @@ async def _read_framed(stream) -> bytes:
 WEIGHTS_PROTOCOL = TProtocol("/autonet/weights/1.0.0")
 ACTIVATIONS_PROTOCOL = TProtocol("/autonet/activations/1.0.0")
 CAPABILITY_PROTOCOL = TProtocol("/autonet/capability/1.0.0")
+BLOB_PROTOCOL = TProtocol("/autonet/blob/1.0.0")
+EMBEDDING_PROTOCOL = TProtocol("/autonet/embeddings/1.0.0")
 GUILD_GOSSIP_TOPIC_PREFIX = "/autonet/guild/"
 
 
@@ -287,6 +319,8 @@ class AutonetHost:
         self._weight_handler: Optional[Callable] = None
         self._activation_handler: Optional[Callable] = None
         self._guild_handlers: Dict[str, Callable] = {}
+        self._blob_handler: Optional[Callable] = None       # async (hash: str) -> Optional[bytes]
+        self._embedding_handler: Optional[Callable] = None  # async (peer_id, metadata, tensor_bytes)
 
         # State (initialized in run())
         self._host: Optional[IHost] = None
@@ -744,6 +778,174 @@ class AutonetHost:
                 setattr(self._capability, key, value)
 
     # =========================================================================
+    # Blob Protocol (content-addressed P2P fetch)
+    # =========================================================================
+
+    def set_blob_handler(self, handler: Callable):
+        """Set handler for blob requests: async handler(content_hash: str) -> Optional[bytes]"""
+        self._blob_handler = handler
+
+    async def fetch_blob(
+        self,
+        target_peer_id: PeerID,
+        content_hash: str,
+        timeout: float = 30.0,
+    ) -> Optional[bytes]:
+        """
+        Request a blob from a peer by content hash.
+
+        Returns the blob bytes if found and integrity-verified, None otherwise.
+        """
+        if not self._host:
+            return None
+        try:
+            stream = await self._host.new_stream(target_peer_id, [BLOB_PROTOCOL])
+            # Write request: hash as UTF-8 (no stream close — waiting for response)
+            await _write_frame_no_close(stream, content_hash.encode("utf-8"))
+            # Read response with timeout
+            data = b""
+            with trio.move_on_after(timeout):
+                data = await _read_frame_no_close(stream)
+            await stream.close()
+
+            if data:
+                actual_hash = hashlib.sha256(data).hexdigest()
+                if actual_hash == content_hash:
+                    self.logger.debug(
+                        f"Fetched blob {content_hash[:16]}... "
+                        f"({len(data)} bytes) from {str(target_peer_id)[:16]}..."
+                    )
+                    return data
+                self.logger.warning(
+                    f"Blob hash mismatch from {str(target_peer_id)[:16]}: "
+                    f"expected {content_hash[:16]}, got {actual_hash[:16]}"
+                )
+            return None
+        except Exception as e:
+            self.logger.debug(
+                f"Failed to fetch blob {content_hash[:16]} "
+                f"from {str(target_peer_id)[:16]}: {e}"
+            )
+            return None
+
+    async def _handle_blob_stream(self, stream):
+        """Handle incoming blob request: read content hash, write blob bytes."""
+        try:
+            hash_bytes = await _read_frame_no_close(stream)
+            content_hash = hash_bytes.decode("utf-8").strip()
+
+            blob_data: Optional[bytes] = None
+            if self._blob_handler:
+                try:
+                    blob_data = await self._blob_handler(content_hash)
+                except Exception as e:
+                    self.logger.debug(f"Blob handler error for {content_hash[:16]}: {e}")
+
+            # Respond with blob data, or empty frame if not found
+            response = blob_data if blob_data is not None else b""
+            await _write_framed(stream, response)
+
+            self.logger.debug(
+                f"Blob request {content_hash[:16]}: "
+                f"{'served' if blob_data else 'not found'} ({len(response)} bytes)"
+            )
+        except Exception as e:
+            self.logger.warning(f"Error handling blob stream: {e}")
+
+    async def fetch_blob_from_any_peer(
+        self,
+        content_hash: str,
+        timeout_per_peer: float = 10.0,
+    ) -> Optional[bytes]:
+        """
+        Try to fetch a blob from any connected peer.
+
+        Tries peers concurrently and returns the first successful response.
+        """
+        if not self._host:
+            return None
+        peers = self._host.get_connected_peers()
+        if not peers:
+            return None
+
+        result: List[Optional[bytes]] = [None]
+
+        async def try_peer(pid):
+            if result[0] is not None:
+                return
+            data = await self.fetch_blob(pid, content_hash, timeout=timeout_per_peer)
+            if data is not None:
+                result[0] = data
+
+        async with trio.open_nursery() as nursery:
+            for pid in peers:
+                nursery.start_soon(try_peer, pid)
+
+        return result[0]
+
+    # =========================================================================
+    # Embedding Exchange Protocol (two-speed inference architecture)
+    # =========================================================================
+
+    def set_embedding_handler(self, handler: Callable):
+        """Set handler for incoming embeddings: async handler(peer_id, metadata, tensor_bytes)"""
+        self._embedding_handler = handler
+
+    async def send_embedding(
+        self,
+        target_peer_id: PeerID,
+        tensor_bytes: bytes,
+        metadata: Optional[Dict] = None,
+    ) -> bool:
+        """
+        Send an embedding tensor to a peer for the two-speed inference architecture.
+
+        Frame format: [4-byte metadata_len][metadata_json][tensor_bytes]
+        """
+        if not self._host:
+            return False
+        try:
+            meta_bytes = json.dumps(metadata or {}).encode("utf-8")
+            meta_len = struct.pack(">I", len(meta_bytes))
+            payload = meta_len + meta_bytes + tensor_bytes
+
+            stream = await self._host.new_stream(target_peer_id, [EMBEDDING_PROTOCOL])
+            await _write_framed(stream, payload)
+
+            self.logger.debug(
+                f"Sent embedding ({len(tensor_bytes)} bytes) "
+                f"to {str(target_peer_id)[:16]}..."
+            )
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to send embedding: {e}")
+            return False
+
+    async def _handle_embedding_stream(self, stream):
+        """Handle incoming embedding tensor."""
+        try:
+            data = await _read_framed(stream)
+            if len(data) < 4:
+                return
+
+            meta_len = struct.unpack(">I", data[:4])[0]
+            meta_bytes = data[4:4 + meta_len]
+            tensor_bytes = data[4 + meta_len:]
+
+            metadata = json.loads(meta_bytes.decode("utf-8"))
+            remote_peer = str(stream.muxed_conn.peer_id)
+
+            self.logger.debug(
+                f"Received embedding ({len(tensor_bytes)} bytes) "
+                f"from {remote_peer[:16]}..."
+            )
+
+            if self._embedding_handler:
+                await self._embedding_handler(remote_peer, metadata, tensor_bytes)
+        except Exception as e:
+            self.logger.warning(f"Error handling embedding stream: {e}")
+
+    # =========================================================================
     # Internal setup
     # =========================================================================
 
@@ -760,6 +962,12 @@ class AutonetHost:
         )
         self._host.set_stream_handler(
             CAPABILITY_PROTOCOL, self._handle_capability_stream
+        )
+        self._host.set_stream_handler(
+            BLOB_PROTOCOL, self._handle_blob_stream
+        )
+        self._host.set_stream_handler(
+            EMBEDDING_PROTOCOL, self._handle_embedding_stream
         )
 
     # =========================================================================

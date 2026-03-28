@@ -112,6 +112,27 @@ class AutonetConfig:
 
 
 @dataclass
+class TraceLoggingConfig:
+    """Configuration for structured agent trace logging.
+
+    Traces are written to ``trace_dir`` (default: ``{data_dir}/traces/``) as
+    content-addressed JSON files and serve as training data for VL-JEPA.
+
+    Example config.yaml snippet::
+
+        trace_logging:
+          enabled: true
+          trace_dir: ~/.atn/traces   # optional override
+          include_user_data: false   # set true to include orchestrator sessions
+          min_turns: 1               # quality filter: skip near-empty sessions
+    """
+    enabled: bool = False
+    trace_dir: str = ""             # empty → {data_dir}/traces/
+    include_user_data: bool = False  # consent gate (Epic 3 Story 3.1)
+    min_turns: int = 1              # minimum assistant turns for quality filter
+
+
+@dataclass
 class ATNConfig:
     """Top-level ATN configuration."""
     data_dir: Path = field(default_factory=lambda: _DEFAULT_DIR)
@@ -119,6 +140,7 @@ class ATNConfig:
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     autonet: AutonetConfig = field(default_factory=AutonetConfig)
+    trace_logging: TraceLoggingConfig = field(default_factory=TraceLoggingConfig)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     connectors: dict[str, ConnectorConfig] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -270,6 +292,16 @@ def load_config(path: Path | None = None) -> ATNConfig:
             chain_id=resolved.get("chain_id", 0),
             private_key=resolved.get("private_key", ""),
             wallet_address=resolved.get("wallet_address", ""),
+        )
+
+    # Trace logging
+    trace_raw = raw.get("trace_logging", {})
+    if isinstance(trace_raw, dict):
+        config.trace_logging = TraceLoggingConfig(
+            enabled=trace_raw.get("enabled", False),
+            trace_dir=trace_raw.get("trace_dir", ""),
+            include_user_data=trace_raw.get("include_user_data", False),
+            min_turns=trace_raw.get("min_turns", 1),
         )
 
     # Connectors

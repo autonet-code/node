@@ -34,6 +34,9 @@ class TrainingFeedConfig:
     """Configuration for the training data feed."""
     # ATN data directory (~/.atn or equivalent)
     data_dir: str = ""
+    # Directory containing structured JSON trace files (Phase B Step 1).
+    # Empty string = auto-derive as {data_dir}/traces/.
+    traces_dir: str = ""
     # Minimum new events before triggering a training cycle
     min_events_for_cycle: int = 5
     # Minimum seconds between training cycles (prevent thrashing)

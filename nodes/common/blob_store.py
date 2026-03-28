@@ -2,10 +2,11 @@
 Node-Native Blob Store for Autonet
 
 Content-addressed storage backed by local disk. Zero external infrastructure.
-Nodes store blobs locally and serve them to peers over HTTP.
+Nodes store blobs locally and serve them to peers over HTTP or P2P.
 Content integrity is guaranteed by hash verification.
 
 Interface: add_json, get_json, add_bytes, get_bytes.
+Async interface: get_bytes_async (uses P2P when available).
 """
 
 import hashlib
@@ -14,7 +15,10 @@ import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+
+if TYPE_CHECKING:
+    from .p2p import AutonetHost
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +35,17 @@ class BlobStore:
         self,
         data_dir: str = "~/.autonet/blobs",
         peer_urls: Optional[List[str]] = None,
+        p2p_host: Optional["AutonetHost"] = None,
     ):
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.peer_urls = peer_urls or []
         self._server: Optional[HTTPServer] = None
         self._server_thread: Optional[threading.Thread] = None
+        self._p2p_host: Optional["AutonetHost"] = None
+
+        if p2p_host is not None:
+            self.set_p2p_host(p2p_host)
 
         logger.info(f"BlobStore initialized at {self.data_dir}")
 
@@ -113,6 +122,101 @@ class BlobStore:
 
         logger.warning(f"Blob not found: {content_hash[:16]}...")
         return None
+
+    # ============ P2P Integration ============
+
+    def set_p2p_host(self, host: "AutonetHost") -> None:
+        """
+        Wire this BlobStore to a running AutonetHost.
+
+        Registers a blob request handler so peers can fetch blobs from us,
+        and enables async P2P fallback in get_bytes_async().
+        """
+        self._p2p_host = host
+        host.set_blob_handler(self._serve_blob_for_p2p)
+        logger.info("BlobStore wired to P2P host — serving blobs to peers")
+
+    async def _serve_blob_for_p2p(self, content_hash: str) -> Optional[bytes]:
+        """P2P blob handler: serve a locally-stored blob to a requesting peer."""
+        return self.get_bytes_local(content_hash)
+
+    async def get_bytes_async(self, content_hash: str) -> Optional[bytes]:
+        """
+        Retrieve blob: local disk first, HTTP peers second, P2P network third.
+
+        Must be called from an async (trio) context.
+        Returns None if the blob cannot be found anywhere.
+        """
+        # 1. Local cache
+        blob_path = self.data_dir / content_hash
+        if blob_path.exists():
+            logger.debug(f"Local hit: {content_hash[:16]}...")
+            return blob_path.read_bytes()
+
+        # 2. HTTP peers (sync, run in thread to not block trio)
+        if self.peer_urls:
+            import trio
+            data = await trio.to_thread.run_sync(
+                lambda: self._fetch_from_http_peers(content_hash), cancellable=True
+            )
+            if data is not None:
+                blob_path.write_bytes(data)
+                return data
+
+        # 3. P2P peers
+        if self._p2p_host and self._p2p_host._running:
+            data = await self._p2p_host.fetch_blob_from_any_peer(content_hash)
+            if data is not None:
+                blob_path.write_bytes(data)
+                logger.info(f"Fetched blob {content_hash[:16]}... from P2P network")
+                return data
+
+        logger.warning(f"Blob not found anywhere: {content_hash[:16]}...")
+        return None
+
+    def _fetch_from_http_peers(self, content_hash: str) -> Optional[bytes]:
+        """Synchronous HTTP peer fetch (called from trio thread executor)."""
+        for peer_url in self.peer_urls:
+            try:
+                import requests
+                url = f"{peer_url}/blob/{content_hash}"
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 200:
+                    actual_hash = hashlib.sha256(resp.content).hexdigest()
+                    if actual_hash == content_hash:
+                        logger.info(f"Fetched from peer {peer_url}: {content_hash[:16]}...")
+                        return resp.content
+                    logger.warning(
+                        f"Hash mismatch from {peer_url}: "
+                        f"expected {content_hash[:16]}, got {actual_hash[:16]}"
+                    )
+            except Exception as e:
+                logger.debug(f"Peer {peer_url} unreachable: {e}")
+        return None
+
+    async def announce_blobs_to_peers(self) -> int:
+        """
+        Advertise all locally-stored blobs to connected P2P peers.
+
+        This is a capability hint — peers learn what blobs we can serve them.
+        Returns the number of peers notified.
+        """
+        if not self._p2p_host or not self._p2p_host._running:
+            return 0
+
+        local_hashes = self.list_hashes()
+        if not local_hashes:
+            return 0
+
+        # Advertise via capability update (blob_count in modules_hosted)
+        self._p2p_host.update_capability(
+            modules_hosted=list(self._p2p_host._capability.modules_hosted) + [
+                f"blob:{h}" for h in local_hashes[:50]  # cap at 50 to keep capability small
+            ]
+        )
+        await self._p2p_host.advertise_capability()
+        logger.info(f"Announced {len(local_hashes)} blobs to P2P peers")
+        return len(self._p2p_host.get_connected_peers())
 
     # ============ Utility ============
 

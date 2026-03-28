@@ -94,6 +94,16 @@ class P2PConfig:
 
 
 @dataclass
+class InferenceP2PConfig:
+    """P2P settings specific to inference and embedding exchange."""
+    embedding_exchange_timeout: float = 5.0   # seconds to wait for embedding response
+    max_embedding_peers: int = 4              # max peers to broadcast embeddings to
+    shard_announce_enabled: bool = True       # announce locally-stored shards to peers
+    blob_fetch_timeout: float = 30.0          # seconds to wait for P2P blob fetch
+    blob_announce_on_store: bool = True       # announce blobs when added to store
+
+
+@dataclass
 class CaptureConfig:
     """Data capture configuration (Epic 5)."""
     enabled_sources: list = field(default_factory=list)  # ["screen", "audio", "browser"]

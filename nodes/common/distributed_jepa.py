@@ -1,25 +1,49 @@
 """
-Distributed JEPA - Integration with ModelShardRegistry
+Distributed JEPA - Integration with ModelShardRegistry and P2P
 
 Provides infrastructure for:
 1. Sharding JEPA model weights across network nodes
 2. Registering shards on-chain with merkle proofs
 3. Retrieving and reassembling models from distributed storage
 4. Erasure coding for fault tolerance
+5. P2P embedding exchange for the two-speed inference architecture
 """
 
+import io
+import struct
 import torch
 import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Any
+from typing import TYPE_CHECKING, Callable, Dict, List, Tuple, Optional, Any
 from pathlib import Path
 
 from .jepa import JEPAConfig, JEPA
 from .blob_store import BlobStore
 
+if TYPE_CHECKING:
+    from .p2p import AutonetHost
+
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Tensor serialization helpers (used for P2P embedding exchange)
+# =============================================================================
+
+
+def _tensor_to_bytes(tensor: torch.Tensor) -> bytes:
+    """Serialize a tensor to bytes using torch.save into a buffer."""
+    buf = io.BytesIO()
+    torch.save(tensor, buf)
+    return buf.getvalue()
+
+
+def _bytes_to_tensor(data: bytes) -> torch.Tensor:
+    """Deserialize a tensor from bytes."""
+    buf = io.BytesIO(data)
+    return torch.load(buf, weights_only=True)
 
 
 @dataclass
@@ -118,16 +142,53 @@ class DistributedJEPA:
     """
     Handles distributed storage and retrieval of JEPA models.
 
-    Integrates with ModelShardRegistry.sol for on-chain coordination.
+    Integrates with ModelShardRegistry.sol for on-chain coordination
+    and with AutonetHost for P2P shard transfer and embedding exchange.
     """
 
     def __init__(
         self,
         store: BlobStore,
         registry=None,  # ContractRegistry
+        p2p_host: Optional["AutonetHost"] = None,
     ):
         self.store = store
         self.registry = registry
+        self._p2p_host: Optional["AutonetHost"] = p2p_host
+        self._embedding_handler: Optional[Callable] = None
+
+        if p2p_host is not None:
+            self._wire_p2p(p2p_host)
+
+    def set_p2p_host(self, host: "AutonetHost") -> None:
+        """Wire a P2P host to this DistributedJEPA after construction."""
+        self._p2p_host = host
+        self._wire_p2p(host)
+
+    def _wire_p2p(self, host: "AutonetHost") -> None:
+        """Register embedding handler on the P2P host."""
+        host.set_embedding_handler(self._handle_incoming_embedding)
+        logger.info("DistributedJEPA wired to P2P host")
+
+    def set_embedding_handler(self, handler: Callable) -> None:
+        """
+        Set callback for received embeddings from peers.
+
+        handler signature: async handler(peer_id: str, metadata: dict, embedding: torch.Tensor)
+        """
+        self._embedding_handler = handler
+
+    async def _handle_incoming_embedding(
+        self, peer_id: str, metadata: dict, tensor_bytes: bytes
+    ) -> None:
+        """Deserialize an incoming embedding tensor and invoke user handler."""
+        if self._embedding_handler is None:
+            return
+        try:
+            tensor = _bytes_to_tensor(tensor_bytes)
+            await self._embedding_handler(peer_id, metadata, tensor)
+        except Exception as e:
+            logger.warning(f"Failed to deserialize embedding from {peer_id[:16]}: {e}")
 
     def shard_model(
         self,
@@ -313,6 +374,167 @@ class DistributedJEPA:
 
         logger.info(f"Uploaded {len(manifest.shards)} shards to blob store")
         return manifest
+
+    async def upload_and_announce(self, manifest: JEPAShardManifest) -> JEPAShardManifest:
+        """
+        Upload shards to blob store and announce availability over P2P.
+
+        Must be called from an async (trio) context.
+        """
+        manifest = self.upload_shards(manifest)
+
+        if self._p2p_host and self._p2p_host._running:
+            shard_cids = [s.blob_hash for s in manifest.shards if s.blob_hash and not s.is_parity]
+            self._p2p_host.update_capability(
+                modules_hosted=list(self._p2p_host._capability.modules_hosted) + [
+                    f"jepa_shard:{cid[:16]}" for cid in shard_cids
+                ]
+            )
+            await self._p2p_host.advertise_capability()
+            logger.info(
+                f"Announced {len(shard_cids)} JEPA shards over P2P "
+                f"(model: {manifest.model_hash.hex()[:16]}...)"
+            )
+
+        return manifest
+
+    async def retrieve_async(
+        self,
+        manifest: JEPAShardManifest,
+        config: Optional[JEPAConfig] = None,
+    ) -> "JEPA":
+        """
+        Async version of retrieve_and_reassemble — falls back to P2P for missing shards.
+
+        Must be called from an async (trio) context.
+        """
+        config = config or manifest.config
+        state_dict = {}
+        available_shards = 0
+        missing_blob_hashes = []
+
+        for shard_info in manifest.shards:
+            if shard_info.is_parity:
+                continue
+            if not shard_info.blob_hash:
+                logger.warning(f"Shard {shard_info.shard_index} has no blob hash")
+                continue
+
+            shard_data = self.store.get_json(shard_info.blob_hash)
+
+            if shard_data is None and self._p2p_host and self._p2p_host._running:
+                # Try to fetch from P2P
+                raw = await self.store.get_bytes_async(shard_info.blob_hash)
+                if raw is not None:
+                    import json as _json
+                    try:
+                        shard_data = _json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        shard_data = None
+
+            if shard_data is None:
+                missing_blob_hashes.append(shard_info.blob_hash)
+                logger.warning(f"Shard {shard_info.shard_index} unavailable")
+                continue
+
+            try:
+                tensors = shard_data.get('tensors', {})
+                for name, tensor_info in tensors.items():
+                    tensor = torch.tensor(
+                        tensor_info['data'],
+                        dtype=getattr(torch, tensor_info['dtype'].split('.')[-1])
+                    ).reshape(tensor_info['shape'])
+                    state_dict[name] = tensor
+                available_shards += 1
+            except Exception as e:
+                logger.warning(f"Failed to deserialize shard {shard_info.shard_index}: {e}")
+
+        if missing_blob_hashes:
+            logger.warning(
+                f"{len(missing_blob_hashes)} shards missing even after P2P fallback"
+            )
+
+        model = JEPA(config)
+        model.load_state_dict(state_dict, strict=False)
+        logger.info(f"Reassembled JEPA model from {available_shards} shards (async)")
+        return model
+
+    # =========================================================================
+    # Embedding Exchange — two-speed inference architecture
+    # =========================================================================
+
+    async def send_embedding_to_peer(
+        self,
+        peer_id_str: str,
+        embedding: torch.Tensor,
+        metadata: Optional[Dict] = None,
+    ) -> bool:
+        """
+        Send an embedding tensor to a specific peer for network-guided inference.
+
+        This implements the fast-loop embedding exchange in the two-speed architecture:
+        the local node sends its current context embedding to peers, and peers
+        can return guidance embeddings to augment local predictions.
+
+        Args:
+            peer_id_str: Peer's libp2p peer ID string
+            embedding: The embedding tensor to send
+            metadata: Optional metadata dict (e.g. {"seq_id": 42, "layer": "context"})
+        """
+        if not self._p2p_host or not self._p2p_host._running:
+            logger.debug("P2P not available for embedding exchange")
+            return False
+
+        try:
+            from libp2p.peer.id import ID as PeerID
+            target = PeerID.from_base58(peer_id_str)
+        except Exception as e:
+            logger.warning(f"Invalid peer ID {peer_id_str[:16]}: {e}")
+            return False
+
+        tensor_bytes = _tensor_to_bytes(embedding)
+        return await self._p2p_host.send_embedding(target, tensor_bytes, metadata)
+
+    async def broadcast_embedding(
+        self,
+        embedding: torch.Tensor,
+        metadata: Optional[Dict] = None,
+        max_peers: int = 4,
+    ) -> int:
+        """
+        Broadcast an embedding to up to max_peers connected peers.
+
+        Used by the slow loop to distribute network context to fast-loop nodes.
+        Returns the number of peers the embedding was sent to successfully.
+        """
+        if not self._p2p_host or not self._p2p_host._running:
+            return 0
+
+        import trio
+        peers = self._p2p_host.get_connected_peers()[:max_peers]
+        if not peers:
+            return 0
+
+        tensor_bytes = _tensor_to_bytes(embedding)
+        results = []
+
+        async def send_to_one(pid_str):
+            try:
+                from libp2p.peer.id import ID as PeerID
+                pid = PeerID.from_base58(pid_str)
+                ok = await self._p2p_host.send_embedding(pid, tensor_bytes, metadata)
+                results.append(ok)
+            except Exception as e:
+                logger.debug(f"Failed to send embedding to {pid_str[:16]}: {e}")
+                results.append(False)
+
+        async with trio.open_nursery() as nursery:
+            for pid_str in peers:
+                nursery.start_soon(send_to_one, pid_str)
+
+        sent = sum(1 for r in results if r)
+        logger.debug(f"Broadcast embedding to {sent}/{len(peers)} peers")
+        return sent
 
     def register_model_on_chain(
         self,
