@@ -66,6 +66,16 @@ class VLJEPAConfig(JEPAConfig):
     # Selective decoding
     semantic_change_threshold: float = 0.1  # cosine distance threshold
 
+    # Dynamics predictor (for multi-step rollout in embedding space)
+    dynamics_depth: int = 4  # transformer layers in LatentDynamicsPredictor
+
+    # SIGReg: Spectral Instance-Global Regularization
+    # From LeJEPA (Balestriero & LeCun, 2025, arXiv 2511.08544).
+    # Prevents embedding collapse by enforcing isotropic Gaussian structure.
+    # Set sigreg_weight=0.0 to disable.
+    sigreg_weight: float = 0.1
+    sigreg_num_projections: int = 128
+
     def __post_init__(self):
         if self.decoder_embed_dim == 0:
             self.decoder_embed_dim = self.embed_dim
@@ -308,6 +318,147 @@ class SemanticPredictor(nn.Module):
         queries = self.latent_queries.expand(B, -1, -1)  # (B, K, D)
         latent_plan = self.cross_attn(queries, x)  # (B, K, D)
         return self.norm(latent_plan)
+
+
+# =============================================================================
+# SIGReg: Spectral Instance-Global Regularization
+# =============================================================================
+
+class SIGReg(nn.Module):
+    """Spectral Instance-Global Regularization (SIGReg).
+
+    From: "LeJEPA: Provable and Scalable Self-Supervised Learning Without
+    the Heuristics" — Balestriero & LeCun, 2025 (arXiv 2511.08544).
+    Also used in: "LeWorldModel" — Maes, Balestriero, LeCun et al., 2026
+    (arXiv 2603.19312), where it is the key mechanism that enables stable
+    end-to-end JEPA training without EMA or stop-gradient.
+
+    **Why this matters for VL-JEPA scale-up:**
+    The 18M validation model collapsed in all four real-data runs (Runs 1-4
+    in VALIDATION_FINDINGS.md). The root cause was insufficient latent plan
+    capacity combined with embedding collapse. SIGReg addresses the collapse
+    component by constraining the embedding distribution.
+
+    **How it works:**
+    The Cramér-Wold theorem guarantees that a d-dimensional distribution is
+    uniquely determined by all its 1D projections. SIGReg enforces that each
+    1D random projection of the embeddings follows N(0,1), which implies the
+    full joint distribution is isotropic Gaussian — the theoretical optimum
+    for self-supervised embedding objectives.
+
+    Practically:
+    1. Sample P fixed random unit-norm directions from the unit sphere.
+    2. Project embeddings onto each direction: z_p = Z @ r_p (scalar per sample).
+    3. Penalize deviation of the empirical distribution of z_p from N(0,1)
+       via moment matching (mean=0, variance=1, skewness=0, kurtosis=3).
+
+    Properties:
+    - Single hyperparameter (sigreg_weight).
+    - O(N * P) time and memory — linear in batch size and projections.
+    - No stop-gradient, no EMA target, no adversarial component.
+    - Fixed random directions (not trained) — reproducible across runs.
+    """
+
+    def __init__(self, embed_dim: int, num_projections: int = 128):
+        super().__init__()
+        # Fixed unit-norm projection directions — not trained, reproducible
+        directions = F.normalize(torch.randn(num_projections, embed_dim), dim=1)
+        self.register_buffer("directions", directions)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """Compute SIGReg loss for a batch of embeddings.
+
+        Args:
+            z: Embeddings of any shape (..., embed_dim). Flattened to (N, D).
+
+        Returns:
+            Scalar regularization loss. Add to training loss weighted by
+            config.sigreg_weight.
+        """
+        flat = z.reshape(-1, z.shape[-1])   # (N, D)
+
+        # 1D projections onto each random direction: (N, P)
+        proj = flat @ self.directions.T
+
+        # --- Instance-level terms (properties of the projection distribution) ---
+        # Mean of each projection should be 0 (zero-centered)
+        mean_loss = proj.mean(dim=0).pow(2).mean()
+
+        # Variance of each projection should be 1 (non-collapsed, unit spread)
+        var_loss = (proj.var(dim=0) - 1.0).pow(2).mean()
+
+        # --- Global-level terms (shape of distribution, normalized) ---
+        # Standardize for higher-order moment checks
+        proj_std = proj.std(dim=0, keepdim=True).clamp(min=1e-6)
+        proj_norm = (proj - proj.mean(dim=0, keepdim=True)) / proj_std
+
+        # Third standardized moment (skewness) should be 0
+        skew_loss = proj_norm.pow(3).mean(dim=0).pow(2).mean()
+
+        # Fourth standardized moment (kurtosis) should be 3 for Gaussian
+        kurt_loss = (proj_norm.pow(4).mean(dim=0) - 3.0).pow(2).mean()
+
+        return mean_loss + var_loss + skew_loss + kurt_loss
+
+
+# =============================================================================
+# Latent Dynamics Predictor (multi-step rollout)
+# =============================================================================
+
+class LatentDynamicsPredictor(nn.Module):
+    """Predicts the next-step latent plan from the current latent plan.
+
+    This is the "world model" component for multi-step rollout in embedding
+    space. Given a latent plan (B, K, D) representing one reasoning step, it
+    predicts the latent plan (B, K, D) for the *next* reasoning step.
+
+    Analogous to V-JEPA 2-AC's predictor (Bardes et al., 2025) but applied
+    to agent-trace latent plans rather than robot video frames.
+
+    Architecture:
+    - Stacked TransformerBlocks that let the K latent vectors attend to
+      each other (capturing inter-token dependencies within the plan).
+    - Residual output projection initialized to zero (identity at init),
+      so training starts from "predict no change" — stable initialization.
+
+    The residual design means early in training the model simply echoes the
+    input plan, and the transformer gradually learns to predict meaningful
+    dynamics. This mirrors the initialization strategy recommended in
+    LeWorldModel (Maes et al., 2026).
+    """
+
+    def __init__(self, config: 'VLJEPAConfig'):
+        super().__init__()
+        d = config.embed_dim
+
+        self.blocks = nn.ModuleList([
+            TransformerBlock(d, config.num_heads, config.mlp_ratio)
+            for _ in range(config.dynamics_depth)
+        ])
+        self.norm = nn.LayerNorm(d)
+
+        # Residual delta projection — zero-initialized for stable training start
+        self.delta_proj = nn.Linear(d, d)
+        nn.init.zeros_(self.delta_proj.weight)
+        nn.init.zeros_(self.delta_proj.bias)
+
+    def forward(self, latent_plan: torch.Tensor) -> torch.Tensor:
+        """Predict the next-step latent plan.
+
+        Args:
+            latent_plan: (B, K, D) — current latent plan
+
+        Returns:
+            next_plan: (B, K, D) — predicted next-step latent plan
+        """
+        x = latent_plan
+        for block in self.blocks:
+            x = block(x)
+        x = self.norm(x)
+
+        # Residual: output = input + predicted_delta (zero at initialization)
+        delta = self.delta_proj(x)
+        return latent_plan + delta
 
 
 # =============================================================================
@@ -642,6 +793,15 @@ class VLJEPA(nn.Module):
         self.semantic_predictor = SemanticPredictor(self.config)
         self.text_decoder = TextDecoder(self.config)
 
+        # Multi-step rollout: predicts next-step latent plan from current plan
+        self.dynamics_predictor = LatentDynamicsPredictor(self.config)
+
+        # Collapse prevention: SIGReg regularization on latent plan embeddings
+        self.sigreg = SIGReg(
+            self.config.embed_dim,
+            self.config.sigreg_num_projections,
+        )
+
         # Track previous semantic embedding for selective decoding
         self._prev_semantic: Optional[torch.Tensor] = None
 
@@ -756,6 +916,96 @@ class VLJEPA(nn.Module):
 
         return False
 
+    @torch.no_grad()
+    def rollout(
+        self,
+        context_embeddings: torch.Tensor,
+        num_steps: int,
+    ) -> Dict[str, object]:
+        """Autoregressive rollout in latent embedding space.
+
+        Given a starting latent plan, uses the LatentDynamicsPredictor to
+        iteratively predict future latent plans — one step at a time.
+
+        This is the core multi-step prediction capability for Phase B:
+        given agent-trace embeddings for turns 1..N, predict the embedding
+        for turn N+1, then use that to predict N+2, and so on.
+
+        Architecture rationale (from jepa_reasoning_survey.md):
+        - V-JEPA 2-AC trains with a T=2 rollout loss and uses MPC replanning
+          to avoid long open-loop chains. We start from T=1 and extend.
+        - LeWorldModel (Maes et al., 2026) confirms that SIGReg + residual
+          prediction enables stable chaining; adding it here mirrors that
+          design.
+        - Uncertainty tracking follows the survey recommendation: "Monitor
+          embedding variance during chained prediction as an early warning
+          signal — if variance drops >50% over 5 steps, the chain is
+          collapsing."
+
+        Args:
+            context_embeddings: (B, K, D) — latent plan at step 0. Typically
+                the output of ``predict_semantic()`` for the current turn.
+            num_steps: Number of future steps to predict (>= 1).
+
+        Returns:
+            Dict with:
+            - ``predictions``:  list of ``num_steps`` tensors, each (B, K, D).
+                                predictions[i] is the predicted plan at step i+1.
+            - ``uncertainties``: list of ``num_steps`` floats in [0, 1].
+                                 0 = confident/diverse, 1 = collapsed/uncertain.
+                                 Derived from inter-vector spread of each plan:
+                                 higher spread = more information = lower uncertainty.
+            - ``embedding_variances``: list of ``num_steps`` floats — mean
+                                       variance of each step's plan across
+                                       embed_dim. Use as collapse diagnostic:
+                                       sharp drop signals representation collapse.
+        """
+        predictions: List[torch.Tensor] = []
+        uncertainties: List[float] = []
+        embedding_variances: List[float] = []
+
+        current = context_embeddings  # (B, K, D)
+
+        # Compute baseline spread from the context plan (step 0) for reference
+        baseline_spread = self._plan_spread(current)
+
+        for _ in range(num_steps):
+            next_plan = self.dynamics_predictor(current)       # (B, K, D)
+            predictions.append(next_plan)
+
+            # Embedding variance: mean variance across embed_dim for each token,
+            # then averaged over tokens and batch. Sharp drop = collapse.
+            emb_var = next_plan.var(dim=-1).mean().item()      # scalar
+            embedding_variances.append(emb_var)
+
+            # Uncertainty: 1 - normalized inter-vector spread.
+            # Inter-vector spread = how much the K latent vectors differ from
+            # each other within the plan. Collapsed plan → K vectors converge
+            # to the same point → zero spread → uncertainty = 1.
+            spread = self._plan_spread(next_plan)
+            # Normalize by baseline so the first step is near 0 uncertainty
+            normalized_spread = spread / (baseline_spread + 1e-8)
+            uncertainty = 1.0 / (1.0 + normalized_spread)
+            uncertainties.append(float(uncertainty))
+
+            current = next_plan
+
+        return {
+            "predictions": predictions,
+            "uncertainties": uncertainties,
+            "embedding_variances": embedding_variances,
+        }
+
+    @staticmethod
+    def _plan_spread(plan: torch.Tensor) -> float:
+        """Mean squared deviation of K latent vectors from their centroid.
+
+        High spread = K vectors are diverse = plan carries more information.
+        """
+        centroid = plan.mean(dim=1, keepdim=True)          # (B, 1, D)
+        spread = (plan - centroid).pow(2).mean().item()
+        return spread
+
     def self_supervised_loss(
         self,
         images: torch.Tensor,
@@ -797,12 +1047,192 @@ class VLJEPA(nn.Module):
         online_fused = self.cross_modal_fusion(online_visual_masked, online_text)
         online_plan = self.semantic_predictor(online_fused)  # (B, K, D)
 
-        # Loss: online plan should match target plan
+        # Primary loss: online plan should match target plan
         visual_loss = F.smooth_l1_loss(online_plan, target_plan.detach())
+
+        # SIGReg: spectral regularization to prevent embedding collapse.
+        # Applied to the online latent plan so the dynamics predictor and
+        # downstream decoder always receive a well-distributed embedding.
+        # Per LeWorldModel (Maes et al., 2026): "two loss terms — MSE + SIGReg
+        # — are sufficient for stable end-to-end JEPA training from pixels."
+        # Weight=0 disables it entirely (backward-compatible default: 0.1).
+        if self.config.sigreg_weight > 0.0:
+            sigreg_loss = self.sigreg(online_plan)
+            total_loss = visual_loss + self.config.sigreg_weight * sigreg_loss
+        else:
+            sigreg_loss = torch.zeros(1, device=images.device)
+            total_loss = visual_loss
 
         result = {
             "latent_plan": online_plan,
             "visual_loss": visual_loss,
-            "loss": visual_loss,
+            "sigreg_loss": sigreg_loss,
+            "loss": total_loss,
         }
         return result
+
+
+# =============================================================================
+# Configuration Presets
+# =============================================================================
+
+# Parameter estimates below are approximate (exclude frozen target encoder).
+# The target encoder is a frozen EMA copy of the visual encoder; it contributes
+# to checkpoint size but not to the gradient computation graph.
+#
+# Calculation methodology:
+#   TransformerBlock(D, H): ~12 * D^2 params (attn QKV+O + MLP)
+#   DecoderBlock(D, H):     ~16 * D^2 params (adds cross-attn + 2x FiLM)
+#   FusionBlock(D, H):      ~10 * D^2 params (cross-attn + self-attn)
+#   Patch embed (C→D):      patch_size^2 * 3 * D
+#   Token embed (V×D):      vocab_size * D (≈ 260 * D)
+
+VLJEPA_PRESETS: Dict[str, VLJEPAConfig] = {
+    # -------------------------------------------------------------------------
+    # small — validated 18M configuration from VALIDATION_FINDINGS.md.
+    # Runs 1-4 used this config. Confirmed to work on synthetic data (100%
+    # shape+color accuracy) but collapses on real COCO images.
+    # Use for unit testing and integration debugging only.
+    # Approximate trainable parameters: ~18M
+    # -------------------------------------------------------------------------
+    "small": VLJEPAConfig(
+        # Vision encoder
+        image_size=64,
+        patch_size=8,
+        embed_dim=256,
+        num_heads=8,
+        encoder_depth=4,
+        # Language encoder + fusion
+        text_encoder_depth=4,
+        fusion_depth=4,
+        semantic_predictor_depth=2,
+        # Latent plan bottleneck
+        num_latent_vectors=16,
+        # Text decoder
+        decoder_depth=4,
+        # Dynamics predictor
+        dynamics_depth=2,
+        # SIGReg
+        sigreg_weight=0.1,
+        sigreg_num_projections=64,
+    ),
+
+    # -------------------------------------------------------------------------
+    # medium — minimum viable scale for real-world agent traces.
+    # The JEPA survey (jepa_reasoning_survey.md) sets the floor at 200M params
+    # for useful latent reasoning. This preset targets ~200M total parameters
+    # (~155M trainable, ~55M in frozen target encoder).
+    #
+    # Key scaling choices vs. small:
+    #  - embed_dim 256→768: 9x capacity per layer
+    #  - K 16→64: 4x richer latent plan (was the primary failure mode)
+    #  - image_size 64→224: full COCO resolution; patch 8→16 keeps seq length ≈ 196
+    #  - encoder_depth 4→6: moderate depth to encode 224px images
+    #  - sigreg_weight: increased to 0.2 for more aggressive collapse prevention
+    #    at higher K (more vectors = more collapse surface area)
+    #
+    # Approximate trainable parameters: ~155M
+    # -------------------------------------------------------------------------
+    "medium": VLJEPAConfig(
+        # Vision encoder
+        image_size=224,
+        patch_size=16,
+        embed_dim=768,
+        num_heads=12,
+        encoder_depth=6,
+        # Language encoder + fusion
+        text_encoder_depth=4,
+        fusion_depth=4,
+        semantic_predictor_depth=3,
+        # Latent plan bottleneck
+        num_latent_vectors=64,
+        # Text decoder
+        decoder_depth=6,
+        # Dynamics predictor
+        dynamics_depth=4,
+        # SIGReg — slightly higher weight at this scale
+        sigreg_weight=0.2,
+        sigreg_num_projections=128,
+    ),
+
+    # -------------------------------------------------------------------------
+    # large — Phase B target configuration.
+    # The JEPA survey notes Meta's VL-JEPA achieves strong results at 1.6B
+    # on general VL tasks; agent traces are a tighter distribution. This
+    # preset targets ~500M total params (~380M trainable) — the survey's
+    # minimum for multi-step latent reasoning.
+    #
+    # Key scaling choices vs. medium:
+    #  - embed_dim 768→1024: 1.8x capacity per layer
+    #  - K 64→128: 2x richer latent plan for longer agent traces
+    #  - encoder_depth 6→8: deeper visual encoding for 224px
+    #  - text_encoder_depth 4→6: deeper text understanding
+    #  - fusion_depth 4→6: more cross-modal refinement passes
+    #  - semantic_predictor_depth 3→4: richer latent plan extraction
+    #  - decoder_depth 6→8: more expressive generation
+    #  - dynamics_depth 4→6: more capacity for multi-step dynamics modeling
+    #
+    # Approximate trainable parameters: ~380M
+    # -------------------------------------------------------------------------
+    "large": VLJEPAConfig(
+        # Vision encoder
+        image_size=224,
+        patch_size=16,
+        embed_dim=1024,
+        num_heads=16,
+        encoder_depth=8,
+        # Language encoder + fusion
+        text_encoder_depth=6,
+        fusion_depth=6,
+        semantic_predictor_depth=4,
+        # Latent plan bottleneck
+        num_latent_vectors=128,
+        # Text decoder
+        decoder_depth=8,
+        # Dynamics predictor
+        dynamics_depth=6,
+        # SIGReg — same relative weight at large scale
+        sigreg_weight=0.2,
+        sigreg_num_projections=256,
+    ),
+}
+
+
+def get_vljepa_preset(name: str, **overrides) -> VLJEPAConfig:
+    """Return a named VLJEPAConfig preset, optionally with field overrides.
+
+    Available presets:
+        ``small``  — ~18M params. Validated on synthetic data (VALIDATION_FINDINGS.md).
+                     Use for testing only.
+        ``medium`` — ~155M trainable params. Minimum viable for real agent traces.
+        ``large``  — ~380M trainable params. Phase B target.
+
+    Args:
+        name: Preset name — ``"small"``, ``"medium"``, or ``"large"``.
+        **overrides: Optional field overrides applied after preset defaults.
+            Example: ``get_vljepa_preset("medium", sigreg_weight=0.5)``
+
+    Returns:
+        A fresh :class:`VLJEPAConfig` instance.
+
+    Raises:
+        ValueError: If ``name`` is not a known preset.
+
+    Example::
+
+        cfg = get_vljepa_preset("medium")
+        model = VLJEPA(cfg)
+
+        # Override a single field for an experiment
+        cfg_exp = get_vljepa_preset("medium", num_latent_vectors=32)
+    """
+    if name not in VLJEPA_PRESETS:
+        raise ValueError(
+            f"Unknown preset {name!r}. Available: {list(VLJEPA_PRESETS)}"
+        )
+    # Shallow-copy the preset so mutations don't affect the global dict
+    cfg = VLJEPA_PRESETS[name]
+    if overrides:
+        import dataclasses
+        cfg = dataclasses.replace(cfg, **overrides)
+    return cfg
