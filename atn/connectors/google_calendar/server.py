@@ -42,11 +42,8 @@ log = logging.getLogger("gcal.mcp")
 GCAL_BASE = "https://www.googleapis.com/calendar/v3"
 GTASKS_BASE = "https://tasks.googleapis.com/tasks/v1"
 
-CLIENT_ID = (
-    "901620659302-e7pkd1o0bsooedaothhkln9rhc5ah8k5"
-    ".apps.googleusercontent.com"
-)
-CLIENT_SECRET = "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"
+CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
 # Mutable token state — refreshed automatically on 401.

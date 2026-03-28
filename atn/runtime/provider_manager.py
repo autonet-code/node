@@ -23,6 +23,71 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Model capability tiers
+# ---------------------------------------------------------------------------
+# Tier 4: orchestrator — multi-agent coordination, complex planning, 20+ tools
+# Tier 3: autonomous   — independent multi-step execution, 10+ tools, self-correction
+# Tier 2: tool-use     — reliable tool calling, structured instructions, single-task
+# Tier 1: conversational — text in/out, unreliable with tools
+
+TIER_LABELS: dict[int, str] = {
+    4: "orchestrator",
+    3: "autonomous",
+    2: "tool-use",
+    1: "conversational",
+}
+
+# Known model → tier mappings.  Prefix matching is used: the longest prefix
+# that matches wins.  Unknown models default to tier 2.
+_MODEL_TIERS: dict[str, int] = {
+    # Anthropic
+    "claude-opus-4": 4,
+    "claude-sonnet-4": 3,
+    "claude-haiku-4": 2,
+    "claude-sonnet-3.5": 3,
+    "claude-haiku-3.5": 2,
+    # OpenAI
+    "o3": 4,
+    "o1": 3,
+    "gpt-4o": 3,
+    "gpt-4-turbo": 3,
+    "gpt-4": 3,
+    "gpt-3.5": 2,
+    # Google
+    "gemini-2.5-pro": 4,
+    "gemini-2.5-flash": 3,
+    "gemini-2.0-flash": 3,
+    "gemini-2.0-pro": 4,
+    "gemini-1.5-pro": 3,
+    "gemini-1.5-flash": 2,
+}
+
+_DEFAULT_TIER = 2
+
+
+def get_model_tier(model_id: str) -> int:
+    """Return the capability tier (1-4) for a model ID.
+
+    Uses longest-prefix matching against _MODEL_TIERS.
+    Unknown models default to tier 2 (tool-use).
+    """
+    if not model_id:
+        return _DEFAULT_TIER
+    lower = model_id.lower()
+    best_match = 0
+    best_tier = _DEFAULT_TIER
+    for prefix, tier in _MODEL_TIERS.items():
+        if lower.startswith(prefix.lower()) and len(prefix) > best_match:
+            best_match = len(prefix)
+            best_tier = tier
+    return best_tier
+
+
+def get_tier_label(tier: int) -> str:
+    """Return the human-readable label for a tier number."""
+    return TIER_LABELS.get(tier, "unknown")
+
 
 class ProviderManager:
     """Provider configuration, resolution, probing, and lifecycle."""
@@ -341,7 +406,13 @@ class ProviderManager:
                 {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
             ],
         }
-        return _PROVIDER_MODELS.get(provider_name, [])
+        models = _PROVIDER_MODELS.get(provider_name, [])
+        # Enrich each model entry with capability tier
+        for m in models:
+            tier = get_model_tier(m["id"])
+            m["capability_tier"] = tier
+            m["tier_label"] = get_tier_label(tier)
+        return models
 
     # ------------------------------------------------------------------
     # Provider management (config UI)
@@ -374,6 +445,12 @@ class ProviderManager:
             else:
                 setup_hint = None
 
+            models = self.get_available_models(pid)
+            # Derive orchestrator_capable from model tiers (backward compat)
+            max_tier = max((m.get("capability_tier", _DEFAULT_TIER) for m in models), default=_DEFAULT_TIER) if models else _DEFAULT_TIER
+            # Fall back to the static flag for providers with no model list
+            orch_capable = max_tier >= 4 if models else info.get("orchestrator_capable", False)
+
             entry: dict[str, Any] = {
                 "id": pid,
                 "name": info["name"],
@@ -381,8 +458,10 @@ class ProviderManager:
                 "auth_type": info["auth_type"],
                 "configured": configured,
                 "active": is_active,
-                "orchestrator_capable": info.get("orchestrator_capable", False),
-                "models": self.get_available_models(pid),
+                "orchestrator_capable": orch_capable,
+                "max_capability_tier": max_tier,
+                "max_tier_label": get_tier_label(max_tier),
+                "models": models,
                 "setup_hint": setup_hint,
             }
 
@@ -406,6 +485,9 @@ class ProviderManager:
             pconfig = self._config.providers.get(pid)
             base_url = pconfig.base_url if pconfig else ""
 
+            default_model = pconfig.default_model if pconfig else ""
+            custom_tier = get_model_tier(default_model)
+
             entry = {
                 "id": pid,
                 "name": pid,
@@ -413,10 +495,12 @@ class ProviderManager:
                 "auth_type": "api_key",
                 "configured": True,
                 "active": is_active,
-                "orchestrator_capable": True,
+                "orchestrator_capable": custom_tier >= 4,
+                "max_capability_tier": custom_tier,
+                "max_tier_label": get_tier_label(custom_tier),
                 "custom": True,
                 "base_url": base_url,
-                "default_model": pconfig.default_model if pconfig else "",
+                "default_model": default_model,
                 "models": [],
                 "setup_hint": None,
             }

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
 from ..models import AgentStatus, StepType, TaskStatus
+from .provider_manager import get_model_tier, get_tier_label
 
 if TYPE_CHECKING:
     from .agent_registry import AgentRegistry
@@ -124,9 +125,12 @@ class SnapshotBuilder:
                 primary_provider = raw_provider
                 fallback_providers = []
             orch_model = orch_defn.cognitive_model or ""
+            orch_tier = get_model_tier(orch_model)
             orch_info = {
                 "provider": primary_provider,
                 "model": orch_model,
+                "capability_tier": orch_tier,
+                "tier_label": get_tier_label(orch_tier),
                 "available_models": self.provider_manager.get_available_models(primary_provider),
                 "fallback_providers": fallback_providers,
             }

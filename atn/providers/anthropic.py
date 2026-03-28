@@ -5,6 +5,46 @@ Handles:
   - Tool definition translation
   - Response parsing (text blocks, tool_use blocks)
   - Retry with exponential backoff for transient errors (429, 503, 529)
+
+Provider Unification Analysis: AnthropicProvider vs BridgeProvider
+===================================================================
+Two paths exist for running Claude models:
+
+1. BridgeProvider (bridge.py) — Claude Agent SDK via TypeScript subprocess
+   - Spawns a bun subprocess running bridge/claude-bridge.ts
+   - Uses Claude Agent SDK's native multi-turn orchestration (send_orchestrate)
+   - The SDK handles its own agentic loop, context compaction, session resumption
+   - Built-in shell tools (Bash, Read, Write, Glob, Grep) live in the SDK process
+   - ATN framework tools are relayed as MCP tool_call/tool_result over stdin/stdout
+   - Streaming events arrive on stderr as @@EVENT@@ NDJSON lines
+   - Supports session_id for cross-turn prompt caching and context persistence
+   - Requires bun + node_modules installed; heavier subprocess lifecycle
+
+2. AnthropicProvider (this file) — Python REST client via httpx
+   - Direct HTTP calls to the Anthropic Messages API
+   - Multi-turn orchestration uses the generic loop in base.py (send_orchestrate)
+     which calls send_stream() repeatedly, executing tool calls in Python
+   - Shell tools come from atn/shell_tools.py (Python implementations)
+   - No subprocess, no SDK dependency — pure Python
+   - No native session resumption or context compaction
+   - Lighter weight, easier to test, works without bun/node
+
+Key differences:
+  - BridgeProvider has native context compaction (SDK auto-summarises on overflow)
+  - BridgeProvider has session resumption via session_id (persistent conversations)
+  - BridgeProvider emits richer events (tool_use_start/result, compaction, thinking)
+  - AnthropicProvider uses the base class generic agentic loop (simpler but less capable)
+  - AnthropicProvider could be enhanced to use the Anthropic Python SDK's agent loop
+    for parity with BridgeProvider without the TypeScript subprocess overhead
+
+Path forward:
+  - Short-term: Both paths coexist. BridgeProvider is used for the orchestrator
+    (needs session persistence + compaction). AnthropicProvider is used for
+    delegates and one-shot calls (lighter weight, no subprocess overhead).
+  - Medium-term: Consider migrating AnthropicProvider to use the Anthropic Python
+    SDK's agent loop (anthropic.Agent) instead of the generic base.py loop.
+    This would give parity with BridgeProvider (compaction, session management)
+    without the TypeScript subprocess, and could eventually replace BridgeProvider.
 """
 from __future__ import annotations
 

@@ -1,27 +1,46 @@
+# Environment and secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Node
+node_modules/
+bun.lockb
+bun.lock
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+training_run*.log
+
+# Data and artifacts
+data/
+artifacts/
+artefacts/
+test_data_*/
+
+# ATN runtime
+*.running.json
+latest.txt
+deployment-addresses.json
+.claude-workers/
+
+# Project-specific
 FUNDING_LEADS.md
 CLAUDE.md
 rpb_gemini.txt
 rpb_speaker_notes.md
 share.md
-artefacts/
-.env
-node_modules/
-__pycache__/
-*.pyc
-.claude-workers/
-artifacts/
-training_run*.log
-deployment-addresses.json
-# ATN runtime
-*.egg-info/
-dist/
-build/
-.pytest_cache/
-test_data_*/
-*.running.json
-latest.txt
-bun.lockb
-bun.lock
 /agents/
-*.log
 PLAN.md

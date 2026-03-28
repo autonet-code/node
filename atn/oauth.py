@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -24,11 +25,11 @@ log = logging.getLogger(__name__)
 
 # -- Google OAuth2 constants --------------------------------------------------
 
-GOOGLE_CLIENT_ID = (
-    "901620659302-e7pkd1o0bsooedaothhkln9rhc5ah8k5"
-    ".apps.googleusercontent.com"
+GOOGLE_CLIENT_ID = os.environ.get(
+    "GOOGLE_CLIENT_ID",
+    "",
 )
-GOOGLE_CLIENT_SECRET = "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"
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/auth"
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 

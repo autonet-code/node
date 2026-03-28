@@ -1,6 +1,6 @@
 """MCP server for voice / text-to-speech -- lets agents speak aloud.
 
-Wraps the voice module (c:/code/voice) as MCP tools so that any
+Wraps an external voice module as MCP tools so that any
 ATN agent can produce audible speech on the user's machine.
 
 Supports two backends:
@@ -11,7 +11,7 @@ Runs as a subprocess launched by ConnectorManager.
 
 Usage (standalone):
     python server.py
-    python server.py --voice-dir C:/code/voice
+    python server.py --voice-dir /path/to/voice
 
 Usage (via ATN):
     Launched automatically by ConnectorManager.start("voice")
@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -38,7 +39,10 @@ log = logging.getLogger("voice.mcp")
 
 # -- Configuration -------------------------------------------------------------
 
-VOICE_MODULE_DIR = r"C:\code\voice"
+VOICE_MODULE_DIR = os.environ.get(
+    "VOICE_MODULE_DIR",
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "voice"),
+)
 
 # -- MCP Server ----------------------------------------------------------------
 
