@@ -50,6 +50,8 @@ contract ParticipantStaking {
         minStakeAmount[AutonetLib.ParticipantRole.COORDINATOR] = 500 * (10**decimals);
         minStakeAmount[AutonetLib.ParticipantRole.AGGREGATOR] = 1000 * (10**decimals);
         minStakeAmount[AutonetLib.ParticipantRole.VALIDATOR] = 10000 * (10**decimals);
+        // Inference providers stake as guarantee for BME payment integrity
+        minStakeAmount[AutonetLib.ParticipantRole.INFERENCE_PROVIDER] = 200 * (10**decimals);
 
         // Default lockup durations
         stakeLockupDuration[AutonetLib.ParticipantRole.PROPOSER] = 7 days;
@@ -57,6 +59,8 @@ contract ParticipantStaking {
         stakeLockupDuration[AutonetLib.ParticipantRole.COORDINATOR] = 14 days;
         stakeLockupDuration[AutonetLib.ParticipantRole.AGGREGATOR] = 14 days;
         stakeLockupDuration[AutonetLib.ParticipantRole.VALIDATOR] = 21 days;
+        // Inference providers: 7-day lockup (shorter than training roles — faster market)
+        stakeLockupDuration[AutonetLib.ParticipantRole.INFERENCE_PROVIDER] = 7 days;
     }
 
     function setGovernance(address _newGovernance) external onlyGovernance {

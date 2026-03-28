@@ -14,7 +14,11 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 contract ATNToken is ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     address public daoAddress;
 
+    /// @notice Authorized minters (e.g. InferenceProviderBridge contracts for BME payments)
+    mapping(address => bool) public authorizedMinters;
+
     event DaoAddressChanged(address indexed newDaoAddress);
+    event MinterAuthorized(address indexed minter, bool authorized);
 
     /**
      * @param _initialHolder Address receiving initial supply
@@ -33,11 +37,28 @@ contract ATNToken is ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     }
 
     /**
-     * @dev Allows the DAO to mint new tokens.
+     * @dev Allows the DAO or authorized minters to mint new tokens.
+     *      Authorized minters are used by InferenceProviderBridge contracts
+     *      to implement BME (Burn-Mint Equilibrium): providers receive freshly
+     *      minted tokens funded by the burn pool accumulated from user payments.
      */
     function mint(address to, uint256 amount) external {
-        require(msg.sender == daoAddress, "ATNToken: caller is not DAO");
+        require(
+            msg.sender == daoAddress || authorizedMinters[msg.sender],
+            "ATNToken: caller is not DAO or authorized minter"
+        );
         _mint(to, amount);
+    }
+
+    /**
+     * @dev Allows the DAO to authorize or revoke a minter.
+     *      Used to whitelist InferenceProviderBridge instances for BME payments.
+     */
+    function setAuthorizedMinter(address minter, bool authorized) external {
+        require(msg.sender == daoAddress, "ATNToken: caller is not DAO");
+        require(minter != address(0), "ATNToken: zero minter address");
+        authorizedMinters[minter] = authorized;
+        emit MinterAuthorized(minter, authorized);
     }
 
     /**

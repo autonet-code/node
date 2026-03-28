@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "../utils/AutonetLib.sol";
 import "./ParticipantStaking.sol";
+import "../tokens/ATNToken.sol";
 
 /**
  * @title TaskContract
@@ -11,6 +12,7 @@ import "./ParticipantStaking.sol";
  */
 contract TaskContract {
     ParticipantStaking public immutable staking;
+    ATNToken public immutable atnToken;
     address public governance;
     address public resultsRewardsContract;
 
@@ -63,9 +65,10 @@ contract TaskContract {
         _;
     }
 
-    constructor(address _staking, address _governance) {
+    constructor(address _staking, address _governance, address _atnToken) {
         staking = ParticipantStaking(_staking);
         governance = _governance;
+        atnToken = ATNToken(_atnToken);
     }
 
     function setResultsRewardsContract(address _contract) external onlyGovernance {
@@ -379,6 +382,112 @@ contract TaskContract {
         require(low > 0, "No checkpoint at or before step");
         return low - 1;
     }
+
+    // ============ Inference Tasks (BME) ============
+
+    /// @notice InferenceTaskSubmitted: emitted when a user burns ATN for an inference task
+    event InferenceTaskSubmitted(
+        bytes32 indexed inferenceId,
+        address indexed requester,
+        uint256 burnedAmount,
+        bytes32 inputCidHash,
+        uint256 projectId
+    );
+
+    event InferenceTaskCompleted(
+        bytes32 indexed inferenceId,
+        address indexed provider,
+        bytes32 outputCidHash
+    );
+
+    // inferenceId => InferenceTask metadata
+    mapping(bytes32 => AutonetLib.InferenceTask) public inferenceTasks;
+    uint256 public nextInferenceNonce;
+
+    /**
+     * @dev Submit an inference task with BME burn-on-submission.
+     *
+     *      The caller pays by burning ATN immediately. This creates an on-chain
+     *      record that off-chain inference nodes can listen for. The actual
+     *      provider payment (mint) is handled by InferenceProviderBridge.
+     *
+     *      On-chain record enables:
+     *      - Auditability of inference demand
+     *      - ForcedError-style verification for inference outputs
+     *      - Reward attribution for the inference registry
+     *
+     * @param _projectId  Project whose model should serve this request
+     * @param _inputCidHash Hash of the input content identifier
+     * @param _burnAmount   ATN to burn (user's max payment)
+     * @return inferenceId  Unique identifier for this inference task
+     */
+    function submitInferenceTask(
+        uint256 _projectId,
+        bytes32 _inputCidHash,
+        uint256 _burnAmount
+    ) external returns (bytes32 inferenceId) {
+        require(_burnAmount > 0, "Zero burn amount");
+
+        inferenceId = keccak256(abi.encodePacked(
+            block.chainid,
+            address(this),
+            msg.sender,
+            nextInferenceNonce++,
+            block.timestamp
+        ));
+
+        // BME burn: tokens destroyed on submission, provider gets minted on completion
+        require(atnToken.transferFrom(msg.sender, address(this), _burnAmount), "Transfer failed");
+        atnToken.burn(_burnAmount);
+
+        inferenceTasks[inferenceId] = AutonetLib.InferenceTask({
+            requestId: inferenceId,
+            requester: msg.sender,
+            provider: address(0),
+            burnedAmount: _burnAmount,
+            mintedToProvider: 0,
+            protocolFee: 0,
+            inputCidHash: _inputCidHash,
+            outputCidHash: bytes32(0),
+            creationBlock: block.number,
+            completed: false,
+            verified: false
+        });
+
+        emit InferenceTaskSubmitted(inferenceId, msg.sender, _burnAmount, _inputCidHash, _projectId);
+    }
+
+    /**
+     * @dev Record completion of an inference task (called by authorized bridge or governance).
+     *      Marks task as complete with output CID hash for auditability.
+     */
+    function recordInferenceCompletion(
+        bytes32 _inferenceId,
+        address _provider,
+        bytes32 _outputCidHash
+    ) external {
+        require(msg.sender == resultsRewardsContract || msg.sender == governance, "Not authorized");
+        AutonetLib.InferenceTask storage t = inferenceTasks[_inferenceId];
+        require(t.creationBlock > 0, "Inference task not found");
+        require(!t.completed, "Already completed");
+
+        t.provider = _provider;
+        t.outputCidHash = _outputCidHash;
+        t.completed = true;
+
+        emit InferenceTaskCompleted(_inferenceId, _provider, _outputCidHash);
+    }
+
+    /**
+     * @dev Get inference task details.
+     */
+    function getInferenceTask(bytes32 _inferenceId)
+        external view returns (AutonetLib.InferenceTask memory)
+    {
+        return inferenceTasks[_inferenceId];
+    }
+
+    // ============ Status Updates ============
 
     function updateTaskStatus(uint256 _taskId, AutonetLib.TaskStatus _newStatus)
         external taskExists(_taskId)

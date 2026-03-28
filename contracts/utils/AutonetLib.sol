@@ -10,18 +10,20 @@ library AutonetLib {
     // ============ Participant Roles ============
     enum ParticipantRole {
         NONE,
-        PROPOSER,      // Generates training tasks
-        SOLVER,        // Performs distributed training
-        COORDINATOR,   // Verifies task completion
-        AGGREGATOR,    // Combines model updates
-        VALIDATOR,     // Rollup chain validator
-        CURATOR        // Optional: task/standard curation
+        PROPOSER,          // Generates training tasks
+        SOLVER,            // Performs distributed training
+        COORDINATOR,       // Verifies task completion
+        AGGREGATOR,        // Combines model updates
+        VALIDATOR,         // Rollup chain validator
+        CURATOR,           // Optional: task/standard curation
+        INFERENCE_PROVIDER // Serves inference requests with stake-backed guarantee
     }
 
     // ============ Task Mode ============
     enum TaskMode {
         GROUND_TRUTH,      // Legacy: proposer commits known answer
-        CONSENSUS_TRUTH    // MM-Zero: truth emerges from solver agreement
+        CONSENSUS_TRUTH,   // MM-Zero: truth emerges from solver agreement
+        INFERENCE          // Real-time inference with BME payment (burn→verify→mint)
     }
 
     // ============ Task Lifecycle ============
@@ -151,6 +153,22 @@ library AutonetLib {
         TrainingCheckpoint[] checkpoints;
         uint256 checkpointFrequency;  // Steps between checkpoints
         bytes32 finalWeightsHash;
+    }
+
+    // ============ Inference Task (BME) ============
+
+    struct InferenceTask {
+        bytes32 requestId;         // Unique request identifier
+        address requester;         // Who submitted the request
+        address provider;          // Assigned inference provider
+        uint256 burnedAmount;      // ATN burned by requester
+        uint256 mintedToProvider;  // ATN minted to provider on completion
+        uint256 protocolFee;       // ATN retained as protocol fee
+        bytes32 inputCidHash;      // Hash of input content CID
+        bytes32 outputCidHash;     // Hash of output content CID (set on completion)
+        uint256 creationBlock;
+        bool completed;
+        bool verified;             // True if selected for probabilistic spot-check
     }
 
     // ============ Bittensor-style Multi-Coordinator Voting ============
