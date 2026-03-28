@@ -194,9 +194,13 @@ class Runtime:
         # Voice service (lazy)
         self.voice = None  # type: Any
 
-        # Autonet service
+        # Autonet service (Story 3.2: pass data_dir for training data feed)
         from ..autonet_service import AutonetBridge
-        self.autonet = AutonetBridge(self._config.autonet, event_bus=self.events)
+        self.autonet = AutonetBridge(
+            self._config.autonet,
+            event_bus=self.events,
+            data_dir=str(self._config.data_dir),
+        )
 
         # Tool registry
         from ..tool_registry import ToolRegistry

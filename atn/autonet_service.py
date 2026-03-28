@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TYPE_CHECKING
 
+from .events import EventType
+
 if TYPE_CHECKING:
     from .config import AutonetConfig
     from .events import EventBus
@@ -85,7 +87,8 @@ class AutonetBridge:
     task so it doesn't block the ATN event loop.
     """
 
-    def __init__(self, config: AutonetConfig, event_bus: EventBus | None = None) -> None:
+    def __init__(self, config: AutonetConfig, event_bus: EventBus | None = None,
+                 data_dir: str = "") -> None:
         self.config = config
         self.state = AutonetState()
         self._events = event_bus
@@ -96,6 +99,8 @@ class AutonetBridge:
         self._published_standards_hash: str = ""
         self._published_tx_hash: str = ""
         self._user_contract_address: str = ""
+        # Training data feed (Story 3.2) — ATN data dir for JSONL files
+        self._data_dir = data_dir
 
         # Apply config values to state
         if config.wallet_address:
@@ -105,6 +110,13 @@ class AutonetBridge:
             self.state.rpc_url = config.rpc_url
         if config.chain_id:
             self.state.chain_id = config.chain_id
+
+        # Subscribe to execution events for training data feed
+        if self._events:
+            self._events.subscribe(
+                EventType.EXECUTION_COMPLETED,
+                self._on_execution_completed,
+            )
 
     async def _emit(self, event_type_name: str, data: dict[str, Any] | None = None) -> None:
         """Emit an event if the event bus is available."""
@@ -118,6 +130,20 @@ class AutonetBridge:
                 source="autonet",
                 data=data or self.state.to_dict(),
             ))
+
+    async def _on_execution_completed(self, event) -> None:
+        """Handle EXECUTION_COMPLETED events from the EventBus.
+
+        Story 3.2: When an agent execution completes, notify the training
+        service so it knows new training data is available on disk.
+        """
+        data = event.data or {}
+        agent_id = data.get("agent_id", "")
+        execution_id = data.get("execution_id", "")
+        status = data.get("status", "")
+
+        if self._service:
+            self._service.notify_execution(agent_id, execution_id, status)
 
     async def start(self) -> dict[str, Any]:
         """Start the autonet training service.
@@ -144,10 +170,12 @@ class AutonetBridge:
                 self._autonet_config.blockchain.rpc_url = self.config.rpc_url
             if self.config.chain_id:
                 self._autonet_config.blockchain.chain_id = self.config.chain_id
+            if self.config.private_key:
+                self._autonet_config.blockchain.private_key = self.config.private_key
 
             # Create and start the service in a background thread
             # (AutonetService.start() is blocking)
-            self._service = AutonetService(self._autonet_config)
+            self._service = AutonetService(self._autonet_config, data_dir=self._data_dir)
             self._task = asyncio.create_task(self._run_service())
 
             self.state.status = AutonetStatus.RUNNING

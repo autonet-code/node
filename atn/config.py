@@ -106,6 +106,7 @@ class AutonetConfig:
     # Blockchain connection (overrides autonet.yaml if set)
     rpc_url: str = ""                   # e.g. "https://node.shadownet.etherlink.com"
     chain_id: int = 0                   # e.g. 127823 for Etherlink Shadownet
+    private_key: str = ""               # Hex private key for signing attestation txns
     # Wallet is managed externally (MetaMask etc.) — we just track the address
     wallet_address: str = ""            # Connected wallet address (empty = not connected)
 
@@ -267,6 +268,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
             config_path=resolved.get("config_path", ""),
             rpc_url=resolved.get("rpc_url", ""),
             chain_id=resolved.get("chain_id", 0),
+            private_key=resolved.get("private_key", ""),
             wallet_address=resolved.get("wallet_address", ""),
         )
 

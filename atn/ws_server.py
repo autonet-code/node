@@ -654,7 +654,10 @@ class WebSocketBridge:
         if msg_type == "post_message" and "source" not in args:
             args["source"] = "user"
 
-        # Record user turn in conversation history when messaging the orchestrator
+        # Record user turn in conversation history early so the UI can fetch
+        # it immediately via get_conversation (the frontend does an optimistic
+        # add, but a history reload would lose it without this).
+        # The execution engine skips re-adding it (dedup check at line ~624).
         if (msg_type == "post_message"
                 and args.get("target") == "orchestrator"
                 and args.get("source") == "user"):

@@ -55,7 +55,7 @@ class AutonetService:
         SIGTERM/SIGINT → stop()
     """
 
-    def __init__(self, config: Optional[AutonetConfig] = None):
+    def __init__(self, config: Optional[AutonetConfig] = None, data_dir: Optional[str] = None):
         self.config = config or load_config()
         self._state = ServiceState.STOPPED
         self._start_time: float = 0.0
@@ -67,6 +67,10 @@ class AutonetService:
         self._resource_monitor: Optional[ResourceMonitor] = None
         self._updater: Optional[AutonetUpdater] = None
         self._node = None  # Solver or other node type
+
+        # Training data feed (Story 3.2) — bridges agent activity → JEPA training
+        self._training_feed = None
+        self._data_dir = data_dir  # ATN data dir (~/.atn), passed from AutonetBridge
 
     @property
     def state(self) -> ServiceState:
@@ -123,10 +127,15 @@ class AutonetService:
             self._resource_monitor._last_check = now
             self._updater._last_check = now
 
+            # Initialize training data feed if ATN data dir is available
+            if self._data_dir:
+                self._init_training_feed()
+
             logger.info(
                 f"AutonetService initialized: "
                 f"device={self.config.device}, "
-                f"arch={self.config.model.architecture}"
+                f"arch={self.config.model.architecture}, "
+                f"training_feed={'active' if self._training_feed else 'disabled'}"
             )
 
         except Exception as e:
@@ -215,8 +224,19 @@ class AutonetService:
             self._node._run_cycle()
             return
 
-        # Placeholder: in production, the node is created during start()
-        # based on the configured role. For now, log the cycle.
+        # Training data feed: train on accumulated agent activity
+        if self._training_feed:
+            result = self._training_feed.run_cycle()
+            if result:
+                weight_delta, metrics = result
+                logger.info(
+                    f"Training cycle {self._cycles}: "
+                    f"loss={metrics.get('loss', 0):.4f}, "
+                    f"batches={metrics.get('num_batches', 0)}"
+                )
+            return
+
+        # Fallback: no node and no training feed
         logger.debug(f"Service cycle {self._cycles}")
 
     def _check_updates(self):
@@ -249,6 +269,99 @@ class AutonetService:
         except (OSError, ValueError):
             # signal handlers can only be set in main thread
             logger.debug("Could not install signal handlers (not main thread?)")
+
+    def _init_governance(self):
+        """Initialize the governance bridge for on-chain attestation.
+
+        Returns a GovernanceBridge if blockchain config has a private_key,
+        or None for offline mode (training still works, just no attestation).
+        """
+        if not self.config.blockchain.private_key:
+            logger.info("No blockchain private_key configured, governance offline")
+            return None
+
+        try:
+            from .common.blockchain import BlockchainInterface
+            from .common.contracts import ContractRegistry
+            from .common.governance import GovernanceBridge
+
+            blockchain = BlockchainInterface(
+                rpc_url=self.config.blockchain.rpc_url,
+                private_key=self.config.blockchain.private_key,
+                chain_id=self.config.blockchain.chain_id,
+            )
+
+            if not blockchain.web3 or not blockchain.web3.is_connected():
+                logger.warning("Blockchain not reachable, governance offline")
+                return None
+
+            registry = ContractRegistry(blockchain)
+
+            governance = GovernanceBridge(
+                registry=registry,
+                node_id=f"service-{blockchain.account.address[:10]}" if blockchain.account else "service-anon",
+                project_id=0,
+            )
+
+            logger.info(
+                "Governance bridge initialized (rpc=%s, account=%s)",
+                self.config.blockchain.rpc_url,
+                blockchain.account.address if blockchain.account else "none",
+            )
+            return governance
+
+        except Exception as e:
+            logger.warning("Failed to initialize governance bridge: %s", e)
+            return None
+
+    def _init_training_feed(self):
+        """Initialize the training data feed from ATN agent activity.
+
+        Story 3.2: Reads conversations and execution records from the ATN
+        data directory and feeds them into JEPA training.
+        """
+        try:
+            from .common.training_feed import TrainingDataFeed, TrainingFeedConfig
+
+            feed_config = TrainingFeedConfig(
+                data_dir=self._data_dir,
+                # Map from nodes config
+                vocab_size=getattr(self.config.model, "vocab_size", 260),
+                max_seq_length=getattr(self.config.model, "max_seq_length", 2048),
+                embed_dim=getattr(self.config.model, "embed_dim", 64),
+                num_heads=getattr(self.config.model, "num_heads", 4),
+                encoder_depth=getattr(self.config.model, "encoder_depth", 2),
+                predictor_depth=getattr(self.config.model, "predictor_depth", 1),
+                predictor_embed_dim=getattr(self.config.model, "predictor_embed_dim", 32),
+                epochs=self.config.training.epochs,
+                learning_rate=self.config.training.learning_rate,
+                batch_size=self.config.training.batch_size,
+                scrub_pii=getattr(self.config, "privacy", None) is not None
+                    and getattr(self.config.privacy, "scrub_pii", True),
+            )
+
+            governance = self._init_governance()
+            self._training_feed = TrainingDataFeed(feed_config, governance=governance)
+            logger.info(
+                "Training data feed initialized (data_dir=%s, governance=%s)",
+                self._data_dir,
+                "online" if governance else "offline",
+            )
+
+        except Exception as e:
+            logger.warning("Failed to initialize training data feed: %s", e)
+            self._training_feed = None
+
+    def notify_execution(self, agent_id: str, execution_id: str, status: str) -> None:
+        """Notify the training feed that an agent execution completed.
+
+        Called by AutonetBridge when EXECUTION_COMPLETED events fire.
+        Thread-safe: the training feed's counter is incremented here
+        (from the async event loop thread), and read in _run_cycle()
+        (from the service's blocking thread).
+        """
+        if self._training_feed:
+            self._training_feed.notify_execution(agent_id, execution_id, status)
 
     @staticmethod
     def _get_version() -> str:

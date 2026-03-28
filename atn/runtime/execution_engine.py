@@ -613,19 +613,23 @@ class ExecutionEngine:
             # --- Session resume / history ---
             session_id = ""
             if is_orchestrator:
-                # Build history from PRIOR turns before recording this one.
                 session_id = getattr(sub_provider, '_session_id', "") or ""
-                if not session_id:
-                    history = self.session_manager.conversation.get_history_for_prompt()
-                else:
-                    history = ""
-                # Store the raw user message (skip if already recorded by
-                # ws_server or send_agent_message to avoid duplicates).
+                # Record the user message (skip if already recorded by
+                # ws_server to avoid duplicates in the conversation store).
                 existing_turns = self.session_manager.conversation.get_turns()
                 if (not existing_turns
                         or existing_turns[-1].role != "user"
                         or existing_turns[-1].content != user_message):
                     self.session_manager.conversation.add_user_turn(user_message)
+                # Build prior-turn history for non-session providers,
+                # excluding the current user message (exclude_last=1) so
+                # it doesn't appear in both history AND the prompt.
+                if not session_id:
+                    history = self.session_manager.conversation.get_history_for_prompt(
+                        exclude_last=1,
+                    )
+                else:
+                    history = ""
                 # Prepend conversation history for non-session providers
                 if history:
                     user_message = history + "\n\nUser: " + user_message

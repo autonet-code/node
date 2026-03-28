@@ -1048,5 +1048,127 @@ class TestRPBConsensus:
         assert resolved == 0
 
 
+# =============================================================================
+# Tests: AutonetService governance wiring (Phase 2.2)
+# =============================================================================
+
+
+class TestAutonetServiceGovernanceWiring:
+    """Verify that AutonetService._init_governance() creates a GovernanceBridge
+    when blockchain config has a private_key, and passes it to TrainingDataFeed."""
+
+    def test_init_governance_returns_bridge_with_private_key(self):
+        """With private_key configured, _init_governance returns a GovernanceBridge."""
+        from nodes.common.config import AutonetConfig, BlockchainConfig
+        from nodes.service import AutonetService
+
+        config = AutonetConfig()
+        config.blockchain = BlockchainConfig(
+            rpc_url="http://127.0.0.1:8545",
+            private_key="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+            chain_id=31337,
+        )
+
+        service = AutonetService(config=config, data_dir="/tmp/test")
+
+        with patch("nodes.common.blockchain.BlockchainInterface") as MockBI, \
+             patch("nodes.common.contracts.ContractRegistry") as MockCR, \
+             patch("nodes.common.governance.GovernanceBridge") as MockGB:
+
+            # Mock blockchain is connected
+            mock_bi = MockBI.return_value
+            mock_bi.web3 = MagicMock()
+            mock_bi.web3.is_connected.return_value = True
+            mock_bi.account = MagicMock()
+            mock_bi.account.address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+
+            result = service._init_governance()
+
+            assert result is not None
+            MockBI.assert_called_once_with(
+                rpc_url="http://127.0.0.1:8545",
+                private_key="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+                chain_id=31337,
+            )
+            MockCR.assert_called_once_with(mock_bi)
+            MockGB.assert_called_once()
+
+    def test_init_governance_returns_none_without_private_key(self):
+        """Without private_key, _init_governance returns None (offline mode)."""
+        from nodes.common.config import AutonetConfig, BlockchainConfig
+        from nodes.service import AutonetService
+
+        config = AutonetConfig()
+        config.blockchain = BlockchainConfig(
+            rpc_url="http://127.0.0.1:8545",
+            private_key=None,
+            chain_id=31337,
+        )
+
+        service = AutonetService(config=config)
+        result = service._init_governance()
+        assert result is None
+
+    def test_init_governance_returns_none_on_connection_failure(self):
+        """If blockchain unreachable, returns None (offline mode)."""
+        from nodes.common.config import AutonetConfig, BlockchainConfig
+        from nodes.service import AutonetService
+
+        config = AutonetConfig()
+        config.blockchain = BlockchainConfig(
+            rpc_url="http://127.0.0.1:9999",
+            private_key="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+            chain_id=31337,
+        )
+
+        service = AutonetService(config=config, data_dir="/tmp/test")
+
+        with patch("nodes.common.blockchain.BlockchainInterface") as MockBI:
+            mock_bi = MockBI.return_value
+            mock_bi.web3 = MagicMock()
+            mock_bi.web3.is_connected.return_value = False
+
+            result = service._init_governance()
+            assert result is None
+
+    def test_training_feed_receives_governance(self):
+        """_init_training_feed passes governance bridge to TrainingDataFeed."""
+        from nodes.common.config import AutonetConfig, BlockchainConfig
+        from nodes.service import AutonetService
+
+        config = AutonetConfig()
+        config.blockchain = BlockchainConfig(
+            rpc_url="http://127.0.0.1:8545",
+            private_key="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+            chain_id=31337,
+        )
+
+        service = AutonetService(config=config, data_dir="/tmp/test")
+
+        mock_gov = MagicMock()
+        with patch.object(service, "_init_governance", return_value=mock_gov):
+            service._init_training_feed()
+
+        assert service._training_feed is not None
+        # The attestor inside the feed should have governance set
+        assert service._training_feed._attestor.governance is mock_gov
+
+    def test_training_feed_works_offline(self):
+        """Training feed works without governance (offline mode)."""
+        from nodes.common.config import AutonetConfig, BlockchainConfig
+        from nodes.service import AutonetService
+
+        config = AutonetConfig()
+        config.blockchain = BlockchainConfig(private_key=None)
+
+        service = AutonetService(config=config, data_dir="/tmp/test")
+
+        with patch.object(service, "_init_governance", return_value=None):
+            service._init_training_feed()
+
+        assert service._training_feed is not None
+        assert service._training_feed._attestor.governance is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

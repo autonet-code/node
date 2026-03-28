@@ -120,20 +120,27 @@ class ConversationStore:
             return [], total
         return list(self._turns[start:end]), total
 
-    def get_history_for_prompt(self) -> str:
+    def get_history_for_prompt(self, exclude_last: int = 0) -> str:
         """Build a conversation history string that fits within the token budget.
 
         Returns a formatted string of previous turns, newest last, trimmed
         from the front (oldest) if the total exceeds the budget.  Returns
         empty string if no history.
+
+        Args:
+            exclude_last: Number of turns to exclude from the end (e.g. 1 to
+                skip the current user message that was just recorded).
         """
-        if not self._turns:
+        turns = self._turns
+        if exclude_last > 0:
+            turns = turns[:-exclude_last] if len(turns) > exclude_last else []
+        if not turns:
             return ""
 
         # Build formatted turns
         formatted: list[str] = []
         _ROLE_PREFIX = {"user": "User", "assistant": "Orchestrator", "system": "System"}
-        for turn in self._turns:
+        for turn in turns:
             prefix = _ROLE_PREFIX.get(turn.role, turn.role.title())
             formatted.append(f"{prefix}: {turn.content}")
 

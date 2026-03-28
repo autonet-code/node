@@ -1186,11 +1186,11 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     priority = MessagePriority(input.get("priority", "normal"))
     instruction = (input.get("data") or {}).get("instruction", "")
 
-    # For cognitive agents with an instruction, persist the message in
-    # the agent's conversation store so it appears in its chat thread.
-    if defn.mode == AgentMode.COGNITIVE and instruction:
-        store = runtime.get_agent_conversation_store(target)
-        store.add_user_turn(instruction)
+    # NOTE: Do NOT add_user_turn here.  The execution engine records the
+    # user turn right before calling the LLM (execution_engine.py lines
+    # 624-636), which is the single place responsible for persisting turns
+    # for both the orchestrator and child agents.  Adding it here caused
+    # duplicate user messages in the conversation store.
 
     msg = InboxMessage(
         id=InboxMessage.generate_id(),

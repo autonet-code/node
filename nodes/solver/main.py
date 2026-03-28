@@ -357,7 +357,9 @@ class SolverNode:
 
         task_type = task_spec.get("task_type", self.task_type)
 
-        if task_type in ("jepa", "jepa_pretrain"):
+        if task_type in ("vl_jepa", "text_jepa"):
+            return self._train_vljepa(task_id, task_spec, global_model_cid)
+        elif task_type in ("jepa", "jepa_pretrain"):
             return self._train_jepa(task_id, task_spec, global_model_cid)
         else:
             return self._train_supervised(task_id, task_spec, global_model_cid)
@@ -472,6 +474,99 @@ class SolverNode:
         logger.info(
             f"[{self.node_id}] JEPA training done: loss={metrics['loss']:.4f}, "
             f"cosine_sim={metrics.get('cosine_similarity', 0):.4f}"
+        )
+        return model_update, checkpoints
+
+    def _train_vljepa(self, task_id: int, task_spec: dict, global_model_cid: str = None) -> tuple:
+        """
+        Perform VL-JEPA / Text-JEPA training using agent framework data.
+
+        Story 3.4: Instead of training on CIFAR/FakeData, uses the real
+        agent interaction data (conversations, execution records) stored
+        in the ATN data directory.
+
+        Supports three modality paths:
+        - text_jepa: Text-only (from conversations + execution logs)
+        - vl_jepa: Multimodal (text + visual, when visual data is available)
+        - Falls back to text-only if no visual data source is provided
+        """
+        from ..common.ml import train_vljepa_on_task
+
+        epochs = task_spec.get("epochs", self.config.training.epochs)
+        lr = task_spec.get("learning_rate", self.config.training.learning_rate)
+        batch_size = task_spec.get("batch_size", self.config.training.batch_size)
+
+        # Build text data source from ATN data directory
+        text_source = None
+        data_dir = task_spec.get("data_dir", "")
+        if not data_dir:
+            # Try config-level data_dir
+            data_dir = getattr(self.config, "data_dir", "")
+
+        if data_dir:
+            from ..common.text_data import TextDataConfig, TextTrainingDataSource
+            from pathlib import Path
+
+            data_path = Path(data_dir)
+            conversations_dir = data_path / "conversations"
+            agents_dir = data_path / "agents"
+
+            text_config = TextDataConfig(
+                conversations_dir=str(conversations_dir) if conversations_dir.is_dir() else "",
+                agents_dir=str(agents_dir) if agents_dir.is_dir() else "",
+                max_seq_length=task_spec.get("max_seq_length", 2048),
+                vocab_size=task_spec.get("vocab_size", 260),
+                batch_size=batch_size,
+                scrub_pii=True,
+                shuffle=True,
+            )
+            text_source = TextTrainingDataSource(text_config)
+
+            logger.info(
+                f"[{self.node_id}] VL-JEPA training: task={task_id}, "
+                f"epochs={epochs}, batch={batch_size}, lr={lr}, "
+                f"data_dir={data_dir}"
+            )
+        else:
+            logger.info(
+                f"[{self.node_id}] VL-JEPA training (no data dir): task={task_id}, "
+                f"epochs={epochs}, batch={batch_size}, lr={lr}"
+            )
+
+        # Determine modalities from task_spec
+        modalities = task_spec.get("modalities")
+        task_type = task_spec.get("task_type", "text_jepa")
+
+        weight_delta, metrics = train_vljepa_on_task(
+            task_spec=task_spec,
+            global_model_cid=global_model_cid,
+            store=self.store,
+            text_data_source=text_source,
+            epochs=epochs,
+            learning_rate=lr,
+            modalities=modalities,
+        )
+
+        checkpoints = self._generate_training_checkpoints(task_id, metrics)
+
+        model_update = {
+            "task_id": task_id,
+            "task_type": task_type,
+            "weight_delta": weight_delta,
+            "metrics": metrics,
+            "training_steps": metrics.get("num_batches", 0),
+            "final_seed": self._generate_deterministic_seed(task_id, 100),
+            "solver": self.node_id,
+            "real_training": True,
+            "self_supervised": True,
+        }
+
+        logger.info(
+            f"[{self.node_id}] VL-JEPA training done: "
+            f"arch={metrics.get('architecture', 'unknown')}, "
+            f"modalities={metrics.get('modalities', [])}, "
+            f"loss={metrics.get('loss', 0):.4f}, "
+            f"batches={metrics.get('num_batches', 0)}"
         )
         return model_update, checkpoints
 

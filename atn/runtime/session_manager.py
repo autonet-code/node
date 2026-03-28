@@ -86,17 +86,21 @@ class SessionManager:
             return {"error": f"Agent '{agent_id}' is not a cognitive agent"}
 
         store = self.get_agent_conversation_store(agent_id)
-        store.add_user_turn(text)
 
         # Mid-session injection — only if actually running
         is_running = self.registry._running_count.get(agent_id, 0) > 0
         if is_running:
             provider = self.provider_manager._active_providers.get(agent_id)
             if provider is not None:
+                # Record in conversation store here — the execution engine
+                # won't see this message (it goes directly to the provider).
+                store.add_user_turn(text)
                 await provider.send_user_message(text)
                 return {"status": "injected", "agent_id": agent_id}
 
-        # Not running — post to inbox
+        # Not running — post to inbox.  Do NOT add_user_turn here;
+        # the execution engine records it when it drains the inbox
+        # (avoiding duplicates in the conversation store).
         msg = InboxMessage(
             id=InboxMessage.generate_id(),
             type=MessageType.WORK,
