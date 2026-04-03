@@ -85,7 +85,7 @@ jobs:
 
             **pip:**
             ```bash
-            pip install autonet
+            pip install autonet-computer
             ```
 
             **Linux/macOS:**
@@ -100,9 +100,9 @@ jobs:
 
             **Optional extras:**
             ```bash
-            pip install autonet[voice]      # Voice / TTS
-            pip install autonet[node]       # Full training node (PyTorch)
-            pip install autonet[p2p]        # P2P networking
+            pip install autonet-computer[voice]      # Voice / TTS
+            pip install autonet-computer[node]       # Full training node (PyTorch)
+            pip install autonet-computer[p2p]        # P2P networking
             ```
 
             ## Package Integrity Hash

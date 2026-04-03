@@ -64,8 +64,8 @@ if ($WheelPath -and (Test-Path $WheelPath)) {
     Info "Installing from local file: $WheelPath"
     & $PipExe install --upgrade $WheelPath
 } else {
-    Info "Installing autonet from PyPI"
-    & $PipExe install --upgrade autonet
+    Info "Installing autonet-computer from PyPI"
+    & $PipExe install --upgrade autonet-computer
 }
 
 # --- Add to PATH ---
@@ -81,4 +81,4 @@ if ($UserPath -notlike "*$VenvBin*") {
 
 Info "Installation complete!"
 Info "Run 'atn' to start the agent framework."
-Info "Optional extras: pip install autonet[voice] autonet[node] autonet[p2p]"
+Info "Optional extras: pip install autonet-computer[voice] autonet-computer[node] autonet-computer[p2p]"

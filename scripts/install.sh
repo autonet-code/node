@@ -46,8 +46,8 @@ if [ "${1:-}" != "" ] && [ -f "$1" ]; then
     info "Installing from local file: $1"
     "$VENV_DIR/bin/pip" install --upgrade "$1"
 else
-    info "Installing autonet from PyPI"
-    "$VENV_DIR/bin/pip" install --upgrade autonet
+    info "Installing autonet-computer from PyPI"
+    "$VENV_DIR/bin/pip" install --upgrade autonet-computer
 fi
 
 # --- Symlink ---
@@ -77,4 +77,4 @@ fi
 
 info "Installation complete!"
 info "Run 'atn' to start the agent framework."
-info "Optional extras: pip install autonet[voice] autonet[node] autonet[p2p]"
+info "Optional extras: pip install autonet-computer[voice] autonet-computer[node] autonet-computer[p2p]"

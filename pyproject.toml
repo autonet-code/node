@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "autonet"
+name = "autonet-computer"
 version = "0.1.0"
 description = "Decentralized AI alignment network with agent orchestration framework"
 requires-python = ">=3.11"
