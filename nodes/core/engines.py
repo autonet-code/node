@@ -364,7 +364,7 @@ class WorkEngine(BaseEngine):
 
     def _handle_aggregation(self, details: Dict[str, Any]) -> None:
         """Handle model aggregation."""
-        self.logger.info(f"Aggregating updates for project: {details.get('project_id')}")
+        self.logger.info(f"Aggregating updates for RPB: {details.get('rpb_address', 'default')}")
         # In production: download verified updates, perform FedAvg
 
     def _handle_inference(self, details: Dict[str, Any]) -> None:

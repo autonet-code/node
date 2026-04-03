@@ -247,7 +247,7 @@ class NodeRunner:
         contract_addresses: Dict[str, str],
         store: BlobStore,
         metrics: NetworkMetrics,
-        project_id: int = 1,
+        rpb_address: str = "",
         max_cycles: int = 10,
         cycle_delay: float = 2.0,
         extra_kwargs: Optional[Dict[str, Any]] = None,
@@ -260,7 +260,7 @@ class NodeRunner:
         self.contract_addresses = contract_addresses
         self.store = store
         self.metrics = metrics
-        self.project_id = project_id
+        self.rpb_address = rpb_address
         self.max_cycles = max_cycles
         self.cycle_delay = cycle_delay
         self.extra_kwargs = extra_kwargs or {}
@@ -313,7 +313,7 @@ class NodeRunner:
                 registry=registry,
                 store=self.store,
                 node_id=self.node_id,
-                project_id=self.project_id,
+                rpb_address=self.rpb_address,
                 **kwargs,
             )
 
@@ -344,71 +344,8 @@ class NodeRunner:
 
 
 # =============================================================================
-# Project Setup
+# RPB Setup (Project.sol was removed — RPB is the project)
 # =============================================================================
-
-def setup_project(
-    deployer_blockchain: BlockchainInterface,
-    registry: ContractRegistry,
-    project_id: int = 1,
-) -> None:
-    """Create and fund a test project for training."""
-    from web3 import Web3
-
-    logger.info("Setting up test project...")
-
-    # Approve ATN for the Project contract
-    project_handle = registry.get("Project")
-    if not project_handle:
-        raise RuntimeError("Project contract not found in registry")
-
-    # Approve tokens
-    result = registry.approve_atn(project_handle.address, Web3.to_wei(100000, "ether"))
-    if not result.success:
-        logger.warning(f"ATN approval failed: {result.error}")
-
-    # Create project
-    result = registry.send(
-        "Project", "createProject",
-        "Autonet Test Model",   # name
-        "QmTestDescription",    # descriptionCid
-        Web3.to_wei(10000, "ether"),  # fundingGoal
-        Web3.to_wei(0, "ether"),      # initialBudget (start at 0)
-        Web3.to_wei(100, "ether"),    # founderPTAmount
-        "TestPT",               # ptName
-        "TPT",                  # ptSymbol
-        gas_limit=3000000,
-    )
-    if not result.success:
-        logger.error(f"Project creation failed: {result.error}")
-        return
-
-    logger.info(f"Project {project_id} created")
-
-    # Fund the project
-    result = registry.send(
-        "Project", "fundProject",
-        project_id,
-        Web3.to_wei(10000, "ether"),  # atnAmount
-        Web3.to_wei(100, "ether"),    # expectedPTs
-    )
-    if not result.success:
-        logger.error(f"Project funding failed: {result.error}")
-        return
-
-    logger.info(f"Project {project_id} funded with 10000 ATN")
-
-    # Allocate task budget
-    result = registry.send(
-        "Project", "allocateTaskBudget",
-        project_id,
-        Web3.to_wei(5000, "ether"),  # budget for tasks
-    )
-    if not result.success:
-        logger.error(f"Budget allocation failed: {result.error}")
-        return
-
-    logger.info(f"Task budget allocated: 5000 ATN")
 
 
 def distribute_tokens(
@@ -495,7 +432,7 @@ def validate_coordination(metrics: NetworkMetrics) -> bool:
 # =============================================================================
 
 
-def _setup_governance(registry: ContractRegistry, project_id: int, config: AutonetConfig):
+def _setup_governance(registry: ContractRegistry, config: AutonetConfig):
     """
     Register the training service and start the first epoch.
 
@@ -506,11 +443,12 @@ def _setup_governance(registry: ContractRegistry, project_id: int, config: Auton
         logger.info("AutonetEconomy not deployed, skipping governance setup")
         return
 
-    service_id = compute_service_id(project_id)
+    rpb_contract = registry.get("RPB")
+    rpb_addr = rpb_contract.address if rpb_contract else ""
+    service_id = compute_service_id(rpb_addr)
 
     # Register service
-    project_contract = registry.get("Project")
-    if project_contract:
+    if rpb_contract:
         try:
             import subprocess
             codebase_hash = subprocess.check_output(
@@ -522,7 +460,7 @@ def _setup_governance(registry: ContractRegistry, project_id: int, config: Auton
             codebase_hash = "simulation"
 
         result = registry.register_service(
-            service_id, project_contract.address, codebase_hash
+            service_id, rpb_contract.address, codebase_hash
         )
         if result.success:
             logger.info(f"Registered training service: {service_id[:8].hex()}...")
@@ -622,25 +560,10 @@ def run_orchestrator(
         addresses=addresses,
     )
 
-    # Step 3: Distribute tokens and setup project
-    logger.info("\n--- STEP 3: Distributing tokens and creating project ---")
+    # Step 3: Distribute tokens
+    logger.info("\n--- STEP 3: Distributing tokens ---")
     node_accounts = HARDHAT_ACCOUNTS[1:total_nodes + 1]
     distribute_tokens(deployer_blockchain, deployer_registry, node_accounts)
-    setup_project(deployer_blockchain, deployer_registry, project_id=1)
-
-    # Authorize aggregator accounts as model setters
-    aggregator_start_idx = num_proposers + num_solvers + num_coordinators
-    for i in range(num_aggregators):
-        aggregator_addr = node_accounts[aggregator_start_idx + i]["address"]
-        result = deployer_registry.send(
-            "Project", "setAuthorizedModelSetter",
-            aggregator_addr,
-            True,
-        )
-        if result.success:
-            logger.info(f"Authorized aggregator {aggregator_addr[:10]}... as model setter")
-        else:
-            logger.warning(f"Failed to authorize aggregator: {result.error}")
 
     # Step 4: Create shared blob store (all threads share one directory)
     import tempfile
@@ -672,7 +595,7 @@ def run_orchestrator(
             contract_addresses=addresses,
             store=store,
             metrics=metrics,
-            project_id=1,
+            rpb_address="",
             max_cycles=num_rounds * 10,
             cycle_delay=cycle_delay,
             extra_kwargs={"task_mode": task_mode},
@@ -691,7 +614,7 @@ def run_orchestrator(
             contract_addresses=addresses,
             store=store,
             metrics=metrics,
-            project_id=1,
+            rpb_address="",
             max_cycles=num_rounds * 10,
             cycle_delay=cycle_delay,
             extra_kwargs={"task_mode": task_mode},
@@ -710,7 +633,7 @@ def run_orchestrator(
             contract_addresses=addresses,
             store=store,
             metrics=metrics,
-            project_id=1,
+            rpb_address="",
             max_cycles=num_rounds * 20,
             cycle_delay=cycle_delay,
             extra_kwargs={"task_mode": task_mode},
@@ -729,7 +652,7 @@ def run_orchestrator(
             contract_addresses=addresses,
             store=store,
             metrics=metrics,
-            project_id=1,
+            rpb_address="",
             max_cycles=num_rounds * 10,
             cycle_delay=cycle_delay * 1.5,
             extra_kwargs={"task_mode": task_mode},
@@ -748,7 +671,7 @@ def run_orchestrator(
             contract_addresses=addresses,
             store=store,
             metrics=metrics,
-            project_id=1,
+            rpb_address="",
             max_cycles=num_rounds * 15,
             cycle_delay=cycle_delay,
             config=config,
@@ -757,7 +680,7 @@ def run_orchestrator(
         account_idx += 1
 
     # Step 5b: Register training service and start epoch (if economy available)
-    _setup_governance(deployer_registry, project_id=1, config=config)
+    _setup_governance(deployer_registry, config=config)
 
     # Start all nodes
     logger.info(f"Starting {len(runners)} nodes...")

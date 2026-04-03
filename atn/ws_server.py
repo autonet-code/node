@@ -485,6 +485,8 @@ class WebSocketBridge:
         # Autonet network service
         # ---------------------------------------------------------------
         if msg_type == "autonet_status":
+            # Lazily load constitution CID from chain on first status request
+            await self.runtime.autonet.load_constitution()
             return {"msg_id": msg_id, "ok": True, "result": self.runtime.autonet.get_status()}
 
         if msg_type == "autonet_start":
@@ -616,10 +618,333 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        # On-chain agent registration
+        if msg_type == "register_agent_on_chain":
+            agent_id = msg.get("agent_id", "")
+            is_root = msg.get("is_root", False)
+            private_key = msg.get("private_key", "")
+            sponsor_address = msg.get("sponsor_address", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id'"}
+            try:
+                result = await self._handle_register_on_chain(
+                    agent_id=agent_id,
+                    is_root=is_root,
+                    private_key=private_key,
+                    sponsor_address=sponsor_address,
+                )
+                return {"msg_id": msg_id, "ok": result.get("success", False), "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "check_agent_registration":
+            agent_id = msg.get("agent_id", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id'"}
+            try:
+                result = await self._handle_check_registration(agent_id)
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        # Confirm that a non-custodial registration tx landed on-chain
+        if msg_type == "confirm_agent_registration":
+            agent_id = msg.get("agent_id", "")
+            tx_hash = msg.get("tx_hash", "")
+            agent_address = msg.get("agent_address", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id'"}
+            agent_def = self.runtime.registry.get_agent(agent_id)
+            if agent_def and agent_def.identity:
+                agent_def.identity.registered_on_chain = True
+                agent_def.identity.registration_tx = tx_hash
+                if agent_address:
+                    agent_def.identity.address = agent_address
+                self.runtime.registry.persist_identity(agent_id)
+                log.info("Agent %s confirmed on-chain: tx=%s addr=%s", agent_id, tx_hash, agent_address)
+            return {"msg_id": msg_id, "ok": True, "result": {"confirmed": True}}
+
+        # RPB on-chain state queries
+        if msg_type == "rpb_state":
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                result = await svc.get_rpb_state()
+                return {"msg_id": msg_id, "ok": True, "result": result or {}}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rpb_agent_training":
+            address = msg.get("address", "")
+            if not address:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'address'"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                result = await svc.get_agent_training_info(address)
+                return {"msg_id": msg_id, "ok": True, "result": result or {}}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rpb_agent_record":
+            address = msg.get("address", "")
+            if not address:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'address'"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                result = await svc.get_agent_record(address)
+                return {"msg_id": msg_id, "ok": True, "result": result or {}}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        # RPB investment/funding pipeline
+        if msg_type == "rpb_investor_info":
+            address = msg.get("address", "")
+            if not address:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'address'"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                result = await svc.get_investor_info(address)
+                return {"msg_id": msg_id, "ok": True, "result": result or {}}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rpb_accepted_tokens":
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                result = await svc.get_accepted_tokens()
+                return {"msg_id": msg_id, "ok": True, "result": {"tokens": result}}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rpb_purchase_shares":
+            token = msg.get("token", "")
+            amount = msg.get("amount")
+            if not token:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'token'"}
+            if amount is None:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'amount'"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                call_data = svc.build_purchase_shares_call_data(token, int(amount))
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "call_data": call_data,
+                    "to": self.runtime._config.rpb.rpb_contract_address,
+                }}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rpb_fund_training":
+            token = msg.get("token", "")
+            amount = msg.get("amount")
+            if not token:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'token'"}
+            if amount is None:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'amount'"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                call_data = svc.build_fund_training_call_data(token, int(amount))
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "call_data": call_data,
+                    "to": self.runtime._config.rpb.rpb_contract_address,
+                }}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rpb_claim_training_reward":
+            token = msg.get("token", "")
+            if not token:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'token'"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                call_data = svc.build_claim_training_reward_call_data(token)
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "call_data": call_data,
+                    "to": self.runtime._config.rpb.rpb_contract_address,
+                }}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rpb_claim_dividends":
+            token = msg.get("token", "")
+            if not token:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'token'"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                call_data = svc.build_claim_dividends_call_data(token)
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "call_data": call_data,
+                    "to": self.runtime._config.rpb.rpb_contract_address,
+                }}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        # RPB sponsorship / inference pipeline
+        if msg_type == "rpb_record_inference":
+            requester = msg.get("requester", "")
+            provider = msg.get("provider", "")
+            units = msg.get("units")
+            token = msg.get("token", "")
+            cost = msg.get("cost")
+            if not all([requester, provider, token]) or units is None or cost is None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Missing required fields: requester, provider, units, token, cost"}
+            try:
+                from .on_chain import OnChainService
+                config = self.runtime._config.rpb
+                svc = OnChainService(config)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                if not config.private_key:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": "Owner private_key not configured (required for onlyOwner call)"}
+                result = await svc.record_inference(
+                    requester=requester,
+                    provider=provider,
+                    units=int(units),
+                    token_address=token,
+                    cost=int(cost),
+                    private_key=config.private_key,
+                )
+                return {"msg_id": msg_id, "ok": result.get("success", False), "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rpb_sponsor_budget":
+            address = msg.get("address", "")
+            if not address:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'address'"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                result = await svc.get_sponsor_budget(address)
+                return {"msg_id": msg_id, "ok": "error" not in result, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rpb_registered_agents":
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                agents_list = await svc.get_all_registered_agents()
+
+                # Build lookup: on-chain address → local agent metadata
+                local_meta = {}
+                for defn in self.runtime.registry._agents.values():
+                    if defn.identity and defn.identity.address:
+                        addr = defn.identity.address.lower()
+                        local_meta[addr] = {
+                            "display_name": defn.name,
+                            "display_description": defn.description,
+                            "agent_type": getattr(defn, "agent_type", ""),
+                            "model": defn.model or "",
+                            "is_online": True,
+                        }
+                # Also check the connected wallet (root agent's address may
+                # be the user's wallet, not the generated identity address)
+                connected_wallet = getattr(
+                    getattr(self.runtime, "autonet", None),
+                    "state", None
+                )
+                wallet_addr = getattr(connected_wallet, "wallet_address", "") if connected_wallet else ""
+                if wallet_addr:
+                    wallet_lower = wallet_addr.lower()
+                    if wallet_lower not in local_meta:
+                        # Root agent uses the wallet address on-chain
+                        root = self.runtime.registry._agents.get("orchestrator")
+                        if root:
+                            local_meta[wallet_lower] = {
+                                "display_name": root.name,
+                                "display_description": root.description,
+                                "agent_type": getattr(root, "agent_type", ""),
+                                "model": root.model or "",
+                                "is_online": True,
+                            }
+
+                # Enrich on-chain records with local metadata
+                for agent in agents_list:
+                    addr = agent.get("agent_address", "").lower()
+                    if addr in local_meta:
+                        agent.update(local_meta[addr])
+
+                return {"msg_id": msg_id, "ok": True, "result": {"agents": agents_list}}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         # New conversation: reset conversation history without changing model
         if msg_type == "new_conversation":
             await self.runtime.new_conversation()
             return {"msg_id": msg_id, "ok": True, "result": {"status": "Conversation reset"}}
+
+        # Generic agent operations: reset conversation, change model, remove
+        if msg_type == "reset_agent_conversation":
+            agent_id = msg.get("agent_id", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
+            try:
+                await self.runtime.reset_agent_conversation(agent_id)
+                return {"msg_id": msg_id, "ok": True, "result": {"status": "reset", "agent_id": agent_id}}
+            except ValueError as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
+        if msg_type == "set_agent_model":
+            agent_id = msg.get("agent_id", "")
+            model = msg.get("model", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
+            if not model:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'model' field"}
+            try:
+                await self.runtime.set_agent_model(agent_id, model)
+                tier = get_model_tier(model)
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "agent_id": agent_id, "model": model, "status": "Model changed",
+                    "capability_tier": tier, "tier_label": get_tier_label(tier),
+                }}
+            except ValueError as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
+        if msg_type == "remove_agent":
+            agent_id = msg.get("agent_id", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
+            from .orchestrator import ORCHESTRATOR_ID
+            if agent_id == ORCHESTRATOR_ID:
+                return {"msg_id": msg_id, "ok": False, "error": "The root agent cannot be removed"}
+            try:
+                await self.runtime.unregister_agent(agent_id)
+                return {"msg_id": msg_id, "ok": True, "result": {"status": "removed", "agent_id": agent_id}}
+            except ValueError as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
         # Special case: inject user message into running orchestrator session.
         # If the bridge process isn't running (e.g. after a daemon restart),
@@ -682,6 +1007,151 @@ class WebSocketBridge:
         if result.get("error"):
             return {"msg_id": msg_id, "ok": False, "error": result["error"]}
         return {"msg_id": msg_id, "ok": True, "result": result}
+
+    # ------------------------------------------------------------------
+    # On-chain registration helpers
+    # ------------------------------------------------------------------
+
+    async def _handle_register_on_chain(
+        self,
+        agent_id: str,
+        is_root: bool = False,
+        private_key: str = "",
+        sponsor_address: str = "",
+    ) -> dict[str, Any]:
+        """Handle agent registration on the RPB contract.
+
+        Two modes:
+        - Root agent (is_root=True): requires private_key from the frontend
+          wallet (custodial) or returns call_data for the frontend to sign
+          (non-custodial / WalletConnect).
+        - Child agent: daemon holds the key and signs directly.
+
+        If private_key is empty and is_root=True, returns unsigned call_data
+        for the frontend wallet to submit via sendTransaction.
+        """
+        from .on_chain import OnChainService
+
+        config = self.runtime.autonet.config
+        svc = OnChainService(config)
+
+        if not svc.available:
+            return {"success": False, "error": "On-chain not configured (missing rpb_contract_address or rpc_url)"}
+
+        # Look up the agent
+        agent_def = self.runtime.registry.get_agent(agent_id)
+        if not agent_def:
+            return {"success": False, "error": f"Agent '{agent_id}' not found"}
+        if not agent_def.identity:
+            return {"success": False, "error": f"Agent '{agent_id}' has no identity"}
+
+        identity = agent_def.identity
+        system_prompt = agent_def.system_prompt or ""
+
+        # Determine parent's on-chain address
+        parent_address = ""
+        if agent_def.parent_id:
+            parent_def = self.runtime.registry.get_agent(agent_def.parent_id)
+            if parent_def and parent_def.identity:
+                parent_address = parent_def.identity.address
+
+        if is_root and not private_key:
+            # Non-custodial: return call data for frontend wallet
+            try:
+                call_data = svc.build_register_call_data(
+                    identity=identity,
+                    system_prompt=system_prompt,
+                    parent_address=parent_address,
+                    sponsor_address=sponsor_address,
+                )
+                return {
+                    "success": True,
+                    "mode": "sign_required",
+                    "call_data": call_data,
+                    "to": config.rpb_contract_address,
+                    "agent_address": identity.address,
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+        # Custodial path: we have the private key
+        if is_root:
+            # Root agent — private_key was passed from frontend
+            key = private_key
+        else:
+            # Child agent — daemon holds the key
+            key = self.runtime.registry.get_agent_key(agent_id)
+            if not key:
+                return {"success": False, "error": f"No private key stored for agent '{agent_id}'"}
+
+        result = await svc.register_agent(
+            identity=identity,
+            private_key=key,
+            system_prompt=system_prompt,
+            parent_address=parent_address,
+            sponsor_address=sponsor_address,
+        )
+        if result.get("success"):
+            identity.registered_on_chain = True
+            identity.registration_tx = result.get("tx_hash")
+            self.runtime.registry.persist_identity(agent_id)
+        return result
+
+    async def _handle_check_registration(self, agent_id: str) -> dict[str, Any]:
+        """Check if an agent is registered on-chain."""
+        from .on_chain import OnChainService
+
+        config = self.runtime.autonet.config
+        svc = OnChainService(config)
+
+        if not svc.available:
+            return {"registered": False, "available": False}
+
+        agent_def = self.runtime.registry.get_agent(agent_id)
+        if not agent_def or not agent_def.identity:
+            return {"registered": False, "error": "Agent has no identity"}
+
+        # Root agents register via the user's wallet, not the daemon-generated
+        # keypair.  After a daemon restart the keypair is regenerated, so the
+        # generated address will differ from the one that was actually
+        # registered.  Check both addresses (generated + connected wallet).
+        addrs_to_check = []
+        if agent_def.identity.address:
+            addrs_to_check.append(agent_def.identity.address)
+        wallet = self.runtime.autonet.state.wallet_address
+        if wallet and wallet not in addrs_to_check:
+            addrs_to_check.append(wallet)
+
+        registered = False
+        matched_address = ""
+        for addr in addrs_to_check:
+            if await svc.is_registered(addr):
+                registered = True
+                matched_address = addr
+                break
+
+        result: dict[str, Any] = {
+            "registered": registered,
+            "available": True,
+            "agent_address": matched_address or agent_def.identity.address,
+        }
+
+        # Sync daemon's in-memory flag with on-chain truth.
+        # This handles both directions: newly registered or contract redeployed.
+        if registered != agent_def.identity.registered_on_chain:
+            agent_def.identity.registered_on_chain = registered
+            if registered and matched_address:
+                agent_def.identity.address = matched_address
+            self.runtime.registry.persist_identity(agent_id)
+            log.info("Agent %s on-chain status synced to %s (address: %s)",
+                     agent_id, registered, matched_address or "n/a")
+
+        if registered:
+            record = await svc.get_agent_record(matched_address)
+            if record:
+                result["record"] = record
+
+        return result
 
     # ------------------------------------------------------------------
     # Event broadcasting

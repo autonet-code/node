@@ -6,7 +6,8 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
   let staking;
   let taskContract;
   let resultsRewards;
-  let project;
+  let rpb;
+  let rpbAddr;
   let owner, proposer, solver1, solver2, solver3, solver4, coord1;
 
   const PROPOSER_STAKE = ethers.parseEther("100");
@@ -40,19 +41,31 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
     );
     await staking.waitForDeployment();
 
-    // Deploy Project
-    const Project = await ethers.getContractFactory("Project");
-    project = await Project.deploy(
-      await atnToken.getAddress(),
-      owner.address
+    // Deploy RPB via factory (replaces Project)
+    const Registry = await ethers.getContractFactory("Registry");
+    const registry = await Registry.deploy(owner.address, owner.address);
+    await registry.waitForDeployment();
+    await registry.setJurisdictionAddress(owner.address);
+
+    const RPBFactory = await ethers.getContractFactory("RPBFactory");
+    const rpbFactory = await RPBFactory.deploy();
+    await rpbFactory.waitForDeployment();
+
+    const rpbTx = await rpbFactory.createRPB(
+      await registry.getAddress(),
+      await atnToken.getAddress()
     );
-    await project.waitForDeployment();
+    const rpbReceipt = await rpbTx.wait();
+    const rpbEvent = rpbReceipt.logs.find(l => l.fragment && l.fragment.name === "RPBDeployed");
+    rpbAddr = rpbEvent.args[0];
+    rpb = await ethers.getContractAt("RPB", rpbAddr);
 
     // Deploy TaskContract
     const TaskContract = await ethers.getContractFactory("TaskContract");
     taskContract = await TaskContract.deploy(
       await staking.getAddress(),
-      owner.address
+      owner.address,
+      await atnToken.getAddress()
     );
     await taskContract.waitForDeployment();
 
@@ -69,12 +82,12 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
     await taskContract.setResultsRewardsContract(
       await resultsRewards.getAddress()
     );
-    await resultsRewards.setProjectContract(await project.getAddress());
+    await resultsRewards.setRPBContract(rpbAddr);
     await staking.setAuthorizedSlasher(
       await resultsRewards.getAddress(),
       true
     );
-    await project.setAuthorizedDisburser(
+    await rpb.setAuthorizedDisburser(
       await resultsRewards.getAddress(),
       true
     );
@@ -93,21 +106,10 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
     await staking.connect(solver1).stake(2, SOLVER_STAKE);
     await staking.connect(solver2).stake(2, SOLVER_STAKE);
 
-    // Fund a project so rewards can be disbursed
-    const projectFunding = ethers.parseEther("1000");
-    await atnToken.approve(await project.getAddress(), projectFunding);
-    await project.createProject(
-      "TestProject",
-      "QmTest",
-      projectFunding,             // fundingGoal
-      ethers.parseEther("0"),     // initialBudget
-      ethers.parseEther("100"),   // founderPTAmount
-      "TestPT",                   // ptName
-      "TPT"                       // ptSymbol
-    );
-    // Approve ATN for funding, then fund the project
-    await atnToken.approve(await project.getAddress(), projectFunding);
-    await project.fundProject(1, projectFunding, ethers.parseEther("100"));
+    // Fund RPB task budget for reward disbursement
+    const budgetFunding = ethers.parseEther("1000");
+    await atnToken.approve(rpbAddr, budgetFunding);
+    await rpb.fundTaskBudget(budgetFunding);
   });
 
   describe("Consensus Task Proposal", function () {
@@ -117,7 +119,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       const tx = await taskContract
         .connect(proposer)
         .proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           DEFAULT_DIFFICULTY,
           ethers.parseEther("10"),
@@ -134,7 +136,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
 
       const parsed = taskContract.interface.parseLog(event);
       expect(parsed.args.taskId).to.equal(1);
-      expect(parsed.args.projectId).to.equal(1);
+      expect(parsed.args.rpbAddress).to.equal(rpbAddr);
       expect(parsed.args.peakSolvability).to.equal(5000);
     });
 
@@ -143,7 +145,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
 
       await expect(
         taskContract.connect(proposer).proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           { minSolvability: 7500, maxSolvability: 2500, peakSolvability: 5000 },
           ethers.parseEther("10"),
@@ -157,7 +159,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
 
       await expect(
         taskContract.connect(proposer).proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           { minSolvability: 2500, maxSolvability: 7500, peakSolvability: 8000 },
           ethers.parseEther("10"),
@@ -175,7 +177,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       await taskContract
         .connect(proposer)
         .proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           DEFAULT_DIFFICULTY,
           ethers.parseEther("10"),
@@ -232,7 +234,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       const gtHash = ethers.keccak256(ethers.toUtf8Bytes("gt-answer"));
       await taskContract
         .connect(proposer)
-        .proposeTask(1, specHash, gtHash, ethers.parseEther("10"), ethers.parseEther("5"));
+        .proposeTask(rpbAddr, specHash, gtHash, ethers.parseEther("10"), ethers.parseEther("5"));
 
       const gtTaskId = 2;
       const answerHash = ethers.keccak256(ethers.toUtf8Bytes("answer"));
@@ -277,7 +279,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       await taskContract
         .connect(proposer)
         .proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           DEFAULT_DIFFICULTY,
           ethers.parseEther("10"),
@@ -306,7 +308,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       await taskContract
         .connect(proposer)
         .proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           DEFAULT_DIFFICULTY,
           ethers.parseEther("10"),
@@ -344,7 +346,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       await taskContract
         .connect(proposer)
         .proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           { minSolvability: 2500, maxSolvability: 7500, peakSolvability: 5000 },
           ethers.parseEther("10"),
@@ -386,7 +388,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       await taskContract
         .connect(proposer)
         .proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           DEFAULT_DIFFICULTY,
           ethers.parseEther("10"),
@@ -408,7 +410,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       await taskContract
         .connect(proposer)
         .proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           DEFAULT_DIFFICULTY,
           ethers.parseEther("10"),
@@ -440,7 +442,7 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       await taskContract
         .connect(proposer)
         .proposeConsensusTask(
-          1,
+          rpbAddr,
           specHash,
           DEFAULT_DIFFICULTY,
           ethers.parseEther("10"),

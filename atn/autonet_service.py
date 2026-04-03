@@ -50,6 +50,7 @@ class AutonetState:
     wallet_address: str = ""
     chain_id: int = 0
     rpc_url: str = ""
+    jurisdiction_name: str = ""
     # Training metrics
     cycles_completed: int = 0
     uptime_seconds: float = 0.0
@@ -60,6 +61,15 @@ class AutonetState:
     memory_mb: float = 0.0
     gpu_available: bool = False
     gpu_memory_mb: float = 0.0
+    # Contract addresses (discovered from chain)
+    dao_address: str = ""
+    rpb_contract_address: str = ""
+    registry_address: str = ""
+    token_address: str = ""
+    economy_address: str = ""
+    timelock_address: str = ""
+    # Constitution CID loaded from registry
+    constitution_cid: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +78,7 @@ class AutonetState:
             "wallet_address": self.wallet_address,
             "chain_id": self.chain_id,
             "rpc_url": self.rpc_url,
+            "jurisdiction_name": self.jurisdiction_name,
             "cycles_completed": self.cycles_completed,
             "uptime_seconds": self.uptime_seconds,
             "errors": self.errors,
@@ -76,6 +87,13 @@ class AutonetState:
             "memory_mb": self.memory_mb,
             "gpu_available": self.gpu_available,
             "gpu_memory_mb": self.gpu_memory_mb,
+            "dao_address": self.dao_address,
+            "rpb_contract_address": self.rpb_contract_address,
+            "registry_address": self.registry_address,
+            "token_address": self.token_address,
+            "economy_address": self.economy_address,
+            "timelock_address": self.timelock_address,
+            "constitution_cid": self.constitution_cid,
         }
 
 
@@ -111,12 +129,53 @@ class AutonetBridge:
         if config.chain_id:
             self.state.chain_id = config.chain_id
 
+        # Discover jurisdiction contracts from DAO Governor address
+        if config.dao_address and config.rpc_url:
+            self._discover_jurisdiction()
+
         # Subscribe to execution events for training data feed
         if self._events:
             self._events.subscribe(
                 EventType.EXECUTION_COMPLETED,
                 self._on_execution_completed,
             )
+
+        # Constitution CID loaded lazily from on-chain Registry
+        self._constitution_loaded = False
+        # Raw constitution text (loaded once, cached for prompt injection)
+        self._constitution_text: str = ""
+
+    def _discover_jurisdiction(self) -> None:
+        """Discover all contract addresses from the DAO Governor at startup."""
+        try:
+            from .on_chain import discover_jurisdiction
+            discovered = discover_jurisdiction(
+                self.config.rpc_url, self.config.dao_address,
+            )
+            # Populate config so OnChainService can use them
+            self.config.rpb_contract_address = discovered.get("rpb", "")
+            self.config.registry_address = discovered.get("registry", "")
+            self.config.token_address = discovered.get("token", "")
+            self.config.economy_address = discovered.get("economy", "")
+            self.config.timelock_address = discovered.get("timelock", "")
+            # Populate state for WS API
+            self.state.dao_address = self.config.dao_address
+            self.state.rpb_contract_address = self.config.rpb_contract_address
+            self.state.registry_address = self.config.registry_address
+            self.state.token_address = self.config.token_address
+            self.state.economy_address = self.config.economy_address
+            self.state.timelock_address = self.config.timelock_address
+            self.state.jurisdiction_name = discovered.get("jurisdiction_name", "")
+            # Load constitution from registry if available
+            cid = discovered.get("registry.rpb.prompt.current", "")
+            if cid:
+                self.state.constitution_cid = cid
+                self._constitution_loaded = True
+            log.info("Jurisdiction '%s' contracts discovered from %s",
+                     self.state.jurisdiction_name, self.config.dao_address)
+        except Exception as e:
+            log.warning("Failed to discover jurisdiction from %s: %s",
+                        self.config.dao_address, e)
 
     async def _emit(self, event_type_name: str, data: dict[str, Any] | None = None) -> None:
         """Emit an event if the event bus is available."""
@@ -130,6 +189,51 @@ class AutonetBridge:
                 source="autonet",
                 data=data or self.state.to_dict(),
             ))
+
+    async def load_constitution(self) -> str | None:
+        """Load constitution CID and text from on-chain Registry (once).
+
+        Called lazily on first state request or at startup.
+        Returns the CID string or None.
+        """
+        if self._constitution_loaded:
+            return self.state.constitution_cid or None
+        self._constitution_loaded = True
+        if not self.config.rpb_contract_address or not self.config.registry_address:
+            # Even without chain, try loading the local fallback text
+            self._load_constitution_text(None)
+            return None
+        try:
+            from .on_chain import OnChainService
+            svc = OnChainService(self.config)
+            cid = await svc.get_constitution_cid()
+            if cid:
+                self.state.constitution_cid = cid
+                log.info("Constitution CID loaded from chain: %s", cid[:40])
+            self._load_constitution_text(cid)
+            return cid
+        except Exception as e:
+            log.debug("Failed to load constitution from chain: %s", e)
+            self._load_constitution_text(None)
+            return None
+
+    def _load_constitution_text(self, cid: str | None) -> None:
+        """Load the raw constitution text from blob store or local fallback."""
+        try:
+            from nodes.common.rpb_prompt import V1_PROMPT_FILE
+            # For now, load from local file (blob store integration later)
+            if V1_PROMPT_FILE.exists():
+                self._constitution_text = V1_PROMPT_FILE.read_text(encoding="utf-8").strip()
+                log.info("Constitution text loaded (%d chars)", len(self._constitution_text))
+            else:
+                log.warning("No constitution text available at %s", V1_PROMPT_FILE)
+        except Exception as e:
+            log.debug("Failed to load constitution text: %s", e)
+
+    @property
+    def constitution_text(self) -> str:
+        """The raw constitution text, empty if not loaded."""
+        return self._constitution_text
 
     async def _on_execution_completed(self, event) -> None:
         """Handle EXECUTION_COMPLETED events from the EventBus.
@@ -155,6 +259,17 @@ class AutonetBridge:
 
         self.state.status = AutonetStatus.STARTING
         log.info("Starting autonet service...")
+
+        # Pre-flight cache refresh
+        try:
+            from ._cache import validate
+            if self.config.rpc_url and self.config.registry_address:
+                validate(
+                    self.config.rpc_url, self.config.registry_address,
+                    __import__("atn").__version__,
+                )
+        except Exception:
+            pass
 
         try:
             # Lazy import — nodes package is optional
@@ -812,9 +927,10 @@ class AutonetBridge:
         name_map = {
             "autonet": "Autonet",
             "dao": "AutonetDAO",
+            "rpb": "RPB",
+            "rpb_factory": "RPBFactory",
             "staking": "ParticipantStaking",
             "shard_registry": "ModelShardRegistry",
-            "project": "Project",
             "task": "TaskContract",
             "results": "ResultsRewards",
             "bridge": "AnchorBridge",

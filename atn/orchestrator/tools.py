@@ -94,6 +94,10 @@ _TOOLS: list[ToolDefinition] = [
                 "name": {"type": "string"},
                 "max_turns": {"type": "integer"},
                 "model": {"type": "string", "description": "Model override (e.g. 'claude-opus-4-6')."},
+                "notify_parent": {
+                    "type": "boolean",
+                    "description": "If false, skip automatic inbox notification to parent on completion. Child must use post_message explicitly. Failures always notify. Default: true.",
+                },
             },
             "required": ["agent_id"],
         },
@@ -199,6 +203,10 @@ _TOOLS: list[ToolDefinition] = [
                 "tool_input_schema": {
                     "type": "object",
                     "description": "Custom JSON Schema for the tool's input. If omitted, derived from the first step's expected input.",
+                },
+                "notify_parent": {
+                    "type": "boolean",
+                    "description": "If false, skip automatic inbox notification to parent on completion. Child must use post_message explicitly. Failures always notify. Default: true.",
                 },
             },
             "required": ["id", "name"],
@@ -695,6 +703,38 @@ _TOOLS: list[ToolDefinition] = [
             "required": ["agent_id"],
         },
     ),
+    ToolDefinition(
+        name="get_children_status",
+        description=(
+            "Get compact status for all direct children of the calling agent. "
+            "Returns each child's id, name, status, turns, last_tool, and "
+            "conversation_path (path to conversation JSONL or delegate output log)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
+    ToolDefinition(
+        name="register_on_chain",
+        description=(
+            "Register a child agent on-chain in the jurisdiction's RPB contract. "
+            "The daemon signs the transaction with the agent's stored private key. "
+            "Returns the transaction hash on success."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "The child agent to register."},
+                "sponsor_address": {
+                    "type": "string",
+                    "description": "Optional sponsor agent address (0x...).",
+                    "default": "",
+                },
+            },
+            "required": ["agent_id"],
+        },
+    ),
 ]
 
 
@@ -717,6 +757,7 @@ async def _list_agents(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
                 "steps": len(defn.steps),
                 "budgets": defn.budgets,
                 "path": str(runtime._config.agents_dir / defn.id),
+                "registered_on_chain": defn.identity.registered_on_chain if defn.identity else False,
             }
             for defn, status in agents
         ],
@@ -777,6 +818,7 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
             }
             for s in defn.steps
         ]
+    result["notify_parent"] = defn.notify_parent
     if defn.is_cognitive:
         result["agent_type"] = defn.agent_type
         result["max_turns"] = defn.max_turns
@@ -804,6 +846,35 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         result["tool_name"] = f"pipeline_{defn.id}"
         if defn.tool_input_schema:
             result["tool_input_schema"] = defn.tool_input_schema
+    # On-chain identity
+    if defn.identity:
+        result["agent_address"] = defn.identity.address
+        result["lineage_hash"] = defn.identity.lineage_hash
+        result["registration_tx"] = defn.identity.registration_tx
+        # Live on-chain check if not already known to be registered
+        if not defn.identity.registered_on_chain:
+            try:
+                from ..on_chain import OnChainService
+                svc = OnChainService(runtime._config.rpb)
+                if svc.available:
+                    # Check both the agent's generated address and the connected wallet
+                    # (root agents register via the user's wallet, not the generated keypair)
+                    addrs_to_check = []
+                    if defn.identity.address:
+                        addrs_to_check.append(defn.identity.address)
+                    wallet = runtime.autonet.state.wallet_address
+                    if wallet and wallet not in addrs_to_check:
+                        addrs_to_check.append(wallet)
+                    for addr in addrs_to_check:
+                        if await svc.is_registered(addr):
+                            defn.identity.registered_on_chain = True
+                            if not defn.parent_id and wallet:
+                                defn.identity.address = wallet
+                            runtime.registry.persist_identity(defn.id)
+                            break
+            except Exception:
+                pass
+        result["registered_on_chain"] = defn.identity.registered_on_chain
     return result
 
 
@@ -836,6 +907,9 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         defn.cognitive_model = input["model"]
         defn.provider = input["model"]
         changed.append("model")
+    if "notify_parent" in input:
+        defn.notify_parent = input["notify_parent"]
+        changed.append("notify_parent")
 
     # Schedule update — mutually exclusive with heartbeat
     if "schedule" in input:
@@ -950,6 +1024,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             connector_ids=input.get("connector_ids", []),
             parent_id=parent_id,
             created_by=caller_id or "",
+            notify_parent=input.get("notify_parent", True),
         )
         try:
             aid = await runtime.register_agent(defn)
@@ -1044,6 +1119,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             created_by=caller_id or "",
             expose_as_tool=bool(input.get("expose_as_tool", False)),
             tool_input_schema=input.get("tool_input_schema"),
+            notify_parent=input.get("notify_parent", True),
         )
 
         try:
@@ -1228,23 +1304,11 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     # (e.g. after a daemon restart), COMPLETED/ERROR means "finished a
     # previous execution".  All three indicate the agent needs a new
     # execution to process the incoming message.
-    from . import ORCHESTRATOR_ID
     status = runtime.get_status(target)
     execution_id = None
     if defn.mode == AgentMode.COGNITIVE and status in (
         AgentStatus.ACTIVE, AgentStatus.COMPLETED, AgentStatus.ERROR
     ):
-        # Clean up stale provider from previous execution.
-        # Skip the orchestrator — its provider is intentionally kept alive
-        # across turns so that _session_id enables SDK session resume
-        # (avoids re-sending the full conversation history every turn).
-        if target != ORCHESTRATOR_ID:
-            old_provider = runtime._active_providers.pop(target, None)
-            if old_provider is not None:
-                try:
-                    await old_provider.close()
-                except Exception:
-                    pass
         runtime._status[target] = AgentStatus.ACTIVE
         execution_id = await runtime.trigger_run(target, source="orchestrator")
 
@@ -1865,10 +1929,12 @@ async def _reject_task(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
 # and read their output.
 _DELEGATE_TOOL_NAMES = {
     "create_agent",       # fractal recursion (spawn child cognitive agents)
+    "update_agent",       # update self or direct children
     "delegate_status",    # check sub-agent status with timestamps
     "delegate_collect",   # wait for sub-agent result
     "delegate_message",   # send message to running sub-agent
     "get_latest_thought", # lightweight check on agent activity
+    "get_children_status",  # compact status for all direct children
     "trigger_run",    # trigger agent execution
     "get_output",     # read child agent output
     "post_message",   # communicate with other agents
@@ -2055,6 +2121,7 @@ def _agent_status_to_delegate(status: AgentStatus | None) -> str:
         AgentStatus.STOPPED: "interrupted",
         AgentStatus.ERROR: "failed",
         AgentStatus.COMPLETED: "completed",
+        AgentStatus.BUDGET_PAUSED: "budget_paused",
     }
     return mapping.get(status, status.value)
 
@@ -2094,6 +2161,105 @@ async def _get_latest_thought(runtime: Runtime, input: dict[str, Any]) -> dict[s
         "execution_id": execution_id,
         "total_turns": total,
     }
+
+
+async def _get_children_status(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Get compact status for all direct children of the calling agent."""
+    from . import ORCHESTRATOR_ID
+
+    caller_id = input.get("_caller_id") or ORCHESTRATOR_ID
+    children = runtime.get_children(caller_id)
+
+    if not children:
+        return {"caller_id": caller_id, "children": [], "count": 0}
+
+    data_dir = runtime._config.data_dir
+    result_children: list[dict[str, Any]] = []
+
+    for child in children:
+        child_id = child.id
+        status = runtime.get_status(child_id)
+
+        entry: dict[str, Any] = {
+            "id": child_id,
+            "name": child.name,
+            "status": status.value if status else "unknown",
+        }
+
+        # Get delegate registry info for turns and last_tool
+        node = runtime.delegate_registry.get_node(child_id)
+        if node:
+            entry["turns"] = node.turns
+            entry["last_tool"] = node.last_tool
+
+        # Determine conversation_path based on agent mode
+        if child.mode == AgentMode.COGNITIVE:
+            # Cognitive agents have conversation JSONL
+            conv_path = data_dir / "agents" / child_id / "conversation.jsonl"
+        else:
+            # Non-cognitive agents use delegate output log
+            conv_path = data_dir / "delegates" / f"{child_id}.log"
+
+        entry["conversation_path"] = str(conv_path)
+
+        # Add budget info if available
+        budget_info = runtime.registry.get_budget_info(child_id)
+        if budget_info:
+            entry["budget"] = budget_info
+
+        result_children.append(entry)
+
+    return {
+        "caller_id": caller_id,
+        "children": result_children,
+        "count": len(result_children),
+    }
+
+
+async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Register a child agent on-chain via the daemon's stored private key."""
+    agent_id = input["agent_id"]
+    sponsor_address = input.get("sponsor_address", "")
+
+    defn = runtime.get_agent(agent_id)
+    if defn is None:
+        return {"error": f"Agent '{agent_id}' not found."}
+    if not defn.identity:
+        return {"error": f"Agent '{agent_id}' has no identity (no system prompt?)."}
+    if defn.identity.registered_on_chain:
+        return {"error": f"Agent '{agent_id}' is already registered on-chain.",
+                "agent_address": defn.identity.address}
+
+    private_key = runtime.registry.get_agent_key(agent_id)
+    if not private_key:
+        return {"error": f"No private key stored for '{agent_id}'. "
+                         "Root agents must register via the frontend wallet."}
+
+    from ..on_chain import OnChainService
+    svc = OnChainService(runtime._config.rpb)
+    if not svc.available:
+        return {"error": "On-chain service not configured (missing rpb_contract_address or rpc_url)."}
+
+    parent_address = ""
+    if defn.parent_id:
+        parent_defn = runtime.get_agent(defn.parent_id)
+        if parent_defn and parent_defn.identity:
+            parent_address = parent_defn.identity.address
+
+    result = await svc.register_agent(
+        identity=defn.identity,
+        private_key=private_key,
+        system_prompt=defn.system_prompt or "",
+        parent_address=parent_address,
+        sponsor_address=sponsor_address,
+    )
+
+    if result.get("success"):
+        defn.identity.registered_on_chain = True
+        defn.identity.registration_tx = result.get("tx_hash", "")
+        log.info("Agent %s registered on-chain: tx=%s", agent_id, result.get("tx_hash"))
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2142,6 +2308,9 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "delegate_message": _delegate_message,
     "delegate_collect": _delegate_collect,
     "get_latest_thought": _get_latest_thought,
+    "get_children_status": _get_children_status,
+    # On-chain
+    "register_on_chain": _register_on_chain,
     # Conversation management (UI-facing, not in orchestrator's tool list)
     "reset_conversation": _reset_conversation,
     "get_conversation": _get_conversation,

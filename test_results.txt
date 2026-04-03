@@ -1,0 +1,36 @@
+.....FF....................F.F..............ssF...FF.FFFFFFFFFFFF.FFFF.. [ 41%]
+.....F.....FFF...........................................sF............. [ 82%]
+........................FFF...                                           [100%]
+=========================== short test summary info ===========================
+FAILED tests/atn/test_agent_registry.py::TestDelegateRegistryRegistration::test_generate_child_id_sequential
+FAILED tests/atn/test_agent_registry.py::TestDelegateRegistryRegistration::test_generate_child_id_nested
+FAILED tests/atn/test_agent_registry.py::TestDelegateRegistryCleanup::test_clear_removes_everything
+FAILED tests/atn/test_agent_registry.py::TestDelegateRegistryPersistence::test_load_rebuilds_child_counters
+FAILED tests/atn/test_cognitive.py::test_unit - AssertionError: assert '[Curr...
+FAILED tests/atn/test_cognitive_mode.py::TestCognitiveAgentExecution::test_cognitive_agent_completes
+FAILED tests/atn/test_cognitive_mode.py::TestCognitiveAgentExecution::test_cognitive_agent_failure
+FAILED tests/atn/test_cognitive_mode.py::TestCognitiveAgentExecution::test_active_providers_tracked
+FAILED tests/atn/test_cognitive_mode.py::TestInnateWakeUp::test_parent_gets_inbox_message
+FAILED tests/atn/test_cognitive_mode.py::TestInnateWakeUp::test_no_notification_without_parent
+FAILED tests/atn/test_cognitive_mode.py::TestInnateWakeUp::test_inject_into_parent_bridge_session
+FAILED tests/atn/test_cognitive_mode.py::TestDelegateToolsUnified::test_delegate_creates_cognitive_agent
+FAILED tests/atn/test_cognitive_mode.py::TestDelegateToolsUnified::test_delegate_status_checks_cognitive
+FAILED tests/atn/test_cognitive_mode.py::TestDelegateToolsUnified::test_delegate_message_reaches_cognitive
+FAILED tests/atn/test_cognitive_mode.py::TestCompletionCallbacks::test_callback_registered_via_delegate
+FAILED tests/atn/test_cognitive_mode.py::TestDelegateRegistryBackwardCompat::test_delegate_registry_synced
+FAILED tests/atn/test_cognitive_mode.py::TestFractality::test_delegate_tools_include_create_agent
+FAILED tests/atn/test_cognitive_mode.py::TestFractality::test_sub_agent_spawns_child_with_correct_parent
+FAILED tests/atn/test_cognitive_mode.py::TestFractality::test_create_agent_cognitive_with_caller_context
+FAILED tests/atn/test_cognitive_mode.py::TestFractality::test_tool_executor_passes_caller_id
+FAILED tests/atn/test_cognitive_mode.py::TestInnateWakeUpInstruction::test_instruction_field_in_completion_message
+FAILED tests/atn/test_cognitive_mode.py::TestInnateWakeUpInstruction::test_failed_child_instruction
+FAILED tests/atn/test_delegate.py::TestDelegateRegistry::test_generate_child_id
+FAILED tests/atn/test_delegate.py::TestDelegateRegistry::test_persistence - A...
+FAILED tests/atn/test_delegate.py::test_delegate_tool_executor - AttributeErr...
+FAILED tests/atn/test_delegate.py::test_delegate_tool_failure - AttributeErro...
+FAILED tests/atn/test_delegate.py::test_delegate_status_tool - AttributeError...
+FAILED tests/atn/test_orchestrator.py::test - KeyError: 'total_turns'
+FAILED tests/atn/test_tools_orchestrator.py::TestDelegateSpawnAndCollect::test_delegate_spawns_and_collects
+FAILED tests/atn/test_tools_orchestrator.py::TestDelegateSpawnAndCollect::test_delegate_failure_captured
+FAILED tests/atn/test_tools_orchestrator.py::TestDelegateStatus::test_status_while_running
+31 failed, 140 passed, 3 skipped in 182.67s (0:03:02)

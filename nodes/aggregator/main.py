@@ -36,9 +36,9 @@ class AggregatorMetrics:
 
 
 @dataclass
-class ProjectAggregationState:
-    """State tracking for a single project."""
-    project_id: int
+class RPBAggregationState:
+    """State tracking for an RPB."""
+    rpb_address: str
     collected_updates: List[str] = field(default_factory=list)
     aggregation_rounds: int = 0
     last_model_cid: Optional[str] = None
@@ -68,7 +68,7 @@ class AggregatorNode:
         registry: ContractRegistry,
         store: BlobStore,
         node_id: str,
-        project_id: int = 1,
+        rpb_address: str = "",
         aggregation_method: str = "fedavg",
         trim_ratio: float = 0.2,
         task_mode: str = "ground_truth",
@@ -81,7 +81,7 @@ class AggregatorNode:
             registry: ContractRegistry for blockchain calls
             store: BlobStore for content-addressed storage
             node_id: Unique identifier for this node (e.g., "aggregator-0")
-            project_id: Project ID to aggregate updates for
+            rpb_address: RPB contract address for this jurisdiction
             aggregation_method: Aggregation method to use ("fedavg" or "trimmed_mean")
             trim_ratio: Ratio to trim from top/bottom for trimmed_mean (default: 0.2 = 20%)
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
@@ -90,7 +90,7 @@ class AggregatorNode:
         self.registry = registry
         self.store = store
         self.node_id = node_id
-        self.project_id = project_id
+        self.rpb_address = rpb_address
         self.config = config or load_config()
         self.aggregation_method = self.config.node.aggregation_method
         self.trim_ratio = self.config.node.trim_ratio
@@ -100,14 +100,14 @@ class AggregatorNode:
         self.min_updates = self.config.node.min_updates_for_aggregation
 
         self.metrics = AggregatorMetrics()
-        self.project_state = ProjectAggregationState(project_id=project_id)
+        self.project_state = RPBAggregationState(rpb_address=rpb_address)
         self.is_staked = False
         self.should_stop = False
 
         self.my_address = self.registry.blockchain.account.address
 
         # Governance bridge for attestation and heartbeat
-        self.governance = GovernanceBridge(registry, node_id, project_id)
+        self.governance = GovernanceBridge(registry, node_id)
 
         # Guild manager for guild-aware aggregation
         self.guild_manager = GuildManager(registry, node_id, self.config)
@@ -130,7 +130,7 @@ class AggregatorNode:
             max_cycles: Maximum number of cycles to run (0 = unlimited)
             cycle_delay: Seconds to wait between cycles
         """
-        logger.info(f"[{self.node_id}] Starting aggregator node for project {self.project_id}")
+        logger.info(f"[{self.node_id}] Starting aggregator node for project {self.rpb_address}")
         logger.info(f"[{self.node_id}] max_cycles={max_cycles}, cycle_delay={cycle_delay}s")
 
         cycle = 0
@@ -330,7 +330,7 @@ class AggregatorNode:
 
         # Add metadata
         aggregated_model["metadata"] = {
-            "project_id": self.project_id,
+            "rpb_address": self.rpb_address,
             "aggregation_round": self.project_state.aggregation_rounds + 1,
             "updates_count": len(updates),
             "aggregator": self.my_address,
@@ -364,14 +364,13 @@ class AggregatorNode:
 
         # Publish on-chain
         result = self.registry.set_mature_model(
-            self.project_id,
             new_model_cid,
             price=0  # Free model for now
         )
 
         if result.success:
             logger.info(
-                f"[{self.node_id}] Published mature model for project {self.project_id}: "
+                f"[{self.node_id}] Published mature model for project {self.rpb_address}: "
                 f"{new_model_cid[:20]}..."
             )
             self.metrics.aggregations_done += 1
@@ -774,7 +773,7 @@ class AggregatorNode:
         # Load current global model
         global_model_cid = None
         try:
-            global_model_cid = self.registry.get_mature_model(self.project_id)
+            global_model_cid = self.registry.get_mature_model()
         except Exception:
             pass
 
@@ -866,7 +865,7 @@ class AggregatorNode:
 
         # Add guild-level metadata
         aggregated["metadata"] = {
-            "project_id": self.project_id,
+            "rpb_address": self.rpb_address,
             "guild_id": guild_id,
             "aggregation_level": "guild",
             "aggregation_round": self.project_state.aggregation_rounds + 1,
@@ -976,7 +975,7 @@ class AggregatorNode:
         aggregated = self._weighted_guild_aggregate(guild_updates, weights)
 
         aggregated["metadata"] = {
-            "project_id": self.project_id,
+            "rpb_address": self.rpb_address,
             "aggregation_level": "network",
             "aggregation_round": self.project_state.aggregation_rounds + 1,
             "guild_count": len(guild_updates),
@@ -1007,7 +1006,6 @@ class AggregatorNode:
 
             # Publish on-chain
             result = self.registry.set_mature_model(
-                self.project_id,
                 new_model_cid,
                 price=0,
             )
@@ -1163,7 +1161,7 @@ def main():
         registry=registry,
         store=store,
         node_id="aggregator-demo",
-        project_id=1,
+        rpb_address="",
     )
 
     # Run for a few cycles

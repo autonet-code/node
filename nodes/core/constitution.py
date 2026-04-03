@@ -54,7 +54,7 @@ AUTONET_BLUEPRINT = {
     "staking_contract_address": "0x0000000000000000000000000000000000000000",
     "task_contract_address": "0x0000000000000000000000000000000000000000",
     "results_contract_address": "0x0000000000000000000000000000000000000000",
-    "project_contract_address": "0x0000000000000000000000000000000000000000",
+    "rpb_contract_address": "0x0000000000000000000000000000000000000000",
 }
 
 DEFAULT_CONSTITUTION = Constitution(
@@ -76,7 +76,7 @@ def constitution_from_registry(registry) -> Constitution:
         ("ParticipantStaking", "staking_contract_address"),
         ("TaskContract", "task_contract_address"),
         ("ResultsRewards", "results_contract_address"),
-        ("Project", "project_contract_address"),
+        ("RPB", "rpb_contract_address"),
         ("AutonetDAO", "consensus_contract_address"),
     ]:
         handle = registry.get(name)

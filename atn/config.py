@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import json
+
 import yaml
 
 log = logging.getLogger(__name__)
@@ -94,12 +96,14 @@ class OrchestratorConfig:
 
 
 @dataclass
-class AutonetConfig:
-    """Configuration for the Autonet network layer.
+class RPBConfig:
+    """Configuration for RPB (Recursive Principial Body) network participation.
 
     Controls the decentralized training service, blockchain connection,
     and network participation.  All fields are optional — the framework
     works fully without any network participation.
+
+    Previously named AutonetConfig; "Autonet" is the first jurisdiction.
     """
     enabled: bool = False               # Whether the autonet service starts
     config_path: str = ""               # Path to autonet.yaml (auto-discovered if empty)
@@ -109,6 +113,21 @@ class AutonetConfig:
     private_key: str = ""               # Hex private key for signing attestation txns
     # Wallet is managed externally (MetaMask etc.) — we just track the address
     wallet_address: str = ""            # Connected wallet address (empty = not connected)
+    # Jurisdiction entry point — everything else discovered from chain
+    dao_address: str = ""               # Governor contract address (entry point)
+    # RPB-specific fields
+    jurisdiction_id: str = "autonet"    # First jurisdiction
+    rpb_contract_address: str = ""      # Discovered from Registry
+    registry_address: str = ""          # Discovered from RepToken.registryAddress()
+    token_address: str = ""             # Discovered from Governor.token()
+    economy_address: str = ""           # Discovered from RepToken.economyAddress()
+    timelock_address: str = ""          # Discovered from Governor.timelock()
+    min_alignment_threshold: float = 0.5
+    generate_keypairs: bool = True
+
+
+# Backward-compat alias
+AutonetConfig = RPBConfig
 
 
 @dataclass
@@ -144,6 +163,52 @@ class ATNConfig:
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     connectors: dict[str, ConnectorConfig] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def rpb(self) -> AutonetConfig:
+        """Alias — RPB config is the autonet config."""
+        return self.autonet
+
+
+# ---------------------------------------------------------------------------
+# Registry seed — repo-level jurisdiction defaults
+# ---------------------------------------------------------------------------
+
+def _load_registry_seed(jurisdiction_id: str = "autonet") -> dict[str, Any]:
+    """Load network + contract defaults from registry.json in the repo root.
+
+    Returns a flat dict suitable for merging into the RPBConfig builder.
+    Empty dict if the file is missing or the jurisdiction isn't listed.
+    """
+    # registry.json lives at the repo root (parent of atn/)
+    registry_path = Path(__file__).resolve().parent.parent / "registry.json"
+    if not registry_path.is_file():
+        return {}
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+        entry = data.get("jurisdictions", {}).get(jurisdiction_id)
+        if not entry:
+            return {}
+        seed: dict[str, Any] = {}
+        seed["jurisdiction_id"] = jurisdiction_id
+        net = entry.get("network", {})
+        if net.get("rpc_url"):
+            seed["rpc_url"] = net["rpc_url"]
+        if net.get("chain_id"):
+            seed["chain_id"] = net["chain_id"]
+        contracts = entry.get("contracts", {})
+        if contracts.get("dao"):
+            seed["dao_address"] = contracts["dao"]
+        if contracts.get("rpb"):
+            seed["rpb_contract_address"] = contracts["rpb"]
+        log.info("Registry seed for '%s': dao=%s, rpb=%s",
+                 jurisdiction_id,
+                 seed.get("dao_address", "")[:10] or "(none)",
+                 seed.get("rpb_contract_address", "")[:10] or "(none)")
+        return seed
+    except Exception:
+        log.warning("Failed to load registry.json", exc_info=True)
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -281,18 +346,58 @@ def load_config(path: Path | None = None) -> ATNConfig:
             piper_module_dir=voice_raw.get("piper_module_dir"),
         )
 
-    # Autonet network layer
+    # Autonet / RPB network layer
+    # Merge priority (lowest to highest):
+    #   registry.json (repo-level defaults) < blockchain < rpb < autonet
     autonet_raw = raw.get("autonet", {})
-    if isinstance(autonet_raw, dict):
-        resolved = _resolve_env(autonet_raw)
-        config.autonet = AutonetConfig(
-            enabled=resolved.get("enabled", False),
-            config_path=resolved.get("config_path", ""),
-            rpc_url=resolved.get("rpc_url", ""),
-            chain_id=resolved.get("chain_id", 0),
-            private_key=resolved.get("private_key", ""),
-            wallet_address=resolved.get("wallet_address", ""),
-        )
+    if not isinstance(autonet_raw, dict):
+        autonet_raw = {}
+    rpb_raw = raw.get("rpb", {})
+    if not isinstance(rpb_raw, dict):
+        rpb_raw = {}
+    blockchain_raw = raw.get("blockchain", {})
+    if not isinstance(blockchain_raw, dict):
+        blockchain_raw = {}
+    # Seed from registry.json (repo-level jurisdiction registry)
+    jurisdiction_id = (
+        autonet_raw.get("jurisdiction_id")
+        or rpb_raw.get("jurisdiction_id")
+        or "autonet"
+    )
+    merged = _load_registry_seed(jurisdiction_id)
+    # Layer blockchain section on top
+    if blockchain_raw.get("rpc_url"):
+        merged["rpc_url"] = blockchain_raw["rpc_url"]
+    if blockchain_raw.get("chain_id"):
+        merged["chain_id"] = blockchain_raw["chain_id"]
+    # Pull dao_address from blockchain.contracts.AutonetDAO
+    bc_contracts = blockchain_raw.get("contracts", {})
+    if isinstance(bc_contracts, dict) and bc_contracts.get("AutonetDAO"):
+        merged["dao_address"] = bc_contracts["AutonetDAO"]
+    merged.update(rpb_raw)
+    merged.update(autonet_raw)
+    resolved = _resolve_env(merged)
+    # Enable automatically if dao_address + rpc_url are present
+    enabled = resolved.get("enabled", False)
+    if not enabled and resolved.get("dao_address") and resolved.get("rpc_url"):
+        enabled = True
+    config.autonet = RPBConfig(
+        enabled=enabled,
+        config_path=resolved.get("config_path", ""),
+        rpc_url=resolved.get("rpc_url", ""),
+        chain_id=resolved.get("chain_id", 0),
+        private_key=resolved.get("private_key", ""),
+        wallet_address=resolved.get("wallet_address", ""),
+        dao_address=resolved.get("dao_address", ""),
+        jurisdiction_id=resolved.get("jurisdiction_id", "autonet"),
+        rpb_contract_address=resolved.get("rpb_contract_address", ""),
+        registry_address=resolved.get("registry_address", ""),
+        token_address=resolved.get("token_address", ""),
+        economy_address=resolved.get("economy_address", ""),
+        timelock_address=resolved.get("timelock_address", ""),
+        min_alignment_threshold=resolved.get("min_alignment_threshold", 0.5),
+        generate_keypairs=resolved.get("generate_keypairs", True),
+    )
 
     # Trace logging
     trace_raw = raw.get("trace_logging", {})
@@ -333,6 +438,10 @@ def load_config(path: Path | None = None) -> ATNConfig:
             base_url=resolved.get("base_url", ""),
             extra={k: v for k, v in resolved.items() if k not in known_keys},
         )
+
+    # Warm the module cache (used by scheduler for periodic health checks)
+    from . import _cache
+    _cache.warm_left()
 
     return config
 

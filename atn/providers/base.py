@@ -25,6 +25,41 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Context window registry
+# ---------------------------------------------------------------------------
+
+CONTEXT_WINDOWS: dict[str, int] = {
+    # Anthropic
+    "claude-opus-4": 200_000,
+    "claude-sonnet-4": 200_000,
+    "claude-haiku-4": 200_000,
+    "claude-3.5-sonnet": 200_000,
+    "claude-3-haiku": 200_000,
+    # OpenAI
+    "gpt-4o": 128_000,
+    "gpt-4.1": 1_048_576,
+    "gpt-4.1-mini": 1_048_576,
+    "gpt-4.1-nano": 1_048_576,
+    "o3": 200_000,
+    "o4-mini": 200_000,
+    # Google
+    "gemini-2.5-pro": 1_048_576,
+    "gemini-2.5-flash": 1_048_576,
+    "gemini-2.0-flash": 1_048_576,
+    # Defaults
+    "default": 128_000,
+}
+
+
+def get_context_window(model: str) -> int:
+    """Resolve context window size for a model identifier."""
+    for prefix, size in CONTEXT_WINDOWS.items():
+        if prefix != "default" and model.startswith(prefix):
+            return size
+    return CONTEXT_WINDOWS.get("default", 128_000)
+
+
+# ---------------------------------------------------------------------------
 # Canonical data types
 # ---------------------------------------------------------------------------
 
@@ -75,6 +110,39 @@ class Provider(ABC):
     # Attributes set by the runtime when the provider is used for cognitive agents.
     event_bus: Any = None
     source_agent_id: str = ""
+
+    # Session tracking (works for ALL providers, not just bridge)
+    _cumulative_input_tokens: int = 0
+    _cumulative_output_tokens: int = 0
+    _cumulative_cache_read: int = 0
+    _cumulative_cache_creation: int = 0
+    _cumulative_turns: int = 0
+    _last_input_tokens: int = 0
+    _active_model: str = ""
+
+    @property
+    def session_stats(self) -> dict[str, Any]:
+        """Session statistics — base implementation for non-bridge providers.
+
+        BridgeProvider overrides this with richer stats from the Claude SDK.
+        """
+        ctx_window = get_context_window(self._active_model) if self._active_model else 0
+        pct = round(100 * self._last_input_tokens / ctx_window, 1) if ctx_window > 0 and self._last_input_tokens > 0 else None
+        return {
+            "session_id": "",
+            "active_model": self._active_model,
+            "num_turns": self._cumulative_turns,
+            "total_cost_usd": 0,
+            "context_window": ctx_window,
+            "max_output_tokens": 0,
+            "last_input_tokens": self._last_input_tokens,
+            "cumulative_input_tokens": self._cumulative_input_tokens,
+            "cumulative_output_tokens": self._cumulative_output_tokens,
+            "cumulative_cache_read": self._cumulative_cache_read,
+            "cumulative_cache_creation": self._cumulative_cache_creation,
+            "context_used_pct": pct,
+            "compaction_count": 0,
+        }
 
     async def close(self) -> None:
         """Clean up resources.  Default is a no-op."""
@@ -165,6 +233,10 @@ class Provider(ABC):
             on_chunk:       Optional async callback for streaming text deltas.
             session_id:     Session ID to resume (ignored by generic impl).
         """
+        # Track active model for session stats
+        if model:
+            self._active_model = model
+
         # Convert tool dicts to ToolDefinition objects for send_stream()
         tool_defs: list[ToolDefinition] | None = None
         if tools:
@@ -196,6 +268,46 @@ class Provider(ABC):
             cumulative_usage.output_tokens += response.usage.output_tokens
             cumulative_usage.cache_read_tokens += response.usage.cache_read_tokens
             cumulative_usage.cache_creation_tokens += response.usage.cache_creation_tokens
+
+            # Update session tracking
+            self._cumulative_input_tokens += response.usage.input_tokens
+            self._cumulative_output_tokens += response.usage.output_tokens
+            self._cumulative_cache_read += response.usage.cache_read_tokens
+            self._cumulative_cache_creation += response.usage.cache_creation_tokens
+            self._cumulative_turns += 1
+            # Total input = uncached + cache_read + cache_creation (full context sent)
+            self._last_input_tokens = (
+                response.usage.input_tokens
+                + response.usage.cache_read_tokens
+                + response.usage.cache_creation_tokens
+            )
+            if response.model:
+                self._active_model = response.model
+
+            # Emit per-turn usage event (same format as BridgeProvider)
+            if self.event_bus and self.source_agent_id:
+                from ..events import Event, EventType
+                await self.event_bus.emit(Event(
+                    type=EventType.STEP_OUTPUT,
+                    source=self.source_agent_id,
+                    data={
+                        "agent_id": self.source_agent_id,
+                        "channel": "usage",
+                        "usage": {
+                            "input_tokens": response.usage.input_tokens,
+                            "output_tokens": response.usage.output_tokens,
+                            "cache_read_tokens": response.usage.cache_read_tokens,
+                            "cache_creation_tokens": response.usage.cache_creation_tokens,
+                        },
+                        "cumulative": {
+                            "input_tokens": self._cumulative_input_tokens,
+                            "output_tokens": self._cumulative_output_tokens,
+                            "cache_read_tokens": self._cumulative_cache_read,
+                            "cache_creation_tokens": self._cumulative_cache_creation,
+                            "total_cost_usd": 0,
+                        },
+                    },
+                ))
 
             # No tool calls or not a tool_use stop — we're done
             if not response.tool_calls or response.stop_reason != "tool_use":

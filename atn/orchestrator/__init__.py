@@ -71,23 +71,10 @@ def create_orchestrator_agent(
     """
     config = config or OrchestratorConfig()
 
-    primary_provider = config.provider or "claude_max"
-
-    # Normalise short aliases to full model IDs so the snapshot value
-    # always matches an entry in available_models.
-    _MODEL_ALIASES: dict[str, str] = {
-        "sonnet": "claude-sonnet-4-6",
-        "opus":   "claude-opus-4-6",
-        "haiku":  "claude-haiku-4-5",
-    }
-    raw_model = config.model or "claude-sonnet-4-6"
-    model = _MODEL_ALIASES.get(raw_model, raw_model)
-    import logging as _log
-    _log.getLogger("atn.orchestrator").info(
-        "create_orchestrator_agent: config.model=%r → raw_model=%r → model=%r",
-        config.model, raw_model, model,
-    )
-
+    # Root agent is locked to the Claude Max bridge with Opus 4.6.
+    # Child agents on other providers are unaffected.
+    primary_provider = "claude_max"
+    model = "claude-opus-4-6"
     # Provider fallback chain: primary first, then alternatives.
     # Providers that aren't configured are silently skipped at runtime.
     # Ollama is excluded — local models can't reliably handle 20+ tools,

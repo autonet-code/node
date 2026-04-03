@@ -60,6 +60,9 @@ class EventType(Enum):
     AGENT_TOOL_USE_START = "agent.tool_use_start"
     AGENT_TOOL_USE_RESULT = "agent.tool_use_result"
 
+    # Context compaction (from Claude Agent SDK)
+    CONTEXT_COMPACTION = "context.compaction"
+
     # Voice service
     VOICE_STARTED = "voice.started"
     VOICE_STOPPED = "voice.stopped"
@@ -72,6 +75,9 @@ class EventType(Enum):
     AUTONET_STOPPED = "autonet.stopped"
     AUTONET_STATUS = "autonet.status"
     AUTONET_WALLET = "autonet.wallet"
+
+    # Budget
+    BUDGET_EXCEEDED = "budget.exceeded"
 
     # Generic / custom events
     CUSTOM = "custom"

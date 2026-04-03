@@ -91,6 +91,9 @@ contract ForcedErrorRegistry {
         require(!isForcedError[_taskId], "Already a forced error");
         require(jackpotPool >= jackpotAmount, "Insufficient jackpot pool");
 
+        // Reserve jackpot from pool so concurrent injections can't over-commit
+        jackpotPool -= jackpotAmount;
+
         forcedErrors[_taskId] = AutonetLib.ForcedError({
             taskId: _taskId,
             knownBadHash: _knownBadHash,
@@ -141,9 +144,8 @@ contract ForcedErrorRegistry {
         fe.caught = true;
         fe.catcher = msg.sender;
 
-        // Award jackpot
+        // Award jackpot (already reserved from pool during injection)
         uint256 award = fe.jackpotAmount;
-        jackpotPool -= award;
         require(atnToken.transfer(msg.sender, award), "Jackpot transfer failed");
 
         emit ForcedErrorCaught(_taskId, msg.sender, award);
@@ -179,8 +181,8 @@ contract ForcedErrorRegistry {
         require(!fe.caught, "Already caught");
         require(block.number > fe.expirationBlock, "Not yet expired");
 
-        // Return jackpot to pool (it wasn't awarded)
-        // The jackpot was already reserved, so we don't need to do anything
+        // Return reserved jackpot to pool (it wasn't awarded)
+        jackpotPool += fe.jackpotAmount;
 
         emit ForcedErrorExpired(_taskId);
     }

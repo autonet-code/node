@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "jurisdictions": {
+    "autonet": {
+      "name": "Autonet",
+      "network": {
+        "rpc_url": "https://node.shadownet.etherlink.com",
+        "chain_id": 127823,
+        "network_name": "Etherlink Shadownet"
+      },
+      "contracts": {
+        "dao": "0x7c83FF7b0356DbE332BFC527F1Ea73283974aEA2",
+        "rpb": ""
+      }
+    }
+  }
+}

@@ -12,6 +12,14 @@ In V1 this is **advisory only**: the score is computed and displayed but
 pricing is not enforced. The same mechanism drives both inference pricing
 and training reward multipliers.
 
+Dual-mode similarity:
+    - Keyword mode (default fallback): Jaccard overlap of filtered word sets.
+      Works everywhere, no dependencies.
+    - Embedding mode: Cosine similarity of dense vectors produced by
+      VL-JEPA's TextEncoder (or a lightweight hash-based fallback when
+      torch is unavailable).  Activated automatically when embeddings are
+      supplied, or explicitly via ``embedding_mode=True``.
+
 Usage:
     pricing = AlignmentPricing()
     result = pricing.compute_price(
@@ -116,6 +124,137 @@ def _cosine_similarity_keywords(text_a: str, text_b: str) -> float:
     return len(intersection) / len(union)
 
 
+def _cosine_similarity_embeddings(
+    embedding_a: list[float],
+    embedding_b: list[float],
+) -> float:
+    """Compute cosine similarity between two embedding vectors.
+
+    Used for semantic alignment checking between:
+    - Agent charter and constitution
+    - Agent activity and sponsor charter
+    - Training work and jurisdiction goals
+
+    Returns:
+        Similarity score in [-1.0, 1.0] (typically [0.0, 1.0] for
+        non-negative embeddings).
+    """
+    import math
+
+    if not embedding_a or not embedding_b:
+        return 0.0
+    if len(embedding_a) != len(embedding_b):
+        return 0.0
+
+    dot = sum(a * b for a, b in zip(embedding_a, embedding_b))
+    norm_a = math.sqrt(sum(a * a for a in embedding_a))
+    norm_b = math.sqrt(sum(b * b for b in embedding_b))
+
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+
+    return dot / (norm_a * norm_b)
+
+
+def compute_text_embedding(
+    text: str,
+    model: str = "vl-jepa",
+) -> list[float]:
+    """Compute semantic embedding of text for alignment checking.
+
+    Uses VL-JEPA TextEncoder if available, falls back to simple hash-based
+    bag-of-words representation for environments without torch.
+
+    Args:
+        text: The text to embed (system prompt, charter, constitution
+            article, etc.)
+        model: Which embedding model to use. ``"vl-jepa"`` or
+            ``"fallback"``.
+
+    Returns:
+        List of floats representing the semantic embedding.
+    """
+    if model == "vl-jepa":
+        try:
+            # Try VL-JEPA text encoder
+            from .vl_jepa import VLJEPAConfig, VLJEPA
+            import torch
+
+            config = VLJEPAConfig()
+            # Use text encoder only — don't need the full model
+            vljepa = VLJEPA(config)
+            vljepa.eval()
+
+            # Tokenize (byte-level, matching VL-JEPA's vocab)
+            token_ids = [
+                min(b + 4, 259)
+                for b in text.encode("utf-8")[: config.max_seq_length]
+            ]
+            if not token_ids:
+                token_ids = [0]  # BOS
+
+            token_tensor = torch.tensor([token_ids], dtype=torch.long)
+            mask = torch.ones_like(token_tensor)
+
+            with torch.no_grad():
+                text_embeds = vljepa.text_encoder(token_tensor, mask)
+                # Mean pool over sequence length to get fixed-size vector
+                embedding = text_embeds.mean(dim=1).squeeze(0).tolist()
+
+            return embedding
+
+        except ImportError:
+            pass  # Fall through to fallback
+
+    # Fallback: simple bag-of-words with hash-based dimensionality reduction.
+    # This is deterministic but not semantically meaningful — it provides a
+    # consistent interface so callers don't need to branch.
+    import hashlib
+
+    dim = 256
+    embedding = [0.0] * dim
+    words = text.lower().split()
+    for word in words:
+        h = int(hashlib.md5(word.encode()).hexdigest(), 16)
+        idx = h % dim
+        embedding[idx] += 1.0
+
+    # L2 normalize
+    norm = sum(x * x for x in embedding) ** 0.5
+    if norm > 0:
+        embedding = [x / norm for x in embedding]
+
+    return embedding
+
+
+def check_agent_alignment(
+    agent_charter_embedding: list[float],
+    reference_embedding: list[float],
+    threshold: float = 0.5,
+) -> Tuple[float, bool]:
+    """Check if an agent's charter aligns with a reference document.
+
+    Convenience wrapper around :func:`_cosine_similarity_embeddings` for
+    the sponsor-agent use case: given pre-computed embeddings for an
+    agent's charter and a reference (sponsor charter or constitution
+    article), return both the raw similarity score and a boolean
+    indicating whether the threshold is met.
+
+    Args:
+        agent_charter_embedding: Embedding of the agent's charter text.
+        reference_embedding: Embedding of the sponsor charter or
+            constitution article.
+        threshold: Minimum cosine similarity to be considered aligned.
+
+    Returns:
+        ``(similarity_score, is_aligned)``
+    """
+    score = _cosine_similarity_embeddings(
+        agent_charter_embedding, reference_embedding
+    )
+    return score, score >= threshold
+
+
 class AlignmentPricing:
     """
     Computes alignment-based pricing for inference and training.
@@ -142,6 +281,7 @@ class AlignmentPricing:
         treasury_balance: float = 0.0,
         treasury_threshold: float = 100000.0,
         similarity_fn=None,
+        embedding_mode: Optional[bool] = None,
     ):
         """
         Args:
@@ -153,6 +293,10 @@ class AlignmentPricing:
             treasury_balance: Current treasury balance (affects subsidy capacity)
             treasury_threshold: Treasury balance at which full subsidy is available
             similarity_fn: Custom text similarity function (default: keyword overlap)
+            embedding_mode: If ``True``, use embedding-based cosine similarity
+                (requires pre-computed embeddings passed to ``compute_alignment``).
+                If ``False``, use keyword overlap.  If ``None`` (default), auto-detect:
+                attempt to import torch and fall back to keywords if unavailable.
         """
         self.high_threshold = high_alignment_threshold
         self.low_threshold = low_alignment_threshold
@@ -161,6 +305,16 @@ class AlignmentPricing:
         self.network_maturity = network_maturity
         self.treasury_balance = treasury_balance
         self.treasury_threshold = treasury_threshold
+
+        # Resolve embedding_mode when set to auto-detect
+        if embedding_mode is None:
+            try:
+                import torch as _torch  # noqa: F401
+                embedding_mode = True
+            except ImportError:
+                embedding_mode = False
+
+        self.embedding_mode = embedding_mode
         self._similarity = similarity_fn or _cosine_similarity_keywords
 
         self.logger = logging.getLogger("AlignmentPricing")
@@ -170,6 +324,10 @@ class AlignmentPricing:
         task_description: str,
         user_standards: str,
         jurisdiction_standards: str,
+        *,
+        task_embedding: Optional[List[float]] = None,
+        user_embedding: Optional[List[float]] = None,
+        jurisdiction_embedding: Optional[List[float]] = None,
     ) -> Tuple[float, Dict[str, float]]:
         """
         Compute composite alignment score.
@@ -179,12 +337,51 @@ class AlignmentPricing:
         - task_to_user: How aligned the task is with the user's standards
         - task_to_jurisdiction: How aligned the task is with jurisdiction standards
 
+        When ``embedding_mode`` is active and pre-computed embeddings are
+        provided, cosine similarity of those embeddings is used instead of
+        keyword overlap.  If any embedding is *not* supplied, it will be
+        computed on-the-fly via :func:`compute_text_embedding`.
+
+        Args:
+            task_description: Description of the task/operation.
+            user_standards: User's published personal standards.
+            jurisdiction_standards: Jurisdiction's published standards.
+            task_embedding: Optional pre-computed embedding for *task_description*.
+            user_embedding: Optional pre-computed embedding for *user_standards*.
+            jurisdiction_embedding: Optional pre-computed embedding for
+                *jurisdiction_standards*.
+
         Returns:
             (composite_score, breakdown_dict)
         """
-        user_to_jurisdiction = self._similarity(user_standards, jurisdiction_standards)
-        task_to_user = self._similarity(task_description, user_standards)
-        task_to_jurisdiction = self._similarity(task_description, jurisdiction_standards)
+        if self.embedding_mode:
+            # Compute any missing embeddings
+            if task_embedding is None:
+                task_embedding = compute_text_embedding(task_description)
+            if user_embedding is None:
+                user_embedding = compute_text_embedding(user_standards)
+            if jurisdiction_embedding is None:
+                jurisdiction_embedding = compute_text_embedding(
+                    jurisdiction_standards
+                )
+
+            user_to_jurisdiction = _cosine_similarity_embeddings(
+                user_embedding, jurisdiction_embedding
+            )
+            task_to_user = _cosine_similarity_embeddings(
+                task_embedding, user_embedding
+            )
+            task_to_jurisdiction = _cosine_similarity_embeddings(
+                task_embedding, jurisdiction_embedding
+            )
+        else:
+            user_to_jurisdiction = self._similarity(
+                user_standards, jurisdiction_standards
+            )
+            task_to_user = self._similarity(task_description, user_standards)
+            task_to_jurisdiction = self._similarity(
+                task_description, jurisdiction_standards
+            )
 
         # Geometric mean (handles zeros gracefully)
         product = user_to_jurisdiction * task_to_user * task_to_jurisdiction

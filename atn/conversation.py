@@ -83,13 +83,18 @@ class ConversationStore:
         self._dir = data_dir / "conversations"
         self._dir.mkdir(parents=True, exist_ok=True)
         self._active_path = self._dir / "active.jsonl"
+        self._stats_path = self._dir / "session_stats.json"
         self._budget = history_token_budget
 
         # In-memory buffer of the active conversation
         self._turns: list[ConversationTurn] = []
 
+        # Persisted session stats (survives restart)
+        self._session_stats: dict[str, Any] = {}
+
         # Load active conversation from disk if it exists
         self._hydrate()
+        self._load_stats()
 
     # ------------------------------------------------------------------
     # Read
@@ -245,7 +250,9 @@ class ConversationStore:
                     log.exception("Failed to archive conversation (fallback)")
 
         self._turns.clear()
-        log.info("Conversation reset (archived as %s, %d turns)", session_id, len(self._turns))
+        self._session_stats.clear()
+        self._stats_path.unlink(missing_ok=True)
+        log.info("Conversation reset (archived as %s)", session_id)
         return session_id
 
     def list_sessions(self) -> list[dict[str, Any]]:
@@ -281,6 +288,38 @@ class ConversationStore:
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Session stats persistence
+    # ------------------------------------------------------------------
+
+    def save_session_stats(self, stats: dict[str, Any]) -> None:
+        """Persist session stats to disk (called after each execution)."""
+        # Always keep turn count in sync with actual conversation
+        stats["num_turns"] = len(self._turns)
+        self._session_stats = stats
+        try:
+            with open(self._stats_path, "w", encoding="utf-8") as f:
+                json.dump(stats, f)
+        except Exception:
+            log.exception("Failed to persist session stats")
+
+    def get_session_stats(self) -> dict[str, Any]:
+        """Return persisted session stats, with turn count from conversation."""
+        stats = dict(self._session_stats)
+        if stats:
+            stats["num_turns"] = len(self._turns)
+        return stats
+
+    def _load_stats(self) -> None:
+        """Load session stats from disk."""
+        if not self._stats_path.exists():
+            return
+        try:
+            with open(self._stats_path, encoding="utf-8") as f:
+                self._session_stats = json.load(f)
+        except Exception:
+            log.exception("Failed to load session stats")
 
     def _persist_turn(self, turn: ConversationTurn) -> None:
         """Append one turn to the active JSONL file."""

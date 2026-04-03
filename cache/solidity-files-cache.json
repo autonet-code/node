@@ -2,8 +2,8 @@
   "_format": "hh-sol-cache-2",
   "files": {
     "C:\\code\\autonet\\contracts\\core\\ForcedErrorRegistry.sol": {
-      "lastModificationDate": 1766052139328,
-      "contentHash": "24701b24bf587f344e5d914a77716e6d",
+      "lastModificationDate": 1775239912997,
+      "contentHash": "be33eef7182cfaa84f5590b0e6eca8cd",
       "sourceName": "contracts/core/ForcedErrorRegistry.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -43,8 +43,8 @@
       ]
     },
     "C:\\code\\autonet\\contracts\\utils\\AutonetLib.sol": {
-      "lastModificationDate": 1774011281582,
-      "contentHash": "aa1e5eb1816fb1c342ad1bb50da7730d",
+      "lastModificationDate": 1775241762745,
+      "contentHash": "8b4a94dfb0fe875b02e8594f1a6a952b",
       "sourceName": "contracts/utils/AutonetLib.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -80,8 +80,8 @@
       ]
     },
     "C:\\code\\autonet\\contracts\\tokens\\ATNToken.sol": {
-      "lastModificationDate": 1766052240479,
-      "contentHash": "fad82245e5a762f5246b8df2f62736cc",
+      "lastModificationDate": 1774671500201,
+      "contentHash": "247b26a79c570599bb3764b0f88badad",
       "sourceName": "contracts/tokens/ATNToken.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -121,8 +121,8 @@
       ]
     },
     "C:\\code\\autonet\\contracts\\core\\ParticipantStaking.sol": {
-      "lastModificationDate": 1766052139357,
-      "contentHash": "3eb7cfa559c16d6532485149a76a54e5",
+      "lastModificationDate": 1775239858207,
+      "contentHash": "9e38c9ac325559a5ff8a93b164e82f75",
       "sourceName": "contracts/core/ParticipantStaking.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -1216,8 +1216,8 @@
       ]
     },
     "C:\\code\\autonet\\contracts\\core\\TaskContract.sol": {
-      "lastModificationDate": 1773530283612,
-      "contentHash": "8366e53c969d39acdf676b84c2879a32",
+      "lastModificationDate": 1775241667283,
+      "contentHash": "7e23eb389545c72387b1045a67e9d466",
       "sourceName": "contracts/core/TaskContract.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -1246,7 +1246,8 @@
       },
       "imports": [
         "../utils/AutonetLib.sol",
-        "./ParticipantStaking.sol"
+        "./ParticipantStaking.sol",
+        "../tokens/ATNToken.sol"
       ],
       "versionPragmas": [
         "^0.8.20"
@@ -1334,92 +1335,9 @@
         "Ownable"
       ]
     },
-    "C:\\code\\autonet\\contracts\\tokens\\ProjectToken.sol": {
-      "lastModificationDate": 1766052139534,
-      "contentHash": "74ed0177e7d1e7ebf1a25e0544cc7b8f",
-      "sourceName": "contracts/tokens/ProjectToken.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "optimizer": {
-            "enabled": true,
-            "runs": 200
-          },
-          "viaIR": true,
-          "evmVersion": "paris",
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
-        "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol",
-        "@openzeppelin/contracts/access/Ownable.sol"
-      ],
-      "versionPragmas": [
-        "^0.8.20"
-      ],
-      "artifacts": [
-        "ProjectToken"
-      ]
-    },
-    "C:\\code\\autonet\\contracts\\core\\Project.sol": {
-      "lastModificationDate": 1773789206542,
-      "contentHash": "2f855251a5fe0d87b648308ff41653b5",
-      "sourceName": "contracts/core/Project.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "optimizer": {
-            "enabled": true,
-            "runs": 200
-          },
-          "viaIR": true,
-          "evmVersion": "paris",
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "../tokens/ATNToken.sol",
-        "../tokens/ProjectToken.sol",
-        "../utils/AutonetLib.sol",
-        "@openzeppelin/contracts/access/Ownable.sol"
-      ],
-      "versionPragmas": [
-        "^0.8.20"
-      ],
-      "artifacts": [
-        "Project"
-      ]
-    },
     "C:\\code\\autonet\\contracts\\core\\ResultsRewards.sol": {
-      "lastModificationDate": 1774011282584,
-      "contentHash": "7c711df297fc9f462567a9e21091a2b1",
+      "lastModificationDate": 1775241422186,
+      "contentHash": "73344900ea988dba91c26f97fee17eac",
       "sourceName": "contracts/core/ResultsRewards.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -1450,7 +1368,7 @@
         "../utils/AutonetLib.sol",
         "./TaskContract.sol",
         "./ParticipantStaking.sol",
-        "./Project.sol"
+        "./RPB.sol"
       ],
       "versionPragmas": [
         "^0.8.20"
@@ -1539,49 +1457,6 @@
         "AutonetDAO"
       ]
     },
-    "C:\\code\\autonet\\contracts\\bridge\\InferenceProviderBridge.sol": {
-      "lastModificationDate": 1774011283616,
-      "contentHash": "cfa07a1c0a275a5592c5d1e2ca229db4",
-      "sourceName": "contracts/bridge/InferenceProviderBridge.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "optimizer": {
-            "enabled": true,
-            "runs": 200
-          },
-          "viaIR": true,
-          "evmVersion": "paris",
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "../interfaces/IInferenceProvider.sol",
-        "../core/Project.sol",
-        "../tokens/ATNToken.sol",
-        "@openzeppelin/contracts/access/Ownable.sol",
-        "@openzeppelin/contracts/utils/ReentrancyGuard.sol"
-      ],
-      "versionPragmas": [
-        "^0.8.20"
-      ],
-      "artifacts": [
-        "InferenceProviderBridge"
-      ]
-    },
     "C:\\code\\autonet\\contracts\\interfaces\\IInferenceProvider.sol": {
       "lastModificationDate": 1774011284680,
       "contentHash": "6675e48124c84bb2736a19065459aec5",
@@ -1656,50 +1531,9 @@
         "ReentrancyGuard"
       ]
     },
-    "C:\\code\\autonet\\contracts\\bridge\\InferenceProviderFactory.sol": {
-      "lastModificationDate": 1770376856650,
-      "contentHash": "124f93123027d1509bf060b612fcc561",
-      "sourceName": "contracts/bridge/InferenceProviderFactory.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "optimizer": {
-            "enabled": true,
-            "runs": 200
-          },
-          "viaIR": true,
-          "evmVersion": "paris",
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "./InferenceProviderBridge.sol",
-        "../core/Project.sol",
-        "@openzeppelin/contracts/access/Ownable.sol"
-      ],
-      "versionPragmas": [
-        "^0.8.20"
-      ],
-      "artifacts": [
-        "InferenceProviderFactory"
-      ]
-    },
     "C:\\code\\autonet\\contracts\\core\\ModelShardRegistry.sol": {
-      "lastModificationDate": 1774011279625,
-      "contentHash": "41b925656b32185e12ed38afa5d3ce81",
+      "lastModificationDate": 1775241675758,
+      "contentHash": "c9cf6fa44f868a60b535bd727e998636",
       "sourceName": "contracts/core/ModelShardRegistry.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -1735,53 +1569,6 @@
       ],
       "artifacts": [
         "ModelShardRegistry"
-      ]
-    },
-    "C:\\code\\autonet\\contracts\\economic\\Autonet.sol": {
-      "lastModificationDate": 1774029339435,
-      "contentHash": "0407e11219e7a10c13e6d27ecc4ed1fe",
-      "sourceName": "contracts/economic/Autonet.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "optimizer": {
-            "enabled": true,
-            "runs": 200
-          },
-          "viaIR": true,
-          "evmVersion": "paris",
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
-        "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol",
-        "@openzeppelin/contracts/utils/ReentrancyGuard.sol",
-        "@openzeppelin/contracts/utils/structs/Checkpoints.sol",
-        "../core/Registry.sol",
-        "../core/AutonetUser.sol",
-        "../interfaces/IAutonetUser.sol",
-        "./CapabilityScorecard.sol"
-      ],
-      "versionPragmas": [
-        "^0.8.20"
-      ],
-      "artifacts": [
-        "Autonet",
-        "IInferenceProvider"
       ]
     },
     "C:\\code\\autonet\\contracts\\core\\Registry.sol": {
@@ -1826,82 +1613,6 @@
       ],
       "artifacts": [
         "Registry"
-      ]
-    },
-    "C:\\code\\autonet\\contracts\\core\\AutonetUser.sol": {
-      "lastModificationDate": 1774025761274,
-      "contentHash": "96ddccd862bfc302624994478a2d77c3",
-      "sourceName": "contracts/core/AutonetUser.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "optimizer": {
-            "enabled": true,
-            "runs": 200
-          },
-          "viaIR": true,
-          "evmVersion": "paris",
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "../interfaces/IAutonetUser.sol"
-      ],
-      "versionPragmas": [
-        "^0.8.20"
-      ],
-      "artifacts": [
-        "AutonetUser"
-      ]
-    },
-    "C:\\code\\autonet\\contracts\\interfaces\\IAutonetUser.sol": {
-      "lastModificationDate": 1774025716566,
-      "contentHash": "c6f0873e4cc32366ac613f61f712dae5",
-      "sourceName": "contracts/interfaces/IAutonetUser.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "optimizer": {
-            "enabled": true,
-            "runs": 200
-          },
-          "viaIR": true,
-          "evmVersion": "paris",
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [],
-      "versionPragmas": [
-        "^0.8.20"
-      ],
-      "artifacts": [
-        "IAutonetUser"
       ]
     },
     "C:\\code\\autonet\\contracts\\economic\\CapabilityScorecard.sol": {
@@ -2091,47 +1802,6 @@
       ],
       "artifacts": [
         "IERC165"
-      ]
-    },
-    "C:\\code\\autonet\\contracts\\economic\\AutonetFactory.sol": {
-      "lastModificationDate": 1774025850515,
-      "contentHash": "08d6d84e7a78bb7e825a25f226f1a43a",
-      "sourceName": "contracts/economic/AutonetFactory.sol",
-      "solcConfig": {
-        "version": "0.8.20",
-        "settings": {
-          "optimizer": {
-            "enabled": true,
-            "runs": 200
-          },
-          "viaIR": true,
-          "evmVersion": "paris",
-          "outputSelection": {
-            "*": {
-              "*": [
-                "abi",
-                "evm.bytecode",
-                "evm.deployedBytecode",
-                "evm.methodIdentifiers",
-                "metadata"
-              ],
-              "": [
-                "ast"
-              ]
-            }
-          }
-        }
-      },
-      "imports": [
-        "@openzeppelin/contracts/proxy/Clones.sol",
-        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
-        "./Autonet.sol"
-      ],
-      "versionPragmas": [
-        "^0.8.20"
-      ],
-      "artifacts": [
-        "AutonetFactory"
       ]
     },
     "C:\\code\\autonet\\node_modules\\@openzeppelin\\contracts\\proxy\\Clones.sol": {
@@ -2444,6 +2114,178 @@
       ],
       "artifacts": [
         "GuildRegistry"
+      ]
+    },
+    "C:\\code\\autonet\\contracts\\core\\RPB.sol": {
+      "lastModificationDate": 1775244476547,
+      "contentHash": "890a04172463048c9181f080fddbdc64",
+      "sourceName": "contracts/core/RPB.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "viaIR": true,
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "@openzeppelin/contracts/access/Ownable.sol",
+        "@openzeppelin/contracts/utils/ReentrancyGuard.sol",
+        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
+        "@openzeppelin/contracts/utils/Strings.sol",
+        "./Registry.sol",
+        "../tokens/ATNToken.sol",
+        "../utils/AutonetLib.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.20"
+      ],
+      "artifacts": [
+        "RPB"
+      ]
+    },
+    "C:\\code\\autonet\\contracts\\bridge\\InferenceProviderBridge.sol": {
+      "lastModificationDate": 1775244526155,
+      "contentHash": "4607e5e79aba459dbd21a60ba8379c8f",
+      "sourceName": "contracts/bridge/InferenceProviderBridge.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "viaIR": true,
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "../interfaces/IInferenceProvider.sol",
+        "../core/RPB.sol",
+        "../core/ParticipantStaking.sol",
+        "../tokens/ATNToken.sol",
+        "../utils/AutonetLib.sol",
+        "@openzeppelin/contracts/access/Ownable.sol",
+        "@openzeppelin/contracts/utils/ReentrancyGuard.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.20"
+      ],
+      "artifacts": [
+        "InferenceProviderBridge"
+      ]
+    },
+    "C:\\code\\autonet\\contracts\\bridge\\InferenceProviderFactory.sol": {
+      "lastModificationDate": 1775241524464,
+      "contentHash": "630fc1b7418635f6dc1b494fda1beb01",
+      "sourceName": "contracts/bridge/InferenceProviderFactory.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "viaIR": true,
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "./InferenceProviderBridge.sol",
+        "../core/RPB.sol",
+        "@openzeppelin/contracts/access/Ownable.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.20"
+      ],
+      "artifacts": [
+        "InferenceProviderFactory"
+      ]
+    },
+    "C:\\code\\autonet\\contracts\\core\\RPBFactory.sol": {
+      "lastModificationDate": 1775241330076,
+      "contentHash": "76d0b9ea5eabf87ef535c64d476f9c3c",
+      "sourceName": "contracts/core/RPBFactory.sol",
+      "solcConfig": {
+        "version": "0.8.20",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "viaIR": true,
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "./RPB.sol",
+        "./Registry.sol",
+        "@openzeppelin/contracts/access/Ownable.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.20"
+      ],
+      "artifacts": [
+        "RPBFactory"
       ]
     }
   }

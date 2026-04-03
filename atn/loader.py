@@ -168,6 +168,9 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
 
     created_by = str(raw.get("created_by", ""))
 
+    # --- Parent notification ---
+    notify_parent = bool(raw.get("notify_parent", True))
+
     # --- Heartbeat ---
     heartbeat: HeartbeatConfig | None = None
     heartbeat_raw = raw.get("heartbeat")
@@ -231,6 +234,7 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         connector_ids=connector_ids,
         parent_id=parent_id,
         created_by=created_by,
+        notify_parent=notify_parent,
         heartbeat=heartbeat,
         expose_as_tool=expose_as_tool,
         tool_input_schema=tool_input_schema,
@@ -343,6 +347,8 @@ def save_agent(defn: AgentDefinition, directory: Path) -> Path:
         data["parent_id"] = defn.parent_id
     if defn.created_by:
         data["created_by"] = defn.created_by
+    if not defn.notify_parent:
+        data["notify_parent"] = False
 
     # Heartbeat
     if defn.heartbeat:

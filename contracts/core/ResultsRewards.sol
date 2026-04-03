@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "../utils/AutonetLib.sol";
 import "./TaskContract.sol";
 import "./ParticipantStaking.sol";
-import "./Project.sol";
+import "./RPB.sol";
 
 /**
  * @title ResultsRewards
@@ -20,7 +20,7 @@ import "./Project.sol";
 contract ResultsRewards {
     TaskContract public immutable taskContract;
     ParticipantStaking public immutable staking;
-    Project public projectContract;
+    RPB public rpbContract;
     address public governance;
 
     // ============ Configuration ============
@@ -84,8 +84,8 @@ contract ResultsRewards {
         governance = _governance;
     }
 
-    function setProjectContract(address _project) external onlyGovernance {
-        projectContract = Project(_project);
+    function setRPBContract(address _rpb) external onlyGovernance {
+        rpbContract = RPB(_rpb);
     }
 
     // ============ Reveal Functions ============
@@ -311,7 +311,6 @@ contract ResultsRewards {
         require(!rewardsProcessed[_taskId], "Already processed");
 
         AutonetLib.TaskProposal memory proposal = taskContract.getTaskProposal(_taskId);
-        uint256 projectId = proposal.projectId;
 
         // Distribute coordinator fees with bond multiplier
         uint256 baseCoordFee = 1 * 1e18; // 1 ATN base fee
@@ -326,7 +325,7 @@ contract ResultsRewards {
                 uint256 multiplier = 1000 + (bondStrength * (BOND_MULTIPLIER_MAX - 1000)) / 1e18;
                 uint256 adjustedFee = (baseCoordFee * multiplier) / 1000;
 
-                try projectContract.disburseFromBudget(projectId, coordinator, adjustedFee) returns (bool success) {
+                try rpbContract.disburseFromBudget(coordinator, adjustedFee) returns (bool success) {
                     if (success) {
                         emit RewardsDistributed(_taskId, coordinator, adjustedFee, "CoordinatorFee");
                     }
@@ -343,7 +342,7 @@ contract ResultsRewards {
         if (_isCorrect) {
             // Solver reward scaled by consensus score
             uint256 scaledSolverReward = (proposal.proposedSolverReward * _consensusScore) / 100;
-            try projectContract.disburseFromBudget(projectId, _solver, scaledSolverReward) returns (bool success) {
+            try rpbContract.disburseFromBudget(_solver, scaledSolverReward) returns (bool success) {
                 if (success) {
                     emit RewardsDistributed(_taskId, _solver, scaledSolverReward, "SolverReward");
                 }
@@ -352,7 +351,7 @@ contract ResultsRewards {
             }
 
             // Proposer reward
-            try projectContract.disburseFromBudget(projectId, proposal.proposer, proposal.proposedLearnabilityReward) returns (bool success) {
+            try rpbContract.disburseFromBudget(proposal.proposer, proposal.proposedLearnabilityReward) returns (bool success) {
                 if (success) {
                     emit RewardsDistributed(_taskId, proposal.proposer, proposal.proposedLearnabilityReward, "ProposerReward");
                 }
@@ -493,14 +492,12 @@ contract ResultsRewards {
         uint256 _difficultyScore,
         uint256 /* _actualSolvabilityBps */
     ) internal {
-        uint256 projectId = _proposal.projectId;
-
         // Proposer reward: base reward scaled by difficulty score
         // Peak difficulty = full reward; poor calibration = reduced/zero reward
         uint256 proposerReward = (_proposal.proposedLearnabilityReward * _difficultyScore) / 10000;
 
         if (proposerReward > 0) {
-            try projectContract.disburseFromBudget(projectId, _proposal.proposer, proposerReward) returns (bool success) {
+            try rpbContract.disburseFromBudget(_proposal.proposer, proposerReward) returns (bool success) {
                 if (success) {
                     emit RewardsDistributed(_taskId, _proposal.proposer, proposerReward, "ProposerReward");
                 }
@@ -520,7 +517,7 @@ contract ResultsRewards {
                 }
 
                 if (solverReward > 0) {
-                    try projectContract.disburseFromBudget(projectId, _rollouts[i].solver, solverReward) returns (bool success) {
+                    try rpbContract.disburseFromBudget(_rollouts[i].solver, solverReward) returns (bool success) {
                         if (success) {
                             emit RewardsDistributed(_taskId, _rollouts[i].solver, solverReward, "SolverReward");
                         }
@@ -580,21 +577,20 @@ contract ResultsRewards {
         require(!rewardsProcessed[_taskId], "Already processed");
 
         AutonetLib.TaskProposal memory proposal = taskContract.getTaskProposal(_taskId);
-        uint256 projectId = proposal.projectId;
 
         // Coordinator fee (1 ATN)
         uint256 coordFee = 1 * 1e18;
-        if (projectContract.disburseFromBudget(projectId, _coordinator, coordFee)) {
+        if (rpbContract.disburseFromBudget(_coordinator, coordFee)) {
             emit RewardsDistributed(_taskId, _coordinator, coordFee, "CoordinatorFee");
         }
 
         if (_isCorrect) {
             // Solver reward
-            if (projectContract.disburseFromBudget(projectId, _solver, proposal.proposedSolverReward)) {
+            if (rpbContract.disburseFromBudget(_solver, proposal.proposedSolverReward)) {
                 emit RewardsDistributed(_taskId, _solver, proposal.proposedSolverReward, "SolverReward");
             }
             // Proposer reward
-            if (projectContract.disburseFromBudget(projectId, proposal.proposer, proposal.proposedLearnabilityReward)) {
+            if (rpbContract.disburseFromBudget(proposal.proposer, proposal.proposedLearnabilityReward)) {
                 emit RewardsDistributed(_taskId, proposal.proposer, proposal.proposedLearnabilityReward, "ProposerReward");
             }
         }

@@ -2,61 +2,61 @@
 pragma solidity ^0.8.20;
 
 import "./InferenceProviderBridge.sol";
-import "../core/Project.sol";
+import "../core/RPB.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title InferenceProviderFactory
- * @dev Factory for deploying InferenceProviderBridge instances per Autonet project.
+ * @dev Factory for deploying InferenceProviderBridge instances per RPB jurisdiction.
  *
- *      When a project reaches DEPLOYED status (setMatureModel called), the project
- *      founder or governance can deploy a bridge to make the model available as
+ *      When an RPB's model is deployed (setMatureModel called), the RPB owner
+ *      or governance can deploy a bridge to make the model available as
  *      an IInferenceProvider for the Jurisdiction economic layer.
  *
- *      Each project gets exactly one bridge. The bridge address is registered
- *      with Jurisdiction's Autonet.sol as a INFERENCE_PROVIDER service.
+ *      Each RPB gets exactly one bridge. The bridge address is registered
+ *      with Jurisdiction's Autonet.sol as an INFERENCE_PROVIDER service.
  */
 contract InferenceProviderFactory is Ownable {
-    Project public immutable project;
+    address public immutable staking;
 
-    /// @notice Mapping from project ID to its bridge (if deployed)
-    mapping(uint256 => address) public projectBridges;
+    /// @notice Mapping from RPB address to its bridge (if deployed)
+    mapping(address => address) public rpbBridges;
 
     /// @notice All deployed bridges
     address[] public allBridges;
 
-    event BridgeDeployed(uint256 indexed projectId, address indexed bridge, address indexed deployer);
+    event BridgeDeployed(address indexed rpb, address indexed bridge, address indexed deployer);
 
-    constructor(address _project, address _owner) Ownable(_owner) {
-        project = Project(_project);
+    constructor(address _staking, address _owner) Ownable(_owner) {
+        staking = _staking;
     }
 
-    /// @notice Deploy a bridge for a project
-    /// @param projectId The Autonet project ID
-    /// @param bridgeOwner Who should own the bridge (typically project founder or DAO)
+    /// @notice Deploy a bridge for an RPB jurisdiction
+    /// @param rpbAddress The RPB contract address
+    /// @param bridgeOwner Who should own the bridge (typically RPB owner or DAO)
     /// @return bridge The deployed bridge address
-    function deployBridge(uint256 projectId, address bridgeOwner)
+    function deployBridge(address rpbAddress, address bridgeOwner)
         external
         returns (address bridge)
     {
-        require(projectBridges[projectId] == address(0), "Bridge already deployed");
+        require(rpbBridges[rpbAddress] == address(0), "Bridge already deployed");
 
-        // Verify project exists and is deployed
-        (string memory weightsCid, ) = project.getMatureModel(projectId);
-        require(bytes(weightsCid).length > 0, "Project has no mature model");
+        // Verify RPB has a deployed model
+        (string memory weightsCid, ) = RPB(rpbAddress).getMatureModel();
+        require(bytes(weightsCid).length > 0, "RPB has no mature model");
 
         // Deploy bridge
         InferenceProviderBridge newBridge = new InferenceProviderBridge(
-            address(project),
-            projectId,
+            rpbAddress,
+            staking,
             bridgeOwner
         );
 
         bridge = address(newBridge);
-        projectBridges[projectId] = bridge;
+        rpbBridges[rpbAddress] = bridge;
         allBridges.push(bridge);
 
-        emit BridgeDeployed(projectId, bridge, msg.sender);
+        emit BridgeDeployed(rpbAddress, bridge, msg.sender);
     }
 
     /// @notice Get the number of deployed bridges
@@ -64,8 +64,8 @@ contract InferenceProviderFactory is Ownable {
         return allBridges.length;
     }
 
-    /// @notice Check if a project has a bridge
-    function hasBridge(uint256 projectId) external view returns (bool) {
-        return projectBridges[projectId] != address(0);
+    /// @notice Check if an RPB has a bridge
+    function hasBridge(address rpbAddress) external view returns (bool) {
+        return rpbBridges[rpbAddress] != address(0);
     }
 }

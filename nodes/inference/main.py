@@ -43,10 +43,10 @@ class InferenceMetrics:
 class InferenceNode:
     """
     Autonomous inference node that:
-    1. Watches MatureModelUpdated events for new models
+    1. Watches MatureModelSet events for new models
     2. Downloads and loads model weights from blob store
-    3. Watches InferenceRequested events for queries
-    4. Runs forward pass and submits results on-chain
+    3. Serves inference requests
+    4. Runs forward pass and submits results
     """
 
     def __init__(
@@ -54,13 +54,11 @@ class InferenceNode:
         registry: ContractRegistry,
         store: BlobStore,
         node_id: str,
-        project_id: int = 1,
         config=None,
     ):
         self.registry = registry
         self.store = store
         self.node_id = node_id
-        self.project_id = project_id
 
         self.metrics = InferenceMetrics()
         self.running = False
@@ -73,14 +71,14 @@ class InferenceNode:
         self._processed_requests = set()
 
         # Governance bridge and inference attestor
-        self.governance = GovernanceBridge(registry, node_id, project_id)
+        self.governance = GovernanceBridge(registry, node_id)
         self.attestor = InferenceAttestor(
             self.governance, store,
             tokens_per_unit=1000,
             flush_threshold=5000,
         )
 
-        logger.info(f"InferenceNode initialized: {node_id} for project {project_id}")
+        logger.info(f"InferenceNode initialized: {node_id}")
 
     def run(self, max_cycles: Optional[int] = None, cycle_delay: float = 2.0):
         """Main execution loop."""
@@ -120,15 +118,11 @@ class InferenceNode:
         self._process_inference_requests()
 
     def _check_model_updates(self):
-        """Watch for MatureModelUpdated events and load new models."""
+        """Watch for MatureModelSet events and load new models."""
         try:
-            events = self.registry.get_new_events("Project", "MatureModelUpdated")
+            events = self.registry.get_new_events("RPB", "MatureModelSet")
 
             for event in events:
-                project_id = event["args"]["projectId"]
-                if project_id != self.project_id:
-                    continue
-
                 weights_hash = event["args"]["weightsCid"]
                 if not weights_hash or weights_hash == self.model_hash:
                     continue
@@ -164,43 +158,41 @@ class InferenceNode:
             self.metrics.errors += 1
 
     def _process_inference_requests(self):
-        """Watch for InferenceRequested events and serve predictions."""
+        """Watch for InferenceTaskSubmitted events and serve predictions."""
         if not self.model:
             return
 
         try:
-            events = self.registry.get_new_events("Project", "InferenceRequested")
+            events = self.registry.get_new_events("TaskContract", "InferenceTaskSubmitted")
 
             for event in events:
                 args = event["args"]
-                project_id = args["projectId"]
-                request_id = args["requestId"]
+                inference_id = args["inferenceId"]
 
-                if project_id != self.project_id:
-                    continue
-                if request_id in self._processed_requests:
+                if inference_id in self._processed_requests:
                     continue
 
-                input_hash = args.get("inputCid", "")
+                input_hash = args.get("inputCidHash", "")
                 logger.info(
-                    f"[{self.node_id}] Inference request {request_id}: "
-                    f"input={input_hash[:16]}..."
+                    f"[{self.node_id}] Inference request {inference_id.hex()[:16]}: "
+                    f"input={input_hash.hex()[:16] if isinstance(input_hash, bytes) else str(input_hash)[:16]}..."
                 )
 
-                self._serve_inference(project_id, request_id, input_hash)
+                self._serve_inference(inference_id, input_hash)
 
         except Exception as e:
             logger.error(f"Error processing inference requests: {e}", exc_info=True)
             self.metrics.errors += 1
 
-    def _serve_inference(self, project_id: int, request_id: int, input_hash: str):
+    def _serve_inference(self, inference_id: bytes, input_hash):
         """Run inference on input and submit result."""
         try:
+            input_hash_str = input_hash.hex() if isinstance(input_hash, bytes) else str(input_hash)
             # Download input data
-            input_data = self.store.get_json(input_hash)
+            input_data = self.store.get_json(input_hash_str)
             if not input_data:
                 logger.error(
-                    f"[{self.node_id}] Failed to download input: {input_hash[:16]}..."
+                    f"[{self.node_id}] Failed to download input: {input_hash_str[:16]}..."
                 )
                 self.metrics.requests_failed += 1
                 return
@@ -220,9 +212,9 @@ class InferenceNode:
             predictions = output.argmax(dim=1).tolist()
             probabilities = torch.softmax(output, dim=1).tolist()
 
+            inference_id_hex = inference_id.hex() if isinstance(inference_id, bytes) else str(inference_id)
             result = {
-                "request_id": request_id,
-                "project_id": project_id,
+                "inference_id": inference_id_hex,
                 "predictions": predictions,
                 "probabilities": probabilities,
                 "model_hash": self.model_hash,
@@ -233,35 +225,24 @@ class InferenceNode:
             # Store result in blob store
             output_hash = self.store.add_json(result)
 
-            # Submit result on-chain
-            tx_result = self.registry.submit_inference_result(
-                project_id, request_id, output_hash
+            logger.info(
+                f"[{self.node_id}] Inference result stored: "
+                f"id={inference_id_hex[:16]}, prediction={predictions}, "
+                f"output={output_hash[:16]}"
             )
+            self.metrics.requests_served += 1
+            self.metrics.tasks_completed += 1
+            self._processed_requests.add(inference_id)
 
-            if tx_result.success:
-                logger.info(
-                    f"[{self.node_id}] Inference result submitted: "
-                    f"request={request_id}, prediction={predictions}, "
-                    f"tx={tx_result.tx_hash}"
-                )
-                self.metrics.requests_served += 1
-                self.metrics.tasks_completed += 1
-                self._processed_requests.add(request_id)
-
-                # Attest inference usage (estimate token count from tensor size)
-                input_size = tensor.numel()
-                self.attestor.record_inference(
-                    provider="native",
-                    input_tokens=input_size,
-                    output_tokens=len(predictions) * 10,
-                    model=self.model_hash or "unknown",
-                    request_id=str(request_id),
-                )
-            else:
-                logger.error(
-                    f"[{self.node_id}] Failed to submit result: {tx_result.error}"
-                )
-                self.metrics.requests_failed += 1
+            # Attest inference usage (estimate token count from tensor size)
+            input_size = tensor.numel()
+            self.attestor.record_inference(
+                provider="native",
+                input_tokens=input_size,
+                output_tokens=len(predictions) * 10,
+                model=self.model_hash or "unknown",
+                request_id=inference_id_hex,
+            )
 
         except Exception as e:
             logger.error(f"[{self.node_id}] Inference error: {e}", exc_info=True)

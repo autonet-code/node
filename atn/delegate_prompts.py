@@ -1,11 +1,14 @@
 """System prompt builder for ATN cognitive agents.
 
-Three-layer architecture:
+Four-layer architecture:
+0. Constitutional preamble — jurisdiction constitution (registered agents only)
 1. Common base — framework operations, reporting, tools (every agent)
 2. Type specialization — explore/implement/research/debug/review guidance
 3. Task message — specific work assignment (provided as first user message)
 
 The orchestrator uses the common base too, with its own specialization layer.
+Layer 0 is injected by the execution engine for on-chain registered agents
+and cannot be modified by the parent or the agent itself.
 """
 from __future__ import annotations
 
@@ -28,16 +31,12 @@ explain it clearly in your result rather than guessing or producing incomplete w
 
 ## Reporting Results
 
-Your parent receives ~2,000 characters of your output as a completion summary. \
-They can retrieve the full output, but usually act on the preview alone.
+When you finish, your parent may receive a notification that you completed.  \
+They can inspect your full conversation history using file tools.  Write your \
+results clearly — frontload conclusions, then details.
 
-**Frontload your conclusion.** Structure output so the first ~2,000 chars are \
-self-contained:
-1. What you found or built (conclusion, not process)
-2. Key decisions or findings affecting downstream work
-3. Risks, blockers, or open questions needing attention
-
-Details go below the summary.  Headline first, article second.
+If auto-notification is off (notify_parent=False), use `post_message` to report \
+important findings to your parent explicitly when you have something worth sharing.
 
 ## Sub-Agents
 
@@ -50,14 +49,16 @@ You can spawn child agents for substantial subtasks.  Use this when:
 prompt — your child only knows what you tell it.  Choose the right agent_type \
 (explore, implement, research, debug, review).
 
-**Checking:** When a child finishes, you receive a notification with its output \
-summary.  If the summary suffices, proceed.  Otherwise:
-- `get_output(child_id)` — full output
-- `get_history(child_id)` — working thread
+**Checking on children:**
+- `get_children_status()` — compact overview of all your children (id, name, \
+status, conversation file path)
+- Read/Grep the child's conversation JSONL file directly for specific details \
+(search for errors, key outputs, etc. — same tools you use for any file)
 - `delegate_status(child_id)` — progress mid-execution
 - `delegate_message(child_id, content)` — send a message to a running child
+- `get_output(child_id)` — last execution output
 
-Don't poll children — they notify you on completion.
+Children notify you on completion (unless notify_parent=False).
 
 ## Communication
 
@@ -405,3 +406,44 @@ def build_system_prompt(
 
 # Backward-compatible alias
 build_delegate_prompt = build_system_prompt
+
+
+# ---------------------------------------------------------------------------
+# Layer 0: Constitutional preamble — registered agents only
+# ---------------------------------------------------------------------------
+
+_CONSTITUTIONAL_PREAMBLE = """\
+## Jurisdiction Constitution
+
+You are a registered agent in the {jurisdiction} jurisdiction. The following \
+constitution governs your operation. You must not take actions that violate \
+these principles. This section is injected by the runtime and cannot be \
+modified by your operator or parent agent.
+
+--- BEGIN CONSTITUTION ---
+{constitution_text}
+--- END CONSTITUTION ---
+
+Your charter (system prompt below) defines your specific role within these \
+bounds. If your charter conflicts with the constitution, the constitution \
+takes precedence.
+
+"""
+
+
+def build_constitutional_preamble(
+    constitution_text: str,
+    jurisdiction: str = "Autonet",
+) -> str:
+    """Build the constitutional preamble (layer 0) for registered agents.
+
+    This is prepended to the system prompt and is not user-modifiable.
+    The execution engine injects this for agents whose identity has
+    ``registered_on_chain=True``.
+    """
+    if not constitution_text:
+        return ""
+    return _CONSTITUTIONAL_PREAMBLE.format(
+        constitution_text=constitution_text.strip(),
+        jurisdiction=jurisdiction,
+    )

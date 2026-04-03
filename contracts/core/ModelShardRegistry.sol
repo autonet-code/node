@@ -48,7 +48,7 @@ contract ModelShardRegistry is Ownable {
         address creator;
         StorageTier tier;
         ShardingStrategy strategy;
-        uint256 projectId;           // Associated Autonet project
+        address rpbAddress;          // Associated RPB jurisdiction
     }
 
     struct ShardInfo {
@@ -80,7 +80,7 @@ contract ModelShardRegistry is Ownable {
         bytes32 indexed modelHash,
         string manifestCid,
         uint8 totalShards,
-        uint256 projectId
+        address rpbAddress
     );
     event ShardAnnounced(
         bytes32 indexed modelHash,
@@ -158,7 +158,7 @@ contract ModelShardRegistry is Ownable {
      * @param totalSize Total model size in bytes
      * @param tier Storage tier for this model
      * @param strategy Sharding strategy used
-     * @param projectId Associated Autonet project ID
+     * @param rpbAddress Associated RPB jurisdiction address
      */
     function registerModel(
         bytes32 modelHash,
@@ -169,7 +169,7 @@ contract ModelShardRegistry is Ownable {
         uint256 totalSize,
         StorageTier tier,
         ShardingStrategy strategy,
-        uint256 projectId
+        address rpbAddress
     ) external {
         require(modelManifests[modelHash].createdAt == 0, "Model already registered");
         require(dataShards > 0, "Need at least 1 data shard");
@@ -187,10 +187,10 @@ contract ModelShardRegistry is Ownable {
             creator: msg.sender,
             tier: tier,
             strategy: strategy,
-            projectId: projectId
+            rpbAddress: rpbAddress
         });
 
-        emit ModelRegistered(modelHash, manifestCid, totalShards, projectId);
+        emit ModelRegistered(modelHash, manifestCid, totalShards, rpbAddress);
     }
 
     // ============ Shard Announcements ============
@@ -311,9 +311,7 @@ contract ModelShardRegistry is Ownable {
         bytes32 modelHash,
         uint8 shardIndex,
         address provider
-    ) external {
-        // In production, would require proof of failure
-        // For now, just update reputation
+    ) external onlyOwner {
         StorageProvider storage p = providers[provider];
         p.failedVerifications++;
 
@@ -332,7 +330,7 @@ contract ModelShardRegistry is Ownable {
         bytes32 modelHash,
         uint8 shardIndex,
         address provider
-    ) external {
+    ) external onlyOwner {
         StorageProvider storage p = providers[provider];
         p.successfulVerifications++;
 

@@ -134,12 +134,27 @@ ACTIVATIONS_PROTOCOL = TProtocol("/autonet/activations/1.0.0")
 CAPABILITY_PROTOCOL = TProtocol("/autonet/capability/1.0.0")
 BLOB_PROTOCOL = TProtocol("/autonet/blob/1.0.0")
 EMBEDDING_PROTOCOL = TProtocol("/autonet/embeddings/1.0.0")
+INFERENCE_REQUEST_PROTOCOL = TProtocol("/rpb/inference/1.0.0")
 GUILD_GOSSIP_TOPIC_PREFIX = "/autonet/guild/"
+PROVIDER_REGISTRY_TOPIC = "/rpb/provider-registry/"
 
 
 # =============================================================================
 # Data classes
 # =============================================================================
+
+
+@dataclass
+class AgentAdvertisement:
+    """Metadata for a single agent running on this node."""
+    address: str                                           # on-chain wallet address
+    name: str = ""
+    description: str = ""
+    agent_type: str = ""                                   # general, explore, implement, etc.
+    model: str = ""                                        # e.g. "claude-opus-4-6"
+    is_root: bool = False
+    parent_address: str = ""
+    registered_on_chain: bool = False
 
 
 @dataclass
@@ -153,6 +168,7 @@ class NodeCapability:
     bandwidth_mbps: float = 0.0
     modules_hosted: List[str] = field(default_factory=list)  # module IDs
     listen_addrs: List[str] = field(default_factory=list)
+    agents: List[Dict] = field(default_factory=list)      # list of AgentAdvertisement dicts
     timestamp: float = field(default_factory=time.time)
 
     def to_bytes(self) -> bytes:
@@ -882,6 +898,35 @@ class AutonetHost:
                 nursery.start_soon(try_peer, pid)
 
         return result[0]
+
+    # =========================================================================
+    # RPB Inference Protocol (/rpb/inference/1.0.0)
+    # =========================================================================
+
+    async def request_inference(self, target_peer_id: str, request: dict) -> dict:
+        """Send an inference request to a provider node.
+
+        Uses the /rpb/inference/1.0.0 protocol.
+        """
+        # TODO: Implement framed I/O inference request
+        # 1. Serialize request to JSON
+        # 2. Open stream with INFERENCE_REQUEST_PROTOCOL
+        # 3. Write framed request
+        # 4. Read framed response
+        # 5. Deserialize and return
+        raise NotImplementedError("RPB inference protocol not yet implemented")
+
+    async def advertise_models(self, models: List[str], agent_address: str) -> None:
+        """Advertise available models on the provider registry gossip topic.
+
+        Publishes to PROVIDER_REGISTRY_TOPIC so that RPB provider nodes
+        can discover available inference endpoints.
+        """
+        # TODO: Publish to PROVIDER_REGISTRY_TOPIC
+        # 1. Ensure GossipSub is initialized
+        # 2. Build advertisement message with models, peer_id, agent_address
+        # 3. Publish to PROVIDER_REGISTRY_TOPIC
+        pass
 
     # =========================================================================
     # Embedding Exchange Protocol (two-speed inference architecture)

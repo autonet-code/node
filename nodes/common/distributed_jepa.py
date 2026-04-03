@@ -539,7 +539,7 @@ class DistributedJEPA:
     def register_model_on_chain(
         self,
         manifest: JEPAShardManifest,
-        project_id: int,
+        rpb_address: str = "",
     ) -> Optional[bytes]:
         """
         Register the sharded model on-chain via ModelShardRegistry.
@@ -588,7 +588,7 @@ class DistributedJEPA:
                 manifest.total_size,      # uint256 totalSize
                 1,                        # StorageTier.NODE_PINNED
                 0,                        # ShardingStrategy.LAYER_WISE
-                project_id,               # uint256 projectId
+                rpb_address,              # address rpbAddress
             )
 
             if result.success:

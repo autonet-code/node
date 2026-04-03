@@ -82,8 +82,8 @@ def make_registry(
             return FakeContractHandle("TaskContract", "0x4444444444444444444444444444444444444444")
         if name == "ResultsRewards":
             return FakeContractHandle("ResultsRewards", "0x5555555555555555555555555555555555555555")
-        if name == "Project":
-            return FakeContractHandle("Project", "0x6666666666666666666666666666666666666666")
+        if name == "RPB":
+            return FakeContractHandle("RPB", "0x6666666666666666666666666666666666666666")
         if name == "EvolutionProposal" and has_evolution:
             return FakeContractHandle("EvolutionProposal", "0x7777777777777777777777777777777777777777")
         return None
@@ -108,22 +108,22 @@ def make_registry(
 
 class TestComputeServiceId:
     def test_deterministic(self):
-        """Same project_id always produces the same service_id."""
-        a = compute_service_id(1)
-        b = compute_service_id(1)
+        """Same address always produces the same service_id."""
+        a = compute_service_id("0xABC")
+        b = compute_service_id("0xABC")
         assert a == b
         assert len(a) == 32  # SHA-256 → 32 bytes
 
-    def test_different_projects(self):
-        """Different project IDs produce different service IDs."""
-        a = compute_service_id(1)
-        b = compute_service_id(2)
+    def test_different_addresses(self):
+        """Different addresses produce different service IDs."""
+        a = compute_service_id("0xABC")
+        b = compute_service_id("0xDEF")
         assert a != b
 
     def test_matches_manual_sha256(self):
         """The function uses the expected hashing scheme."""
-        expected = hashlib.sha256(b"autonet-training-project-42").digest()
-        assert compute_service_id(42) == expected
+        expected = hashlib.sha256(b"autonet-rpb-0xabc").digest()
+        assert compute_service_id("0xABC") == expected
 
 
 # =============================================================================
@@ -135,7 +135,7 @@ class TestAttestation:
     def test_attest_success(self):
         """Attestation succeeds when economy is deployed."""
         registry = make_registry(has_economy=True)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.attest_task_completion(units=3)
 
@@ -145,7 +145,7 @@ class TestAttestation:
     def test_attest_skipped_no_economy(self):
         """Attestation is gracefully skipped when economy is not deployed."""
         registry = make_registry(has_economy=False)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.attest_task_completion(units=1)
 
@@ -156,7 +156,7 @@ class TestAttestation:
         """Attestation returns False when the TX fails."""
         registry = make_registry(has_economy=True)
         registry.attest_usage.return_value = _fail("epoch not started")
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.attest_task_completion(units=1)
 
@@ -166,7 +166,7 @@ class TestAttestation:
         """Attestation returns False on unexpected exceptions."""
         registry = make_registry(has_economy=True)
         registry.attest_usage.side_effect = RuntimeError("connection lost")
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.attest_task_completion(units=1)
 
@@ -175,7 +175,7 @@ class TestAttestation:
     def test_default_units_is_one(self):
         """Default attestation unit count is 1."""
         registry = make_registry(has_economy=True)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         bridge.attest_task_completion()
 
@@ -191,7 +191,7 @@ class TestHeartbeat:
     def test_heartbeat_alive_on_first_check(self):
         """First heartbeat check returns True (benefit of the doubt)."""
         registry = make_registry(has_dao=True)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge.check_heartbeat() is True
 
@@ -199,14 +199,14 @@ class TestHeartbeat:
         """Heartbeat returns True when HeartbeatEmitted events arrive."""
         registry = make_registry(has_dao=True)
         registry.get_new_events.return_value = [{"event": "HeartbeatEmitted"}]
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge.check_heartbeat() is True
 
     def test_heartbeat_missed_after_timeout(self):
         """Heartbeat returns False when no event for > interval."""
         registry = make_registry(has_dao=True)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         bridge._heartbeat_interval = 0.1  # 100ms for fast test
 
         # First check sets _last_heartbeat
@@ -220,7 +220,7 @@ class TestHeartbeat:
     def test_heartbeat_always_alive_no_dao(self):
         """When no DAO deployed, heartbeat is always alive (dev mode)."""
         registry = make_registry(has_dao=False)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         # Even after arbitrary time, always returns True
         assert bridge.check_heartbeat() is True
@@ -229,7 +229,7 @@ class TestHeartbeat:
     def test_receive_heartbeat_manual(self):
         """Manual heartbeat resets the timer."""
         registry = make_registry(has_dao=True)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         bridge._heartbeat_interval = 0.1
 
         # First check
@@ -247,7 +247,7 @@ class TestHeartbeat:
         """Exceptions from event fetching are silently ignored."""
         registry = make_registry(has_dao=True)
         registry.get_new_events.side_effect = RuntimeError("RPC error")
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         # Should not raise, and should still give benefit of the doubt
         assert bridge.check_heartbeat() is True
@@ -262,7 +262,7 @@ class TestServiceRegistration:
     def test_register_new_service(self):
         """First registration succeeds and marks the bridge as registered."""
         registry = make_registry(has_economy=True)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.register_if_needed("0x6666666666666666666666666666666666666666")
 
@@ -273,7 +273,7 @@ class TestServiceRegistration:
     def test_register_skipped_when_already_registered(self):
         """Second registration call is a no-op."""
         registry = make_registry(has_economy=True)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         bridge.register_if_needed("0x6666666666666666666666666666666666666666")
         bridge.register_if_needed("0x6666666666666666666666666666666666666666")
@@ -284,7 +284,7 @@ class TestServiceRegistration:
     def test_register_skipped_no_economy(self):
         """Registration is skipped when economy is not deployed."""
         registry = make_registry(has_economy=False)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.register_if_needed("0x6666666666666666666666666666666666666666")
 
@@ -298,7 +298,7 @@ class TestServiceRegistration:
             "projectContract": "0x6666666666666666666666666666666666666666",
             "isActive": True,
         }
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.register_if_needed("0x6666666666666666666666666666666666666666")
 
@@ -310,7 +310,7 @@ class TestServiceRegistration:
         """Registration failure returns False."""
         registry = make_registry(has_economy=True)
         registry.register_service.return_value = _fail("already registered")
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.register_if_needed("0x6666666666666666666666666666666666666666")
 
@@ -380,7 +380,7 @@ class TestEpochHelper:
         """_get_epoch returns the current epoch number."""
         registry = make_registry(has_economy=True)
         registry.get_current_epoch.return_value = 5
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge._get_epoch() == 5
 
@@ -388,7 +388,7 @@ class TestEpochHelper:
         """_get_epoch returns 0 when the call fails."""
         registry = make_registry(has_economy=True)
         registry.get_current_epoch.side_effect = RuntimeError("RPC down")
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge._get_epoch() == 0
 
@@ -401,24 +401,24 @@ class TestEpochHelper:
 class TestBridgeInit:
     def test_economy_available_flag(self):
         """Bridge detects economy availability at init."""
-        bridge_with = GovernanceBridge(make_registry(has_economy=True), "n", 1)
-        bridge_without = GovernanceBridge(make_registry(has_economy=False), "n", 1)
+        bridge_with = GovernanceBridge(make_registry(has_economy=True), "n")
+        bridge_without = GovernanceBridge(make_registry(has_economy=False), "n")
 
         assert bridge_with._economy_available is True
         assert bridge_without._economy_available is False
 
     def test_dao_available_flag(self):
         """Bridge detects DAO availability at init."""
-        bridge_with = GovernanceBridge(make_registry(has_dao=True), "n", 1)
-        bridge_without = GovernanceBridge(make_registry(has_dao=False), "n", 1)
+        bridge_with = GovernanceBridge(make_registry(has_dao=True), "n")
+        bridge_without = GovernanceBridge(make_registry(has_dao=False), "n")
 
         assert bridge_with._dao_available is True
         assert bridge_without._dao_available is False
 
-    def test_service_id_set_from_project_id(self):
-        """Service ID is derived from project_id at init."""
-        bridge = GovernanceBridge(make_registry(), "solver-0", project_id=7)
-        assert bridge.service_id == compute_service_id(7)
+    def test_service_id_set_from_rpb_address(self):
+        """Service ID is derived from rpb_address at init."""
+        bridge = GovernanceBridge(make_registry(), "solver-0", rpb_address="0x1234")
+        assert bridge.service_id == compute_service_id("0x1234")
 
 
 # =============================================================================
@@ -432,7 +432,7 @@ class TestRewardClaiming:
         registry = make_registry(has_economy=True)
         registry.get_current_epoch.return_value = 3
         registry.claim_participant_reward = MagicMock(return_value=_ok())
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_epoch_rewards()
 
@@ -446,7 +446,7 @@ class TestRewardClaiming:
         """Claim rewards for a specific epoch."""
         registry = make_registry(has_economy=True)
         registry.claim_participant_reward = MagicMock(return_value=_ok())
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_epoch_rewards(epoch_id=5)
 
@@ -459,7 +459,7 @@ class TestRewardClaiming:
         """Reward claiming is skipped when economy is not deployed."""
         registry = make_registry(has_economy=False)
         registry.claim_participant_reward = MagicMock()
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_epoch_rewards()
 
@@ -473,7 +473,7 @@ class TestRewardClaiming:
         registry.claim_participant_reward = MagicMock(
             return_value=_fail("AlreadyClaimed")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_epoch_rewards()
 
@@ -486,7 +486,7 @@ class TestRewardClaiming:
         registry.claim_participant_reward = MagicMock(
             return_value=_fail("NothingToClaim")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_epoch_rewards()
 
@@ -499,7 +499,7 @@ class TestRewardClaiming:
         registry.claim_participant_reward = MagicMock(
             return_value=_fail("InsufficientFunds")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_epoch_rewards()
 
@@ -512,7 +512,7 @@ class TestRewardClaiming:
         registry.claim_participant_reward = MagicMock(
             side_effect=RuntimeError("RPC error")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_epoch_rewards()
 
@@ -523,7 +523,7 @@ class TestRewardClaiming:
         registry = make_registry(has_economy=True)
         registry.get_current_epoch.return_value = 1
         registry.claim_participant_reward = MagicMock()
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_epoch_rewards()
 
@@ -541,7 +541,7 @@ class TestReputation:
         """Successful reputation claim."""
         registry = make_registry(has_economy=True)
         registry.claim_reputation = MagicMock(return_value=_ok())
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_reputation()
 
@@ -552,7 +552,7 @@ class TestReputation:
         """Reputation claim skipped when economy is not deployed."""
         registry = make_registry(has_economy=False)
         registry.claim_reputation = MagicMock()
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_reputation()
 
@@ -565,7 +565,7 @@ class TestReputation:
         registry.claim_reputation = MagicMock(
             return_value=_fail("Nothing to claim")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_reputation()
 
@@ -577,7 +577,7 @@ class TestReputation:
         registry.claim_reputation = MagicMock(
             side_effect=RuntimeError("RPC error")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.claim_reputation()
 
@@ -594,7 +594,7 @@ class TestCapabilityReporting:
         """Successful capability score report."""
         registry = make_registry(has_economy=True)
         registry.update_capability_score = MagicMock(return_value=_ok())
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         module_id = hashlib.sha256(b"visual_encoder").digest()
         result = bridge.report_capability_score(module_id, 7500)
@@ -606,7 +606,7 @@ class TestCapabilityReporting:
         """Score report skipped when economy is not deployed."""
         registry = make_registry(has_economy=False)
         registry.update_capability_score = MagicMock()
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         module_id = hashlib.sha256(b"visual_encoder").digest()
         result = bridge.report_capability_score(module_id, 7500)
@@ -623,7 +623,7 @@ class TestCapabilityReporting:
                 {"id": b"\x02" * 32, "score": 0, "target": 6000, "multiplier": 30000},
             ]
         })
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         scorecard = bridge.get_training_scorecard()
 
@@ -634,7 +634,7 @@ class TestCapabilityReporting:
     def test_get_scorecard_returns_none_no_economy(self):
         """Scorecard returns None when economy is not deployed."""
         registry = make_registry(has_economy=False)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge.get_training_scorecard() is None
 
@@ -644,7 +644,7 @@ class TestCapabilityReporting:
         registry.get_capability_scorecard = MagicMock(
             side_effect=RuntimeError("not deployed")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge.get_training_scorecard() is None
 
@@ -664,7 +664,7 @@ class TestEvolutionProposals:
             {"status": 1, "contentCid": "cid2"},   # Evaluating
             {"status": 2, "contentCid": "cid3"},   # Trial
         ])
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         pending = bridge.get_pending_proposals()
 
@@ -675,7 +675,7 @@ class TestEvolutionProposals:
     def test_get_pending_proposals_no_evolution(self):
         """Returns empty list when evolution contract not deployed."""
         registry = make_registry(has_evolution=False)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge.get_pending_proposals() == []
 
@@ -685,7 +685,7 @@ class TestEvolutionProposals:
         registry.get_evolution_proposal_count = MagicMock(
             side_effect=RuntimeError("RPC error")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge.get_pending_proposals() == []
 
@@ -693,7 +693,7 @@ class TestEvolutionProposals:
         """Successful RPB evaluation submission."""
         registry = make_registry(has_evolution=True)
         registry.submit_rpb_evaluation = MagicMock(return_value=_ok())
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
 
@@ -706,7 +706,7 @@ class TestEvolutionProposals:
         """Evaluation skipped when evolution contract not deployed."""
         registry = make_registry(has_evolution=False)
         registry.submit_rpb_evaluation = MagicMock()
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
 
@@ -719,7 +719,7 @@ class TestEvolutionProposals:
         registry.submit_rpb_evaluation = MagicMock(
             return_value=_fail("AlreadyEvaluated")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
 
@@ -731,7 +731,7 @@ class TestEvolutionProposals:
         registry.submit_rpb_evaluation = MagicMock(
             return_value=_fail("InsufficientStake")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
 
@@ -743,7 +743,7 @@ class TestEvolutionProposals:
         registry.submit_rpb_evaluation = MagicMock(
             side_effect=RuntimeError("connection lost")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         result = bridge.submit_rpb_evaluation(1, True, 8000, "reason-cid")
 
@@ -753,14 +753,14 @@ class TestEvolutionProposals:
         """Successful RPB prompt fetch."""
         registry = make_registry(has_evolution=True)
         registry.get_current_rpb_prompt = MagicMock(return_value="bafyrpb_prompt_v1")
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge.get_rpb_prompt() == "bafyrpb_prompt_v1"
 
     def test_get_rpb_prompt_no_evolution(self):
         """Returns None when evolution contract not deployed."""
         registry = make_registry(has_evolution=False)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge.get_rpb_prompt() is None
 
@@ -770,7 +770,7 @@ class TestEvolutionProposals:
         registry.get_current_rpb_prompt = MagicMock(
             side_effect=RuntimeError("RPC error")
         )
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
 
         assert bridge.get_rpb_prompt() is None
 
@@ -857,7 +857,7 @@ class TestRPBEvaluator:
         registry.get_current_rpb_prompt = MagicMock(return_value="prompt-cid")
         registry.submit_rpb_evaluation = MagicMock(return_value=_ok())
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         evaluator = RPBEvaluator(bridge)
 
         count = evaluator.evaluate_pending_proposals()
@@ -879,7 +879,7 @@ class TestRPBEvaluator:
         registry.get_current_rpb_prompt = MagicMock(return_value="prompt-cid")
         registry.submit_rpb_evaluation = MagicMock(return_value=_ok())
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         evaluator = RPBEvaluator(bridge)
 
         # First call evaluates
@@ -896,7 +896,7 @@ class TestRPBEvaluator:
         })
         registry.get_current_rpb_prompt = MagicMock(return_value=None)
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         evaluator = RPBEvaluator(bridge)
 
         assert evaluator.evaluate_pending_proposals() == 0
@@ -906,7 +906,7 @@ class TestRPBEvaluator:
         registry = make_registry(has_evolution=True)
         registry.get_evolution_proposal_count = MagicMock(return_value=0)
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         evaluator = RPBEvaluator(bridge)
 
         assert evaluator.evaluate_pending_proposals() == 0
@@ -930,7 +930,7 @@ class TestRPBEvaluator:
                     constitutional_alignment=0.1,
                 )
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         evaluator = RPBEvaluator(bridge, provider=RejectProvider())
 
         count = evaluator.evaluate_pending_proposals()
@@ -954,7 +954,7 @@ class TestRPBEvaluator:
             def evaluate(self, system_prompt, proposal_content):
                 raise RuntimeError("model unavailable")
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         evaluator = RPBEvaluator(bridge, provider=ErrorProvider())
 
         # Should not raise
@@ -977,7 +977,7 @@ class TestRPBConsensus:
         })
         registry.resolve_proposal_evaluation = MagicMock(return_value=_ok())
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         consensus = RPBConsensus(bridge)
 
         resolved = consensus.try_resolve_proposals()
@@ -996,7 +996,7 @@ class TestRPBConsensus:
             return_value=_fail("QuorumNotReached")
         )
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         consensus = RPBConsensus(bridge)
 
         resolved = consensus.try_resolve_proposals()
@@ -1014,7 +1014,7 @@ class TestRPBConsensus:
             return_value=_fail("EvaluationPeriodActive")
         )
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         consensus = RPBConsensus(bridge)
 
         resolved = consensus.try_resolve_proposals()
@@ -1024,7 +1024,7 @@ class TestRPBConsensus:
     def test_try_resolve_no_evolution(self):
         """Returns 0 when evolution contract not deployed."""
         registry = make_registry(has_evolution=False)
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         consensus = RPBConsensus(bridge)
 
         assert consensus.try_resolve_proposals() == 0
@@ -1040,7 +1040,7 @@ class TestRPBConsensus:
             side_effect=RuntimeError("RPC error")
         )
 
-        bridge = GovernanceBridge(registry, "solver-0", project_id=1)
+        bridge = GovernanceBridge(registry, "solver-0", rpb_address="")
         consensus = RPBConsensus(bridge)
 
         # Should not raise

@@ -124,6 +124,7 @@ async function main() {
   const InferenceProviderFactory = await hre.ethers.getContractFactory("InferenceProviderFactory");
   const inferenceFactory = await InferenceProviderFactory.deploy(
     projectAddress,
+    stakingAddress,
     deployer.address // owner
   );
   await inferenceFactory.waitForDeployment();

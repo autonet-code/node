@@ -76,6 +76,7 @@ class SnapshotBuilder:
                 "description": defn.description,
                 "model": defn.model,
                 "mode": defn.mode.value,
+                "notify_parent": defn.notify_parent,
                 "status": self.registry._status[aid].value,
                 "schedule": defn.schedule,
                 "concurrency": defn.concurrency,
@@ -86,6 +87,11 @@ class SnapshotBuilder:
                 "last_output": _preview(last_output.data) if last_output else None,
                 "path": str(self._config.agents_dir / aid),
             }
+            if defn.identity and defn.identity.registered_on_chain:
+                agent_info["registered_on_chain"] = True
+            if defn.expose_as_tool:
+                agent_info["expose_as_tool"] = True
+                agent_info["tool_name"] = f"pipeline_{aid}"
             if defn.connector_ids:
                 agent_info["connector_ids"] = defn.connector_ids
             if defn.parent_id:

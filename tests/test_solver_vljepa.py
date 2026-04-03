@@ -80,7 +80,7 @@ def _make_solver(data_dir: str = ""):
         registry=registry,
         store=store,
         node_id="test-solver-0",
-        project_id=1,
+        rpb_address="",
         task_type="text_jepa",
     )
 

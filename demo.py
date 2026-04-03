@@ -71,7 +71,7 @@ def run_demo():
     print_banner()
 
     store = create_demo_store()
-    project_id = 1
+    rpb_address = ""
 
     # =========================================================================
     # PHASE 1: Proposer creates a training task
@@ -85,7 +85,7 @@ def run_demo():
 
     # Create task specification
     task_spec = {
-        "project_id": project_id,
+        "rpb_address": rpb_address,
         "description": "Train a sentiment classifier on movie reviews",
         "input_data": {
             "dataset": "imdb_reviews_sample",

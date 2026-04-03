@@ -655,6 +655,9 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
         atn: atnServer,
       },
       allowedTools,
+      // Block SDK's Agent tool — forces delegation through ATN's create_agent
+      // so child work goes through the registry, budget tracking, and event bus.
+      disallowedTools: ["Agent"],
       settingSources: [],
     }
 
@@ -699,6 +702,10 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
     let cacheReadTokens = 0
     let cacheCreationTokens = 0
     let wasInterrupted = false
+    // Track the last assistant message's usage for accurate context occupancy.
+    // modelUsage sums across ALL rounds in the agentic loop, but for "context
+    // used" we only care about the most recent round's input tokens.
+    let lastRoundInputTokens = 0
     let numTurns = 0
     let totalCostUsd = 0
     let contextWindow = 0
@@ -746,6 +753,14 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
         if (message.type === "assistant") {
           if (!resolvedModel && (message as any).message?.model) {
             resolvedModel = (message as any).message.model
+          }
+          // Track per-response usage for context occupancy (BetaMessage.usage)
+          const msgUsage = (message as any).message?.usage
+          if (msgUsage) {
+            lastRoundInputTokens =
+              (msgUsage.input_tokens ?? 0) +
+              (msgUsage.cache_read_input_tokens ?? 0) +
+              (msgUsage.cache_creation_input_tokens ?? 0)
           }
           for (const block of message.message.content) {
             if (block.type === "text" && block.text) {
@@ -867,6 +882,7 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
         output_tokens: outputTokens,
         cache_read_input_tokens: cacheReadTokens,
         cache_creation_input_tokens: cacheCreationTokens,
+        last_round_input_tokens: lastRoundInputTokens,
       },
       context: {
         num_turns: numTurns,

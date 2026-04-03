@@ -82,7 +82,7 @@ class SolverNode:
         registry,
         store,
         node_id: str,
-        project_id: int,
+        rpb_address: str = "",
         deterministic_seed: Optional[int] = None,
         task_type: str = "supervised",
         task_mode: str = "ground_truth",
@@ -95,7 +95,7 @@ class SolverNode:
             registry: ContractRegistry instance
             store: BlobStore instance for content-addressed storage
             node_id: Unique identifier for this node (e.g., "solver-0")
-            project_id: Project ID to work on
+            rpb_address: RPB contract address for this jurisdiction
             deterministic_seed: Seed for reproducible training
             task_type: Type of training ("supervised" or "jepa")
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
@@ -104,7 +104,7 @@ class SolverNode:
         self.registry = registry
         self.store = store
         self.node_id = node_id
-        self.project_id = project_id
+        self.rpb_address = rpb_address
         self.config = config or load_config()
         self.deterministic_seed = deterministic_seed or self.config.seed or int(time.time())
         self.task_type = self.config.training.task_type
@@ -121,7 +121,7 @@ class SolverNode:
         # Governance bridge for attestation and heartbeat
         self.governance: Optional[GovernanceBridge] = None  # Set in run() after registry is available
 
-        logger.info(f"[{self.node_id}] Initialized solver node for project {project_id} (task_type={self.task_type})")
+        logger.info(f"[{self.node_id}] Initialized solver node (task_type={self.task_type})")
 
     def run(self, max_cycles: int = 10, cycle_delay: float = 2.0):
         """
@@ -134,7 +134,7 @@ class SolverNode:
         self.running = True
         # Initialize governance bridge now that registry is available
         if self.governance is None:
-            self.governance = GovernanceBridge(self.registry, self.node_id, self.project_id)
+            self.governance = GovernanceBridge(self.registry, self.node_id)
         logger.info(f"[{self.node_id}] Starting main loop: max_cycles={max_cycles}, delay={cycle_delay}s")
 
         for cycle in range(max_cycles):
@@ -238,12 +238,12 @@ class SolverNode:
                 if task_id in self.processed_task_ids:
                     continue
 
-                # Filter by project
-                project_id = event["args"]["projectId"]
-                if project_id != self.project_id:
+                # Filter by RPB
+                rpb_addr = event["args"].get("rpbAddress", "")
+                if self.rpb_address and rpb_addr != self.rpb_address:
                     continue
 
-                logger.info(f"[{self.node_id}] Discovered task {task_id} for project {project_id}")
+                logger.info(f"[{self.node_id}] Discovered task {task_id} (rpb={rpb_addr[:10]}...)" if rpb_addr else f"[{self.node_id}] Discovered task {task_id}")
 
                 # Create task info
                 task_info = TaskInfo(
@@ -346,7 +346,7 @@ class SolverNode:
         global_model_cid = task_spec.get("global_model_cid")
         if not global_model_cid:
             try:
-                global_model_cid = self.registry.get_mature_model(self.project_id)
+                global_model_cid = self.registry.get_mature_model()
             except Exception:
                 pass
 
@@ -858,7 +858,7 @@ def main():
         registry=registry,
         store=store,
         node_id="solver-demo",
-        project_id=1,
+        rpb_address="",
         deterministic_seed=42,
     )
 

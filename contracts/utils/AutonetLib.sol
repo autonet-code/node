@@ -44,16 +44,6 @@ library AutonetLib {
         CONSENSUS_FINALIZED    // Consensus computed and rewards distributed
     }
 
-    // ============ Project Lifecycle ============
-    enum ProjectStatus {
-        FUNDING,           // Accepting investments
-        ACTIVE_TRAINING,   // Distributed training in progress
-        MATURING,          // Final validation phase
-        DEPLOYED,          // Inference service live
-        PAUSED,
-        FAILED
-    }
-
     // ============ Dispute States ============
     enum DisputeStatus {
         CREATED,
@@ -72,7 +62,7 @@ library AutonetLib {
         uint256 proposedSolverReward;        // r_solve
         uint256 creationBlock;
         TaskStatus status;
-        uint256 projectId;
+        address rpbAddress;             // RPB jurisdiction this task belongs to
         TaskMode taskMode;              // GROUND_TRUTH or CONSENSUS_TRUTH
     }
 

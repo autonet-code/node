@@ -29,21 +29,17 @@ DEFAULT_ADDRESSES_FILE = os.path.join(
 # Contract name -> artifact path mapping
 CONTRACT_ARTIFACTS = {
     "ATNToken": "tokens/ATNToken.sol/ATNToken.json",
-    "ProjectToken": "tokens/ProjectToken.sol/ProjectToken.json",
     "ParticipantStaking": "core/ParticipantStaking.sol/ParticipantStaking.json",
     "ModelShardRegistry": "core/ModelShardRegistry.sol/ModelShardRegistry.json",
-    "Project": "core/Project.sol/Project.json",
     "TaskContract": "core/TaskContract.sol/TaskContract.json",
     "ResultsRewards": "core/ResultsRewards.sol/ResultsRewards.json",
     "ForcedErrorRegistry": "core/ForcedErrorRegistry.sol/ForcedErrorRegistry.json",
     "AnchorBridge": "rollup/AnchorBridge.sol/AnchorBridge.json",
     "DisputeManager": "rollup/DisputeManager.sol/DisputeManager.json",
     "AutonetDAO": "governance/AutonetDAO.sol/AutonetDAO.json",
-    # Economic layer — Autonet.sol from trustless-contracts, deployed separately
-    # When deployed, its address goes into deployment-addresses.json as "AutonetEconomy"
-    "AutonetEconomy": "governance/AutonetEconomy.sol/Autonet.json",
-    # Evolution proposals — EvolutionProposal.sol from trustless-contracts
     "EvolutionProposal": "governance/EvolutionProposal.sol/EvolutionProposal.json",
+    "RPB": "core/RPB.sol/RPB.json",
+    "RPBFactory": "core/RPBFactory.sol/RPBFactory.json",
 }
 
 
@@ -235,7 +231,7 @@ class ContractRegistry:
 
     def propose_task(
         self,
-        project_id: int,
+        rpb_address: str,
         spec_hash: bytes,
         ground_truth_hash: bytes,
         learnability_reward: int,
@@ -244,7 +240,7 @@ class ContractRegistry:
         """Propose a new task."""
         return self.send(
             "TaskContract", "proposeTask",
-            project_id, spec_hash, ground_truth_hash,
+            rpb_address, spec_hash, ground_truth_hash,
             learnability_reward, solver_reward,
             gas_limit=800000,
         )
@@ -338,13 +334,13 @@ class ContractRegistry:
         except Exception:
             return False
 
-    # --- Project ---
+    # --- RPB Model ---
 
     def set_mature_model(
-        self, project_id: int, weights_cid: str, price: int
+        self, weights_cid: str, price: int
     ) -> TransactionResult:
-        """Set the mature model for a project."""
-        return self.send("Project", "setMatureModel", project_id, weights_cid, price)
+        """Set the mature model on the RPB."""
+        return self.send("RPB", "setMatureModel", weights_cid, price)
 
     # --- ATN Token ---
 
@@ -659,7 +655,7 @@ class ContractRegistry:
 
     def propose_consensus_task(
         self,
-        project_id: int,
+        rpb_address: str,
         spec_hash: bytes,
         difficulty_target: tuple,
         learnability_reward: int,
@@ -672,7 +668,7 @@ class ContractRegistry:
         """
         return self.send(
             "TaskContract", "proposeConsensusTask",
-            project_id, spec_hash, difficulty_target,
+            rpb_address, spec_hash, difficulty_target,
             learnability_reward, solver_reward,
             gas_limit=800000,
         )
@@ -736,40 +732,16 @@ class ContractRegistry:
         except Exception:
             return None
 
-    # --- Project ---
+    # --- RPB Model ---
 
-    def get_mature_model(self, project_id: int) -> Optional[str]:
-        """Get the current global model hash for a project."""
+    def get_mature_model(self) -> Optional[str]:
+        """Get the current mature model from the RPB."""
         try:
-            result = self.call("Project", "getMatureModel", project_id)
+            result = self.call("RPB", "getMatureModel")
             # Returns (weightsCid, price) tuple
             if result and len(result) >= 1:
                 cid = result[0] if isinstance(result, (list, tuple)) else result
                 return cid if cid else None
-            return None
-        except Exception:
-            return None
-
-    def submit_inference_result(
-        self, project_id: int, request_id: int, output_hash: str
-    ) -> "TransactionResult":
-        """Submit an inference result on-chain."""
-        return self.send(
-            "Project", "submitInferenceResult",
-            project_id, request_id, output_hash,
-        )
-
-    def get_inference_result(self, request_id: int) -> Optional[dict]:
-        """Get an inference result by request ID."""
-        try:
-            result = self.call("Project", "getInferenceResult", request_id)
-            if result:
-                return {
-                    "provider": result[0],
-                    "outputHash": result[1],
-                    "timestamp": result[2],
-                    "fulfilled": result[3],
-                }
             return None
         except Exception:
             return None

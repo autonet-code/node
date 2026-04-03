@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
 from ..events import Event, EventBus, EventType
@@ -24,6 +23,8 @@ from ..models import (
 )
 from ..store import AgentOutput, ExecutionLog, OutputStore
 from ..steps.base import StepContext, StepExecutor
+from ..run_summary import extract_run_summary
+from ..shell_tools import SHELL_TOOLS as _SHELL_TOOLS, SHELL_TOOL_EXECUTORS as _SHELL_TOOL_EXECUTORS
 
 if TYPE_CHECKING:
     from .agent_registry import AgentRegistry
@@ -35,164 +36,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Shell tools for non-bridge providers
-# ---------------------------------------------------------------------------
-
-_SHELL_TOOLS: list[dict[str, Any]] = [
-    {
-        "name": "bash",
-        "description": "Execute a shell command and return stdout+stderr. Use for running scripts, git, npm, pip, etc.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "The shell command to execute"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds (default 120)", "default": 120},
-            },
-            "required": ["command"],
-        },
-    },
-    {
-        "name": "read_file",
-        "description": "Read the contents of a file. Returns the text content.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Absolute path to the file"},
-                "offset": {"type": "integer", "description": "Line number to start from (1-based)"},
-                "limit": {"type": "integer", "description": "Max lines to read"},
-            },
-            "required": ["path"],
-        },
-    },
-    {
-        "name": "write_file",
-        "description": "Write content to a file (creates or overwrites).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Absolute path to the file"},
-                "content": {"type": "string", "description": "The content to write"},
-            },
-            "required": ["path", "content"],
-        },
-    },
-    {
-        "name": "list_directory",
-        "description": "List files and directories at the given path.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Directory path to list"},
-            },
-            "required": ["path"],
-        },
-    },
-    {
-        "name": "search_files",
-        "description": "Search for a regex pattern in files. Returns matching lines with file paths and line numbers.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "Regex pattern to search for"},
-                "path": {"type": "string", "description": "Directory to search in"},
-                "glob": {"type": "string", "description": "File glob pattern (e.g. '*.py')"},
-            },
-            "required": ["pattern"],
-        },
-    },
-]
-
-
-async def _exec_bash(inp: dict) -> dict:
-    import subprocess
-    cmd = inp.get("command", "")
-    timeout = inp.get("timeout", 120)
-    try:
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True,
-            timeout=timeout, cwd=str(Path.cwd()),
-        )
-        output = result.stdout
-        if result.stderr:
-            output += ("\n" if output else "") + result.stderr
-        return {"output": output[:50000], "exit_code": result.returncode}
-    except subprocess.TimeoutExpired:
-        return {"error": f"Command timed out after {timeout}s"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-async def _exec_read_file(inp: dict) -> dict:
-    try:
-        p = Path(inp["path"])
-        if not p.exists():
-            return {"error": f"File not found: {p}"}
-        text = p.read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines(keepends=True)
-        offset = max(0, inp.get("offset", 1) - 1)
-        limit = inp.get("limit", len(lines))
-        selected = lines[offset:offset + limit]
-        numbered = [f"{i + offset + 1}\t{line}" for i, line in enumerate(selected)]
-        return {"content": "".join(numbered)[:100000]}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-async def _exec_write_file(inp: dict) -> dict:
-    try:
-        p = Path(inp["path"])
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(inp["content"], encoding="utf-8")
-        return {"status": "ok", "path": str(p), "bytes": len(inp["content"])}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-async def _exec_list_dir(inp: dict) -> dict:
-    try:
-        p = Path(inp["path"])
-        if not p.is_dir():
-            return {"error": f"Not a directory: {p}"}
-        entries = []
-        for item in sorted(p.iterdir()):
-            kind = "dir" if item.is_dir() else "file"
-            size = item.stat().st_size if item.is_file() else 0
-            entries.append({"name": item.name, "type": kind, "size": size})
-        return {"entries": entries[:500]}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-async def _exec_search_files(inp: dict) -> dict:
-    import subprocess
-    pattern = inp.get("pattern", "")
-    path = inp.get("path", str(Path.cwd()))
-    glob_pat = inp.get("glob", "")
-    cmd = ["rg", "-n", "--max-count", "50", pattern, path]
-    if glob_pat:
-        cmd.extend(["--glob", glob_pat])
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        return {"matches": result.stdout[:50000]}
-    except FileNotFoundError:
-        cmd = ["grep", "-rn", pattern, path]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            return {"matches": result.stdout[:50000]}
-        except Exception as e:
-            return {"error": str(e)}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-_SHELL_TOOL_EXECUTORS: dict[str, Any] = {
-    "bash": _exec_bash,
-    "read_file": _exec_read_file,
-    "write_file": _exec_write_file,
-    "list_directory": _exec_list_dir,
-    "search_files": _exec_search_files,
-}
+class _BudgetExceeded(Exception):
+    """Flow control exception for budget exceeded condition."""
+    pass
 
 
 class ExecutionEngine:
@@ -244,6 +90,11 @@ class ExecutionEngine:
     async def trigger_run(self, agent_id: str, source: str = "user") -> str | None:
         self.registry._require_agent(agent_id)
         defn = self.registry._agents[agent_id]
+
+        # Check if agent is budget-paused
+        status = self.registry._status.get(agent_id)
+        if status == AgentStatus.BUDGET_PAUSED:
+            return None  # Can't run — budget exceeded
 
         if self.registry._running_count.get(agent_id, 0) >= defn.concurrency:
             await self.events.emit(Event(
@@ -380,23 +231,6 @@ class ExecutionEngine:
                     connector_ids=defn.connector_ids,
                 )
 
-                # Budget check before cognitive steps
-                if step_def.type == StepType.COGNITIVE and defn.budgets:
-                    provider_name = step_def.config.get("provider", "")
-                    if isinstance(provider_name, list):
-                        provider_name = provider_name[0] if provider_name else ""
-                    limit = defn.budgets.get(provider_name, 0)
-                    if limit > 0:
-                        current = record.token_usage.get(provider_name)
-                        used = current.total if current else 0
-                        if used >= limit:
-                            record.status = ExecutionStatus.FAILED
-                            record.error = (
-                                f"Token budget exceeded for '{provider_name}': "
-                                f"used {used}, limit {limit}"
-                            )
-                            break
-
                 step_result = await executor.execute(step_def, i, ctx)
                 record.step_results.append(step_result)
                 previous.append(step_result.output)
@@ -521,31 +355,19 @@ class ExecutionEngine:
         cancel: asyncio.Event,
     ) -> None:
         from ..delegate_prompts import build_delegate_prompt
-        from ..orchestrator import ORCHESTRATOR_ID
         from ..orchestrator.tools import _get_delegate_tools, get_tool_definitions_for_bridge
 
-        is_orchestrator = defn.id == ORCHESTRATOR_ID
         sub_provider = None
         owns_provider = True
 
         try:
-            # --- Provider lifecycle ---
-            if is_orchestrator:
-                sub_provider = self.provider_manager._active_providers.get(defn.id)
-                if sub_provider is None:
-                    sub_provider = self.provider_manager.resolve_provider_with_fallback(defn)
-                    owns_provider = True
-                else:
-                    owns_provider = False
-            else:
-                stale_provider = self.provider_manager._active_providers.pop(defn.id, None)
-                if stale_provider is not None:
-                    log.info("Cleaning up stale provider for agent %s", defn.id)
-                    try:
-                        await stale_provider.close()
-                    except Exception:
-                        pass
+            # --- Provider lifecycle (unified: all agents reuse existing provider) ---
+            sub_provider = self.provider_manager._active_providers.get(defn.id)
+            if sub_provider is None:
                 sub_provider = self.provider_manager.resolve_provider_with_fallback(defn)
+                owns_provider = True
+            else:
+                owns_provider = False
 
             sub_provider.event_bus = self.events
             sub_provider.source_agent_id = defn.id
@@ -554,6 +376,14 @@ class ExecutionEngine:
             # Register interrupt hook
             self.register_interrupt_hook(record.execution_id, sub_provider.interrupt)
 
+            # Pre-execution budget check
+            provider_name = getattr(sub_provider, 'name', 'claude_max')
+            ok, blocker = self.registry.check_budget(defn.id, provider_name)
+            if not ok:
+                record.status = ExecutionStatus.FAILED
+                record.error = f"Budget exceeded (blocked by {blocker})"
+                raise _BudgetExceeded()
+
             # --- System prompt ---
             if defn.system_prompt:
                 system_prompt = defn.system_prompt
@@ -561,6 +391,19 @@ class ExecutionEngine:
                 system_prompt = build_delegate_prompt(
                     defn.agent_type, defn.id, defn.parent_id,
                 )
+
+            # --- Constitutional preamble (registered agents only) ---
+            # Injected by the runtime, not user-modifiable.  The constitution
+            # text comes from the on-chain Registry and is cached by the
+            # AutonetBridge.  Only agents with registered_on_chain=True get
+            # the preamble — unregistered agents operate without it.
+            if (defn.identity and defn.identity.registered_on_chain
+                    and hasattr(self, '_autonet_bridge') and self._autonet_bridge):
+                constitution = self._autonet_bridge.constitution_text
+                if constitution:
+                    from ..delegate_prompts import build_constitutional_preamble
+                    preamble = build_constitutional_preamble(constitution)
+                    system_prompt = preamble + system_prompt
 
             # --- Tool surface ---
             if "atn_full" in (defn.tools or []):
@@ -613,36 +456,25 @@ class ExecutionEngine:
                 prompt_parts.append(defn.description or defn.name)
             user_message = "\n\n".join(prompt_parts)
 
-            # --- Session resume / history ---
-            session_id = ""
-            if is_orchestrator:
-                session_id = getattr(sub_provider, '_session_id', "") or ""
-                # Record the user message (skip if already recorded by
-                # ws_server to avoid duplicates in the conversation store).
-                existing_turns = self.session_manager.conversation.get_turns()
-                if (not existing_turns
-                        or existing_turns[-1].role != "user"
-                        or existing_turns[-1].content != user_message):
-                    self.session_manager.conversation.add_user_turn(user_message)
-                # Build prior-turn history for non-session providers,
-                # excluding the current user message (exclude_last=1) so
-                # it doesn't appear in both history AND the prompt.
-                if not session_id:
-                    history = self.session_manager.conversation.get_history_for_prompt(
-                        exclude_last=1,
-                    )
-                else:
-                    history = ""
-                # Prepend conversation history for non-session providers
-                if history:
-                    user_message = history + "\n\nUser: " + user_message
-            else:
-                agent_convo = self.session_manager.get_agent_conversation_store(defn.id)
-                existing = agent_convo.get_turns()
-                if not existing or existing[-1].role != "user" or existing[-1].content != user_message:
-                    agent_convo.add_user_turn(user_message)
+            # --- Session resume / history (unified for all agents) ---
+            agent_convo = self.session_manager.get_agent_conversation_store(defn.id)
+            session_id = getattr(sub_provider, '_session_id', "") or ""
+            # Record the user message (skip if already recorded by
+            # ws_server or prior path to avoid duplicates).
+            existing_turns = agent_convo.get_turns()
+            if (not existing_turns
+                    or existing_turns[-1].role != "user"
+                    or existing_turns[-1].content != user_message):
+                agent_convo.add_user_turn(user_message)
+
+            # Non-session providers need history injected (session providers
+            # have it in the SDK's conversation already).
+            if not session_id:
                 prior_turns = agent_convo.get_turns()
-                if prior_turns and prior_turns[-1].role == "user" and prior_turns[-1].content == user_message:
+                # Exclude the current message so it doesn't appear twice
+                if (prior_turns
+                        and prior_turns[-1].role == "user"
+                        and prior_turns[-1].content == user_message):
                     prior_turns = prior_turns[:-1]
                 if prior_turns:
                     system_prompt = self._append_history_to_prompt(system_prompt, prior_turns)
@@ -653,9 +485,19 @@ class ExecutionEngine:
             time_line = f"Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')} ({now.strftime('%A, %B %d, %Y')})"
             user_message = f"[{time_line}]\n\n{user_message}"
 
-            # --- Tool executor ---
+            # --- Tool executor (with call accumulation for run summary) ---
+            _accumulated_tool_calls: list[dict[str, Any]] = []
+
             async def _tool_executor(name: str, tool_input: dict) -> dict:
-                return await self.route_tool_call(name, tool_input, defn.id)
+                result = await self.route_tool_call(name, tool_input, defn.id)
+                is_error = isinstance(result, dict) and "error" in result
+                _accumulated_tool_calls.append({
+                    "tool": name,
+                    "args": tool_input,
+                    "result": str(result)[:4000],
+                    "success": not is_error,
+                })
+                return result
 
             # --- Streaming callback ---
             async def _on_chunk(text: str) -> None:
@@ -676,7 +518,7 @@ class ExecutionEngine:
                 self.trace_logger.begin_execution(
                     agent_id=defn.id,
                     execution_id=record.execution_id,
-                    agent_type=defn.agent_type or ("orchestrator" if is_orchestrator else "cognitive"),
+                    agent_type=defn.agent_type or "cognitive",
                     system_prompt=system_prompt,
                     # Store the raw user message before history prepending for cleaner traces
                     user_message="\n\n".join(prompt_parts) if prompt_parts else (defn.description or defn.name),
@@ -704,7 +546,6 @@ class ExecutionEngine:
                 + response.usage.cache_read_tokens
                 + response.usage.cache_creation_tokens
             )
-
             if response.stop_reason == "interrupted" or cancel.is_set():
                 record.status = ExecutionStatus.KILLED
                 record.error = "Interrupted"
@@ -730,14 +571,29 @@ class ExecutionEngine:
             record.token_usage[provider_key].cache_read_tokens += response.usage.cache_read_tokens
             record.token_usage[provider_key].cache_creation_tokens += response.usage.cache_creation_tokens
 
-            if is_orchestrator and result_text:
-                self.session_manager.conversation.add_assistant_turn(
+            # Record assistant turn to conversation store (unified for all agents).
+            # For the root agent, get_agent_conversation_store returns the
+            # central store visible in the UI.
+            if result_text:
+                agent_convo.add_assistant_turn(
                     result_text, execution_id=record.execution_id,
                 )
+
+            # Sync the provider's turn count with the conversation store
+            # (the real source of truth that includes history from disk).
+            all_turns = agent_convo.get_turns()
+            sub_provider._cumulative_turns = len(all_turns)
+
+            # Persist session stats to disk so they survive restarts
+            if hasattr(sub_provider, 'session_stats'):
+                agent_convo.save_session_stats(sub_provider.session_stats)
 
         except asyncio.CancelledError:
             record.status = ExecutionStatus.KILLED
             record.error = "Force-cancelled by kill switch"
+        except _BudgetExceeded:
+            # Already handled — status and error set before raising
+            pass
         except Exception as exc:
             record.status = ExecutionStatus.FAILED
             record.error = str(exc)
@@ -755,6 +611,24 @@ class ExecutionEngine:
                     execution_id=record.execution_id,
                 ))
 
+            # Record usage in cascading budget system
+            for provider_key, usage in record.token_usage.items():
+                total = usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_creation_tokens
+                if total > 0:
+                    exceeded = self.registry.record_token_usage(defn.id, provider_key, total)
+                    if exceeded:
+                        # Auto-pause the exceeded agent
+                        self.registry._status[exceeded] = AgentStatus.BUDGET_PAUSED
+                        await self.events.emit(Event(
+                            type=EventType.BUDGET_EXCEEDED,
+                            source=exceeded,
+                            data={
+                                "agent_id": exceeded,
+                                "triggered_by": defn.id,
+                                "provider": provider_key,
+                            },
+                        ))
+
             # --- Trace logging: finalise trace ---
             if self.trace_logger is not None:
                 _trace_result = ""
@@ -771,24 +645,16 @@ class ExecutionEngine:
                     completed_at=record.completed_at,
                 )
 
-            # Record assistant turn (children)
-            if not is_orchestrator:
-                _convo_text = ""
-                if isinstance(record.output, dict):
-                    _convo_text = record.output.get("result", "")
-                elif record.output:
-                    _convo_text = str(record.output)
-                if record.error:
-                    _convo_text = (
-                        f"{_convo_text}\n\nError: {record.error}"
-                        if _convo_text else f"Error: {record.error}"
+            # Record error in conversation if the try block didn't get to
+            # record the assistant turn (exception path).
+            if record.error and record.status != ExecutionStatus.COMPLETED:
+                try:
+                    _err_store = self.session_manager.get_agent_conversation_store(defn.id)
+                    _err_store.add_assistant_turn(
+                        f"Error: {record.error}", execution_id=record.execution_id,
                     )
-                if _convo_text:
-                    try:
-                        _convo_store = self.session_manager.get_agent_conversation_store(defn.id)
-                        _convo_store.add_assistant_turn(_convo_text, execution_id=record.execution_id)
-                    except Exception:
-                        log.warning("Failed to record assistant turn for %s", defn.id)
+                except Exception:
+                    log.warning("Failed to record error turn for %s", defn.id)
 
             # Sync delegate registry
             result_text = ""
@@ -796,19 +662,47 @@ class ExecutionEngine:
             if isinstance(record.output, dict):
                 result_text = record.output.get("result", "")
                 total_tokens = record.output.get("tokens_used", 0)
+
+            # Build deterministic run summary from accumulated tool calls
+            run_summary = ""
+            try:
+                run_summary = extract_run_summary(
+                    tool_calls=_accumulated_tool_calls,
+                    max_turns=defn.max_turns,
+                    actual_turns=len([
+                        tc for tc in _accumulated_tool_calls
+                    ]) if _accumulated_tool_calls else None,
+                    status=record.status.value if record.status else "",
+                    error=record.error,
+                )
+            except Exception:
+                log.debug("Failed to extract run summary for %s", defn.id, exc_info=True)
+
+            # Store run summary in output for downstream consumers
+            if run_summary and isinstance(record.output, dict):
+                record.output["run_summary"] = run_summary
+
+            # Combine: deterministic summary + agent's last response
+            if run_summary and result_text:
+                combined_preview = f"{run_summary}\n\n---\n{result_text}"
+            elif run_summary:
+                combined_preview = run_summary
+            else:
+                combined_preview = result_text
+
             delegate_node = self.delegate_registry.get_node(defn.id)
             if delegate_node is not None:
                 from ..agent_registry import DelegateStatus
                 if record.status == ExecutionStatus.COMPLETED:
                     self.delegate_registry.update_status(
                         defn.id, DelegateStatus.COMPLETED,
-                        result_preview=result_text[:500],
+                        result_preview=combined_preview[:2000],
                         tokens_used=total_tokens,
                     )
                 elif record.status == ExecutionStatus.KILLED:
                     self.delegate_registry.update_status(
                         defn.id, DelegateStatus.KILLED,
-                        result_preview=result_text[:500],
+                        result_preview=combined_preview[:2000],
                         tokens_used=total_tokens,
                     )
                 else:
@@ -825,13 +719,11 @@ class ExecutionEngine:
             self._cancels.pop(record.execution_id, None)
             self._interrupt_hooks.pop(record.execution_id, None)
 
-            # Provider lifecycle
-            if owns_provider and sub_provider is not None:
-                self.provider_manager._active_providers.pop(defn.id, None)
-                try:
-                    await sub_provider.close()
-                except Exception:
-                    pass
+            # Provider lifecycle: keep the provider alive in _active_providers
+            # so it is reused across executions. This preserves session state,
+            # prompt caching, and allows session_stats to be fetched after
+            # execution completes. Cleanup happens on explicit reset
+            # (new_conversation, agent unregistered) not after each execution.
 
             if self.registry._running_count.get(defn.id, 0) == 0:
                 self.registry._last_idle[defn.id] = datetime.now(timezone.utc)

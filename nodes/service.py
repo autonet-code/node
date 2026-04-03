@@ -300,7 +300,6 @@ class AutonetService:
             governance = GovernanceBridge(
                 registry=registry,
                 node_id=f"service-{blockchain.account.address[:10]}" if blockchain.account else "service-anon",
-                project_id=0,
             )
 
             logger.info(

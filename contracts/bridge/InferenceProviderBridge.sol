@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "../interfaces/IInferenceProvider.sol";
-import "../core/Project.sol";
+import "../core/RPB.sol";
 import "../core/ParticipantStaking.sol";
 import "../tokens/ATNToken.sol";
 import "../utils/AutonetLib.sol";
@@ -33,10 +33,9 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  * - Protocol fee funds jackpots that incentivize honest spot-checking
  */
 contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard {
-    Project public immutable project;
+    RPB public immutable rpb;
     ATNToken public immutable atnToken;
     ParticipantStaking public immutable staking;
-    uint256 public immutable projectId;
 
     // ============ BME Economics Parameters ============
 
@@ -110,15 +109,13 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
     // ============ Constructor ============
 
     constructor(
-        address _project,
-        uint256 _projectId,
+        address _rpb,
         address _staking,
         address _owner
     ) Ownable(_owner) {
-        project = Project(_project);
-        projectId = _projectId;
+        rpb = RPB(_rpb);
         staking = ParticipantStaking(_staking);
-        atnToken = project.atnToken();
+        atnToken = rpb.atnToken();
     }
 
     // ============ Admin Functions ============
@@ -169,7 +166,7 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
         ));
 
         // Get effective price
-        uint256 fee = project.getEffectivePrice(projectId, msg.sender);
+        uint256 fee = rpb.getEffectivePrice(msg.sender);
         require(fee <= maxCredits, "Price exceeds maxCredits");
         require(fee > 0, "Zero fee");
 
@@ -225,7 +222,7 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
 
     /// @notice Get current price per inference unit
     function getPricePerUnit() external view override returns (uint256) {
-        (, uint256 price) = project.getMatureModel(projectId);
+        (, uint256 price) = rpb.getMatureModel();
         return price;
     }
 
@@ -267,9 +264,9 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
             emit ResultSubmitted(requestId, msg.sender, provider, outputCid);
             // Payment is staged — resolveVerification() will finalize
         } else {
-            // BME Step 2: Mint ATN to provider from burn pool
+            // BME Step 2: Settle via RPB revenue split (provider/shareholder/treasury)
             req.completed = true;
-            _mintToProvider(provider, req.providerAmount);
+            _settleInference(req.requester, provider, req.providerAmount, req.burnedAmount);
             emit ResultSubmitted(requestId, msg.sender, provider, outputCid);
             emit InferenceCompleted(requestId, req.burnedAmount);
             emit ProviderPaid(requestId, provider, req.providerAmount);
@@ -301,7 +298,7 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
             emit VerificationTriggered(requestId, provider, req.providerAmount);
         } else {
             req.completed = true;
-            _mintToProvider(provider, req.providerAmount);
+            _settleInference(req.requester, provider, req.providerAmount, req.burnedAmount);
             emit InferenceCompleted(requestId, req.burnedAmount);
             emit ProviderPaid(requestId, provider, req.providerAmount);
         }
@@ -331,8 +328,8 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
         address provider = req.provider;
 
         if (honest) {
-            // Provider was honest: pay them in full
-            _mintToProvider(provider, req.providerAmount);
+            // Provider was honest: settle via RPB revenue split
+            _settleInference(req.requester, provider, req.providerAmount, req.burnedAmount);
             emit VerificationResolved(requestId, provider, true, req.providerAmount);
             emit ProviderPaid(requestId, provider, req.providerAmount);
         } else {
@@ -374,13 +371,54 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
     // ============ BME Internal Helpers ============
 
     /**
-     * @dev Mint ATN to provider from burn pool (BME mint step).
-     *      Requires this contract is an authorized minter on ATNToken.
+     * @dev Settle an inference payment using RPB's revenue split ratios.
+     *
+     *      Reads the 60/25/15 (provider/shareholder/treasury) split from RPB
+     *      and mints ATN accordingly:
+     *        - Provider share  → minted to provider
+     *        - Treasury share  → minted to DAO
+     *        - Shareholder share → minted to RPB contract (for dividend claims)
+     *
+     *      Then calls rpb.recordInferenceBME() to update RPB accounting so
+     *      shareholders can claim dividends.
+     *
+     *      Requires this contract is an authorized minter on ATNToken and an
+     *      authorized disburser on RPB.
      */
-    function _mintToProvider(address provider, uint256 amount) internal {
-        if (amount > 0) {
-            atnToken.mint(provider, amount);
+    function _settleInference(
+        address requester,
+        address provider,
+        uint256 amount,
+        uint256 burnedAmount
+    ) internal {
+        if (amount == 0) return;
+
+        uint256 providerSplit = rpb.inferenceProviderShare();
+        uint256 treasurySplit = rpb.treasuryShare();
+
+        uint256 providerPayment = (amount * providerSplit) / 10000;
+        uint256 treasuryPayment = (amount * treasurySplit) / 10000;
+        uint256 shareholderPayment = amount - providerPayment - treasuryPayment;
+
+        // Mint to each recipient
+        if (providerPayment > 0) {
+            atnToken.mint(provider, providerPayment);
         }
+        if (treasuryPayment > 0) {
+            atnToken.mint(rpb.dao(), treasuryPayment);
+        }
+        if (shareholderPayment > 0) {
+            atnToken.mint(address(rpb), shareholderPayment);
+        }
+
+        // Update RPB accounting for dividend tracking
+        rpb.recordInferenceBME(
+            requester,
+            provider,
+            1,                   // 1 inference unit per request
+            burnedAmount,        // total revenue = what the user burned
+            shareholderPayment   // portion minted to RPB for dividends
+        );
     }
 
     /**
@@ -431,7 +469,7 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
     }
 
     function getModelCid() external view returns (string memory) {
-        (string memory weightsCid, ) = project.getMatureModel(projectId);
+        (string memory weightsCid, ) = rpb.getMatureModel();
         return weightsCid;
     }
 

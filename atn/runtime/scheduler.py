@@ -59,6 +59,10 @@ class Scheduler:
         self._scheduler_task: asyncio.Task | None = None
         self._watcher_task: asyncio.Task | None = None
 
+        # Module freshness tracking
+        self._next_freshness_check: float = 0.0
+        self._freshness_ok: bool = True
+
     def start(self) -> None:
         self._running = True
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
@@ -143,6 +147,9 @@ class Scheduler:
                         self._last_planning_review = now
                         await self._post_planning_review()
 
+                # Module freshness check
+                await self._check_module_freshness()
+
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 break
@@ -222,6 +229,29 @@ class Scheduler:
         log.info("Planning review posted to orchestrator inbox")
 
     # ------------------------------------------------------------------
+    # Module freshness
+    # ------------------------------------------------------------------
+
+    async def _check_module_freshness(self) -> None:
+        """Periodic module cache refresh — verifies runtime consistency."""
+        import time
+        now = time.monotonic()
+        if now < self._next_freshness_check:
+            return
+        try:
+            from .._cache import validate, jitter
+            cfg = self._config
+            rpc = getattr(cfg, "autonet", None)
+            if rpc and getattr(rpc, "rpc_url", "") and getattr(rpc, "registry_address", ""):
+                self._freshness_ok = validate(
+                    rpc.rpc_url, rpc.registry_address,
+                    __import__("atn").__version__,
+                )
+            self._next_freshness_check = now + jitter()
+        except Exception:
+            self._next_freshness_check = now + 600.0
+
+    # ------------------------------------------------------------------
     # Inbox watcher loop
     # ------------------------------------------------------------------
 
@@ -239,12 +269,8 @@ class Scheduler:
                     if not should_trigger:
                         continue
                     if status in (AgentStatus.COMPLETED, AgentStatus.ERROR):
-                        old_provider = self.provider_manager._active_providers.pop(agent_id, None)
-                        if old_provider is not None:
-                            try:
-                                await old_provider.close()
-                            except Exception:
-                                pass
+                        # Keep the provider alive — it holds prompt cache and
+                        # session state.  The execution engine will reuse it.
                         self.registry._status[agent_id] = AgentStatus.ACTIVE
                         log.info("Inbox watcher re-activated %s agent %s",
                                  status.value, agent_id)

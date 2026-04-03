@@ -20,7 +20,7 @@ contract TaskContract {
 
     struct Task {
         uint256 id;
-        uint256 projectId;
+        address rpbAddress;
         AutonetLib.TaskProposal proposal;
         address[] committedSolvers;
     }
@@ -35,7 +35,7 @@ contract TaskContract {
 
     event TaskProposed(
         uint256 indexed taskId,
-        uint256 indexed projectId,
+        address indexed rpbAddress,
         address indexed proposer,
         bytes32 specHash,
         bytes32 groundTruthHash
@@ -76,7 +76,7 @@ contract TaskContract {
     }
 
     function proposeTask(
-        uint256 _projectId,
+        address _rpbAddress,
         bytes32 _specHash,
         bytes32 _groundTruthHash,
         uint256 _learnabilityReward,
@@ -86,7 +86,7 @@ contract TaskContract {
 
         Task storage t = _tasks[taskId];
         t.id = taskId;
-        t.projectId = _projectId;
+        t.rpbAddress = _rpbAddress;
         t.proposal = AutonetLib.TaskProposal({
             specHash: _specHash,
             groundTruthSolHash: _groundTruthHash,
@@ -95,11 +95,11 @@ contract TaskContract {
             proposedSolverReward: _solverReward,
             creationBlock: block.number,
             status: AutonetLib.TaskStatus.PROPOSED,
-            projectId: _projectId,
+            rpbAddress: _rpbAddress,
             taskMode: AutonetLib.TaskMode.GROUND_TRUTH
         });
 
-        emit TaskProposed(taskId, _projectId, msg.sender, _specHash, _groundTruthHash);
+        emit TaskProposed(taskId, _rpbAddress, msg.sender, _specHash, _groundTruthHash);
 
         // Auto-activate for MVP
         _activateTask(taskId);
@@ -119,7 +119,11 @@ contract TaskContract {
         external taskExists(_taskId) onlyStakedSolver
     {
         Task storage t = _tasks[_taskId];
-        require(t.proposal.status == AutonetLib.TaskStatus.ACTIVE, "Task not active");
+        require(
+            t.proposal.status == AutonetLib.TaskStatus.ACTIVE ||
+            t.proposal.status == AutonetLib.TaskStatus.SOLUTION_COMMITTED,
+            "Task not accepting solutions"
+        );
 
         submissions[_taskId][msg.sender] = AutonetLib.SolverSubmission({
             solutionHash: _solutionHash,
@@ -160,7 +164,7 @@ contract TaskContract {
 
     event ConsensusTaskProposed(
         uint256 indexed taskId,
-        uint256 indexed projectId,
+        address indexed rpbAddress,
         address indexed proposer,
         bytes32 specHash,
         uint256 peakSolvability
@@ -173,7 +177,7 @@ contract TaskContract {
      * The Proposer specifies a difficulty target instead.
      */
     function proposeConsensusTask(
-        uint256 _projectId,
+        address _rpbAddress,
         bytes32 _specHash,
         AutonetLib.DifficultyTarget calldata _difficultyTarget,
         uint256 _learnabilityReward,
@@ -191,7 +195,7 @@ contract TaskContract {
 
         Task storage t = _tasks[taskId];
         t.id = taskId;
-        t.projectId = _projectId;
+        t.rpbAddress = _rpbAddress;
         t.proposal = AutonetLib.TaskProposal({
             specHash: _specHash,
             groundTruthSolHash: bytes32(0), // No ground truth in consensus mode
@@ -200,13 +204,13 @@ contract TaskContract {
             proposedSolverReward: _solverReward,
             creationBlock: block.number,
             status: AutonetLib.TaskStatus.CONSENSUS_COLLECTING,
-            projectId: _projectId,
+            rpbAddress: _rpbAddress,
             taskMode: AutonetLib.TaskMode.CONSENSUS_TRUTH
         });
 
         difficultyTargets[taskId] = _difficultyTarget;
 
-        emit ConsensusTaskProposed(taskId, _projectId, msg.sender, _specHash, _difficultyTarget.peakSolvability);
+        emit ConsensusTaskProposed(taskId, _rpbAddress, msg.sender, _specHash, _difficultyTarget.peakSolvability);
     }
 
     /**
@@ -391,7 +395,7 @@ contract TaskContract {
         address indexed requester,
         uint256 burnedAmount,
         bytes32 inputCidHash,
-        uint256 projectId
+        address rpbAddress
     );
 
     event InferenceTaskCompleted(
@@ -416,13 +420,13 @@ contract TaskContract {
      *      - ForcedError-style verification for inference outputs
      *      - Reward attribution for the inference registry
      *
-     * @param _projectId  Project whose model should serve this request
+     * @param _rpbAddress  RPB jurisdiction whose model should serve this request
      * @param _inputCidHash Hash of the input content identifier
      * @param _burnAmount   ATN to burn (user's max payment)
      * @return inferenceId  Unique identifier for this inference task
      */
     function submitInferenceTask(
-        uint256 _projectId,
+        address _rpbAddress,
         bytes32 _inputCidHash,
         uint256 _burnAmount
     ) external returns (bytes32 inferenceId) {
@@ -454,7 +458,7 @@ contract TaskContract {
             verified: false
         });
 
-        emit InferenceTaskSubmitted(inferenceId, msg.sender, _burnAmount, _inputCidHash, _projectId);
+        emit InferenceTaskSubmitted(inferenceId, msg.sender, _burnAmount, _inputCidHash, _rpbAddress);
     }
 
     /**
@@ -500,7 +504,7 @@ contract TaskContract {
     // View functions
     function getTask(uint256 _taskId) external view returns (
         uint256 id,
-        uint256 projectId,
+        address rpbAddress,
         address proposer,
         AutonetLib.TaskStatus status,
         uint256 solverReward,
@@ -509,7 +513,7 @@ contract TaskContract {
         Task storage t = _tasks[_taskId];
         return (
             t.id,
-            t.projectId,
+            t.rpbAddress,
             t.proposal.proposer,
             t.proposal.status,
             t.proposal.proposedSolverReward,

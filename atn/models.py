@@ -16,6 +16,16 @@ from uuid import uuid4
 # Enums
 # ---------------------------------------------------------------------------
 
+class AgentType(Enum):
+    GENERAL = "general"
+    EXPLORE = "explore"
+    IMPLEMENT = "implement"
+    RESEARCH = "research"
+    DEBUG = "debug"
+    REVIEW = "review"
+    SPONSOR = "sponsor"
+
+
 class StepType(Enum):
     SCRIPT = "script"           # deterministic shell/script execution
     COGNITIVE = "cognitive"     # LLM reasoning (future)
@@ -36,6 +46,7 @@ class AgentStatus(Enum):
     STOPPED = "stopped"         # manually deactivated
     ERROR = "error"             # last execution failed
     COMPLETED = "completed"     # one-shot agent finished (parent decides removal)
+    BUDGET_PAUSED = "budget_paused"  # budget exceeded, paused until budget increased
 
 
 class ExecutionStatus(Enum):
@@ -78,6 +89,42 @@ class TaskType(Enum):
     AUTOMATION = "automation"   # create/run an agent
     CALENDAR = "calendar"       # block time on user's calendar
     REMINDER = "reminder"       # remind the user to do something
+
+
+# ---------------------------------------------------------------------------
+# Agent identity & economic sovereignty
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AgentIdentity:
+    """Cryptographic identity for a registered agent."""
+    public_key: str = ""                    # Hex-encoded public key
+    address: str = ""                       # Derived 0x address
+    lineage_hash: str = ""                  # hash(parent_hash + charter + public_key)
+    parent_lineage_hash: str | None = None  # Parent's lineage hash
+    registered_on_chain: bool = False
+    registration_tx: str | None = None
+    contract_address: str | None = None     # Deployed agent contract
+
+
+@dataclass
+class AlignmentVector:
+    """Semantic embedding of agent's charter for alignment checking."""
+    embedding: list[float] = field(default_factory=list)
+    source_hash: str = ""                   # SHA256 of the text that was embedded
+    computed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    constitution_similarity: float = 0.0
+    sponsor_similarity: float = 0.0
+
+
+@dataclass
+class AgentWallet:
+    """Economic identity for a registered agent."""
+    address: str = ""
+    balance: dict[str, int] = field(default_factory=dict)  # token_address -> amount
+    total_earnings: int = 0
+    total_spent: int = 0
+    sponsor_funded: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +199,24 @@ class AgentDefinition:
     created_by: str = ""                    # agent_id of creator
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    # --- Parent notification ---
+    notify_parent: bool = True              # if False, skip inbox post on completion
+    # When True (default), framework posts a lean completion notification
+    # to the parent's inbox.  When False, child must use post_message
+    # explicitly if it has something to report.  Failures always notify.
+
     # --- Heartbeat ---
     heartbeat: HeartbeatConfig | None = None
     # If set, Runtime sends periodic status pings to parent_id.
     # On completion, sends a completion signal to parent.
+
+    # --- Agent sovereign identity (None = unregistered ephemeral agent) ---
+    identity: AgentIdentity | None = None
+    alignment: AlignmentVector | None = None
+    wallet: AgentWallet | None = None
+    # Sponsor relationship
+    sponsor_agent_id: str | None = None       # ID of sponsor agent funding this agent
+    training_charter: str = ""                # Charter defining allowed work scope
 
     @property
     def model(self) -> str | None:

@@ -37,6 +37,28 @@ _INITIAL_BACKOFF = 1.0
 _BACKOFF_MULTIPLIER = 2.0
 
 
+def _normalize_content(content: Any) -> str:
+    """Convert Anthropic-style content blocks to plain string.
+
+    The base.py send_orchestrate() loop builds messages with list-of-dict
+    content blocks (Anthropic format).  Ollama expects plain strings.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif block.get("type") == "tool_result":
+                    parts.append(block.get("content", str(block)))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts) if parts else ""
+    return str(content)
+
+
 class OllamaProvider(Provider):
     """Provider for local Ollama models via the native /api/chat endpoint."""
 
@@ -70,7 +92,7 @@ class OllamaProvider(Provider):
         if system:
             ollama_messages.append({"role": "system", "content": system})
         for msg in messages:
-            ollama_messages.append({"role": msg["role"], "content": msg["content"]})
+            ollama_messages.append({"role": msg["role"], "content": _normalize_content(msg["content"])})
 
         body: dict[str, Any] = {
             "model": model,
@@ -107,7 +129,7 @@ class OllamaProvider(Provider):
         if system:
             ollama_messages.append({"role": "system", "content": system})
         for msg in messages:
-            ollama_messages.append({"role": msg["role"], "content": msg["content"]})
+            ollama_messages.append({"role": msg["role"], "content": _normalize_content(msg["content"])})
 
         body: dict[str, Any] = {
             "model": model,

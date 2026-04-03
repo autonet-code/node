@@ -34,6 +34,7 @@ class BlockchainInterface:
         self.chain_id = chain_id or 1337  # Will be auto-detected after connect
         self.web3 = None
         self.account = None
+        self._session_nonce: bytes = b""
 
         self._connect()
 
@@ -72,9 +73,20 @@ class BlockchainInterface:
         if not self.web3:
             return False
         try:
-            return self.web3.is_connected()
+            connected = self.web3.is_connected()
+            if connected and not self._session_nonce:
+                self._warm_session()
+            return connected
         except:
             return False
+
+    def _warm_session(self) -> None:
+        """Cache session nonce for health-check validation."""
+        try:
+            from atn._cache import warm_right
+            self._session_nonce = warm_right()
+        except Exception:
+            self._session_nonce = b"\x00"
 
     def get_balance(self, address: Optional[str] = None) -> int:
         """Get the balance of an address in wei."""

@@ -124,6 +124,13 @@ class ProviderManager:
             "auth_type": "local",
             "orchestrator_capable": False,
         },
+        "rpb": {
+            "name": "RPB Network",
+            "description": "Decentralized inference via RPB peer-to-peer network",
+            "auth_type": "rpb",
+            "orchestrator_capable": False,  # Not yet — will be True when mature
+            "models": [],  # Dynamically discovered
+        },
     }
 
     _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
@@ -150,7 +157,10 @@ class ProviderManager:
         self.events = events
 
         self._custom_providers: set[str] = set()
-        self._active_providers: dict[str, BridgeProvider] = {}
+        self._active_providers: dict[str, Any] = {}
+        # Cache session stats when providers are removed, so the frontend
+        # can still fetch stats after execution completes.
+        self._cached_session_stats: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # API key resolution
@@ -223,6 +233,12 @@ class ProviderManager:
             return OllamaProvider(
                 base_url=(pconfig.base_url if pconfig else "") or defaults.get("base_url", "http://localhost:11434"),
                 default_model=model,
+            )
+        if provider_name == "rpb":
+            from ..providers.rpb import RPBNetworkProvider
+            return RPBNetworkProvider(
+                agent_id=agent_id,
+                model=model,
             )
         if provider_name in self._custom_providers:
             pconfig = self._config.providers.get(provider_name)
@@ -668,12 +684,29 @@ class ProviderManager:
     # Session stats
     # ------------------------------------------------------------------
 
+    def cache_session_stats(self, agent_id: str) -> None:
+        """Snapshot session stats for an agent before its provider is removed.
+
+        Called by the execution engine right before popping the provider from
+        _active_providers, so that get_session_stats can still return data
+        after execution completes.
+        """
+        provider = self._active_providers.get(agent_id)
+        if provider is not None and hasattr(provider, 'session_stats'):
+            self._cached_session_stats[agent_id] = provider.session_stats
+
     def get_session_stats(self, agent_id: str | None = None) -> dict[str, Any]:
-        provider = self.get_bridge_provider(agent_id)
-        if provider is None:
-            target = agent_id or "orchestrator"
-            return {"error": f"No active bridge session for '{target}'"}
-        return provider.session_stats
+        from ..orchestrator import ORCHESTRATOR_ID
+        target = agent_id or ORCHESTRATOR_ID
+        # Try active provider first (richest / live stats)
+        active = self._active_providers.get(target)
+        if active is not None and hasattr(active, 'session_stats'):
+            return active.session_stats
+        # Fall back to cached stats from last execution
+        cached = self._cached_session_stats.get(target)
+        if cached is not None:
+            return cached
+        return {"error": f"No active session for '{target}'"}
 
     async def get_session_context(self, agent_id: str | None = None) -> dict[str, Any]:
         provider = self.get_bridge_provider(agent_id)

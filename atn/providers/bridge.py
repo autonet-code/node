@@ -463,25 +463,26 @@ class BridgeProvider(Provider):
                             )
                             if self.event_bus:
                                 await self.event_bus.emit(Event(
-                                    type=EventType.CUSTOM,
+                                    type=EventType.CONTEXT_COMPACTION,
                                     source=self.source_agent_id,
                                     data={
-                                        "type": "context_compaction",
                                         "agent_id": self.source_agent_id,
                                         "compaction_count": self._compaction_count,
                                         "trigger": event.get("trigger", "auto"),
                                         "pre_tokens": self._last_compaction_pre_tokens,
+                                        "status": "completed",
                                     },
                                 ))
                         elif event.get("type") == "status":
                             status = event.get("status", "idle")
                             if status == "compacting" and self.event_bus:
                                 await self.event_bus.emit(Event(
-                                    type=EventType.CUSTOM,
+                                    type=EventType.CONTEXT_COMPACTION,
                                     source=self.source_agent_id,
                                     data={
-                                        "type": "context_compacting",
                                         "agent_id": self.source_agent_id,
+                                        "compaction_count": self._compaction_count,
+                                        "status": "in_progress",
                                     },
                                 ))
                     except Exception:
@@ -599,7 +600,16 @@ class BridgeProvider(Provider):
                 self._max_output_tokens = ctx.get("max_output_tokens", self._max_output_tokens)
             if final_resp.get("session_id"):
                 self._session_id = final_resp["session_id"]
-            self._last_input_tokens = usage.input_tokens
+            # Context occupancy: prefer per-response usage from the last assistant
+            # message (accurate for multi-round tool-use turns).  Fall back to
+            # the aggregate modelUsage sum if the bridge didn't report it.
+            last_round = usage_data.get("last_round_input_tokens", 0)
+            if last_round > 0:
+                self._last_input_tokens = last_round
+            else:
+                self._last_input_tokens = (
+                    usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens
+                )
             self._cumulative_input_tokens += usage.input_tokens
             self._cumulative_output_tokens += usage.output_tokens
             self._cumulative_cache_read += usage.cache_read_tokens
@@ -614,7 +624,8 @@ class BridgeProvider(Provider):
                         "agent_id": self.source_agent_id,
                         "channel": "usage",
                         "usage": {
-                            "input_tokens": usage.input_tokens,
+                            # Total context = uncached + cache_read + cache_creation
+                            "input_tokens": self._last_input_tokens,
                             "output_tokens": usage.output_tokens,
                             "cache_read_tokens": usage.cache_read_tokens,
                             "cache_creation_tokens": usage.cache_creation_tokens,
@@ -896,25 +907,39 @@ class BridgeProvider(Provider):
 
     async def close(self) -> None:
         """Shut down the bridge process gracefully."""
-        if self._process and self._process.returncode is None:
-            try:
-                async with self._lock:
-                    await self._send_raw({"type": "shutdown"}, _retry=False)
-            except Exception:
-                pass
-            try:
-                self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=5)
-            except Exception:
-                pass
-            # Close pipes explicitly to avoid ResourceWarning on GC
-            for pipe in (self._process.stdin, self._process.stdout, self._process.stderr):
-                if pipe:
-                    try:
-                        pipe.close()
-                    except Exception:
-                        pass
+        proc = self._process
         self._process = None
         if self._stderr_task:
             self._stderr_task.cancel()
             self._stderr_task = None
+        if proc is None or proc.returncode is not None:
+            return
+        # Ask the bridge to exit cleanly
+        try:
+            async with self._lock:
+                await self._send_raw({"type": "shutdown"}, _retry=False)
+        except Exception:
+            pass
+        # Wait for graceful exit, then force-kill
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3)
+        except (asyncio.TimeoutError, Exception):
+            try:
+                proc.kill()
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            except Exception:
+                pass
+        # Close pipes explicitly so no transport lingers for GC
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+        # Close the underlying transport to prevent __del__ warnings
+        transport = getattr(proc, '_transport', None)
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:
+                pass

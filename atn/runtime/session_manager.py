@@ -54,24 +54,44 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     async def new_conversation(self) -> None:
+        """Reset the orchestrator conversation (legacy wrapper)."""
         from ..orchestrator import ORCHESTRATOR_ID
-        # Kill running executions — use execution_control via runtime
-        # (This is called from the facade which passes through)
-        self.conversation.reset()
-        old_provider = self.provider_manager._active_providers.pop(ORCHESTRATOR_ID, None)
+        await self.reset_agent_conversation(ORCHESTRATOR_ID)
+
+    async def reset_agent_conversation(self, agent_id: str) -> None:
+        """Reset conversation history for any agent.
+
+        Kills the provider session, archives conversation, and re-injects
+        a status briefing for the root agent.  The caller is responsible
+        for killing running executions first.
+        """
+        from ..orchestrator import ORCHESTRATOR_ID
+
+        store = self.get_agent_conversation_store(agent_id)
+        store.reset()
+
+        old_provider = self.provider_manager._active_providers.pop(agent_id, None)
         if old_provider is not None:
             try:
                 await old_provider.close()
             except Exception:
                 pass
-        self._inject_status_briefing()
-        log.info("Conversation reset")
+
+        # Root agent gets a fresh status briefing after reset
+        if agent_id == ORCHESTRATOR_ID:
+            self._inject_status_briefing()
+
+        log.info("Conversation reset for %s", agent_id)
 
     # ------------------------------------------------------------------
     # Per-agent conversation stores
     # ------------------------------------------------------------------
 
     def get_agent_conversation_store(self, agent_id: str) -> ConversationStore:
+        from ..orchestrator import ORCHESTRATOR_ID
+        # The root agent's conversation store is the central one visible in the UI.
+        if agent_id == ORCHESTRATOR_ID:
+            return self.conversation
         if agent_id not in self._agent_conversations:
             store_dir = self._config.data_dir / "agents" / agent_id
             store_dir.mkdir(parents=True, exist_ok=True)
@@ -111,17 +131,9 @@ class SessionManager:
         )
         self.inbox.post(msg)
 
-        # Re-activate completed agents
-        from ..orchestrator import ORCHESTRATOR_ID
+        # Re-activate completed agents (all agents keep their providers)
         status = self.registry.get_status(agent_id)
         if status in (AgentStatus.COMPLETED, AgentStatus.ERROR):
-            if agent_id != ORCHESTRATOR_ID:
-                old_provider = self.provider_manager._active_providers.pop(agent_id, None)
-                if old_provider is not None:
-                    try:
-                        await old_provider.close()
-                    except Exception:
-                        pass
             self.registry._status[agent_id] = AgentStatus.ACTIVE
             log.info("Re-activated %s agent %s for follow-up message", status.value, agent_id)
             status = AgentStatus.ACTIVE

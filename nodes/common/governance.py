@@ -44,9 +44,10 @@ logger = logging.getLogger(__name__)
 CONSTITUTIONAL_QUORUM_BPS: int = 9500  # 95% in basis points
 
 
-def compute_service_id(project_id: int) -> bytes:
-    """Deterministic service ID for a training project."""
-    return hashlib.sha256(f"autonet-training-project-{project_id}".encode()).digest()
+def compute_service_id(rpb_address: str = "") -> bytes:
+    """Deterministic service ID for an RPB."""
+    key = rpb_address.lower() if rpb_address else "autonet-rpb"
+    return hashlib.sha256(f"autonet-rpb-{key}".encode()).digest()
 
 
 class GovernanceBridge:
@@ -63,12 +64,12 @@ class GovernanceBridge:
         self,
         registry: ContractRegistry,
         node_id: str,
-        project_id: int,
+        rpb_address: str = "",
     ):
         self.registry = registry
         self.node_id = node_id
-        self.project_id = project_id
-        self.service_id = compute_service_id(project_id)
+        self.rpb_address = rpb_address
+        self.service_id = compute_service_id(rpb_address)
 
         self._last_heartbeat: Optional[float] = None
         self._heartbeat_interval: float = 60.0
@@ -177,15 +178,15 @@ class GovernanceBridge:
     # Service Registration
     # =========================================================================
 
-    def register_if_needed(self, project_contract_address: str) -> bool:
+    def register_if_needed(self, rpb_contract_address: str) -> bool:
         """
-        Register this project as a service in the economic layer.
+        Register this RPB as a service in the economic layer.
 
         Called once at node startup. Idempotent — will skip if already
         registered or if the economy contract isn't deployed.
 
         Args:
-            project_contract_address: Address of the Project.sol contract.
+            rpb_contract_address: Address of the RPB contract.
 
         Returns:
             True if registered (or already was), False on failure.
@@ -196,7 +197,7 @@ class GovernanceBridge:
         # Check if already registered
         try:
             info = self.registry.get_service(self.service_id)
-            if info and info.get("projectContract") not in (None, "0x" + "0" * 40):
+            if info and info.get("rpbContract", info.get("projectContract")) not in (None, "0x" + "0" * 40):
                 self._service_registered = True
                 self.logger.info(
                     f"Service already registered: {self.service_id[:8].hex()}..."
@@ -219,7 +220,7 @@ class GovernanceBridge:
         try:
             result = self.registry.register_service(
                 self.service_id,
-                project_contract_address,
+                rpb_contract_address,
                 codebase_hash,
             )
             if result.success:

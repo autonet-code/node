@@ -1247,7 +1247,7 @@ class VoiceService:
         if channel == "tool_call":
             tool_name = data.get("tool_name", "")
             tool_input = data.get("tool_input", {})
-            if source == self.tools_focus or source == "orchestrator":
+            if source == self.tools_focus:
                 if self.mixer:
                     self.mixer.play("effects", make_tool_tone(tool_name))
                 if self.config.narrate_tools:
@@ -1312,7 +1312,7 @@ class VoiceService:
         if "agent_completed" not in self.config.announcements:
             return
         agent_id = event.data.get("agent_id", event.source)
-        if agent_id and agent_id != "orchestrator" and self._voice_enabled:
+        if agent_id and self._voice_enabled:
             self._play_cached_announcement(agent_id, "completed")
 
     async def _on_execution_started(self, event: Event) -> None:
@@ -1320,22 +1320,20 @@ class VoiceService:
         if "agent_runs" not in self.config.announcements:
             return
         agent_id = event.data.get("agent_id", event.source)
-        if agent_id == "orchestrator":
-            return  # Don't announce orchestrator runs (too noisy)
         if self._voice_enabled:
             self._play_cached_announcement(agent_id, "running")
 
     async def _on_agent_registered(self, event: Event) -> None:
         """Cache agent name and announce when a new agent is created."""
         agent_id = event.data.get("agent_id", "")
-        if agent_id and agent_id != "orchestrator":
+        if agent_id:
             # Cache name clip in background (don't block event handler)
             threading.Thread(
                 target=self._cache_name, args=(agent_id,), daemon=True,
             ).start()
         if "agent_created" not in self.config.announcements:
             return
-        if agent_id and agent_id != "orchestrator" and self._voice_enabled:
+        if agent_id and self._voice_enabled:
             self._play_cached_announcement(agent_id, "created")
 
     # ------------------------------------------------------------------
@@ -1405,40 +1403,36 @@ class VoiceService:
                     data={"text": text, "target": self.voice_focus},
                 )))
 
-                if self.voice_focus == "orchestrator":
-                    self._run_on_main_loop(
-                        self._send_to_orchestrator(text)
-                    )
-                else:
-                    self._run_on_main_loop(
-                        self._send_to_delegate(self.voice_focus, text)
-                    )
+                self._run_on_main_loop(
+                    self._send_to_agent(self.voice_focus, text)
+                )
 
             except Exception as exc:
                 log.warning("[PTT] Error: %s", exc)
                 time.sleep(0.5)
 
-    async def _send_to_orchestrator(self, text: str) -> None:
+    async def _send_to_agent(self, agent_id: str, text: str) -> None:
+        """Send voice input to any agent (orchestrator or delegate).
+
+        Uses send_agent_message which handles all cases correctly:
+        - Records user turn in conversation store
+        - Injects mid-session if agent is running (via bridge)
+        - Re-activates COMPLETED/ERROR agents and triggers new execution
+        """
         from .orchestrator import ORCHESTRATOR_ID
 
-        # Use send_agent_message which handles all cases correctly:
-        # - Records user turn in conversation store
-        # - Injects mid-session if orchestrator is running (via bridge)
-        # - Re-activates COMPLETED/ERROR agents and triggers new execution
-        # Previously this did a raw inbox.post() which relied on the inbox
-        # watcher loop — but that loop skips COMPLETED agents, so voice
-        # messages were silently dropped after the first orchestrator turn.
         tagged = f"🎤 [Voice Input] {text}"
-        await self.runtime.send_agent_message(ORCHESTRATOR_ID, tagged)
 
-    async def _send_to_delegate(self, agent_id: str, text: str) -> None:
-        delivered = await self.runtime.send_delegate_message(agent_id, text)
-        if not delivered:
+        # Try to deliver to the focused agent first
+        delivered = await self.runtime.send_agent_message(agent_id, tagged)
+
+        # If delivery failed and this isn't the orchestrator, fall back to orchestrator
+        if not delivered and agent_id != ORCHESTRATOR_ID:
             log.warning(
-                "[PTT] Delegate '%s' is not running, routing to orchestrator",
+                "[PTT] Agent '%s' is not available, routing to orchestrator",
                 agent_id,
             )
-            await self._send_to_orchestrator(text)
+            await self.runtime.send_agent_message(ORCHESTRATOR_ID, tagged)
 
     # ------------------------------------------------------------------
     # Status for WS/UI

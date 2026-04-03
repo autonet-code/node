@@ -7,6 +7,20 @@ name = "autonet"
 version = "0.1.0"
 description = "Decentralized AI alignment network with agent orchestration framework"
 requires-python = ">=3.11"
+license = "MIT"
+readme = "README.md"
+authors = [
+    {name = "ATN Contributors"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     # ATN core (agent framework)
     "rich>=13.0",
@@ -24,6 +38,11 @@ dependencies = [
     "mss>=9.0.0",
 ]
 
+[project.urls]
+Homepage = "https://autonet.computer"
+Repository = "https://github.com/autonet-code/node"
+Issues = "https://github.com/autonet-code/node/issues"
+
 [project.optional-dependencies]
 # P2P networking (for decentralized training)
 p2p = [
@@ -31,8 +50,8 @@ p2p = [
     "trio>=0.22.0",
     "miniupnpc>=2.0",
 ]
-# ML training (for local model training)
-training = [
+# Full node: training loop, JEPA models, consensus verification
+node = [
     "torch>=2.0.0",
     "numpy>=1.24.0",
     "scipy>=1.10.0",
@@ -68,6 +87,9 @@ atn = "atn.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["atn*", "nodes*"]
+
+[tool.setuptools.package-data]
+"atn.connectors" = ["*/connector.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

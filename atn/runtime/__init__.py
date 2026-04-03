@@ -201,6 +201,8 @@ class Runtime:
             event_bus=self.events,
             data_dir=str(self._config.data_dir),
         )
+        # Give engine access to the autonet bridge for constitutional injection
+        self.engine._autonet_bridge = self.autonet
 
         # Trace logger (Phase B Step 1 — Agent Trace Collection)
         from ..trace_logger import TraceLogger, TraceLoggingConfig as _TLConfig
@@ -279,6 +281,9 @@ class Runtime:
         # Start autonet service if configured
         if self._config.autonet.enabled:
             await self.autonet.start()
+
+        # Load constitution text (needed for prompt injection on registered agents)
+        await self.autonet.load_constitution()
 
         # Attach trace logger to event bus (subscribes to AGENT_TOOL_USE_* events)
         self.trace_logger.attach(self.events)
@@ -369,6 +374,14 @@ class Runtime:
         if agent_id == ORCHESTRATOR_ID and not _force:
             raise ValueError("The orchestrator cannot be unregistered")
         await self.control.kill_agent(agent_id)
+        # Clean up the persisted provider (closes session / subprocess)
+        old_provider = self.providers._active_providers.pop(agent_id, None)
+        if old_provider is not None:
+            try:
+                await old_provider.close()
+            except Exception:
+                pass
+        self.providers._cached_session_stats.pop(agent_id, None)
         # Clean up persistent files before unregistering from registry
         self.sessions._agent_conversations.pop(agent_id, None)
         agent_data_dir = self._config.data_dir / "agents" / agent_id
@@ -450,8 +463,12 @@ class Runtime:
 
     async def new_conversation(self) -> None:
         from ..orchestrator import ORCHESTRATOR_ID
-        await self.control.kill_agent(ORCHESTRATOR_ID)
-        await self.sessions.new_conversation()
+        await self.reset_agent_conversation(ORCHESTRATOR_ID)
+
+    async def reset_agent_conversation(self, agent_id: str) -> None:
+        """Reset conversation history for any agent."""
+        await self.control.kill_agent(agent_id)
+        await self.sessions.reset_agent_conversation(agent_id)
 
     def get_agent_conversation_store(self, agent_id: str) -> ConversationStore:
         return self.sessions.get_agent_conversation_store(agent_id)
@@ -485,7 +502,22 @@ class Runtime:
         return self.providers.get_bridge_provider(agent_id)
 
     def get_session_stats(self, agent_id: str | None = None) -> dict[str, Any]:
-        return self.providers.get_session_stats(agent_id)
+        from ..orchestrator import ORCHESTRATOR_ID
+        target = agent_id or ORCHESTRATOR_ID
+
+        # 1. Live provider (best — real-time data)
+        stats = self.providers.get_session_stats(target)
+        if "error" not in stats:
+            return stats
+
+        # 2. Persisted stats from conversation store (survives restarts)
+        convo = self.sessions.get_agent_conversation_store(target)
+        persisted = convo.get_session_stats()
+        if persisted:
+            return persisted
+
+        # 3. Genuinely no data
+        return stats
 
     async def get_session_context(self, agent_id: str | None = None) -> dict[str, Any]:
         return await self.providers.get_session_context(agent_id)
@@ -517,8 +549,12 @@ class Runtime:
 
     async def set_orchestrator_model(self, model: str) -> str:
         from ..orchestrator import ORCHESTRATOR_ID
-        await self.control.kill_agent(ORCHESTRATOR_ID)
-        return await self._orch_setup.set_orchestrator_model(model)
+        return await self.set_agent_model(ORCHESTRATOR_ID, model)
+
+    async def set_agent_model(self, agent_id: str, model: str) -> str:
+        """Change the cognitive model for any agent."""
+        await self.control.kill_agent(agent_id)
+        return await self._orch_setup.set_agent_model(agent_id, model)
 
     # ==================================================================
     # Snapshot — delegate to snapshot builder

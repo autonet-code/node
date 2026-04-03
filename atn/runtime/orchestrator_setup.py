@@ -75,27 +75,75 @@ class OrchestratorSetup:
         return defn.id
 
     async def set_orchestrator_model(self, model: str) -> str:
+        """Legacy wrapper — prefer set_agent_model()."""
+        from ..orchestrator import ORCHESTRATOR_ID
+        return await self.set_agent_model(ORCHESTRATOR_ID, model)
+
+    async def set_agent_model(self, agent_id: str, model: str) -> str:
+        """Change the cognitive model for any agent.
+
+        Preserves the agent's system prompt, max_turns, heartbeat, and other
+        config.  The caller is responsible for killing running executions first.
+        """
+        from ..orchestrator import ORCHESTRATOR_ID
+        from ..models import AgentMode
+
+        old_defn = self.registry._agents.get(agent_id)
+        if old_defn is None:
+            raise ValueError(f"Agent '{agent_id}' not found")
+        if old_defn.mode != AgentMode.COGNITIVE:
+            raise ValueError(f"Agent '{agent_id}' is not a cognitive agent")
+
+        # Root agent is locked to Opus 4.6 on the bridge provider
+        if agent_id == ORCHESTRATOR_ID:
+            if model != "claude-opus-4-6":
+                raise ValueError(
+                    "Root agent is locked to claude-opus-4-6 through the Claude Max bridge"
+                )
+            return await self._set_orchestrator_model_impl(model, old_defn)
+
+        # Validate model against the agent's provider
+        raw_provider = old_defn.provider or ""
+        primary_provider = raw_provider[0] if isinstance(raw_provider, list) else raw_provider
+        if primary_provider:
+            available = self.provider_manager.get_available_models(primary_provider)
+            available_ids = [m["id"] for m in available]
+            if available_ids and model not in available_ids:
+                raise ValueError(
+                    f"Invalid model {model!r}. Available: {', '.join(available_ids)}"
+                )
+
+        # --- Generic agent model change ---
+        # Build an updated definition preserving all existing config
+        from dataclasses import replace
+        new_defn = replace(old_defn, cognitive_model=model)
+
+        # Re-register: unregister old, register new
+        is_force = agent_id == ORCHESTRATOR_ID
+        await self.registry.unregister_agent(agent_id, _force=is_force)
+        await self.registry.register_agent(new_defn)
+
+        # Reactivate if it was active/running before
+        await self.registry.activate_agent(agent_id)
+
+        # Close old provider so next execution gets a fresh one with new model
+        old_provider = self.provider_manager._active_providers.pop(agent_id, None)
+        if old_provider is not None:
+            try:
+                await old_provider.close()
+            except Exception:
+                pass
+
+        log.info("Agent '%s' model changed to '%s'", agent_id, model)
+        return agent_id
+
+    async def _set_orchestrator_model_impl(self, model: str, old_defn: Any) -> str:
+        """Orchestrator-specific model change (persists to config file)."""
         from ..orchestrator import ORCHESTRATOR_ID, create_orchestrator_agent
         from ..config import save_orchestrator_model_to_config
 
-        orch_defn = self.registry._agents.get(ORCHESTRATOR_ID)
-        raw_provider = orch_defn.provider if orch_defn else ""
-        primary_provider = raw_provider[0] if isinstance(raw_provider, list) else raw_provider
-        available = self.provider_manager.get_available_models(primary_provider)
-        available_ids = [m["id"] for m in available]
-        if available_ids and model not in available_ids:
-            raise ValueError(
-                f"Invalid model {model!r}. Available: {', '.join(available_ids)}"
-            )
-
-        # Kill running orchestrator — caller must provide kill_agent
-        # This is handled by the facade
-
         self._config.orchestrator.model = model
         save_orchestrator_model_to_config(model)
-
-        # Preserve user-edited fields from the current definition
-        old_defn = self.registry._agents.get(ORCHESTRATOR_ID)
 
         if ORCHESTRATOR_ID in self.registry._agents:
             await self.registry.unregister_agent(ORCHESTRATOR_ID, _force=True)

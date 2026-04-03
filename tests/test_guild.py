@@ -539,7 +539,7 @@ class TestAggregatorGuildLevel:
             registry=registry,
             store=store,
             node_id="test-agg",
-            project_id=1,
+            rpb_address="",
             config=config,
         )
         node.is_staked = True
@@ -643,7 +643,7 @@ class TestWeightedAggregation:
             registry=registry,
             store=store,
             node_id="test-agg",
-            project_id=1,
+            rpb_address="",
             config=config,
         )
         return node
@@ -704,21 +704,21 @@ class TestWeightedAggregation:
 # =============================================================================
 
 
-class TestProjectAggregationState:
+class TestRPBAggregationState:
     def test_guild_tracking_fields(self):
-        """ProjectAggregationState has guild tracking fields."""
-        from nodes.aggregator.main import ProjectAggregationState
+        """RPBAggregationState has guild tracking fields."""
+        from nodes.aggregator.main import RPBAggregationState
 
-        state = ProjectAggregationState(project_id=1)
+        state = RPBAggregationState(rpb_address="")
         assert state.guild_updates == {}
         assert state.guild_aggregated_cids == {}
         assert state.update_solvers == {}
 
     def test_solver_tracking(self):
         """update_solvers maps CIDs to solver addresses."""
-        from nodes.aggregator.main import ProjectAggregationState
+        from nodes.aggregator.main import RPBAggregationState
 
-        state = ProjectAggregationState(project_id=1)
+        state = RPBAggregationState(rpb_address="")
         state.update_solvers["cid1"] = "0xSolver1"
         state.update_solvers["cid2"] = "0xSolver2"
 

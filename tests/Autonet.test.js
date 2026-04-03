@@ -6,7 +6,8 @@ describe("Autonet - Core Contracts", function () {
   let staking;
   let taskContract;
   let resultsRewards;
-  let project;
+  let rpb;
+  let rpbAddr;
   let forcedErrorRegistry;
   let owner, proposer, solver1, solver2, coord1, coord2, coord3;
 
@@ -27,14 +28,32 @@ describe("Autonet - Core Contracts", function () {
     staking = await Staking.deploy(await atnToken.getAddress(), owner.address);
     await staking.waitForDeployment();
 
-    // Deploy Project
-    const Project = await ethers.getContractFactory("Project");
-    project = await Project.deploy(await atnToken.getAddress(), owner.address);
-    await project.waitForDeployment();
+    // Deploy RPB via factory (replaces Project)
+    const Registry = await ethers.getContractFactory("Registry");
+    const registry = await Registry.deploy(owner.address, owner.address);
+    await registry.waitForDeployment();
+    await registry.setJurisdictionAddress(owner.address);
+
+    const RPBFactory = await ethers.getContractFactory("RPBFactory");
+    const rpbFactory = await RPBFactory.deploy();
+    await rpbFactory.waitForDeployment();
+
+    const rpbTx = await rpbFactory.createRPB(
+      await registry.getAddress(),
+      await atnToken.getAddress()
+    );
+    const rpbReceipt = await rpbTx.wait();
+    const rpbEvent = rpbReceipt.logs.find(l => l.fragment && l.fragment.name === "RPBDeployed");
+    rpbAddr = rpbEvent.args[0];
+    rpb = await ethers.getContractAt("RPB", rpbAddr);
 
     // Deploy TaskContract
     const TaskContract = await ethers.getContractFactory("TaskContract");
-    taskContract = await TaskContract.deploy(await staking.getAddress(), owner.address);
+    taskContract = await TaskContract.deploy(
+      await staking.getAddress(),
+      owner.address,
+      await atnToken.getAddress()
+    );
     await taskContract.waitForDeployment();
 
     // Deploy ResultsRewards
@@ -57,10 +76,10 @@ describe("Autonet - Core Contracts", function () {
 
     // Configure contracts
     await taskContract.setResultsRewardsContract(await resultsRewards.getAddress());
-    await resultsRewards.setProjectContract(await project.getAddress());
+    await resultsRewards.setRPBContract(rpbAddr);
     await staking.setAuthorizedSlasher(await resultsRewards.getAddress(), true);
     await staking.setAuthorizedSlasher(await forcedErrorRegistry.getAddress(), true);
-    await project.setAuthorizedDisburser(await resultsRewards.getAddress(), true);
+    await rpb.setAuthorizedDisburser(await resultsRewards.getAddress(), true);
 
     // Distribute tokens for testing
     const testAmount = ethers.parseEther("10000");
@@ -110,7 +129,7 @@ describe("Autonet - Core Contracts", function () {
 
       await expect(
         taskContract.connect(proposer).proposeTask(
-          1, // projectId
+          rpbAddr, // rpbAddress
           specHash,
           groundTruthHash,
           ethers.parseEther("10"), // learnability reward
@@ -123,7 +142,7 @@ describe("Autonet - Core Contracts", function () {
       // Create task
       const specHash = ethers.keccak256(ethers.toUtf8Bytes("task_spec"));
       const groundTruthHash = ethers.keccak256(ethers.toUtf8Bytes("ground_truth"));
-      await taskContract.connect(proposer).proposeTask(1, specHash, groundTruthHash, ethers.parseEther("10"), ethers.parseEther("5"));
+      await taskContract.connect(proposer).proposeTask(rpbAddr, specHash, groundTruthHash, ethers.parseEther("10"), ethers.parseEther("5"));
 
       // Submit checkpoints
       const weightsHash = ethers.keccak256(ethers.toUtf8Bytes("weights_step_10"));
@@ -147,7 +166,7 @@ describe("Autonet - Core Contracts", function () {
       // Create task
       const specHash = ethers.keccak256(ethers.toUtf8Bytes("task_spec"));
       const groundTruthHash = ethers.keccak256(ethers.toUtf8Bytes("ground_truth"));
-      await taskContract.connect(proposer).proposeTask(1, specHash, groundTruthHash, ethers.parseEther("10"), ethers.parseEther("5"));
+      await taskContract.connect(proposer).proposeTask(rpbAddr, specHash, groundTruthHash, ethers.parseEther("10"), ethers.parseEther("5"));
 
       // Submit first checkpoint at step 10
       await taskContract.connect(solver1).submitCheckpoint(
@@ -181,7 +200,6 @@ describe("Autonet - Core Contracts", function () {
 
   describe("Multi-Coordinator Yuma Voting", function () {
     let taskId;
-    let projectId;
 
     beforeEach(async function () {
       // Setup stakes
@@ -191,31 +209,16 @@ describe("Autonet - Core Contracts", function () {
       await staking.connect(coord2).stake(3, COORDINATOR_STAKE);
       await staking.connect(coord3).stake(3, COORDINATOR_STAKE);
 
-      // Create a project first (needed for reward distribution)
-      await atnToken.connect(proposer).approve(await project.getAddress(), ethers.parseEther("1000"));
-      const tx = await project.connect(proposer).createProject(
-        "Test Project",
-        "QmDesc",
-        ethers.parseEther("100"),  // funding goal
-        ethers.parseEther("0"),    // initial budget (start at 0)
-        ethers.parseEther("10"),
-        "TestPT",
-        "TPT"
-      );
-      projectId = 1;
-
-      // Fund the project first
-      await project.connect(proposer).fundProject(projectId, ethers.parseEther("100"), ethers.parseEther("10"));
-
-      // Now allocate the project budget for rewards (currentFunding is 100, we allocate 50)
-      await project.connect(proposer).allocateTaskBudget(projectId, ethers.parseEther("50"));
+      // Fund RPB task budget for reward distribution
+      await atnToken.approve(rpbAddr, ethers.parseEther("1000"));
+      await rpb.fundTaskBudget(ethers.parseEther("500"));
 
       // Create and setup task
       const specHash = ethers.keccak256(ethers.toUtf8Bytes("task_spec"));
       const groundTruthCid = "QmGroundTruth123456789";
       const groundTruthHash = ethers.keccak256(ethers.toUtf8Bytes(groundTruthCid));
 
-      await taskContract.connect(proposer).proposeTask(projectId, specHash, groundTruthHash, ethers.parseEther("10"), ethers.parseEther("5"));
+      await taskContract.connect(proposer).proposeTask(rpbAddr, specHash, groundTruthHash, ethers.parseEther("10"), ethers.parseEther("5"));
       taskId = 1;
 
       // Solver commits solution
@@ -336,7 +339,6 @@ describe("Autonet - Core Contracts", function () {
 
   describe("Legacy Single-Coordinator Mode", function () {
     let taskId;
-    let projectId;
 
     beforeEach(async function () {
       // Setup stakes
@@ -344,31 +346,16 @@ describe("Autonet - Core Contracts", function () {
       await staking.connect(solver1).stake(2, SOLVER_STAKE);
       await staking.connect(coord1).stake(3, COORDINATOR_STAKE);
 
-      // Create a project first (needed for reward distribution)
-      await atnToken.connect(proposer).approve(await project.getAddress(), ethers.parseEther("1000"));
-      await project.connect(proposer).createProject(
-        "Test Project",
-        "QmDesc",
-        ethers.parseEther("100"),  // funding goal
-        ethers.parseEther("0"),    // initial budget
-        ethers.parseEther("10"),
-        "TestPT",
-        "TPT"
-      );
-      projectId = 1;
-
-      // Fund the project first
-      await project.connect(proposer).fundProject(projectId, ethers.parseEther("100"), ethers.parseEther("10"));
-
-      // Now allocate the project budget for rewards
-      await project.connect(proposer).allocateTaskBudget(projectId, ethers.parseEther("50"));
+      // Fund RPB task budget for reward distribution
+      await atnToken.approve(rpbAddr, ethers.parseEther("1000"));
+      await rpb.fundTaskBudget(ethers.parseEther("500"));
 
       // Create task
       const specHash = ethers.keccak256(ethers.toUtf8Bytes("task_spec"));
       const groundTruthCid = "QmGroundTruth123456789";
       const groundTruthHash = ethers.keccak256(ethers.toUtf8Bytes(groundTruthCid));
 
-      await taskContract.connect(proposer).proposeTask(projectId, specHash, groundTruthHash, ethers.parseEther("10"), ethers.parseEther("5"));
+      await taskContract.connect(proposer).proposeTask(rpbAddr, specHash, groundTruthHash, ethers.parseEther("10"), ethers.parseEther("5"));
       taskId = 1;
 
       // Solver commits solution
@@ -390,71 +377,53 @@ describe("Autonet - Core Contracts", function () {
 
   describe("InferenceProviderBridge - Jurisdiction Integration", function () {
     let inferenceFactory;
-    let projectId;
 
     beforeEach(async function () {
       // Deploy InferenceProviderFactory
       const InferenceProviderFactory = await ethers.getContractFactory("InferenceProviderFactory");
       inferenceFactory = await InferenceProviderFactory.deploy(
-        await project.getAddress(),
+        await staking.getAddress(),
         owner.address
       );
       await inferenceFactory.waitForDeployment();
 
-      // Create and deploy a project
-      await atnToken.connect(proposer).approve(await project.getAddress(), ethers.parseEther("1000"));
-      await project.connect(proposer).createProject(
-        "AI Inference Project",
-        "QmDesc",
-        ethers.parseEther("100"),
-        ethers.parseEther("0"),
-        ethers.parseEther("10"),
-        "AIP",
-        "AIP"
-      );
-      projectId = 1;
-
-      // Fund the project
-      await project.connect(proposer).fundProject(projectId, ethers.parseEther("100"), ethers.parseEther("10"));
-
-      // Set mature model (makes project DEPLOYED)
-      await project.connect(proposer).setMatureModel(
-        projectId,
+      // Set mature model on the RPB
+      await rpb.setMatureModel(
         "QmModelWeightsCid123456789",
         ethers.parseEther("1") // 1 ATN per inference
       );
     });
 
-    it("Should deploy a bridge for a deployed project", async function () {
+    it("Should deploy a bridge for an RPB with a mature model", async function () {
       await expect(
-        inferenceFactory.deployBridge(projectId, proposer.address)
+        inferenceFactory.deployBridge(rpbAddr, proposer.address)
       ).to.emit(inferenceFactory, "BridgeDeployed");
 
-      expect(await inferenceFactory.hasBridge(projectId)).to.be.true;
+      expect(await inferenceFactory.hasBridge(rpbAddr)).to.be.true;
       expect(await inferenceFactory.getBridgeCount()).to.equal(1);
     });
 
     it("Should not allow duplicate bridge deployment", async function () {
-      await inferenceFactory.deployBridge(projectId, proposer.address);
+      await inferenceFactory.deployBridge(rpbAddr, proposer.address);
 
       await expect(
-        inferenceFactory.deployBridge(projectId, proposer.address)
+        inferenceFactory.deployBridge(rpbAddr, proposer.address)
       ).to.be.revertedWith("Bridge already deployed");
     });
 
     it("Bridge should return correct price per unit", async function () {
-      await inferenceFactory.deployBridge(projectId, proposer.address);
+      await inferenceFactory.deployBridge(rpbAddr, proposer.address);
 
-      const bridgeAddress = await inferenceFactory.projectBridges(projectId);
+      const bridgeAddress = await inferenceFactory.rpbBridges(rpbAddr);
       const bridge = await ethers.getContractAt("InferenceProviderBridge", bridgeAddress);
 
       expect(await bridge.getPricePerUnit()).to.equal(ethers.parseEther("1"));
     });
 
     it("Bridge should return model CID", async function () {
-      await inferenceFactory.deployBridge(projectId, proposer.address);
+      await inferenceFactory.deployBridge(rpbAddr, proposer.address);
 
-      const bridgeAddress = await inferenceFactory.projectBridges(projectId);
+      const bridgeAddress = await inferenceFactory.rpbBridges(rpbAddr);
       const bridge = await ethers.getContractAt("InferenceProviderBridge", bridgeAddress);
 
       expect(await bridge.getModelCid()).to.equal("QmModelWeightsCid123456789");
@@ -566,9 +535,9 @@ describe("Autonet - Core Contracts", function () {
             totalSize,
             0, // StorageTier.NODE_PUBLIC
             1, // ShardingStrategy.TENSOR_PARALLEL
-            1  // projectId
+            rpbAddr  // rpbAddress
           )
-        ).to.emit(shardRegistry, "ModelRegistered").withArgs(modelHash, manifestCid, dataShards + parityShards, 1);
+        ).to.emit(shardRegistry, "ModelRegistered").withArgs(modelHash, manifestCid, dataShards + parityShards, rpbAddr);
 
         // Verify model manifest
         const manifest = await shardRegistry.getModelManifest(modelHash);
@@ -586,13 +555,13 @@ describe("Autonet - Core Contracts", function () {
 
         await shardRegistry.connect(proposer).registerModel(
           modelHash, manifestCid, merkleRoot, 10, 4,
-          ethers.parseUnits("100000000", 0), 0, 1, 1
+          ethers.parseUnits("100000000", 0), 0, 1, rpbAddr
         );
 
         await expect(
           shardRegistry.connect(proposer).registerModel(
             modelHash, manifestCid, merkleRoot, 10, 4,
-            ethers.parseUnits("100000000", 0), 0, 1, 1
+            ethers.parseUnits("100000000", 0), 0, 1, rpbAddr
           )
         ).to.be.revertedWith("Model already registered");
       });
@@ -603,7 +572,7 @@ describe("Autonet - Core Contracts", function () {
         await expect(
           shardRegistry.connect(proposer).registerModel(
             modelHash, "QmManifest", ethers.keccak256(ethers.toUtf8Bytes("root")),
-            0, 4, ethers.parseUnits("100000000", 0), 0, 1, 1
+            0, 4, ethers.parseUnits("100000000", 0), 0, 1, rpbAddr
           )
         ).to.be.revertedWith("Need at least 1 data shard");
       });
@@ -622,7 +591,7 @@ describe("Autonet - Core Contracts", function () {
           ethers.keccak256(ethers.toUtf8Bytes("merkle_root")),
           10, 4,
           ethers.parseUnits("100000000", 0),
-          0, 1, 1
+          0, 1, rpbAddr
         );
 
         // Register providers
@@ -748,7 +717,7 @@ describe("Autonet - Core Contracts", function () {
         modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_merkle"));
         await shardRegistry.connect(proposer).registerModel(
           modelHash, "QmManifest", merkleRoot, 2, 2,
-          ethers.parseUnits("40000000", 0), 0, 1, 1
+          ethers.parseUnits("40000000", 0), 0, 1, rpbAddr
         );
 
         // Register provider and announce shard
@@ -795,7 +764,7 @@ describe("Autonet - Core Contracts", function () {
         modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_availability"));
         await shardRegistry.connect(proposer).registerModel(
           modelHash, "QmManifest", ethers.keccak256(ethers.toUtf8Bytes("root")),
-          10, 4, ethers.parseUnits("140000000", 0), 0, 1, 1
+          10, 4, ethers.parseUnits("140000000", 0), 0, 1, rpbAddr
         );
 
         // Register providers
@@ -861,7 +830,7 @@ describe("Autonet - Core Contracts", function () {
         modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_removal"));
         await shardRegistry.connect(proposer).registerModel(
           modelHash, "QmManifest", ethers.keccak256(ethers.toUtf8Bytes("root")),
-          10, 4, ethers.parseUnits("140000000", 0), 0, 1, 1
+          10, 4, ethers.parseUnits("140000000", 0), 0, 1, rpbAddr
         );
 
         await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);
@@ -918,7 +887,7 @@ describe("Autonet - Core Contracts", function () {
         modelHash = ethers.keccak256(ethers.toUtf8Bytes("model_reputation"));
         await shardRegistry.connect(proposer).registerModel(
           modelHash, "QmManifest", ethers.keccak256(ethers.toUtf8Bytes("root")),
-          10, 4, ethers.parseUnits("140000000", 0), 0, 1, 1
+          10, 4, ethers.parseUnits("140000000", 0), 0, 1, rpbAddr
         );
 
         await staking.connect(provider1).stake(2, MIN_STORAGE_STAKE);

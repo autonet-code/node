@@ -46,7 +46,7 @@ class CoordinatorNode:
     Autonomous coordinator node that verifies solver solutions.
 
     Interface Requirements (for orchestrator.py):
-    - __init__(registry, store, node_id, project_id)
+    - __init__(registry, store, node_id, rpb_address)
     - run(max_cycles, cycle_delay)
     - stop()
     - metrics attribute
@@ -62,7 +62,7 @@ class CoordinatorNode:
         registry: ContractRegistry,
         store: BlobStore,
         node_id: str,
-        project_id: int,
+        rpb_address: str = "",
         task_mode: str = "ground_truth",
     ):
         """
@@ -72,13 +72,13 @@ class CoordinatorNode:
             registry: ContractRegistry for blockchain interactions
             store: BlobStore for content-addressed storage
             node_id: Unique identifier for this node instance
-            project_id: Project ID to coordinate for
+            rpb_address: RPB contract address for this jurisdiction
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
         """
         self.registry = registry
         self.store = store
         self.node_id = node_id
-        self.project_id = project_id
+        self.rpb_address = rpb_address
         self.task_mode = task_mode
 
         self.metrics = CoordinatorMetrics()
@@ -95,10 +95,10 @@ class CoordinatorNode:
         self._ground_truth_cache: dict[int, str] = {}
 
         # Governance bridge for attestation and heartbeat
-        self.governance = GovernanceBridge(registry, node_id, project_id)
+        self.governance = GovernanceBridge(registry, node_id)
 
         logger.info(
-            f"CoordinatorNode initialized: {node_id} for project {project_id}"
+            f"CoordinatorNode initialized: {node_id}"
         )
 
     def run(self, max_cycles: Optional[int] = None, cycle_delay: float = 2.0):

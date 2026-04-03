@@ -140,6 +140,10 @@ contract ParticipantStaking {
         require(_amount <= userStake.amount, "Slash exceeds stake");
 
         userStake.amount -= _amount;
+
+        // Burn slashed tokens so they don't stay locked in the contract
+        atnToken.burn(_amount);
+
         emit Slashed(_participant, userStake.role, _amount, _reason);
 
         // Deactivate if below minimum

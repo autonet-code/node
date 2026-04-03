@@ -43,7 +43,7 @@ class ProposerNode:
         registry: ContractRegistry,
         store: BlobStore,
         node_id: str,
-        project_id: int,
+        rpb_address: str = "",
         task_mode: str = "ground_truth",
         config: Optional[AutonetConfig] = None,
     ):
@@ -54,14 +54,14 @@ class ProposerNode:
             registry: ContractRegistry instance for blockchain interactions
             store: BlobStore instance for content-addressed storage
             node_id: Unique identifier for this node (e.g., "proposer-0")
-            project_id: Project ID to propose tasks for
+            rpb_address: RPB contract address for this jurisdiction
             task_mode: "ground_truth" (legacy) or "consensus_truth" (MM-Zero)
             config: AutonetConfig (loaded from yaml/env if not provided)
         """
         self.registry = registry
         self.store = store
         self.node_id = node_id
-        self.project_id = project_id
+        self.rpb_address = rpb_address
         self.task_mode = task_mode
         self.config = config or load_config()
         self.metrics = ProposerMetrics()
@@ -92,7 +92,7 @@ class ProposerNode:
             cycle_delay: Delay between cycles in seconds
         """
         self.running = True
-        self.logger.info(f"Starting ProposerNode {self.node_id} for project {self.project_id}")
+        self.logger.info(f"Starting ProposerNode {self.node_id} for project {self.rpb_address}")
 
         cycle_count = 0
         while self.running:
@@ -196,12 +196,12 @@ class ProposerNode:
             solver_reward = 5 * 10**18         # 5 ATN
 
             self.logger.info(
-                f"Proposing task for project {self.project_id} "
+                f"Proposing task for project {self.rpb_address} "
                 f"(spec={spec_cid[:16]}..., rewards={learnability_reward}/{solver_reward})"
             )
 
             result = self.registry.propose_task(
-                self.project_id,
+                self.rpb_address,
                 spec_hash,
                 ground_truth_hash,
                 learnability_reward,
@@ -269,7 +269,7 @@ class ProposerNode:
         # Look up current global model so solvers can continue from it
         global_model_cid = None
         try:
-            global_model_cid = self.registry.get_mature_model(self.project_id)
+            global_model_cid = self.registry.get_mature_model()
         except Exception:
             pass
 
@@ -365,12 +365,12 @@ class ProposerNode:
             solver_reward = 5 * 10**18         # 5 ATN
 
             self.logger.info(
-                f"Proposing consensus task for project {self.project_id} "
+                f"Proposing consensus task for project {self.rpb_address} "
                 f"(spec={spec_cid[:16]}..., peak_difficulty=50%)"
             )
 
             result = self.registry.propose_consensus_task(
-                self.project_id,
+                self.rpb_address,
                 spec_hash,
                 difficulty_target,
                 learnability_reward,
@@ -407,7 +407,7 @@ class ProposerNode:
         # Try to get the current global model for frontier estimation
         global_model_cid = None
         try:
-            global_model_cid = self.registry.get_mature_model(self.project_id)
+            global_model_cid = self.registry.get_mature_model()
         except Exception:
             pass
 
