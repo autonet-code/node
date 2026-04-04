@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonet-computer"
-version = "0.1.1"
+version = "0.1.2"
 description = "Decentralized AI alignment network with agent orchestration framework"
 requires-python = ">=3.11"
 license = "MIT"
@@ -36,6 +36,10 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "requests>=2.28.0",
     "mss>=9.0.0",
+    # P2P networking
+    "libp2p>=0.6.0",
+    "trio>=0.22.0",
+    "miniupnpc>=2.0",
 ]
 
 [project.urls]
@@ -44,12 +48,6 @@ Repository = "https://github.com/autonet-code/node"
 Issues = "https://github.com/autonet-code/node/issues"
 
 [project.optional-dependencies]
-# P2P networking (for decentralized training)
-p2p = [
-    "libp2p>=0.6.0",
-    "trio>=0.22.0",
-    "miniupnpc>=2.0",
-]
 # Full node: training loop, JEPA models, consensus verification
 node = [
     "torch>=2.0.0",
