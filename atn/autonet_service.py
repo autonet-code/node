@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TYPE_CHECKING
@@ -140,6 +141,17 @@ class AutonetBridge:
                 self._on_execution_completed,
             )
 
+        # P2P agent advertisement
+        self._p2p_host = None      # AutonetHost (lazy, trio-based)
+        self._p2p_thread: threading.Thread | None = None
+        self._p2p_stop = threading.Event()
+        self._agent_registry = None  # Set by Runtime after init
+        # Subscribe to agent lifecycle events for p2p advertisement refresh
+        if self._events:
+            for evt in (EventType.AGENT_REGISTERED, EventType.AGENT_UNREGISTERED,
+                        EventType.AGENT_ACTIVATED, EventType.AGENT_DEACTIVATED):
+                self._events.subscribe(evt, self._on_agent_changed)
+
         # Constitution CID loaded lazily from on-chain Registry
         self._constitution_loaded = False
         # Raw constitution text (loaded once, cached for prompt injection)
@@ -176,6 +188,107 @@ class AutonetBridge:
         except Exception as e:
             log.warning("Failed to discover jurisdiction from %s: %s",
                         self.config.dao_address, e)
+
+    # ------------------------------------------------------------------
+    # P2P agent advertisement
+    # ------------------------------------------------------------------
+
+    def set_agent_registry(self, registry: Any) -> None:
+        """Called by Runtime after init to provide agent registry reference."""
+        self._agent_registry = registry
+
+    async def _on_agent_changed(self, event: Any) -> None:
+        """Refresh p2p capability when agents are registered/unregistered."""
+        self._refresh_p2p_agents()
+
+    def _refresh_p2p_agents(self) -> None:
+        """Rebuild agent advertisements from registry and push to p2p host."""
+        if not self._p2p_host or not self._agent_registry:
+            return
+        try:
+            ads = self._agent_registry.build_agent_advertisements()
+            # Also include the connected wallet as a root agent if present
+            if self.state.wallet_address and not any(
+                a["address"].lower() == self.state.wallet_address.lower() for a in ads
+            ):
+                ads.insert(0, {
+                    "address": self.state.wallet_address,
+                    "name": "root",
+                    "description": "",
+                    "agent_type": "orchestrator",
+                    "model": "",
+                    "is_root": True,
+                    "parent_address": "",
+                    "registered_on_chain": False,
+                })
+            self._p2p_host.update_capability(agents=ads)
+            log.debug("P2P capability updated with %d agent(s)", len(ads))
+        except Exception:
+            log.debug("Failed to refresh p2p agents", exc_info=True)
+
+    def start_p2p(self) -> None:
+        """Start the p2p host in a background thread for agent advertisement."""
+        if self._p2p_thread and self._p2p_thread.is_alive():
+            return
+        try:
+            from nodes.common.p2p import AutonetHost, NodeCapability
+            from nodes.common.config import load_config as load_autonet_config
+        except Exception:
+            log.debug("P2P not available (nodes package not installed or import error)")
+            return
+
+        config_path = self.config.config_path or None
+        try:
+            cfg = load_autonet_config(config_path)
+        except Exception:
+            cfg = None
+
+        listen_port = cfg.p2p.listen_port if cfg else 0
+        listen_host = cfg.p2p.listen_host if cfg else "0.0.0.0"
+        bootstrap = cfg.p2p.bootstrap_peers if cfg else []
+        advertise_interval = cfg.p2p.capability_advertise_interval if cfg else 60
+
+        node_id = f"atn-{self.state.wallet_address[:8]}" if self.state.wallet_address else "atn-daemon"
+        cap = NodeCapability(peer_id="", node_id=node_id)
+
+        host = AutonetHost(
+            node_id=node_id,
+            listen_port=listen_port,
+            listen_host=listen_host,
+            bootstrap_peers=bootstrap,
+            capability=cap,
+        )
+        self._p2p_host = host
+        self._p2p_stop.clear()
+
+        def _run():
+            import trio
+            async def _main():
+                async with host.run():
+                    self._refresh_p2p_agents()
+                    await host.advertise_capability()
+                    log.info("P2P host running, advertising %d agent(s)",
+                             len(host._capability.agents))
+                    while not self._p2p_stop.is_set():
+                        await trio.sleep(advertise_interval)
+                        self._refresh_p2p_agents()
+                        await host.advertise_capability()
+            try:
+                trio.run(_main)
+            except Exception:
+                log.debug("P2P host stopped", exc_info=True)
+
+        self._p2p_thread = threading.Thread(target=_run, name="p2p-host", daemon=True)
+        self._p2p_thread.start()
+        log.info("P2P agent advertisement started")
+
+    def stop_p2p(self) -> None:
+        """Stop the p2p background thread."""
+        self._p2p_stop.set()
+        if self._p2p_thread:
+            self._p2p_thread.join(timeout=5)
+            self._p2p_thread = None
+        self._p2p_host = None
 
     async def _emit(self, event_type_name: str, data: dict[str, Any] | None = None) -> None:
         """Emit an event if the event bus is available."""
@@ -295,6 +408,8 @@ class AutonetBridge:
 
             self.state.status = AutonetStatus.RUNNING
             log.info("Autonet service started")
+            # Start p2p agent advertisement alongside the training service
+            self.start_p2p()
             await self._emit("AUTONET_STARTED")
             return {"status": "started"}
 
@@ -338,6 +453,7 @@ class AutonetBridge:
                 except asyncio.CancelledError:
                     pass
 
+            self.stop_p2p()
             self.state.status = AutonetStatus.STOPPED
             log.info("Autonet service stopped")
             await self._emit("AUTONET_STOPPED")

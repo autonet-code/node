@@ -203,6 +203,8 @@ class Runtime:
         )
         # Give engine access to the autonet bridge for constitutional injection
         self.engine._autonet_bridge = self.autonet
+        # Wire agent registry into autonet bridge for p2p advertisement
+        self.autonet.set_agent_registry(self.registry)
 
         # Trace logger (Phase B Step 1 — Agent Trace Collection)
         from ..trace_logger import TraceLogger, TraceLoggingConfig as _TLConfig
@@ -281,6 +283,8 @@ class Runtime:
         # Start autonet service if configured
         if self._config.autonet.enabled:
             await self.autonet.start()
+        # Always start p2p agent advertisement (even without training service)
+        self.autonet.start_p2p()
 
         # Load constitution text (needed for prompt injection on registered agents)
         await self.autonet.load_constitution()

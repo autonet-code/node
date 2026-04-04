@@ -240,6 +240,30 @@ class AgentRegistry:
             for aid, defn in self._agents.items()
         ]
 
+    def build_agent_advertisements(self) -> list[dict]:
+        """Build p2p AgentAdvertisement dicts for all agents with identity."""
+        ads = []
+        for aid, defn in self._agents.items():
+            identity = defn.identity
+            if not identity or not identity.address:
+                continue
+            parent_addr = ""
+            if defn.parent_id:
+                parent = self._agents.get(defn.parent_id)
+                if parent and parent.identity:
+                    parent_addr = parent.identity.address
+            ads.append({
+                "address": identity.address,
+                "name": defn.name,
+                "description": defn.description or "",
+                "agent_type": defn.agent_type or "",
+                "model": defn.model or "",
+                "is_root": defn.parent_id is None or defn.parent_id == "",
+                "parent_address": parent_addr,
+                "registered_on_chain": identity.registered_on_chain,
+            })
+        return ads
+
     def get_agent_key(self, agent_id: str) -> str | None:
         """Get the private key for an agent (parent holds child's key)."""
         return self._agent_keys.get(agent_id)
