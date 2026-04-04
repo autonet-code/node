@@ -93,6 +93,7 @@ library AutonetLib {
 
     struct SolverSubmission {
         bytes32 solutionHash;    // Hash of solution (content hash)
+        bytes32 charterCid;      // Content hash of solver's charter (for alignment scoring)
         address solver;
         uint256 submissionBlock;
         uint256 score;           // Quality score if verified
@@ -166,7 +167,8 @@ library AutonetLib {
     struct CoordinatorVote {
         address coordinator;
         bool isCorrect;
-        uint256 score;           // 0-100
+        uint256 score;           // 0-100 correctness score
+        uint256 alignmentScore;  // 0-10000 charter↔constitution alignment (basis points)
         uint256 stake;           // Coordinator's stake at vote time
         uint256 voteBlock;
         bytes32 reportHash;
@@ -176,7 +178,8 @@ library AutonetLib {
         uint256 taskId;
         address solver;
         bool consensusCorrect;    // Final consensus decision
-        uint256 consensusScore;   // Stake-weighted score
+        uint256 consensusScore;   // Stake-weighted correctness score
+        uint256 consensusAlignmentScore; // Stake-weighted alignment score (basis points)
         uint256 totalStake;       // Total stake that voted
         uint256 correctStake;     // Stake that voted correct
         uint256 clippedVotes;     // Number of votes that were clipped

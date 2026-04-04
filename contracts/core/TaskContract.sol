@@ -115,7 +115,7 @@ contract TaskContract {
         _activateTask(_taskId);
     }
 
-    function commitSolution(uint256 _taskId, bytes32 _solutionHash)
+    function commitSolution(uint256 _taskId, bytes32 _solutionHash, bytes32 _charterCid)
         external taskExists(_taskId) onlyStakedSolver
     {
         Task storage t = _tasks[_taskId];
@@ -127,6 +127,7 @@ contract TaskContract {
 
         submissions[_taskId][msg.sender] = AutonetLib.SolverSubmission({
             solutionHash: _solutionHash,
+            charterCid: _charterCid,
             solver: msg.sender,
             submissionBlock: block.number,
             score: 0

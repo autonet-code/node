@@ -129,6 +129,7 @@ contract ResultsRewards {
         address _solver,
         bool _isCorrect,
         uint256 _score,
+        uint256 _alignmentScore,
         string calldata _reportCid
     ) external onlyStakedCoordinator {
         AutonetLib.TaskProposal memory proposal = taskContract.getTaskProposal(_taskId);
@@ -159,6 +160,7 @@ contract ResultsRewards {
             coordinator: msg.sender,
             isCorrect: _isCorrect,
             score: _score,
+            alignmentScore: _alignmentScore,
             stake: stakeInfo.amount,
             voteBlock: block.number,
             reportHash: keccak256(abi.encodePacked(_reportCid))
@@ -187,7 +189,7 @@ contract ResultsRewards {
         require(taskVotes.length >= MIN_COORDINATORS, "Insufficient coordinator votes");
 
         // Compute Yuma consensus
-        (bool consensusCorrect, uint256 consensusScore, uint256 totalStake, uint256 correctStake, uint256 clippedCount) =
+        (bool consensusCorrect, uint256 consensusScore, uint256 consensusAlignmentScore, uint256 totalStake, uint256 correctStake, uint256 clippedCount) =
             _computeYumaConsensus(_taskId, taskVotes);
 
         // Store result
@@ -195,6 +197,7 @@ contract ResultsRewards {
         result.solver = _solver;
         result.consensusCorrect = consensusCorrect;
         result.consensusScore = consensusScore;
+        result.consensusAlignmentScore = consensusAlignmentScore;
         result.totalStake = totalStake;
         result.correctStake = correctStake;
         result.clippedVotes = clippedCount;
@@ -212,7 +215,7 @@ contract ResultsRewards {
         emit YumaConsensusReached(_taskId, _solver, consensusCorrect, consensusScore);
 
         // Process rewards
-        _processRewardsYuma(_taskId, _solver, taskVotes, consensusCorrect, consensusScore);
+        _processRewardsYuma(_taskId, _solver, taskVotes, consensusCorrect, consensusScore, consensusAlignmentScore);
     }
 
     /**
@@ -220,27 +223,32 @@ contract ResultsRewards {
      */
     function _computeYumaConsensus(uint256 _taskId, AutonetLib.CoordinatorVote[] storage taskVotes)
         internal
-        returns (bool consensusCorrect, uint256 consensusScore, uint256 totalStake, uint256 correctStake, uint256 clippedCount)
+        returns (bool consensusCorrect, uint256 consensusScore, uint256 consensusAlignmentScore, uint256 totalStake, uint256 correctStake, uint256 clippedCount)
     {
         uint256 numVotes = taskVotes.length;
 
-        // Calculate total stake and stake-weighted score
+        // Calculate total stake, stake-weighted correctness score, and alignment score
         uint256 weightedScoreSum = 0;
+        uint256 weightedAlignmentSum = 0;
         for (uint256 i = 0; i < numVotes; i++) {
             totalStake += taskVotes[i].stake;
             if (taskVotes[i].isCorrect) {
                 correctStake += taskVotes[i].stake;
             }
             weightedScoreSum += taskVotes[i].score * taskVotes[i].stake;
+            weightedAlignmentSum += taskVotes[i].alignmentScore * taskVotes[i].stake;
         }
 
         // Consensus correct if majority stake agrees
         consensusCorrect = correctStake > totalStake / 2;
 
-        // Calculate stake-weighted average score (before clipping)
+        // Stake-weighted average alignment score (no clipping — alignment is subjective)
+        consensusAlignmentScore = totalStake > 0 ? weightedAlignmentSum / totalStake : 0;
+
+        // Calculate stake-weighted average correctness score (before clipping)
         uint256 avgScore = totalStake > 0 ? weightedScoreSum / totalStake : 0;
 
-        // Apply clipping: scores that deviate too much from average are clipped
+        // Apply clipping: correctness scores that deviate too much from average are clipped
         uint256 clippedWeightedSum = 0;
         uint256 clippedTotalStake = 0;
 
@@ -306,7 +314,8 @@ contract ResultsRewards {
         address _solver,
         AutonetLib.CoordinatorVote[] storage taskVotes,
         bool _isCorrect,
-        uint256 _consensusScore
+        uint256 _consensusScore,
+        uint256 _consensusAlignmentScore
     ) internal {
         require(!rewardsProcessed[_taskId], "Already processed");
 
@@ -340,8 +349,11 @@ contract ResultsRewards {
         }
 
         if (_isCorrect) {
-            // Solver reward scaled by consensus score
-            uint256 scaledSolverReward = (proposal.proposedSolverReward * _consensusScore) / 100;
+            // Solver reward scaled by correctness AND alignment
+            // correctness: 0-100, alignment: 0-10000 (basis points)
+            // Formula: base * (correctness/100) * (alignment/10000)
+            // = base * correctness * alignment / 1_000_000
+            uint256 scaledSolverReward = (proposal.proposedSolverReward * _consensusScore * _consensusAlignmentScore) / 1000000;
             try rpbContract.disburseFromBudget(_solver, scaledSolverReward) returns (bool success) {
                 if (success) {
                     emit RewardsDistributed(_taskId, _solver, scaledSolverReward, "SolverReward");
@@ -350,7 +362,7 @@ contract ResultsRewards {
                 // Continue if disbursement fails
             }
 
-            // Proposer reward
+            // Proposer reward (not alignment-gated — proposers create tasks, not charters)
             try rpbContract.disburseFromBudget(proposal.proposer, proposal.proposedLearnabilityReward) returns (bool success) {
                 if (success) {
                     emit RewardsDistributed(_taskId, proposal.proposer, proposal.proposedLearnabilityReward, "ProposerReward");
@@ -539,6 +551,7 @@ contract ResultsRewards {
         address _solver,
         bool _isCorrect,
         uint256 _score,
+        uint256 _alignmentScore,
         string calldata _reportCid
     ) external onlyStakedCoordinator {
         AutonetLib.TaskProposal memory proposal = taskContract.getTaskProposal(_taskId);

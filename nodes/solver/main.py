@@ -309,8 +309,11 @@ class SolverNode:
 
         logger.info(f"[{self.node_id}] Solution uploaded: {solution_cid}, hash: {solution_hash.hex()[:16]}...")
 
-        # Commit solution hash to blockchain
-        commit_result = self.registry.commit_solution(task_id, solution_hash)
+        # Upload charter for alignment scoring by coordinators
+        charter_cid_bytes = self._upload_charter()
+
+        # Commit solution hash and charter CID to blockchain
+        commit_result = self.registry.commit_solution(task_id, solution_hash, charter_cid_bytes)
 
         if commit_result.success:
             logger.info(f"[{self.node_id}] Solution committed for task {task_id}: {commit_result.tx_hash}")
@@ -326,6 +329,27 @@ class SolverNode:
             self._submit_checkpoints(task_id, checkpoints)
         else:
             logger.error(f"[{self.node_id}] Failed to commit solution: {commit_result.error}")
+
+    def _upload_charter(self) -> bytes:
+        """Upload this solver's charter to the blob store for alignment scoring.
+
+        Returns:
+            The charter CID as bytes32 (zero bytes if upload fails).
+        """
+        try:
+            from ..core.constitution import DEFAULT_CONSTITUTION
+            charter = {
+                "charter": self.config.charter if hasattr(self.config, 'charter') and self.config.charter else "",
+                "node_id": self.node_id,
+                "constitution_hash": DEFAULT_CONSTITUTION.get_principle_summary()[:64],
+            }
+            cid = self.store.add_json(charter)
+            if cid:
+                from web3 import Web3
+                return Web3.keccak(text=cid)
+        except Exception as e:
+            logger.warning(f"[{self.node_id}] Failed to upload charter: {e}")
+        return b'\x00' * 32
 
     def _train(self, task_id: int, task_spec: Optional[dict] = None) -> tuple:
         """

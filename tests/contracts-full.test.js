@@ -360,7 +360,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
       );
 
       const solHash = ethers.keccak256(ethers.toUtf8Bytes("my-solution"));
-      const tx = await f.taskContract.connect(f.solver1).commitSolution(1, solHash);
+      const tx = await f.taskContract.connect(f.solver1).commitSolution(1, solHash, ethers.ZeroHash);
       await expect(tx).to.emit(f.taskContract, "SolutionCommitted");
 
       const solvers = await f.taskContract.getCommittedSolvers(1);
@@ -369,7 +369,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
 
     it("solver cannot commit to non-existent task", async function () {
       await expect(
-        f.taskContract.connect(f.solver1).commitSolution(999, ethers.randomBytes(32))
+        f.taskContract.connect(f.solver1).commitSolution(999, ethers.randomBytes(32), ethers.ZeroHash)
       ).to.be.revertedWith("Task does not exist");
     });
 
@@ -607,7 +607,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
       await f.taskContract.connect(f.proposer).proposeTask(rpbAddr, ethers.randomBytes(32), gtHash, e18(10), e18(5));
 
       // Solver commits
-      await f.taskContract.connect(f.solver1).commitSolution(1, solHash);
+      await f.taskContract.connect(f.solver1).commitSolution(1, solHash, ethers.ZeroHash);
 
       // Proposer reveals ground truth
       await f.resultsRewards.connect(f.proposer).revealGroundTruth(1, groundTruthCid);
@@ -617,7 +617,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
 
       // Coordinator verifies (legacy single-coordinator mode)
       const tx = await f.resultsRewards.connect(f.coord1).submitVerification(
-        1, f.solver1.address, true, 85, "QmReport"
+        1, f.solver1.address, true, 85, 8000, "QmReport"
       );
       await expect(tx).to.emit(f.resultsRewards, "VerificationSubmitted");
       await expect(tx).to.emit(f.resultsRewards, "RewardsDistributed");
@@ -640,7 +640,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
       const solHash = ethers.keccak256(ethers.toUtf8Bytes("correct-sol"));
 
       await f.taskContract.connect(f.proposer).proposeTask(rpbAddr, ethers.randomBytes(32), gtHash, e18(10), e18(5));
-      await f.taskContract.connect(f.solver1).commitSolution(1, solHash);
+      await f.taskContract.connect(f.solver1).commitSolution(1, solHash, ethers.ZeroHash);
       await f.resultsRewards.connect(f.proposer).revealGroundTruth(1, gtCid);
 
       await expect(
@@ -669,14 +669,14 @@ describe("Autonet Contracts — Full Test Suite", function () {
       const solHash = ethers.keccak256(ethers.toUtf8Bytes(solCid));
 
       await f.taskContract.connect(f.proposer).proposeTask(rpbAddr, ethers.randomBytes(32), gtHash, e18(10), e18(5));
-      await f.taskContract.connect(f.solver1).commitSolution(1, solHash);
+      await f.taskContract.connect(f.solver1).commitSolution(1, solHash, ethers.ZeroHash);
       await f.resultsRewards.connect(f.proposer).revealGroundTruth(1, gtCid);
       await f.resultsRewards.connect(f.solver1).revealSolution(1, solCid);
     });
 
     it("two coordinators vote and finalize consensus", async function () {
-      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, "QmR1");
-      await f.resultsRewards.connect(f.coord2).submitVote(1, f.solver1.address, true, 90, "QmR2");
+      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, 8000, "QmR1");
+      await f.resultsRewards.connect(f.coord2).submitVote(1, f.solver1.address, true, 90, 8000, "QmR2");
 
       const tx = await f.resultsRewards.finalizeVoting(1, f.solver1.address);
       await expect(tx).to.emit(f.resultsRewards, "YumaConsensusReached");
@@ -688,8 +688,8 @@ describe("Autonet Contracts — Full Test Suite", function () {
 
     it("disagreeing coordinators: minority gets slashed", async function () {
       // coord1 votes correct, coord2 votes incorrect
-      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, "QmR1");
-      await f.resultsRewards.connect(f.coord2).submitVote(1, f.solver1.address, false, 80, "QmR2");
+      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, 8000, "QmR1");
+      await f.resultsRewards.connect(f.coord2).submitVote(1, f.solver1.address, false, 80, 8000, "QmR2");
 
       // Finalize — coord1 has 500 stake, coord2 has 600 stake
       // correctStake=500, totalStake=1100 → correctStake NOT > totalStake/2 (500 not > 550)
@@ -701,21 +701,21 @@ describe("Autonet Contracts — Full Test Suite", function () {
     });
 
     it("cannot double-vote", async function () {
-      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, "QmR");
+      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, 8000, "QmR");
       await expect(
-        f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, "QmR")
+        f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, 8000, "QmR")
       ).to.be.revertedWith("Already voted");
     });
 
     it("cannot finalize with insufficient votes before period ends", async function () {
-      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, "QmR");
+      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, 8000, "QmR");
       await expect(
         f.resultsRewards.finalizeVoting(1, f.solver1.address)
       ).to.be.revertedWith("Cannot finalize yet");
     });
 
     it("cannot finalize after period with insufficient votes", async function () {
-      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, "QmR");
+      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, 8000, "QmR");
       // Mine past voting period
       await mineBlocks(101);
       await expect(
@@ -724,8 +724,8 @@ describe("Autonet Contracts — Full Test Suite", function () {
     });
 
     it("EMA bond updates track coordinator reliability", async function () {
-      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, "QmR1");
-      await f.resultsRewards.connect(f.coord2).submitVote(1, f.solver1.address, true, 90, "QmR2");
+      await f.resultsRewards.connect(f.coord1).submitVote(1, f.solver1.address, true, 80, 8000, "QmR1");
+      await f.resultsRewards.connect(f.coord2).submitVote(1, f.solver1.address, true, 90, 8000, "QmR2");
       await f.resultsRewards.finalizeVoting(1, f.solver1.address);
 
       const bond1 = await f.resultsRewards.getCoordinatorBond(f.coord1.address);
@@ -1963,10 +1963,10 @@ describe("Autonet Contracts — Full Test Suite", function () {
       );
 
       // First solver commits
-      await f.taskContract.connect(f.solver1).commitSolution(1, ethers.randomBytes(32));
+      await f.taskContract.connect(f.solver1).commitSolution(1, ethers.randomBytes(32), ethers.ZeroHash);
 
       // Second solver can now also commit (status is SOLUTION_COMMITTED, which is accepted)
-      await f.taskContract.connect(f.solver2).commitSolution(1, ethers.randomBytes(32));
+      await f.taskContract.connect(f.solver2).commitSolution(1, ethers.randomBytes(32), ethers.ZeroHash);
 
       const solvers = await f.taskContract.getCommittedSolvers(1);
       expect(solvers.length).to.equal(2);

@@ -18,6 +18,7 @@ from typing import Optional
 from ..common.contracts import ContractRegistry
 from ..common.blob_store import BlobStore
 from ..common.governance import GovernanceBridge
+from ..common.alignment_pricing import AlignmentPricing
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -96,6 +97,10 @@ class CoordinatorNode:
 
         # Governance bridge for attestation and heartbeat
         self.governance = GovernanceBridge(registry, node_id)
+
+        # Alignment scoring
+        self._alignment_pricing = AlignmentPricing(embedding_mode=False)
+        self._constitution_text: Optional[str] = None
 
         logger.info(
             f"CoordinatorNode initialized: {node_id}"
@@ -262,6 +267,9 @@ class CoordinatorNode:
                 ground_truth_cid
             )
 
+            # Compute alignment score (charter ↔ constitution)
+            alignment_score = self._compute_solver_alignment(task_id, solver)
+
             # Create verification report
             report = {
                 "task_id": task_id,
@@ -270,6 +278,7 @@ class CoordinatorNode:
                 "ground_truth_cid": ground_truth_cid,
                 "is_correct": is_correct,
                 "score": score,
+                "alignment_score": alignment_score,
                 "coordinator": self.registry.blockchain.account.address,
                 "timestamp": int(time.time()),
                 "node_id": self.node_id,
@@ -285,6 +294,7 @@ class CoordinatorNode:
                 solver,
                 is_correct,
                 score,
+                alignment_score,
                 report_cid
             )
 
@@ -673,3 +683,82 @@ class CoordinatorNode:
             self.EMA_ALPHA * target +
             (1 - self.EMA_ALPHA) * self.metrics.ema_bond_strength
         )
+
+    # ============ Alignment Scoring ============
+
+    def _get_constitution_text(self) -> str:
+        """Load and cache the jurisdiction constitution text."""
+        if self._constitution_text is not None:
+            return self._constitution_text
+
+        try:
+            from ..core.constitution import DEFAULT_CONSTITUTION
+            self._constitution_text = DEFAULT_CONSTITUTION.get_principle_summary()
+        except Exception as e:
+            logger.warning(f"Failed to load constitution: {e}")
+            self._constitution_text = ""
+
+        return self._constitution_text
+
+    def _compute_solver_alignment(self, task_id: int, solver: str) -> int:
+        """
+        Compute a solver's charter↔constitution alignment score.
+
+        Retrieves the solver's charter text from the blob store (via the
+        charterCid committed with their solution), then computes similarity
+        against the jurisdiction constitution.
+
+        Returns:
+            Alignment score in basis points (0-10000).
+        """
+        constitution = self._get_constitution_text()
+        if not constitution:
+            return 5000  # Neutral default if constitution unavailable
+
+        # Get solver's charter from their submission
+        charter_text = self._get_solver_charter(task_id, solver)
+        if not charter_text:
+            return 5000  # Neutral default if charter unavailable
+
+        try:
+            alignment, breakdown = self._alignment_pricing.compute_alignment(
+                task_description=charter_text,
+                user_standards=charter_text,
+                jurisdiction_standards=constitution,
+            )
+            score_bps = int(alignment * 10000)
+            logger.info(
+                f"Alignment score for solver {solver[:10]}...: "
+                f"{score_bps} bps (breakdown: {breakdown})"
+            )
+            return score_bps
+        except Exception as e:
+            logger.warning(f"Alignment computation failed: {e}")
+            return 5000
+
+    def _get_solver_charter(self, task_id: int, solver: str) -> Optional[str]:
+        """
+        Retrieve the solver's charter text from the blob store.
+
+        The solver commits a charterCid alongside their solution hash.
+        We read it from the on-chain submission and fetch the text.
+        """
+        try:
+            submission = self.registry.get_submission(task_id, solver)
+            charter_cid_bytes = submission.get("charterCid", b'\x00' * 32)
+
+            # Zero hash means no charter submitted
+            if charter_cid_bytes == b'\x00' * 32 or not charter_cid_bytes:
+                return None
+
+            # charterCid is a content hash — fetch from blob store
+            charter_cid = charter_cid_bytes.hex() if isinstance(charter_cid_bytes, bytes) else str(charter_cid_bytes)
+            charter_data = self.store.get_json(charter_cid)
+            if charter_data and isinstance(charter_data, dict):
+                return charter_data.get("charter", "")
+            elif isinstance(charter_data, str):
+                return charter_data
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get solver charter: {e}")
+            return None

@@ -224,7 +224,7 @@ describe("Autonet - Core Contracts", function () {
       // Solver commits solution
       const solutionCid = "QmSolution123456789";
       const solutionHash = ethers.keccak256(ethers.toUtf8Bytes(solutionCid));
-      await taskContract.connect(solver1).commitSolution(taskId, solutionHash);
+      await taskContract.connect(solver1).commitSolution(taskId, solutionHash, ethers.ZeroHash);
 
       // Reveals (simplified - in production would verify hashes)
       await resultsRewards.connect(proposer).revealGroundTruth(taskId, groundTruthCid);
@@ -236,31 +236,31 @@ describe("Autonet - Core Contracts", function () {
 
       // First coordinator votes
       await expect(
-        resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 85, reportCid)
+        resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 85, 8000, reportCid)
       ).to.emit(resultsRewards, "CoordinatorVoted");
 
       // Second coordinator votes
-      await resultsRewards.connect(coord2).submitVote(taskId, solver1.address, true, 90, reportCid);
+      await resultsRewards.connect(coord2).submitVote(taskId, solver1.address, true, 90, 8000, reportCid);
 
       // Third coordinator votes differently
-      await resultsRewards.connect(coord3).submitVote(taskId, solver1.address, true, 75, reportCid);
+      await resultsRewards.connect(coord3).submitVote(taskId, solver1.address, true, 75, 8000, reportCid);
 
       // Check vote count
       expect(await resultsRewards.getVoteCount(taskId, solver1.address)).to.equal(3);
     });
 
     it("Should prevent double voting", async function () {
-      await resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 85, "QmReport");
+      await resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 85, 8000, "QmReport");
 
       await expect(
-        resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 90, "QmReport")
+        resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 90, 8000, "QmReport")
       ).to.be.revertedWith("Already voted");
     });
 
     it("Should compute Yuma consensus with stake weighting", async function () {
       // Coord1 and Coord2 vote correct, Coord3 votes incorrect
-      await resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 85, "QmReport");
-      await resultsRewards.connect(coord2).submitVote(taskId, solver1.address, true, 90, "QmReport");
+      await resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 85, 8000, "QmReport");
+      await resultsRewards.connect(coord2).submitVote(taskId, solver1.address, true, 90, 8000, "QmReport");
 
       // Finalize after minimum coordinators
       await resultsRewards.finalizeVoting(taskId, solver1.address);
@@ -272,8 +272,8 @@ describe("Autonet - Core Contracts", function () {
     });
 
     it("Should update coordinator bonds after consensus", async function () {
-      await resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 85, "QmReport");
-      await resultsRewards.connect(coord2).submitVote(taskId, solver1.address, true, 90, "QmReport");
+      await resultsRewards.connect(coord1).submitVote(taskId, solver1.address, true, 85, 8000, "QmReport");
+      await resultsRewards.connect(coord2).submitVote(taskId, solver1.address, true, 90, 8000, "QmReport");
 
       await expect(resultsRewards.finalizeVoting(taskId, solver1.address))
         .to.emit(resultsRewards, "BondUpdated");
@@ -361,7 +361,7 @@ describe("Autonet - Core Contracts", function () {
       // Solver commits solution
       const solutionCid = "QmSolution123456789";
       const solutionHash = ethers.keccak256(ethers.toUtf8Bytes(solutionCid));
-      await taskContract.connect(solver1).commitSolution(taskId, solutionHash);
+      await taskContract.connect(solver1).commitSolution(taskId, solutionHash, ethers.ZeroHash);
 
       // Reveals
       await resultsRewards.connect(proposer).revealGroundTruth(taskId, groundTruthCid);
@@ -370,7 +370,7 @@ describe("Autonet - Core Contracts", function () {
 
     it("Should allow single coordinator to verify (legacy mode)", async function () {
       await expect(
-        resultsRewards.connect(coord1).submitVerification(taskId, solver1.address, true, 85, "QmReport")
+        resultsRewards.connect(coord1).submitVerification(taskId, solver1.address, true, 85, 8000, "QmReport")
       ).to.emit(resultsRewards, "VerificationSubmitted");
     });
   });

@@ -245,9 +245,23 @@ class ContractRegistry:
             gas_limit=800000,
         )
 
-    def commit_solution(self, task_id: int, solution_hash: bytes) -> TransactionResult:
-        """Commit a solution hash for a task."""
-        return self.send("TaskContract", "commitSolution", task_id, solution_hash)
+    def commit_solution(self, task_id: int, solution_hash: bytes, charter_cid: bytes = b'\x00' * 32) -> TransactionResult:
+        """Commit a solution hash and charter CID for a task."""
+        return self.send("TaskContract", "commitSolution", task_id, solution_hash, charter_cid)
+
+    def get_submission(self, task_id: int, solver: str) -> dict:
+        """Get a solver's submission for a task."""
+        try:
+            result = self.call("TaskContract", "getSubmission", task_id, solver)
+            return {
+                "solutionHash": result[0],
+                "charterCid": result[1],
+                "solver": result[2],
+                "submissionBlock": result[3],
+                "score": result[4],
+            }
+        except Exception:
+            return {}
 
     def submit_checkpoint(
         self,
@@ -295,12 +309,13 @@ class ContractRegistry:
         solver: str,
         is_correct: bool,
         score: int,
+        alignment_score: int,
         report_cid: str,
     ) -> TransactionResult:
-        """Submit a coordinator vote."""
+        """Submit a coordinator vote with correctness and alignment scores."""
         return self.send(
             "ResultsRewards", "submitVote",
-            task_id, solver, is_correct, score, report_cid,
+            task_id, solver, is_correct, score, alignment_score, report_cid,
         )
 
     def finalize_voting(self, task_id: int, solver: str) -> TransactionResult:
