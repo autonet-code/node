@@ -556,12 +556,13 @@ class ProviderManager:
             return {"status": "ok", "provider": provider_id, "models": models}
 
         elif info["auth_type"] == "bridge":
+            # Auto-install bridge dependencies if missing
+            await self._ensure_bridge_deps()
             auth = await self._check_claude_auth()
             if not auth["installed"]:
                 raise ValueError(
-                    "Claude Code SDK not found. Install Claude Code "
-                    "(https://claude.ai/download) and run 'bun install' "
-                    "in the bridge/ directory."
+                    "Bridge setup failed. Ensure 'bun' is installed "
+                    "(npm i -g bun) and try again."
                 )
             if not auth["logged_in"]:
                 log.info("Claude Code not authenticated — launching browser login")
@@ -852,6 +853,63 @@ class ProviderManager:
             raise ValueError(f"Cannot reach {provider_id} API — check your network")
         except httpx.TimeoutException:
             raise ValueError(f"Timeout connecting to {provider_id} API")
+
+    async def _ensure_bridge_deps(self) -> None:
+        """Auto-install bridge dependencies (bun install) if missing."""
+        bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
+        pkg_json = bridge_dir / "package.json"
+        node_modules = bridge_dir / "node_modules"
+        cli_js = node_modules / "@anthropic-ai" / "claude-agent-sdk" / "cli.js"
+
+        if cli_js.exists():
+            return  # Already installed
+
+        if not pkg_json.exists():
+            log.warning("Bridge package.json not found at %s", bridge_dir)
+            return
+
+        # Check bun is available
+        import shutil
+        bun = shutil.which("bun")
+        if not bun:
+            # Try installing bun via npm
+            npm = shutil.which("npm")
+            if npm:
+                log.info("Installing bun via npm...")
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        npm, "install", "-g", "bun",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await asyncio.wait_for(proc.communicate(), timeout=120)
+                    bun = shutil.which("bun")
+                except Exception as e:
+                    log.warning("Failed to install bun: %s", e)
+
+        if not bun:
+            log.warning("bun not found — cannot auto-install bridge dependencies")
+            return
+
+        # Run bun install in the bridge directory
+        log.info("Installing bridge dependencies in %s ...", bridge_dir)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                bun, "install",
+                cwd=str(bridge_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            if proc.returncode == 0:
+                log.info("Bridge dependencies installed successfully")
+            else:
+                log.warning("bun install failed (exit %s): %s",
+                            proc.returncode, stderr.decode(errors="replace")[:500])
+        except asyncio.TimeoutError:
+            log.warning("bun install timed out")
+        except Exception as e:
+            log.warning("Failed to install bridge dependencies: %s", e)
 
     def _resolve_sdk_cli(self) -> Path | None:
         bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
