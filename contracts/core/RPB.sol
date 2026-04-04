@@ -3,15 +3,25 @@ pragma solidity ^0.8.20;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
+import {ERC20Burnable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {Registry} from "./Registry.sol";
-import {ATNToken} from "../tokens/ATNToken.sol";
 import {AutonetLib} from "../utils/AutonetLib.sol";
 
 /**
  * @title RPB (Recursive Principled Body)
  * @notice The single contract for an RPB jurisdiction.
+ *
+ * RPB is itself the jurisdiction's ERC20 token (ATN). It inherits
+ * ERC20Votes for governance, ERC20Burnable for BME, and ERC20Permit
+ * for gasless approvals. Deploying an RPB gives you the token, agent
+ * registry, training economics, inference accounting, and share system
+ * in one contract.
  *
  * Every participant is an Agent — no human/AI distinction. Root agents
  * share a wallet with the human operating the node; child agents get
@@ -20,8 +30,10 @@ import {AutonetLib} from "../utils/AutonetLib.sol";
  * Accepts any ERC20 token that has a parity entry in the jurisdiction's
  * Registry (key: "jurisdiction.parity.{token_address}"). All internal
  * accounting uses normalized value units (raw amount × parity ratio).
+ * The RPB's own token always has implicit parity of 1.
  *
  * Manages:
+ * - ERC20 token (ATN) with mint/burn for authorized parties
  * - Agent registration (lineage, alignment, sponsorship)
  * - Wallet hierarchy (parent-child key ownership, cascading drain)
  * - Training reward distribution
@@ -29,7 +41,7 @@ import {AutonetLib} from "../utils/AutonetLib.sol";
  * - RPB share issuance (claims on inference dividends)
  * - Model versioning
  */
-contract RPB is Ownable, ReentrancyGuard {
+contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
 
     // =========================================================================
     // Structs
@@ -86,6 +98,9 @@ contract RPB is Ownable, ReentrancyGuard {
     Registry public registry;         // Jurisdiction registry (source of truth)
     address public dao;               // Governor contract (read from registry owner)
 
+    // --- Authorized minters (for BME bridge, disbursers, etc.) ---
+    mapping(address => bool) public authorizedMinters;
+
     // --- Training rewards ---
     uint256 public trainingRewardPool;
     uint256 public totalTrainingTokens;
@@ -115,8 +130,7 @@ contract RPB is Ownable, ReentrancyGuard {
     bytes32 public currentModelHash;
     uint256 public modelVersion;
 
-    // --- Task reward budget (replaces Project.sol budget) ---
-    ATNToken public atnToken;
+    // --- Task reward budget (denominated in this token) ---
     uint256 public taskRewardBudgetATN;
     mapping(address => bool) public authorizedDisbursers;
 
@@ -155,6 +169,7 @@ contract RPB is Ownable, ReentrancyGuard {
     event ModelUpdated(bytes32 newModelHash, uint256 version);
     event RewardPoolFunded(address indexed funder, address indexed token, uint256 amount, uint256 normalizedValue);
     event DisburserAuthorized(address indexed disburser, bool authorized);
+    event MinterAuthorized(address indexed minter, bool authorized);
     event TaskBudgetFunded(uint256 amount, uint256 newTotal);
     event TaskBudgetDisbursed(address indexed recipient, uint256 amount);
     event MatureModelSet(string weightsCid, uint256 price);
@@ -200,16 +215,23 @@ contract RPB is Ownable, ReentrancyGuard {
 
     error InvalidJurisdiction();
 
+    uint256 public constant INITIAL_SUPPLY = 1_000_000_000; // 1 billion ATN
+
     constructor(
-        address _registry,
-        address _atnToken
-    ) Ownable(msg.sender) {
+        address _registry
+    )
+        Ownable(msg.sender)
+        ERC20("Autonoma Token", "ATN")
+        ERC20Permit("Autonoma Token")
+    {
         Registry reg = Registry(payable(_registry));
         if (reg.jurisdictionAddress() == address(0)) revert InvalidJurisdiction();
 
         registry = reg;
         dao = reg.owner();
-        atnToken = ATNToken(_atnToken);
+
+        // Mint initial supply to the deployer (typically transferred to DAO via proposal)
+        _mint(msg.sender, INITIAL_SUPPLY * (10 ** decimals()));
 
         // Default revenue split (basis points, must sum to 10000)
         inferenceProviderShare = 6000;  // 60%
@@ -220,14 +242,47 @@ contract RPB is Ownable, ReentrancyGuard {
     }
 
     // =========================================================================
+    // ERC20 Overrides (required for multiple inheritance)
+    // =========================================================================
+
+    function _update(address from, address to, uint256 amount) internal override(ERC20, ERC20Votes) {
+        super._update(from, to, amount);
+    }
+
+    function nonces(address owner_) public view override(ERC20Permit, Nonces) returns (uint256) {
+        return super.nonces(owner_);
+    }
+
+    // =========================================================================
+    // Minting (DAO + authorized minters for BME bridge)
+    // =========================================================================
+
+    function mint(address to, uint256 amount) external {
+        require(
+            msg.sender == dao || msg.sender == owner() || authorizedMinters[msg.sender],
+            "RPB: not authorized to mint"
+        );
+        _mint(to, amount);
+    }
+
+    function setAuthorizedMinter(address minter, bool authorized) external {
+        if (msg.sender != owner() && msg.sender != dao) revert NotOwnerOrDAO();
+        require(minter != address(0), "RPB: zero minter address");
+        authorizedMinters[minter] = authorized;
+        emit MinterAuthorized(minter, authorized);
+    }
+
+    // =========================================================================
     // Value Index — Parity Validation
     // =========================================================================
 
     /**
      * @notice Get the parity ratio for a token from the jurisdiction registry.
      * @dev Reads "jurisdiction.parity.{token_address}" — returns 0 if not found.
+     *      The RPB's own token (address(this)) always has implicit parity of 1.
      */
     function _getParityValue(address token) internal view returns (uint256) {
+        if (token == address(this)) return 1;
         string memory parityKey = string.concat(
             "jurisdiction.parity.",
             Strings.toHexString(uint160(token))
@@ -327,11 +382,6 @@ contract RPB is Ownable, ReentrancyGuard {
     // Wallet Hierarchy — Drain
     // =========================================================================
 
-    /**
-     * @notice Drain a specific token from a child agent to its parent.
-     * @param child Address of the child agent to drain
-     * @param token ERC20 token to drain (must be in value index)
-     */
     function drainChild(address child, address token) external nonReentrant {
         AgentRecord storage childRecord = agents[child];
         if (!childRecord.active && childRecord.registeredAt == 0) revert AgentNotActive();
@@ -345,11 +395,6 @@ contract RPB is Ownable, ReentrancyGuard {
         }
     }
 
-    /**
-     * @notice Cascading drain of a specific token from all descendants.
-     * @param agent Starting agent (drains all children of this agent)
-     * @param token ERC20 token to drain
-     */
     function drainDescendants(address agent, address token) external nonReentrant {
         if (msg.sender != agent && msg.sender != agents[agent].parentAgent) {
             revert NotParentOrSelf();
@@ -410,10 +455,6 @@ contract RPB is Ownable, ReentrancyGuard {
     // Training
     // =========================================================================
 
-    /**
-     * @notice Record a training contribution from an agent.
-     * @dev Called by the owner after Proof of Intelligence verification.
-     */
     function recordTraining(address agent, uint256 contribution) external onlyOwner {
         if (!agents[agent].active) revert AgentNotActive();
 
@@ -434,7 +475,7 @@ contract RPB is Ownable, ReentrancyGuard {
 
     /**
      * @notice Claim training rewards, withdrawn in a specific value-index token.
-     * @param token ERC20 token to receive (must be in value index)
+     * @param token ERC20 token to receive (must be in value index; use address(this) for ATN)
      */
     function claimTrainingReward(address token) external nonReentrant {
         uint256 tokens = agentTrainingTokens[msg.sender];
@@ -449,7 +490,6 @@ contract RPB is Ownable, ReentrancyGuard {
             normalizedReward = trainingRewardPool;
         }
 
-        // Convert normalized value to raw token amount
         uint256 rawAmount = _denormalize(token, normalizedReward);
         if (rawAmount == 0) revert NoRewardsToClaim();
         if (tokenPoolBalances[token] < rawAmount) revert InsufficientPoolBalance();
@@ -458,18 +498,26 @@ contract RPB is Ownable, ReentrancyGuard {
         trainingRewardPool -= normalizedReward;
         tokenPoolBalances[token] -= rawAmount;
 
-        if (!IERC20(token).transfer(msg.sender, rawAmount)) revert TransferFailed();
+        if (token == address(this)) {
+            _transfer(address(this), msg.sender, rawAmount);
+        } else {
+            if (!IERC20(token).transfer(msg.sender, rawAmount)) revert TransferFailed();
+        }
         emit RewardClaimed(msg.sender, token, rawAmount);
     }
 
     /**
      * @notice Fund the training reward pool with any value-index token.
-     * @param token ERC20 token to deposit (must be in value index)
+     * @param token ERC20 token to deposit (must be in value index; use address(this) for ATN)
      * @param amount Raw token amount to deposit
      */
     function fundTrainingPool(address token, uint256 amount) external nonReentrant {
         uint256 normalizedValue = _normalize(token, amount);
-        if (!IERC20(token).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
+        if (token == address(this)) {
+            _transfer(msg.sender, address(this), amount);
+        } else {
+            if (!IERC20(token).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
+        }
         trainingRewardPool += normalizedValue;
         tokenPoolBalances[token] += amount;
         emit RewardPoolFunded(msg.sender, token, amount, normalizedValue);
@@ -479,16 +527,15 @@ contract RPB is Ownable, ReentrancyGuard {
     // RPB Shares
     // =========================================================================
 
-    /**
-     * @notice Purchase RPB shares (claims on inference dividends).
-     * @param token ERC20 token to pay with (must be in value index)
-     * @param amount Raw token amount to spend
-     */
     function purchaseShares(address token, uint256 amount) external nonReentrant {
         if (amount == 0) revert AmountMustBePositive();
         uint256 normalizedValue = _normalize(token, amount);
 
-        if (!IERC20(token).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
+        if (token == address(this)) {
+            _transfer(msg.sender, address(this), amount);
+        } else {
+            if (!IERC20(token).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
+        }
 
         shares[msg.sender] += normalizedValue;
         totalShares += normalizedValue;
@@ -498,10 +545,6 @@ contract RPB is Ownable, ReentrancyGuard {
         emit SharesPurchased(msg.sender, normalizedValue, token, amount);
     }
 
-    /**
-     * @notice Claim accumulated dividends from inference revenue.
-     * @param token ERC20 token to receive dividends in (must be in value index)
-     */
     function claimDividends(address token) external nonReentrant {
         if (shares[msg.sender] == 0) revert NoShares();
         if (totalShares == 0) revert NoSharesOutstanding();
@@ -521,7 +564,11 @@ contract RPB is Ownable, ReentrancyGuard {
         totalDividendsPaid += normalizedToClaim;
         tokenPoolBalances[token] -= rawAmount;
 
-        if (!IERC20(token).transfer(msg.sender, rawAmount)) revert TransferFailed();
+        if (token == address(this)) {
+            _transfer(address(this), msg.sender, rawAmount);
+        } else {
+            if (!IERC20(token).transfer(msg.sender, rawAmount)) revert TransferFailed();
+        }
         emit DividendClaimed(msg.sender, token, rawAmount);
     }
 
@@ -529,14 +576,6 @@ contract RPB is Ownable, ReentrancyGuard {
     // Inference
     // =========================================================================
 
-    /**
-     * @notice Record an inference event and distribute payment.
-     * @param requester Agent that requested inference
-     * @param provider Agent that served inference
-     * @param units Number of inference units served
-     * @param token ERC20 token used for payment (must be in value index)
-     * @param cost Raw token amount for the inference cost
-     */
     function recordInference(
         address requester,
         address provider,
@@ -552,7 +591,6 @@ contract RPB is Ownable, ReentrancyGuard {
         totalInferenceRevenue += normalizedCost;
         agents[provider].totalInferenceServed += units;
 
-        // Debit sponsor budget if provider is sponsored
         if (agents[provider].sponsorAgent != address(0)) {
             address sponsor = agents[provider].sponsorAgent;
             if (sponsors[sponsor].active) {
@@ -560,20 +598,22 @@ contract RPB is Ownable, ReentrancyGuard {
             }
         }
 
-        // Split revenue (in raw token amounts)
         uint256 providerPayment = (cost * inferenceProviderShare) / 10000;
         uint256 treasuryPayment = (cost * treasuryShare) / 10000;
         uint256 shareholderPoolPayment = cost - providerPayment - treasuryPayment;
 
-        if (providerPayment > 0) {
-            if (!IERC20(token).transfer(provider, providerPayment)) revert ProviderPaymentFailed();
+        if (token == address(this)) {
+            if (providerPayment > 0) _transfer(address(this), provider, providerPayment);
+            if (treasuryPayment > 0) _transfer(address(this), dao, treasuryPayment);
+        } else {
+            if (providerPayment > 0) {
+                if (!IERC20(token).transfer(provider, providerPayment)) revert ProviderPaymentFailed();
+            }
+            if (treasuryPayment > 0) {
+                if (!IERC20(token).transfer(dao, treasuryPayment)) revert TreasuryPaymentFailed();
+            }
         }
 
-        if (treasuryPayment > 0) {
-            if (!IERC20(token).transfer(dao, treasuryPayment)) revert TreasuryPaymentFailed();
-        }
-
-        // Shareholder portion stays in the contract for dividend claims
         if (shareholderPoolPayment > 0) {
             tokenPoolBalances[token] += shareholderPoolPayment;
         }
@@ -581,22 +621,6 @@ contract RPB is Ownable, ReentrancyGuard {
         emit InferenceServed(provider, requester, units, normalizedCost);
     }
 
-    /**
-     * @notice Record an inference completed via BME (burn-mint) bridge.
-     *
-     *         The bridge handles all token minting. This function only updates
-     *         RPB accounting so that shareholder dividends and agent stats
-     *         reflect inference activity.
-     *
-     *         The bridge MUST mint `shareholderAmount` of ATN to this contract
-     *         before calling, so that dividend claims can be honored.
-     *
-     * @param requester       Address that requested inference
-     * @param provider        Address that served inference
-     * @param units           Number of inference units served
-     * @param totalRevenue    Total ATN value of the inference (burned amount)
-     * @param shareholderAmount ATN minted to this contract for shareholder dividends
-     */
     function recordInferenceBME(
         address requester,
         address provider,
@@ -611,7 +635,6 @@ contract RPB is Ownable, ReentrancyGuard {
         totalInferenceUnits += units;
         totalInferenceRevenue += totalRevenue;
 
-        // Update agent stats if provider is a registered agent
         if (agents[provider].active) {
             agents[provider].totalInferenceServed += units;
 
@@ -625,7 +648,7 @@ contract RPB is Ownable, ReentrancyGuard {
 
         // Track shareholder pool (bridge already minted ATN to this contract)
         if (shareholderAmount > 0) {
-            tokenPoolBalances[address(atnToken)] += shareholderAmount;
+            tokenPoolBalances[address(this)] += shareholderAmount;
         }
 
         emit InferenceServed(provider, requester, units, totalRevenue);
@@ -646,7 +669,7 @@ contract RPB is Ownable, ReentrancyGuard {
     }
 
     // =========================================================================
-    // Task Budget & Disbursement (replaces Project.sol)
+    // Task Budget & Disbursement
     // =========================================================================
 
     function setAuthorizedDisburser(address _disburser, bool _authorized) external {
@@ -656,7 +679,7 @@ contract RPB is Ownable, ReentrancyGuard {
     }
 
     function fundTaskBudget(uint256 _amount) external nonReentrant {
-        require(IERC20(address(atnToken)).transferFrom(msg.sender, address(this), _amount), "Transfer failed");
+        _transfer(msg.sender, address(this), _amount);
         taskRewardBudgetATN += _amount;
         emit TaskBudgetFunded(_amount, taskRewardBudgetATN);
     }
@@ -668,13 +691,13 @@ contract RPB is Ownable, ReentrancyGuard {
         if (taskRewardBudgetATN < _amount) revert InsufficientBudget();
 
         taskRewardBudgetATN -= _amount;
-        require(IERC20(address(atnToken)).transfer(_recipient, _amount), "Transfer failed");
+        _transfer(address(this), _recipient, _amount);
         emit TaskBudgetDisbursed(_recipient, _amount);
         return true;
     }
 
     // =========================================================================
-    // Mature Model & Inference Pricing (replaces Project.sol)
+    // Mature Model & Inference Pricing
     // =========================================================================
 
     function setMatureModel(string memory _weightsCid, uint256 _price) external {

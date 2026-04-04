@@ -36,8 +36,16 @@ from ..events import Event, EventBus, EventType
 
 log = logging.getLogger(__name__)
 
-# Path to the bridge script relative to this file
-_BRIDGE_DIR = Path(__file__).resolve().parent.parent.parent / "bridge"
+# Locate the bridge directory: try importlib first (pip install), then relative path (dev)
+def _find_bridge_dir() -> Path:
+    try:
+        import bridge as _bridge_pkg
+        return Path(_bridge_pkg.__file__).resolve().parent
+    except ImportError:
+        pass
+    return Path(__file__).resolve().parent.parent.parent / "bridge"
+
+_BRIDGE_DIR = _find_bridge_dir()
 _BRIDGE_SCRIPT = _BRIDGE_DIR / "claude-bridge.ts"
 
 
@@ -777,14 +785,38 @@ class BridgeProvider(Provider):
         node_modules = self._bridge_script.parent / "node_modules"
         if not node_modules.exists():
             raise ProviderError(
-                f"Bridge dependencies not installed. Run: cd {self._bridge_script.parent} && bun install",
+                f"Bridge dependencies not installed. "
+                f"Run: cd {self._bridge_script.parent} && bun install  (or npm install)",
                 provider="claude_max",
             )
 
         # Fresh queue for new process
         self._event_queue = asyncio.Queue()
 
-        log.info("Spawning bridge: bun run %s", self._bridge_script)
+        # Resolve JS runtime: prefer bun, fall back to node
+        import shutil
+        runtime = shutil.which("bun")
+        runtime_args = ["run", str(self._bridge_script)]
+        if not runtime:
+            runtime = shutil.which("node")
+            if runtime:
+                # node needs the compiled .ts → use tsx or run .ts directly
+                # bun handles .ts natively; for node we need tsx or pre-compiled JS
+                tsx = shutil.which("tsx") or shutil.which("npx")
+                if tsx and "npx" in str(tsx):
+                    runtime_args = ["tsx", str(self._bridge_script)]
+                elif tsx:
+                    runtime = tsx
+                    runtime_args = [str(self._bridge_script)]
+                else:
+                    runtime_args = ["--import", "tsx", str(self._bridge_script)]
+        if not runtime:
+            raise ProviderError(
+                "Neither bun nor node found. Install bun: https://bun.sh/docs/installation",
+                provider="claude_max",
+            )
+
+        log.info("Spawning bridge: %s %s", runtime, " ".join(runtime_args))
 
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
@@ -795,7 +827,7 @@ class BridgeProvider(Provider):
         env.pop("CLAUDECODE", None)
 
         self._process = await asyncio.create_subprocess_exec(
-            "bun", "run", str(self._bridge_script),
+            runtime, *runtime_args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

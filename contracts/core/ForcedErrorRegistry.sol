@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "../utils/AutonetLib.sol";
 import "./ParticipantStaking.sol";
-import "../tokens/ATNToken.sol";
+import "./RPB.sol";
 
 /**
  * @title ForcedErrorRegistry
@@ -19,7 +19,7 @@ import "../tokens/ATNToken.sol";
  * might rubber-stamp everything since real errors are rare.
  */
 contract ForcedErrorRegistry {
-    ATNToken public immutable atnToken;
+    RPB public immutable rpb;
     ParticipantStaking public immutable staking;
     address public governance;
 
@@ -61,8 +61,8 @@ contract ForcedErrorRegistry {
 
     // ============ Constructor ============
 
-    constructor(address _atnToken, address _staking, address _governance) {
-        atnToken = ATNToken(_atnToken);
+    constructor(address _rpb, address _staking, address _governance) {
+        rpb = RPB(_rpb);
         staking = ParticipantStaking(_staking);
         governance = _governance;
     }
@@ -73,7 +73,7 @@ contract ForcedErrorRegistry {
      * @dev Fund the jackpot pool. Anyone can contribute.
      */
     function fundJackpotPool(uint256 _amount) external {
-        require(atnToken.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
+        require(rpb.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
         jackpotPool += _amount;
         emit JackpotFunded(msg.sender, _amount);
     }
@@ -146,7 +146,7 @@ contract ForcedErrorRegistry {
 
         // Award jackpot (already reserved from pool during injection)
         uint256 award = fe.jackpotAmount;
-        require(atnToken.transfer(msg.sender, award), "Jackpot transfer failed");
+        require(rpb.transfer(msg.sender, award), "Jackpot transfer failed");
 
         emit ForcedErrorCaught(_taskId, msg.sender, award);
     }

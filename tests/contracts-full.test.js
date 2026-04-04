@@ -26,14 +26,23 @@ async function deployAll() {
   const [owner, proposer, solver1, solver2, coord1, coord2, coord3, aggregator1, user1, user2] =
     await ethers.getSigners();
 
-  // ── ATN Token ──
-  const ATNToken = await ethers.getContractFactory("ATNToken");
-  const atnToken = await ATNToken.deploy(owner.address, 1_000_000_000);
-  await atnToken.waitForDeployment();
+  // ── Registry (mock jurisdiction) ──
+  const Registry = await ethers.getContractFactory("Registry");
+  const registry = await Registry.deploy(owner.address, owner.address);
+  await registry.waitForDeployment();
+
+  // Set jurisdiction address so RPB constructor doesn't revert
+  await registry.setJurisdictionAddress(owner.address);
+
+  // ── RPB (IS the ERC20 token — replaces ATNToken) ──
+  const RPB_Factory = await ethers.getContractFactory("RPB");
+  const rpb = await RPB_Factory.deploy(await registry.getAddress());
+  await rpb.waitForDeployment();
+  const rpbAddr = await rpb.getAddress();
 
   // ── ParticipantStaking ──
   const Staking = await ethers.getContractFactory("ParticipantStaking");
-  const staking = await Staking.deploy(await atnToken.getAddress(), owner.address);
+  const staking = await Staking.deploy(rpbAddr, owner.address);
   await staking.waitForDeployment();
 
   // ── TaskContract ──
@@ -41,7 +50,7 @@ async function deployAll() {
   const taskContract = await TaskContract.deploy(
     await staking.getAddress(),
     owner.address,
-    await atnToken.getAddress()
+    rpbAddr
   );
   await taskContract.waitForDeployment();
 
@@ -57,7 +66,7 @@ async function deployAll() {
   // ── ForcedErrorRegistry ──
   const ForcedErrorRegistry = await ethers.getContractFactory("ForcedErrorRegistry");
   const forcedErrorRegistry = await ForcedErrorRegistry.deploy(
-    await atnToken.getAddress(),
+    rpbAddr,
     await staking.getAddress(),
     owner.address
   );
@@ -73,7 +82,7 @@ async function deployAll() {
 
   // ── AutonetDAO ──
   const AutonetDAO = await ethers.getContractFactory("AutonetDAO");
-  const dao = await AutonetDAO.deploy(await atnToken.getAddress(), owner.address);
+  const dao = await AutonetDAO.deploy(rpbAddr, owner.address);
   await dao.waitForDeployment();
 
   // ── CapabilityScorecard ──
@@ -84,7 +93,7 @@ async function deployAll() {
   // ── GuildRegistry ──
   const GuildRegistry = await ethers.getContractFactory("GuildRegistry");
   const guildRegistry = await GuildRegistry.deploy(
-    await atnToken.getAddress(),
+    rpbAddr,
     owner.address,
     e18(500),  // minGuildStake
     e18(50)    // minMemberStake
@@ -93,36 +102,21 @@ async function deployAll() {
 
   // ── AnchorBridge ──
   const AnchorBridge = await ethers.getContractFactory("AnchorBridge");
-  const anchorBridge = await AnchorBridge.deploy(await atnToken.getAddress());
+  const anchorBridge = await AnchorBridge.deploy(rpbAddr);
   await anchorBridge.waitForDeployment();
 
   // ── DisputeManager ──
   const DisputeManager = await ethers.getContractFactory("DisputeManager");
-  const disputeManager = await DisputeManager.deploy(await atnToken.getAddress());
+  const disputeManager = await DisputeManager.deploy(rpbAddr);
   await disputeManager.waitForDeployment();
-
-  // ── Registry (mock jurisdiction) ──
-  const Registry = await ethers.getContractFactory("Registry");
-  const registry = await Registry.deploy(owner.address, owner.address);
-  await registry.waitForDeployment();
-
-  // Set jurisdiction address so RPB constructor doesn't revert
-  await registry.setJurisdictionAddress(owner.address);
 
   // ── RPBFactory ──
   const RPBFactory = await ethers.getContractFactory("RPBFactory");
   const rpbFactory = await RPBFactory.deploy();
   await rpbFactory.waitForDeployment();
 
-  // ── Deploy a default RPB for reward/task tests ──
-  const rpbTx = await rpbFactory.createRPB(
-    await registry.getAddress(),
-    await atnToken.getAddress()
-  );
-  const rpbReceipt = await rpbTx.wait();
-  const rpbEvent = rpbReceipt.logs.find(l => l.fragment && l.fragment.name === "RPBDeployed");
-  const rpbAddr = rpbEvent.args[0];
-  const rpb = await ethers.getContractAt("RPB", rpbAddr);
+  // Register the already-deployed RPB with the factory
+  await rpbFactory.registerRPB(rpbAddr);
 
   // ── InferenceProviderFactory ──
   const InferenceProviderFactory = await ethers.getContractFactory("InferenceProviderFactory");
@@ -135,7 +129,7 @@ async function deployAll() {
   // ── EvolutionProposal ──
   const EvolutionProposal = await ethers.getContractFactory("EvolutionProposal");
   const evolutionProposal = await EvolutionProposal.deploy(
-    await atnToken.getAddress(),
+    rpbAddr,
     await registry.getAddress(),
     owner.address // timelock = owner for testing
   );
@@ -150,26 +144,25 @@ async function deployAll() {
   // Authorize ResultsRewards to disburse from RPB budget
   await rpb.setAuthorizedDisburser(await resultsRewards.getAddress(), true);
 
-  // Fund RPB task budget (owner sends ATN to RPB)
-  await atnToken.approve(rpbAddr, e18(100000));
+  // Fund RPB task budget (RPB uses internal _transfer, no approval needed)
   await rpb.fundTaskBudget(e18(10000));
 
   // ── Distribute tokens ──
   const testAmount = e18(100_000);
   for (const s of [proposer, solver1, solver2, coord1, coord2, coord3, aggregator1, user1, user2]) {
-    await atnToken.transfer(s.address, testAmount);
+    await rpb.transfer(s.address, testAmount);
   }
 
   // ── Pre-approve staking for common roles ──
   for (const s of [proposer, solver1, solver2, coord1, coord2, coord3, aggregator1]) {
-    await atnToken.connect(s).approve(await staking.getAddress(), testAmount);
+    await rpb.connect(s).approve(await staking.getAddress(), testAmount);
   }
 
   return {
-    atnToken, staking, taskContract, resultsRewards,
+    rpb, staking, taskContract, resultsRewards,
     forcedErrorRegistry, modelShardRegistry, dao, scorecard,
     guildRegistry, anchorBridge, disputeManager, inferenceFactory,
-    registry, rpbFactory, rpb, evolutionProposal,
+    registry, rpbFactory, evolutionProposal,
     owner, proposer, solver1, solver2, coord1, coord2, coord3,
     aggregator1, user1, user2,
   };
@@ -183,47 +176,37 @@ describe("Autonet Contracts — Full Test Suite", function () {
   this.timeout(120_000);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 1. ATNToken
+  // 1. RPB Token (ERC20 inherited by RPB)
   // ─────────────────────────────────────────────────────────────────────────
-  describe("ATNToken", function () {
+  describe("RPB Token", function () {
     let f;
     beforeEach(async () => { f = await deployAll(); });
 
-    it("mints initial supply to holder", async function () {
-      // 1B * 1e18
-      expect(await f.atnToken.balanceOf(f.owner.address)).to.be.gt(0);
+    it("mints initial supply to deployer", async function () {
+      // 1B * 1e18 minus what was distributed in deployAll
+      expect(await f.rpb.balanceOf(f.owner.address)).to.be.gt(0);
     });
 
-    it("only DAO can mint", async function () {
+    it("only owner/dao/authorized can mint", async function () {
       await expect(
-        f.atnToken.connect(f.user1).mint(f.user1.address, e18(1))
-      ).to.be.revertedWith("ATNToken: caller is not DAO or authorized minter");
+        f.rpb.connect(f.user1).mint(f.user1.address, e18(1))
+      ).to.be.revertedWith("RPB: not authorized to mint");
     });
 
-    it("DAO can authorize minter", async function () {
-      await f.atnToken.setAuthorizedMinter(f.user1.address, true);
-      await f.atnToken.connect(f.user1).mint(f.user2.address, e18(100));
-      expect(await f.atnToken.balanceOf(f.user2.address)).to.equal(e18(100_100));
+    it("owner can authorize minter", async function () {
+      await f.rpb.setAuthorizedMinter(f.user1.address, true);
+      await f.rpb.connect(f.user1).mint(f.user2.address, e18(100));
+      expect(await f.rpb.balanceOf(f.user2.address)).to.equal(e18(100_100));
     });
 
-    it("only DAO can change DAO address", async function () {
+    it("rejects zero address for minter", async function () {
       await expect(
-        f.atnToken.connect(f.user1).setDaoAddress(f.user1.address)
-      ).to.be.revertedWith("ATNToken: caller is not current DAO");
+        f.rpb.setAuthorizedMinter(ethers.ZeroAddress, true)
+      ).to.be.revertedWith("RPB: zero minter address");
     });
 
-    it("setDaoAddress works", async function () {
-      await f.atnToken.setDaoAddress(f.user1.address);
-      expect(await f.atnToken.daoAddress()).to.equal(f.user1.address);
-    });
-
-    it("rejects zero address for minter and DAO", async function () {
-      await expect(
-        f.atnToken.setAuthorizedMinter(ethers.ZeroAddress, true)
-      ).to.be.revertedWith("ATNToken: zero minter address");
-      await expect(
-        f.atnToken.setDaoAddress(ethers.ZeroAddress)
-      ).to.be.revertedWith("ATNToken: new DAO is zero");
+    it("dao address is set from registry owner", async function () {
+      expect(await f.rpb.dao()).to.equal(f.owner.address);
     });
   });
 
@@ -283,9 +266,9 @@ describe("Autonet Contracts — Full Test Suite", function () {
       // Advance past 7 days lockup for proposer
       await increaseTime(7 * 24 * 3600 + 1);
 
-      const balBefore = await f.atnToken.balanceOf(f.proposer.address);
+      const balBefore = await f.rpb.balanceOf(f.proposer.address);
       await f.staking.connect(f.proposer).unstake();
-      const balAfter = await f.atnToken.balanceOf(f.proposer.address);
+      const balAfter = await f.rpb.balanceOf(f.proposer.address);
       expect(balAfter - balBefore).to.equal(e18(100));
 
       expect(await f.staking.isActiveParticipant(f.proposer.address, 1)).to.be.false;
@@ -534,14 +517,14 @@ describe("Autonet Contracts — Full Test Suite", function () {
     beforeEach(async () => {
       f = await deployAll();
       // Approve taskContract to spend user1 ATN
-      await f.atnToken.connect(f.user1).approve(
+      await f.rpb.connect(f.user1).approve(
         await f.taskContract.getAddress(), e18(10000)
       );
     });
 
     it("submits inference task and burns tokens", async function () {
       const rpbAddr = await f.rpb.getAddress();
-      const balBefore = await f.atnToken.balanceOf(f.user1.address);
+      const balBefore = await f.rpb.balanceOf(f.user1.address);
       const tx = await f.taskContract.connect(f.user1).submitInferenceTask(
         rpbAddr,
         ethers.keccak256(ethers.toUtf8Bytes("input-data")),
@@ -549,7 +532,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
       );
       await expect(tx).to.emit(f.taskContract, "InferenceTaskSubmitted");
 
-      const balAfter = await f.atnToken.balanceOf(f.user1.address);
+      const balAfter = await f.rpb.balanceOf(f.user1.address);
       expect(balBefore - balAfter).to.equal(e18(10));
     });
 
@@ -746,7 +729,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
 
     it("fundTaskBudget adds to budget", async function () {
       const budgetBefore = await f.rpb.taskRewardBudgetATN();
-      await f.atnToken.approve(await f.rpb.getAddress(), e18(1000));
+      await f.rpb.approve(await f.rpb.getAddress(), e18(1000));
       await f.rpb.fundTaskBudget(e18(1000));
       const budgetAfter = await f.rpb.taskRewardBudgetATN();
       expect(budgetAfter - budgetBefore).to.equal(e18(1000));
@@ -766,10 +749,10 @@ describe("Autonet Contracts — Full Test Suite", function () {
     });
 
     it("authorized disburser can pay from budget", async function () {
-      const balBefore = await f.atnToken.balanceOf(f.user1.address);
+      const balBefore = await f.rpb.balanceOf(f.user1.address);
       // Owner is authorized (owner or DAO can disburse)
       await f.rpb.disburseFromBudget(f.user1.address, e18(100));
-      const balAfter = await f.atnToken.balanceOf(f.user1.address);
+      const balAfter = await f.rpb.balanceOf(f.user1.address);
       expect(balAfter - balBefore).to.equal(e18(100));
     });
 
@@ -784,12 +767,12 @@ describe("Autonet Contracts — Full Test Suite", function () {
       await f.rpb.setMatureModel("QmW", e18(10));
 
       // Set parity for ATN in registry so purchaseShares works
-      const atnAddr = await f.atnToken.getAddress();
+      const atnAddr = await f.rpb.getAddress();
       const parityKey = "jurisdiction.parity." + atnAddr.toLowerCase();
       await f.registry.editRegistry(parityKey, "1");
 
       // user1 purchases shares
-      await f.atnToken.connect(f.user1).approve(await f.rpb.getAddress(), e18(10000));
+      await f.rpb.connect(f.user1).approve(await f.rpb.getAddress(), e18(10000));
       await f.rpb.connect(f.user1).purchaseShares(atnAddr, e18(100));
 
       // Set discount tiers: 50 shares → 10% off, 100 shares → 20% off
@@ -844,7 +827,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
       await f.staking.connect(f.coord1).stake(3, e18(500));
 
       // Fund jackpot pool
-      await f.atnToken.approve(await f.forcedErrorRegistry.getAddress(), e18(1000));
+      await f.rpb.approve(await f.forcedErrorRegistry.getAddress(), e18(1000));
       await f.forcedErrorRegistry.fundJackpotPool(e18(200));
     });
 
@@ -856,9 +839,9 @@ describe("Autonet Contracts — Full Test Suite", function () {
       expect(await f.forcedErrorRegistry.isForcedErrorActive(42)).to.be.true;
 
       // Coordinator catches it
-      const balBefore = await f.atnToken.balanceOf(f.coord1.address);
+      const balBefore = await f.rpb.balanceOf(f.coord1.address);
       await f.forcedErrorRegistry.connect(f.coord1).reportForcedError(42, badHash);
-      const balAfter = await f.atnToken.balanceOf(f.coord1.address);
+      const balAfter = await f.rpb.balanceOf(f.coord1.address);
 
       // Should receive jackpot of 50 ATN
       expect(balAfter - balBefore).to.equal(e18(50));
@@ -1057,7 +1040,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
     beforeEach(async () => {
       f = await deployAll();
       // Owner needs to delegate votes to self for governance
-      await f.atnToken.connect(f.owner).delegate(f.owner.address);
+      await f.rpb.connect(f.owner).delegate(f.owner.address);
       await mineBlocks(1);
     });
 
@@ -1187,7 +1170,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
       f = await deployAll();
       // Approve guild registry for staking
       for (const s of [f.user1, f.user2, f.proposer]) {
-        await f.atnToken.connect(s).approve(await f.guildRegistry.getAddress(), e18(10000));
+        await f.rpb.connect(s).approve(await f.guildRegistry.getAddress(), e18(10000));
       }
     });
 
@@ -1216,9 +1199,9 @@ describe("Autonet Contracts — Full Test Suite", function () {
       await f.guildRegistry.connect(f.user2).joinGuild(1);
       expect(await f.guildRegistry.isMember(f.user2.address, 1)).to.be.true;
 
-      const balBefore = await f.atnToken.balanceOf(f.user2.address);
+      const balBefore = await f.rpb.balanceOf(f.user2.address);
       await f.guildRegistry.connect(f.user2).leaveGuild(1);
-      const balAfter = await f.atnToken.balanceOf(f.user2.address);
+      const balAfter = await f.rpb.balanceOf(f.user2.address);
       expect(balAfter - balBefore).to.equal(e18(50)); // minMemberStake returned
     });
 
@@ -1274,10 +1257,10 @@ describe("Autonet Contracts — Full Test Suite", function () {
     let f;
     beforeEach(async () => {
       f = await deployAll();
-      await f.atnToken.connect(f.user1).approve(
+      await f.rpb.connect(f.user1).approve(
         await f.evolutionProposal.getAddress(), e18(10000)
       );
-      await f.atnToken.approve(await f.evolutionProposal.getAddress(), e18(100000));
+      await f.rpb.approve(await f.evolutionProposal.getAddress(), e18(100000));
     });
 
     it("submits proposal with stake", async function () {
@@ -1333,9 +1316,9 @@ describe("Autonet Contracts — Full Test Suite", function () {
       await f.evolutionProposal.recordTrialContribution(1, f.solver2.address, 0, 200); // Compute type
 
       // Adopt
-      const user1BalBefore = await f.atnToken.balanceOf(f.user1.address);
+      const user1BalBefore = await f.rpb.balanceOf(f.user1.address);
       await f.evolutionProposal.adoptProposal(1);
-      const user1BalAfter = await f.atnToken.balanceOf(f.user1.address);
+      const user1BalAfter = await f.rpb.balanceOf(f.user1.address);
 
       // Proposer stake returned
       expect(user1BalAfter - user1BalBefore).to.equal(e18(100));
@@ -1347,9 +1330,9 @@ describe("Autonet Contracts — Full Test Suite", function () {
     it("rejection refunds stake minus processing fee", async function () {
       await f.evolutionProposal.connect(f.user1).submitProposal("QmCid", e18(100));
 
-      const balBefore = await f.atnToken.balanceOf(f.user1.address);
+      const balBefore = await f.rpb.balanceOf(f.user1.address);
       await f.evolutionProposal.rejectProposal(1);
-      const balAfter = await f.atnToken.balanceOf(f.user1.address);
+      const balAfter = await f.rpb.balanceOf(f.user1.address);
 
       // 5% processing fee → refund 95 ATN
       expect(balAfter - balBefore).to.equal(e18(95));
@@ -1386,7 +1369,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
     beforeEach(async () => {
       f = await deployAll();
       await f.anchorBridge.addValidator(f.coord1.address);
-      await f.atnToken.connect(f.user1).approve(await f.anchorBridge.getAddress(), e18(10000));
+      await f.rpb.connect(f.user1).approve(await f.anchorBridge.getAddress(), e18(10000));
     });
 
     it("adds and removes validators", async function () {
@@ -1416,7 +1399,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
       const tx = await f.anchorBridge.connect(f.user1).deposit(e18(100));
       await expect(tx).to.emit(f.anchorBridge, "Deposited");
 
-      const bridgeBal = await f.atnToken.balanceOf(await f.anchorBridge.getAddress());
+      const bridgeBal = await f.rpb.balanceOf(await f.anchorBridge.getAddress());
       expect(bridgeBal).to.equal(e18(100));
     });
 
@@ -1464,8 +1447,8 @@ describe("Autonet Contracts — Full Test Suite", function () {
     beforeEach(async () => {
       f = await deployAll();
       // Delegate votes for dispute voting
-      await f.atnToken.connect(f.owner).delegate(f.owner.address);
-      await f.atnToken.connect(f.user1).delegate(f.user1.address);
+      await f.rpb.connect(f.owner).delegate(f.owner.address);
+      await f.rpb.connect(f.user1).delegate(f.user1.address);
       await mineBlocks(1);
     });
 
@@ -1530,7 +1513,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
       bridge = await ethers.getContractAt("InferenceProviderBridge", bridgeAddr);
 
       // Authorize the bridge as a minter for BME
-      await f.atnToken.setAuthorizedMinter(bridgeAddr, true);
+      await f.rpb.setAuthorizedMinter(bridgeAddr, true);
 
       // Authorize the bridge as a disburser on RPB (for recordInferenceBME)
       await f.rpb.setAuthorizedDisburser(bridgeAddr, true);
@@ -1555,13 +1538,10 @@ describe("Autonet Contracts — Full Test Suite", function () {
 
     it("factory rejects RPB without mature model", async function () {
       // Deploy a fresh RPB without model
-      const rpbTx = await f.rpbFactory.createRPB(
-        await f.registry.getAddress(),
-        await f.atnToken.getAddress()
-      );
-      const receipt = await rpbTx.wait();
-      const evt = receipt.logs.find(l => l.fragment && l.fragment.name === "RPBDeployed");
-      const newRpbAddr = evt.args[0];
+      const RPB2 = await ethers.getContractFactory("RPB");
+      const rpb2 = await RPB2.deploy(await f.registry.getAddress());
+      await rpb2.waitForDeployment();
+      const newRpbAddr = await rpb2.getAddress();
 
       await expect(
         f.inferenceFactory.deployBridge(newRpbAddr, f.owner.address)
@@ -1570,13 +1550,13 @@ describe("Autonet Contracts — Full Test Suite", function () {
 
     it("requestInference burns ATN via BME", async function () {
       // User needs to approve burn (burnFrom requires allowance)
-      await f.atnToken.connect(f.user1).approve(await bridge.getAddress(), e18(10000));
+      await f.rpb.connect(f.user1).approve(await bridge.getAddress(), e18(10000));
 
-      const balBefore = await f.atnToken.balanceOf(f.user1.address);
+      const balBefore = await f.rpb.balanceOf(f.user1.address);
       const input = ethers.AbiCoder.defaultAbiCoder().encode(["string"], ["QmInput"]);
       const tx = await bridge.connect(f.user1).requestInference(input, e18(100));
       const receipt = await tx.wait();
-      const balAfter = await f.atnToken.balanceOf(f.user1.address);
+      const balAfter = await f.rpb.balanceOf(f.user1.address);
 
       // Price is 10 ATN (from setMatureModel), user1 has 0 shares → full price
       expect(balBefore - balAfter).to.equal(e18(10));
@@ -1585,7 +1565,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
 
     it("submitResult splits revenue via RPB ratios (provider/shareholder/treasury)", async function () {
       // Request inference
-      await f.atnToken.connect(f.user1).approve(await bridge.getAddress(), e18(10000));
+      await f.rpb.connect(f.user1).approve(await bridge.getAddress(), e18(10000));
       const input = ethers.AbiCoder.defaultAbiCoder().encode(["string"], ["QmInput"]);
       const tx = await bridge.connect(f.user1).requestInference(input, e18(100));
       const receipt = await tx.wait();
@@ -1599,15 +1579,15 @@ describe("Autonet Contracts — Full Test Suite", function () {
 
       const rpbAddr = await f.rpb.getAddress();
       const daoAddr = await f.rpb.dao();
-      const providerBalBefore = await f.atnToken.balanceOf(f.solver1.address);
-      const rpbBalBefore = await f.atnToken.balanceOf(rpbAddr);
-      const daoBalBefore = await f.atnToken.balanceOf(daoAddr);
+      const providerBalBefore = await f.rpb.balanceOf(f.solver1.address);
+      const rpbBalBefore = await f.rpb.balanceOf(rpbAddr);
+      const daoBalBefore = await f.rpb.balanceOf(daoAddr);
 
       await bridge.connect(f.coord1).submitResult(requestId, "QmOutput", f.solver1.address);
 
-      const providerBalAfter = await f.atnToken.balanceOf(f.solver1.address);
-      const rpbBalAfter = await f.atnToken.balanceOf(rpbAddr);
-      const daoBalAfter = await f.atnToken.balanceOf(daoAddr);
+      const providerBalAfter = await f.rpb.balanceOf(f.solver1.address);
+      const rpbBalAfter = await f.rpb.balanceOf(rpbAddr);
+      const daoBalAfter = await f.rpb.balanceOf(daoAddr);
 
       // 10 ATN burned, 3% protocol fee = 0.3 ATN to jackpot, 9.7 ATN to split
       // RPB revenue split (60/25/15):
@@ -1629,7 +1609,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
     });
 
     it("expired request recycles to jackpot pool", async function () {
-      await f.atnToken.connect(f.user1).approve(await bridge.getAddress(), e18(10000));
+      await f.rpb.connect(f.user1).approve(await bridge.getAddress(), e18(10000));
       const input = ethers.AbiCoder.defaultAbiCoder().encode(["string"], ["QmInput"]);
       const tx = await bridge.connect(f.user1).requestInference(input, e18(100));
       const receipt = await tx.wait();
@@ -1675,19 +1655,17 @@ describe("Autonet Contracts — Full Test Suite", function () {
     beforeEach(async () => {
       f = await deployAll();
 
-      // Deploy a separate RPB through factory for isolated testing
-      const tx = await f.rpbFactory.createRPB(
-        await f.registry.getAddress(),
-        await f.atnToken.getAddress()
-      );
-      const receipt = await tx.wait();
-      const event = receipt.logs.find(l => l.fragment && l.fragment.name === "RPBDeployed");
-      const rpbAddr = event.args[0];
-      rpb = await ethers.getContractAt("RPB", rpbAddr);
+      // Deploy a separate RPB directly for isolated testing
+      const RPB2 = await ethers.getContractFactory("RPB");
+      rpb = await RPB2.deploy(await f.registry.getAddress());
+      await rpb.waitForDeployment();
+
+      // Register it with the factory
+      await f.rpbFactory.registerRPB(await rpb.getAddress());
     });
 
-    it("factory deploys RPB linked to registry", async function () {
-      // deployAll creates 1, beforeEach creates another
+    it("factory registers RPB linked to registry", async function () {
+      // deployAll registers 1, beforeEach registers another
       expect(await f.rpbFactory.getRPBCount()).to.equal(2);
       expect(await rpb.registry()).to.equal(await f.registry.getAddress());
     });
@@ -1940,11 +1918,11 @@ describe("Autonet Contracts — Full Test Suite", function () {
     it("FIX: ParticipantStaking.slash burns slashed tokens", async function () {
       await f.staking.connect(f.coord1).stake(3, e18(500));
 
-      const totalBefore = await f.atnToken.totalSupply();
-      const contractBalBefore = await f.atnToken.balanceOf(await f.staking.getAddress());
+      const totalBefore = await f.rpb.totalSupply();
+      const contractBalBefore = await f.rpb.balanceOf(await f.staking.getAddress());
       await f.staking.slash(f.coord1.address, e18(100), "test");
-      const totalAfter = await f.atnToken.totalSupply();
-      const contractBalAfter = await f.atnToken.balanceOf(await f.staking.getAddress());
+      const totalAfter = await f.rpb.totalSupply();
+      const contractBalAfter = await f.rpb.balanceOf(await f.staking.getAddress());
 
       // Slashed tokens are burned — removed from total supply
       expect(totalBefore - totalAfter).to.equal(e18(100));
@@ -1982,7 +1960,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
     });
 
     it("FIX: ForcedErrorRegistry reserves jackpot on injection", async function () {
-      await f.atnToken.approve(await f.forcedErrorRegistry.getAddress(), e18(1000));
+      await f.rpb.approve(await f.forcedErrorRegistry.getAddress(), e18(1000));
       await f.forcedErrorRegistry.fundJackpotPool(e18(100)); // 100 ATN pool
 
       await f.staking.connect(f.coord1).stake(3, e18(500));
@@ -2009,7 +1987,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
     it("EDGE: DisputeManager auto-resolves on first large voter", async function () {
       // If a single whale has >20% of total supply, their vote alone triggers quorum
       // and immediately resolves the dispute. Other voters never get a chance.
-      await f.atnToken.connect(f.owner).delegate(f.owner.address);
+      await f.rpb.connect(f.owner).delegate(f.owner.address);
       await mineBlocks(1);
 
       await f.disputeManager.createDispute(ethers.randomBytes(32));

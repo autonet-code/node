@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonet-computer"
-version = "0.1.2"
+version = "0.1.3"
 description = "Decentralized AI alignment network with agent orchestration framework"
 requires-python = ">=3.11"
 license = "MIT"
@@ -84,10 +84,11 @@ dev = [
 atn = "atn.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["atn*", "nodes*"]
+include = ["atn*", "nodes*", "bridge"]
 
 [tool.setuptools.package-data]
 "atn.connectors" = ["*/connector.json"]
+"bridge" = ["*.ts", "package.json", "bun.lock"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

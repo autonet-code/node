@@ -2,7 +2,6 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
 describe("Consensus-as-Truth (MM-Zero)", function () {
-  let atnToken;
   let staking;
   let taskContract;
   let resultsRewards;
@@ -25,47 +24,29 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
     [owner, proposer, solver1, solver2, solver3, solver4, coord1] =
       await ethers.getSigners();
 
-    // Deploy ATN Token
-    const ATNToken = await ethers.getContractFactory("ATNToken");
-    atnToken = await ATNToken.deploy(
-      owner.address,
-      ethers.parseEther("1000000000")
-    );
-    await atnToken.waitForDeployment();
-
-    // Deploy Staking
-    const Staking = await ethers.getContractFactory("ParticipantStaking");
-    staking = await Staking.deploy(
-      await atnToken.getAddress(),
-      owner.address
-    );
-    await staking.waitForDeployment();
-
-    // Deploy RPB via factory (replaces Project)
+    // Deploy Registry (mock jurisdiction)
     const Registry = await ethers.getContractFactory("Registry");
     const registry = await Registry.deploy(owner.address, owner.address);
     await registry.waitForDeployment();
     await registry.setJurisdictionAddress(owner.address);
 
-    const RPBFactory = await ethers.getContractFactory("RPBFactory");
-    const rpbFactory = await RPBFactory.deploy();
-    await rpbFactory.waitForDeployment();
+    // Deploy RPB — IS the ERC20 token, mints 1B to deployer
+    const RPB = await ethers.getContractFactory("RPB");
+    rpb = await RPB.deploy(await registry.getAddress());
+    await rpb.waitForDeployment();
+    rpbAddr = await rpb.getAddress();
 
-    const rpbTx = await rpbFactory.createRPB(
-      await registry.getAddress(),
-      await atnToken.getAddress()
-    );
-    const rpbReceipt = await rpbTx.wait();
-    const rpbEvent = rpbReceipt.logs.find(l => l.fragment && l.fragment.name === "RPBDeployed");
-    rpbAddr = rpbEvent.args[0];
-    rpb = await ethers.getContractAt("RPB", rpbAddr);
+    // Deploy Staking (uses RPB as token)
+    const Staking = await ethers.getContractFactory("ParticipantStaking");
+    staking = await Staking.deploy(rpbAddr, owner.address);
+    await staking.waitForDeployment();
 
-    // Deploy TaskContract
+    // Deploy TaskContract (uses RPB as token)
     const TaskContract = await ethers.getContractFactory("TaskContract");
     taskContract = await TaskContract.deploy(
       await staking.getAddress(),
       owner.address,
-      await atnToken.getAddress()
+      rpbAddr
     );
     await taskContract.waitForDeployment();
 
@@ -92,11 +73,11 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       true
     );
 
-    // Distribute tokens
+    // Distribute tokens (RPB is the token)
     const testAmount = ethers.parseEther("10000");
     for (const signer of [proposer, solver1, solver2, solver3, solver4, coord1]) {
-      await atnToken.transfer(signer.address, testAmount);
-      await atnToken
+      await rpb.transfer(signer.address, testAmount);
+      await rpb
         .connect(signer)
         .approve(await staking.getAddress(), testAmount);
     }
@@ -106,9 +87,8 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
     await staking.connect(solver1).stake(2, SOLVER_STAKE);
     await staking.connect(solver2).stake(2, SOLVER_STAKE);
 
-    // Fund RPB task budget for reward disbursement
+    // Fund RPB task budget (internal _transfer, no approval needed)
     const budgetFunding = ethers.parseEther("1000");
-    await atnToken.approve(rpbAddr, budgetFunding);
     await rpb.fundTaskBudget(budgetFunding);
   });
 
@@ -457,11 +437,11 @@ describe("Consensus-as-Truth (MM-Zero)", function () {
       await taskContract.connect(solver2).submitRollout(1, sameAnswer, sol, 95);
       await taskContract.connect(solver3).submitRollout(1, sameAnswer, sol, 95);
 
-      const proposerBalBefore = await atnToken.balanceOf(proposer.address);
+      const proposerBalBefore = await rpb.balanceOf(proposer.address);
 
       await resultsRewards.finalizeConsensusTask(1);
 
-      const proposerBalAfter = await atnToken.balanceOf(proposer.address);
+      const proposerBalAfter = await rpb.balanceOf(proposer.address);
 
       // 100% solvability is > maxSolvability (75%), so difficulty score = 0
       // Proposer should get ZERO reward

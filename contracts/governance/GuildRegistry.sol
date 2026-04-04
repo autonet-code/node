@@ -31,7 +31,7 @@ contract GuildRegistry is ReentrancyGuard {
     // State
     // =========================================================================
 
-    IERC20 public immutable atnToken;
+    IERC20 public immutable rpbToken;
     address public admin;
 
     uint256 public minGuildStake;   // Minimum ATN for guild creator
@@ -148,8 +148,8 @@ contract GuildRegistry is ReentrancyGuard {
     // Constructor
     // =========================================================================
 
-    constructor(address _atnToken, address _admin, uint256 _minGuildStake, uint256 _minMemberStake) {
-        atnToken = IERC20(_atnToken);
+    constructor(address _rpbToken, address _admin, uint256 _minGuildStake, uint256 _minMemberStake) {
+        rpbToken = IERC20(_rpbToken);
         admin = _admin;
         minGuildStake = _minGuildStake;
         minMemberStake = _minMemberStake;
@@ -182,7 +182,7 @@ contract GuildRegistry is ReentrancyGuard {
 
         // Transfer creator's stake
         if (minGuildStake > 0) {
-            bool ok = atnToken.transferFrom(msg.sender, address(this), minGuildStake);
+            bool ok = rpbToken.transferFrom(msg.sender, address(this), minGuildStake);
             if (!ok) revert TransferFailed();
         }
 
@@ -236,7 +236,7 @@ contract GuildRegistry is ReentrancyGuard {
 
         uint256 stakeRequired = minMemberStake;
         if (stakeRequired > 0) {
-            bool ok = atnToken.transferFrom(msg.sender, address(this), stakeRequired);
+            bool ok = rpbToken.transferFrom(msg.sender, address(this), stakeRequired);
             if (!ok) revert TransferFailed();
         }
 
@@ -276,7 +276,7 @@ contract GuildRegistry is ReentrancyGuard {
 
         // Return stake
         if (stakeToReturn > 0) {
-            bool ok = atnToken.transfer(msg.sender, stakeToReturn);
+            bool ok = rpbToken.transfer(msg.sender, stakeToReturn);
             if (!ok) revert TransferFailed();
         }
 

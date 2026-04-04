@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "../tokens/ATNToken.sol";
+import "./RPB.sol";
 import "../utils/AutonetLib.sol";
 
 /**
@@ -12,7 +12,7 @@ import "../utils/AutonetLib.sol";
 contract ParticipantStaking {
     using AutonetLib for AutonetLib.ParticipantRole;
 
-    ATNToken public immutable atnToken;
+    RPB public immutable rpb;
     address public governance;
 
     mapping(address => AutonetLib.StakeInfo) public stakes;
@@ -39,12 +39,12 @@ contract ParticipantStaking {
         _;
     }
 
-    constructor(address _atnToken, address _governance) {
-        atnToken = ATNToken(_atnToken);
+    constructor(address _rpb, address _governance) {
+        rpb = RPB(_rpb);
         governance = _governance;
 
         // Default minimum stakes (in wei)
-        uint8 decimals = atnToken.decimals();
+        uint8 decimals = rpb.decimals();
         minStakeAmount[AutonetLib.ParticipantRole.PROPOSER] = 100 * (10**decimals);
         minStakeAmount[AutonetLib.ParticipantRole.SOLVER] = 50 * (10**decimals);
         minStakeAmount[AutonetLib.ParticipantRole.COORDINATOR] = 500 * (10**decimals);
@@ -93,7 +93,7 @@ contract ParticipantStaking {
             active: true
         });
 
-        require(atnToken.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
+        require(rpb.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
         emit Staked(msg.sender, _role, _amount);
     }
 
@@ -103,7 +103,7 @@ contract ParticipantStaking {
         require(userStake.lockupUntil == 0, "Unstake in progress");
 
         userStake.amount += _amount;
-        require(atnToken.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
+        require(rpb.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
         emit Staked(msg.sender, userStake.role, _amount);
     }
 
@@ -130,7 +130,7 @@ contract ParticipantStaking {
         userStake.role = AutonetLib.ParticipantRole.NONE;
         userStake.lockupUntil = 0;
 
-        require(atnToken.transfer(msg.sender, amount), "Transfer failed");
+        require(rpb.transfer(msg.sender, amount), "Transfer failed");
         emit Unstaked(msg.sender, role, amount);
     }
 
@@ -142,7 +142,7 @@ contract ParticipantStaking {
         userStake.amount -= _amount;
 
         // Burn slashed tokens so they don't stay locked in the contract
-        atnToken.burn(_amount);
+        rpb.burn(_amount);
 
         emit Slashed(_participant, userStake.role, _amount, _reason);
 

@@ -8,7 +8,7 @@ module.exports = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 200,
+        runs: 50,
       },
       viaIR: true,
     },
@@ -19,6 +19,7 @@ module.exports = {
     },
     hardhat: {
       chainId: 1337,
+      allowUnlimitedContractSize: true,
     },
     sepolia: {
       url: process.env.SEPOLIA_RPC_URL || "",

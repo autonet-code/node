@@ -91,7 +91,7 @@ contract EvolutionProposal is ReentrancyGuard {
     // =========================================================================
 
     address public admin;
-    address public immutable atnTokenAddress;
+    address public immutable rpbTokenAddress;
     address payable public immutable registryAddress;
     address public immutable timelockAddress;
 
@@ -188,15 +188,15 @@ contract EvolutionProposal is ReentrancyGuard {
     // =========================================================================
 
     constructor(
-        address _atnToken,
+        address _rpbToken,
         address payable _registry,
         address _timelock
     ) {
-        if (_atnToken == address(0)) revert ZeroAddress();
+        if (_rpbToken == address(0)) revert ZeroAddress();
         if (_registry == address(0)) revert ZeroAddress();
         if (_timelock == address(0)) revert ZeroAddress();
 
-        atnTokenAddress = _atnToken;
+        rpbTokenAddress = _rpbToken;
         registryAddress = _registry;
         timelockAddress = _timelock;
         admin = msg.sender;
@@ -220,7 +220,7 @@ contract EvolutionProposal is ReentrancyGuard {
         if (stakeAmount < minStake) revert InsufficientStake();
 
         // Transfer stake from proposer
-        bool transferred = IERC20(atnTokenAddress).transferFrom(
+        bool transferred = IERC20(rpbTokenAddress).transferFrom(
             msg.sender, address(this), stakeAmount
         );
         require(transferred, "EvolutionProposal: ATN transfer failed");
@@ -370,7 +370,7 @@ contract EvolutionProposal is ReentrancyGuard {
         if (budget == 0) revert InvalidAmount();
 
         // Transfer trial budget from admin/treasury
-        bool transferred = IERC20(atnTokenAddress).transferFrom(
+        bool transferred = IERC20(rpbTokenAddress).transferFrom(
             msg.sender, address(this), budget
         );
         require(transferred, "EvolutionProposal: Trial funding transfer failed");
@@ -435,7 +435,7 @@ contract EvolutionProposal is ReentrancyGuard {
         prop.adoptionRewardPool = prop.trialBudget - prop.trialSpent;
 
         // Return proposer's stake
-        IERC20(atnTokenAddress).transfer(prop.proposer, prop.stakeAmount);
+        IERC20(rpbTokenAddress).transfer(prop.proposer, prop.stakeAmount);
 
         emit ProposalAdopted(proposalId, prop.adoptionRewardPool);
         emit ProposalStatusChanged(proposalId, oldStatus, ProposalStatus.Adopted);
@@ -466,7 +466,7 @@ contract EvolutionProposal is ReentrancyGuard {
         uint256 refund = prop.stakeAmount - fee;
 
         if (refund > 0) {
-            IERC20(atnTokenAddress).transfer(prop.proposer, refund);
+            IERC20(rpbTokenAddress).transfer(prop.proposer, refund);
         }
         // Fee stays in contract (treasury can collect)
 
@@ -527,7 +527,7 @@ contract EvolutionProposal is ReentrancyGuard {
         participant.rewardClaimed = true;
         prop.trialSpent += reward;
 
-        IERC20(atnTokenAddress).transfer(msg.sender, reward);
+        IERC20(rpbTokenAddress).transfer(msg.sender, reward);
 
         emit ParticipantRewardClaimed(proposalId, msg.sender, reward);
     }
@@ -656,7 +656,7 @@ contract EvolutionProposal is ReentrancyGuard {
      */
     function recoverTokens(address to, uint256 amount) external onlyAdmin {
         if (to == address(0)) revert ZeroAddress();
-        IERC20(atnTokenAddress).transfer(to, amount);
+        IERC20(rpbTokenAddress).transfer(to, amount);
     }
 
     // =========================================================================

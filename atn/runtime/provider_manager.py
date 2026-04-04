@@ -856,7 +856,11 @@ class ProviderManager:
 
     async def _ensure_bridge_deps(self) -> None:
         """Auto-install bridge dependencies (bun install) if missing."""
-        bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
+        try:
+            import bridge as _bridge_pkg
+            bridge_dir = Path(_bridge_pkg.__file__).resolve().parent
+        except ImportError:
+            bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
         pkg_json = bridge_dir / "package.json"
         node_modules = bridge_dir / "node_modules"
         cli_js = node_modules / "@anthropic-ai" / "claude-agent-sdk" / "cli.js"
@@ -868,27 +872,31 @@ class ProviderManager:
             log.warning("Bridge package.json not found at %s", bridge_dir)
             return
 
-        # Check bun is available
+        # Check bun is available; auto-install if missing
         import shutil
         bun = shutil.which("bun")
         if not bun:
-            # Try installing bun via npm
+            bun = await self._auto_install_bun()
+        if not bun:
+            # Fall back to npm if available
             npm = shutil.which("npm")
             if npm:
-                log.info("Installing bun via npm...")
+                log.info("bun not available, falling back to npm install...")
                 try:
                     proc = await asyncio.create_subprocess_exec(
-                        npm, "install", "-g", "bun",
+                        npm, "install",
+                        cwd=str(bridge_dir),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    await asyncio.wait_for(proc.communicate(), timeout=120)
-                    bun = shutil.which("bun")
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                    if proc.returncode == 0:
+                        log.info("Bridge dependencies installed via npm")
+                    return
                 except Exception as e:
-                    log.warning("Failed to install bun: %s", e)
-
-        if not bun:
-            log.warning("bun not found — cannot auto-install bridge dependencies")
+                    log.warning("npm install failed: %s", e)
+            log.warning("Neither bun nor npm found — cannot auto-install bridge dependencies. "
+                        "Install bun: https://bun.sh/docs/installation")
             return
 
         # Run bun install in the bridge directory
@@ -911,8 +919,51 @@ class ProviderManager:
         except Exception as e:
             log.warning("Failed to install bridge dependencies: %s", e)
 
+    async def _auto_install_bun(self) -> str | None:
+        """Download and install bun without requiring npm/node."""
+        import shutil
+        import sys
+
+        log.info("bun not found — attempting automatic install...")
+        try:
+            if sys.platform == "win32":
+                # PowerShell one-liner from bun.sh
+                proc = await asyncio.create_subprocess_exec(
+                    "powershell", "-Command",
+                    "irm bun.sh/install.ps1 | iex",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            else:
+                # Unix: curl | bash
+                proc = await asyncio.create_subprocess_shell(
+                    "curl -fsSL https://bun.sh/install | bash",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            await asyncio.wait_for(proc.communicate(), timeout=120)
+            if proc.returncode == 0:
+                # Bun installs to ~/.bun/bin — refresh PATH
+                bun_bin = Path.home() / ".bun" / "bin"
+                if bun_bin.exists():
+                    os.environ["PATH"] = str(bun_bin) + os.pathsep + os.environ.get("PATH", "")
+                bun = shutil.which("bun")
+                if bun:
+                    log.info("bun installed successfully: %s", bun)
+                    return bun
+            log.warning("bun install script exited with code %s", proc.returncode)
+        except asyncio.TimeoutError:
+            log.warning("bun install timed out")
+        except Exception as e:
+            log.warning("Failed to auto-install bun: %s", e)
+        return None
+
     def _resolve_sdk_cli(self) -> Path | None:
-        bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
+        try:
+            import bridge as _bridge_pkg
+            bridge_dir = Path(_bridge_pkg.__file__).resolve().parent
+        except ImportError:
+            bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
         cli_js = bridge_dir / "node_modules" / "@anthropic-ai" / "claude-agent-sdk" / "cli.js"
         if cli_js.exists():
             return cli_js

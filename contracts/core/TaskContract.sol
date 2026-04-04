@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "../utils/AutonetLib.sol";
 import "./ParticipantStaking.sol";
-import "../tokens/ATNToken.sol";
+import "./RPB.sol";
 
 /**
  * @title TaskContract
@@ -12,7 +12,7 @@ import "../tokens/ATNToken.sol";
  */
 contract TaskContract {
     ParticipantStaking public immutable staking;
-    ATNToken public immutable atnToken;
+    RPB public immutable rpb;
     address public governance;
     address public resultsRewardsContract;
 
@@ -65,10 +65,10 @@ contract TaskContract {
         _;
     }
 
-    constructor(address _staking, address _governance, address _atnToken) {
+    constructor(address _staking, address _governance, address _rpb) {
         staking = ParticipantStaking(_staking);
         governance = _governance;
-        atnToken = ATNToken(_atnToken);
+        rpb = RPB(_rpb);
     }
 
     function setResultsRewardsContract(address _contract) external onlyGovernance {
@@ -442,8 +442,8 @@ contract TaskContract {
         ));
 
         // BME burn: tokens destroyed on submission, provider gets minted on completion
-        require(atnToken.transferFrom(msg.sender, address(this), _burnAmount), "Transfer failed");
-        atnToken.burn(_burnAmount);
+        require(rpb.transferFrom(msg.sender, address(this), _burnAmount), "Transfer failed");
+        rpb.burn(_burnAmount);
 
         inferenceTasks[inferenceId] = AutonetLib.InferenceTask({
             requestId: inferenceId,

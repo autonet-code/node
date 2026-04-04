@@ -4,7 +4,6 @@ pragma solidity ^0.8.20;
 import "../interfaces/IInferenceProvider.sol";
 import "../core/RPB.sol";
 import "../core/ParticipantStaking.sol";
-import "../tokens/ATNToken.sol";
 import "../utils/AutonetLib.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -23,7 +22,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  *      - Spot-check triggered: payment staged, verifier reviews output
  *      - No spot-check (93%): immediate provider payout
  *   6. On completion, bridge mints ATN to provider from burn pool
- *      (requires this contract is an authorized minter on ATNToken)
+ *      (requires this contract is an authorized minter on RPB)
  *   7. PROTOCOL_FEE_BPS is retained as jackpot pool for verification rewards
  *
  * Key design decisions:
@@ -34,7 +33,6 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  */
 contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard {
     RPB public immutable rpb;
-    ATNToken public immutable atnToken;
     ParticipantStaking public immutable staking;
 
     // ============ BME Economics Parameters ============
@@ -115,7 +113,6 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
     ) Ownable(_owner) {
         rpb = RPB(_rpb);
         staking = ParticipantStaking(_staking);
-        atnToken = rpb.atnToken();
     }
 
     // ============ Admin Functions ============
@@ -172,7 +169,7 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
 
         // BME Step 1: Burn ATN from user immediately
         // No token holds — tokens are destroyed, provider gets fresh minted tokens
-        atnToken.burnFrom(msg.sender, fee);
+        rpb.burnFrom(msg.sender, fee);
         totalBurned += fee;
 
         // Split: provider amount vs protocol fee (goes to jackpot pool)
@@ -341,7 +338,7 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
             // Award jackpot to the verifier (msg.sender)
             if (jackpotPool >= verificationJackpotAmount) {
                 jackpotPool -= verificationJackpotAmount;
-                atnToken.mint(msg.sender, verificationJackpotAmount);
+                rpb.mint(msg.sender, verificationJackpotAmount);
                 emit JackpotAwarded(msg.sender, verificationJackpotAmount);
             }
 
@@ -382,7 +379,7 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
      *      Then calls rpb.recordInferenceBME() to update RPB accounting so
      *      shareholders can claim dividends.
      *
-     *      Requires this contract is an authorized minter on ATNToken and an
+     *      Requires this contract is an authorized minter on RPB and an
      *      authorized disburser on RPB.
      */
     function _settleInference(
@@ -402,13 +399,13 @@ contract InferenceProviderBridge is IInferenceProvider, Ownable, ReentrancyGuard
 
         // Mint to each recipient
         if (providerPayment > 0) {
-            atnToken.mint(provider, providerPayment);
+            rpb.mint(provider, providerPayment);
         }
         if (treasuryPayment > 0) {
-            atnToken.mint(rpb.dao(), treasuryPayment);
+            rpb.mint(rpb.dao(), treasuryPayment);
         }
         if (shareholderPayment > 0) {
-            atnToken.mint(address(rpb), shareholderPayment);
+            rpb.mint(address(rpb), shareholderPayment);
         }
 
         // Update RPB accounting for dividend tracking
