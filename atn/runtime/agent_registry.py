@@ -261,6 +261,7 @@ class AgentRegistry:
                 "is_root": defn.parent_id is None or defn.parent_id == "",
                 "parent_address": parent_addr,
                 "registered_on_chain": identity.registered_on_chain,
+                "is_sponsor": getattr(defn, "is_sponsor", False),
             })
         return ads
 

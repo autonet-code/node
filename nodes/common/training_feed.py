@@ -59,6 +59,8 @@ class TrainingFeedConfig:
     profile_decay: float = 0.998
     # LLM backbone (empty = use TextJEPA, set to HF repo ID to use backbone)
     backbone_model_id: str = ""
+    # Constitution text (for alignment scoring during training)
+    constitution_text: str = ""
     # Privacy
     scrub_pii: bool = True
     exclude_patterns: list[str] = field(default_factory=list)
@@ -268,6 +270,20 @@ class TrainingDataFeed:
             epochs=self.config.epochs,
             learning_rate=self.config.learning_rate,
         )
+
+        # Compute alignment score for this node's training output.
+        # Used by aggregator to weight this delta in FedAvg.
+        try:
+            from .alignment_pricing import AlignmentPricing
+            ap = AlignmentPricing()
+            alignment = ap.compute_alignment(
+                task_description="training cycle output",
+                user_standards="",
+                jurisdiction_standards=self.config.constitution_text or "",
+            )
+            metrics["alignment_score"] = alignment.get("composite_score", 1.0)
+        except Exception:
+            metrics["alignment_score"] = 1.0  # Default to full weight if scoring unavailable
 
         # Update behavioral profile
         self._update_profile(metrics)

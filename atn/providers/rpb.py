@@ -1,4 +1,14 @@
-"""RPB Network Provider - routes inference through the P2P network."""
+"""RPB Network Provider - routes inference through the P2P network.
+
+Path A (v1): Sponsor nodes proxy inference through their centralized API
+subscriptions to dependent nodes via P2P. The requesting node discovers
+sponsor nodes via gossip, selects the best by latency and budget, and
+sends the request over libp2p. The sponsor node forwards it to its own
+provider (Claude, OpenAI, etc.) and returns the response.
+
+Path B (mature, future): Two-speed architecture with distributed VL-JEPA
+latent reasoning. Not implemented in v1.
+"""
 
 import logging
 from typing import Any, Optional
@@ -17,13 +27,12 @@ logger = logging.getLogger(__name__)
 class RPBNetworkProvider(Provider):
     """Provider that routes inference requests through the RPB P2P network.
 
-    This provider discovers sponsor nodes or decentralized model nodes
-    via the gossip registry, selects the best available based on latency
-    and budget, and routes the request over libp2p.
+    v1 (Path A): Discovers sponsor nodes via gossip registry, selects
+    the best available by latency and budget, and routes the request
+    over libp2p. The sponsor node serves it through their own provider.
 
-    Two resolution paths:
-    - Path A (bootstrap): Sponsor nodes with centralized subscriptions
-    - Path B (mature): Jurisdiction's VL-JEPA distributed inference
+    No-chaining rule: Inference received through RPB cannot be
+    re-advertised through RPB. This prevents infinite loops.
     """
 
     def __init__(
@@ -40,16 +49,47 @@ class RPBNetworkProvider(Provider):
         self._discovered_providers: list[dict] = []
 
     async def discover_providers(self, model: str = "") -> list[dict]:
-        """Discover nodes offering the requested model via gossip registry."""
+        """Discover sponsor nodes offering the requested model via gossip.
+
+        Scans the P2P host's known capabilities for nodes that advertise
+        agents with the requested model and have sponsor status.
+        """
         target_model = model or self._model
         if not self._p2p:
             logger.warning("RPB provider: No P2P host configured")
             return []
 
-        # Query gossip registry cache for nodes advertising this model
-        # TODO: Wire to the actual P2P discovery when available
-        logger.info(f"RPB: Discovering providers for model={target_model}")
-        return self._discovered_providers
+        providers = []
+        capabilities = getattr(self._p2p, "_known_capabilities", {})
+        latency_tracker = getattr(self._p2p, "_latency_tracker", None)
+
+        for peer_id, cap in capabilities.items():
+            # Check if this peer advertises the target model
+            for agent_ad in getattr(cap, "agents", []):
+                ad_model = getattr(agent_ad, "model", "") if hasattr(agent_ad, "model") else agent_ad.get("model", "")
+                ad_is_sponsor = getattr(agent_ad, "is_sponsor", False) if hasattr(agent_ad, "is_sponsor") else agent_ad.get("is_sponsor", False)
+
+                if ad_model == target_model or not target_model:
+                    latency = 9999.0
+                    if latency_tracker:
+                        lat = latency_tracker.get_latency(peer_id)
+                        if lat and lat.ema_rtt_ms > 0:
+                            latency = lat.ema_rtt_ms
+
+                    providers.append({
+                        "peer_id": peer_id,
+                        "model": ad_model,
+                        "is_sponsor": ad_is_sponsor,
+                        "latency_ms": latency,
+                        "remaining_budget": agent_ad.get("remaining_budget", 0) if isinstance(agent_ad, dict) else 0,
+                    })
+
+        # Prefer sponsors, then sort by latency
+        providers.sort(key=lambda p: (not p.get("is_sponsor", False), p.get("latency_ms", 9999)))
+        self._discovered_providers = providers
+
+        logger.info("RPB: Discovered %d providers for model=%s", len(providers), target_model)
+        return providers
 
     async def send(
         self,
@@ -63,8 +103,9 @@ class RPBNetworkProvider(Provider):
     ) -> ProviderResponse:
         """Send an inference request through the RPB network.
 
-        Finds the best available provider node, routes the request
-        over P2P, and returns the response.
+        Discovers sponsor nodes, selects the best one, and routes the
+        request over P2P. The sponsor node serves it through their own
+        centralized provider and returns the response.
         """
         target_model = model or self._model
 
@@ -77,29 +118,51 @@ class RPBNetworkProvider(Provider):
                 "Ensure sponsor nodes are online or fall back to direct providers."
             )
 
-        # Select best provider (lowest latency + available budget)
+        # Select best provider (lowest latency sponsor)
         provider = self._select_best_provider(providers)
 
-        # Build signed request
+        # Build request payload
         request = {
             "messages": messages,
             "system": system,
             "model": target_model,
             "max_tokens": max_tokens,
-            "tools": [{"name": t.name, "description": t.description, "input_schema": t.input_schema} for t in tools] if tools else [],
+            "tools": [
+                {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+                for t in tools
+            ] if tools else [],
             "temperature": temperature,
             "agent_address": self._agent_address,
+            "via_rpb": True,  # No-chaining flag
         }
 
         # Route through P2P
-        logger.info(f"RPB: Routing to provider {provider.get('peer_id', 'unknown')}")
+        peer_id = provider["peer_id"]
+        logger.info("RPB: Routing to provider %s (latency=%.0fms)",
+                     str(peer_id)[:16], provider.get("latency_ms", 0))
 
-        # TODO: Wire to actual P2P inference protocol
-        # response = await self._p2p.request_inference(provider['peer_id'], request)
+        response = await self._p2p.request_inference(peer_id, request)
 
-        raise NotImplementedError(
-            "RPB P2P inference routing not yet wired. "
-            "This provider will be functional when the /rpb/inference/1.0.0 protocol is implemented."
+        # Parse response into ProviderResponse
+        tool_calls = []
+        for tc in response.get("tool_calls", []):
+            tool_calls.append(ToolCall(
+                id=tc.get("id", ""),
+                name=tc.get("name", ""),
+                input=tc.get("input", {}),
+            ))
+
+        usage_data = response.get("usage", {})
+
+        return ProviderResponse(
+            text=response.get("text", ""),
+            tool_calls=tool_calls if tool_calls else None,
+            usage=Usage(
+                input_tokens=usage_data.get("input_tokens", 0),
+                output_tokens=usage_data.get("output_tokens", 0),
+            ),
+            model=response.get("model", target_model),
+            stop_reason=response.get("stop_reason", "end_turn"),
         )
 
     async def send_stream(
@@ -129,10 +192,14 @@ class RPBNetworkProvider(Provider):
         if not providers:
             raise ValueError("No providers to select from")
 
-        # Sort by latency (ascending), then by remaining budget (descending)
+        # Sort by: sponsor first, then latency ascending, then budget descending
         sorted_providers = sorted(
             providers,
-            key=lambda p: (p.get("latency_ms", 9999), -p.get("remaining_budget", 0)),
+            key=lambda p: (
+                not p.get("is_sponsor", False),
+                p.get("latency_ms", 9999),
+                -p.get("remaining_budget", 0),
+            ),
         )
         return sorted_providers[0]
 

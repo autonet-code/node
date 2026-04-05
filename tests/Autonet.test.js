@@ -22,10 +22,13 @@ describe("Autonet - Core Contracts", function () {
     await registry.waitForDeployment();
     await registry.setJurisdictionAddress(owner.address);
 
-    // Deploy RPB — RPB IS the ERC20 token, mints 1B to deployer
+    // Deploy RPB — RPB IS the ERC20 token, no pre-mint
     const RPB = await ethers.getContractFactory("RPB");
     rpb = await RPB.deploy(await registry.getAddress());
     await rpb.waitForDeployment();
+
+    // DAO mints test liquidity (owner == dao in test fixture)
+    await rpb.mint(owner.address, ethers.parseEther("1000000000"));
 
     // Deploy Staking (uses RPB as token)
     const Staking = await ethers.getContractFactory("ParticipantStaking");

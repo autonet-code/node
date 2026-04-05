@@ -425,13 +425,18 @@ class AggregatorNode:
         try:
             from ..common.ml import aggregate_weight_deltas
 
-            # Extract weight deltas and sample counts
+            # Extract weight deltas, sample counts, and alignment scores.
+            # Weight = num_samples * alignment_score so higher-alignment
+            # nodes have proportionally more influence on the merged model.
             deltas = []
             weights = []
             for update in updates:
                 deltas.append(update["weight_delta"])
                 num_samples = update.get("metrics", {}).get("num_samples", 1)
-                weights.append(num_samples)
+                alignment = update.get("metrics", {}).get("alignment_score", 1.0)
+                # Clamp alignment to [0.01, 1.0] — never zero (would discard entirely)
+                alignment = max(0.01, min(1.0, alignment))
+                weights.append(num_samples * alignment)
 
             # Aggregate using FedAvg
             aggregated_delta = aggregate_weight_deltas(deltas, weights)

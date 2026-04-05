@@ -73,6 +73,23 @@ RPB_ABI = [
     },
 ]
 
+RPB_CONSTITUTION_ABI = [
+    {
+        "inputs": [],
+        "name": "constitution",
+        "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "getConstitution",
+        "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
 REGISTRY_ABI = [
     {
         "inputs": [{"internalType": "string", "name": "key", "type": "string"}],
@@ -801,6 +818,23 @@ class OnChainService:
             return value if value else None
         except Exception as e:
             log.debug("Failed to read constitution CID: %s", e)
+            return None
+
+    async def get_constitution_text(self) -> str | None:
+        """Read the full constitution text stored on-chain in the RPB contract."""
+        try:
+            w3 = self._get_web3()
+            addr = self.config.rpb_contract_address
+            if not addr:
+                return None
+            contract = w3.eth.contract(
+                address=w3.to_checksum_address(addr),
+                abi=RPB_CONSTITUTION_ABI,
+            )
+            text = contract.functions.constitution().call()
+            return text if text else None
+        except Exception as e:
+            log.debug("Failed to read constitution text from RPB: %s", e)
             return None
 
     async def get_rpb_state(self) -> dict[str, Any] | None:

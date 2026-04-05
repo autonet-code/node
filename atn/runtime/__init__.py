@@ -203,6 +203,8 @@ class Runtime:
         )
         # Give engine access to the autonet bridge for constitutional injection
         self.engine._autonet_bridge = self.autonet
+        # Wire runtime reference so sponsor handler can resolve providers
+        self.autonet._runtime = self
         # Wire agent registry into autonet bridge for p2p advertisement
         self.autonet.set_agent_registry(self.registry)
 
@@ -285,6 +287,9 @@ class Runtime:
             await self.autonet.start()
         # Always start p2p agent advertisement (even without training service)
         self.autonet.start_p2p()
+        # Wire P2P host into provider manager for RPB provider discovery
+        if self.autonet._p2p_host:
+            self.providers._p2p_host = self.autonet._p2p_host
 
         # Load constitution text (needed for prompt injection on registered agents)
         await self.autonet.load_constitution()

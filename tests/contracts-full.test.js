@@ -40,6 +40,9 @@ async function deployAll() {
   await rpb.waitForDeployment();
   const rpbAddr = await rpb.getAddress();
 
+  // DAO mints test liquidity (owner == dao in test fixture)
+  await rpb.mint(owner.address, e18(1_000_000_000));
+
   // ── ParticipantStaking ──
   const Staking = await ethers.getContractFactory("ParticipantStaking");
   const staking = await Staking.deploy(rpbAddr, owner.address);
@@ -793,19 +796,19 @@ describe("Autonet Contracts — Full Test Suite", function () {
     it("setMatureModel requires owner or DAO", async function () {
       await expect(
         f.rpb.connect(f.user1).setMatureModel("QmW", e18(1))
-      ).to.be.revertedWithCustomError(f.rpb, "NotOwnerOrDAO");
+      ).to.be.revertedWithCustomError(f.rpb, "NotDAO");
     });
 
     it("setAuthorizedDisburser requires owner or DAO", async function () {
       await expect(
         f.rpb.connect(f.user1).setAuthorizedDisburser(f.user1.address, true)
-      ).to.be.revertedWithCustomError(f.rpb, "NotOwnerOrDAO");
+      ).to.be.revertedWithCustomError(f.rpb, "NotDAO");
     });
 
     it("setDiscountTiers requires owner or DAO", async function () {
       await expect(
         f.rpb.connect(f.user1).setDiscountTiers([])
-      ).to.be.revertedWithCustomError(f.rpb, "NotOwnerOrDAO");
+      ).to.be.revertedWithCustomError(f.rpb, "NotDAO");
     });
 
     it("getDiscountTierCount reflects current tiers", async function () {

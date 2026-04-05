@@ -222,6 +222,55 @@ class TextJEPAPredictor(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# VICReg-style regularization (prevents embedding collapse)
+# ---------------------------------------------------------------------------
+
+def _variance_loss(embeddings: torch.Tensor, target_std: float = 1.0) -> torch.Tensor:
+    """Penalize low variance across the batch in each embedding dimension.
+
+    Encourages each dimension to have std >= target_std. Without this,
+    JEPA collapses all embeddings to a constant (the "shortcut" solution).
+
+    Args:
+        embeddings: (B, S, D) or (B, D) — operates on flattened (N, D).
+        target_std: Target standard deviation per dimension.
+
+    Returns:
+        Scalar loss (lower = more variance = better).
+    """
+    if embeddings.dim() == 3:
+        x = embeddings.reshape(-1, embeddings.shape[-1])  # (B*S, D)
+    else:
+        x = embeddings
+    std = x.std(dim=0)  # (D,)
+    return F.relu(target_std - std).mean()
+
+
+def _covariance_loss(embeddings: torch.Tensor) -> torch.Tensor:
+    """Penalize correlation between embedding dimensions.
+
+    Encourages decorrelated dimensions — each dimension should carry
+    independent information. Part of VICReg's three-term objective.
+
+    Args:
+        embeddings: (B, S, D) or (B, D) — operates on flattened (N, D).
+
+    Returns:
+        Scalar loss (lower = more decorrelated = better).
+    """
+    if embeddings.dim() == 3:
+        x = embeddings.reshape(-1, embeddings.shape[-1])  # (B*S, D)
+    else:
+        x = embeddings
+    x = x - x.mean(dim=0)
+    N, D = x.shape
+    cov = (x.T @ x) / max(N - 1, 1)  # (D, D)
+    # Zero the diagonal (we only penalize off-diagonal correlations)
+    off_diag = cov.pow(2).sum() - cov.diagonal().pow(2).sum()
+    return off_diag / D
+
+
+# ---------------------------------------------------------------------------
 # TextJEPA Model
 # ---------------------------------------------------------------------------
 
@@ -346,9 +395,16 @@ class TextJEPA(nn.Module):
         }
 
         if return_loss:
-            result["loss"] = F.smooth_l1_loss(
+            prediction_loss = F.smooth_l1_loss(
                 predicted_embeddings, target_embeddings
             )
+            # VICReg-style regularization to prevent embedding collapse
+            var_loss = _variance_loss(context_embeddings)
+            cov_loss = _covariance_loss(context_embeddings)
+            result["loss"] = prediction_loss + 1.0 * var_loss + 0.04 * cov_loss
+            result["prediction_loss"] = prediction_loss
+            result["variance_loss"] = var_loss
+            result["covariance_loss"] = cov_loss
 
         return result
 

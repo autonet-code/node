@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
@@ -41,7 +40,7 @@ import {AutonetLib} from "../utils/AutonetLib.sol";
  * - RPB share issuance (claims on inference dividends)
  * - Model versioning
  */
-contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
+contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
 
     // =========================================================================
     // Structs
@@ -134,6 +133,12 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     uint256 public taskRewardBudgetATN;
     mapping(address => bool) public authorizedDisbursers;
 
+    // --- Authorized operators (service addresses for high-frequency ops) ---
+    mapping(address => bool) public authorizedOperators;
+
+    // --- Constitution (the RPB's defining document, stored on-chain) ---
+    string public constitution;
+
     // --- Inference pricing ---
     string public modelWeightsCid;
     uint256 public atnPricePerInference;
@@ -175,6 +180,8 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     event MatureModelSet(string weightsCid, uint256 price);
     event InferencePriceSet(uint256 price);
     event DiscountTiersUpdated(uint256 tierCount);
+    event ConstitutionUpdated(uint256 timestamp);
+    event OperatorAuthorized(address indexed operator, bool authorized);
 
     // =========================================================================
     // Errors
@@ -207,7 +214,24 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     error InsufficientPoolBalance();
     error NotAuthorizedDisburser();
     error InsufficientBudget();
-    error NotOwnerOrDAO();
+    error NotDAO();
+
+    // =========================================================================
+    // Modifiers
+    // =========================================================================
+
+    modifier onlyOperator() {
+        require(
+            msg.sender == dao || authorizedOperators[msg.sender],
+            "RPB: not operator"
+        );
+        _;
+    }
+
+    modifier onlyDAO() {
+        if (msg.sender != dao) revert NotDAO();
+        _;
+    }
 
     // =========================================================================
     // Constructor
@@ -215,12 +239,9 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
 
     error InvalidJurisdiction();
 
-    uint256 public constant INITIAL_SUPPLY = 1_000_000_000; // 1 billion ATN
-
     constructor(
         address _registry
     )
-        Ownable(msg.sender)
         ERC20("Autonoma Token", "ATN")
         ERC20Permit("Autonoma Token")
     {
@@ -229,9 +250,6 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
 
         registry = reg;
         dao = reg.owner();
-
-        // Mint initial supply to the deployer (typically transferred to DAO via proposal)
-        _mint(msg.sender, INITIAL_SUPPLY * (10 ** decimals()));
 
         // Default revenue split (basis points, must sum to 10000)
         inferenceProviderShare = 6000;  // 60%
@@ -259,17 +277,24 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
 
     function mint(address to, uint256 amount) external {
         require(
-            msg.sender == dao || msg.sender == owner() || authorizedMinters[msg.sender],
+            msg.sender == dao || authorizedMinters[msg.sender],
             "RPB: not authorized to mint"
         );
         _mint(to, amount);
     }
 
     function setAuthorizedMinter(address minter, bool authorized) external {
-        if (msg.sender != owner() && msg.sender != dao) revert NotOwnerOrDAO();
+        if (msg.sender != dao) revert NotDAO();
         require(minter != address(0), "RPB: zero minter address");
         authorizedMinters[minter] = authorized;
         emit MinterAuthorized(minter, authorized);
+    }
+
+    function setAuthorizedOperator(address operator, bool authorized) external {
+        if (msg.sender != dao) revert NotDAO();
+        require(operator != address(0), "RPB: zero operator address");
+        authorizedOperators[operator] = authorized;
+        emit OperatorAuthorized(operator, authorized);
     }
 
     // =========================================================================
@@ -455,7 +480,7 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     // Training
     // =========================================================================
 
-    function recordTraining(address agent, uint256 contribution) external onlyOwner {
+    function recordTraining(address agent, uint256 contribution) external onlyOperator {
         if (!agents[agent].active) revert AgentNotActive();
 
         epochRecords[currentEpoch].push(TrainingRecord({
@@ -582,7 +607,7 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
         uint256 units,
         address token,
         uint256 cost
-    ) external onlyOwner nonReentrant {
+    ) external onlyOperator nonReentrant {
         if (!agents[provider].active) revert AgentNotActive();
 
         uint256 normalizedCost = _normalize(token, cost);
@@ -628,7 +653,7 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
         uint256 totalRevenue,
         uint256 shareholderAmount
     ) external nonReentrant {
-        if (!authorizedDisbursers[msg.sender] && msg.sender != dao && msg.sender != owner()) {
+        if (!authorizedDisbursers[msg.sender] && msg.sender != dao) {
             revert NotAuthorizedDisburser();
         }
 
@@ -658,13 +683,13 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     // Model Management
     // =========================================================================
 
-    function updateModel(bytes32 newModelHash) external onlyOwner {
+    function updateModel(bytes32 newModelHash) external onlyOperator {
         currentModelHash = newModelHash;
         modelVersion++;
         emit ModelUpdated(newModelHash, modelVersion);
     }
 
-    function setModelArchitecture(bytes32 archHash) external onlyOwner {
+    function setModelArchitecture(bytes32 archHash) external onlyOperator {
         modelArchitectureHash = archHash;
     }
 
@@ -673,7 +698,7 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     // =========================================================================
 
     function setAuthorizedDisburser(address _disburser, bool _authorized) external {
-        if (msg.sender != owner() && msg.sender != dao) revert NotOwnerOrDAO();
+        if (msg.sender != dao) revert NotDAO();
         authorizedDisbursers[_disburser] = _authorized;
         emit DisburserAuthorized(_disburser, _authorized);
     }
@@ -685,7 +710,7 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     }
 
     function disburseFromBudget(address _recipient, uint256 _amount) external returns (bool) {
-        if (!authorizedDisbursers[msg.sender] && msg.sender != dao && msg.sender != owner()) {
+        if (!authorizedDisbursers[msg.sender] && msg.sender != dao) {
             revert NotAuthorizedDisburser();
         }
         if (taskRewardBudgetATN < _amount) revert InsufficientBudget();
@@ -701,7 +726,7 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     // =========================================================================
 
     function setMatureModel(string memory _weightsCid, uint256 _price) external {
-        if (msg.sender != owner() && msg.sender != dao) revert NotOwnerOrDAO();
+        if (msg.sender != dao) revert NotDAO();
         modelWeightsCid = _weightsCid;
         atnPricePerInference = _price;
         emit MatureModelSet(_weightsCid, _price);
@@ -713,7 +738,7 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     }
 
     function setDiscountTiers(AutonetLib.DiscountTier[] memory _tiers) external {
-        if (msg.sender != owner() && msg.sender != dao) revert NotOwnerOrDAO();
+        if (msg.sender != dao) revert NotDAO();
         delete discountTiers;
         for (uint i = 0; i < _tiers.length; i++) {
             discountTiers.push(_tiers[i]);
@@ -743,7 +768,7 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     // Epoch Management
     // =========================================================================
 
-    function advanceEpoch() external onlyOwner {
+    function advanceEpoch() external onlyOperator {
         currentEpoch++;
         emit EpochAdvanced(currentEpoch);
     }
@@ -836,6 +861,11 @@ contract RPB is Ownable, ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20B
     }
 
     function getConstitution() external view returns (string memory) {
-        return registry.getRegistryValue("rpb.prompt.current");
+        return constitution;
+    }
+
+    function setConstitution(string memory _constitution) external onlyDAO {
+        constitution = _constitution;
+        emit ConstitutionUpdated(block.timestamp);
     }
 }

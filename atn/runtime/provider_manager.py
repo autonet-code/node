@@ -161,6 +161,7 @@ class ProviderManager:
 
         self._custom_providers: set[str] = set()
         self._active_providers: dict[str, Any] = {}
+        self._p2p_host: Any = None  # Set by runtime when P2P is available
         # Cache session stats when providers are removed, so the frontend
         # can still fetch stats after execution completes.
         self._cached_session_stats: dict[str, dict[str, Any]] = {}
@@ -242,6 +243,7 @@ class ProviderManager:
             return RPBNetworkProvider(
                 agent_id=agent_id,
                 model=model,
+                p2p_host=self._p2p_host,
             )
         if provider_name in self._custom_providers:
             pconfig = self._config.providers.get(provider_name)

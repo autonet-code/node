@@ -40,6 +40,33 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# VICReg-style regularization (prevents embedding collapse)
+# ---------------------------------------------------------------------------
+
+def _variance_loss(embeddings: torch.Tensor, target_std: float = 1.0) -> torch.Tensor:
+    """Penalize low variance across the batch in each embedding dimension."""
+    if embeddings.dim() == 3:
+        x = embeddings.reshape(-1, embeddings.shape[-1])
+    else:
+        x = embeddings
+    std = x.std(dim=0)
+    return F.relu(target_std - std).mean()
+
+
+def _covariance_loss(embeddings: torch.Tensor) -> torch.Tensor:
+    """Penalize correlation between embedding dimensions."""
+    if embeddings.dim() == 3:
+        x = embeddings.reshape(-1, embeddings.shape[-1])
+    else:
+        x = embeddings
+    x = x - x.mean(dim=0)
+    N, D = x.shape
+    cov = (x.T @ x) / max(N - 1, 1)
+    off_diag = cov.pow(2).sum() - cov.diagonal().pow(2).sum()
+    return off_diag / D
+
+
 @dataclass
 class BackboneConfig:
     """Configuration for the LLM backbone encoder."""
@@ -642,6 +669,11 @@ class BackboneJEPATrainer:
         else:
             avg_loss = torch.tensor(0.0, device=self._device, requires_grad=True)
 
+        # VICReg regularization on context embeddings to prevent collapse
+        var_loss = _variance_loss(context_embeds)
+        cov_loss = _covariance_loss(context_embeds)
+        avg_loss = avg_loss + 1.0 * var_loss + 0.04 * cov_loss
+
         optimizer.zero_grad()
         avg_loss.backward()
         # Gradient clipping
@@ -660,6 +692,8 @@ class BackboneJEPATrainer:
             "loss": avg_loss.item(),
             "cosine_similarity": total_cos / max(n_targets, 1),
             "num_targets": n_targets,
+            "variance_loss": var_loss.item(),
+            "covariance_loss": cov_loss.item(),
         }
 
     def get_weights(self) -> Dict[str, Any]:

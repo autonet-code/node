@@ -54,7 +54,6 @@ contract RPBFactory {
         address _registry
     ) external returns (address rpb) {
         RPB newRPB = new RPB(_registry);
-        newRPB.transferOwnership(msg.sender);
 
         rpb = address(newRPB);
         deployedRPBs.push(rpb);

@@ -131,6 +131,12 @@ class RPBConfig:
     timelock_address: str = ""          # Discovered from Governor.timelock()
     min_alignment_threshold: float = 0.5
     generate_keypairs: bool = True
+    # Sponsor mode — advertise willingness to proxy inference for dependents
+    sponsor_inference: bool = False
+    # Provider to use for sponsored inference (e.g. "anthropic", "openai").
+    # Empty = use same provider resolution as local agents.
+    sponsor_provider: str = ""
+    sponsor_model: str = ""  # Model to serve (empty = accept any model request)
 
     def __post_init__(self) -> None:
         """Apply jurisdiction defaults for empty fields."""

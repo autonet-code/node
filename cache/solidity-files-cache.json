@@ -2117,8 +2117,8 @@
       ]
     },
     "C:\\code\\autonet\\contracts\\core\\RPB.sol": {
-      "lastModificationDate": 1775331223582,
-      "contentHash": "8491b692439c31e42a3e957c4210f8e4",
+      "lastModificationDate": 1775427060074,
+      "contentHash": "d7fa0defd6ceb3043713694db38367b2",
       "sourceName": "contracts/core/RPB.sol",
       "solcConfig": {
         "version": "0.8.20",
@@ -2146,7 +2146,6 @@
         }
       },
       "imports": [
-        "@openzeppelin/contracts/access/Ownable.sol",
         "@openzeppelin/contracts/utils/ReentrancyGuard.sol",
         "@openzeppelin/contracts/token/ERC20/ERC20.sol",
         "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol",
@@ -2251,8 +2250,8 @@
       ]
     },
     "C:\\code\\autonet\\contracts\\core\\RPBFactory.sol": {
-      "lastModificationDate": 1775331687054,
-      "contentHash": "81d0048c8eddd3d9a5703e019ff01c81",
+      "lastModificationDate": 1775426841633,
+      "contentHash": "2ea762261bf822d0523209d72ecf9880",
       "sourceName": "contracts/core/RPBFactory.sol",
       "solcConfig": {
         "version": "0.8.20",

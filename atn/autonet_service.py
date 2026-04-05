@@ -83,6 +83,8 @@ class AutonetState:
     timelock_address: str = ""
     # Constitution CID loaded from registry
     constitution_cid: str = ""
+    # Full constitution text (loaded from RPB.constitution() or local file)
+    constitution_text: str = ""
 
     _MAX_LOSS_HISTORY: int = 100
 
@@ -121,6 +123,7 @@ class AutonetState:
             "economy_address": self.economy_address,
             "timelock_address": self.timelock_address,
             "constitution_cid": self.constitution_cid,
+            "constitution_text": self.constitution_text,
         }
 
 
@@ -166,6 +169,9 @@ class AutonetBridge:
                 EventType.EXECUTION_COMPLETED,
                 self._on_execution_completed,
             )
+
+        # Runtime back-reference (set by Runtime.__init__)
+        self._runtime = None
 
         # P2P agent advertisement
         self._p2p_host = None      # AutonetHost (lazy, trio-based)
@@ -239,15 +245,17 @@ class AutonetBridge:
             if self.state.wallet_address and not any(
                 a["address"].lower() == self.state.wallet_address.lower() for a in ads
             ):
+                rpb_cfg = self.config.rpb if hasattr(self.config, 'rpb') else None
                 ads.insert(0, {
                     "address": self.state.wallet_address,
                     "name": "root",
                     "description": "",
                     "agent_type": "orchestrator",
-                    "model": "",
+                    "model": getattr(rpb_cfg, "sponsor_model", "") if rpb_cfg else "",
                     "is_root": True,
                     "parent_address": "",
                     "registered_on_chain": False,
+                    "is_sponsor": getattr(rpb_cfg, "sponsor_inference", False) if rpb_cfg else False,
                 })
             self._p2p_host.update_capability(agents=ads)
             log.debug("P2P capability updated with %d agent(s)", len(ads))
@@ -289,6 +297,13 @@ class AutonetBridge:
         self._p2p_host = host
         self._p2p_stop.clear()
 
+        # Wire sponsor-side inference handler (Path A)
+        rpb_cfg = self.config.rpb if hasattr(self.config, 'rpb') else None
+        if rpb_cfg and getattr(rpb_cfg, 'sponsor_inference', False):
+            host._inference_handler = self._create_sponsor_handler(rpb_cfg)
+            log.info("Sponsor inference handler wired (provider=%s, model=%s)",
+                     rpb_cfg.sponsor_provider or "auto", rpb_cfg.sponsor_model or "any")
+
         def _run():
             import trio
             async def _main():
@@ -309,6 +324,139 @@ class AutonetBridge:
         self._p2p_thread = threading.Thread(target=_run, name="p2p-host", daemon=True)
         self._p2p_thread.start()
         log.info("P2P agent advertisement started")
+
+    def _create_sponsor_handler(self, rpb_cfg):
+        """Create an async inference handler for sponsor-side Path A.
+
+        When a dependent node sends an inference request over P2P, this
+        handler forwards it through the sponsor's own centralized provider
+        (Anthropic, OpenAI, etc.) and returns the response.
+        """
+        from .providers.base import ToolDefinition
+
+        service = self  # closure reference
+
+        async def _handle_sponsor_inference(request: dict) -> dict:
+            # No-chaining rule: reject requests that already came through RPB
+            if request.get("via_rpb"):
+                return {"error": "No-chaining: cannot re-route RPB inference through RPB"}
+
+            model = request.get("model", rpb_cfg.sponsor_model or "")
+            messages = request.get("messages", [])
+            system = request.get("system", "")
+            max_tokens = request.get("max_tokens", 4096)
+            temperature = request.get("temperature", 0.0)
+            tools_raw = request.get("tools", [])
+
+            # Resolve provider — use configured sponsor provider or auto-resolve
+            provider = service._resolve_sponsor_provider(rpb_cfg, model)
+            if provider is None:
+                return {"error": "Sponsor node has no provider configured for this model"}
+
+            # Convert tool dicts to ToolDefinition
+            tools = None
+            if tools_raw:
+                tools = [
+                    ToolDefinition(
+                        name=t.get("name", ""),
+                        description=t.get("description", ""),
+                        input_schema=t.get("input_schema", {}),
+                    )
+                    for t in tools_raw
+                ]
+
+            try:
+                resp = await provider.send(
+                    messages=messages,
+                    system=system,
+                    model=model,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                    temperature=temperature,
+                )
+
+                # Serialize ProviderResponse back to dict for P2P transport
+                result = {
+                    "text": resp.text or "",
+                    "model": resp.model or model,
+                    "stop_reason": resp.stop_reason or "end_turn",
+                    "usage": {
+                        "input_tokens": resp.usage.input_tokens if resp.usage else 0,
+                        "output_tokens": resp.usage.output_tokens if resp.usage else 0,
+                    },
+                }
+                if resp.tool_calls:
+                    result["tool_calls"] = [
+                        {"id": tc.id, "name": tc.name, "input": tc.input}
+                        for tc in resp.tool_calls
+                    ]
+
+                log.debug("Sponsor served inference: model=%s, tokens=%d+%d",
+                          model,
+                          result["usage"]["input_tokens"],
+                          result["usage"]["output_tokens"])
+                return result
+
+            except Exception as e:
+                log.warning("Sponsor inference failed: %s", e)
+                return {"error": f"Sponsor inference failed: {e}"}
+
+        return _handle_sponsor_inference
+
+    def _resolve_sponsor_provider(self, rpb_cfg, model: str):
+        """Resolve a provider instance for sponsor inference."""
+        provider_name = rpb_cfg.sponsor_provider
+
+        if not provider_name:
+            # Auto-resolve from model name
+            model_lower = (model or "").lower()
+            if model_lower.startswith("claude"):
+                provider_name = "anthropic"
+            elif model_lower.startswith(("gpt", "o1", "o3", "o4")):
+                provider_name = "openai"
+            elif model_lower.startswith("gemini"):
+                provider_name = "gemini"
+            else:
+                provider_name = "anthropic"  # default
+
+        # Use the runtime's provider manager if available
+        if self._runtime and hasattr(self._runtime, 'providers'):
+            try:
+                from .models import AgentDefinition
+                dummy_defn = AgentDefinition(
+                    id="_sponsor",
+                    name="sponsor",
+                    provider=provider_name,
+                    cognitive_model=model,
+                )
+                return self._runtime.providers.resolve_provider_with_fallback(dummy_defn)
+            except Exception:
+                log.debug("Failed to resolve sponsor provider via runtime", exc_info=True)
+
+        # Fallback: direct creation from credentials
+        try:
+            from .providers.anthropic import AnthropicProvider
+            from .credentials import CredentialStore
+            creds = CredentialStore()
+            api_key = creds.load(f"provider_{provider_name}").get("api_key", "")
+            if api_key and provider_name == "anthropic":
+                return AnthropicProvider(api_key=api_key, default_model=model)
+            if api_key and provider_name in ("openai", "gemini"):
+                from .providers.openai_compat import OpenAICompatibleProvider
+                base_urls = {
+                    "openai": "https://api.openai.com/v1",
+                    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+                }
+                return OpenAICompatibleProvider(
+                    name=f"sponsor-{provider_name}",
+                    base_url=base_urls.get(provider_name, ""),
+                    api_key=api_key,
+                    default_model=model,
+                )
+        except Exception:
+            log.debug("Failed to create sponsor provider directly", exc_info=True)
+
+        return None
 
     def stop_p2p(self) -> None:
         """Stop the p2p background thread."""
@@ -332,7 +480,11 @@ class AutonetBridge:
             ))
 
     async def load_constitution(self) -> str | None:
-        """Load constitution CID and text from on-chain Registry (once).
+        """Load constitution text from on-chain RPB contract (once).
+
+        Tries in order:
+        1. RPB.constitution() — the actual text stored on-chain
+        2. Local file fallback (constitution/v1_udhr.txt) for offline dev
 
         Called lazily on first state request or at startup.
         Returns the CID string or None.
@@ -340,32 +492,53 @@ class AutonetBridge:
         if self._constitution_loaded:
             return self.state.constitution_cid or None
         self._constitution_loaded = True
-        if not self.config.rpb_contract_address or not self.config.registry_address:
-            # Even without chain, try loading the local fallback text
-            self._load_constitution_text(None)
+        if not self.config.rpb_contract_address:
+            # No chain config — fall back to local file
+            self._load_constitution_text_local()
+            self._push_constitution_to_training_feed()
             return None
         try:
             from .on_chain import OnChainService
             svc = OnChainService(self.config)
-            cid = await svc.get_constitution_cid()
-            if cid:
-                self.state.constitution_cid = cid
-                log.info("Constitution CID loaded from chain: %s", cid[:40])
-            self._load_constitution_text(cid)
-            return cid
+            # Try reading the full text directly from the RPB contract
+            text = await svc.get_constitution_text()
+            if text:
+                self._constitution_text = text.strip()
+                log.info("Constitution text loaded from RPB contract (%d chars)", len(self._constitution_text))
+            else:
+                log.debug("No constitution text on-chain, falling back to local file")
+                self._load_constitution_text_local()
+            # Also grab the CID from Registry if available
+            if self.config.registry_address:
+                cid = await svc.get_constitution_cid()
+                if cid:
+                    self.state.constitution_cid = cid
+            self._push_constitution_to_training_feed()
+            return self.state.constitution_cid or None
         except Exception as e:
             log.debug("Failed to load constitution from chain: %s", e)
-            self._load_constitution_text(None)
+            self._load_constitution_text_local()
+            self._push_constitution_to_training_feed()
             return None
 
-    def _load_constitution_text(self, cid: str | None) -> None:
-        """Load the raw constitution text from blob store or local fallback."""
+    def _push_constitution_to_training_feed(self) -> None:
+        """Push loaded constitution text to the training feed and state."""
+        # Always sync to state (for WS API)
+        self.state.constitution_text = self._constitution_text
+        if not self._constitution_text or not self._service:
+            return
+        feed = getattr(self._service, "_training_feed", None)
+        if feed and hasattr(feed, "config"):
+            feed.config.constitution_text = self._constitution_text
+            log.debug("Constitution text pushed to training feed (%d chars)", len(self._constitution_text))
+
+    def _load_constitution_text_local(self) -> None:
+        """Load the raw constitution text from local file (offline fallback)."""
         try:
             from nodes.common.rpb_prompt import V1_PROMPT_FILE
-            # For now, load from local file (blob store integration later)
             if V1_PROMPT_FILE.exists():
                 self._constitution_text = V1_PROMPT_FILE.read_text(encoding="utf-8").strip()
-                log.info("Constitution text loaded (%d chars)", len(self._constitution_text))
+                log.info("Constitution text loaded from local file (%d chars)", len(self._constitution_text))
             else:
                 log.warning("No constitution text available at %s", V1_PROMPT_FILE)
         except Exception as e:

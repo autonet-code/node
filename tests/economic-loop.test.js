@@ -53,10 +53,13 @@ describe("Full Economic Loop — E2E", function () {
     await rpb.waitForDeployment();
     rpbAddr = await rpb.getAddress();
 
-    // Verify RPB is the token
+    // Verify RPB is the token — no pre-mint, supply starts at zero
     expect(await rpb.name()).to.equal("Autonoma Token");
     expect(await rpb.symbol()).to.equal("ATN");
-    expect(await rpb.totalSupply()).to.equal(e18(1_000_000_000));
+    expect(await rpb.totalSupply()).to.equal(0n);
+
+    // DAO mints test liquidity (owner == dao in test fixture)
+    await rpb.mint(owner.address, e18(1_000_000_000));
 
     // ── Step 3: Deploy supporting contracts ──
     const Staking = await ethers.getContractFactory("ParticipantStaking");
@@ -555,7 +558,39 @@ describe("Full Economic Loop — E2E", function () {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Test 8: Coordinator Bond Dynamics
+  // Test 8: On-Chain Constitution Storage
+  // ─────────────────────────────────────────────────────────────────────────
+  describe("On-Chain Constitution", function () {
+    it("owner can set and read constitution text", async function () {
+      // Initially empty
+      expect(await rpb.getConstitution()).to.equal("");
+
+      // Owner sets the constitution
+      const text = "Article 1\nAll agents are born free and equal in dignity and rights.";
+      await rpb.setConstitution(text);
+      expect(await rpb.getConstitution()).to.equal(text);
+      expect(await rpb.constitution()).to.equal(text);
+
+      // Update it
+      const updated = text + "\n\nArticle 2\nEveryone is entitled to all rights without distinction.";
+      await rpb.setConstitution(updated);
+      expect(await rpb.getConstitution()).to.equal(updated);
+    });
+
+    it("non-DAO cannot set constitution", async function () {
+      await expect(
+        rpb.connect(solver1).setConstitution("rogue constitution")
+      ).to.be.revertedWithCustomError(rpb, "NotDAO");
+    });
+
+    it("emits ConstitutionUpdated event", async function () {
+      await expect(rpb.setConstitution("test"))
+        .to.emit(rpb, "ConstitutionUpdated");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Test 9: Coordinator Bond Dynamics
   // ─────────────────────────────────────────────────────────────────────────
   describe("Coordinator Bond EMA", function () {
     it("coordinators who align with consensus build stronger bonds", async function () {

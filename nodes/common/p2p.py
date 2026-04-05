@@ -1030,15 +1030,89 @@ class AutonetHost:
     async def request_inference(self, target_peer_id: str, request: dict) -> dict:
         """Send an inference request to a provider node.
 
-        Uses the /rpb/inference/1.0.0 protocol.
+        Uses the /rpb/inference/1.0.0 protocol. The provider node forwards
+        the request to its own centralized API subscription (Path A) and
+        returns the response.
+
+        Args:
+            target_peer_id: Peer ID of the provider node.
+            request: Dict with messages, system, model, max_tokens, tools, temperature.
+
+        Returns:
+            Dict with text, tool_calls, usage, model fields from the provider.
+
+        Raises:
+            RuntimeError: If the provider returns an error or connection fails.
         """
-        # TODO: Implement framed I/O inference request
-        # 1. Serialize request to JSON
-        # 2. Open stream with INFERENCE_REQUEST_PROTOCOL
-        # 3. Write framed request
-        # 4. Read framed response
-        # 5. Deserialize and return
-        raise NotImplementedError("RPB inference protocol not yet implemented")
+        import json
+
+        req_bytes = json.dumps(request).encode("utf-8")
+        try:
+            stream = await self._host.new_stream(
+                target_peer_id, [INFERENCE_REQUEST_PROTOCOL]
+            )
+            await _write_framed(stream, req_bytes)
+
+            # Read response
+            resp_bytes = await _read_framed(stream)
+            response = json.loads(resp_bytes.decode("utf-8"))
+
+            if "error" in response:
+                raise RuntimeError(f"Provider error: {response['error']}")
+
+            self.logger.info(
+                "Inference response from %s (%d bytes)",
+                str(target_peer_id)[:16], len(resp_bytes),
+            )
+            return response
+        except NotImplementedError:
+            raise
+        except Exception as e:
+            self.logger.warning("Inference request to %s failed: %s", str(target_peer_id)[:16], e)
+            raise RuntimeError(f"Inference request failed: {e}") from e
+
+    async def _handle_inference_stream(self, stream):
+        """Handle incoming inference request from a dependent node.
+
+        Path A: Forward the request through this node's own provider
+        (Claude, OpenAI, etc.) and return the response.
+        """
+        import json
+
+        try:
+            data = await _read_framed(stream)
+            request = json.loads(data.decode("utf-8"))
+
+            self.logger.info("Received inference request (%d bytes)", len(data))
+
+            # Forward through this node's configured provider
+            response = await self._serve_inference_locally(request)
+
+            resp_bytes = json.dumps(response).encode("utf-8")
+            await _write_framed(stream, resp_bytes)
+
+        except Exception as e:
+            self.logger.warning("Failed to handle inference request: %s", e)
+            try:
+                error_resp = json.dumps({"error": str(e)}).encode("utf-8")
+                await _write_framed(stream, error_resp)
+            except Exception:
+                pass
+
+    async def _serve_inference_locally(self, request: dict) -> dict:
+        """Serve an inference request using this node's own provider.
+
+        This is the sponsor side of Path A — the sponsor node has a
+        centralized API subscription and uses it to serve dependent nodes.
+
+        Override this method or set self._inference_handler to customize.
+        """
+        handler = getattr(self, "_inference_handler", None)
+        if handler:
+            return await handler(request)
+
+        # Default: return error indicating no provider configured
+        return {"error": "This node has no inference provider configured for sponsorship"}
 
     async def advertise_models(self, models: List[str], agent_address: str) -> None:
         """Advertise available models on the provider registry gossip topic.
@@ -1137,6 +1211,9 @@ class AutonetHost:
         )
         self._host.set_stream_handler(
             EMBEDDING_PROTOCOL, self._handle_embedding_stream
+        )
+        self._host.set_stream_handler(
+            INFERENCE_REQUEST_PROTOCOL, self._handle_inference_stream
         )
 
     # =========================================================================
