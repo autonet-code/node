@@ -256,7 +256,7 @@ class TextTrainingDataSource:
         return max(1, n_segments // self.config.batch_size)
 
     def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
-        """Yield training batches: {token_ids, attention_mask}."""
+        """Yield training batches: {token_ids, attention_mask, raw_texts}."""
         segs = self.segments
         if not segs:
             return
@@ -275,6 +275,7 @@ class TextTrainingDataSource:
             yield {
                 "token_ids": token_ids,
                 "attention_mask": attention_mask,
+                "raw_texts": batch_texts,
             }
 
 

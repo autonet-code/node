@@ -635,8 +635,24 @@ def train_vljepa_on_task(
 
     has_text = "text" in modalities
     has_visual = "visual" in modalities
+    backbone_model_id = task_spec.get("backbone_model_id", "")
 
     try:
+        # -----------------------------------------------------------
+        # LLM BACKBONE: Use frozen open-weights LLM as encoder
+        # -----------------------------------------------------------
+        if backbone_model_id and has_text and not has_visual:
+            return _train_backbone_jepa(
+                task_spec=task_spec,
+                text_data_source=text_data_source,
+                global_model_cid=global_model_cid,
+                store=store,
+                epochs=epochs,
+                learning_rate=learning_rate,
+                device=device,
+                start_time=start_time,
+            )
+
         # -----------------------------------------------------------
         # TEXT-ONLY: Use TextJEPA
         # -----------------------------------------------------------
@@ -963,6 +979,151 @@ def train_vljepa_on_task(
     except Exception as e:
         logger.error("VL-JEPA training failed: %s", e)
         return _mock_jepa_result(task_spec)
+
+
+def _train_backbone_jepa(
+    task_spec: Dict[str, Any],
+    text_data_source,
+    global_model_cid: Optional[str],
+    store,
+    epochs: int,
+    learning_rate: float,
+    device: str,
+    start_time: float,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Train using a frozen open-weights LLM as the encoder backbone.
+
+    Only the projection head and predictor are trained.  The LLM provides
+    rich semantic embeddings; the projection head compresses them into the
+    JEPA latent space for FedAvg distribution.
+    """
+    from .llm_backbone import BackboneConfig, BackboneJEPATrainer
+    from .local_models import get_model_spec
+
+    model_id = task_spec["backbone_model_id"]
+    spec = get_model_spec(model_id)
+
+    config = BackboneConfig(
+        model_id=model_id,
+        hidden_dim=spec.hidden_dim if spec else task_spec.get("hidden_dim", 2048),
+        num_layers=spec.num_layers if spec else task_spec.get("num_layers", 16),
+        extract_layer=spec.extract_layer if spec else task_spec.get("extract_layer", -1),
+        embed_dim=task_spec.get("embed_dim", 256),
+        num_heads=task_spec.get("num_heads", 4),
+        predictor_depth=task_spec.get("predictor_depth", 2),
+        predictor_embed_dim=task_spec.get("predictor_embed_dim", 128),
+        max_seq_length=task_spec.get("max_seq_length", 2048),
+        device=device,
+    )
+
+    trainer = BackboneJEPATrainer(config, device=device)
+    trainer.load_backbone(device)
+
+    # Load global weights if continuing
+    if global_model_cid and store:
+        try:
+            global_weights = load_weights(global_model_cid, store)
+            if global_weights:
+                trainer.load_weights(global_weights)
+                logger.info("Loaded global backbone model: %s...", global_model_cid[:20])
+        except Exception as e:
+            logger.warning("Failed to load global backbone model: %s", e)
+
+    initial_weights = trainer.get_weights()
+
+    optimizer = torch.optim.AdamW(
+        list(trainer.encoder.projection.parameters())
+        + [trainer.encoder.pos_embed]
+        + list(trainer.predictor.parameters()),
+        lr=learning_rate,
+        weight_decay=0.05,
+    )
+
+    total_loss = 0.0
+    total_cosine = 0.0
+    num_batches = 0
+
+    for epoch in range(epochs):
+        if hasattr(text_data_source, "reload"):
+            text_data_source.reload()
+
+        for batch in text_data_source:
+            # The text_data_source yields byte-level token batches.
+            # We need to re-tokenize with the LLM's tokenizer.
+            # Extract raw text from the batch and re-tokenize.
+            texts = _batch_to_texts(batch, text_data_source)
+            if not texts:
+                continue
+
+            encoded = trainer.encoder.tokenize(texts, max_length=config.max_seq_length)
+            metrics = trainer.train_step(
+                encoded["input_ids"],
+                encoded["attention_mask"],
+                optimizer,
+            )
+            total_loss += metrics["loss"]
+            total_cosine += metrics["cosine_similarity"]
+            num_batches += 1
+
+        if num_batches > 0:
+            logger.info(
+                "Backbone Epoch %d/%d: Loss=%.4f, CosSim=%.4f",
+                epoch + 1, epochs,
+                total_loss / num_batches,
+                total_cosine / num_batches,
+            )
+
+    training_time = time.time() - start_time
+
+    # Weight delta (only trainable params)
+    final_weights = trainer.get_weights()
+    weight_delta = {}
+    for key in final_weights:
+        if key in initial_weights:
+            delta = final_weights[key] - initial_weights[key]
+            weight_delta[key] = delta.cpu().numpy().tolist()
+        else:
+            weight_delta[key] = final_weights[key].cpu().numpy().tolist()
+
+    result_metrics = {
+        "loss": total_loss / max(1, num_batches),
+        "cosine_similarity": total_cosine / max(1, num_batches),
+        "training_time": training_time,
+        "epochs": epochs,
+        "num_batches": num_batches,
+        "architecture": f"backbone:{model_id}",
+        "modalities": ["text"],
+        "self_supervised": True,
+        "param_count": trainer.encoder.trainable_param_count(),
+        "backbone_model_id": model_id,
+        "backbone_frozen_params": trainer.encoder.total_param_count() - trainer.encoder.trainable_param_count(),
+    }
+
+    return weight_delta, result_metrics
+
+
+def _batch_to_texts(batch, data_source) -> list[str]:
+    """Extract raw text strings from a training batch for LLM re-tokenization.
+
+    The TextTrainingDataSource includes raw_texts in each batch dict.
+    Falls back to byte-decoding the token_ids if not available.
+    """
+    # Prefer raw text from the batch (added in text_data.py)
+    if isinstance(batch, dict) and "raw_texts" in batch:
+        return batch["raw_texts"]
+
+    # Fallback: decode byte tokens
+    from .tokenizer import SimpleTokenizer
+    tokenizer = SimpleTokenizer()
+
+    token_ids = batch.get("token_ids") if isinstance(batch, dict) else batch[0]
+    texts = []
+    for seq in token_ids:
+        ids = seq.tolist() if hasattr(seq, "tolist") else list(seq)
+        text = tokenizer.decode(ids)
+        if text.strip():
+            texts.append(text)
+    return texts
 
 
 def verify_jepa_solution(

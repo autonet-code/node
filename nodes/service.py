@@ -383,6 +383,7 @@ class AutonetService:
                 epochs=self.config.training.epochs,
                 learning_rate=self.config.training.learning_rate,
                 batch_size=self.config.training.batch_size,
+                backbone_model_id=getattr(self.config.model, "backbone_model_id", ""),
                 scrub_pii=getattr(self.config, "privacy", None) is not None
                     and getattr(self.config.privacy, "scrub_pii", True),
             )
@@ -392,7 +393,7 @@ class AutonetService:
             logger.info(
                 "Training data feed initialized (data_dir=%s, governance=%s)",
                 self._data_dir,
-                "online" if governance else "offline",
+                "online" if self._governance else "offline",
             )
 
         except Exception as e:

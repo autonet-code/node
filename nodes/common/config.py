@@ -50,7 +50,7 @@ class BlobStoreConfig:
 @dataclass
 class ModelConfig:
     """Model architecture config."""
-    architecture: str = "jepa"  # "simplenet", "jepa", "vl_jepa"
+    architecture: str = "jepa"  # "simplenet", "jepa", "vl_jepa", "backbone"
     image_size: int = 32
     patch_size: int = 4
     embed_dim: int = 192
@@ -58,6 +58,8 @@ class ModelConfig:
     encoder_depth: int = 6
     predictor_depth: int = 3
     predictor_embed_dim: int = 96
+    # LLM backbone (when architecture="backbone")
+    backbone_model_id: str = ""  # HuggingFace repo ID, e.g. "Qwen/Qwen3-1.7B"
 
 
 @dataclass

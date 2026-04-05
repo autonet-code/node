@@ -57,6 +57,8 @@ class TrainingFeedConfig:
     profile_K: int = 32
     profile_D: int = 0  # 0 = auto from embed_dim
     profile_decay: float = 0.998
+    # LLM backbone (empty = use TextJEPA, set to HF repo ID to use backbone)
+    backbone_model_id: str = ""
     # Privacy
     scrub_pii: bool = True
     exclude_patterns: list[str] = field(default_factory=list)
@@ -254,6 +256,8 @@ class TrainingDataFeed:
             "predictor_depth": self.config.predictor_depth,
             "predictor_embed_dim": self.config.predictor_embed_dim,
         }
+        if self.config.backbone_model_id:
+            spec["backbone_model_id"] = self.config.backbone_model_id
         if task_spec:
             spec.update(task_spec)
 

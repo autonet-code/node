@@ -900,6 +900,39 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        # Local model selection (LLM backbone for JEPA training)
+        if msg_type == "local_models":
+            try:
+                from nodes.common.local_models import host_status
+                return {"msg_id": msg_id, "ok": True, "result": host_status()}
+            except ImportError:
+                return {"msg_id": msg_id, "ok": False, "error": "Network package not installed"}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "set_local_model":
+            model_id = msg.get("model_id", "")
+            try:
+                from nodes.common.local_models import get_model_spec
+                if model_id and not get_model_spec(model_id):
+                    return {"msg_id": msg_id, "ok": False, "error": f"Unknown model: {model_id}"}
+                # Update the autonet config
+                if hasattr(self.runtime, "autonet") and self.runtime.autonet:
+                    bridge = self.runtime.autonet
+                    if hasattr(bridge, "_autonet_config") and bridge._autonet_config:
+                        bridge._autonet_config.model.backbone_model_id = model_id
+                    # Update active training feed config
+                    if bridge._service and bridge._service._training_feed:
+                        bridge._service._training_feed.config.backbone_model_id = model_id
+                return {
+                    "msg_id": msg_id, "ok": True,
+                    "result": {"model_id": model_id, "status": "set" if model_id else "cleared"},
+                }
+            except ImportError:
+                return {"msg_id": msg_id, "ok": False, "error": "Network package not installed"}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         # New conversation: reset conversation history without changing model
         if msg_type == "new_conversation":
             await self.runtime.new_conversation()
