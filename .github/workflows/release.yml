@@ -98,11 +98,12 @@ jobs:
             irm https://github.com/autonet-code/node/releases/latest/download/install.ps1 | iex
             ```
 
-            **Optional extras:**
+            **Install tiers:**
             ```bash
-            pip install autonet-computer[voice]      # Voice / TTS
-            pip install autonet-computer[node]       # Full training node (PyTorch)
-            pip install autonet-computer[p2p]        # P2P networking
+            pip install autonet-computer                  # Agent framework (local)
+            pip install autonet-computer[voice]           # + Voice / TTS
+            pip install autonet-computer[network]         # + Blockchain, P2P, training
+            pip install autonet-computer[network,voice]   # Everything
             ```
 
             ## Package Integrity Hash

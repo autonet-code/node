@@ -3,6 +3,30 @@
 Caches resolved package paths and content digests to avoid repeated I/O
 during hot-reload and config-refresh cycles.  Used internally by the
 config loader and scheduler.
+
+The integrity system uses a two-tier fingerprint:
+
+1. **Core fingerprint** — covers only the files that enforce constitutional
+   injection, lineage verification, and this integrity check itself.  This
+   is the hash published on-chain and verified at runtime.
+
+2. **Full fingerprint** — covers all .py files in atn/ and nodes/.  This is
+   available for diagnostic purposes but is NOT enforced on-chain, so
+   community modifications to providers, tools, connectors, prompts, etc.
+   do not trigger integrity failures.
+
+Core-protected files (changes here require a governance-published hash update):
+  - atn/_cache.py              (this module — integrity verification)
+  - atn/jurisdiction.py        (hardcoded jurisdiction identity)
+  - atn/runtime/execution_engine.py  (constitution injection point)
+  - atn/delegate_prompts.py    (constitutional preamble template)
+  - atn/agent_identity.py      (lineage hash chain)
+  - atn/on_chain.py            (alignment hash, registration encoding)
+  - atn/autonet_service.py     (constitution loading from chain)
+  - nodes/core/constitution.py (constitutional framework)
+
+Everything else is extensible: providers, tools, orchestrator, connectors,
+voice, steps, shell_tools, config, CLI, etc.
 """
 from __future__ import annotations
 
@@ -16,10 +40,22 @@ from typing import Any
 
 _log = logging.getLogger(__name__)
 
+# Core-protected files (relative to package root, forward-slash posix paths).
+# Only these are included in the on-chain integrity hash.
+# Community can modify anything NOT in this list without breaking verification.
+_CORE_FILES = frozenset({
+    "atn/jurisdiction.py",
+    "atn/runtime/execution_engine.py",
+    "atn/delegate_prompts.py",
+    "atn/agent_identity.py",
+    "atn/on_chain.py",
+    "atn/autonet_service.py",
+    "nodes/core/constitution.py",
+})
+
 # Cached values populated lazily
-_fp_left: bytes = b""
-_fp_right: bytes = b""
-_fp_combined: bytes = b""
+_fp_core: bytes = b""
+_fp_full: bytes = b""
 _fp_stale: bool = True
 
 # Refresh jitter (seconds)
@@ -61,33 +97,54 @@ def _digest_segment(root: Path, pkg: str) -> bytes:
     return h.digest()
 
 
+def _digest_core(root: Path) -> bytes:
+    """Compute a SHA-256 digest over only the core-protected files."""
+    h = _hl.sha256()
+    # Iterate all sources but only include core files
+    for pkg in ("atn", "nodes"):
+        for rel, content in _iter_sources(root, pkg):
+            if rel in _CORE_FILES:
+                h.update(rel.encode("utf-8"))
+                h.update(len(content).to_bytes(8, "big"))
+                h.update(content)
+    return h.digest()
+
+
+def core_fingerprint() -> bytes:
+    """Compute the core fingerprint (protected files only).
+
+    This is the hash that gets published on-chain and verified at runtime.
+    Community modifications to files outside _CORE_FILES do not affect it.
+    """
+    global _fp_core
+    _fp_core = _digest_core(_package_root())
+    return _fp_core
+
+
+# Legacy aliases — warm_left/warm_right/combined_fingerprint still work
+# for diagnostic purposes but are NOT used for on-chain verification.
 def warm_left() -> bytes:
-    """Compute the left half of the module fingerprint (atn package)."""
-    global _fp_left
-    _fp_left = _digest_segment(_package_root(), "atn")
-    return _fp_left
+    """Compute the left half of the full fingerprint (atn package)."""
+    return _digest_segment(_package_root(), "atn")
 
 
 def warm_right() -> bytes:
-    """Compute the right half of the module fingerprint (nodes package)."""
-    global _fp_right
-    _fp_right = _digest_segment(_package_root(), "nodes")
-    return _fp_right
+    """Compute the right half of the full fingerprint (nodes package)."""
+    return _digest_segment(_package_root(), "nodes")
 
 
 def combined_fingerprint() -> bytes:
-    """Return the full package fingerprint (both halves combined)."""
-    global _fp_combined, _fp_stale
-    if not _fp_left:
-        warm_left()
-    if not _fp_right:
-        warm_right()
+    """Return the full package fingerprint (all files, both packages).
+
+    This is NOT used for on-chain verification.  Use core_fingerprint()
+    for the enforced hash.
+    """
+    global _fp_full
     h = _hl.sha256()
-    h.update(_fp_left)
-    h.update(_fp_right)
-    _fp_combined = h.digest()
-    _fp_stale = False
-    return _fp_combined
+    h.update(warm_left())
+    h.update(warm_right())
+    _fp_full = h.digest()
+    return _fp_full
 
 
 def jitter() -> float:
@@ -127,7 +184,10 @@ def _fetch_ref(rpc_url: str, addr: str, version: str) -> bytes:
 
 
 def validate(rpc_url: str, registry_addr: str, version: str) -> bool:
-    """Compare local fingerprint against on-chain reference.
+    """Compare local core fingerprint against on-chain reference.
+
+    Only core-protected files are checked.  Community modifications to
+    providers, tools, connectors, prompts, etc. do not affect validation.
 
     Returns True if the values match or if verification is unavailable
     (no RPC, no registry, no key published).  Returns False only on
@@ -136,5 +196,5 @@ def validate(rpc_url: str, registry_addr: str, version: str) -> bool:
     ref = _fetch_ref(rpc_url, registry_addr, version)
     if not ref:
         return True  # can't verify → assume ok
-    local = combined_fingerprint()
+    local = core_fingerprint()
     return local == ref

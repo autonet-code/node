@@ -14,7 +14,7 @@ import sys
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from .common.config import AutonetConfig, load_config
 from .common.resource_monitor import ResourceMonitor
@@ -234,10 +234,58 @@ class AutonetService:
                     f"loss={metrics.get('loss', 0):.4f}, "
                     f"batches={metrics.get('num_batches', 0)}"
                 )
+                # Update model state in P2P gossip so peers can surface stats
+                self._update_gossip_model_state(metrics)
             return
 
         # Fallback: no node and no training feed
         logger.debug(f"Service cycle {self._cycles}")
+
+    def _update_gossip_model_state(self, metrics: Dict[str, Any]) -> None:
+        """Push training metrics + on-chain state into P2P gossip.
+
+        Called after a training cycle completes.  Updates this node's
+        ModelState in the NodeCapability, which gets broadcast to peers
+        on the next advertise_capability() call.
+        """
+        try:
+            from .common.p2p import AutonetHost
+        except ImportError:
+            return
+
+        # Find the P2P host — it's managed by AutonetBridge, not us directly.
+        # The service doesn't own the host, so we check if it was set externally.
+        host = getattr(self, "_p2p_host", None)
+        if not host or not isinstance(host, AutonetHost):
+            return
+
+        # Read on-chain state if governance bridge is available
+        on_chain = {}
+        governance = getattr(self, "_governance", None)
+        if governance:
+            try:
+                rpb = governance.get_contract("RPB")
+                if rpb:
+                    on_chain["model_version"] = rpb.functions.modelVersion().call()
+                    raw_hash = rpb.functions.currentModelHash().call()
+                    on_chain["model_hash"] = "0x" + raw_hash.hex() if raw_hash else ""
+                    on_chain["current_epoch"] = rpb.functions.currentEpoch().call()
+                    on_chain["total_training_tokens"] = rpb.functions.totalTrainingTokens().call()
+            except Exception as e:
+                logger.debug("Failed to read on-chain model state: %s", e)
+
+        host.update_model_state(
+            model_version=on_chain.get("model_version", 0),
+            model_hash=on_chain.get("model_hash", ""),
+            current_epoch=on_chain.get("current_epoch", 0),
+            total_training_tokens=on_chain.get("total_training_tokens", 0),
+            local_cycles_completed=self._training_feed.cycles_completed if self._training_feed else 0,
+            last_loss=metrics.get("loss", 0.0),
+            last_cosine_similarity=metrics.get("cosine_similarity", 0.0),
+            architecture=metrics.get("architecture", ""),
+            param_count=metrics.get("param_count", 0),
+        )
+        logger.debug("Model state updated in P2P gossip")
 
     def _check_updates(self):
         """Check for and optionally apply updates."""
@@ -339,8 +387,8 @@ class AutonetService:
                     and getattr(self.config.privacy, "scrub_pii", True),
             )
 
-            governance = self._init_governance()
-            self._training_feed = TrainingDataFeed(feed_config, governance=governance)
+            self._governance = self._init_governance()
+            self._training_feed = TrainingDataFeed(feed_config, governance=self._governance)
             logger.info(
                 "Training data feed initialized (data_dir=%s, governance=%s)",
                 self._data_dir,

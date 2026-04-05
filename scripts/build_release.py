@@ -3,10 +3,16 @@
 
 Usage:
     python scripts/build_release.py              # build only
-    python scripts/build_release.py --hash-only  # just print the package hash
+    python scripts/build_release.py --hash-only  # just print the core package hash
 
 Requires: python-minifier, build
     pip install python-minifier build
+
+The integrity system uses a two-tier fingerprint.  The on-chain hash covers
+ONLY the core-protected files (constitution injection, lineage verification,
+integrity checking).  Community-modifiable files (providers, tools, connectors,
+prompts, etc.) are NOT included in the on-chain hash, so modifications to
+those files do not break integrity verification.
 """
 from __future__ import annotations
 
@@ -25,37 +31,67 @@ OBFUSCATE_TARGETS = [
     ROOT / "atn" / "_cache.py",
 ]
 
+# Core-protected files — must match _CORE_FILES in atn/_cache.py.
+# Only these are included in the on-chain integrity hash.
+_CORE_FILES = frozenset({
+    "atn/jurisdiction.py",
+    "atn/runtime/execution_engine.py",
+    "atn/delegate_prompts.py",
+    "atn/agent_identity.py",
+    "atn/on_chain.py",
+    "atn/autonet_service.py",
+    "nodes/core/constitution.py",
+})
 
-def _digest_segment(package_root: Path, pkg: str) -> bytes:
-    """Hash all .py files in a subpackage, excluding _cache.py."""
+
+def _iter_sources(package_root: Path, pkg: str):
+    """Yield (posix_rel_path, raw_bytes) for .py files in a subpackage."""
     cache_path = (package_root / "atn" / "_cache.py").resolve()
-    h = hashlib.sha256()
     base = package_root / pkg
     if not base.is_dir():
-        return h.digest()
+        return
     for f in sorted(base.rglob("*.py"),
                     key=lambda p: PurePosixPath(p.relative_to(package_root))):
         if f.resolve() == cache_path:
             continue
         rel = PurePosixPath(f.relative_to(package_root))
         content = f.read_bytes().replace(b"\r\n", b"\n")
-        h.update(str(rel).encode("utf-8"))
-        h.update(len(content).to_bytes(8, "big"))
-        h.update(content)
-    return h.digest()
+        yield str(rel), content
 
 
-def compute_package_hash(package_root: Path) -> str:
-    """Compute the canonical SHA-256 hash of all .py files in atn/ and nodes/.
+def compute_core_hash(package_root: Path) -> str:
+    """Compute the SHA-256 hash of only the core-protected files.
 
-    This matches the runtime algorithm: hash each package separately,
-    then combine. The _cache.py module is excluded (it is the verifier).
+    This matches the runtime core_fingerprint() algorithm in _cache.py.
+    Only files in _CORE_FILES are included.
     """
-    left = _digest_segment(package_root, "atn")
-    right = _digest_segment(package_root, "nodes")
     h = hashlib.sha256()
-    h.update(left)
-    h.update(right)
+    for pkg in ("atn", "nodes"):
+        for rel, content in _iter_sources(package_root, pkg):
+            if rel in _CORE_FILES:
+                h.update(rel.encode("utf-8"))
+                h.update(len(content).to_bytes(8, "big"))
+                h.update(content)
+    return "0x" + h.hexdigest()
+
+
+def compute_full_hash(package_root: Path) -> str:
+    """Compute the SHA-256 hash of ALL .py files (diagnostic, not enforced)."""
+    left = hashlib.sha256()
+    for rel, content in _iter_sources(package_root, "atn"):
+        left.update(rel.encode("utf-8"))
+        left.update(len(content).to_bytes(8, "big"))
+        left.update(content)
+
+    right = hashlib.sha256()
+    for rel, content in _iter_sources(package_root, "nodes"):
+        right.update(rel.encode("utf-8"))
+        right.update(len(content).to_bytes(8, "big"))
+        right.update(content)
+
+    h = hashlib.sha256()
+    h.update(left.digest())
+    h.update(right.digest())
     return "0x" + h.hexdigest()
 
 
@@ -117,7 +153,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.hash_only:
-        h = compute_package_hash(ROOT)
+        h = compute_core_hash(ROOT)
         print(h)
         return
 
@@ -135,18 +171,22 @@ def main() -> None:
     wheel = build_wheel()
     print(f"   Wheel: {wheel.name}")
 
-    # Step 3: Compute package hash (AFTER obfuscation, BEFORE wheel)
-    # Hash is computed from the source tree, which now has obfuscated modules
-    print("\n3. Computing package hash...")
-    pkg_hash = compute_package_hash(ROOT)
-    print(f"   Hash: {pkg_hash}")
-    print(f"\n   Publish this hash on-chain:")
+    # Step 3: Compute core hash (covers only protected files)
+    print("\n3. Computing core integrity hash...")
+    core_hash = compute_core_hash(ROOT)
+    full_hash = compute_full_hash(ROOT)
+    print(f"   Core hash: {core_hash}")
+    print(f"   Full hash: {full_hash} (diagnostic only, not enforced)")
+    print(f"\n   Publish the CORE hash on-chain:")
     print(f"   Key:   node.code.hash.{_get_version()}")
-    print(f"   Value: {pkg_hash}")
+    print(f"   Value: {core_hash}")
+    print(f"\n   Core-protected files ({len(_CORE_FILES)}):")
+    for f in sorted(_CORE_FILES):
+        print(f"     - {f}")
 
     # Write hash to a file for CI to pick up
     hash_file = ROOT / "dist" / "package_hash.txt"
-    hash_file.write_text(pkg_hash, encoding="utf-8")
+    hash_file.write_text(core_hash, encoding="utf-8")
     print(f"\n   Written to: {hash_file}")
 
     print("\n=== Done ===")

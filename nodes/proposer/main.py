@@ -4,16 +4,22 @@ Autonomous Proposer Node
 Proposes training tasks with ground truth, reveals ground truth after solutions are committed.
 Task specs are generated from config and current global model state.
 """
+from __future__ import annotations
 
 import time
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
-from web3 import Web3
 
 from ..common.contracts import ContractRegistry
 from ..common.blob_store import BlobStore
 from ..common.config import AutonetConfig, load_config
+
+
+def _keccak(text: str) -> bytes:
+    """Lazy Web3.keccak wrapper — imported on first call."""
+    from web3 import Web3
+    return Web3.keccak(text=text)
 
 
 @dataclass
@@ -187,8 +193,8 @@ class ProposerNode:
             self.logger.info(f"Ground truth hash: {ground_truth_cid}")
 
             # Hash both CIDs to bytes32 (contracts expect bytes32)
-            spec_hash = Web3.keccak(text=spec_cid)
-            ground_truth_hash = Web3.keccak(text=ground_truth_cid)
+            spec_hash = _keccak(spec_cid)
+            ground_truth_hash = _keccak(ground_truth_cid)
             self.logger.info(f"Spec hash: {spec_hash.hex()[:16]}..., Ground truth hash: {ground_truth_hash.hex()[:16]}...")
 
             # Propose task on-chain
@@ -352,7 +358,7 @@ class ProposerNode:
             self.logger.info(f"Consensus task spec hash: {spec_cid}")
 
             # Hash the spec CID
-            spec_hash = Web3.keccak(text=spec_cid)
+            spec_hash = _keccak(spec_cid)
 
             # Difficulty target: peak at 50% solver agreement
             difficulty_target = (

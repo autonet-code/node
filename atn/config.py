@@ -104,17 +104,24 @@ class RPBConfig:
     works fully without any network participation.
 
     Previously named AutonetConfig; "Autonet" is the first jurisdiction.
+
+    Defaults to the Autonet jurisdiction on Etherlink Shadownet.  The
+    Governor address, RPC URL, and chain ID are hardcoded in
+    ``atn.jurisdiction`` and used when no user override is provided.
+    This means a fresh ``pip install autonet-computer`` connects to the
+    Autonet jurisdiction automatically — no configuration required for
+    contract discovery.
     """
     enabled: bool = False               # Whether the autonet service starts
     config_path: str = ""               # Path to autonet.yaml (auto-discovered if empty)
-    # Blockchain connection (overrides autonet.yaml if set)
-    rpc_url: str = ""                   # e.g. "https://node.shadownet.etherlink.com"
-    chain_id: int = 0                   # e.g. 127823 for Etherlink Shadownet
+    # Blockchain connection — defaults from atn.jurisdiction
+    rpc_url: str = ""                   # Defaults to jurisdiction.RPC_URL
+    chain_id: int = 0                   # Defaults to jurisdiction.CHAIN_ID
     private_key: str = ""               # Hex private key for signing attestation txns
     # Wallet is managed externally (MetaMask etc.) — we just track the address
     wallet_address: str = ""            # Connected wallet address (empty = not connected)
-    # Jurisdiction entry point — everything else discovered from chain
-    dao_address: str = ""               # Governor contract address (entry point)
+    # Jurisdiction entry point — defaults from atn.jurisdiction
+    dao_address: str = ""               # Defaults to jurisdiction.GOVERNOR_ADDRESS
     # RPB-specific fields
     jurisdiction_id: str = "autonet"    # First jurisdiction
     rpb_contract_address: str = ""      # Discovered from Registry
@@ -124,6 +131,16 @@ class RPBConfig:
     timelock_address: str = ""          # Discovered from Governor.timelock()
     min_alignment_threshold: float = 0.5
     generate_keypairs: bool = True
+
+    def __post_init__(self) -> None:
+        """Apply jurisdiction defaults for empty fields."""
+        from .jurisdiction import GOVERNOR_ADDRESS, RPC_URL, CHAIN_ID
+        if not self.dao_address:
+            self.dao_address = GOVERNOR_ADDRESS
+        if not self.rpc_url:
+            self.rpc_url = RPC_URL
+        if not self.chain_id:
+            self.chain_id = CHAIN_ID
 
 
 # Backward-compat alias

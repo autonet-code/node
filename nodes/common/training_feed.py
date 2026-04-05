@@ -96,6 +96,8 @@ class TrainingDataFeed:
         self._text_source = None
         self._profile = None
         self._last_segment_count: int = 0
+        # Last training metrics (read by AutonetBridge for WS status)
+        self._last_metrics: Optional[Dict[str, Any]] = None
 
         # Training attestor (Story 4.2) — attests usage on-chain after cycles
         from .training_attestor import TrainingAttestor
@@ -175,6 +177,7 @@ class TrainingDataFeed:
 
             if result:
                 weight_delta, metrics = result
+                self._last_metrics = metrics
                 logger.info(
                     "Training feed: cycle %d complete — loss=%.4f, batches=%d",
                     self._cycles_completed,

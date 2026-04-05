@@ -50,11 +50,14 @@ _MODEL_TIERS: dict[str, int] = {
     # OpenAI
     "o3": 4,
     "o1": 3,
+    "gpt-4.1": 4,
     "gpt-4o": 3,
     "gpt-4-turbo": 3,
     "gpt-4": 3,
     "gpt-3.5": 2,
     # Google
+    "gemini-3-pro": 4,
+    "gemini-3-flash": 3,
     "gemini-2.5-pro": 4,
     "gemini-2.5-flash": 3,
     "gemini-2.0-flash": 3,
@@ -266,7 +269,7 @@ class ProviderManager:
                 api_key=api_key,
                 default_model=model_name,
             )
-        if model_lower.startswith("gpt") or model_lower.startswith("o1") or model_lower.startswith("o3"):
+        if model_lower.startswith(("gpt", "o1", "o3", "o4")):
             defaults = self._PROVIDER_DEFAULTS.get("openai", {})
             api_key = self._resolve_api_key("openai")
             if not api_key:
@@ -278,6 +281,11 @@ class ProviderManager:
                 api_key=api_key,
                 default_model=model_name,
             )
+        # Default for claude-* models: prefer Anthropic API if key available
+        if model_lower.startswith("claude"):
+            api_key = self._resolve_api_key("anthropic")
+            if api_key:
+                return AnthropicProvider(api_key=api_key, default_model=model_name)
         return BridgeProvider(model=model_name)
 
     def get_bridge_provider(self, agent_id: str | None = None) -> Any:

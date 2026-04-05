@@ -31,19 +31,24 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-import trio
-from multiaddr import Multiaddr
+try:
+    import trio
+    from multiaddr import Multiaddr
 
-import libp2p
-from libp2p import new_host
-from libp2p.custom_types import TProtocol
-from libp2p.abc import IHost
-from libp2p.peer.id import ID as PeerID
-from libp2p.peer.peerinfo import PeerInfo, info_from_p2p_addr
-from libp2p.host.ping import PingService
-from libp2p.pubsub.gossipsub import GossipSub
-from libp2p.pubsub.pubsub import Pubsub
-from libp2p.tools.async_service.trio_service import background_trio_service
+    import libp2p
+    from libp2p import new_host
+    from libp2p.custom_types import TProtocol
+    from libp2p.abc import IHost
+    from libp2p.peer.id import ID as PeerID
+    from libp2p.peer.peerinfo import PeerInfo, info_from_p2p_addr
+    from libp2p.host.ping import PingService
+    from libp2p.pubsub.gossipsub import GossipSub
+    from libp2p.pubsub.pubsub import Pubsub
+    from libp2p.tools.async_service.trio_service import background_trio_service
+
+    _P2P_AVAILABLE = True
+except ImportError:
+    _P2P_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +163,32 @@ class AgentAdvertisement:
 
 
 @dataclass
+class ModelState:
+    """VL-JEPA model state — gossipped with NodeCapability.
+
+    Every node that runs training cycles populates this from the on-chain
+    RPB state and local training metrics.  Nodes that don't train leave
+    this as defaults (version=0) and rely on peers for the latest state.
+    """
+    # On-chain (from RPB contract via discover_jurisdiction)
+    model_version: int = 0                                # RPB.modelVersion()
+    model_hash: str = ""                                  # RPB.currentModelHash() hex
+    architecture_hash: str = ""                           # RPB.modelArchitectureHash() hex
+    current_epoch: int = 0                                # RPB.currentEpoch()
+    total_training_tokens: int = 0                        # RPB.totalTrainingTokens()
+    training_reward_pool: int = 0                         # RPB.trainingRewardPool() (wei)
+    total_inference_revenue: int = 0                      # RPB.totalInferenceRevenue() (wei)
+    # Local training metrics (from last training cycle)
+    local_cycles_completed: int = 0
+    last_loss: float = 0.0
+    last_cosine_similarity: float = 0.0
+    architecture: str = ""                                # "text_jepa", "vl_jepa", etc.
+    param_count: int = 0                                  # total model parameters
+    # Aggregate (computed from peer gossip)
+    known_contributors: int = 0                           # unique peers with cycles > 0
+
+
+@dataclass
 class NodeCapability:
     """A node's advertised capabilities."""
     peer_id: str
@@ -169,6 +200,7 @@ class NodeCapability:
     modules_hosted: List[str] = field(default_factory=list)  # module IDs
     listen_addrs: List[str] = field(default_factory=list)
     agents: List[Dict] = field(default_factory=list)      # list of AgentAdvertisement dicts
+    model_state: Dict = field(default_factory=dict)       # ModelState as dict
     timestamp: float = field(default_factory=time.time)
 
     def to_bytes(self) -> bytes:
@@ -312,6 +344,8 @@ class AutonetHost:
     - Activation relay (inference pipeline)
     - Guild gossip (GossipSub)
     - Node capability advertisement
+
+    Requires ``pip install autonet-computer[network]`` for P2P dependencies.
     """
 
     def __init__(
@@ -792,6 +826,96 @@ class AutonetHost:
         for key, value in kwargs.items():
             if hasattr(self._capability, key):
                 setattr(self._capability, key, value)
+
+    def update_model_state(
+        self,
+        *,
+        model_version: int = 0,
+        model_hash: str = "",
+        architecture_hash: str = "",
+        current_epoch: int = 0,
+        total_training_tokens: int = 0,
+        training_reward_pool: int = 0,
+        total_inference_revenue: int = 0,
+        local_cycles_completed: int = 0,
+        last_loss: float = 0.0,
+        last_cosine_similarity: float = 0.0,
+        architecture: str = "",
+        param_count: int = 0,
+    ):
+        """Update this node's model state for the next capability advertisement.
+
+        Called after training cycles complete and/or after on-chain state refresh.
+        The model state is included in NodeCapability gossip so all peers
+        can surface VL-JEPA stats without hitting the chain individually.
+        """
+        state = ModelState(
+            model_version=model_version,
+            model_hash=model_hash,
+            architecture_hash=architecture_hash,
+            current_epoch=current_epoch,
+            total_training_tokens=total_training_tokens,
+            training_reward_pool=training_reward_pool,
+            total_inference_revenue=total_inference_revenue,
+            local_cycles_completed=local_cycles_completed,
+            last_loss=last_loss,
+            last_cosine_similarity=last_cosine_similarity,
+            architecture=architecture,
+            param_count=param_count,
+            known_contributors=self.get_network_contributor_count(),
+        )
+        self._capability.model_state = asdict(state)
+
+    def get_network_model_state(self) -> Dict[str, Any]:
+        """Aggregate model state from all known peers.
+
+        Returns the highest model version seen across the network,
+        plus contributor count and aggregate training stats.  This is
+        the view a node surfaces to its UI without any chain queries.
+        """
+        best_version = 0
+        best_state: Dict[str, Any] = {}
+        contributors = 0
+        total_local_cycles = 0
+
+        # Include self
+        self_state = self._capability.model_state
+        if self_state:
+            best_version = self_state.get("model_version", 0)
+            best_state = dict(self_state)
+            if self_state.get("local_cycles_completed", 0) > 0:
+                contributors += 1
+                total_local_cycles += self_state["local_cycles_completed"]
+
+        # Merge from peers
+        for cap in self._known_capabilities.values():
+            ms = cap.model_state
+            if not ms:
+                continue
+            pv = ms.get("model_version", 0)
+            if pv > best_version:
+                best_version = pv
+                best_state = dict(ms)
+            if ms.get("local_cycles_completed", 0) > 0:
+                contributors += 1
+                total_local_cycles += ms["local_cycles_completed"]
+
+        if best_state:
+            best_state["known_contributors"] = contributors
+            best_state["network_total_cycles"] = total_local_cycles
+        return best_state
+
+    def get_network_contributor_count(self) -> int:
+        """Count unique peers (including self) that have completed training cycles."""
+        count = 0
+        self_state = self._capability.model_state
+        if self_state and self_state.get("local_cycles_completed", 0) > 0:
+            count += 1
+        for cap in self._known_capabilities.values():
+            ms = cap.model_state
+            if ms and ms.get("local_cycles_completed", 0) > 0:
+                count += 1
+        return count
 
     # =========================================================================
     # Blob Protocol (content-addressed P2P fetch)

@@ -43,6 +43,8 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "o3": 200_000,
     "o4-mini": 200_000,
     # Google
+    "gemini-3-pro": 1_048_576,
+    "gemini-3-flash": 1_048_576,
     "gemini-2.5-pro": 1_048_576,
     "gemini-2.5-flash": 1_048_576,
     "gemini-2.0-flash": 1_048_576,
@@ -141,7 +143,7 @@ class Provider(ABC):
             "cumulative_cache_read": self._cumulative_cache_read,
             "cumulative_cache_creation": self._cumulative_cache_creation,
             "context_used_pct": pct,
-            "compaction_count": 0,
+            "compaction_count": self._compaction_count,
         }
 
     async def close(self) -> None:
@@ -200,6 +202,18 @@ class Provider(ABC):
         """
         return True
 
+    # Context compaction: when input tokens exceed this fraction of the
+    # context window, summarize the conversation to free space.
+    _COMPACTION_THRESHOLD = 0.80
+    _compaction_count: int = 0
+
+    # Interrupt flag — set via interrupt() to stop the orchestration loop.
+    _interrupted: bool = False
+
+    async def interrupt(self) -> None:
+        """Signal the orchestration loop to stop after the current turn."""
+        self._interrupted = True
+
     async def send_orchestrate(
         self,
         *,
@@ -218,6 +232,10 @@ class Provider(ABC):
         Each turn: call the LLM, execute any tool calls via ``tool_executor``,
         feed results back, and repeat until end_turn or max_turns.
 
+        Includes context compaction: when input tokens approach the context
+        window limit, the conversation history is summarized into a single
+        message to free space, matching the BridgeProvider's SDK compaction.
+
         Providers with native multi-turn support (e.g. BridgeProvider) override
         this entirely.  Other providers (Anthropic direct, OpenAI, Ollama) use
         this base implementation — it works with any provider that has a working
@@ -233,6 +251,8 @@ class Provider(ABC):
             on_chunk:       Optional async callback for streaming text deltas.
             session_id:     Session ID to resume (ignored by generic impl).
         """
+        self._interrupted = False
+
         # Track active model for session stats
         if model:
             self._active_model = model
@@ -253,6 +273,14 @@ class Provider(ABC):
         cumulative_usage = Usage()
 
         for turn in range(max_turns):
+            if self._interrupted:
+                return ProviderResponse(
+                    text="",
+                    stop_reason="interrupted",
+                    usage=cumulative_usage,
+                    model=model or self._active_model,
+                )
+
             response = await self.send_stream(
                 messages=messages,
                 system=system,
@@ -335,11 +363,55 @@ class Provider(ABC):
             tool_result_content: list[dict[str, Any]] = []
             for tc in response.tool_calls:
                 log.info("Orchestrate tool %s (turn %d/%d)", tc.name, turn + 1, max_turns)
+
+                # Emit tool use start event
+                if self.event_bus and self.source_agent_id:
+                    from ..events import Event, EventType
+                    await self.event_bus.emit(Event(
+                        type=EventType.AGENT_TOOL_USE_START,
+                        source=self.source_agent_id,
+                        data={
+                            "agent_id": self.source_agent_id,
+                            "tool_use_id": tc.id,
+                            "tool_name": tc.name,
+                            "input": tc.input,
+                        },
+                    ))
+                    await self.event_bus.emit(Event(
+                        type=EventType.STEP_OUTPUT,
+                        source=self.source_agent_id,
+                        data={
+                            "agent_id": self.source_agent_id,
+                            "channel": "tool_call",
+                            "tool_name": tc.name,
+                            "tool_input": tc.input,
+                        },
+                    ))
+
+                is_error = False
                 try:
                     result = await tool_executor(tc.name, tc.input)
                 except Exception as exc:
                     log.warning("Tool %s failed: %s", tc.name, exc)
                     result = {"error": str(exc)}
+                    is_error = True
+
+                # Emit tool use result event
+                if self.event_bus and self.source_agent_id:
+                    from ..events import Event, EventType
+                    result_str = str(result)
+                    await self.event_bus.emit(Event(
+                        type=EventType.AGENT_TOOL_USE_RESULT,
+                        source=self.source_agent_id,
+                        data={
+                            "agent_id": self.source_agent_id,
+                            "tool_use_id": tc.id,
+                            "tool_name": tc.name,
+                            "is_error": is_error,
+                            "result_preview": result_str[:500],
+                        },
+                    ))
+
                 tool_result_content.append({
                     "type": "tool_result",
                     "tool_use_id": tc.id,
@@ -347,9 +419,99 @@ class Provider(ABC):
                 })
             messages.append({"role": "user", "content": tool_result_content})
 
+            # Context compaction: if input tokens approach the context window,
+            # summarize the conversation to free space.
+            ctx_window = get_context_window(self._active_model) if self._active_model else 0
+            if ctx_window > 0 and self._last_input_tokens > ctx_window * self._COMPACTION_THRESHOLD:
+                messages = await self._compact_messages(messages, system, model)
+
         # Exhausted max_turns — return last response with accumulated usage
         response.usage = cumulative_usage
         return response
+
+    async def _compact_messages(
+        self,
+        messages: list[dict[str, Any]],
+        system: str,
+        model: str,
+    ) -> list[dict[str, Any]]:
+        """Summarize conversation history to free context space.
+
+        Asks the LLM to produce a concise summary of the conversation so far,
+        then replaces the message history with the summary as a single user
+        message.  The original user request is preserved at the end.
+        """
+        self._compaction_count += 1
+        log.info("Context compaction #%d triggered (last_input=%d tokens)",
+                 self._compaction_count, self._last_input_tokens)
+
+        # Emit compaction event
+        if self.event_bus and self.source_agent_id:
+            from ..events import Event, EventType
+            await self.event_bus.emit(Event(
+                type=EventType.CONTEXT_COMPACTION,
+                source=self.source_agent_id,
+                data={
+                    "agent_id": self.source_agent_id,
+                    "compaction_count": self._compaction_count,
+                    "pre_tokens": self._last_input_tokens,
+                    "status": "in_progress",
+                },
+            ))
+
+        # Build a summary request using just the conversation (no tools)
+        summary_prompt = (
+            "Summarize the conversation so far in a concise format that preserves "
+            "all critical context: what was requested, what actions were taken, "
+            "what results were observed, what decisions were made, and what remains "
+            "to be done. Be specific about file paths, code changes, error messages, "
+            "and tool results. This summary will replace the conversation history."
+        )
+        summary_messages = messages + [{"role": "user", "content": summary_prompt}]
+
+        try:
+            summary_resp = await self.send(
+                messages=summary_messages,
+                system="You are a conversation summarizer. Produce a dense, accurate summary.",
+                model=model,
+                max_tokens=4096,
+            )
+            summary_text = summary_resp.text
+        except Exception as exc:
+            log.warning("Compaction summary failed: %s — continuing without compaction", exc)
+            return messages
+
+        # Extract the original user request (first message)
+        original_request = messages[0]["content"] if messages else ""
+
+        # Rebuild messages: summary + original request
+        compacted: list[dict[str, Any]] = [
+            {"role": "user", "content": (
+                f"[Context compaction — conversation summary follows]\n\n"
+                f"{summary_text}\n\n"
+                f"---\n\n"
+                f"[Original request]\n{original_request}\n\n"
+                f"Continue from where you left off. Do not repeat completed work."
+            )},
+        ]
+
+        log.info("Compaction #%d complete: %d messages → 1 summary message",
+                 self._compaction_count, len(messages))
+
+        if self.event_bus and self.source_agent_id:
+            from ..events import Event, EventType
+            await self.event_bus.emit(Event(
+                type=EventType.CONTEXT_COMPACTION,
+                source=self.source_agent_id,
+                data={
+                    "agent_id": self.source_agent_id,
+                    "compaction_count": self._compaction_count,
+                    "pre_tokens": self._last_input_tokens,
+                    "status": "completed",
+                },
+            ))
+
+        return compacted
 
     async def send_stream(
         self,

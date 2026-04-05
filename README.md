@@ -14,12 +14,20 @@ For the full protocol specification, see the [whitepaper](https://github.com/aut
 pip install autonet-computer
 ```
 
-Optional extras:
+Install tiers:
 
 ```bash
-pip install autonet-computer[voice]      # Voice / TTS
-pip install autonet-computer[node]       # Full training node (PyTorch, VL-JEPA)
-pip install autonet-computer[p2p]        # P2P networking
+pip install autonet-computer                  # Agent framework (local operation)
+pip install autonet-computer[voice]           # + Voice / TTS
+pip install autonet-computer[network]         # + Blockchain, P2P, training (full node)
+pip install autonet-computer[network,voice]   # Everything
+```
+
+Add extras to an existing installation:
+
+```bash
+pip install autonet-computer[voice]           # adds voice to base
+pip install autonet-computer[network]         # adds network to base or base+voice
 ```
 
 Or install from source:
@@ -27,7 +35,7 @@ Or install from source:
 ```bash
 git clone https://github.com/autonet-code/node.git
 cd node
-pip install -e .
+pip install -e ".[network]"
 ```
 
 Start the agent framework:
@@ -188,6 +196,51 @@ pytest                        # Python tests
 - P2P node discovery and weight replication
 - Inference marketplace
 - Constitution published on-chain
+
+## Contributing
+
+The codebase is split into a **core-protected layer** and an **extensible surface**.
+
+### Core-Protected Files
+
+Seven files enforce the jurisdiction's constitutional guarantees: constitution injection into registered agents, lineage hash verification, alignment hash computation, and on-chain integrity checking. These files are hashed together into a core fingerprint published on-chain via the Registry at `node.code.hash.<version>`. The runtime periodically verifies that the installed code matches.
+
+| File | What it protects |
+|------|-----------------|
+| `atn/runtime/execution_engine.py` | Constitution injection into agent executions |
+| `atn/delegate_prompts.py` | Constitutional preamble template |
+| `atn/agent_identity.py` | Lineage hash chain verification |
+| `atn/on_chain.py` | Alignment hash computation, agent registration encoding |
+| `atn/autonet_service.py` | Constitution loading from chain |
+| `nodes/core/constitution.py` | Constitutional governance framework |
+| `atn/_cache.py` | Integrity verification itself (obfuscated in release builds) |
+
+Modifications to these files require a new governance-published hash.
+
+### Extensible Surface
+
+Everything else — providers, tools, connectors, the orchestrator loop, voice, CLI, config, prompt templates for non-constitutional layers, and the entire training pipeline — sits outside the core fingerprint and can be freely modified without breaking integrity verification.
+
+You can:
+- Add new LLM providers
+- Rewrite the tool surface
+- Swap out prompt templates (for non-constitutional layers)
+- Extend the connector system
+- Add CLI commands
+- Modify training pipeline code
+
+The node will continue to pass its on-chain integrity check.
+
+The `_cache.py` module that performs verification is obfuscated in release builds to prevent trivial bypass, but its interface is documented: `core_fingerprint()` returns the enforced hash, `combined_fingerprint()` returns a full diagnostic hash, and `validate(rpc_url, registry_addr, version)` runs the on-chain comparison.
+
+The boundary is intentionally narrow — seven files out of ~60 — so the community has maximum surface area to iterate on while constitutional protections remain tamper-evident.
+
+### How to Contribute
+
+1. Fork the repo
+2. Make changes (see extensible surface above)
+3. Run tests: `npx hardhat test && pytest`
+4. Open a PR
 
 ## Related Repositories
 

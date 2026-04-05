@@ -57,6 +57,18 @@ class AutonetState:
     uptime_seconds: float = 0.0
     errors: int = 0
     last_error: str = ""
+    paused_reason: str = ""
+    # Per-cycle training metrics (from TrainingDataFeed)
+    training_loss: float = 0.0
+    training_batches: int = 0
+    training_cosine_sim: float = 0.0
+    training_segments: int = 0
+    pending_events: int = 0
+    last_cycle_time: float = 0.0
+    # Training history (last N cycles for charting)
+    loss_history: list[float] = field(default_factory=list)
+    # Behavioral profile
+    profile_hash: str = ""
     # Resource usage (from ResourceMonitor)
     cpu_percent: float = 0.0
     memory_mb: float = 0.0
@@ -72,6 +84,8 @@ class AutonetState:
     # Constitution CID loaded from registry
     constitution_cid: str = ""
 
+    _MAX_LOSS_HISTORY: int = 100
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status.value,
@@ -84,6 +98,18 @@ class AutonetState:
             "uptime_seconds": self.uptime_seconds,
             "errors": self.errors,
             "last_error": self.last_error,
+            "paused_reason": self.paused_reason,
+            # Training metrics
+            "training": {
+                "loss": self.training_loss,
+                "batches": self.training_batches,
+                "cosine_similarity": self.training_cosine_sim,
+                "segments_loaded": self.training_segments,
+                "pending_events": self.pending_events,
+                "last_cycle_time": self.last_cycle_time,
+                "loss_history": self.loss_history,
+                "profile_hash": self.profile_hash,
+            },
             "cpu_percent": self.cpu_percent,
             "memory_mb": self.memory_mb,
             "gpu_available": self.gpu_available,
@@ -185,6 +211,8 @@ class AutonetBridge:
                 self._constitution_loaded = True
             log.info("Jurisdiction '%s' contracts discovered from %s",
                      self.state.jurisdiction_name, self.config.dao_address)
+        except ImportError:
+            log.info("Contract discovery skipped (install autonet-computer[network] for on-chain features)")
         except Exception as e:
             log.warning("Failed to discover jurisdiction from %s: %s",
                         self.config.dao_address, e)
@@ -410,6 +438,9 @@ class AutonetBridge:
             log.info("Autonet service started")
             # Start p2p agent advertisement alongside the training service
             self.start_p2p()
+            # Wire P2P host to the service so training cycles can update gossip
+            if self._p2p_host and self._service:
+                self._service._p2p_host = self._p2p_host
             await self._emit("AUTONET_STARTED")
             return {"status": "started"}
 
@@ -474,6 +505,7 @@ class AutonetBridge:
                 self.state.cycles_completed = svc_status.cycles_completed
                 self.state.uptime_seconds = svc_status.uptime_seconds
                 self.state.errors = svc_status.errors
+                self.state.paused_reason = svc_status.paused_reason or ""
                 # Sync state (service may have paused itself due to resources)
                 if svc_status.state.value == "paused":
                     self.state.status = AutonetStatus.PAUSED
@@ -491,10 +523,47 @@ class AutonetBridge:
                             self.state.gpu_available = torch.cuda.is_available()
                         except ImportError:
                             self.state.gpu_available = False
+                # Pull training feed metrics
+                self._sync_training_metrics()
             except Exception:
                 pass  # Service might be between cycles
 
         return self.state.to_dict()
+
+    def _sync_training_metrics(self) -> None:
+        """Pull real-time training metrics from the training feed into state."""
+        feed = getattr(self._service, "_training_feed", None)
+        if not feed:
+            return
+        self.state.pending_events = feed._pending_events
+        self.state.training_segments = getattr(feed, "_last_segment_count", 0)
+        self.state.last_cycle_time = feed._last_cycle_time
+
+        # Per-cycle metrics from the last training run
+        metrics = getattr(feed, "_last_metrics", None)
+        if metrics:
+            loss = metrics.get("loss", 0.0)
+            self.state.training_loss = loss
+            self.state.training_batches = metrics.get("num_batches", 0)
+            self.state.training_cosine_sim = metrics.get("cosine_similarity", 0.0)
+            # Append to loss history if this is a new cycle
+            cycle_count = feed._cycles_completed
+            if cycle_count > len(self.state.loss_history):
+                self.state.loss_history.append(round(loss, 6))
+                if len(self.state.loss_history) > self.state._MAX_LOSS_HISTORY:
+                    self.state.loss_history = self.state.loss_history[-self.state._MAX_LOSS_HISTORY:]
+
+        # Behavioral profile hash
+        profile = getattr(feed, "_profile", None)
+        if profile:
+            profile_hash = getattr(profile, "hash", None)
+            if callable(profile_hash):
+                try:
+                    self.state.profile_hash = profile_hash()
+                except Exception:
+                    pass
+            elif isinstance(profile_hash, str):
+                self.state.profile_hash = profile_hash
 
     def connect_wallet(self, address: str) -> dict[str, Any]:
         """Register a wallet connection (from frontend wallet provider)."""
@@ -1252,9 +1321,12 @@ class AutonetBridge:
 
     def _load_autonet_config_readonly(self):
         """Load autonet config without storing it (for read-only access)."""
-        from nodes.common.config import load_config as load_autonet_config
-        config_path = self.config.config_path or None
-        return load_autonet_config(config_path)
+        try:
+            from nodes.common.config import load_config as load_autonet_config
+            config_path = self.config.config_path or None
+            return load_autonet_config(config_path)
+        except ImportError:
+            return None
 
     def _save_autonet_config(self, cfg) -> None:
         """Save autonet config back to YAML file."""
