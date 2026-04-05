@@ -100,23 +100,27 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     // --- Authorized minters (for BME bridge, disbursers, etc.) ---
     mapping(address => bool) public authorizedMinters;
 
-    // --- Training rewards ---
-    uint256 public trainingRewardPool;
-    uint256 public totalTrainingTokens;
+    // --- Training rewards (funded by share purchases, caps ATN minting) ---
+    uint256 public trainingRewardPool;       // normalized value: total budget ceiling for minting
+    uint256 public totalTrainingTokens;      // total contribution units across all agents
+    uint256 public totalTrainingMinted;      // total ATN minted as training rewards
     uint256 public currentEpoch;
     mapping(uint256 => TrainingRecord[]) public epochRecords;
     mapping(address => uint256) public agentTrainingTokens;
     mapping(address => uint256) public claimedRewards;
 
-    // --- Per-token pool tracking (token address -> amount held in raw token units) ---
+    // --- Per-token pool tracking for training pool (token address -> raw units held) ---
     mapping(address => uint256) public tokenPoolBalances;
 
     // --- RPB shares (claims on inference dividends) ---
     uint256 public totalShares;
     mapping(address => uint256) public shares;
-    uint256 public totalInferenceRevenue;
+    uint256 public totalInferenceRevenue;     // cumulative normalized inference revenue
     uint256 public totalDividendsPaid;
     mapping(address => uint256) public lastDividendClaim;
+
+    // --- Dividend pool (separate from training pool, funded by inference revenue) ---
+    mapping(address => uint256) public dividendPoolBalances;  // token -> raw units held for dividends
 
     // --- Inference accounting ---
     uint256 public totalInferenceUnits;
@@ -205,7 +209,6 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     error NoShares();
     error NoSharesOutstanding();
     error NoDividendsToClaim();
-    error OnlyDAO();
     error RevenueSplitInvalid();
     error TransferFailed();
     error ProviderPaymentFailed();
@@ -499,36 +502,30 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     }
 
     /**
-     * @notice Claim training rewards, withdrawn in a specific value-index token.
-     * @param token ERC20 token to receive (must be in value index; use address(this) for ATN)
+     * @notice Claim training rewards as freshly minted ATN.
+     * @dev ATN is minted proportional to the agent's training contribution,
+     *      capped by the training reward pool (funded by share purchases).
      */
-    function claimTrainingReward(address token) external nonReentrant {
+    function claimTrainingReward() external nonReentrant {
         uint256 tokens = agentTrainingTokens[msg.sender];
         uint256 alreadyClaimed = claimedRewards[msg.sender];
         if (tokens <= alreadyClaimed) revert NoRewardsToClaim();
         if (trainingRewardPool == 0 || totalTrainingTokens == 0) revert RewardPoolEmpty();
 
         uint256 unclaimed = tokens - alreadyClaimed;
-        uint256 normalizedReward = (unclaimed * trainingRewardPool) / totalTrainingTokens;
+        uint256 reward = (unclaimed * trainingRewardPool) / totalTrainingTokens;
 
-        if (normalizedReward > trainingRewardPool) {
-            normalizedReward = trainingRewardPool;
+        if (reward > trainingRewardPool) {
+            reward = trainingRewardPool;
         }
-
-        uint256 rawAmount = _denormalize(token, normalizedReward);
-        if (rawAmount == 0) revert NoRewardsToClaim();
-        if (tokenPoolBalances[token] < rawAmount) revert InsufficientPoolBalance();
+        if (reward == 0) revert NoRewardsToClaim();
 
         claimedRewards[msg.sender] = tokens;
-        trainingRewardPool -= normalizedReward;
-        tokenPoolBalances[token] -= rawAmount;
+        totalTrainingMinted += reward;
+        agents[msg.sender].totalRewardsEarned += reward;
 
-        if (token == address(this)) {
-            _transfer(address(this), msg.sender, rawAmount);
-        } else {
-            if (!IERC20(token).transfer(msg.sender, rawAmount)) revert TransferFailed();
-        }
-        emit RewardClaimed(msg.sender, token, rawAmount);
+        _mint(msg.sender, reward);
+        emit RewardClaimed(msg.sender, address(this), reward);
     }
 
     /**
@@ -583,11 +580,11 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
 
         uint256 rawAmount = _denormalize(token, normalizedToClaim);
         if (rawAmount == 0) revert NoDividendsToClaim();
-        if (tokenPoolBalances[token] < rawAmount) revert InsufficientPoolBalance();
+        if (dividendPoolBalances[token] < rawAmount) revert InsufficientPoolBalance();
 
         lastDividendClaim[msg.sender] = myShare;
         totalDividendsPaid += normalizedToClaim;
-        tokenPoolBalances[token] -= rawAmount;
+        dividendPoolBalances[token] -= rawAmount;
 
         if (token == address(this)) {
             _transfer(address(this), msg.sender, rawAmount);
@@ -610,6 +607,13 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     ) external onlyOperator nonReentrant {
         if (!agents[provider].active) revert AgentNotActive();
 
+        // Pull payment from the requester
+        if (token == address(this)) {
+            _transfer(requester, address(this), cost);
+        } else {
+            if (!IERC20(token).transferFrom(requester, address(this), cost)) revert TransferFailed();
+        }
+
         uint256 normalizedCost = _normalize(token, cost);
 
         totalInferenceUnits += units;
@@ -627,6 +631,7 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
         uint256 treasuryPayment = (cost * treasuryShare) / 10000;
         uint256 shareholderPoolPayment = cost - providerPayment - treasuryPayment;
 
+        // Distribute provider and treasury shares
         if (token == address(this)) {
             if (providerPayment > 0) _transfer(address(this), provider, providerPayment);
             if (treasuryPayment > 0) _transfer(address(this), dao, treasuryPayment);
@@ -639,8 +644,9 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
             }
         }
 
+        // Shareholder portion goes to dividend pool (separate from training pool)
         if (shareholderPoolPayment > 0) {
-            tokenPoolBalances[token] += shareholderPoolPayment;
+            dividendPoolBalances[token] += shareholderPoolPayment;
         }
 
         emit InferenceServed(provider, requester, units, normalizedCost);
@@ -671,9 +677,9 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
             }
         }
 
-        // Track shareholder pool (bridge already minted ATN to this contract)
+        // Track dividend pool (bridge already minted ATN to this contract)
         if (shareholderAmount > 0) {
-            tokenPoolBalances[address(this)] += shareholderAmount;
+            dividendPoolBalances[address(this)] += shareholderAmount;
         }
 
         emit InferenceServed(provider, requester, units, totalRevenue);
@@ -782,7 +788,7 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
         uint256 _shareholderShare,
         uint256 _treasuryShare
     ) external {
-        if (msg.sender != dao) revert OnlyDAO();
+        if (msg.sender != dao) revert NotDAO();
         if (_providerShare + _shareholderShare + _treasuryShare != 10000) revert RevenueSplitInvalid();
         inferenceProviderShare = _providerShare;
         shareholderShare = _shareholderShare;
@@ -854,6 +860,10 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
 
     function getTokenPoolBalance(address token) external view returns (uint256) {
         return tokenPoolBalances[token];
+    }
+
+    function getDividendPoolBalance(address token) external view returns (uint256) {
+        return dividendPoolBalances[token];
     }
 
     function getRegisteredAgents() external view returns (address[] memory) {

@@ -317,10 +317,10 @@ describe("Full Economic Loop — E2E", function () {
         ethers.ZeroAddress
       );
 
-      // Fund RPB with ATN for inference payments (owner sends to RPB)
-      await rpb.transfer(rpbAddr, e18(10000));
+      // Requester approves RPB to pull inference payment
+      await rpb.connect(investor1).approve(rpbAddr, e18(10000));
 
-      // Record inference (owner is contract owner, can call recordInference)
+      // Record inference — RPB pulls 1000 ATN from requester, splits it
       // 100 units, 1000 ATN cost, paid in ATN (address(this))
       await rpb.recordInference(
         investor1.address, // requester
@@ -395,13 +395,13 @@ describe("Full Economic Loop — E2E", function () {
       expect(unclaimed).to.equal(e18(5000));
 
       const balBefore = await rpb.balanceOf(solver1.address);
-      await rpb.connect(solver1).claimTrainingReward(rpbAddr);
+      await rpb.connect(solver1).claimTrainingReward();
       const balAfter = await rpb.balanceOf(solver1.address);
       expect(balAfter - balBefore).to.equal(e18(5000));
 
       // Cannot double-claim
       await expect(
-        rpb.connect(solver1).claimTrainingReward(rpbAddr)
+        rpb.connect(solver1).claimTrainingReward()
       ).to.be.revertedWithCustomError(rpb, "NoRewardsToClaim");
     });
   });
@@ -501,7 +501,7 @@ describe("Full Economic Loop — E2E", function () {
       );
 
       // ── D: Inference generates revenue ──
-      await rpb.transfer(rpbAddr, e18(10000)); // Fund RPB for inference payments
+      await rpb.connect(investor1).approve(rpbAddr, e18(10000));
       await rpb.recordInference(
         investor1.address,  // requester
         solver1.address,    // provider
@@ -534,8 +534,8 @@ describe("Full Economic Loop — E2E", function () {
         lineage, ethers.randomBytes(32), ethers.ZeroAddress, ethers.ZeroAddress
       );
 
-      // Fund RPB for payments
-      await rpb.transfer(rpbAddr, e18(10000));
+      // Requester approves RPB to pull inference payment
+      await rpb.connect(investor1).approve(rpbAddr, e18(10000));
 
       const providerBefore = await rpb.balanceOf(solver1.address);
       const daoBefore = await rpb.balanceOf(owner.address); // owner = dao in test
@@ -551,8 +551,8 @@ describe("Full Economic Loop — E2E", function () {
       expect(providerAfter - providerBefore).to.equal(e18(600));
       // DAO/treasury gets 15%
       expect(daoAfter - daoBefore).to.equal(e18(150));
-      // Remaining 25% stays in RPB contract for shareholders
-      const shareholderPool = await rpb.getTokenPoolBalance(rpbAddr);
+      // Remaining 25% stays in RPB contract's dividend pool for shareholders
+      const shareholderPool = await rpb.getDividendPoolBalance(rpbAddr);
       expect(shareholderPool).to.equal(e18(250));
     });
   });

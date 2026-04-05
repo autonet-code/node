@@ -1791,7 +1791,7 @@ describe("Autonet Contracts — Full Test Suite", function () {
       // Only DAO can update revenue split
       await expect(
         rpb.connect(f.user1).updateRevenueSplit(3000, 3000, 3000)
-      ).to.be.revertedWithCustomError(rpb, "OnlyDAO");
+      ).to.be.revertedWithCustomError(rpb, "NotDAO");
     });
 
     it("alignment updates", async function () {

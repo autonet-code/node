@@ -2117,8 +2117,8 @@
       ]
     },
     "C:\\code\\autonet\\contracts\\core\\RPB.sol": {
-      "lastModificationDate": 1775427060074,
-      "contentHash": "d7fa0defd6ceb3043713694db38367b2",
+      "lastModificationDate": 1775428571872,
+      "contentHash": "35a318fbe7aa4480caaf921d329fb442",
       "sourceName": "contracts/core/RPB.sol",
       "solcConfig": {
         "version": "0.8.20",
