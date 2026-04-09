@@ -305,7 +305,7 @@ class AutonetService:
                 contribution = metrics.get("num_batches", 1)
                 account = registry.blockchain.account
                 if account:
-                    result = registry.send("RPB", "recordTraining", account.address, contribution)
+                    result = registry.send("RPB", "recordTraining", contribution)
                     if result.success:
                         logger.info(
                             "Training recorded on-chain: contribution=%d, delta=%s",

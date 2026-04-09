@@ -4,10 +4,9 @@
  * Confirms the on-chain training recording and reward minting flow:
  *   1. Deploy RPB with a test Registry
  *   2. Register an agent
- *   3. Authorize an operator
- *   4. Operator calls recordTraining()
- *   5. Fund training pool via purchaseShares()
- *   6. Agent calls claimTrainingReward() → mints ATN
+ *   3. Agent self-reports training via recordTraining()
+ *   4. Fund training pool via purchaseShares()
+ *   5. Agent calls claimTrainingReward() → mints ATN
  *
  * Run:
  *   cd C:\code\autonet
@@ -23,10 +22,10 @@ describe("Test 2: Training → On-Chain Reward", function () {
   this.timeout(60_000);
 
   let rpb, rpbAddr, registry;
-  let dao, operator, trainer, investor;
+  let dao, trainer, investor;
 
   beforeEach(async function () {
-    [dao, operator, trainer, investor] = await ethers.getSigners();
+    [dao, trainer, investor] = await ethers.getSigners();
 
     // Deploy Registry (dao is owner)
     const Registry = await ethers.getContractFactory("Registry");
@@ -43,9 +42,6 @@ describe("Test 2: Training → On-Chain Reward", function () {
     // Verify: no pre-mint
     expect(await rpb.totalSupply()).to.equal(0n);
 
-    // DAO authorizes operator for training/inference recording
-    await rpb.setAuthorizedOperator(operator.address, true);
-
     // Register trainer as an agent
     const lineage = ethers.keccak256(ethers.toUtf8Bytes("trainer-agent"));
     const alignment = ethers.keccak256(ethers.toUtf8Bytes("aligned-v1"));
@@ -57,8 +53,8 @@ describe("Test 2: Training → On-Chain Reward", function () {
   });
 
   it("records training and mints reward after pool is funded", async function () {
-    // Step 1: Operator records training contribution
-    await rpb.connect(operator).recordTraining(trainer.address, 100);
+    // Step 1: Trainer self-reports training contribution
+    await rpb.connect(trainer).recordTraining(100);
 
     // Verify training was recorded
     const tokens = await rpb.agentTrainingTokens(trainer.address);
@@ -97,12 +93,6 @@ describe("Test 2: Training → On-Chain Reward", function () {
     expect(minted).to.equal(reward);
   });
 
-  it("reverts if non-operator tries to record training", async function () {
-    await expect(
-      rpb.connect(trainer).recordTraining(trainer.address, 100)
-    ).to.be.revertedWith("RPB: not operator");
-  });
-
   it("reverts if claiming with no recorded training", async function () {
     // Fund pool first
     await rpb.mint(investor.address, e18(1_000));
@@ -116,7 +106,7 @@ describe("Test 2: Training → On-Chain Reward", function () {
 
   it("reverts if pool is empty", async function () {
     // Record training but don't fund pool
-    await rpb.connect(operator).recordTraining(trainer.address, 100);
+    await rpb.connect(trainer).recordTraining(100);
 
     await expect(
       rpb.connect(trainer).claimTrainingReward()
@@ -135,8 +125,8 @@ describe("Test 2: Training → On-Chain Reward", function () {
     );
 
     // Record: trainer gets 300, trainer2 gets 100 (3:1 ratio)
-    await rpb.connect(operator).recordTraining(trainer.address, 300);
-    await rpb.connect(operator).recordTraining(trainer2.address, 100);
+    await rpb.connect(trainer).recordTraining(300);
+    await rpb.connect(trainer2).recordTraining(100);
 
     // Fund pool
     await rpb.mint(investor.address, e18(10_000));

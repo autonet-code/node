@@ -3,7 +3,7 @@
  *
  * The complete cycle with balance reconciliation:
  *   1. Investor purchases shares → funds training pool
- *   2. Trainer trains, operator records on-chain
+ *   2. Trainer self-reports training on-chain
  *   3. Trainer claims reward → ATN minted
  *   4. Requester pays for inference (using ATN)
  *   5. Revenue splits: provider, treasury, dividend pool
@@ -24,10 +24,10 @@ describe("Test 7: Full Economic Loop", function () {
   this.timeout(120_000);
 
   let rpb, rpbAddr, registry;
-  let dao, operator, trainer, requester, provider, investor;
+  let dao, trainer, requester, provider, investor;
 
   beforeEach(async function () {
-    [dao, operator, trainer, requester, provider, investor] =
+    [dao, trainer, requester, provider, investor] =
       await ethers.getSigners();
 
     // Deploy infrastructure
@@ -40,9 +40,6 @@ describe("Test 7: Full Economic Loop", function () {
     rpb = await RPB.deploy(await registry.getAddress());
     await rpb.waitForDeployment();
     rpbAddr = await rpb.getAddress();
-
-    // Authorize operator
-    await rpb.setAuthorizedOperator(operator.address, true);
 
     // Register all agents
     for (const [signer, name] of [
@@ -82,8 +79,8 @@ describe("Test 7: Full Economic Loop", function () {
 
     // ─── Phase 2: Training ──────────────────────────────────────────
 
-    // Operator records 500 units of training for trainer
-    await rpb.connect(operator).recordTraining(trainer.address, 500);
+    // Trainer self-reports 500 units of training
+    await rpb.connect(trainer).recordTraining(500);
 
     const trainingTokens = await rpb.agentTrainingTokens(trainer.address);
     console.log("  [Training] Tokens recorded:", trainingTokens.toString());
@@ -112,7 +109,7 @@ describe("Test 7: Full Economic Loop", function () {
     const daoBefore = await rpb.balanceOf(dao.address);
     const requesterBefore = await rpb.balanceOf(requester.address);
 
-    await rpb.connect(operator).recordInference(
+    await rpb.connect(requester).recordInference(
       requester.address,
       provider.address,
       100,       // units

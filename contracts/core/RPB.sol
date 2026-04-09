@@ -10,7 +10,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {Registry} from "./Registry.sol";
-import {AutonetLib} from "../utils/AutonetLib.sol";
+// AutonetLib import removed — only DiscountTier was used, now inlined
 
 /**
  * @title RPB (Recursive Principled Body)
@@ -45,6 +45,11 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     // =========================================================================
     // Structs
     // =========================================================================
+
+    struct DiscountTier {
+        uint256 ptThreshold;      // Min PT balance for tier
+        uint256 discountPermille; // Discount in parts per 1000
+    }
 
     struct AgentRecord {
         address agentAddress;
@@ -97,8 +102,7 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     Registry public registry;         // Jurisdiction registry (source of truth)
     address public dao;               // Governor contract (read from registry owner)
 
-    // --- Authorized minters (for BME bridge, disbursers, etc.) ---
-    mapping(address => bool) public authorizedMinters;
+    // [DEPRECATED] authorizedMinters removed — no BME bridge in autonomous path
 
     // --- Training rewards (funded by share purchases, caps ATN minting) ---
     uint256 public trainingRewardPool;       // normalized value: total budget ceiling for minting
@@ -133,12 +137,7 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     bytes32 public currentModelHash;
     uint256 public modelVersion;
 
-    // --- Task reward budget (denominated in this token) ---
-    uint256 public taskRewardBudgetATN;
-    mapping(address => bool) public authorizedDisbursers;
-
-    // --- Authorized operators (service addresses for high-frequency ops) ---
-    mapping(address => bool) public authorizedOperators;
+    // [DEPRECATED] task budget, disbursers, operators removed — autonomous path only
 
     // --- Constitution (the RPB's defining document, stored on-chain) ---
     string public constitution;
@@ -146,7 +145,7 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     // --- Inference pricing ---
     string public modelWeightsCid;
     uint256 public atnPricePerInference;
-    AutonetLib.DiscountTier[] public discountTiers;
+    DiscountTier[] public discountTiers;
 
     // =========================================================================
     // Events
@@ -177,15 +176,12 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     event EpochAdvanced(uint256 newEpoch);
     event ModelUpdated(bytes32 newModelHash, uint256 version);
     event RewardPoolFunded(address indexed funder, address indexed token, uint256 amount, uint256 normalizedValue);
-    event DisburserAuthorized(address indexed disburser, bool authorized);
-    event MinterAuthorized(address indexed minter, bool authorized);
-    event TaskBudgetFunded(uint256 amount, uint256 newTotal);
-    event TaskBudgetDisbursed(address indexed recipient, uint256 amount);
+    // [DEPRECATED] DisburserAuthorized, MinterAuthorized, TaskBudget events removed
     event MatureModelSet(string weightsCid, uint256 price);
     event InferencePriceSet(uint256 price);
     event DiscountTiersUpdated(uint256 tierCount);
     event ConstitutionUpdated(uint256 timestamp);
-    event OperatorAuthorized(address indexed operator, bool authorized);
+    // [DEPRECATED] OperatorAuthorized event removed
 
     // =========================================================================
     // Errors
@@ -215,21 +211,12 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     error TreasuryPaymentFailed();
     error TokenNotInValueIndex();
     error InsufficientPoolBalance();
-    error NotAuthorizedDisburser();
-    error InsufficientBudget();
+    // [DEPRECATED] NotAuthorizedDisburser, InsufficientBudget errors removed
     error NotDAO();
 
     // =========================================================================
     // Modifiers
     // =========================================================================
-
-    modifier onlyOperator() {
-        require(
-            msg.sender == dao || authorizedOperators[msg.sender],
-            "RPB: not operator"
-        );
-        _;
-    }
 
     modifier onlyDAO() {
         if (msg.sender != dao) revert NotDAO();
@@ -275,30 +262,14 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     }
 
     // =========================================================================
-    // Minting (DAO + authorized minters for BME bridge)
+    // Minting (DAO only)
     // =========================================================================
 
-    function mint(address to, uint256 amount) external {
-        require(
-            msg.sender == dao || authorizedMinters[msg.sender],
-            "RPB: not authorized to mint"
-        );
+    function mint(address to, uint256 amount) external onlyDAO {
         _mint(to, amount);
     }
 
-    function setAuthorizedMinter(address minter, bool authorized) external {
-        if (msg.sender != dao) revert NotDAO();
-        require(minter != address(0), "RPB: zero minter address");
-        authorizedMinters[minter] = authorized;
-        emit MinterAuthorized(minter, authorized);
-    }
-
-    function setAuthorizedOperator(address operator, bool authorized) external {
-        if (msg.sender != dao) revert NotDAO();
-        require(operator != address(0), "RPB: zero operator address");
-        authorizedOperators[operator] = authorized;
-        emit OperatorAuthorized(operator, authorized);
-    }
+    // [DEPRECATED] setAuthorizedMinter and setAuthorizedOperator removed
 
     // =========================================================================
     // Value Index — Parity Validation
@@ -483,22 +454,27 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     // Training
     // =========================================================================
 
-    function recordTraining(address agent, uint256 contribution) external onlyOperator {
-        if (!agents[agent].active) revert AgentNotActive();
+    /**
+     * @notice Record a training contribution. Any active registered agent
+     *         can self-report. Trust comes from alignment scoring and
+     *         FedAvg weighting, not from operator permission.
+     */
+    function recordTraining(uint256 contribution) external {
+        if (!agents[msg.sender].active) revert AgentNotActive();
 
         epochRecords[currentEpoch].push(TrainingRecord({
-            agent: agent,
+            agent: msg.sender,
             contribution: contribution,
             epoch: currentEpoch,
             rewarded: false
         }));
 
-        agentTrainingTokens[agent] += contribution;
+        agentTrainingTokens[msg.sender] += contribution;
         totalTrainingTokens += contribution;
-        agents[agent].totalTrainingContributions += contribution;
+        agents[msg.sender].totalTrainingContributions += contribution;
 
-        emit TrainingRecorded(agent, contribution, currentEpoch);
-        emit TrainingRewarded(agent, contribution, currentEpoch);
+        emit TrainingRecorded(msg.sender, contribution, currentEpoch);
+        emit TrainingRewarded(msg.sender, contribution, currentEpoch);
     }
 
     /**
@@ -598,13 +574,22 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     // Inference
     // =========================================================================
 
+    /**
+     * @notice Record an inference event. Callable by the requester (who pays)
+     *         or the provider (if requester has approved this contract).
+     *         No operator gate — agents transact directly.
+     */
     function recordInference(
         address requester,
         address provider,
         uint256 units,
         address token,
         uint256 cost
-    ) external onlyOperator nonReentrant {
+    ) external nonReentrant {
+        require(
+            msg.sender == requester || msg.sender == provider || msg.sender == dao,
+            "RPB: caller must be requester, provider, or dao"
+        );
         if (!agents[provider].active) revert AgentNotActive();
 
         // Pull payment from the requester
@@ -652,80 +637,23 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
         emit InferenceServed(provider, requester, units, normalizedCost);
     }
 
-    function recordInferenceBME(
-        address requester,
-        address provider,
-        uint256 units,
-        uint256 totalRevenue,
-        uint256 shareholderAmount
-    ) external nonReentrant {
-        if (!authorizedDisbursers[msg.sender] && msg.sender != dao) {
-            revert NotAuthorizedDisburser();
-        }
-
-        totalInferenceUnits += units;
-        totalInferenceRevenue += totalRevenue;
-
-        if (agents[provider].active) {
-            agents[provider].totalInferenceServed += units;
-
-            if (agents[provider].sponsorAgent != address(0)) {
-                address sponsor = agents[provider].sponsorAgent;
-                if (sponsors[sponsor].active) {
-                    sponsors[sponsor].budgetSpent += totalRevenue;
-                }
-            }
-        }
-
-        // Track dividend pool (bridge already minted ATN to this contract)
-        if (shareholderAmount > 0) {
-            dividendPoolBalances[address(this)] += shareholderAmount;
-        }
-
-        emit InferenceServed(provider, requester, units, totalRevenue);
-    }
+    // [DEPRECATED] recordInferenceBME removed — no BME bridge in autonomous path
 
     // =========================================================================
     // Model Management
     // =========================================================================
 
-    function updateModel(bytes32 newModelHash) external onlyOperator {
+    function updateModel(bytes32 newModelHash) external onlyDAO {
         currentModelHash = newModelHash;
         modelVersion++;
         emit ModelUpdated(newModelHash, modelVersion);
     }
 
-    function setModelArchitecture(bytes32 archHash) external onlyOperator {
+    function setModelArchitecture(bytes32 archHash) external onlyDAO {
         modelArchitectureHash = archHash;
     }
 
-    // =========================================================================
-    // Task Budget & Disbursement
-    // =========================================================================
-
-    function setAuthorizedDisburser(address _disburser, bool _authorized) external {
-        if (msg.sender != dao) revert NotDAO();
-        authorizedDisbursers[_disburser] = _authorized;
-        emit DisburserAuthorized(_disburser, _authorized);
-    }
-
-    function fundTaskBudget(uint256 _amount) external nonReentrant {
-        _transfer(msg.sender, address(this), _amount);
-        taskRewardBudgetATN += _amount;
-        emit TaskBudgetFunded(_amount, taskRewardBudgetATN);
-    }
-
-    function disburseFromBudget(address _recipient, uint256 _amount) external returns (bool) {
-        if (!authorizedDisbursers[msg.sender] && msg.sender != dao) {
-            revert NotAuthorizedDisburser();
-        }
-        if (taskRewardBudgetATN < _amount) revert InsufficientBudget();
-
-        taskRewardBudgetATN -= _amount;
-        _transfer(address(this), _recipient, _amount);
-        emit TaskBudgetDisbursed(_recipient, _amount);
-        return true;
-    }
+    // [DEPRECATED] Task Budget & Disbursement section removed
 
     // =========================================================================
     // Mature Model & Inference Pricing
@@ -743,7 +671,7 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
         return (modelWeightsCid, atnPricePerInference);
     }
 
-    function setDiscountTiers(AutonetLib.DiscountTier[] memory _tiers) external {
+    function setDiscountTiers(DiscountTier[] memory _tiers) external {
         if (msg.sender != dao) revert NotDAO();
         delete discountTiers;
         for (uint i = 0; i < _tiers.length; i++) {
@@ -774,7 +702,7 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     // Epoch Management
     // =========================================================================
 
-    function advanceEpoch() external onlyOperator {
+    function advanceEpoch() external onlyDAO {
         currentEpoch++;
         emit EpochAdvanced(currentEpoch);
     }

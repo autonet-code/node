@@ -4,7 +4,7 @@
  * Confirms inference payment pull + revenue split + dividend claim:
  *   1. Deploy RPB, register agents
  *   2. Requester approves RPB to spend tokens
- *   3. Operator calls recordInference() → payment pulled
+ *   3. Requester calls recordInference() → payment pulled
  *   4. Revenue splits: 60% provider, 15% treasury, 25% dividend pool
  *   5. Shareholder claims dividends
  *
@@ -22,10 +22,10 @@ describe("Test 6: Inference Accounting", function () {
   this.timeout(60_000);
 
   let rpb, rpbAddr, registry;
-  let dao, operator, provider, requester, investor;
+  let dao, provider, requester, investor;
 
   beforeEach(async function () {
-    [dao, operator, provider, requester, investor] = await ethers.getSigners();
+    [dao, provider, requester, investor] = await ethers.getSigners();
 
     // Deploy Registry
     const Registry = await ethers.getContractFactory("Registry");
@@ -38,9 +38,6 @@ describe("Test 6: Inference Accounting", function () {
     rpb = await RPB.deploy(await registry.getAddress());
     await rpb.waitForDeployment();
     rpbAddr = await rpb.getAddress();
-
-    // Setup operator
-    await rpb.setAuthorizedOperator(operator.address, true);
 
     // Register agents
     for (const [signer, name] of [[provider, "provider"], [requester, "requester"]]) {
@@ -70,8 +67,8 @@ describe("Test 6: Inference Accounting", function () {
     const daoBefore = await rpb.balanceOf(dao.address);
     const requesterBefore = await rpb.balanceOf(requester.address);
 
-    // Operator records inference (pulls payment from requester)
-    await rpb.connect(operator).recordInference(
+    // Requester records inference (payment pulled from requester)
+    await rpb.connect(requester).recordInference(
       requester.address,
       provider.address,
       10,       // units
@@ -119,7 +116,7 @@ describe("Test 6: Inference Accounting", function () {
     // Generate inference revenue
     const cost = e18(10_000);
     await rpb.connect(requester).approve(rpbAddr, cost);
-    await rpb.connect(operator).recordInference(
+    await rpb.connect(requester).recordInference(
       requester.address,
       provider.address,
       100,
@@ -142,14 +139,13 @@ describe("Test 6: Inference Accounting", function () {
 
   it("ATN payment uses internal _transfer (no approval needed)", async function () {
     // When paying in ATN (token == RPB address), the contract uses
-    // internal _transfer() which doesn't check allowance. This is by
-    // design: the operator is trusted (onlyOperator gate).
+    // internal _transfer() which doesn't check allowance.
     // So no approval is needed for ATN payments.
     const cost = e18(500);
     const requesterBefore = await rpb.balanceOf(requester.address);
 
     // No explicit approval — should still work because token == address(this)
-    await rpb.connect(operator).recordInference(
+    await rpb.connect(requester).recordInference(
       requester.address,
       provider.address,
       5,
@@ -165,7 +161,7 @@ describe("Test 6: Inference Accounting", function () {
   it("tracks inference metrics per provider", async function () {
     const cost = e18(500);
     await rpb.connect(requester).approve(rpbAddr, cost);
-    await rpb.connect(operator).recordInference(
+    await rpb.connect(requester).recordInference(
       requester.address,
       provider.address,
       25,

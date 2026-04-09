@@ -154,20 +154,7 @@ class AggregatorNode:
 
     def _cycle(self):
         """Execute one cycle of the aggregator loop."""
-        # Step 1: Stake on first cycle
-        if not self.is_staked:
-            self._stake()
-            return
-
-        # Check governance heartbeat — halt work if missed
-        if not self.governance.check_heartbeat():
-            logger.warning(f"[{self.node_id}] Governance heartbeat missed, halting work")
-            return
-
-        # Step 2: Poll for new verified updates (task-driven path)
-        self._poll_rewards_distributed()
-
-        # Step 2b: Poll for autonomous training deltas
+        # Poll for autonomous training deltas
         self._poll_autonomous_training()
 
         # Step 3: Aggregate based on configured level

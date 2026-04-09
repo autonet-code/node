@@ -4,7 +4,7 @@
  * Full economic path from investor to trainer:
  *   1. Deploy RPB + test ERC20 with parity set
  *   2. Investor buys shares (funds training pool)
- *   3. Operator records training
+ *   3. Trainer self-reports training
  *   4. Trainer claims reward → mints ATN
  *   5. Verify all balances reconcile
  *
@@ -22,10 +22,10 @@ describe("Test 4: Investment → Training Pool → Reward", function () {
   this.timeout(60_000);
 
   let rpb, rpbAddr, registry;
-  let dao, operator, trainer, investor;
+  let dao, trainer, investor;
 
   beforeEach(async function () {
-    [dao, operator, trainer, investor] = await ethers.getSigners();
+    [dao, trainer, investor] = await ethers.getSigners();
 
     // Deploy Registry
     const Registry = await ethers.getContractFactory("Registry");
@@ -39,9 +39,7 @@ describe("Test 4: Investment → Training Pool → Reward", function () {
     await rpb.waitForDeployment();
     rpbAddr = await rpb.getAddress();
 
-    // Setup: operator authorized, trainer registered
-    await rpb.setAuthorizedOperator(operator.address, true);
-
+    // Register trainer as an agent
     const lineage = ethers.keccak256(ethers.toUtf8Bytes("trainer-agent"));
     const alignment = ethers.keccak256(ethers.toUtf8Bytes("aligned-v1"));
     await rpb.connect(trainer).registerAgent(
@@ -78,7 +76,7 @@ describe("Test 4: Investment → Training Pool → Reward", function () {
     // --- Training Phase ---
 
     const contribution = 200;
-    await rpb.connect(operator).recordTraining(trainer.address, contribution);
+    await rpb.connect(trainer).recordTraining(contribution);
 
     const trainingTokens = await rpb.agentTrainingTokens(trainer.address);
     expect(trainingTokens).to.equal(BigInt(contribution));
@@ -132,7 +130,7 @@ describe("Test 4: Investment → Training Pool → Reward", function () {
     await rpb.mint(investor.address, e18(10_000));
     await rpb.connect(investor).approve(rpbAddr, e18(10_000));
     await rpb.connect(investor).purchaseShares(rpbAddr, e18(10_000));
-    await rpb.connect(operator).recordTraining(trainer.address, 100);
+    await rpb.connect(trainer).recordTraining(100);
 
     // First claim succeeds
     await rpb.connect(trainer).claimTrainingReward();
@@ -145,7 +143,7 @@ describe("Test 4: Investment → Training Pool → Reward", function () {
     ).to.be.revertedWithCustomError(rpb, "NoRewardsToClaim");
 
     // But if more training is recorded, can claim again
-    await rpb.connect(operator).recordTraining(trainer.address, 50);
+    await rpb.connect(trainer).recordTraining(50);
     await rpb.connect(trainer).claimTrainingReward();
     const bal2 = await rpb.balanceOf(trainer.address);
     console.log("  After second training + claim:", ethers.formatEther(bal2));

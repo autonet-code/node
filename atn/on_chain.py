@@ -290,7 +290,6 @@ RPB_SPONSOR_ABI = [
     },
     {
         "inputs": [
-            {"internalType": "address", "name": "agent", "type": "address"},
             {"internalType": "uint256", "name": "contribution", "type": "uint256"},
         ],
         "name": "recordTraining",
@@ -1016,19 +1015,16 @@ class OnChainService:
 
     async def record_training(
         self,
-        agent: str,
         contribution: int,
         private_key: str,
     ) -> dict[str, Any]:
         """Record a training contribution on-chain via recordTraining.
 
-        This is an ``onlyOperator`` function on RPB, so ``private_key``
-        must belong to the DAO or an authorized operator.
+        The agent is msg.sender — any active registered agent can self-report.
 
         Args:
-            agent: Address of the agent that contributed training work.
             contribution: Number of training units to record.
-            private_key: Operator's hex private key for signing.
+            private_key: Agent's hex private key for signing.
 
         Returns:
             dict with ``success``, ``tx_hash``, or ``error``.
@@ -1045,7 +1041,6 @@ class OnChainService:
             chain_id = self.config.chain_id or w3.eth.chain_id
 
             tx = contract.functions.recordTraining(
-                w3.to_checksum_address(agent),
                 contribution,
             ).build_transaction({
                 "from": account.address,
@@ -1062,12 +1057,11 @@ class OnChainService:
             if receipt.status == 1:
                 log.info(
                     "Training recorded on-chain: agent=%s contribution=%d tx=%s",
-                    agent, contribution, tx_hash.hex(),
+                    account.address, contribution, tx_hash.hex(),
                 )
                 return {
                     "success": True,
                     "tx_hash": tx_hash.hex(),
-                    "agent": agent,
                     "contribution": contribution,
                 }
             else:

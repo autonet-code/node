@@ -74,14 +74,6 @@ class TrainingConfig:
     task_type: str = "jepa"  # "supervised" or "jepa"
 
 
-@dataclass
-class StakingConfig:
-    """Staking amounts (in ATN, not wei)."""
-    proposer: int = 100
-    solver: int = 50
-    coordinator: int = 500
-    aggregator: int = 1000
-
 
 @dataclass
 class P2PConfig:
@@ -161,7 +153,6 @@ class NodeConfig:
     """Per-node runtime config."""
     max_cycles: int = 10
     cycle_delay: float = 3.0
-    task_mode: str = "ground_truth"  # "ground_truth" or "consensus_truth"
     aggregation_method: str = "fedavg"  # "fedavg" or "trimmed_mean"
     trim_ratio: float = 0.2
     min_updates_for_aggregation: int = 2
@@ -179,7 +170,6 @@ class AutonetConfig:
     blob_store: BlobStoreConfig = field(default_factory=BlobStoreConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
-    staking: StakingConfig = field(default_factory=StakingConfig)
     node: NodeConfig = field(default_factory=NodeConfig)
     p2p: P2PConfig = field(default_factory=P2PConfig)
     guild: GuildConfig = field(default_factory=GuildConfig)
@@ -246,7 +236,6 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_LOG_LEVEL": ("log_level", str),
         "AUTONET_SEED": ("seed", int),
         "AUTONET_TASK_TYPE": ("training.task_type", str),
-        "AUTONET_TASK_MODE": ("node.task_mode", str),
         "AUTONET_EPOCHS": ("training.epochs", int),
         "AUTONET_BATCH_SIZE": ("training.batch_size", int),
         "AUTONET_LEARNING_RATE": ("training.learning_rate", float),
@@ -283,7 +272,6 @@ def _dict_to_config(raw: dict) -> AutonetConfig:
         "blob_store": (BlobStoreConfig, cfg.blob_store),
         "model": (ModelConfig, cfg.model),
         "training": (TrainingConfig, cfg.training),
-        "staking": (StakingConfig, cfg.staking),
         "node": (NodeConfig, cfg.node),
         "p2p": (P2PConfig, cfg.p2p),
         "guild": (GuildConfig, cfg.guild),
