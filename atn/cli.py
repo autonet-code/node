@@ -337,14 +337,48 @@ async def _load_agents(runtime: Runtime, config: ATNConfig) -> int:
     return len(agents)
 
 
+def _try_reclaim_port(port: int) -> int | None:
+    """If *port* is held by an ATN MCP server (our own child), kill it.
+
+    Returns the PID that was killed, or None.
+    """
+    import psutil
+
+    for conn in psutil.net_connections(kind="tcp"):
+        if conn.laddr.port == port and conn.status == "LISTEN":
+            try:
+                proc = psutil.Process(conn.pid)
+                cmdline = " ".join(proc.cmdline())
+                if "atn.mcp_server" in cmdline or "atn/mcp_server" in cmdline:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                    return conn.pid
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+                pass
+    return None
+
+
 async def run_cli() -> None:
     """Main async entry point."""
-    from .ws_server import _acquire_lock
+    from .lock_manager import LockManager
 
     config = load_config()
 
-    # Singleton lock — only one daemon per data_dir / port
-    _acquire_lock(config.data_dir, port=DEFAULT_PORT)
+    # Singleton lock — only one daemon per data_dir
+    lock = LockManager()
+    lock.set_data_dir(config.data_dir)
+
+    existing = lock.is_daemon_running()
+    if existing:
+        console.print(
+            f"[red]ATN daemon is already running![/]  "
+            f"[dim]PID {existing['pid']}, started {existing.get('started_at', '?')}[/]"
+        )
+        sys.exit(1)
+
+    if not lock.acquire_lock():
+        console.print("[red]Failed to acquire daemon lock.[/]")
+        sys.exit(1)
 
     event_bus = EventBus()
     runtime = Runtime(event_bus, data_dir=config.data_dir, config=config)
@@ -379,14 +413,30 @@ async def run_cli() -> None:
     except Exception as exc:
         console.print(f"  [yellow]Orchestrator not available: {exc}[/]")
 
-    # Start WebSocket bridge so the Flutter frontend can connect
-    ws_bridge = WebSocketBridge(runtime, host="localhost", port=DEFAULT_PORT)
-    try:
-        await ws_bridge.start()
-        console.print(f"  [green]WebSocket server listening on ws://localhost:{DEFAULT_PORT}[/]")
-    except OSError as exc:
-        console.print(f"  [red]WebSocket server failed to start: {exc}[/]")
-        ws_bridge = None
+    # Start WebSocket bridge so the Flutter frontend can connect.
+    # If the port is held by a stale MCP server, attempt to reclaim it.
+    ws_bridge: WebSocketBridge | None = None
+    for _attempt in range(2):
+        ws_bridge = WebSocketBridge(runtime, host="localhost", port=DEFAULT_PORT)
+        try:
+            await ws_bridge.start()
+            console.print(f"  [green]WebSocket server listening on ws://localhost:{DEFAULT_PORT}[/]")
+            break
+        except OSError as exc:
+            ws_bridge = None
+            if _attempt == 0:
+                # Try to find and kill the process holding the port
+                killed = _try_reclaim_port(DEFAULT_PORT)
+                if killed:
+                    console.print(f"  [yellow]Reclaimed port {DEFAULT_PORT} from stale process (PID {killed})[/]")
+                    await asyncio.sleep(0.5)
+                    continue
+            console.print(
+                f"  [red]WebSocket server failed to start: {exc}[/]\n"
+                f"  [dim]Port {DEFAULT_PORT} is in use. Find the process: "
+                f"netstat -ano | findstr {DEFAULT_PORT}[/]"
+            )
+            break
 
     _print_help()
     console.print("[dim]Events stream below.  Type commands at any time.\n[/]")
@@ -401,6 +451,7 @@ async def run_cli() -> None:
             await ws_bridge.stop()
         if not runtime._shutdown_event.is_set():
             await runtime.stop()
+        lock.release_lock()
         console.print("[dim]Bye.[/]")
 
 

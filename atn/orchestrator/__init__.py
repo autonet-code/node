@@ -96,6 +96,6 @@ def create_orchestrator_agent(
         provider=provider_chain,
         cognitive_model=model,
         max_turns=max_turns,
-        tools=["atn_full"],
+        tools=["atn_progressive"],
         concurrency=1,
     )

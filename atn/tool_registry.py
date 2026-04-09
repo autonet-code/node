@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 class ToolCategory(Enum):
     CONNECTOR = "connector"
     PIPELINE = "pipeline"
+    CORE = "core"
 
 
 @dataclass
@@ -72,9 +73,10 @@ class ToolRegistry:
         """Return all available tools as dicts.
 
         Args:
-            category: Filter by category (connector/pipeline). None = all.
+            category: Filter by category (connector/pipeline/core). None = all.
             include_operations: If True, include per-tool operations (connector
                 tools list their MCP operations, pipeline tools list their steps).
+                For core tools, includes the full input_schema.
 
         Returns:
             List of tool descriptors, each with: name, description, category,
@@ -88,6 +90,9 @@ class ToolRegistry:
         if category is None or category == ToolCategory.PIPELINE:
             tools.extend(self._list_pipeline_tools(include_operations))
 
+        if category is None or category == ToolCategory.CORE:
+            tools.extend(self._list_core_tools(include_operations))
+
         return tools
 
     def get_tool(self, name: str) -> UnifiedTool | None:
@@ -95,6 +100,7 @@ class ToolRegistry:
 
         Connector tools are named: ``tool_<connector_id>_<tool_name>``
         Pipeline tools are named: ``pipeline_<agent_id>``
+        Core tools use their original name (e.g. ``get_goals``).
         """
         # Check pipeline tools first (cheaper lookup)
         if name.startswith("pipeline_"):
@@ -122,6 +128,17 @@ class ToolRegistry:
                 input_schema={"type": "object", "properties": {}},
                 connector_id=connector_id,
                 connector_tool_name=tool_name,
+            )
+
+        # Check core ATN tools
+        from .orchestrator.tools import get_core_tool_def
+        tdef = get_core_tool_def(name)
+        if tdef:
+            return UnifiedTool(
+                name=name,
+                description=tdef["description"],
+                category=ToolCategory.CORE,
+                input_schema=tdef["input_schema"],
             )
 
         return None
@@ -154,6 +171,8 @@ class ToolRegistry:
             return await self._call_connector_tool(tool, arguments)
         elif tool.category == ToolCategory.PIPELINE:
             return await self._call_pipeline_tool(tool, arguments, caller_id=caller_id)
+        elif tool.category == ToolCategory.CORE:
+            return await self._call_core_tool(tool, arguments, caller_id=caller_id)
         else:
             return {"error": f"Unsupported tool category: {tool.category}"}
 
@@ -329,6 +348,33 @@ class ToolRegistry:
             rt.inbox.post(notify_msg)
 
         return result
+
+    # ------------------------------------------------------------------
+    # Core ATN tools (discoverable via list_tools/use_tool)
+    # ------------------------------------------------------------------
+
+    def _list_core_tools(self, include_operations: bool) -> list[dict[str, Any]]:
+        """List core ATN tools available for discovery."""
+        from .orchestrator.tools import get_all_tool_defs
+        tools: list[dict[str, Any]] = []
+        for tdef in get_all_tool_defs():
+            entry: dict[str, Any] = {
+                "name": tdef["name"],
+                "description": tdef["description"],
+                "category": ToolCategory.CORE.value,
+            }
+            if include_operations:
+                entry["input_schema"] = tdef["input_schema"]
+            tools.append(entry)
+        return tools
+
+    async def _call_core_tool(
+        self, tool: UnifiedTool, arguments: dict[str, Any],
+        *, caller_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a core ATN tool via the standard executor."""
+        from .orchestrator.tools import execute_tool
+        return await execute_tool(tool.name, arguments, self._runtime, caller_id=caller_id)
 
     # ------------------------------------------------------------------
     # Schema derivation

@@ -73,15 +73,16 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="update_agent",
         description=(
-            "Update a registered agent's configuration. Can modify system_prompt, schedule, "
-            "heartbeat, description, name, max_turns, or model. Changes are persisted to YAML."
+            "Update a registered agent's configuration. Supports all fields including "
+            "advanced config (schedule, budgets, connectors, pipeline steps, concurrency). "
+            "Changes are persisted to YAML."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "agent_id": {"type": "string", "description": "The agent to update."},
                 "system_prompt": {"type": "string", "description": "New system prompt (cognitive agents)."},
-                "schedule": {"type": ["string", "null"], "description": "New schedule interval (e.g. '5m', '1h') or null to remove."},
+                "schedule": {"type": ["string", "null"], "description": "Schedule interval (e.g. '5m', '1h') or null to remove."},
                 "heartbeat": {
                     "type": ["object", "null"],
                     "description": "Heartbeat config or null to remove.",
@@ -96,8 +97,39 @@ _TOOLS: list[ToolDefinition] = [
                 "model": {"type": "string", "description": "Model override (e.g. 'claude-opus-4-6')."},
                 "notify_parent": {
                     "type": "boolean",
-                    "description": "If false, skip automatic inbox notification to parent on completion. Child must use post_message explicitly. Failures always notify. Default: true.",
+                    "description": "If false, skip auto-notification to parent on completion. Default: true.",
                 },
+                "concurrency": {"type": "integer", "description": "Max parallel executions."},
+                "budgets": {
+                    "type": "object",
+                    "description": "Per-provider token budget limits. e.g. {'gemini': 50000}.",
+                    "additionalProperties": {"type": "integer"},
+                },
+                "connector_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "MCP connector IDs this agent should use.",
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tool surface for cognitive agents. e.g. ['delegation', 'messaging'].",
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "Pipeline steps (pipeline mode only).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "type": {"type": "string", "enum": ["script", "cognitive", "message", "pull", "collect"]},
+                            "config": {"type": "object"},
+                        },
+                        "required": ["name", "type", "config"],
+                    },
+                },
+                "expose_as_tool": {"type": "boolean", "description": "Expose pipeline agent as a callable tool."},
+                "tool_input_schema": {"type": "object", "description": "Custom JSON Schema for the tool's input."},
             },
             "required": ["agent_id"],
         },
@@ -105,52 +137,25 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="create_agent",
         description=(
-            "Create and register a new agent. Supports two modes: "
-            "'pipeline' (default) with deterministic steps, or 'cognitive' for autonomous LLM sessions. "
-            "Pipeline agents are created in REGISTERED state — call activate_agent afterwards. "
-            "Cognitive agents with a prompt are automatically activated and triggered immediately."
+            "Create and register a new agent. Most agents are 'cognitive' — just provide "
+            "id, name, and prompt. Use update_agent afterwards for advanced config "
+            "(schedule, budgets, connectors, pipeline steps, concurrency)."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "id": {"type": "string", "description": "Unique agent ID (short, lowercase, no spaces)."},
                 "name": {"type": "string", "description": "Human-readable agent name."},
+                "prompt": {
+                    "type": "string",
+                    "description": "Task prompt for cognitive agents. The agent will work on this autonomously.",
+                },
                 "description": {"type": "string", "description": "What this agent does."},
                 "mode": {
                     "type": "string",
                     "enum": ["pipeline", "cognitive"],
-                    "description": "Agent mode. 'pipeline' (default) for step sequences, 'cognitive' for autonomous LLM sessions.",
-                    "default": "pipeline",
-                },
-                "steps": {
-                    "type": "array",
-                    "description": "Ordered list of steps (required for pipeline mode, ignored for cognitive).",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string", "description": "Step name."},
-                            "type": {
-                                "type": "string",
-                                "enum": ["script", "cognitive", "message", "pull", "collect"],
-                                "description": "Step type.",
-                            },
-                            "config": {
-                                "type": "object",
-                                "description": (
-                                    "Step configuration. For 'script': {command, timeout}. "
-                                    "For 'cognitive': {provider, model, system, prompt, max_tokens, tools}. "
-                                    "For 'message': {target, mode}. "
-                                    "For 'pull': {source}. "
-                                    "For 'collect': {from_step, timeout}."
-                                ),
-                            },
-                        },
-                        "required": ["name", "type", "config"],
-                    },
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Task prompt for cognitive agents. The agent will work on this autonomously.",
+                    "description": "Agent mode. Default: 'cognitive'.",
+                    "default": "cognitive",
                 },
                 "agent_type": {
                     "type": "string",
@@ -160,53 +165,26 @@ _TOOLS: list[ToolDefinition] = [
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model override for cognitive agents (e.g. 'sonnet', 'opus').",
-                },
-                "system_prompt": {
-                    "type": "string",
-                    "description": "Custom system prompt for cognitive agents. If omitted, a default is generated from agent_type.",
+                    "description": "Model override (e.g. 'sonnet', 'opus').",
                 },
                 "max_turns": {
                     "type": "integer",
-                    "description": "Max LLM turns for cognitive agents. Default: 50.",
+                    "description": "Max LLM turns. Default: 50.",
                     "default": 50,
+                },
+                "notify_parent": {
+                    "type": "boolean",
+                    "description": "If false, skip auto-notification to parent on completion. Default: true.",
                 },
                 "tools": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Tool surface for cognitive agents. e.g. ['sdk_builtin', 'atn_core'].",
-                },
-                "concurrency": {
-                    "type": "integer",
-                    "description": "Max parallel executions. Default: 1 (singleton).",
-                    "default": 1,
-                },
-                "schedule": {
-                    "type": "string",
-                    "description": "Schedule interval (e.g. '30s', '5m', '1h'). Omit for on-demand only.",
-                },
-                "budgets": {
-                    "type": "object",
-                    "description": "Per-provider token budget limits. e.g. {'gemini': 50000}.",
-                    "additionalProperties": {"type": "integer"},
-                },
-                "connector_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "MCP connector IDs this agent should use. Use list_connectors to see available connectors.",
-                },
-                "expose_as_tool": {
-                    "type": "boolean",
-                    "description": "If true, this pipeline agent is callable as a tool via use_tool/list_tools. Default: false.",
-                    "default": False,
-                },
-                "tool_input_schema": {
-                    "type": "object",
-                    "description": "Custom JSON Schema for the tool's input. If omitted, derived from the first step's expected input.",
-                },
-                "notify_parent": {
-                    "type": "boolean",
-                    "description": "If false, skip automatic inbox notification to parent on completion. Child must use post_message explicitly. Failures always notify. Default: true.",
+                    "description": (
+                        "Tool categories: 'delegation' (spawn/manage children), 'messaging', "
+                        "'observation' (snapshots/history), 'lifecycle' (activate/kill), "
+                        "'connectors', 'unified_tools', 'planning', 'budget', 'identity'. "
+                        "Or 'atn_full' for all. Default: delegation + messaging + observation."
+                    ),
                 },
             },
             "required": ["id", "name"],
@@ -442,17 +420,17 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="list_tools",
         description=(
-            "List all available tools — both MCP connectors and pipeline agents exposed as tools. "
-            "Each tool has a name, description, category (connector/pipeline), and input schema. "
-            "Use use_tool to call any tool by name."
+            "Discover available tools: core ATN tools, MCP connectors, and pipeline agents. "
+            "Returns name + description for each. Use use_tool to call any by name. "
+            "Pass include_operations=true to get full input schemas."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "category": {
                     "type": "string",
-                    "enum": ["connector", "pipeline"],
-                    "description": "Filter by category. Omit to list all tools.",
+                    "enum": ["connector", "pipeline", "core"],
+                    "description": "Filter by category. 'core' = ATN framework tools. Omit to list all.",
                 },
                 "include_operations": {
                     "type": "boolean",
@@ -465,9 +443,8 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="use_tool",
         description=(
-            "Call any tool by its unified name — works for both MCP connectors and pipeline-agent tools. "
-            "Connector tools are named 'mcp_<connector>_<tool>'. Pipeline tools are named 'pipeline_<agent_id>'. "
-            "Use list_tools to discover available tools and their input schemas."
+            "Call any tool by name — core ATN tools, MCP connectors, or pipeline agents. "
+            "Use list_tools first to see available tools and their input schemas."
         ),
         input_schema={
             "type": "object",
@@ -910,6 +887,38 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     if "notify_parent" in input:
         defn.notify_parent = input["notify_parent"]
         changed.append("notify_parent")
+    if "concurrency" in input:
+        defn.concurrency = input["concurrency"]
+        changed.append("concurrency")
+    if "budgets" in input:
+        defn.budgets = input["budgets"]
+        changed.append("budgets")
+    if "connector_ids" in input:
+        defn.connector_ids = input["connector_ids"]
+        changed.append("connector_ids")
+    if "tools" in input:
+        defn.tools = input["tools"]
+        changed.append("tools")
+    if "expose_as_tool" in input:
+        defn.expose_as_tool = input["expose_as_tool"]
+        changed.append("expose_as_tool")
+    if "tool_input_schema" in input:
+        defn.tool_input_schema = input["tool_input_schema"]
+        changed.append("tool_input_schema")
+    if "steps" in input:
+        new_steps = []
+        for s in input["steps"]:
+            try:
+                step_type = StepType(s["type"])
+            except (ValueError, KeyError) as e:
+                return {"error": f"Invalid step: {e}"}
+            new_steps.append(StepDefinition(
+                type=step_type,
+                config=s.get("config", {}),
+                name=s.get("name"),
+            ))
+        defn.steps = new_steps
+        changed.append("steps")
 
     # Schedule update — mutually exclusive with heartbeat
     if "schedule" in input:
@@ -1274,10 +1283,35 @@ async def _kill_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
 
 
 async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    from ..orchestrator import ORCHESTRATOR_ID
+
     target = input["target"]
     defn = runtime.get_agent(target)
     if defn is None:
         return {"error": f"Agent '{target}' not found."}
+
+    # Hierarchy scoping: agents can only message parent, direct children,
+    # or siblings (same parent_id).  The orchestrator is unrestricted.
+    caller_id = input.get("_caller_id")
+    if caller_id and caller_id != ORCHESTRATOR_ID:
+        caller_defn = runtime.get_agent(caller_id)
+        if caller_defn:
+            is_parent = (caller_defn.parent_id == target)
+            is_child = (defn.parent_id == caller_id)
+            is_sibling = (
+                caller_defn.parent_id
+                and defn.parent_id
+                and caller_defn.parent_id == defn.parent_id
+            )
+            is_self = (caller_id == target)
+            if not (is_parent or is_child or is_sibling or is_self):
+                return {
+                    "error": (
+                        f"Agent '{caller_id}' cannot message '{target}': "
+                        f"not a parent, child, or sibling. "
+                        f"Agents can only message within their immediate hierarchy."
+                    )
+                }
 
     msg_type = MessageType(input.get("message_type") or input.get("type", "trigger"))
     priority = MessagePriority(input.get("priority", "normal"))
@@ -1513,7 +1547,7 @@ async def _list_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
         try:
             category = ToolCategory(category_str)
         except ValueError:
-            return {"error": f"Invalid category: '{category_str}'. Use 'connector' or 'pipeline'."}
+            return {"error": f"Invalid category: '{category_str}'. Use 'connector', 'pipeline', or 'core'."}
 
     include_ops = bool(input.get("include_operations", False))
     tools = runtime.tool_registry.list_all(
@@ -1951,6 +1985,89 @@ def _get_delegate_tools() -> list[dict[str, Any]]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Tool categories — granular tool selection for agent creation
+# ---------------------------------------------------------------------------
+# Categories map to tool names.  An agent's `tools` list can contain:
+#   - Category names (e.g. "delegation", "messaging") → expanded to tool names
+#   - Legacy flags: "atn_full" → all tools, "atn_core" → delegate subset
+#   - "sdk_builtin" / "connectors" → handled by execution_engine, not here
+
+_TOOL_CATEGORIES: dict[str, set[str]] = {
+    "delegation": {
+        "create_agent", "update_agent", "delegate_status", "delegate_collect",
+        "delegate_message", "get_latest_thought", "get_children_status",
+        "trigger_run", "get_output",
+    },
+    "messaging": {"post_message"},
+    "observation": {"get_snapshot", "list_agents", "get_agent", "get_execution", "get_history"},
+    "lifecycle": {"activate_agent", "deactivate_agent", "kill_agent", "kill_execution", "remove_agent"},
+    "connectors": {"list_connectors", "add_connector", "get_connector_tools", "use_connector", "remove_connector"},
+    "unified_tools": {"list_tools", "use_tool"},
+    "planning": {"get_goals", "add_goal", "update_goal", "get_projects", "add_project", "update_project",
+                 "propose_task", "list_tasks"},
+    "budget": {"get_credit_budget", "set_credit_budget"},
+    "identity": {"register_on_chain"},
+    "profile": {"get_user_profile"},
+}
+
+
+# High-frequency tools always included in the progressive surface.
+# Everything else is discoverable via list_tools/use_tool.
+_PROGRESSIVE_DIRECT_TOOLS = {
+    "create_agent", "update_agent",
+    "post_message", "get_snapshot", "get_output",
+    "delegate_status", "delegate_collect", "get_children_status",
+    "list_tools", "use_tool",
+}
+
+
+def resolve_tool_surface(tool_spec: list[str]) -> list[dict[str, Any]]:
+    """Resolve a tool spec (categories, flags, or tool names) to tool definitions.
+
+    Returns a list of tool dicts ready for the bridge.
+    """
+    if not tool_spec:
+        # Default: delegate subset
+        return _get_delegate_tools()
+
+    # Legacy flags
+    if "atn_full" in tool_spec:
+        return get_tool_definitions_for_bridge()
+
+    # Progressive: high-frequency tools direct, rest via list_tools/use_tool
+    if "atn_progressive" in tool_spec:
+        return [
+            {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+            for t in _TOOLS
+            if t.name in _PROGRESSIVE_DIRECT_TOOLS
+        ]
+
+    # Collect tool names from categories and explicit names
+    resolved_names: set[str] = set()
+
+    for spec in tool_spec:
+        if spec in ("sdk_builtin", "connectors"):
+            continue  # handled by execution_engine
+        if spec == "atn_core":
+            resolved_names.update(_DELEGATE_TOOL_NAMES)
+        elif spec in _TOOL_CATEGORIES:
+            resolved_names.update(_TOOL_CATEGORIES[spec])
+        else:
+            # Treat as an explicit tool name
+            resolved_names.add(spec)
+
+    # If nothing resolved (e.g. only "sdk_builtin"), fall back to delegate set
+    if not resolved_names:
+        return _get_delegate_tools()
+
+    return [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in _TOOLS
+        if t.name in resolved_names
+    ]
+
+
 async def _delegate_status(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Check the status of a delegate sub-agent via the unified agent registry."""
     from datetime import datetime, timezone
@@ -2343,6 +2460,22 @@ def get_tool_definitions_for_bridge() -> list[dict[str, Any]]:
         }
         for t in _TOOLS
     ]
+
+
+def get_all_tool_defs() -> list[dict[str, Any]]:
+    """Return all core tool definitions (name, description, input_schema)."""
+    return [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in _TOOLS
+    ]
+
+
+def get_core_tool_def(name: str) -> dict[str, Any] | None:
+    """Return a single core tool definition by name, or None."""
+    for t in _TOOLS:
+        if t.name == name:
+            return {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+    return None
 
 
 def get_tool_executor(name: str) -> ToolExecutor | None:

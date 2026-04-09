@@ -355,7 +355,7 @@ class ExecutionEngine:
         cancel: asyncio.Event,
     ) -> None:
         from ..delegate_prompts import build_delegate_prompt
-        from ..orchestrator.tools import _get_delegate_tools, get_tool_definitions_for_bridge
+        from ..orchestrator.tools import resolve_tool_surface
 
         sub_provider = None
         owns_provider = True
@@ -406,10 +406,7 @@ class ExecutionEngine:
                     system_prompt = preamble + system_prompt
 
             # --- Tool surface ---
-            if "atn_full" in (defn.tools or []):
-                agent_tools = get_tool_definitions_for_bridge()
-            else:
-                agent_tools = _get_delegate_tools()
+            agent_tools = resolve_tool_surface(defn.tools or [])
 
             from ..providers.bridge import BridgeProvider as _BP
             if not isinstance(sub_provider, _BP):

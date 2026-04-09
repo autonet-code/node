@@ -26,11 +26,9 @@ Or start from Runtime:  await ws_server.start(runtime, port=7700)
 from __future__ import annotations
 
 import asyncio
-import atexit
 import json
 import logging
 import os
-import socket
 import sys
 import threading
 from datetime import datetime, timezone
@@ -1217,87 +1215,10 @@ class WebSocketBridge:
             self._clients.discard(ws)
 
 
-# ---------------------------------------------------------------------------
-# Singleton process lock (pidfile)
-# ---------------------------------------------------------------------------
-
-_PIDFILE_NAME = "ws_server.pid"
 
 
-def _pid_is_alive(pid: int) -> bool:
-    """Check if a process with the given PID is running."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
-
-
-def _port_in_use(host: str, port: int) -> bool:
-    """Return True if *port* is already bound on *host*."""
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            with socket.socket(family, socket.SOCK_STREAM) as s:
-                s.settimeout(0.5)
-                s.connect((host if family == socket.AF_INET else "::1", port))
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def _get_pidfile(data_dir: Path) -> Path:
-    return data_dir / _PIDFILE_NAME
-
-
-def _acquire_lock(data_dir: Path, host: str = "localhost", port: int = DEFAULT_PORT) -> Path:
-    """Acquire the singleton lock.  Exits the process if another instance is running."""
-    data_dir.mkdir(parents=True, exist_ok=True)
-    pidfile = _get_pidfile(data_dir)
-
-    if pidfile.exists():
-        try:
-            old_pid = int(pidfile.read_text().strip())
-        except (ValueError, OSError):
-            old_pid = 0
-
-        if old_pid and _pid_is_alive(old_pid):
-            print(
-                f"ATN daemon is already running (PID {old_pid}, port {port}).  "
-                f"Kill it first or remove {pidfile}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        log.info("Stale pidfile found (PID %d not running), removing", old_pid)
-        pidfile.unlink(missing_ok=True)
-
-    # Secondary check: even without a pidfile, something may hold the port
-    # (e.g. pidfile was cleaned up but the process survived).
-    if _port_in_use(host, port):
-        print(
-            f"ATN daemon port {port} is already in use (pidfile was missing).  "
-            f"Another instance may be running.  Find it with:\n"
-            f"  netstat -ano | findstr {port}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    pidfile.write_text(str(os.getpid()))
-    atexit.register(_release_lock, data_dir)
-    return pidfile
-
-
-def _release_lock(data_dir: Path) -> None:
-    """Release the singleton lock by removing the pidfile."""
-    pidfile = _get_pidfile(data_dir)
-    try:
-        if pidfile.exists():
-            stored_pid = int(pidfile.read_text().strip())
-            if stored_pid == os.getpid():
-                pidfile.unlink(missing_ok=True)
-    except (ValueError, OSError):
-        pidfile.unlink(missing_ok=True)
+# Old pidfile-based lock removed — see atn/lock_manager.py for the
+# OS-level file-locking singleton used by cli.py and run_standalone().
 
 
 # ---------------------------------------------------------------------------
@@ -1389,7 +1310,19 @@ async def run_standalone(host: str = "localhost", port: int = DEFAULT_PORT) -> N
     config = load_config()
 
     # Singleton lock — only one ws_server per data_dir
-    _acquire_lock(config.data_dir, host=host, port=port)
+    from .lock_manager import LockManager
+    lock = LockManager()
+    lock.set_data_dir(config.data_dir)
+    existing = lock.is_daemon_running()
+    if existing:
+        log.error(
+            "ATN daemon is already running (PID %s, started %s)",
+            existing["pid"], existing.get("started_at", "?"),
+        )
+        sys.exit(1)
+    if not lock.acquire_lock():
+        log.error("Failed to acquire daemon lock")
+        sys.exit(1)
 
     # Start stdin reader thread
     loop = asyncio.get_running_loop()
@@ -1433,7 +1366,7 @@ async def run_standalone(host: str = "localhost", port: int = DEFAULT_PORT) -> N
             await bridge.stop()
         if rt:
             await rt.stop()
-        _release_lock(config.data_dir)
+        lock.release_lock()
 
 
 def main() -> None:

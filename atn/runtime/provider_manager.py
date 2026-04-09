@@ -13,6 +13,7 @@ from ..models import AgentDefinition, StepType, TokenUsage
 from ..providers.anthropic import AnthropicProvider
 from ..providers.base import ProviderError
 from ..providers.bridge import BridgeProvider
+from ..providers.codex_bridge import CodexBridgeProvider
 from ..providers.ollama import OllamaProvider
 from ..providers.openai_compat import OpenAICompatibleProvider
 from ..steps.cognitive import CognitiveStepExecutor
@@ -49,6 +50,7 @@ _MODEL_TIERS: dict[str, int] = {
     "claude-haiku-3.5": 2,
     # OpenAI
     "o3": 4,
+    "o4-mini": 3,
     "o1": 3,
     "gpt-4.1": 4,
     "gpt-4o": 3,
@@ -100,6 +102,12 @@ class ProviderManager:
         "claude_max": {
             "name": "Claude Max",
             "description": "Claude via Claude Code bridge (requires Claude Max subscription)",
+            "auth_type": "bridge",
+            "orchestrator_capable": True,
+        },
+        "codex_max": {
+            "name": "Codex (OpenAI)",
+            "description": "OpenAI Codex via Codex CLI bridge (requires Codex/OpenAI subscription)",
             "auth_type": "bridge",
             "orchestrator_capable": True,
         },
@@ -205,6 +213,9 @@ class ProviderManager:
     def _resolve_provider_by_name(self, provider_name: str, model: str, agent_id: str) -> Any:
         if provider_name == "claude_max":
             return BridgeProvider(model=model)
+        if provider_name == "codex_max":
+            api_key = self._resolve_api_key("codex_max") or self._resolve_api_key("openai")
+            return CodexBridgeProvider(model=model, api_key=api_key)
         if provider_name == "anthropic":
             api_key = self._resolve_api_key("anthropic")
             if not api_key:

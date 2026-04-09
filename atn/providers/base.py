@@ -42,6 +42,7 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-4.1-nano": 1_048_576,
     "o3": 200_000,
     "o4-mini": 200_000,
+    "o4": 200_000,
     # Google
     "gemini-3-pro": 1_048_576,
     "gemini-3-flash": 1_048_576,

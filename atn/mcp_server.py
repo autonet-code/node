@@ -119,14 +119,21 @@ async def run_server() -> None:
     except Exception as exc:
         log.warning("Failed to register orchestrator: %s", exc)
 
-    # Start WebSocket server on the same Runtime so Flutter sees MCP changes
-    ws_bridge = WebSocketBridge(rt, host="localhost", port=DEFAULT_PORT)
-    try:
-        await ws_bridge.start()
-        log.info("WebSocket bridge started on ws://localhost:%d", DEFAULT_PORT)
-    except OSError as exc:
-        log.warning("WebSocket bridge failed to start (port %d in use?): %s", DEFAULT_PORT, exc)
-        ws_bridge = None
+    # Start WebSocket server only if no CLI daemon holds the lock (it owns the port).
+    ws_bridge = None
+    from .lock_manager import LockManager
+    _lm = LockManager()
+    _lm.set_data_dir(config.data_dir)
+    if _lm.is_daemon_running():
+        log.info("CLI daemon running (lock held) — skipping WebSocket bridge (daemon owns port %d)", DEFAULT_PORT)
+    else:
+        ws_bridge = WebSocketBridge(rt, host="localhost", port=DEFAULT_PORT)
+        try:
+            await ws_bridge.start()
+            log.info("WebSocket bridge started on ws://localhost:%d", DEFAULT_PORT)
+        except OSError as exc:
+            log.warning("WebSocket bridge failed to start (port %d in use?): %s", DEFAULT_PORT, exc)
+            ws_bridge = None
 
     # Create MCP server and inject Runtime
     server, state = create_server()
