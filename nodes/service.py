@@ -72,6 +72,9 @@ class AutonetService:
         self._training_feed = None
         self._data_dir = data_dir  # ATN data dir (~/.atn), passed from AutonetBridge
 
+        # Blob store for uploading weight deltas
+        self._blob_store = None
+
     @property
     def state(self) -> ServiceState:
         return self._state
@@ -130,6 +133,9 @@ class AutonetService:
             # Initialize training data feed if ATN data dir is available
             if self._data_dir:
                 self._init_training_feed()
+
+            # Initialize blob store for weight delta uploads
+            self._init_blob_store()
 
             logger.info(
                 f"AutonetService initialized: "
@@ -234,14 +240,85 @@ class AutonetService:
                     f"loss={metrics.get('loss', 0):.4f}, "
                     f"batches={metrics.get('num_batches', 0)}"
                 )
+
+                # Upload delta to blob store and record on-chain
+                delta_cid = self._submit_training_delta(weight_delta, metrics)
+
                 # Update model state in P2P gossip so peers can surface stats
-                self._update_gossip_model_state(metrics)
+                self._update_gossip_model_state(metrics, delta_cid=delta_cid)
             return
 
         # Fallback: no node and no training feed
         logger.debug(f"Service cycle {self._cycles}")
 
-    def _update_gossip_model_state(self, metrics: Dict[str, Any]) -> None:
+    def _init_blob_store(self):
+        """Initialize the blob store for weight delta uploads."""
+        try:
+            from .common.blob_store import BlobStore
+
+            blob_dir = self.config.blob_store.data_dir if hasattr(self.config, "blob_store") else ""
+            if not blob_dir:
+                blob_dir = "~/.autonet/blobs"
+
+            peer_urls = []
+            if hasattr(self.config, "blob_store") and hasattr(self.config.blob_store, "peer_urls"):
+                peer_urls = self.config.blob_store.peer_urls or []
+
+            self._blob_store = BlobStore(data_dir=blob_dir, peer_urls=peer_urls)
+            logger.info("Blob store initialized at %s", blob_dir)
+
+        except Exception as e:
+            logger.warning("Failed to initialize blob store: %s", e)
+            self._blob_store = None
+
+    def _submit_training_delta(self, weight_delta: Dict[str, Any], metrics: Dict[str, Any]) -> Optional[str]:
+        """Upload weight delta to blob store and record training on RPB.
+
+        This bridges the autonomous training loop to the network:
+        1. Package delta + metrics into a model update
+        2. Upload to blob store (content-addressed)
+        3. Record the training contribution on RPB (mints future rewards)
+
+        Returns the blob store CID if upload succeeded, None otherwise.
+        """
+        # Step 1: Upload to blob store
+        delta_cid = None
+        if self._blob_store:
+            try:
+                update = {
+                    "weight_delta": {k: v.tolist() if hasattr(v, "tolist") else v
+                                     for k, v in weight_delta.items()},
+                    "metrics": metrics,
+                    "source": "autonomous",
+                }
+                delta_cid = self._blob_store.add_json(update)
+                if delta_cid:
+                    logger.info("Weight delta uploaded to blob store: %s", delta_cid[:16])
+            except Exception as e:
+                logger.warning("Failed to upload delta to blob store: %s", e)
+
+        # Step 2: Record training on-chain via RPB
+        governance = getattr(self, "_governance", None)
+        if governance and delta_cid:
+            try:
+                registry = governance.registry
+                contribution = metrics.get("num_batches", 1)
+                account = registry.blockchain.account
+                if account:
+                    result = registry.send("RPB", "recordTraining", account.address, contribution)
+                    if result.success:
+                        logger.info(
+                            "Training recorded on-chain: contribution=%d, delta=%s",
+                            contribution, delta_cid[:16],
+                        )
+                    else:
+                        logger.warning("On-chain recordTraining failed: %s", result.error)
+            except Exception as e:
+                logger.warning("Failed to record training on-chain: %s", e)
+
+        return delta_cid
+
+    def _update_gossip_model_state(self, metrics: Dict[str, Any], delta_cid: Optional[str] = None) -> None:
         """Push training metrics + on-chain state into P2P gossip.
 
         Called after a training cycle completes.  Updates this node's
@@ -274,7 +351,7 @@ class AutonetService:
             except Exception as e:
                 logger.debug("Failed to read on-chain model state: %s", e)
 
-        host.update_model_state(
+        kwargs = dict(
             model_version=on_chain.get("model_version", 0),
             model_hash=on_chain.get("model_hash", ""),
             current_epoch=on_chain.get("current_epoch", 0),
@@ -285,6 +362,9 @@ class AutonetService:
             architecture=metrics.get("architecture", ""),
             param_count=metrics.get("param_count", 0),
         )
+        if delta_cid:
+            kwargs["latest_delta_cid"] = delta_cid
+        host.update_model_state(**kwargs)
         logger.debug("Model state updated in P2P gossip")
 
     def _check_updates(self):

@@ -164,8 +164,11 @@ class AggregatorNode:
             logger.warning(f"[{self.node_id}] Governance heartbeat missed, halting work")
             return
 
-        # Step 2: Poll for new RewardsDistributed events
+        # Step 2: Poll for new verified updates (task-driven path)
         self._poll_rewards_distributed()
+
+        # Step 2b: Poll for autonomous training deltas
+        self._poll_autonomous_training()
 
         # Step 3: Aggregate based on configured level
         if self.aggregation_level == "guild":
@@ -254,6 +257,72 @@ class AggregatorNode:
         except Exception as e:
             logger.error(f"[{self.node_id}] Error polling events: {e}", exc_info=True)
             self.metrics.errors += 1
+
+    def _poll_autonomous_training(self):
+        """Poll for TrainingRecorded events from the RPB contract.
+
+        Autonomous training nodes upload deltas to blob store and record
+        contributions on-chain. The delta CID is discovered via P2P gossip
+        (each node advertises its latest_delta_cid in ModelState).
+
+        For each TrainingRecorded event, we look up the agent's delta CID
+        from peer gossip and collect it for aggregation.
+        """
+        try:
+            events = self.registry.get_new_events("RPB", "TrainingRecorded")
+            if not events:
+                return
+
+            logger.info(f"[{self.node_id}] Found {len(events)} TrainingRecorded events")
+
+            for event in events:
+                agent = event["args"]["agent"]
+                contribution = event["args"]["contribution"]
+
+                logger.info(
+                    f"[{self.node_id}] TrainingRecorded: agent={agent[:10]}..., "
+                    f"contribution={contribution}"
+                )
+
+                # Look up this agent's latest delta CID from peer gossip
+                delta_cid = self._find_delta_cid_for_agent(agent)
+                if delta_cid:
+                    self._collect_update(
+                        task_id=0,  # autonomous (no task)
+                        update_cid=delta_cid,
+                        solver=agent,
+                    )
+                else:
+                    logger.debug(
+                        f"[{self.node_id}] No delta CID found for agent {agent[:10]}... "
+                        "(peer may not be connected or gossip not yet received)"
+                    )
+
+        except Exception as e:
+            logger.debug(f"[{self.node_id}] Error polling TrainingRecorded: {e}")
+
+    def _find_delta_cid_for_agent(self, agent_address: str) -> Optional[str]:
+        """Find the latest delta CID for an agent from P2P peer gossip.
+
+        Each training node advertises its latest_delta_cid in its ModelState
+        via the capability gossip protocol. We scan known peers for a match.
+        """
+        p2p_host = getattr(self, "_p2p_host", None)
+        if not p2p_host:
+            return None
+
+        try:
+            for peer_id, capability in p2p_host.get_peer_capabilities().items():
+                model_state = capability.get("model_state", {})
+                delta_cid = model_state.get("latest_delta_cid", "")
+                if delta_cid:
+                    # In the current model, we collect any advertised delta.
+                    # Future: match peer's wallet address to agent_address.
+                    return delta_cid
+        except Exception as e:
+            logger.debug(f"[{self.node_id}] Error scanning peer capabilities: {e}")
+
+        return None
 
     def _get_solution_cid(self, task_id: int, solver: str) -> Optional[str]:
         """

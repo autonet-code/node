@@ -184,6 +184,8 @@ class ModelState:
     last_cosine_similarity: float = 0.0
     architecture: str = ""                                # "text_jepa", "vl_jepa", etc.
     param_count: int = 0                                  # total model parameters
+    # Latest weight delta (blob store CID, for aggregator discovery)
+    latest_delta_cid: str = ""
     # Aggregate (computed from peer gossip)
     known_contributors: int = 0                           # unique peers with cycles > 0
 
@@ -842,6 +844,7 @@ class AutonetHost:
         last_cosine_similarity: float = 0.0,
         architecture: str = "",
         param_count: int = 0,
+        latest_delta_cid: str = "",
     ):
         """Update this node's model state for the next capability advertisement.
 
@@ -862,6 +865,7 @@ class AutonetHost:
             last_cosine_similarity=last_cosine_similarity,
             architecture=architecture,
             param_count=param_count,
+            latest_delta_cid=latest_delta_cid,
             known_contributors=self.get_network_contributor_count(),
         )
         self._capability.model_state = asdict(state)

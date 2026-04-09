@@ -288,6 +288,16 @@ RPB_SPONSOR_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "agent", "type": "address"},
+            {"internalType": "uint256", "name": "contribution", "type": "uint256"},
+        ],
+        "name": "recordTraining",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
 ]
 
 # Write functions for investment/funding pipeline
@@ -313,7 +323,7 @@ RPB_INVEST_ABI = [
         "type": "function",
     },
     {
-        "inputs": [{"internalType": "address", "name": "token", "type": "address"}],
+        "inputs": [],
         "name": "claimTrainingReward",
         "outputs": [],
         "stateMutability": "nonpayable",
@@ -907,12 +917,11 @@ class OnChainService:
         token = w3.to_checksum_address(token_address)
         return contract.functions.fundTrainingPool(token, amount)._encode_transaction_data()
 
-    def build_claim_training_reward_call_data(self, token_address: str) -> str:
-        """Build ABI-encoded call data for claimTrainingReward(token)."""
+    def build_claim_training_reward_call_data(self) -> str:
+        """Build ABI-encoded call data for claimTrainingReward()."""
         w3 = self._get_web3()
         contract = self._get_rpb_invest(w3)
-        token = w3.to_checksum_address(token_address)
-        return contract.functions.claimTrainingReward(token)._encode_transaction_data()
+        return contract.functions.claimTrainingReward()._encode_transaction_data()
 
     def build_claim_dividends_call_data(self, token_address: str) -> str:
         """Build ABI-encoded call data for claimDividends(token)."""
@@ -1004,6 +1013,75 @@ class OnChainService:
     # ------------------------------------------------------------------
     # Sponsorship / inference pipeline
     # ------------------------------------------------------------------
+
+    async def record_training(
+        self,
+        agent: str,
+        contribution: int,
+        private_key: str,
+    ) -> dict[str, Any]:
+        """Record a training contribution on-chain via recordTraining.
+
+        This is an ``onlyOperator`` function on RPB, so ``private_key``
+        must belong to the DAO or an authorized operator.
+
+        Args:
+            agent: Address of the agent that contributed training work.
+            contribution: Number of training units to record.
+            private_key: Operator's hex private key for signing.
+
+        Returns:
+            dict with ``success``, ``tx_hash``, or ``error``.
+        """
+        try:
+            from web3 import Web3
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            contract = self._get_rpb_sponsor(w3)
+            account = Account.from_key(private_key)
+
+            nonce = w3.eth.get_transaction_count(account.address)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+
+            tx = contract.functions.recordTraining(
+                w3.to_checksum_address(agent),
+                contribution,
+            ).build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": 200_000,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": chain_id,
+            })
+
+            signed = account.sign_transaction(tx)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            if receipt.status == 1:
+                log.info(
+                    "Training recorded on-chain: agent=%s contribution=%d tx=%s",
+                    agent, contribution, tx_hash.hex(),
+                )
+                return {
+                    "success": True,
+                    "tx_hash": tx_hash.hex(),
+                    "agent": agent,
+                    "contribution": contribution,
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Transaction reverted",
+                    "tx_hash": tx_hash.hex(),
+                }
+
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to record training on-chain")
+            return {"success": False, "error": str(e)}
 
     async def record_inference(
         self,
