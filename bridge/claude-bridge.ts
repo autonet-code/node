@@ -46,6 +46,48 @@ function emitEvent(event: { type: string; [key: string]: unknown }): void {
   process.stderr.write(`${EVENT_PREFIX}${JSON.stringify(event)}\n`)
 }
 
+// -- Rate-limit snapshot --
+// The Claude Agent SDK emits SDKRateLimitEvent stream messages carrying the
+// subscription-quota data rendered by Claude Code's /usage command.  We keep
+// one entry per rateLimitType (five_hour, seven_day, seven_day_sonnet, etc.)
+// and forward each update to the Python side as @@EVENT@@ rate_limit.
+
+type RateLimitEntry = {
+  status: string
+  rateLimitType: string
+  utilization?: number
+  resetsAt?: number
+  overageStatus?: string
+  overageResetsAt?: number
+  overageDisabledReason?: string
+  isUsingOverage?: boolean
+  surpassedThreshold?: number
+  updatedAt: number
+}
+
+const rateLimitSnapshot: Record<string, RateLimitEntry> = {}
+
+function handleRateLimitEvent(msg: any): void {
+  const info = msg?.rate_limit_info
+  if (!info || typeof info !== "object") return
+  const key: string = info.rateLimitType || "unknown"
+  const entry: RateLimitEntry = {
+    status: info.status,
+    rateLimitType: key,
+    utilization: info.utilization,
+    resetsAt: info.resetsAt,
+    overageStatus: info.overageStatus,
+    overageResetsAt: info.overageResetsAt,
+    overageDisabledReason: info.overageDisabledReason,
+    isUsingOverage: info.isUsingOverage,
+    surpassedThreshold: info.surpassedThreshold,
+    updatedAt: Date.now(),
+  }
+  rateLimitSnapshot[key] = entry
+  emitEvent({ type: "rate_limit", ...entry })
+  log("rate_limit", { type: key, utilization: info.utilization, status: info.status })
+}
+
 // -- Global error handlers --
 
 process.on("unhandledRejection", (reason: unknown) => {
@@ -389,6 +431,11 @@ class SessionManager {
           }
         }
 
+        // Subscription-quota updates (Claude Max)
+        if (message.type === "rate_limit_event") {
+          handleRateLimitEvent(message)
+        }
+
         if (message.type === "assistant") {
           // Capture model from underlying API response
           if (!session.resolvedModel && (message as any).message?.model) {
@@ -524,6 +571,7 @@ interface OrchestrateRequest {
   tools: ATNToolDef[]
   max_turns?: number
   session_id?: string      // Resume this SDK session (loads history)
+  native_tools?: boolean   // If true, allow all native Claude tools (Bash, Read, Write, etc.)
 }
 
 interface DeleteRequest {
@@ -624,7 +672,8 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
     const atnServer = buildATNMcpServer(req.tools)
 
     // Build tool allow-list for auto-approval
-    const allowedTools = req.tools.map(t => `mcp__atn__${t.name}`)
+    // If native_tools is true, don't restrict — allow all tools including Bash, Read, Write, etc.
+    const allowedTools = req.native_tools ? undefined : req.tools.map(t => `mcp__atn__${t.name}`)
 
     // Use streaming input (async generator) — required for MCP tools.
     // Queue stays open so mid-turn user messages and interrupt can be injected.
@@ -661,8 +710,9 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
       settingSources: [],
     }
 
-    // Enable 1M context window for Sonnet models (reduces compaction frequency)
-    if (model && model.toLowerCase().includes("sonnet")) {
+    // Enable 1M context window for models that support it (Sonnet, Opus 4.7+).
+    const lowerModel = (model || "").toLowerCase()
+    if (lowerModel.includes("sonnet") || lowerModel.includes("opus-4-7")) {
       sdkOptions.betas = ["context-1m-2025-08-07"]
       log("request.orchestrate.beta", { betas: sdkOptions.betas })
     }
@@ -724,6 +774,11 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
           if (initModel && typeof initModel === "string") {
             resolvedModel = initModel
           }
+        }
+
+        // Subscription-quota updates (Claude Max)
+        if (message.type === "rate_limit_event") {
+          handleRateLimitEvent(message)
         }
 
         // Detect interrupt result

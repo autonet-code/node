@@ -14,6 +14,22 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _infer_provider_for_model(model: str) -> str | None:
+    """Infer the provider name from a model ID prefix.
+
+    Returns the provider slot best suited for the model, or None if unknown.
+    Prefers bridge providers (claude_max, codex_max) over API-key providers.
+    """
+    m = model.lower()
+    if m.startswith("claude-"):
+        return "claude_max"
+    if m.startswith("gpt-") or m.startswith("o3") or m.startswith("o4") or m.startswith("o1"):
+        return "codex_max"
+    if m.startswith("gemini-"):
+        return "gemini"
+    return None
+
+
 class OrchestratorSetup:
     """Setup and model switching for the orchestrator agent."""
 
@@ -94,13 +110,24 @@ class OrchestratorSetup:
         if old_defn.mode != AgentMode.COGNITIVE:
             raise ValueError(f"Agent '{agent_id}' is not a cognitive agent")
 
-        # Root agent is locked to Opus 4.6 on the bridge provider
+        # Root agent: restrict to tier-4 models on orchestrator-capable providers.
+        # The provider is inferred from the model's prefix via the tier table.
         if agent_id == ORCHESTRATOR_ID:
-            if model != "claude-opus-4-6":
+            from .provider_manager import get_model_tier
+            tier = get_model_tier(model)
+            if tier < 4:
                 raise ValueError(
-                    "Root agent is locked to claude-opus-4-6 through the Claude Max bridge"
+                    f"Root agent requires a top-tier model (got {model!r}, tier {tier}). "
+                    f"Pick an Opus/GPT-5/Gemini-Pro-class model."
                 )
-            return await self._set_orchestrator_model_impl(model, old_defn)
+            # Determine which provider this model belongs to so the config persists correctly.
+            new_provider = _infer_provider_for_model(model)
+            if new_provider is None:
+                raise ValueError(
+                    f"Could not determine provider for model {model!r}. "
+                    f"Supported: claude-*, gpt-*, o3, o4-*, gemini-*."
+                )
+            return await self._set_orchestrator_model_impl(model, old_defn, provider=new_provider)
 
         # Validate model against the agent's provider
         raw_provider = old_defn.provider or ""
@@ -137,13 +164,18 @@ class OrchestratorSetup:
         log.info("Agent '%s' model changed to '%s'", agent_id, model)
         return agent_id
 
-    async def _set_orchestrator_model_impl(self, model: str, old_defn: Any) -> str:
+    async def _set_orchestrator_model_impl(
+        self, model: str, old_defn: Any, *, provider: str | None = None,
+    ) -> str:
         """Orchestrator-specific model change (persists to config file)."""
         from ..orchestrator import ORCHESTRATOR_ID, create_orchestrator_agent
-        from ..config import save_orchestrator_model_to_config
+        from ..config import save_orchestrator_model_to_config, save_orchestrator_provider_to_config
 
         self._config.orchestrator.model = model
         save_orchestrator_model_to_config(model)
+        if provider is not None:
+            self._config.orchestrator.provider = provider
+            save_orchestrator_provider_to_config(provider)
 
         if ORCHESTRATOR_ID in self.registry._agents:
             await self.registry.unregister_agent(ORCHESTRATOR_ID, _force=True)

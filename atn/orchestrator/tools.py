@@ -94,7 +94,7 @@ _TOOLS: list[ToolDefinition] = [
                 "description": {"type": "string"},
                 "name": {"type": "string"},
                 "max_turns": {"type": "integer"},
-                "model": {"type": "string", "description": "Model override (e.g. 'claude-opus-4-6')."},
+                "model": {"type": "string", "description": "Model override (e.g. 'claude-opus-4-7', 'gpt-5.5')."},
                 "notify_parent": {
                     "type": "boolean",
                     "description": "If false, skip auto-notification to parent on completion. Default: true.",

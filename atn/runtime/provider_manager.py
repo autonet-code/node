@@ -43,12 +43,16 @@ TIER_LABELS: dict[int, str] = {
 # that matches wins.  Unknown models default to tier 2.
 _MODEL_TIERS: dict[str, int] = {
     # Anthropic
+    "claude-opus-4-7": 4,
+    "claude-sonnet-4-7": 4,
     "claude-opus-4": 4,
     "claude-sonnet-4": 3,
     "claude-haiku-4": 2,
     "claude-sonnet-3.5": 3,
     "claude-haiku-3.5": 2,
     # OpenAI
+    "gpt-5.5": 4,
+    "gpt-5": 4,
     "o3": 4,
     "o4-mini": 3,
     "o1": 3,
@@ -438,9 +442,16 @@ class ProviderManager:
 
         _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
             "claude_max": [
+                {"id": "claude-opus-4-7", "name": "Claude Opus 4.7"},
                 {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
                 {"id": "claude-opus-4-6", "name": "Claude Opus 4.6"},
                 {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
+            ],
+            "codex_max": [
+                {"id": "gpt-5.5", "name": "GPT-5.5"},
+                {"id": "gpt-4.1", "name": "GPT-4.1"},
+                {"id": "o3", "name": "o3"},
+                {"id": "o4-mini", "name": "o4-mini"},
             ],
         }
         models = _PROVIDER_MODELS.get(provider_name, [])

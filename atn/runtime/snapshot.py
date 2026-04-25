@@ -176,6 +176,7 @@ class SnapshotBuilder:
         registered_providers: set[str] = set()
         if isinstance(cognitive, CognitiveStepExecutor):
             registered_providers = set(cognitive._providers.keys())
+        claude_max_rate_limits = self._aggregate_claude_max_rate_limits()
         providers_summary = {}
         for pid, info in self.provider_manager._KNOWN_PROVIDERS.items():
             is_active = pid in registered_providers
@@ -185,13 +186,16 @@ class SnapshotBuilder:
                 configured = bool(self.provider_manager._resolve_api_key(pid))
             else:
                 configured = False
-            providers_summary[pid] = {
+            entry: dict = {
                 "name": info["name"],
                 "auth_type": info["auth_type"],
                 "configured": configured,
                 "active": is_active,
                 "orchestrator_capable": info.get("orchestrator_capable", False),
             }
+            if pid == "claude_max" and claude_max_rate_limits:
+                entry["rate_limits"] = claude_max_rate_limits
+            providers_summary[pid] = entry
         for pid in sorted(self.provider_manager._custom_providers):
             is_active = pid in registered_providers
             providers_summary[pid] = {
@@ -241,6 +245,26 @@ class SnapshotBuilder:
             "voice": voice_status,
             "autonet": self._autonet_ref.get_status() if self._autonet_ref else {},
         }
+
+    def _aggregate_claude_max_rate_limits(self) -> dict:
+        """Merge rate-limit snapshots across all active claude_max bridges.
+
+        Each BridgeProvider subprocess sees its own stream of rate_limit_event
+        messages.  They all observe the same underlying subscription, so we
+        pick the freshest entry per rateLimitType across all of them.
+        """
+        merged: dict[str, dict] = {}
+        for provider in self.provider_manager._active_providers.values():
+            if getattr(provider, "name", "") != "claude_max":
+                continue
+            snapshot = getattr(provider, "_rate_limits", None)
+            if not snapshot:
+                continue
+            for key, entry in snapshot.items():
+                existing = merged.get(key)
+                if existing is None or entry.get("updatedAt", 0) > existing.get("updatedAt", 0):
+                    merged[key] = dict(entry)
+        return merged
 
     def _delegates_snapshot(self) -> dict:
         tree = self.delegate_registry.get_tree()

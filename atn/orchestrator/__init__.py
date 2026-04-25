@@ -58,8 +58,8 @@ def create_orchestrator_agent(
 
     The orchestrator is a **cognitive-mode** agent — identical in structure
     to any child cognitive agent.  The differences are configuration-level:
-    full tool surface ("atn_full"), provider fallback chain, and the fleet
-    management system prompt.
+    progressive tool surface ("atn_progressive"), provider fallback chain,
+    and the fleet management system prompt.
 
     Args:
         config: Orchestrator config from ATNConfig (provider, model).
@@ -71,16 +71,15 @@ def create_orchestrator_agent(
     """
     config = config or OrchestratorConfig()
 
-    # Root agent is locked to the Claude Max bridge with Opus 4.6.
-    # Child agents on other providers are unaffected.
-    primary_provider = "claude_max"
-    model = "claude-opus-4-6"
+    # Primary provider/model come from config; defaults target Claude Max + Opus 4.7.
+    primary_provider = config.provider or "claude_max"
+    model = config.model or "claude-opus-4-7"
     # Provider fallback chain: primary first, then alternatives.
     # Providers that aren't configured are silently skipped at runtime.
     # Ollama is excluded — local models can't reliably handle 20+ tools,
     # multi-turn planning, and the complex reasoning the orchestrator needs.
     provider_chain = [primary_provider]
-    _FALLBACK_ORDER = ["claude_max", "anthropic", "gemini"]
+    _FALLBACK_ORDER = ["claude_max", "codex_max", "anthropic", "gemini"]
     for p in _FALLBACK_ORDER:
         if p not in provider_chain:
             provider_chain.append(p)

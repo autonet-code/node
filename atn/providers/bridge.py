@@ -94,6 +94,12 @@ class BridgeProvider(Provider):
         self._compaction_count: int = 0
         self._last_compaction_pre_tokens: int = 0
 
+        # Claude Max subscription-quota snapshot.  Keyed by rateLimitType
+        # (five_hour, seven_day, seven_day_sonnet, seven_day_opus, overage).
+        # Populated from SDKRateLimitEvent stream messages; surfaced via
+        # session_stats["rate_limits"].
+        self._rate_limits: dict[str, dict[str, Any]] = {}
+
     @property
     def name(self) -> str:
         return "claude_max"
@@ -318,6 +324,7 @@ class BridgeProvider(Provider):
         tool_executor: Callable[..., Any],
         on_chunk: Callable[..., Any] | None = None,
         session_id: str = "",
+        **kwargs,
     ) -> ProviderResponse:
         """Multi-turn orchestrator call through the bridge.
 
@@ -362,6 +369,7 @@ class BridgeProvider(Provider):
                 "model": effective_model,
                 "tools": tools,
                 "max_turns": max_turns,
+                "native_tools": kwargs.get("native_tools", False),
             }
             if session_id:
                 request["session_id"] = session_id
@@ -733,6 +741,7 @@ class BridgeProvider(Provider):
             "cumulative_cache_creation": self._cumulative_cache_creation,
             "context_used_pct": pct,
             "compaction_count": self._compaction_count,
+            "rate_limits": dict(self._rate_limits),
         }
 
     async def get_session_context(self) -> dict[str, Any]:
@@ -822,7 +831,15 @@ class BridgeProvider(Provider):
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
-        env = {**os.environ, "ENABLE_TOOL_SEARCH": "1"}
+        env = {
+            **os.environ,
+            "ENABLE_TOOL_SEARCH": "1",
+            # Extend prompt cache TTL from 5 min default to 1 hour (sliding
+            # window — refreshes on every cache hit).  Lets heartbeat agents
+            # with intervals < 1h keep their cached prefix warm across wakes,
+            # paying ~10% of input price instead of full price on rehydration.
+            "ENABLE_PROMPT_CACHING_1H": "1",
+        }
         # Clear CLAUDECODE to avoid nesting guard in the SDK
         env.pop("CLAUDECODE", None)
 
@@ -862,6 +879,17 @@ class BridgeProvider(Provider):
                 try:
                     event = json.loads(payload)
                     etype = event.get("type", "")
+                    if etype == "rate_limit":
+                        # Subscription-quota update — store directly and skip the queue.
+                        key = event.get("rateLimitType", "unknown")
+                        self._rate_limits[key] = {
+                            k: v for k, v in event.items() if k != "type"
+                        }
+                        log.info(
+                            "rate_limit %s: utilization=%s status=%s",
+                            key, event.get("utilization"), event.get("status"),
+                        )
+                        continue
                     if etype not in ("text_delta",):
                         log.info("bridge stderr event: type=%s", etype)
                     await self._event_queue.put(event)

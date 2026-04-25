@@ -34,6 +34,7 @@ from .base import (
     Usage,
 )
 from ..events import Event, EventBus, EventType
+from ..model_specs import context_window, max_output_tokens
 
 log = logging.getLogger(__name__)
 
@@ -83,8 +84,10 @@ class CodexBridgeProvider(Provider):
         self._session_id: str = ""
         self._cumulative_turns: int = 0
         self._total_cost_usd: float = 0.0
-        self._context_window: int = 200_000  # o4-mini default
-        self._max_output_tokens: int = 100_000
+        # Context window / output cap come from the model_specs table,
+        # keyed on the current model.  Updated whenever the model changes.
+        self._context_window: int = context_window(model)
+        self._max_output_tokens: int = max_output_tokens(model)
         self._cumulative_input_tokens: int = 0
         self._cumulative_output_tokens: int = 0
         self._cumulative_cache_read: int = 0
@@ -525,11 +528,25 @@ class CodexBridgeProvider(Provider):
             ctx = final_resp.get("context", {})
             if ctx:
                 self._cumulative_turns += ctx.get("num_turns", 0)
-                self._context_window = ctx.get("context_window", self._context_window)
-                self._max_output_tokens = ctx.get("max_output_tokens", self._max_output_tokens)
+            # Refresh context/output limits from the model_specs table based on
+            # the model the bridge actually resolved to (may differ from request).
+            resolved_model = final_resp.get("model") or effective_model
+            if resolved_model:
+                self._context_window = context_window(resolved_model)
+                self._max_output_tokens = max_output_tokens(resolved_model)
             if final_resp.get("session_id"):
                 self._session_id = final_resp["session_id"]
-            self._last_input_tokens = usage.input_tokens + usage.cache_read_tokens
+            # last_round_input_tokens is the most recent turn's *pre-normalisation*
+            # input count, i.e. the full context the model saw that turn — which
+            # equals current thread occupancy.  Falls back to summed-this-call
+            # counts when the bridge didn't emit it (single-turn create request).
+            last_round = usage_data.get("last_round_input_tokens")
+            if last_round is not None:
+                self._last_input_tokens = last_round
+            else:
+                self._last_input_tokens = (
+                    usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens
+                )
             self._cumulative_input_tokens += usage.input_tokens
             self._cumulative_output_tokens += usage.output_tokens
             self._cumulative_cache_read += usage.cache_read_tokens

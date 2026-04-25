@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.70",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.119",
     "@openai/codex-sdk": "^0.118.0",
+    "@zed-industries/agent-client-protocol": "^0.4.5",
     "zod": "^4.3.6"
   }
 }

@@ -171,11 +171,19 @@ class OpenAICompatibleProvider(Provider):
                     event = _json.loads(data_str)
                     response_model = event.get("model", response_model)
 
-                    # Usage (some providers include it in the final chunk)
+                    # Usage (some providers include it in the final chunk).
+                    # OpenAI shape: prompt_tokens is total, cached subset is
+                    # in prompt_tokens_details.cached_tokens.  Normalize to
+                    # ATN convention (input = fresh only, cache tracked
+                    # separately) to avoid double-counting in roll-ups.
                     u = event.get("usage")
                     if u:
-                        usage.input_tokens = u.get("prompt_tokens", usage.input_tokens)
+                        prompt_total = u.get("prompt_tokens", 0)
+                        details = u.get("prompt_tokens_details") or {}
+                        cached = details.get("cached_tokens", 0) or 0
+                        usage.input_tokens = max(0, prompt_total - cached)
                         usage.output_tokens = u.get("completion_tokens", usage.output_tokens)
+                        usage.cache_read_tokens = cached
 
                     for choice in event.get("choices", []):
                         delta = choice.get("delta", {})
@@ -440,16 +448,21 @@ def _parse_response(data: dict, model: str) -> ProviderResponse:
             input=args,
         ))
 
-    # Usage
+    # Usage — normalize OpenAI shape (prompt_tokens includes cached subset)
+    # to ATN convention (input_tokens excludes cache reads).
     usage_data = data.get("usage", {})
+    prompt_total = usage_data.get("prompt_tokens", 0)
+    details = usage_data.get("prompt_tokens_details") or {}
+    cached = details.get("cached_tokens", 0) or 0
 
     return ProviderResponse(
         text=text,
         tool_calls=tool_calls,
         stop_reason=stop_reason,
         usage=Usage(
-            input_tokens=usage_data.get("prompt_tokens", 0),
+            input_tokens=max(0, prompt_total - cached),
             output_tokens=usage_data.get("completion_tokens", 0),
+            cache_read_tokens=cached,
         ),
         model=data.get("model", model),
         raw=data,

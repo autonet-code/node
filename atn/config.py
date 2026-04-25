@@ -606,6 +606,34 @@ def save_orchestrator_model_to_config(
     log.info("Orchestrator model '%s' saved to %s", model, config_path)
 
 
+def save_orchestrator_provider_to_config(
+    provider: str,
+    config_path: Path | None = None,
+) -> None:
+    """Persist the orchestrator provider choice to config.yaml."""
+    config_path = config_path or (_DEFAULT_DIR / "config.yaml")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            log.warning("Failed to read config for orchestrator provider save: %s", config_path)
+            raw = {}
+
+    if "orchestrator" not in raw:
+        raw["orchestrator"] = {}
+
+    raw["orchestrator"]["provider"] = provider
+
+    config_path.write_text(
+        yaml.dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    log.info("Orchestrator provider '%s' saved to %s", provider, config_path)
+
+
 def remove_connector_from_config(
     connector_id: str,
     config_path: Path | None = None,

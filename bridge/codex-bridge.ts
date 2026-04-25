@@ -394,6 +394,12 @@ async function handleCreate(req: CreateRequest): Promise<void> {
     }
 
     const usage = turn.usage || { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0 }
+    // OpenAI/Codex: cached_input_tokens ⊆ input_tokens.  Normalize to the
+    // Anthropic convention used by the rest of ATN (input_tokens = fresh
+    // portion only, cache reads tracked separately) so roll-ups don't
+    // double-count the cached fraction.
+    const cachedTokens = usage.cached_input_tokens || 0
+    const freshInputTokens = Math.max(0, usage.input_tokens - cachedTokens)
 
     respond({
       id: req.id,
@@ -403,9 +409,9 @@ async function handleCreate(req: CreateRequest): Promise<void> {
       thinking: thinking.length > 0 ? thinking : undefined,
       stop_reason: "end_turn",
       usage: {
-        input_tokens: usage.input_tokens,
+        input_tokens: freshInputTokens,
         output_tokens: usage.output_tokens,
-        cache_read_input_tokens: usage.cached_input_tokens || 0,
+        cache_read_input_tokens: cachedTokens,
         cache_creation_input_tokens: 0,
       },
       model,
@@ -483,6 +489,7 @@ async function handleOrchestrate(req: OrchestrateRequest): Promise<void> {
     const thinking: string[] = []
     const allItems: ThreadItem[] = []
     let totalUsage: Usage = { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0 }
+    let lastRoundInputTokens = 0  // most recent turn's total input (for context occupancy)
     let turnCount = 0
     let sessionId = ""
 
@@ -507,6 +514,9 @@ async function handleOrchestrate(req: OrchestrateRequest): Promise<void> {
             totalUsage.input_tokens += event.usage.input_tokens
             totalUsage.output_tokens += event.usage.output_tokens
             totalUsage.cached_input_tokens += event.usage.cached_input_tokens
+            // Codex replays full thread context on every turn, so the
+            // last turn's input_tokens is current context occupancy.
+            lastRoundInputTokens = event.usage.input_tokens
           }
           break
 
@@ -598,6 +608,11 @@ async function handleOrchestrate(req: OrchestrateRequest): Promise<void> {
       })
     }
 
+    // Normalize OpenAI shape → ATN shape: cached_input_tokens is a subset
+    // of input_tokens.  Report fresh-only as input_tokens; cached separately.
+    const totalCachedTokens = totalUsage.cached_input_tokens
+    const totalFreshInputTokens = Math.max(0, totalUsage.input_tokens - totalCachedTokens)
+
     respond({
       id: req.id,
       ok: true,
@@ -606,10 +621,11 @@ async function handleOrchestrate(req: OrchestrateRequest): Promise<void> {
       thinking: thinking.length > 0 ? thinking : undefined,
       stop_reason: "end_turn",
       usage: {
-        input_tokens: totalUsage.input_tokens,
+        input_tokens: totalFreshInputTokens,
         output_tokens: totalUsage.output_tokens,
-        cache_read_input_tokens: totalUsage.cached_input_tokens,
+        cache_read_input_tokens: totalCachedTokens,
         cache_creation_input_tokens: 0,
+        last_round_input_tokens: lastRoundInputTokens,
       },
       context: {
         num_turns: turnCount,

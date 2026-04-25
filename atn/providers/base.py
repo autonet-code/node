@@ -84,8 +84,20 @@ class ToolCall:
 
 @dataclass
 class Usage:
-    """Token usage from a single request."""
-    input_tokens: int = 0
+    """Token usage from a single request.
+
+    Convention (Anthropic-style, enforced at every provider boundary):
+    the four counters are **disjoint** — a given token is counted in exactly
+    one bucket.  Total billable tokens = input + output + cache_read + cache_creation.
+
+    Providers that use OpenAI's shape (``prompt_tokens`` is the total and
+    ``prompt_tokens_details.cached_tokens`` is a subset of that total) MUST
+    normalize before constructing a ``Usage``: subtract cached from input,
+    then populate ``cache_read_tokens`` separately.  Failing to normalize
+    double-counts the cached portion in every downstream roll-up (budgets,
+    EIT, snapshots).
+    """
+    input_tokens: int = 0            # fresh input only, NOT including cache reads
     output_tokens: int = 0
     cache_read_tokens: int = 0       # tokens served from cache (cheap)
     cache_creation_tokens: int = 0   # tokens written to cache (one-time cost)
