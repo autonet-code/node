@@ -49,7 +49,7 @@ contract EvolutionProposal is ReentrancyGuard {
     struct Proposal {
         uint256 id;
         address proposer;
-        string contentCid;          // CID pointing to description + spec
+        string contentCid;          // sha256 hex of description+spec blob
         uint256 stakeAmount;        // ATN staked by proposer
         ProposalStatus status;
         uint256 createdAt;
@@ -66,7 +66,7 @@ contract EvolutionProposal is ReentrancyGuard {
         address evaluator;
         bool approve;               // True = recommend adoption
         uint256 confidence;         // 0-10000 bps
-        string reasonCid;           // CID pointing to structured recommendation
+        string reasonCid;           // sha256 hex of structured recommendation blob
         uint256 timestamp;
     }
 
@@ -208,7 +208,7 @@ contract EvolutionProposal is ReentrancyGuard {
 
     /**
      * @notice Submit an evolution proposal by staking ATN.
-     * @param contentCid CID pointing to the proposal description + spec
+     * @param contentCid sha256 hex of the proposal description+spec blob in the content-addressed store
      * @param stakeAmount ATN to stake (must be >= minStake)
      * @return proposalId The new proposal's ID
      */
@@ -274,7 +274,7 @@ contract EvolutionProposal is ReentrancyGuard {
      * @param proposalId The proposal to evaluate
      * @param approve Whether to recommend adoption
      * @param confidence Confidence level (0-10000 bps)
-     * @param reasonCid CID pointing to structured recommendation
+     * @param reasonCid sha256 hex of the structured recommendation blob
      */
     function submitEvaluation(
         uint256 proposalId,
@@ -545,9 +545,9 @@ contract EvolutionProposal is ReentrancyGuard {
     // =========================================================================
 
     /**
-     * @notice Update the RPB constitutional prompt CID in Registry.
+     * @notice Update the RPB constitutional prompt hash in Registry.
      * @dev Timelock-protected. Higher quorum enforced at DAO level.
-     * @param promptCid New prompt CID
+     * @param promptCid sha256 hex of the new prompt blob
      */
     function updateRPBPrompt(string calldata promptCid) external onlyTimelock {
         if (bytes(promptCid).length == 0) revert InvalidProposal();
@@ -568,7 +568,9 @@ contract EvolutionProposal is ReentrancyGuard {
     }
 
     /**
-     * @notice Get the current RPB prompt CID from Registry.
+     * @notice Get the current RPB prompt hash (sha256 hex) from Registry.
+     * @dev Function name kept for ABI stability; the returned string is a
+     *      sha256 hex digest, not an IPFS CID.
      */
     function getCurrentPromptCid() external view returns (string memory) {
         return Registry(registryAddress).getRegistryValue("rpb.prompt.current");

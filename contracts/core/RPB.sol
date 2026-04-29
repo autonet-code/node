@@ -143,6 +143,9 @@ contract RPB is ReentrancyGuard, ERC20, ERC20Permit, ERC20Votes, ERC20Burnable {
     string public constitution;
 
     // --- Inference pricing ---
+    // sha256 hex of the model weights blob in the content-addressed store
+    // (libp2p `/autonet/blob/1.0.0`, no IPFS dependency). Field name kept
+    // for ABI stability.
     string public modelWeightsCid;
     uint256 public atnPricePerInference;
     DiscountTier[] public discountTiers;

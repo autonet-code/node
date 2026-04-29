@@ -220,9 +220,13 @@ class BlobStore:
 
     # ============ Utility ============
 
-    def compute_cid(self, data: bytes) -> str:
-        """Compute content hash without storing. Kept for API compatibility."""
+    def compute_hash(self, data: bytes) -> str:
+        """Compute sha256 hex digest without storing."""
         return hashlib.sha256(data).hexdigest()
+
+    # Deprecated alias — the original name implied IPFS CIDs but the
+    # blob store has only ever produced sha256 hex digests over libp2p.
+    compute_cid = compute_hash
 
     def has(self, content_hash: str) -> bool:
         """Check if a blob exists locally."""
