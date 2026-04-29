@@ -27,6 +27,8 @@ def _infer_provider_for_model(model: str) -> str | None:
         return "codex_max"
     if m.startswith("gemini-"):
         return "gemini"
+    if m.startswith("deepseek"):
+        return "deepseek"
     return None
 
 

@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -124,6 +125,12 @@ def _print_status(runtime: Runtime) -> None:
         console.print("[dim]No active executions.[/]")
 
 
+# Module-level flag set by the `restart` command so the outer driver knows
+# to re-exec the same Python process after cleanup completes (picks up
+# code changes). Plain `quit` leaves this False and the process exits.
+_restart_requested = False
+
+
 def _print_help() -> None:
     console.print(
         "\n[bold]Commands:[/]\n"
@@ -140,6 +147,8 @@ def _print_help() -> None:
         "  [cyan]logs[/]                Show on-disk execution log summary\n"
         "  [cyan]clear[/] <id>          Clear execution history for an agent\n"
         "  [cyan]clearall[/]            Clear all execution history\n"
+        "  [cyan]usage[/]               Show subscription utilization (Claude Max /usage equivalent)\n"
+        "  [cyan]restart[/]             Stop and re-launch the daemon (picks up code changes)\n"
         "  [cyan]help[/]                Show this message\n"
         "  [cyan]quit[/] / [cyan]q[/]            Shutdown\n"
     )
@@ -155,6 +164,12 @@ async def _handle_command(line: str, runtime: Runtime) -> bool:
     args = parts[1:]
 
     if cmd in ("quit", "q", "exit"):
+        return False
+
+    elif cmd == "restart":
+        global _restart_requested
+        _restart_requested = True
+        console.print("  [yellow]Restart requested — shutting down to re-exec...[/]")
         return False
 
     elif cmd == "help":
@@ -252,6 +267,32 @@ async def _handle_command(line: str, runtime: Runtime) -> bool:
             console.print(f"  [green]Cleared history for {args[0]} (memory + disk)[/]")
         else:
             console.print(f"  [green]Cleared in-memory history for {args[0]}[/]")
+
+    elif cmd == "usage":
+        # Print subscription utilization captured from bridge providers'
+        # SDKRateLimitEvent stream — Anthropic's view of "% of plan used,"
+        # i.e. the same data Claude Code's /usage shows.
+        any_data = False
+        for pid, prov in runtime.providers._active_providers.items():
+            rate_limits = getattr(prov, "_rate_limits", None)
+            if not rate_limits:
+                continue
+            any_data = True
+            console.print(f"\n  [bold cyan]{pid}[/]")
+            for key, entry in rate_limits.items():
+                util = entry.get("utilization")
+                util_pct = f"{util * 100:.1f}%" if isinstance(util, (int, float)) else "?"
+                status = entry.get("status", "?")
+                resets = entry.get("resetsAt", "")
+                console.print(
+                    f"    {key:<20} util={util_pct:<8} status={status}"
+                    + (f"  resets={resets}" if resets else "")
+                )
+        if not any_data:
+            console.print(
+                "  [dim]No rate-limit data yet. Run at least one turn on a "
+                "subscription provider (claude_max, codex_max) first.[/]"
+            )
 
     elif cmd == "clearall":
         n = runtime.execution_log.clear_all()
@@ -460,3 +501,20 @@ def main() -> None:
         asyncio.run(run_cli())
     except KeyboardInterrupt:
         pass
+    if _restart_requested:
+        console.print("[bold green]Re-launching daemon...[/]")
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+    # Force-exit to avoid hanging on lingering non-daemon threads or asyncio
+    # transports during interpreter shutdown (numpy/scipy Fortran runtime,
+    # libp2p protobuf threads, etc.). All persistent state has already been
+    # flushed by runtime.stop() / lock.release_lock().
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(0)

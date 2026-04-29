@@ -303,6 +303,7 @@ class CodexBridgeProvider(Provider):
         tool_executor: Callable[..., Any],
         on_chunk: Callable[..., Any] | None = None,
         session_id: str = "",
+        **kwargs,
     ) -> ProviderResponse:
         """Multi-turn orchestrator call through the Codex bridge.
 

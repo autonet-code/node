@@ -543,8 +543,8 @@ class Runtime:
     async def remove_provider(self, provider_id: str) -> dict[str, str]:
         return await self.providers.remove_provider(provider_id)
 
-    async def add_custom_provider(self, provider_id: str, name: str, base_url: str, api_key: str = "", default_model: str = "") -> dict[str, Any]:
-        return await self.providers.add_custom_provider(provider_id, name, base_url, api_key, default_model)
+    async def add_custom_provider(self, provider_id: str, name: str, base_url: str, api_key: str = "", default_model: str = "", models: list[Any] | None = None) -> dict[str, Any]:
+        return await self.providers.add_custom_provider(provider_id, name, base_url, api_key, default_model, models)
 
     async def remove_custom_provider(self, provider_id: str) -> dict[str, str]:
         return await self.providers.remove_custom_provider(provider_id)

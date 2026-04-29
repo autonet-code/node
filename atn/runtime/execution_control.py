@@ -69,8 +69,31 @@ class ExecutionControl:
         for cancel in self.engine._cancels.values():
             cancel.set()
         tasks = list(self.engine._tasks.values())
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if not tasks:
+            return 0
+        # Bound the wait so a misbehaving task can't block shutdown forever.
+        # Cooperative interrupts get a short window; tasks still running are
+        # cancelled hard and we fall through to subprocess teardown.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=5,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "kill_all: %d task(s) did not exit within 5s — cancelling hard",
+                sum(1 for t in tasks if not t.done()),
+            )
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=2,
+                )
+            except asyncio.TimeoutError:
+                log.warning("kill_all: tasks still alive after hard cancel — abandoning")
         return len(tasks)
 
     # ------------------------------------------------------------------

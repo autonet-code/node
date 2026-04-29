@@ -18,7 +18,7 @@ import type { Query, SDKMessage, SDKUserMessage, Options } from "@anthropic-ai/c
 import { z } from "zod"
 import { randomUUID } from "crypto"
 import { execSync } from "child_process"
-import { existsSync } from "fs"
+import { existsSync, readFileSync } from "fs"
 import { fileURLToPath } from "url"
 import { join, dirname } from "path"
 import { createInterface } from "readline"
@@ -105,18 +105,39 @@ process.on("uncaughtException", (err: Error) => {
 // -- Claude executable resolution --
 
 function resolveClaudeExecutable(): string {
-  // 1. SDK's bundled cli.js
+  // 1. SDK's bundled cli.js (legacy SDK <0.2.119 bundled the CLI directly).
   try {
     const sdkPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
     const sdkCliJs = join(dirname(sdkPath), "cli.js")
     if (existsSync(sdkCliJs)) return sdkCliJs
   } catch {}
 
-  // 2. System-installed claude binary
+  // 2. The standalone @anthropic-ai/claude-code package, native binary.
+  //    Resolve via Node's module resolver and look up its bin entry. This
+  //    is more reliable than `where claude` on Windows, where the shell
+  //    shim has no extension and Node cannot spawn it directly.
+  try {
+    const ccPkgJsonPath = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-code/package.json"))
+    const ccDir = dirname(ccPkgJsonPath)
+    const pkgJson = JSON.parse(readFileSync(ccPkgJsonPath, "utf-8"))
+    const binEntry = typeof pkgJson.bin === "string" ? pkgJson.bin : pkgJson.bin?.claude
+    if (binEntry) {
+      const binPath = join(ccDir, binEntry)
+      if (existsSync(binPath)) return binPath
+    }
+  } catch {}
+
+  // 3. System-installed claude on PATH. On Windows prefer the .cmd shim
+  //    over the bash shim so Node's child_process knows how to spawn it.
   try {
     const cmd = process.platform === "win32" ? "where claude" : "which claude"
-    const claudePath = execSync(cmd, { encoding: "utf-8" }).trim()
-    if (claudePath && existsSync(claudePath.split("\n")[0])) return claudePath.split("\n")[0]
+    const out = execSync(cmd, { encoding: "utf-8" }).trim()
+    const candidates = out.split("\n").map(s => s.trim()).filter(Boolean)
+    if (process.platform === "win32") {
+      const cmdShim = candidates.find(p => p.toLowerCase().endsWith(".cmd"))
+      if (cmdShim && existsSync(cmdShim)) return cmdShim
+    }
+    if (candidates[0] && existsSync(candidates[0])) return candidates[0]
   } catch {}
 
   throw new Error("Could not find Claude Code executable. Install via: npm install -g @anthropic-ai/claude-code")

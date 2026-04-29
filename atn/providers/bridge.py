@@ -691,6 +691,94 @@ class BridgeProvider(Provider):
         except (BrokenPipeError, ConnectionResetError, OSError):
             log.warning("Failed to send interrupt (bridge stdin broken)")
 
+    async def refresh_usage(self) -> dict[str, Any]:
+        """Fetch subscription-window utilization for Claude Max.
+
+        Anthropic's `/v1/messages` endpoint returns `anthropic-ratelimit-unified-*`
+        response headers on every successful call. These headers carry the same
+        five-hour / seven-day utilization that Claude Code's `/usage` slash
+        command displays. The SDK's stream-event API does NOT emit these
+        consistently, so we make a minimal API call ourselves and read the
+        headers directly.
+
+        Stores the parsed result on ``self._rate_limits`` and returns it.
+        Reads the OAuth token from ``~/.claude/.credentials.json``.
+        """
+        import time
+        from pathlib import Path
+        try:
+            import httpx
+        except ImportError:
+            log.warning("httpx not installed — cannot refresh usage")
+            return dict(self._rate_limits)
+
+        creds_path = Path.home() / ".claude" / ".credentials.json"
+        if not creds_path.exists():
+            log.warning("Claude credentials file not found at %s", creds_path)
+            return dict(self._rate_limits)
+        try:
+            creds = json.loads(creds_path.read_text(encoding="utf-8"))
+            token = creds.get("claudeAiOauth", {}).get("accessToken", "")
+        except Exception as exc:
+            log.warning("Failed to read Claude credentials: %s", exc)
+            return dict(self._rate_limits)
+        if not token:
+            log.warning("No OAuth token found in credentials")
+            return dict(self._rate_limits)
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "anthropic-version": "2023-06-01",
+                        "anthropic-beta": "oauth-2025-04-20",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-haiku-4-5",
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                )
+        except Exception as exc:
+            log.warning("Usage probe request failed: %s", exc)
+            return dict(self._rate_limits)
+
+        h = resp.headers
+        # Parse the anthropic-ratelimit-unified-* headers into our existing
+        # _rate_limits shape (keyed by rateLimitType).
+        def _parse_window(prefix: str, key: str) -> dict[str, Any] | None:
+            status = h.get(f"anthropic-ratelimit-unified-{prefix}-status")
+            util = h.get(f"anthropic-ratelimit-unified-{prefix}-utilization")
+            reset = h.get(f"anthropic-ratelimit-unified-{prefix}-reset")
+            if status is None and util is None and reset is None:
+                return None
+            return {
+                "status": status or "unknown",
+                "rateLimitType": key,
+                "utilization": float(util) if util is not None else None,
+                "resetsAt": int(reset) if reset is not None else None,
+                "updatedAt": int(time.time() * 1000),
+            }
+
+        windows = {
+            "five_hour": _parse_window("5h", "five_hour"),
+            "seven_day": _parse_window("7d", "seven_day"),
+            "overage": _parse_window("overage", "overage"),
+        }
+        for key, entry in windows.items():
+            if entry is not None:
+                self._rate_limits[key] = entry
+        log.info(
+            "refresh_usage: 5h=%s, 7d=%s, overage=%s",
+            windows.get("five_hour", {}).get("utilization") if windows.get("five_hour") else "?",
+            windows.get("seven_day", {}).get("utilization") if windows.get("seven_day") else "?",
+            windows.get("overage", {}).get("utilization") if windows.get("overage") else "?",
+        )
+        return dict(self._rate_limits)
+
     async def send_user_message(self, content: str) -> None:
         """Inject a user message into the active orchestration session.
 

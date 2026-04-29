@@ -532,6 +532,12 @@ class ExecutionEngine:
             }
             if session_id:
                 send_kwargs["session_id"] = session_id
+            # Long-horizon safeguards — providers that support them honour these;
+            # bridge providers ignore unknown kwargs in their override.
+            if defn.per_turn_input_max is not None:
+                send_kwargs["per_turn_input_max"] = defn.per_turn_input_max
+            if defn.repeat_call_limit is not None:
+                send_kwargs["repeat_call_limit"] = defn.repeat_call_limit
 
             response = await sub_provider.send_orchestrate(**send_kwargs)
 

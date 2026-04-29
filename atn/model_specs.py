@@ -33,6 +33,13 @@ _CONTEXT_WINDOWS: dict[str, int] = {
     "o4-mini":              200_000,
     "o1":                   200_000,
 
+    # DeepSeek V4 — expanded from 128K (V3) to 1M default
+    "deepseek-reasoner":  1_000_000,
+    "deepseek-chat":      1_000_000,
+    "deepseek-v4-pro":    1_000_000,
+    "deepseek-v4-flash":  1_000_000,
+    "deepseek":             128_000,
+
     # Google Gemini
     "gemini-3-pro":       1_000_000,
     "gemini-3-flash":     1_000_000,
@@ -59,6 +66,9 @@ _MAX_OUTPUT_TOKENS: dict[str, int] = {
     "o3":                100_000,
     "o4-mini":            65_536,
     "o1":                 32_768,
+
+    "deepseek-reasoner":  64_000,
+    "deepseek-chat":       8_192,
 
     "gemini-3-pro":       64_000,
     "gemini-3-flash":     65_536,

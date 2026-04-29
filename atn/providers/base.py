@@ -238,6 +238,9 @@ class Provider(ABC):
         tool_executor: Any = None,
         on_chunk: Any = None,
         session_id: str = "",
+        per_turn_input_max: int | None = None,
+        repeat_call_limit: int | None = None,
+        **_unused: Any,
     ) -> ProviderResponse:
         """Multi-turn orchestration with tool relay.
 
@@ -285,11 +288,46 @@ class Provider(ABC):
         messages: list[dict[str, Any]] = [{"role": "user", "content": message}]
         cumulative_usage = Usage()
 
+        # Long-horizon safeguards (None = use defaults defined here).
+        # Estimate input tokens for the next turn as chars/4 across all messages
+        # — rough but sufficient for runaway prevention. Refuse when the
+        # estimate exceeds per_turn_input_max.
+        effective_per_turn_max = per_turn_input_max if per_turn_input_max is not None else 200_000
+        effective_repeat_limit = repeat_call_limit if repeat_call_limit is not None else 5
+        recent_call_signatures: list[str] = []  # last N tool-call fingerprints
+
         for turn in range(max_turns):
             if self._interrupted:
                 return ProviderResponse(
                     text="",
                     stop_reason="interrupted",
+                    usage=cumulative_usage,
+                    model=model or self._active_model,
+                )
+
+            # Pre-flight per-turn input ceiling — refuse a turn whose estimated
+            # input would exceed the configured cap. Estimate via chars/4 across
+            # the message stack plus the system prompt.
+            estimated_input = (len(system) + sum(
+                len(m["content"]) if isinstance(m.get("content"), str)
+                else len(json.dumps(m.get("content"), default=str))
+                for m in messages
+            )) // 4
+            if effective_per_turn_max > 0 and estimated_input > effective_per_turn_max:
+                log.warning(
+                    "Per-turn input ceiling hit (estimated %d > %d) — aborting cognitive loop "
+                    "for agent %s. Raise AgentDefinition.per_turn_input_max if intended.",
+                    estimated_input, effective_per_turn_max, self.source_agent_id or "?",
+                )
+                cumulative_usage = cumulative_usage  # no-op for clarity
+                return ProviderResponse(
+                    text=(
+                        f"Aborted: estimated input {estimated_input} tokens exceeds "
+                        f"per_turn_input_max ({effective_per_turn_max}). Increase the "
+                        f"limit on this agent if it legitimately needs to process "
+                        f"larger contexts."
+                    ),
+                    stop_reason="per_turn_input_exceeded",
                     usage=cumulative_usage,
                     model=model or self._active_model,
                 )
@@ -372,6 +410,37 @@ class Provider(ABC):
                     "input": tc.input,
                 })
             messages.append({"role": "assistant", "content": assistant_content})
+
+            # Loop-detection: track tool-call fingerprints across turns. If
+            # the last K tool calls (across this and prior turns) are byte-for-byte
+            # identical, the agent is stuck — abort with a structured error.
+            if effective_repeat_limit > 0 and response.tool_calls:
+                for tc in response.tool_calls:
+                    sig = tc.name + ":" + json.dumps(tc.input, sort_keys=True, default=str)
+                    recent_call_signatures.append(sig)
+                # Trim to the window we care about
+                if len(recent_call_signatures) > effective_repeat_limit:
+                    recent_call_signatures = recent_call_signatures[-effective_repeat_limit:]
+                if (
+                    len(recent_call_signatures) >= effective_repeat_limit
+                    and len(set(recent_call_signatures)) == 1
+                ):
+                    log.warning(
+                        "Repeat-call limit hit (%d consecutive identical tool calls) — "
+                        "aborting cognitive loop for agent %s. Last call: %s",
+                        effective_repeat_limit, self.source_agent_id or "?",
+                        recent_call_signatures[-1][:200],
+                    )
+                    return ProviderResponse(
+                        text=(
+                            f"Aborted: {effective_repeat_limit} consecutive identical tool "
+                            f"calls detected (likely stuck in a loop). Last call: "
+                            f"{recent_call_signatures[-1][:200]}"
+                        ),
+                        stop_reason="repeat_call_limit",
+                        usage=cumulative_usage,
+                        model=model or self._active_model,
+                    )
 
             tool_result_content: list[dict[str, Any]] = []
             for tc in response.tool_calls:

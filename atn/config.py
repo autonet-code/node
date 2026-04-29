@@ -49,6 +49,10 @@ class ProviderConfig:
     api_key: str = ""
     default_model: str = ""
     base_url: str = ""
+    # Custom-provider model list — surfaces in the UI's model picker and
+    # cross-provider listings.  Each entry is either a string ID or a dict
+    # {id, name, capability_tier?, context_window?}.
+    models: list[Any] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -453,12 +457,15 @@ def load_config(path: Path | None = None) -> ATNConfig:
         if not isinstance(praw, dict):
             continue
         resolved = _resolve_env(praw)
-        known_keys = {"api_key", "default_model", "base_url"}
+        known_keys = {"api_key", "default_model", "base_url", "models"}
+        models_raw = resolved.get("models", [])
+        models = models_raw if isinstance(models_raw, list) else []
         config.providers[name] = ProviderConfig(
             name=name,
             api_key=resolved.get("api_key", ""),
             default_model=resolved.get("default_model", ""),
             base_url=resolved.get("base_url", ""),
+            models=models,
             extra={k: v for k, v in resolved.items() if k not in known_keys},
         )
 

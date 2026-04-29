@@ -30,6 +30,15 @@ from ..store import ExecutionLog, OutputStore
 log = logging.getLogger(__name__)
 
 
+# Default safeguards for autonomous long-horizon work. Permissive enough
+# that normal use never hits them; tight enough that runaway shapes
+# (one parent spawning hundreds of children, or unbounded recursive
+# delegation) are caught before they exhaust resources. Override per-agent
+# via AgentDefinition.max_children / max_depth_below.
+DEFAULT_MAX_CHILDREN_PER_PARENT = 20
+DEFAULT_MAX_DEPTH_BELOW_ROOT = 6
+
+
 class AgentRegistry:
     """Agent registration, activation, hierarchy, and idle tracking."""
 
@@ -120,7 +129,83 @@ class AgentRegistry:
     # Registration
     # ------------------------------------------------------------------
 
+    def _depth_below_root(self, parent_id: str | None) -> int:
+        """Compute how many ancestors away from root a *new child* of parent_id
+        would be. Root agents return 0 (the new child would be at depth 1).
+        """
+        if parent_id is None:
+            return 0
+        depth = 1
+        current = self._resolve_parent_agent_id(parent_id)
+        while current and current in self._agents:
+            current_defn = self._agents[current]
+            if current_defn.parent_id is None:
+                return depth
+            depth += 1
+            current = self._resolve_parent_agent_id(current_defn.parent_id)
+            if depth > DEFAULT_MAX_DEPTH_BELOW_ROOT * 4:
+                # Pathological — broken parent chain. Bail.
+                log.warning("Parent chain depth runaway from %s; assuming detached", parent_id)
+                return depth
+        return depth
+
+    def _enforce_spawn_limits(self, defn: AgentDefinition) -> None:
+        """Check spawn-count and depth limits before registering a new agent.
+        Raises ValueError if either limit is exceeded. Skipped for re-registration
+        (agent already in the registry — model swaps, reload from disk, etc.).
+        """
+        if defn.id in self._agents:
+            return
+        parent_id = defn.parent_id
+        if parent_id is None:
+            return  # root agent or user-created top-level — no spawn-limit check
+        canonical_parent = self._resolve_parent_agent_id(parent_id)
+        if canonical_parent not in self._agents:
+            return  # disconnected parent (e.g. parent removed) — let it through
+        parent_defn = self._agents[canonical_parent]
+        max_children = getattr(parent_defn, "max_children", None) or DEFAULT_MAX_CHILDREN_PER_PARENT
+        existing_children = sum(
+            1 for d in self._agents.values()
+            if d.parent_id == parent_id or d.parent_id == canonical_parent
+        )
+        if existing_children >= max_children:
+            raise ValueError(
+                f"Spawn limit exceeded: parent '{canonical_parent}' already has "
+                f"{existing_children} children (limit {max_children}). "
+                f"Raise AgentDefinition.max_children on the parent if this is intentional."
+            )
+        # Depth check: walk the chain to root, take the strictest max_depth_below
+        # set anywhere along the way (root's setting governs the subtree, but a
+        # tighter cap on an intermediate ancestor still wins). The depth checked
+        # is "how deep would the new child be relative to *that* ancestor."
+        depth_to_root = self._depth_below_root(parent_id)
+        cursor = canonical_parent
+        depth_above_cursor = 0  # parent is depth 0 above itself
+        while cursor and cursor in self._agents:
+            cursor_defn = self._agents[cursor]
+            cap = getattr(cursor_defn, "max_depth_below", None)
+            if cap:
+                # New child is `depth_above_cursor + 1` below this ancestor
+                if depth_above_cursor + 1 > cap:
+                    raise ValueError(
+                        f"Depth limit exceeded: registering '{defn.id}' would place it "
+                        f"{depth_above_cursor + 1} levels below '{cursor}' (limit {cap}). "
+                        f"Raise AgentDefinition.max_depth_below on '{cursor}' if intentional."
+                    )
+            if cursor_defn.parent_id is None:
+                break
+            cursor = self._resolve_parent_agent_id(cursor_defn.parent_id)
+            depth_above_cursor += 1
+        # Default cap from root if no explicit override exists upstream.
+        if depth_to_root > DEFAULT_MAX_DEPTH_BELOW_ROOT:
+            raise ValueError(
+                f"Depth limit exceeded: registering '{defn.id}' would make it depth "
+                f"{depth_to_root} below root (default limit {DEFAULT_MAX_DEPTH_BELOW_ROOT}). "
+                f"Set AgentDefinition.max_depth_below on an ancestor if this is intentional."
+            )
+
     async def register_agent(self, defn: AgentDefinition) -> str:
+        self._enforce_spawn_limits(defn)
         self._agents[defn.id] = defn
         self._status[defn.id] = AgentStatus.REGISTERED
         self._running_count[defn.id] = 0

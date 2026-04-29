@@ -61,6 +61,13 @@ _MODEL_TIERS: dict[str, int] = {
     "gpt-4-turbo": 3,
     "gpt-4": 3,
     "gpt-3.5": 2,
+    # DeepSeek
+    "deepseek-reasoner": 4,
+    "deepseek-v4-pro": 4,
+    "deepseek-chat": 3,
+    "deepseek-v4-flash": 3,
+    "deepseek-coder": 3,
+    "deepseek": 3,
     # Google
     "gemini-3-pro": 4,
     "gemini-3-flash": 3,
@@ -73,6 +80,50 @@ _MODEL_TIERS: dict[str, int] = {
 }
 
 _DEFAULT_TIER = 2
+
+
+# Curated per-provider model lists.  Keys must match the provider IDs in
+# ProviderManager._KNOWN_PROVIDERS.  Each entry is the canonical model ID
+# the provider expects in API requests, plus a human-readable name.  Tier
+# and context window are looked up from _MODEL_TIERS and model_specs.
+_PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
+    "claude_max": [
+        {"id": "claude-opus-4-7",   "name": "Claude Opus 4.7"},
+        {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
+        {"id": "claude-opus-4-6",   "name": "Claude Opus 4.6"},
+        {"id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5"},
+    ],
+    "codex_max": [
+        {"id": "gpt-5.5",  "name": "GPT-5.5"},
+        {"id": "gpt-4.1",  "name": "GPT-4.1"},
+        {"id": "o3",       "name": "o3"},
+        {"id": "o4-mini",  "name": "o4-mini"},
+    ],
+    "anthropic": [
+        {"id": "claude-opus-4-7",   "name": "Claude Opus 4.7"},
+        {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
+        {"id": "claude-opus-4-6",   "name": "Claude Opus 4.6"},
+        {"id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5"},
+    ],
+    "openai": [
+        {"id": "gpt-5.5",     "name": "GPT-5.5"},
+        {"id": "gpt-5",       "name": "GPT-5"},
+        {"id": "gpt-4.1",     "name": "GPT-4.1"},
+        {"id": "gpt-4o",      "name": "GPT-4o"},
+        {"id": "o3",          "name": "o3"},
+        {"id": "o4-mini",     "name": "o4-mini"},
+    ],
+    "gemini": [
+        {"id": "gemini-3-pro",     "name": "Gemini 3 Pro"},
+        {"id": "gemini-3-flash",   "name": "Gemini 3 Flash"},
+        {"id": "gemini-2.5-pro",   "name": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash"},
+    ],
+    "deepseek": [
+        {"id": "deepseek-reasoner", "name": "DeepSeek V4-Pro (Reasoner)"},
+        {"id": "deepseek-chat",     "name": "DeepSeek V4-Flash"},
+    ],
+}
 
 
 def get_model_tier(model_id: str) -> int:
@@ -133,6 +184,12 @@ class ProviderManager:
             "auth_type": "api_key",
             "orchestrator_capable": True,
         },
+        "deepseek": {
+            "name": "DeepSeek",
+            "description": "DeepSeek V4 models via DeepSeek API (requires API key)",
+            "auth_type": "api_key",
+            "orchestrator_capable": True,
+        },
         "ollama": {
             "name": "Ollama (Local)",
             "description": "Local models via Ollama — no API key needed",
@@ -151,7 +208,11 @@ class ProviderManager:
     _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
         "gemini": {
             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-            "default_model": "gemini-2.0-flash",
+            "default_model": "gemini-2.5-flash",
+        },
+        "deepseek": {
+            "base_url": "https://api.deepseek.com/v1",
+            "default_model": "deepseek-chat",
         },
         "ollama": {
             "base_url": "http://localhost:11434",
@@ -243,6 +304,17 @@ class ProviderManager:
             return OpenAICompatibleProvider(
                 name=f"openai-{agent_id}",
                 base_url="https://api.openai.com/v1",
+                api_key=api_key,
+                default_model=model,
+            )
+        if provider_name == "deepseek":
+            api_key = self._resolve_api_key("deepseek")
+            if not api_key:
+                raise ProviderError("No DeepSeek API key configured")
+            defaults = self._PROVIDER_DEFAULTS.get("deepseek", {})
+            return OpenAICompatibleProvider(
+                name=f"deepseek-{agent_id}",
+                base_url=defaults.get("base_url", "https://api.deepseek.com/v1"),
                 api_key=api_key,
                 default_model=model,
             )
@@ -431,36 +503,72 @@ class ProviderManager:
     # Available models
     # ------------------------------------------------------------------
 
-    def get_available_models(self, provider_name: str, *, require_active: bool = False) -> list[dict[str, str]]:
-        if require_active:
-            cognitive = self._executors.get(StepType.COGNITIVE)
-            if isinstance(cognitive, CognitiveStepExecutor):
-                if provider_name not in cognitive._providers:
-                    return []
-            else:
-                return []
+    def get_available_models(
+        self,
+        provider_name: str | None = None,
+        *,
+        require_active: bool = False,
+        min_tier: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return models, enriched with provider, tier, and context window.
 
-        _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
-            "claude_max": [
-                {"id": "claude-opus-4-7", "name": "Claude Opus 4.7"},
-                {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
-                {"id": "claude-opus-4-6", "name": "Claude Opus 4.6"},
-                {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5"},
-            ],
-            "codex_max": [
-                {"id": "gpt-5.5", "name": "GPT-5.5"},
-                {"id": "gpt-4.1", "name": "GPT-4.1"},
-                {"id": "o3", "name": "o3"},
-                {"id": "o4-mini", "name": "o4-mini"},
-            ],
-        }
-        models = _PROVIDER_MODELS.get(provider_name, [])
-        # Enrich each model entry with capability tier
-        for m in models:
-            tier = get_model_tier(m["id"])
-            m["capability_tier"] = tier
-            m["tier_label"] = get_tier_label(tier)
-        return models
+        Args:
+            provider_name: Filter to one provider, or None for all configured.
+            require_active: Only include providers currently registered with
+                the cognitive executor (i.e. successfully connected).
+            min_tier: Drop entries below this capability tier.  0 = no filter.
+        """
+        from ..model_specs import context_window, max_output_tokens
+
+        cognitive = self._executors.get(StepType.COGNITIVE)
+        active_providers: set[str] = set()
+        if isinstance(cognitive, CognitiveStepExecutor):
+            active_providers = set(cognitive._providers.keys())
+
+        # Decide which provider IDs to include.
+        if provider_name is not None:
+            if require_active and provider_name not in active_providers:
+                return []
+            target_ids = [provider_name]
+        else:
+            target_ids = list(_PROVIDER_MODELS.keys())
+            for pid in sorted(self._custom_providers):
+                if pid not in target_ids:
+                    target_ids.append(pid)
+            if require_active:
+                target_ids = [p for p in target_ids if p in active_providers]
+
+        out: list[dict[str, Any]] = []
+        for pid in target_ids:
+            entries = list(_PROVIDER_MODELS.get(pid, []))
+            # For custom providers, fall back to user-supplied list on the
+            # provider config (set via the custom-provider form).
+            if not entries and pid in self._custom_providers:
+                pconfig = self._config.providers.get(pid)
+                custom_models = (pconfig.models if pconfig else None) or []
+                for cm in custom_models:
+                    if isinstance(cm, str):
+                        entries.append({"id": cm, "name": cm})
+                    elif isinstance(cm, dict) and cm.get("id"):
+                        entries.append({"id": cm["id"], "name": cm.get("name", cm["id"])})
+                if not entries:
+                    default_model = pconfig.default_model if pconfig else ""
+                    if default_model:
+                        entries.append({"id": default_model, "name": default_model})
+            for m in entries:
+                tier = get_model_tier(m["id"])
+                if tier < min_tier:
+                    continue
+                out.append({
+                    "id": m["id"],
+                    "name": m["name"],
+                    "provider": pid,
+                    "capability_tier": tier,
+                    "tier_label": get_tier_label(tier),
+                    "context_window": context_window(m["id"]),
+                    "max_output_tokens": max_output_tokens(m["id"]),
+                })
+        return out
 
     # ------------------------------------------------------------------
     # Provider management (config UI)
@@ -641,6 +749,7 @@ class ProviderManager:
         base_url: str,
         api_key: str = "",
         default_model: str = "",
+        models: list[Any] | None = None,
     ) -> dict[str, Any]:
         if not provider_id:
             raise ValueError("Provider ID is required")
@@ -682,7 +791,32 @@ class ProviderManager:
             "base_url": base_url,
             "default_model": default_model,
         }
+        # Normalize the model list — accept either bare strings or {id, name} dicts.
+        normalized_models: list[Any] = []
+        for entry in (models or []):
+            if isinstance(entry, str) and entry.strip():
+                normalized_models.append(entry.strip())
+            elif isinstance(entry, dict) and entry.get("id"):
+                normalized_models.append({"id": entry["id"], "name": entry.get("name", entry["id"])})
+        if normalized_models:
+            spec["models"] = normalized_models
+
         save_provider_to_config(provider_id, spec)
+
+        # Mirror onto the in-memory ProviderConfig so the running daemon sees it.
+        from ..config import ProviderConfig as _PC
+        existing = self._config.providers.get(provider_id)
+        if existing is None:
+            self._config.providers[provider_id] = _PC(
+                name=provider_id,
+                base_url=base_url,
+                default_model=default_model,
+                models=normalized_models,
+            )
+        else:
+            existing.base_url = base_url
+            existing.default_model = default_model
+            existing.models = normalized_models
 
         if api_key:
             self.credential_store.save(f"provider_{provider_id}", {"api_key": api_key})
@@ -895,9 +1029,13 @@ class ProviderManager:
             bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
         pkg_json = bridge_dir / "package.json"
         node_modules = bridge_dir / "node_modules"
-        cli_js = node_modules / "@anthropic-ai" / "claude-agent-sdk" / "cli.js"
+        # SDK 0.2.119+ ships sdk.mjs (no bundled cli.js). Either marker means
+        # node_modules is populated.
+        sdk_dir = node_modules / "@anthropic-ai" / "claude-agent-sdk"
+        cli_js = sdk_dir / "cli.js"
+        sdk_mjs = sdk_dir / "sdk.mjs"
 
-        if cli_js.exists():
+        if cli_js.exists() or sdk_mjs.exists():
             return  # Already installed
 
         if not pkg_json.exists():
@@ -991,6 +1129,16 @@ class ProviderManager:
         return None
 
     def _resolve_sdk_cli(self) -> Path | None:
+        """Locate a Claude Code executable for auth-status / login flows.
+
+        SDK 0.2.119+ no longer ships a bundled cli.js. Prefer the standalone
+        @anthropic-ai/claude-code binary (the `claude` command); fall back to
+        the legacy bundled cli.js for older SDK installs.
+        """
+        import shutil
+        claude_bin = shutil.which("claude")
+        if claude_bin:
+            return Path(claude_bin)
         try:
             import bridge as _bridge_pkg
             bridge_dir = Path(_bridge_pkg.__file__).resolve().parent
@@ -1001,25 +1149,55 @@ class ProviderManager:
             return cli_js
         return None
 
+    def _build_claude_cmd(self, cli: Path, *args: str) -> tuple[str, ...]:
+        """Build the argv tuple for invoking the claude CLI.
+
+        - Binary path (e.g. ~/AppData/Roaming/npm/claude): invoked directly.
+          On Windows this resolves to a .cmd shim; the cmd extension is added
+          automatically by the OS for asyncio subprocess.
+        - Legacy cli.js: invoked via `bun cli.js ...`.
+        """
+        if cli.suffix == ".js":
+            return ("bun", str(cli), *args)
+        return (str(cli), *args)
+
     async def _check_claude_auth(self) -> dict[str, Any]:
-        cli_js = self._resolve_sdk_cli()
-        if cli_js is None:
+        cli = self._resolve_sdk_cli()
+        if cli is None:
             return {"installed": False, "logged_in": False}
         try:
+            argv = self._build_claude_cmd(cli, "auth", "status")
             proc = await asyncio.create_subprocess_exec(
-                "bun", str(cli_js), "auth", "status",
+                *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-            data = json.loads(stdout.decode("utf-8", errors="replace"))
-            return {
-                "installed": True,
-                "logged_in": bool(data.get("loggedIn", False)),
-                "email": data.get("email", ""),
-                "subscription": data.get("subscriptionType", ""),
-            }
-        except (asyncio.TimeoutError, json.JSONDecodeError, FileNotFoundError) as exc:
+            text = stdout.decode("utf-8", errors="replace").strip()
+            # Newer claude CLI emits human-readable output by default; older
+            # cli.js emits JSON. Try JSON first, fall back to keyword sniffing.
+            try:
+                data = json.loads(text)
+                return {
+                    "installed": True,
+                    "logged_in": bool(data.get("loggedIn", False)),
+                    "email": data.get("email", ""),
+                    "subscription": data.get("subscriptionType", ""),
+                }
+            except json.JSONDecodeError:
+                lower = text.lower()
+                logged_in = (
+                    "logged in" in lower
+                    or "authenticated" in lower
+                    or "subscription" in lower
+                ) and "not " not in lower.split("logged in")[0][-10:]
+                return {
+                    "installed": True,
+                    "logged_in": logged_in,
+                    "email": "",
+                    "subscription": "",
+                }
+        except (asyncio.TimeoutError, FileNotFoundError) as exc:
             log.debug("Claude auth status check failed: %s", exc)
             return {"installed": True, "logged_in": False}
         except Exception as exc:
@@ -1027,12 +1205,13 @@ class ProviderManager:
             return {"installed": False, "logged_in": False}
 
     async def _trigger_claude_login(self) -> bool:
-        cli_js = self._resolve_sdk_cli()
-        if cli_js is None:
+        cli = self._resolve_sdk_cli()
+        if cli is None:
             return False
         try:
+            argv = self._build_claude_cmd(cli, "auth", "login")
             proc = await asyncio.create_subprocess_exec(
-                "bun", str(cli_js), "auth", "login",
+                *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

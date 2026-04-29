@@ -185,6 +185,19 @@ class AgentDefinition:
     budgets: dict[str, int] = field(default_factory=dict)
     # Token budgets per provider.  e.g. {"gemini": 50000, "claude_max": 100000}
     # Limit is total tokens (input+output) per execution.  0 or absent = unlimited.
+
+    # --- Long-horizon safeguards (None = use registry defaults) ---
+    max_children: int | None = None
+    # Max direct children this agent may spawn. Default: 20.
+    max_depth_below: int | None = None
+    # Max nesting depth permitted for descendants. Default: 6 below root.
+    per_turn_input_max: int | None = None
+    # Refuse a cognitive turn whose estimated input exceeds this many tokens.
+    # Default: 200_000. Raise it for agents legitimately working on large
+    # documents or codebases.
+    repeat_call_limit: int | None = None
+    # Abort the cognitive loop after this many *consecutive identical* tool
+    # calls (same name + same args). Default: 5.
     connector_ids: list[str] = field(default_factory=list)
     # MCP connectors this agent uses.  Matched against ConnectorManager specs.
 

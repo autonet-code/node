@@ -154,6 +154,21 @@ class WebSocketBridge:
                 "result": self.runtime.snapshot(),
             }
 
+        # Daemon restart: signal the CLI driver to re-exec the process after
+        # shutdown completes. Reply first so the client sees an ack before
+        # the WebSocket connection drops.
+        if msg_type == "daemon_restart":
+            try:
+                from . import cli as _cli_module
+                _cli_module._restart_requested = True
+                # Schedule the runtime shutdown after the reply is sent
+                # so the client gets the ack. The shutdown event is what
+                # the input loop watches; setting it here breaks the loop.
+                self.runtime._shutdown_event.set()
+                return {"msg_id": msg_id, "ok": True, "result": {"restarting": True}}
+            except Exception as exc:
+                return {"msg_id": msg_id, "ok": False, "error": f"restart failed: {exc}"}
+
         # Model selection: change orchestrator model and start new conversation
         if msg_type == "set_orchestrator_model":
             model = msg.get("model", "")
@@ -242,6 +257,25 @@ class WebSocketBridge:
             except ValueError as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
+        if msg_type == "provider_refresh_usage":
+            provider_id = msg.get("provider_id", "claude_max")
+            # _active_providers is keyed by agent_id, not provider_id. Find any
+            # active provider instance whose .name matches the requested provider.
+            prov = None
+            for candidate in self.runtime.providers._active_providers.values():
+                if getattr(candidate, "name", "") == provider_id and hasattr(candidate, "refresh_usage"):
+                    prov = candidate
+                    break
+            if prov is None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Provider '{provider_id}' is not active or does not support usage refresh"}
+            try:
+                rate_limits = await prov.refresh_usage()
+                return {"msg_id": msg_id, "ok": True,
+                        "result": {"provider_id": provider_id, "rate_limits": rate_limits}}
+            except Exception as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
         if msg_type == "provider_remove":
             provider_id = msg.get("provider_id", "")
             if not provider_id:
@@ -256,6 +290,7 @@ class WebSocketBridge:
             base_url = msg.get("base_url", "")
             api_key = msg.get("api_key", "")
             default_model = msg.get("default_model", "")
+            models = msg.get("models", [])
             if not provider_id:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'provider_id' field"}
             if not base_url:
@@ -267,6 +302,7 @@ class WebSocketBridge:
                     base_url=base_url,
                     api_key=api_key,
                     default_model=default_model,
+                    models=models if isinstance(models, list) else [],
                 )
                 return {"msg_id": msg_id, "ok": True, "result": result}
             except ValueError as exc:
