@@ -187,6 +187,7 @@ class _EventRecorder:
                     coords=list(claim.anchor) if claim else [],
                     polarity_axis=list(claim.polarity_axis) if claim else [],
                     content=node.content,
+                    observation_id=getattr(node, "observation_id", "") or "",
                 ))
 
 
@@ -238,13 +239,55 @@ def train_world_model_on_usefulness(
     recorder = _EventRecorder(agent_id=agent_id)
     n_observations = 0
 
+    # We need a deterministic anchor for each work unit so the locator
+    # can find them. Sprout an explicit node per work unit under
+    # whichever root tendency has the higher cosine similarity to the
+    # work unit's coords. The node's observation_id ties it back to
+    # the work unit for category lookup downstream.
+    from world_model.models.tree import Position
+
+    def _best_root(coords):
+        best = None
+        best_dot = -2.0
+        for tendency in world.tendencies.values():
+            if not tendency.anchor:
+                continue
+            dot = sum(a * b for a, b in zip(coords, tendency.anchor))
+            if dot > best_dot:
+                best_dot = dot
+                best = tendency
+        return best
+
     for epoch in range(max(1, int(epochs))):
         for problem, resolution, outcome in work_units:
             obs = work_unit_to_observation(problem, resolution, outcome, embedder)
             before_ids = _all_node_ids(world)
+            # Add the observation (the engine may decide to absorb it
+            # via probe terminations).
             world.add_observation(obs)
             recorder.observation_added(obs)
-            equilibrate(world, max_rounds=8, tolerance=1e-3)
+            # Sprout an explicit leaf node for this work unit so it's
+            # locatable. Its position-PRO if the outcome was positive
+            # (accepted+kept > 0), CON otherwise.
+            target_tendency = _best_root(obs.coords)
+            if target_tendency is not None:
+                pos_signal = outcome.accepted + outcome.kept
+                position = Position.PRO if pos_signal >= 0 else Position.CON
+                # Polarity axis points along the work-unit's coordinate
+                # direction (so neighbours along the same direction
+                # align with it).
+                from .usefulness_coords import _l2_normalize
+                axis_list = list(obs.coords)
+                axis = _l2_normalize(axis_list) if any(c != 0 for c in axis_list) else target_tendency.polarity_axis
+                new_node = target_tendency.sprout_child(
+                    parent_node_id=target_tendency.tree.root_node.id,
+                    position=position,
+                    anchor=obs.coords,
+                    polarity_axis=tuple(axis),
+                    observation=obs,
+                    content=problem[:80],
+                )
+            equilibrate(world, max_rounds=4, tolerance=1e-3)
             recorder.sub_claims_after_equilibrate(world, before_ids)
             n_observations += 1
         world.clear_observations()
