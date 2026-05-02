@@ -379,7 +379,9 @@ class AggregatorNode:
             return
 
         # Perform aggregation based on configured method
-        if self.aggregation_method == "trimmed_mean":
+        if self.aggregation_method == "world_model":
+            aggregated_model = self._world_model_aggregate(updates)
+        elif self.aggregation_method == "trimmed_mean":
             aggregated_model = self._trimmed_mean_aggregate(updates)
         else:
             aggregated_model = self._fedavg(updates)
@@ -443,6 +445,68 @@ class AggregatorNode:
         else:
             logger.error(f"[{self.node_id}] Failed to publish model: {result.error}")
             self.metrics.errors += 1
+
+    def _world_model_aggregate(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Aggregate world-model substrate contributions.
+
+        Each `update` is a contribution dict from the substrate's
+        train_world_model_on_task: {events, score_snapshot_after, agent_id}.
+
+        Steps:
+          1. Concatenate events deterministically (aggregate_contributions).
+          2. Replay onto a fresh charter world (apply_events).
+          3. Snapshot epoch boundaries.
+          4. Reconcile: per-agent mint and per-agent novelty.
+
+        Returns a payload compatible with the existing aggregator output
+        path: includes the aggregated world (serialized) for blob-store
+        publication, plus per-agent mint that the network reports back
+        through RPB.recordTraining.
+        """
+        from nodes.common.world_model_substrate import (
+            aggregate_contributions,
+            apply_events,
+            build_charter_world,
+            serialize_world,
+            EpochSnapshots,
+            reconcile_epoch,
+        )
+
+        logger.info(
+            f"[{self.node_id}] World-model aggregate on {len(updates)} contributions"
+        )
+
+        if not updates:
+            return {"substrate": "world-model", "events": [], "agent_mint": {}}
+
+        merged = aggregate_contributions(updates, weights=None)
+
+        world = build_charter_world()
+        snapshots = EpochSnapshots()
+        snapshots.record_start(world)
+        apply_events(world, merged["events"])
+        snapshots.record_close(world)
+
+        recon = reconcile_epoch(
+            world=world,
+            snapshots=snapshots,
+            events=merged["events"],
+            agent_weights=merged["agent_weights"],
+        )
+
+        return {
+            "substrate": "world-model",
+            "world_model": serialize_world(world),
+            "agent_mint": recon["agent_mint"],
+            "agent_novelty": recon["agent_novelty"],
+            "total_mint": recon["total_mint"],
+            "total_novelty": recon["total_novelty"],
+            "n_events": len(merged["events"]),
+            # Compatibility: mark this so downstream code doesn't try to
+            # _apply_delta_to_global on it as if it were a tensor delta.
+            "real_training": False,
+        }
 
     def _fedavg(self, updates: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
