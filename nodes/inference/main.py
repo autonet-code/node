@@ -140,15 +140,39 @@ class InferenceNode:
                     self.metrics.errors += 1
                     continue
 
+                # Substrate detection: if the payload has tendencies and
+                # nodes, treat it as a world-model global model. Else,
+                # default to the legacy SimpleNet path.
+                is_substrate = (
+                    weights_data.get("substrate") == "world-model"
+                    or "tendencies" in weights_data
+                    or "world_model" in weights_data
+                )
+
                 try:
-                    model = SimpleNet()
-                    self.model = load_weights_into_model(model, weights_data)
-                    self.model_hash = weights_hash
-                    self.metrics.models_loaded += 1
-                    logger.info(
-                        f"[{self.node_id}] Model loaded successfully "
-                        f"(hash={weights_hash[:16]}...)"
-                    )
+                    if is_substrate:
+                        # The substrate model lives as the payload itself
+                        # (or under "world_model" key when nested). No
+                        # tensor weights to load -- inference walks the
+                        # serialized world directly.
+                        self.model = (
+                            weights_data.get("world_model") or weights_data
+                        )
+                        self.model_hash = weights_hash
+                        self.metrics.models_loaded += 1
+                        logger.info(
+                            f"[{self.node_id}] Substrate model loaded "
+                            f"(hash={weights_hash[:16]}...)"
+                        )
+                    else:
+                        model = SimpleNet()
+                        self.model = load_weights_into_model(model, weights_data)
+                        self.model_hash = weights_hash
+                        self.metrics.models_loaded += 1
+                        logger.info(
+                            f"[{self.node_id}] Model loaded successfully "
+                            f"(hash={weights_hash[:16]}...)"
+                        )
                 except Exception as e:
                     logger.error(f"[{self.node_id}] Failed to load model: {e}")
                     self.metrics.errors += 1
@@ -204,13 +228,22 @@ class InferenceNode:
                 self.metrics.requests_failed += 1
                 return
 
-            # Run inference
-            with torch.no_grad():
-                output = self.model(tensor)
-
-            # Format output
-            predictions = output.argmax(dim=1).tolist()
-            probabilities = torch.softmax(output, dim=1).tolist()
+            # Run inference -- substrate path or tensor path.
+            if isinstance(self.model, dict):
+                # Substrate world-model path: dict payload, not nn.Module.
+                from ..common.world_model_substrate import infer_with_world_model
+                substrate_result = infer_with_world_model(
+                    input_data=input_data if isinstance(input_data, dict)
+                                  else {"turn": input_data},
+                    global_model_payload=self.model,
+                )
+                predictions = substrate_result["predictions"]
+                probabilities = substrate_result["probabilities"]
+            else:
+                with torch.no_grad():
+                    output = self.model(tensor)
+                predictions = output.argmax(dim=1).tolist()
+                probabilities = torch.softmax(output, dim=1).tolist()
 
             inference_id_hex = inference_id.hex() if isinstance(inference_id, bytes) else str(inference_id)
             result = {

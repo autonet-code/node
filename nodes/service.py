@@ -272,43 +272,68 @@ class AutonetService:
             self._blob_store = None
 
     def _submit_training_delta(self, weight_delta: Dict[str, Any], metrics: Dict[str, Any]) -> Optional[str]:
-        """Upload weight delta to blob store and record training on RPB.
+        """Upload training contribution to blob store and record on RPB.
 
-        This bridges the autonomous training loop to the network:
-        1. Package delta + metrics into a model update
-        2. Upload to blob store (content-addressed)
-        3. Record the training contribution on RPB (mints future rewards)
+        Two contribution formats are supported:
 
-        Returns the blob store CID if upload succeeded, None otherwise.
+          - JEPA path: weight_delta is a dict of named tensors. Uploaded
+            as {"weight_delta": ...}; contribution = num_batches.
+          - World-model substrate path: weight_delta carries the events
+            stream and score snapshot. Uploaded as the contribution
+            payload itself; contribution = previous-epoch mint amount
+            looked up from the global model (or 1 if first epoch).
+
+        Routing is by metrics["substrate"]: if "world-model", takes the
+        substrate path; otherwise default to JEPA.
         """
+        is_substrate = metrics.get("substrate") == "world-model"
+
         # Step 1: Upload to blob store
         delta_cid = None
         if self._blob_store:
             try:
-                update = {
-                    "weight_delta": {k: v.tolist() if hasattr(v, "tolist") else v
-                                     for k, v in weight_delta.items()},
-                    "metrics": metrics,
-                    "source": "autonomous",
-                }
+                if is_substrate:
+                    update = {
+                        "events": weight_delta.get("events", []),
+                        "score_snapshot_after": weight_delta.get(
+                            "score_snapshot_after", {}),
+                        "agent_id": weight_delta.get("agent_id", ""),
+                        "metrics": metrics,
+                        "substrate": "world-model",
+                        "source": "autonomous",
+                    }
+                else:
+                    update = {
+                        "weight_delta": {k: v.tolist() if hasattr(v, "tolist") else v
+                                         for k, v in weight_delta.items()},
+                        "metrics": metrics,
+                        "source": "autonomous",
+                    }
                 delta_cid = self._blob_store.add_json(update)
                 if delta_cid:
-                    logger.info("Weight delta uploaded to blob store: %s", delta_cid[:16])
+                    logger.info("Training payload uploaded: %s (substrate=%s)",
+                                delta_cid[:16], is_substrate)
             except Exception as e:
-                logger.warning("Failed to upload delta to blob store: %s", e)
+                logger.warning("Failed to upload payload to blob store: %s", e)
 
         # Step 2: Record training on-chain via RPB
         governance = getattr(self, "_governance", None)
         if governance and delta_cid:
             try:
                 registry = governance.registry
-                contribution = metrics.get("num_batches", 1)
+                if is_substrate:
+                    # Substrate path: contribution = mint earned in
+                    # previous epoch (looked up from prior aggregation).
+                    # Falls back to 1 on first epoch / lookup failure.
+                    contribution = self._lookup_prior_mint() or 1
+                else:
+                    contribution = metrics.get("num_batches", 1)
                 account = registry.blockchain.account
                 if account:
                     result = registry.send("RPB", "recordTraining", contribution)
                     if result.success:
                         logger.info(
-                            "Training recorded on-chain: contribution=%d, delta=%s",
+                            "Training recorded on-chain: contribution=%s, payload=%s",
                             contribution, delta_cid[:16],
                         )
                     else:
@@ -317,6 +342,44 @@ class AutonetService:
                 logger.warning("Failed to record training on-chain: %s", e)
 
         return delta_cid
+
+    def _lookup_prior_mint(self) -> int:
+        """Look up this agent's mint amount from the previous epoch's
+        aggregated global model.
+
+        The aggregator publishes serialized world payloads that include
+        an `agent_mint` map. We fetch the latest mature model CID,
+        download the payload, and read this agent's entry. Returns an
+        integer (mint values are scaled to ints to match the contract's
+        uint256 contribution field).
+
+        Returns 0 if no prior model or no entry for this agent.
+        """
+        try:
+            governance = getattr(self, "_governance", None)
+            if not governance or not self._blob_store:
+                return 0
+            registry = governance.registry
+            try:
+                cid_result = registry.call("RPB", "getMatureModel")
+                cid = cid_result[0] if isinstance(cid_result, (list, tuple)) else cid_result
+            except Exception:
+                return 0
+            if not cid:
+                return 0
+            payload = self._blob_store.get_json(cid)
+            if not payload:
+                return 0
+            agent_mint = payload.get("agent_mint", {}) or {}
+            account = registry.blockchain.account
+            if not account:
+                return 0
+            my_mint = float(agent_mint.get(str(account), 0.0))
+            # Scale to integer units; mint values typically in [0, ~10]
+            return max(1, int(my_mint * 1_000_000)) if my_mint > 0 else 0
+        except Exception as e:
+            logger.debug("prior-mint lookup failed: %s", e)
+            return 0
 
     def _update_gossip_model_state(self, metrics: Dict[str, Any], delta_cid: Optional[str] = None) -> None:
         """Push training metrics + on-chain state into P2P gossip.
