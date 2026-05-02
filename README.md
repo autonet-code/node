@@ -4,7 +4,7 @@
 
 > Alpha pre-release. Deployed on Etherlink Shadownet (testnet). Constitution not yet published on-chain. Expect breaking changes.
 
-Autonet is a protocol for decentralized AI alignment where alignment emerges from economic incentives rather than centralized constraint. This repository contains the node runtime: the agent framework, the distributed training pipeline, smart contracts, and the VL-JEPA model architecture.
+Autonet is a protocol for decentralized AI alignment where alignment emerges from economic incentives rather than centralized constraint. This repository contains the node runtime: the agent framework, the distributed training pipeline, smart contracts, and two interchangeable model architectures — the original VL-JEPA / TextJEPA neural pipeline and a newer **world-model substrate** (graph equilibration over a charter coordinate space). Either architecture plugs into the same protocol slots; smart contracts are unchanged.
 
 For the full protocol specification, see the [whitepaper](https://github.com/autonet-code/whitepaper).
 
@@ -51,12 +51,53 @@ The node operates across three layers:
 | Layer | What it does |
 |-------|-------------|
 | **Agent Framework (ATN)** | Agent orchestration, task delegation, tool execution, inbox messaging, WebSocket server |
-| **Training & Inference** | VL-JEPA distributed training, two-speed inference, trace encoding, alignment pricing |
+| **Training & Inference** | Distributed training (VL-JEPA / TextJEPA *or* world-model substrate), two-speed inference, trace encoding, alignment pricing |
 | **Smart Contracts** | Agent registration, training rewards, inference revenue splitting, staking, governance |
+
+The training/inference layer supports two interchangeable architectures. Pick one per deployment via routing flags — the rest of the stack (proposer, coordinator, smart contracts, staking, rewards) is identical.
+
+### World-Model Substrate (alternative to VL-JEPA)
+
+The substrate is a **graph equilibration architecture, not a neural network**. Instead of gradient descent over weights, it grows a tree of sub-claims under each charter tendency and equilibrates stake/score until the network agrees. This was added after VL-JEPA's mode-collapse failures on real captioning data (see `VALIDATION_FINDINGS.md`); the substrate is content-addressed, deterministic, and converges across solvers without any neural training loop.
+
+**Charter coordinate space.** The substrate operates in a 4D space defined by the four charter tendencies:
+
+| Axis | Tendency | Thesis |
+|------|----------|--------|
+| 0 | `life_precious` | Life is precious and should be preserved. |
+| 1 | `self_preservation` | The system should preserve its own continuity. |
+| 2 | `promotion_of_intelligence` | Intelligence in any form should be promoted. |
+| 3 | `evolution` | Forward advancement of capability is desirable. |
+
+Each agent turn becomes a 4D observation `(life, self_pres, intelligence, evolution)`. The solver replays these into a `World` and records `SubClaimSprouted` / `ObservationAdded` events; the aggregator merges events; the verifier replays them onto a seed world and scores the gap reduction.
+
+**Mint vs novelty.** At an epoch boundary, per-node score movement during the epoch is reconciled into two separate signals:
+
+- **Novelty** — descriptive measure of surprise (magnitude of score movement, including reversions). Diagnostic only.
+- **Mint** — the rewarded subset. Awarded only for *positive* movement that *lands positive*, weighted by a survival factor (how much of the epoch the score-change persisted). CON contributors and reverted moves don't mint. This is the value reported through `RPB.recordTraining`.
+
+See `nodes/common/world_model_substrate/reconcile.py` for the formula.
+
+**Routing flags.**
+
+| Layer | Flag / signal | Effect |
+|-------|---------------|--------|
+| Aggregator (`nodes/aggregator/main.py`) | `aggregation_method='world_model'` | Replays event streams onto a charter world, runs `reconcile_epoch`, publishes a serialized world as the global model |
+| Solver service (`nodes/service.py`) | Auto-detects via `metrics['substrate'] == 'world-model'` | Routes the contribution as an event payload instead of a tensor delta |
+| Inference (`nodes/inference/main.py`) | Auto-detects substrate-shaped global models (presence of `'world_model'` key or `substrate == 'world-model'`) | Runs `infer_with_world_model` instead of the JEPA decoder |
+
+**Quickstart (substrate end-to-end).**
+
+```bash
+pip install -e c:/code/world-model
+python test_world_model_substrate_e2e.py     # vertical slice: solver -> aggregator -> verifier -> inference
+python test_epoch_reconciliation.py           # mint/novelty distribution across 3 solvers
+python test_multi_solver_convergence.py       # content-addressed federation: 2 solvers, shared sub-claims
+```
 
 ### VL-JEPA: The Distributed Model
 
-The network trains a shared [VL-JEPA](https://github.com/autonet-code/whitepaper) (Vision-Language Joint Embedding Predictive Architecture) model using self-supervised learning. No labeled data required.
+The original training architecture: a shared [VL-JEPA](https://github.com/autonet-code/whitepaper) (Vision-Language Joint Embedding Predictive Architecture) trained with self-supervised learning. No labeled data required. (Still present in the codebase; the world-model substrate above is an alternative, not a replacement.)
 
 The model is split between local and network:
 
@@ -138,10 +179,13 @@ atn/                   # Agent framework (ATN)
 nodes/                 # Training node implementations
   core/                # Base node architecture, constitution, 4 engines
   proposer/            # Task generation
-  solver/              # Model training
+  solver/              # Model training (JEPA or substrate)
   coordinator/         # Verification voting
-  aggregator/          # FedAvg weight aggregation
+  aggregator/          # FedAvg or world-model event aggregation
+  inference/           # Two-speed inference, auto-detects substrate vs JEPA models
+  service.py           # Solver service; routes contributions by metrics['substrate']
   common/              # Shared: blockchain, ML, JEPA, VL-JEPA
+    world_model_substrate/   # Graph-equilibration substrate (charter, events, reconcile)
 contracts/             # Solidity smart contracts
   core/                # Project, Task, Staking, Rewards, ModelShardRegistry
   tokens/              # ATN governance token
@@ -175,8 +219,11 @@ python orchestrator.py --proposers 1 --solvers 2 --coordinators 2 --aggregators 
 ### Tests
 
 ```bash
-npx hardhat test              # Smart contract tests
-pytest                        # Python tests
+npx hardhat test                              # Smart contract tests
+pytest                                        # Python tests
+python test_world_model_substrate_e2e.py      # Substrate vertical slice
+python test_epoch_reconciliation.py           # Per-agent mint / novelty
+python test_multi_solver_convergence.py       # Content-addressed federation
 ```
 
 ## Current Status
@@ -185,14 +232,18 @@ pytest                        # Python tests
 - Agent framework with full lifecycle management
 - Training loop simulation (Absolute Zero) with all node types
 - Smart contracts deployed and tested on local Hardhat
-- VL-JEPA architecture validated on synthetic data
+- VL-JEPA architecture validated on synthetic data (mode-collapses on real COCO — see `VALIDATION_FINDINGS.md`)
 - Federated averaging with Byzantine-resistant aggregation
 - Constitutional governance engine (4 engines per node)
 - Execution integrity self-verification against on-chain hash
+- **World-model substrate vertical slice:** solver -> aggregator -> verifier -> inference, all using the graph-equilibration engine instead of VL-JEPA
+- **Per-agent mint computation** with novelty/mint distinction (descriptive surprise vs rewarded positive-and-persistent movement); CON contributors don't mint
+- **Multi-solver content-addressed convergence:** independent solvers proposing the same sub-claim resolve to the same node by id; the aggregator dedupes naturally
+- **Substrate wiring:** `aggregation_method='world_model'` in `nodes/aggregator/main.py`, auto-detection via `metrics['substrate']` in `nodes/service.py`, auto-detection of substrate-shaped global models in `nodes/inference/main.py`
 
 **What's next:**
 - Testnet deployment of RPB contract on Etherlink Shadownet
-- Wire real VL-JEPA training into solver nodes (currently mocked)
+- Wire real VL-JEPA training into solver nodes (currently mocked); substrate path is real
 - P2P node discovery and weight replication
 - Inference marketplace
 - Constitution published on-chain
