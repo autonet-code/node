@@ -35,23 +35,25 @@ In the architecture as understood:
 So the solver's output is its event stream. The aggregator merges
 streams, replays on the global world, and reads scores after.
 
-Why single-parent (protocol) + multi-parent (engine)
-----------------------------------------------------
+Single-parent vs multi-parent shape
+-----------------------------------
 
-SubClaimSprouted carries one (parent_id, position, tendency_id)
-per event — the protocol layer is intentionally single-parent.
-The engine handles co-parenting at replay time: when two events
-sprout claims at the same coordinates from different solvers (or
-under different parents), the engine's content-addressed hashing
-collapses them into one node and accumulates parent edges via
-sprout_child collision detection + cross-tendency edge discovery.
+The protocol-layer event carries a primary (parent_id, position,
+tendency_id) tuple. There's an optional `parents` list field for
+forward-compatibility with explicit multi-parent emission, but in
+practice the engine handles co-parenting at replay time: when
+multiple events land on the same content-addressed coordinate
+hash, the engine's sprout_child collision detection + cross-
+tendency edge discovery accumulates parent edges automatically.
 
-The event protocol is what solvers naturally produce; the engine
-is what makes federation merge work. Don't add a multi-parent
-field to SubClaimSprouted — it's redundant. The engine accumulates
-parent edges from successive events landing on the same content
-hash. See world-model docs/substrate-architecture.md for the
-post-and-coparent + dedup mechanics.
+So solvers can emit single-parent events (the natural shape) and
+federation merge still produces correctly co-parented nodes on
+the live world. The `parents` list is there if a solver has
+explicit reason to emit a multi-parented event in one shot, but
+it's not required for the federation story to work.
+
+See world-model docs/substrate-architecture.md for the
+post-and-coparent + dedup mechanics on the engine side.
 """
 
 from __future__ import annotations
