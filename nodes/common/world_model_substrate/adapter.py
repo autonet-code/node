@@ -246,6 +246,20 @@ class _EventRecorder:
                     continue
                 claim = tendency._node_to_claim.get(node.id)
                 self._seq += 1
+                # Multi-parent nodes (post-and-coparent refactor) get
+                # their full parents list serialized; single-parent
+                # nodes also include a length-1 list for forward
+                # compat. Legacy `parent_id` / `position` /
+                # `tendency_id` fields stay populated for back-compat
+                # readers.
+                parents_list = [
+                    {
+                        "parent_id": p.parent_id,
+                        "position": p.position.value,
+                        "tendency_id": p.tendency_id,
+                    }
+                    for p in node.parents
+                ]
                 self.events.append(SubClaimSprouted(
                     seq=self._seq,
                     author_agent=self.agent_id,
@@ -256,6 +270,7 @@ class _EventRecorder:
                     coords=list(claim.anchor) if claim else [],
                     polarity_axis=list(claim.polarity_axis) if claim else [],
                     content=node.content,
+                    parents=parents_list,
                 ))
 
 

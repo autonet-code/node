@@ -131,29 +131,82 @@ def apply_events(world: World, events: List[Dict[str, Any]]) -> World:
         else:
             logger.warning("unknown event kind: %s", kind)
 
+    def parent_links_of(ev: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Return the list of parent links for this sprout event.
+
+        Multi-parent events carry a `parents` list explicitly. Legacy
+        single-parent events get coerced to a length-1 list.
+        """
+        parents_list = ev.get("parents") or []
+        if parents_list:
+            return parents_list
+        return [{
+            "parent_id": ev.get("parent_id", ""),
+            "position": ev.get("position", "pro"),
+            "tendency_id": ev.get("tendency_id", ""),
+        }]
+
     # Sprout in waves until none remain or no progress is made
     safety = 0
     while pending_sprouts and safety < 10:
         safety += 1
         next_round: List[Dict[str, Any]] = []
         for ev in pending_sprouts:
-            tendency = world.tendencies.get(ev.get("tendency_id", ""))
-            if tendency is None:
-                logger.warning("sprout targets unknown tendency %s",
-                               ev.get("tendency_id"))
-                continue
-            live_parent = resolve_parent(ev)
-            if live_parent is None:
+            links = parent_links_of(ev)
+            # Resolve every link to (live_tendency, live_parent_id) up
+            # front; if any link references an unknown tendency or has
+            # an unresolved parent, defer the whole event.
+            resolved_links: List[tuple] = []
+            stranded = False
+            for link in links:
+                tend = world.tendencies.get(link.get("tendency_id", ""))
+                if tend is None:
+                    logger.warning(
+                        "sprout targets unknown tendency %s",
+                        link.get("tendency_id"),
+                    )
+                    stranded = True
+                    break
+                # Reuse resolve_parent's logic per-link by patching the
+                # event-shaped dict it expects.
+                proxy = {
+                    "tendency_id": link.get("tendency_id", ""),
+                    "parent_id": link.get("parent_id", ""),
+                }
+                live_parent = resolve_parent(proxy)
+                if live_parent is None:
+                    stranded = True
+                    break
+                resolved_links.append((tend, live_parent, link.get("position", "pro")))
+            if stranded:
                 next_round.append(ev)
                 continue
+            if not resolved_links:
+                continue
             try:
-                new_node = tendency.sprout_child(
-                    parent_node_id=live_parent,
-                    position=Position(ev["position"]),
+                # Apply the first parent link via sprout_child to
+                # create (or find by content hash) the node.
+                first_tend, first_parent, first_pos = resolved_links[0]
+                new_node = first_tend.sprout_child(
+                    parent_node_id=first_parent,
+                    position=Position(first_pos),
                     anchor=tuple(ev.get("coords") or ()),
                     polarity_axis=tuple(ev.get("polarity_axis") or ()),
                     content=ev.get("content", ""),
+                    world=world,
                 )
+                # Apply remaining parent links via each tendency's
+                # sprout_child; the existing-node branch will append
+                # parent_links and update child lists.
+                for tend, parent, pos in resolved_links[1:]:
+                    tend.sprout_child(
+                        parent_node_id=parent,
+                        position=Position(pos),
+                        anchor=tuple(ev.get("coords") or ()),
+                        polarity_axis=tuple(ev.get("polarity_axis") or ()),
+                        content=ev.get("content", ""),
+                        world=world,
+                    )
                 # Carry observation_id through replay if present.
                 obs_id = ev.get("observation_id", "")
                 if obs_id:

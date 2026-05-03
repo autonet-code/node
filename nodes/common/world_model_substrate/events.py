@@ -44,7 +44,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 @dataclass
 class SubClaimSprouted:
-    """A sub-claim node was sprouted under a parent."""
+    """A sub-claim node was sprouted under one or more parents.
+
+    Single-parent events (legacy) populate `parent_id` + `tendency_id`
+    + `position` directly. Multi-parent events (post-and-coparent
+    refactor) populate the optional `parents` list with one entry per
+    edge: each entry is {"parent_id": ..., "position": "pro"|"con",
+    "tendency_id": ...}. The aggregator treats single-parent events as
+    a length-1 parents list at apply time.
+    """
     kind: str = "sub_claim_sprouted"
     seq: int = 0
     author_agent: str = ""
@@ -59,6 +67,11 @@ class SubClaimSprouted:
     # for. Carried through replay so locate can map back to the
     # underlying work unit.
     observation_id: str = ""
+    # Multi-parent edge list (post-and-coparent refactor). When empty,
+    # the aggregator falls back to (parent_id, position, tendency_id).
+    # When non-empty, takes precedence; each entry has keys
+    # parent_id, position, tendency_id.
+    parents: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
