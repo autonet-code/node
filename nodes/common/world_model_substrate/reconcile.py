@@ -138,12 +138,23 @@ def _node_survival_factor(node_id: str, snapshots: EpochSnapshots) -> float:
     return max(0.0, min(1.0, factor))
 
 
-def _node_mint(node_id: str, snapshots: EpochSnapshots) -> float:
+def _node_mint(
+    node_id: str,
+    snapshots: EpochSnapshots,
+    world: Optional[World] = None,
+) -> float:
     """mint = max(0, score_close - score_start) * survival_factor *
-    I(score_close > 0).
+    novelty_factor * I(score_close > 0).
 
     Negative or unchanged: zero. Positive movement landing positive:
-    proportional to the rise.
+    proportional to the rise, scaled by survival (did the change
+    persist?) and by persistent novelty n (was this region surprising
+    when the change happened?).
+
+    The novelty factor reads the live world's node.n. If world is
+    None or the node isn't found, we fall back to novelty=1.0
+    (treating the node as fully surprising), which preserves the
+    pre-refactor behavior.
     """
     score_start = snapshots.start.get(node_id, 0.0)
     score_close = snapshots.close.get(node_id, 0.0)
@@ -153,7 +164,24 @@ def _node_mint(node_id: str, snapshots: EpochSnapshots) -> float:
     if rise <= 0:
         return 0.0
     survival = _node_survival_factor(node_id, snapshots)
-    return rise * survival
+    novelty = _node_persistent_n(node_id, world)
+    return rise * survival * novelty
+
+
+def _node_persistent_n(
+    node_id: str,
+    world: Optional[World],
+) -> float:
+    """Look up node.n in the live world. Returns 1.0 if not found
+    (treats unknown nodes as fully novel, matching pre-refactor mint).
+    """
+    if world is None:
+        return 1.0
+    for tendency in world.tendencies.values():
+        node = tendency.tree.get_node(node_id)
+        if node is not None:
+            return float(getattr(node, "n", 1.0))
+    return 1.0
 
 
 def _node_novelty_alone(node_id: str, snapshots: EpochSnapshots) -> float:
@@ -284,7 +312,7 @@ def reconcile_epoch(
 
     for node_id in all_node_ids:
         nov = _node_novelty(node_id, snapshots)
-        mint = _node_mint(node_id, snapshots)
+        mint = _node_mint(node_id, snapshots, world=world)
         if nov > 0:
             node_novelty[node_id] = nov
         if mint > 0:
