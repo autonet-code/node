@@ -95,6 +95,15 @@ python test_epoch_reconciliation.py           # mint/novelty distribution across
 python test_multi_solver_convergence.py       # content-addressed federation: 2 solvers, shared sub-claims
 ```
 
+**Embedder options.** The substrate accepts coordinates from any function that maps a turn dict to 4D charter coords. Two embedders are validated:
+
+| Embedder | Where | Trade-off |
+|----------|-------|-----------|
+| `score_turn_4d` (keyword heuristic) | `nodes/common/world_model_substrate/score_turn.py` | Deterministic, free, but conservative (returns zeros on anything not keyword-matchable) |
+| `turn_to_observation_via_llm` (LLM with binary-flag prompt) | Validated in `videos/SF/.../phase2/tier3a_llm_adapter.py`; not yet wired into the solver service | More decisive (commits where heuristic stays silent), 0.8% real disagreement rate vs heuristic, ~zero per-token cost via Claude Max bridge |
+
+The LLM adapter uses a binary-commit prompt (per axis: -1 = clear flag, +1 = no flag, 0 = can't tell) — this shape produces deterministic substrate verdicts where graded scoring slips through veto thresholds. See `D:/videos/SF/manifesting/from_endstate/new physics/substrate_experiment/phase2/TIER3A_FINDINGS.md` for the validation results.
+
 ### VL-JEPA: The Distributed Model
 
 The original training architecture: a shared [VL-JEPA](https://github.com/autonet-code/whitepaper) (Vision-Language Joint Embedding Predictive Architecture) trained with self-supervised learning. No labeled data required. (Still present in the codebase; the world-model substrate above is an alternative, not a replacement.)

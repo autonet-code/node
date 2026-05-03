@@ -34,6 +34,24 @@ In the architecture as understood:
 
 So the solver's output is its event stream. The aggregator merges
 streams, replays on the global world, and reads scores after.
+
+Why single-parent (protocol) + multi-parent (engine)
+----------------------------------------------------
+
+SubClaimSprouted carries one (parent_id, position, tendency_id)
+per event — the protocol layer is intentionally single-parent.
+The engine handles co-parenting at replay time: when two events
+sprout claims at the same coordinates from different solvers (or
+under different parents), the engine's content-addressed hashing
+collapses them into one node and accumulates parent edges via
+sprout_child collision detection + cross-tendency edge discovery.
+
+The event protocol is what solvers naturally produce; the engine
+is what makes federation merge work. Don't add a multi-parent
+field to SubClaimSprouted — it's redundant. The engine accumulates
+parent edges from successive events landing on the same content
+hash. See world-model docs/substrate-architecture.md for the
+post-and-coparent + dedup mechanics.
 """
 
 from __future__ import annotations
