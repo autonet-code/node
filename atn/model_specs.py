@@ -1,104 +1,259 @@
-"""Per-model context-window and output-limit specs.
+"""Model store — single source of truth for available models.
 
-Centralised so bridges and cost/occupancy math share one table.  Uses
-longest-prefix matching against the model ID, so ``gpt-5.5-preview`` falls
-through to the ``gpt-5.5`` entry, ``claude-opus-4-7-20260320`` to
-``claude-opus-4-7``, etc.
+Each entry carries everything the framework needs to know about a model:
+identity, family/class, context window, output cap, and the relative
+subscription cost weight used to bootstrap the per-model estimator.
+
+Lookups use longest-prefix matching against the model ID, so
+``claude-opus-4-7-20260320`` falls through to ``claude-opus-4-7``,
+``gpt-5.5-preview`` to ``gpt-5.5``, etc.
+
+The store is intentionally provider-agnostic: a model like Opus 4.7 can be
+reached through claude_max bridge OR a direct anthropic API key. The
+``default_channel`` is a hint, not a constraint — whichever provider is
+configured will route the call.
 """
 from __future__ import annotations
 
-
-_CONTEXT_WINDOWS: dict[str, int] = {
-    # Anthropic — all the 4.x family ship 200K by default; Sonnet/Opus 4.7
-    # support 1M with the context-1m-2025-08-07 beta flag (enabled by the
-    # claude-bridge for those models).
-    "claude-opus-4-7":    1_000_000,
-    "claude-sonnet-4-7":  1_000_000,
-    "claude-sonnet-4-6":  1_000_000,
-    "claude-opus-4-6":      200_000,
-    "claude-haiku-4-5":     200_000,
-    "claude-sonnet-4":      200_000,
-    "claude-haiku-4":       200_000,
-    "claude-":              200_000,
-
-    # OpenAI (Codex CLI)
-    "gpt-5.5":              400_000,
-    "gpt-5":                400_000,
-    "gpt-4.1":            1_000_000,
-    "gpt-4o":               128_000,
-    "gpt-4-turbo":          128_000,
-    "gpt-4":                  8_192,
-    "gpt-3.5":               16_385,
-    "o3":                   200_000,
-    "o4-mini":              200_000,
-    "o1":                   200_000,
-
-    # DeepSeek V4 — expanded from 128K (V3) to 1M default
-    "deepseek-reasoner":  1_000_000,
-    "deepseek-chat":      1_000_000,
-    "deepseek-v4-pro":    1_000_000,
-    "deepseek-v4-flash":  1_000_000,
-    "deepseek":             128_000,
-
-    # Google Gemini
-    "gemini-3-pro":       1_000_000,
-    "gemini-3-flash":     1_000_000,
-    "gemini-2.5-pro":     2_000_000,
-    "gemini-2.5-flash":   1_000_000,
-    "gemini-2.0-pro":     2_000_000,
-    "gemini-2.0-flash":   1_000_000,
-    "gemini-1.5-pro":     2_000_000,
-    "gemini-1.5-flash":   1_000_000,
-}
-
-_MAX_OUTPUT_TOKENS: dict[str, int] = {
-    "claude-opus-4-7":    64_000,
-    "claude-sonnet-4-7":  64_000,
-    "claude-sonnet-4-6":  64_000,
-    "claude-opus-4-6":    32_000,
-    "claude-haiku-4-5":    8_192,
-    "claude-":             8_192,
-
-    "gpt-5.5":           128_000,
-    "gpt-5":             128_000,
-    "gpt-4.1":            32_000,
-    "gpt-4o":             16_384,
-    "o3":                100_000,
-    "o4-mini":            65_536,
-    "o1":                 32_768,
-
-    "deepseek-reasoner":  64_000,
-    "deepseek-chat":       8_192,
-
-    "gemini-3-pro":       64_000,
-    "gemini-3-flash":     65_536,
-    "gemini-2.5-pro":     65_536,
-    "gemini-2.5-flash":   65_536,
-}
-
-_DEFAULT_CONTEXT = 128_000
-_DEFAULT_MAX_OUTPUT = 8_192
+from dataclasses import dataclass, field
+from typing import Any
 
 
-def _lookup(table: dict[str, int], model_id: str, default: int) -> int:
-    """Longest-prefix match against the table."""
+@dataclass(frozen=True)
+class ModelSpec:
+    """Static facts about a model that the framework needs to know.
+
+    ``relative_cost`` is the model's cost weight relative to Sonnet (1.0).
+    Used to bootstrap the per-model tokens-per-pct estimator before real
+    observations come in. Anthropic publishes rough subscription multipliers;
+    these are best-effort starting points, not guarantees.
+    """
+    id: str                             # canonical model id (prefix-matched)
+    family: str                         # "claude" | "gpt" | "gemini" | "deepseek" | ...
+    klass: str = "other"                # "haiku" | "sonnet" | "opus" | "other"
+    display_name: str = ""              # human-readable label
+    context_window: int = 128_000
+    max_output_tokens: int = 8_192
+    relative_cost: float = 1.0          # multiplier vs. Sonnet for subscription burn
+    default_channel: str = ""           # provider name typically used (hint only)
+    aliases: tuple[str, ...] = ()       # alternate IDs that resolve here
+
+
+_DEFAULT_SPEC = ModelSpec(
+    id="default",
+    family="unknown",
+    klass="other",
+    display_name="Unknown model",
+    context_window=128_000,
+    max_output_tokens=8_192,
+    relative_cost=1.0,
+)
+
+
+# Curated list — extend here, not in scattered files.
+_MODELS: tuple[ModelSpec, ...] = (
+    # ---- Anthropic / Claude ----
+    ModelSpec(
+        id="claude-opus-4-7", family="claude", klass="opus",
+        display_name="Claude Opus 4.7",
+        context_window=1_000_000, max_output_tokens=64_000,
+        relative_cost=5.0, default_channel="claude_max",
+    ),
+    ModelSpec(
+        id="claude-sonnet-4-7", family="claude", klass="sonnet",
+        display_name="Claude Sonnet 4.7",
+        context_window=1_000_000, max_output_tokens=64_000,
+        relative_cost=1.0, default_channel="claude_max",
+    ),
+    ModelSpec(
+        id="claude-sonnet-4-6", family="claude", klass="sonnet",
+        display_name="Claude Sonnet 4.6",
+        context_window=1_000_000, max_output_tokens=64_000,
+        relative_cost=1.0, default_channel="claude_max",
+    ),
+    ModelSpec(
+        id="claude-opus-4-6", family="claude", klass="opus",
+        display_name="Claude Opus 4.6",
+        context_window=200_000, max_output_tokens=32_000,
+        relative_cost=5.0, default_channel="claude_max",
+    ),
+    ModelSpec(
+        id="claude-haiku-4-5", family="claude", klass="haiku",
+        display_name="Claude Haiku 4.5",
+        context_window=200_000, max_output_tokens=8_192,
+        relative_cost=0.2, default_channel="claude_max",
+    ),
+    ModelSpec(
+        id="claude-sonnet-4", family="claude", klass="sonnet",
+        display_name="Claude Sonnet 4",
+        context_window=200_000, max_output_tokens=8_192,
+        relative_cost=1.0, default_channel="claude_max",
+    ),
+    ModelSpec(
+        id="claude-haiku-4", family="claude", klass="haiku",
+        display_name="Claude Haiku 4",
+        context_window=200_000, max_output_tokens=8_192,
+        relative_cost=0.2, default_channel="claude_max",
+    ),
+
+    # ---- OpenAI ----
+    ModelSpec(
+        id="gpt-5.5", family="gpt", klass="other",
+        display_name="GPT-5.5",
+        context_window=400_000, max_output_tokens=128_000,
+        relative_cost=1.0, default_channel="openai",
+    ),
+    ModelSpec(
+        id="gpt-5", family="gpt", klass="other",
+        display_name="GPT-5",
+        context_window=400_000, max_output_tokens=128_000,
+        relative_cost=1.0, default_channel="openai",
+    ),
+    ModelSpec(
+        id="gpt-4.1", family="gpt", klass="other",
+        display_name="GPT-4.1",
+        context_window=1_000_000, max_output_tokens=32_000,
+        relative_cost=0.5, default_channel="openai",
+    ),
+    ModelSpec(
+        id="gpt-4o", family="gpt", klass="other",
+        display_name="GPT-4o",
+        context_window=128_000, max_output_tokens=16_384,
+        relative_cost=0.5, default_channel="openai",
+    ),
+    ModelSpec(
+        id="o3", family="gpt", klass="other",
+        display_name="o3",
+        context_window=200_000, max_output_tokens=100_000,
+        relative_cost=2.0, default_channel="openai",
+    ),
+    ModelSpec(
+        id="o4-mini", family="gpt", klass="other",
+        display_name="o4-mini",
+        context_window=200_000, max_output_tokens=65_536,
+        relative_cost=0.3, default_channel="openai",
+    ),
+    ModelSpec(
+        id="o1", family="gpt", klass="other",
+        display_name="o1",
+        context_window=200_000, max_output_tokens=32_768,
+        relative_cost=2.0, default_channel="openai",
+    ),
+
+    # ---- DeepSeek ----
+    ModelSpec(
+        id="deepseek-reasoner", family="deepseek", klass="other",
+        display_name="DeepSeek Reasoner",
+        context_window=1_000_000, max_output_tokens=64_000,
+        relative_cost=0.1, default_channel="deepseek",
+    ),
+    ModelSpec(
+        id="deepseek-chat", family="deepseek", klass="other",
+        display_name="DeepSeek Chat",
+        context_window=1_000_000, max_output_tokens=8_192,
+        relative_cost=0.1, default_channel="deepseek",
+    ),
+    ModelSpec(
+        id="deepseek-v4-pro", family="deepseek", klass="other",
+        display_name="DeepSeek V4 Pro",
+        context_window=1_000_000, max_output_tokens=8_192,
+        relative_cost=0.1, default_channel="deepseek",
+    ),
+    ModelSpec(
+        id="deepseek-v4-flash", family="deepseek", klass="other",
+        display_name="DeepSeek V4 Flash",
+        context_window=1_000_000, max_output_tokens=8_192,
+        relative_cost=0.05, default_channel="deepseek",
+    ),
+
+    # ---- Google Gemini ----
+    ModelSpec(
+        id="gemini-3-pro", family="gemini", klass="other",
+        display_name="Gemini 3 Pro",
+        context_window=1_000_000, max_output_tokens=64_000,
+        relative_cost=1.0, default_channel="gemini",
+    ),
+    ModelSpec(
+        id="gemini-3-flash", family="gemini", klass="other",
+        display_name="Gemini 3 Flash",
+        context_window=1_000_000, max_output_tokens=65_536,
+        relative_cost=0.2, default_channel="gemini",
+    ),
+    ModelSpec(
+        id="gemini-2.5-pro", family="gemini", klass="other",
+        display_name="Gemini 2.5 Pro",
+        context_window=2_000_000, max_output_tokens=65_536,
+        relative_cost=1.0, default_channel="gemini",
+    ),
+    ModelSpec(
+        id="gemini-2.5-flash", family="gemini", klass="other",
+        display_name="Gemini 2.5 Flash",
+        context_window=1_000_000, max_output_tokens=65_536,
+        relative_cost=0.2, default_channel="gemini",
+    ),
+)
+
+
+# Sort once at import — longest prefix first so resolve() can short-circuit.
+_MODELS_BY_PREFIX_LEN: tuple[ModelSpec, ...] = tuple(
+    sorted(_MODELS, key=lambda s: -len(s.id))
+)
+_MODELS_BY_ID: dict[str, ModelSpec] = {s.id: s for s in _MODELS}
+
+
+def resolve(model_id: str) -> ModelSpec:
+    """Return the ModelSpec matching ``model_id`` (longest-prefix), or default."""
     if not model_id:
-        return default
+        return _DEFAULT_SPEC
     lower = model_id.lower()
-    best_len = 0
-    best_val = default
-    for prefix, val in table.items():
-        if lower.startswith(prefix.lower()) and len(prefix) > best_len:
-            best_len = len(prefix)
-            best_val = val
-    return best_val
+    # Exact match wins.
+    if lower in _MODELS_BY_ID:
+        return _MODELS_BY_ID[lower]
+    # Alias match.
+    for spec in _MODELS_BY_PREFIX_LEN:
+        if spec.aliases and lower in (a.lower() for a in spec.aliases):
+            return spec
+    # Longest-prefix match.
+    for spec in _MODELS_BY_PREFIX_LEN:
+        if lower.startswith(spec.id.lower()):
+            return spec
+    return _DEFAULT_SPEC
 
+
+def list_models() -> tuple[ModelSpec, ...]:
+    """Return every curated ModelSpec. UI consumers can iterate this."""
+    return _MODELS
+
+
+def list_by_family(family: str) -> tuple[ModelSpec, ...]:
+    """Return models in a family ('claude', 'gpt', 'gemini', 'deepseek')."""
+    return tuple(s for s in _MODELS if s.family == family.lower())
+
+
+def list_by_class(klass: str) -> tuple[ModelSpec, ...]:
+    """Return models in a class ('haiku', 'sonnet', 'opus', 'other')."""
+    return tuple(s for s in _MODELS if s.klass == klass.lower())
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat shims — replaced gradually as call sites migrate.
+# ---------------------------------------------------------------------------
 
 def context_window(model_id: str) -> int:
-    """Return the total context window (input + output) for a model."""
-    return _lookup(_CONTEXT_WINDOWS, model_id, _DEFAULT_CONTEXT)
+    """Legacy: prefer ``resolve(model_id).context_window``."""
+    return resolve(model_id).context_window
 
 
 def max_output_tokens(model_id: str) -> int:
-    """Return the max output-token limit for a single response."""
-    return _lookup(_MAX_OUTPUT_TOKENS, model_id, _DEFAULT_MAX_OUTPUT)
+    """Legacy: prefer ``resolve(model_id).max_output_tokens``."""
+    return resolve(model_id).max_output_tokens
+
+
+def model_class(model_id: str) -> str:
+    """Return the class bucket for a model (replaces classify_model)."""
+    return resolve(model_id).klass
+
+
+def relative_cost(model_id: str) -> float:
+    """Subscription cost weight relative to Sonnet (1.0)."""
+    return resolve(model_id).relative_cost

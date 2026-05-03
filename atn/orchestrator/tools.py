@@ -556,6 +556,20 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
+        name="get_my_budget_status",
+        description=(
+            "Returns the calling agent's per-provider budget caps, current "
+            "usage, ancestor caps & remaining headroom, plus subscription-window "
+            "utilization for any subscription provider in use. Call this when you "
+            "need to decide whether to start expensive work or escalate to your "
+            "parent for more headroom."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
+    ToolDefinition(
         name="set_credit_budget",
         description="Configure the credit budget for a provider.",
         input_schema={
@@ -1841,6 +1855,59 @@ async def _get_credit_budget(runtime: Runtime, input: dict[str, Any]) -> dict[st
     }
 
 
+async def _get_my_budget_status(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Return the calling agent's budget posture.
+
+    Includes own caps, ancestors' caps + headroom, and subscription utilization
+    for any provider whose name maps to a known subscription bridge.
+    """
+    caller_id = input.get("_caller_id") or ORCHESTRATOR_ID
+    own = runtime.registry.get_budget_info(caller_id)
+
+    # Walk ancestors: report each one's cap and remaining headroom for the
+    # providers the caller has declared (or for all of theirs if caller has none).
+    ancestors: list[dict[str, Any]] = []
+    cur_defn = runtime.registry.get_agent(caller_id)
+    seen: set[str] = {caller_id}
+    while cur_defn and cur_defn.parent_id:
+        parent_id = runtime.registry._resolve_parent_agent_id(cur_defn.parent_id)
+        if parent_id in seen or parent_id not in runtime.registry._agents:
+            break
+        seen.add(parent_id)
+        info = runtime.registry.get_budget_info(parent_id)
+        if info:
+            ancestors.append({
+                "agent_id": parent_id,
+                "budgets": info,
+            })
+        cur_defn = runtime.registry.get_agent(parent_id)
+
+    # Subscription utilization (Claude Max, etc.). Only relevant if the agent
+    # uses a subscription provider. We check the active providers map for a
+    # provider whose `_rate_limits` is populated.
+    subscription: dict[str, Any] = {}
+    try:
+        active = getattr(runtime, "_active_providers", None) or {}
+        for prov in active.values():
+            if hasattr(prov, "_rate_limits") and getattr(prov, "_rate_limits"):
+                subscription[getattr(prov, "name", "unknown")] = {
+                    "rate_limits": dict(prov._rate_limits),
+                    "tokens_per_percent": getattr(prov, "tokens_per_percent", None),
+                    "tokens_per_pct_by_class": getattr(
+                        prov, "tokens_per_pct_by_class", {},
+                    ),
+                }
+    except Exception:
+        pass
+
+    return {
+        "caller_id": caller_id,
+        "own": own,
+        "ancestors": ancestors,
+        "subscription": subscription,
+    }
+
+
 async def _set_credit_budget(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     b = runtime.credit_budget.set_budget(
         provider=input["provider"],
@@ -2417,6 +2484,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "update_project": _update_project,
     "get_credit_budget": _get_credit_budget,
     "set_credit_budget": _set_credit_budget,
+    "get_my_budget_status": _get_my_budget_status,
     "propose_task": _propose_task,
     "list_tasks": _list_tasks,
     "get_user_profile": _get_user_profile,

@@ -837,6 +837,19 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
               (msgUsage.input_tokens ?? 0) +
               (msgUsage.cache_read_input_tokens ?? 0) +
               (msgUsage.cache_creation_input_tokens ?? 0)
+            // Inner-loop budget enforcement: emit a per-turn usage event so the
+            // Python side can roll into cascading budgets and abort mid-orchestration
+            // if a cap is crossed. Includes model so the per-class estimator
+            // can attribute tokens correctly.
+            const turnModel = (message as any).message?.model || resolvedModel || ""
+            emitEvent({
+              type: "usage",
+              model: turnModel,
+              input_tokens: msgUsage.input_tokens ?? 0,
+              output_tokens: msgUsage.output_tokens ?? 0,
+              cache_read_input_tokens: msgUsage.cache_read_input_tokens ?? 0,
+              cache_creation_input_tokens: msgUsage.cache_creation_input_tokens ?? 0,
+            })
           }
           for (const block of message.message.content) {
             if (block.type === "text" && block.text) {

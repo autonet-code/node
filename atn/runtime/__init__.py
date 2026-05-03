@@ -375,8 +375,10 @@ class Runtime:
     # Agent Management — delegate to registry
     # ==================================================================
 
-    async def register_agent(self, defn: AgentDefinition) -> str:
-        return await self.registry.register_agent(defn)
+    async def register_agent(
+        self, defn: AgentDefinition, *, legacy: bool = False,
+    ) -> str:
+        return await self.registry.register_agent(defn, legacy=legacy)
 
     async def unregister_agent(self, agent_id: str, *, _force: bool = False) -> None:
         from ..orchestrator import ORCHESTRATOR_ID

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,72 @@ DEFAULT_MAX_CHILDREN_PER_PARENT = 20
 DEFAULT_MAX_DEPTH_BELOW_ROOT = 6
 
 
+# Period rollover for per-agent budgets. "none" means lifetime / no rollover.
+_PERIOD_SECONDS: dict[str, int] = {
+    "hourly": 3_600,
+    "daily": 86_400,
+    "weekly": 604_800,
+    "monthly": 2_592_000,  # 30-day approximation
+}
+
+
+def _normalize_period(raw: Any) -> str:
+    period = str(raw or "none").lower()
+    if period not in _PERIOD_SECONDS and period != "none":
+        return "none"
+    return period
+
+
+def budget_key(provider: str, model_id: str = "") -> str:
+    """Composite budget key: ``provider`` (provider-wide) or ``provider:model``.
+
+    Per-model caps use the composite form so an agent can declare
+    ``budgets["claude_max:claude-opus-4-7"]`` alongside a provider-wide
+    ``budgets["claude_max"]`` for everything else.
+    """
+    if not model_id:
+        return provider
+    return f"{provider}:{model_id}"
+
+
+def _parse_one_budget(raw: Any) -> tuple[float, str, str]:
+    """Parse one budget entry value into (limit, period, unit)."""
+    if isinstance(raw, dict):
+        period = _normalize_period(raw.get("period"))
+        of = str(raw.get("of", "")).lower()
+        if "pct" in raw:
+            pct = float(raw.get("pct", 0) or 0)
+            if of == "parent":
+                # Frozen at registration. If still seen here, treat as uncomputed.
+                return 0.0, period, "tokens"
+            if of in ("subscription_5h", "5h", "subscription"):
+                return pct, period, "pct_subscription_5h"
+            return 0.0, period, "tokens"
+        if "limit" in raw:
+            return float(raw.get("limit", 0) or 0), period, "tokens"
+        return 0.0, period, "tokens"
+    try:
+        return float(raw), "none", "tokens"
+    except (TypeError, ValueError):
+        return 0.0, "none", "tokens"
+
+
+def _resolve_budget(defn: Any, key: str) -> tuple[float, str, str]:
+    """Return (limit, period, unit) for an agent and a budget key.
+
+    ``key`` is either a provider name (``claude_max``) or a composite
+    ``provider:model_id`` form. Both are looked up directly on
+    ``defn.budgets``; no fallback walking happens here — the recorder
+    handles which keys to consult.
+    """
+    if not defn or not getattr(defn, "budgets", None):
+        return 0.0, "none", "tokens"
+    raw = defn.budgets.get(key)
+    if raw is None:
+        return 0.0, "none", "tokens"
+    return _parse_one_budget(raw)
+
+
 class AgentRegistry:
     """Agent registration, activation, hierarchy, and idle tracking."""
 
@@ -63,8 +131,14 @@ class AgentRegistry:
         self._heartbeat_table: dict[str, float] = {}
         self._last_idle: dict[str, datetime] = {}
         self._child_counters: dict[str, int] = {}
-        # Budget tracking: agent_id -> provider -> tokens_used (cumulative across all executions)
+        # Budget tracking: agent_id -> provider -> tokens_used (cumulative
+        # across all executions, persisted to data_dir/budget_state.json).
         self._budget_used: dict[str, dict[str, int]] = {}
+        # Per-(agent, provider) period start timestamps (ISO strings, UTC) for
+        # period-based budget rollover. agent_id -> provider -> iso_string.
+        self._budget_period_start: dict[str, dict[str, str]] = {}
+        self._budget_state_path: Path = self._config.data_dir / "budget_state.json"
+        self._load_budget_state()
         # Wallet manager for agent economic sovereignty
         self._wallet_manager = AgentWalletManager()
         # Agent private keys: agent_id -> private_key_hex (parent holds child's key)
@@ -204,8 +278,156 @@ class AgentRegistry:
                 f"Set AgentDefinition.max_depth_below on an ancestor if this is intentional."
             )
 
-    async def register_agent(self, defn: AgentDefinition) -> str:
+    def _freeze_parent_pct_budgets(self, defn: AgentDefinition) -> None:
+        """Convert ``{pct, of: parent}`` entries to absolute caps using the
+        nearest capping ancestor's cap in the same unit. Mutates defn.budgets.
+
+        Resolution rule per provider:
+          • Parent has tokens cap → child's pct of that → tokens cap.
+          • Parent has pct_subscription_5h cap → child's pct of that pct
+            → pct_subscription_5h cap (still expressed in subscription %).
+          • No capping ancestor → reject (a percentage of nothing is nothing).
+        """
+        if defn.id in self._agents or defn.parent_id is None or not defn.budgets:
+            return
+        for provider, raw in list(defn.budgets.items()):
+            if not isinstance(raw, dict):
+                continue
+            if "pct" not in raw or str(raw.get("of", "")).lower() != "parent":
+                continue
+            child_pct = float(raw.get("pct", 0) or 0)
+            if child_pct <= 0 or child_pct > 100:
+                raise ValueError(
+                    f"Agent '{defn.id}' invalid pct={child_pct} on '{provider}': "
+                    f"must be in (0, 100]."
+                )
+            period = _normalize_period(raw.get("period"))
+            # Find nearest capping ancestor for this provider.
+            cursor = self._resolve_parent_agent_id(defn.parent_id)
+            ancestor_limit = 0.0
+            ancestor_unit = "tokens"
+            while cursor and cursor in self._agents:
+                ancestor = self._agents[cursor]
+                a_limit, _a_period, a_unit = _resolve_budget(ancestor, provider)
+                if a_limit > 0:
+                    ancestor_limit = a_limit
+                    ancestor_unit = a_unit
+                    break
+                if ancestor.parent_id is None:
+                    break
+                cursor = self._resolve_parent_agent_id(ancestor.parent_id)
+            if ancestor_limit <= 0:
+                raise ValueError(
+                    f"Agent '{defn.id}' uses pct-of-parent on '{provider}' but "
+                    f"no ancestor declares a cap for that provider. Either name a "
+                    f"concrete limit or have an ancestor cap '{provider}' first."
+                )
+            if ancestor_unit == "tokens":
+                resolved = {"limit": int(ancestor_limit * child_pct / 100.0),
+                            "period": period}
+            else:
+                # pct_subscription_5h → child's pct is pct-of-pct, still in subscription %.
+                resolved = {"pct": ancestor_limit * child_pct / 100.0,
+                            "of": "subscription_5h", "period": period}
+            defn.budgets[provider] = resolved
+            log.info(
+                "Froze pct-of-parent for %s/%s: %.1f%% of ancestor %.4g%s → %r",
+                defn.id, provider, child_pct, ancestor_limit, ancestor_unit, resolved,
+            )
+
+    def _enforce_budget_required(self, defn: AgentDefinition) -> None:
+        """Cognitive non-root agents must declare at least one budget.
+
+        Roots (parent_id=None) are exempt — they SET the cap for the subtree.
+        Pipeline-mode agents are exempt — they don't drive LLM calls.
+        Re-registration (already in registry) is also exempt.
+        """
+        if defn.id in self._agents:
+            return
+        from ..models import AgentMode
+        if defn.mode != AgentMode.COGNITIVE:
+            return
+        if defn.parent_id is None:
+            return  # root agents set the cap; budget optional
+        if not defn.budgets:
+            raise ValueError(
+                f"Cognitive agent '{defn.id}' must declare a budget "
+                f"(AgentDefinition.budgets={{provider: limit}}). "
+                f"This is a hard requirement so runaway children can't burn "
+                f"the parent's headroom unbounded."
+            )
+        # At least one entry must resolve to a positive limit.
+        for provider in defn.budgets:
+            limit, _period, _unit = _resolve_budget(defn, provider)
+            if limit > 0:
+                return
+        raise ValueError(
+            f"Agent '{defn.id}' declared budgets={defn.budgets!r} but no "
+            f"entry has a positive limit. Use a positive int or "
+            f"{{'limit': N, 'period': '...'}} per provider."
+        )
+
+    def _enforce_budget_cascade(self, defn: AgentDefinition) -> None:
+        """A child's per-provider limit must fit in the parent's remaining headroom.
+
+        Comparable units only — a child capped in tokens isn't constrained by
+        an ancestor capped in pct_subscription_5h (the units don't compose
+        deterministically until refresh time). For mixed-unit chains, the
+        ancestor's runtime check still binds the subtree at execution time.
+
+        Skipped for roots and re-registrations.
+        """
+        if defn.id in self._agents:
+            return
+        if defn.parent_id is None:
+            return
+        if not defn.budgets:
+            return  # already handled by _enforce_budget_required for cognitive
+        for provider in list(defn.budgets):
+            child_limit, _, child_unit = _resolve_budget(defn, provider)
+            if child_limit <= 0:
+                continue
+            cursor = self._resolve_parent_agent_id(defn.parent_id)
+            while cursor and cursor in self._agents:
+                ancestor = self._agents[cursor]
+                a_limit, _a_period, a_unit = _resolve_budget(ancestor, provider)
+                if a_limit > 0 and a_unit == child_unit:
+                    used = self._budget_used.get(cursor, {}).get(provider, 0)
+                    remaining = max(0.0, a_limit - used)
+                    if child_limit > remaining:
+                        raise ValueError(
+                            f"Budget cascade violation: child '{defn.id}' declares "
+                            f"limit={child_limit:g} {child_unit} for '{provider}', "
+                            f"but ancestor '{cursor}' only has {remaining:g} {a_unit} "
+                            f"remaining (cap={a_limit:g}, used={used:g}). Lower the "
+                            f"child's limit or raise the ancestor's."
+                        )
+                    break  # nearest comparable capping ancestor wins
+                if a_limit > 0 and a_unit != child_unit:
+                    log.warning(
+                        "Skipping cascade check for %s/%s: child unit=%s, "
+                        "ancestor %s unit=%s (incomparable).",
+                        defn.id, provider, child_unit, cursor, a_unit,
+                    )
+                if ancestor.parent_id is None:
+                    break
+                cursor = self._resolve_parent_agent_id(ancestor.parent_id)
+
+    async def register_agent(
+        self, defn: AgentDefinition, *, legacy: bool = False,
+    ) -> str:
+        """Register an agent.
+
+        ``legacy=True`` skips the mandatory-budget check — used by the
+        on-disk agent loader so existing agents from before #21 still hydrate.
+        Fresh agent creation (orchestrator's create_agent tool, frontend
+        register-agent) goes through the strict path.
+        """
         self._enforce_spawn_limits(defn)
+        self._freeze_parent_pct_budgets(defn)
+        if not legacy:
+            self._enforce_budget_required(defn)
+        self._enforce_budget_cascade(defn)
         self._agents[defn.id] = defn
         self._status[defn.id] = AgentStatus.REGISTERED
         self._running_count[defn.id] = 0
@@ -282,6 +504,9 @@ class AgentRegistry:
         self._heartbeat_table.pop(agent_id, None)
         self._last_idle.pop(agent_id, None)
         self._agent_keys.pop(agent_id, None)
+        if self._budget_used.pop(agent_id, None) is not None or \
+           self._budget_period_start.pop(agent_id, None) is not None:
+            self._save_budget_state()
         self.inbox.remove_agent(agent_id)
         self.output_store.remove(agent_id)
         self.execution_log.remove_agent(agent_id)
@@ -401,40 +626,135 @@ class AgentRegistry:
     # Budget tracking
     # ------------------------------------------------------------------
 
-    def record_token_usage(self, agent_id: str, provider: str, tokens: int) -> str | None:
+    def _load_budget_state(self) -> None:
+        """Load persisted per-agent budget usage from disk."""
+        path = self._budget_state_path
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            log.warning("Failed to load budget state from %s", path, exc_info=True)
+            return
+        used = raw.get("used", {})
+        starts = raw.get("period_start", {})
+        if isinstance(used, dict):
+            for aid, providers in used.items():
+                if isinstance(providers, dict):
+                    self._budget_used[aid] = {
+                        p: int(v) for p, v in providers.items()
+                        if isinstance(v, (int, float))
+                    }
+        if isinstance(starts, dict):
+            for aid, providers in starts.items():
+                if isinstance(providers, dict):
+                    self._budget_period_start[aid] = {
+                        p: str(v) for p, v in providers.items() if v
+                    }
+        log.info("Loaded budget state for %d agent(s) from %s",
+                 len(self._budget_used), path)
+
+    def _save_budget_state(self) -> None:
+        """Persist budget state to disk atomically (write tmp + replace)."""
+        path = self._budget_state_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "used": self._budget_used,
+                "period_start": self._budget_period_start,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            data = json.dumps(payload, indent=2)
+            # Atomic: write to tmp in same directory, then os.replace.
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".budget_state.", suffix=".tmp", dir=str(path.parent)
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(data)
+                os.replace(tmp_path, path)
+            except Exception:
+                # Cleanup tmp on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception:
+            log.exception("Failed to save budget state to %s", path)
+
+    def _maybe_reset_period(self, agent_id: str, provider: str, period: str) -> bool:
+        """If the period for (agent, provider) has elapsed, zero the counter
+        and stamp a fresh period_started_at. Returns True if a reset happened.
+        """
+        if period == "none" or period not in _PERIOD_SECONDS:
+            return False
+        now = datetime.now(timezone.utc)
+        starts = self._budget_period_start.get(agent_id, {})
+        start_iso = starts.get(provider)
+        if not start_iso:
+            # First time we're tracking this period — stamp now, no reset.
+            self._budget_period_start.setdefault(agent_id, {})[provider] = now.isoformat()
+            return False
+        try:
+            start_dt = datetime.fromisoformat(start_iso)
+        except ValueError:
+            self._budget_period_start.setdefault(agent_id, {})[provider] = now.isoformat()
+            return False
+        if (now - start_dt).total_seconds() < _PERIOD_SECONDS[period]:
+            return False
+        # Period elapsed — reset counter and re-stamp.
+        if agent_id in self._budget_used and provider in self._budget_used[agent_id]:
+            self._budget_used[agent_id][provider] = 0
+        self._budget_period_start.setdefault(agent_id, {})[provider] = now.isoformat()
+        log.info("Budget period reset for %s/%s (%s)", agent_id, provider, period)
+        return True
+
+    def record_token_usage(
+        self,
+        agent_id: str,
+        provider: str,
+        tokens: int,
+        *,
+        model_class: str = "",
+        model_id: str = "",
+        tokens_per_pct: dict[str, float] | None = None,
+    ) -> str | None:
         """Record token usage for an agent and roll up to ancestors.
 
-        Returns the agent_id of the first ancestor that exceeded its budget, or None.
+        Walks each ancestor and updates *every* budget key that applies to
+        this turn — both the provider-wide key (``provider``) and the
+        per-model key (``provider:model_id``) when ``model_id`` is supplied.
+        Returns the agent_id of the first ancestor where any cap is exceeded.
 
-        BRIDGE POINT — on-chain inference accounting:
-        This is where off-chain inference usage should be batched and
-        submitted to the RPB contract via OnChainService.record_inference().
-        A future implementation would:
-        1. Accumulate usage in a per-agent buffer (_pending_inference dict).
-        2. When a buffer exceeds a threshold (e.g. 1000 tokens or 60s),
-           flush it by calling record_inference(requester, provider, units,
-           token, cost) with the owner key from config.
-        3. On flush failure, keep the buffer and retry next cycle.
-        The agent's on-chain address comes from defn.identity.address; the
-        provider address would come from a provider->address mapping in
-        config or Registry.
+        Per-cap unit handling:
+          • ``tokens`` → increment by ``tokens``
+          • ``pct_subscription_5h`` → increment by ``tokens / tokens_per_pct[class]``
         """
-        current = agent_id
-        exceeded_agent = None
-        while current:
-            if current not in self._budget_used:
-                self._budget_used[current] = {}
-            self._budget_used[current][provider] = self._budget_used[current].get(provider, 0) + tokens
+        keys = [provider]
+        if model_id:
+            keys.append(budget_key(provider, model_id))
 
-            # Check if this agent exceeded its budget
+        current = agent_id
+        exceeded_agent: str | None = None
+        while current:
             defn = self._agents.get(current)
-            if defn and defn.budgets:
-                limit = defn.budgets.get(provider, 0)
-                if limit > 0 and self._budget_used[current].get(provider, 0) >= limit:
+            for key in keys:
+                limit, period, unit = _resolve_budget(defn, key)
+                self._maybe_reset_period(current, key, period)
+                if current not in self._budget_used:
+                    self._budget_used[current] = {}
+                increment = self._increment_for_unit(
+                    tokens, unit, model_class, tokens_per_pct,
+                )
+                if increment > 0:
+                    self._budget_used[current][key] = (
+                        self._budget_used[current].get(key, 0) + increment
+                    )
+                if limit > 0 and self._budget_used[current].get(key, 0) >= limit:
                     if exceeded_agent is None:
                         exceeded_agent = current
 
-            # Walk up to parent
             if defn and defn.parent_id:
                 current = self._resolve_parent_agent_id(defn.parent_id)
                 if current not in self._agents:
@@ -442,21 +762,58 @@ class AgentRegistry:
             else:
                 break
 
+        self._save_budget_state()
         return exceeded_agent
 
-    def check_budget(self, agent_id: str, provider: str) -> tuple[bool, str | None]:
-        """Check if agent or any ancestor is over budget.
+    @staticmethod
+    def _increment_for_unit(
+        tokens: int,
+        unit: str,
+        model_class: str,
+        tokens_per_pct: dict[str, float] | None,
+    ) -> float:
+        """Convert a per-turn token count into the cap unit's increment."""
+        if unit == "tokens":
+            return float(tokens)
+        if unit == "pct_subscription_5h":
+            if not tokens_per_pct or not model_class:
+                return 0.0  # estimator not ready or model unknown — skip enforcement increment
+            rate = tokens_per_pct.get(model_class)
+            if not rate or rate <= 0:
+                return 0.0
+            return tokens / rate
+        return 0.0
 
-        Returns (ok, blocking_agent_id). ok=True means execution can proceed.
+    def check_budget(
+        self,
+        agent_id: str,
+        provider: str,
+        *,
+        model_id: str = "",
+    ) -> tuple[bool, str | None]:
+        """Check if agent or any ancestor is over budget for the given keys.
+
+        Examines both the provider-wide cap (``provider``) and the per-model
+        cap (``provider:model_id``) when ``model_id`` is supplied. The first
+        cap to fail wins.
         """
+        keys = [provider]
+        if model_id:
+            keys.append(budget_key(provider, model_id))
+
         current = agent_id
+        any_reset = False
         while current:
             defn = self._agents.get(current)
-            if defn and defn.budgets:
-                limit = defn.budgets.get(provider, 0)
+            for key in keys:
+                limit, period, _unit = _resolve_budget(defn, key)
+                if self._maybe_reset_period(current, key, period):
+                    any_reset = True
                 if limit > 0:
-                    used = self._budget_used.get(current, {}).get(provider, 0)
+                    used = self._budget_used.get(current, {}).get(key, 0)
                     if used >= limit:
+                        if any_reset:
+                            self._save_budget_state()
                         return False, current
             if defn and defn.parent_id:
                 current = self._resolve_parent_agent_id(defn.parent_id)
@@ -464,21 +821,47 @@ class AgentRegistry:
                     break
             else:
                 break
+        if any_reset:
+            self._save_budget_state()
         return True, None
 
-    def get_budget_info(self, agent_id: str) -> dict[str, dict[str, int]]:
-        """Return budget info: {provider: {"limit": N, "used": M, "remaining": R}}"""
+    def get_budget_info(self, agent_id: str) -> dict[str, dict[str, Any]]:
+        """Return budget info per declared key.
+
+        Keys are either ``provider`` (provider-wide cap) or ``provider:model_id``
+        (per-model cap). Each entry includes ``scope`` ('provider' | 'model'),
+        ``provider``, optional ``model_id``, plus the standard limit/used/period
+        fields.
+        """
         defn = self._agents.get(agent_id)
         if not defn:
             return {}
-        result = {}
-        for provider, limit in (defn.budgets or {}).items():
-            used = self._budget_used.get(agent_id, {}).get(provider, 0)
-            result[provider] = {
+        result: dict[str, dict[str, Any]] = {}
+        any_reset = False
+        for key in (defn.budgets or {}).keys():
+            limit, period, unit = _resolve_budget(defn, key)
+            if self._maybe_reset_period(agent_id, key, period):
+                any_reset = True
+            used = self._budget_used.get(agent_id, {}).get(key, 0)
+            if ":" in key:
+                provider, model_id = key.split(":", 1)
+                scope = "model"
+            else:
+                provider, model_id = key, ""
+                scope = "provider"
+            result[key] = {
+                "scope": scope,
+                "provider": provider,
+                "model_id": model_id,
                 "limit": limit,
                 "used": used,
-                "remaining": max(0, limit - used) if limit > 0 else -1,
+                "remaining": max(0.0, limit - used) if limit > 0 else -1,
+                "period": period,
+                "unit": unit,
+                "period_started_at": self._budget_period_start.get(agent_id, {}).get(key),
             }
+        if any_reset:
+            self._save_budget_state()
         return result
 
     # ------------------------------------------------------------------

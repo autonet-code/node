@@ -182,9 +182,12 @@ class AgentDefinition:
     schedule: str | None = None             # e.g. "30s", "5m", "1h"
     output_schema: dict | None = None       # expected shape of final output
     description: str = ""
-    budgets: dict[str, int] = field(default_factory=dict)
-    # Token budgets per provider.  e.g. {"gemini": 50000, "claude_max": 100000}
-    # Limit is total tokens (input+output) per execution.  0 or absent = unlimited.
+    budgets: dict[str, Any] = field(default_factory=dict)
+    # Token budgets per provider.  Two accepted shapes:
+    #   {"gemini": 50000}                              # int = no period (lifetime cap)
+    #   {"claude_max": {"limit": 100000,               # rolls over on period boundary
+    #                   "period": "monthly"}}          # daily | weekly | monthly | hourly | none
+    # 0 or absent = unlimited.  Counter rolls up to ancestors.
 
     # --- Long-horizon safeguards (None = use registry defaults) ---
     max_children: int | None = None

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, TYPE_CHECKING
 
 from ..events import Event, EventBus, EventType
+from ..providers.base import classify_model as _classify_model
 from ..inbox import InboxManager
 from ..models import (
     AgentDefinition,
@@ -521,6 +522,47 @@ class ExecutionEngine:
                     user_message="\n\n".join(prompt_parts) if prompt_parts else (defn.description or defn.name),
                 )
 
+            # --- Per-turn budget recorder (inner-loop enforcement) ---
+            # Wired into send_orchestrate so each turn's tokens roll into the
+            # cascading budget immediately. Returns (ok, blocker_id); on
+            # ok=False the provider aborts the loop with stop_reason=budget_exceeded.
+            _budget_provider_key = getattr(sub_provider, "name", "claude_max")
+            # Track tokens recorded mid-loop so the post-loop reconciliation
+            # only adds the *unrecorded* remainder. The base provider calls
+            # this every turn; the bridge provider's stream events also call it
+            # via _stream_events. Either way, the cascading counter sees the
+            # right total (post-loop block subtracts already_recorded).
+            _recorded_inflight: dict[str, int] = {}
+
+            def _per_turn_recorder(
+                turn_tokens: int,
+                model: str = "",
+            ) -> tuple[bool, str | None]:
+                if turn_tokens <= 0:
+                    return True, None
+                _recorded_inflight[_budget_provider_key] = (
+                    _recorded_inflight.get(_budget_provider_key, 0) + turn_tokens
+                )
+                from ..model_specs import resolve as _resolve_model
+                spec = _resolve_model(model)
+                # Per-model rate from the bridge estimator; all versions of a
+                # class share a rate (Anthropic doesn't break out by version).
+                rate_for_model = None
+                if hasattr(sub_provider, "tokens_per_pct_for_model"):
+                    rate_for_model = sub_provider.tokens_per_pct_for_model(spec.id)
+                # Provide the rate under both class- and id-keys so the recorder
+                # can resolve regardless of how it looks up.
+                tpp = {spec.klass: rate_for_model} if rate_for_model else None
+                exceeded = self.registry.record_token_usage(
+                    defn.id, _budget_provider_key, turn_tokens,
+                    model_class=spec.klass,
+                    model_id=spec.id if spec.id != "default" else "",
+                    tokens_per_pct=tpp,
+                )
+                if exceeded:
+                    return False, exceeded
+                return True, None
+
             # --- Run the agent ---
             send_kwargs: dict[str, Any] = {
                 "message": user_message,
@@ -529,6 +571,7 @@ class ExecutionEngine:
                 "max_turns": defn.max_turns,
                 "tool_executor": _tool_executor,
                 "on_chunk": _on_chunk,
+                "usage_recorder": _per_turn_recorder,
             }
             if session_id:
                 send_kwargs["session_id"] = session_id
@@ -552,6 +595,9 @@ class ExecutionEngine:
             if response.stop_reason == "interrupted" or cancel.is_set():
                 record.status = ExecutionStatus.KILLED
                 record.error = "Interrupted"
+            elif response.stop_reason == "budget_exceeded":
+                record.status = ExecutionStatus.FAILED
+                record.error = response.text or "Budget exceeded mid-orchestration"
             else:
                 record.status = ExecutionStatus.COMPLETED
 
@@ -591,6 +637,16 @@ class ExecutionEngine:
             if hasattr(sub_provider, 'session_stats'):
                 agent_convo.save_session_stats(sub_provider.session_stats)
 
+            # Reconciliation: subscription providers (bridge) compare predicted
+            # vs actual subscription burn after each orchestration to keep the
+            # tokens-per-pct estimator honest. Best-effort — failures here
+            # never affect the user-visible execution result.
+            if hasattr(sub_provider, "reconcile_after_orchestration"):
+                try:
+                    await sub_provider.reconcile_after_orchestration()
+                except Exception:
+                    log.exception("reconcile_after_orchestration failed; continuing")
+
         except asyncio.CancelledError:
             record.status = ExecutionStatus.KILLED
             record.error = "Force-cancelled by kill switch"
@@ -614,11 +670,14 @@ class ExecutionEngine:
                     execution_id=record.execution_id,
                 ))
 
-            # Record usage in cascading budget system
+            # Record usage in cascading budget system. Subtract anything the
+            # inner-loop recorder already booked so we don't double-count.
             for provider_key, usage in record.token_usage.items():
                 total = usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_creation_tokens
-                if total > 0:
-                    exceeded = self.registry.record_token_usage(defn.id, provider_key, total)
+                already_recorded = _recorded_inflight.get(provider_key, 0)
+                remainder = total - already_recorded
+                if remainder > 0:
+                    exceeded = self.registry.record_token_usage(defn.id, provider_key, remainder)
                     if exceeded:
                         # Auto-pause the exceeded agent
                         self.registry._status[exceeded] = AgentStatus.BUDGET_PAUSED

@@ -15,6 +15,7 @@ Tool calls returned by the LLM:
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -22,6 +23,39 @@ from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+async def _maybe_await(value: Any) -> Any:
+    """Await coroutine/awaitable, otherwise pass through.
+
+    Lets callers pass either a sync function (returning a tuple) or an async
+    function (returning a coroutine) as a callback.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _call_recorder(recorder: Any, turn_tokens: int, model: str = "") -> Any:
+    """Call usage_recorder with the right arity.
+
+    Backward-compatible: accepts recorders that take just turn_tokens, or
+    take (turn_tokens, model). Inspect the signature once at call site.
+    """
+    try:
+        sig = inspect.signature(recorder)
+        positional = [
+            p for p in sig.parameters.values()
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        if len(positional) >= 2:
+            return recorder(turn_tokens, model)
+    except (TypeError, ValueError):
+        pass
+    return recorder(turn_tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +94,16 @@ def get_context_window(model: str) -> int:
         if prefix != "default" and model.startswith(prefix):
             return size
     return CONTEXT_WINDOWS.get("default", 128_000)
+
+
+def classify_model(model: str) -> str:
+    """Bucket a model identifier into 'haiku', 'sonnet', 'opus', or 'other'.
+
+    Routes through ``model_specs.model_class`` so the model store is the
+    single source of truth.
+    """
+    from ..model_specs import model_class
+    return model_class(model)
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +284,7 @@ class Provider(ABC):
         session_id: str = "",
         per_turn_input_max: int | None = None,
         repeat_call_limit: int | None = None,
+        usage_recorder: Any = None,
         **_unused: Any,
     ) -> ProviderResponse:
         """Multi-turn orchestration with tool relay.
@@ -362,6 +407,42 @@ class Provider(ABC):
             )
             if response.model:
                 self._active_model = response.model
+
+            # Inner-loop budget enforcement. usage_recorder is supplied by the
+            # execution engine and rolls per-turn tokens into the cascading
+            # _budget_used dict; if any ancestor's cap is now exceeded, abort
+            # the loop early instead of running all max_turns.
+            if usage_recorder is not None:
+                try:
+                    turn_total = (
+                        response.usage.input_tokens
+                        + response.usage.output_tokens
+                        + response.usage.cache_read_tokens
+                        + response.usage.cache_creation_tokens
+                    )
+                    if turn_total > 0:
+                        rec_model = response.model or model or self._active_model
+                        ok, blocker = await _maybe_await(
+                            _call_recorder(usage_recorder, turn_total, rec_model)
+                        )
+                        if not ok:
+                            log.warning(
+                                "Inner-loop budget exceeded mid-orchestration "
+                                "(blocker=%s) — aborting cognitive loop for agent %s",
+                                blocker, self.source_agent_id or "?",
+                            )
+                            return ProviderResponse(
+                                text=(
+                                    f"Aborted: budget exceeded "
+                                    f"(blocked by '{blocker}'). Adjust the budget on "
+                                    f"that agent or wait for the next period."
+                                ),
+                                stop_reason="budget_exceeded",
+                                usage=cumulative_usage,
+                                model=model or self._active_model,
+                            )
+                except Exception:
+                    log.exception("usage_recorder failed; continuing")
 
             # Emit per-turn usage event (same format as BridgeProvider)
             if self.event_bus and self.source_agent_id:

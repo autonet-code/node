@@ -358,12 +358,13 @@ async def _load_agents(runtime: Runtime, config: ATNConfig) -> int:
         except ValueError:
             pass
 
-    # Register new or update existing
+    # Register new or update existing. legacy=True so on-disk agents from
+    # before the mandatory-budget rule still hydrate; new creates via
+    # create_agent / the frontend go through the strict path.
     for defn in agents:
         if defn.id in current_ids:
-            # Re-register: unregister old, register new
             await runtime.unregister_agent(defn.id)
-        await runtime.register_agent(defn)
+        await runtime.register_agent(defn, legacy=True)
 
     if agents:
         console.print(f"  [green]Loaded {len(agents)} agent(s) from {config.agents_dir}[/]")

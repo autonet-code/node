@@ -100,6 +100,45 @@ class BridgeProvider(Provider):
         # session_stats["rate_limits"].
         self._rate_limits: dict[str, dict[str, Any]] = {}
 
+        # Per-model-class estimator for the 5h subscription window. We track
+        # cumulative tokens by class (haiku / sonnet / opus / other) and pair
+        # each refresh_usage() reading with a per-class breakdown of the
+        # tokens consumed since the previous reading. Anthropic charges
+        # different rates per class against the 5h window; the EMA per class
+        # gives us a tokens-per-1%-of-window factor we can apply when
+        # resolving pct_subscription_5h budgets.
+        self._cum_tokens_by_class: dict[str, int] = {
+            "haiku": 0, "sonnet": 0, "opus": 0, "other": 0,
+        }
+        self._last_snapshot: dict[str, Any] | None = None
+        # Bootstrap relative-cost multipliers (Anthropic's published rough
+        # ratios). Used until the EMA has at least one observation per class.
+        # Normalized so sonnet=1.0 — when we see a Sonnet-only delta we can
+        # set tokens_per_pct[sonnet] from data and derive others.
+        self._bootstrap_relative = {
+            "haiku": 5.0,    # Haiku is ~5x cheaper per token, so ~5x more tokens per 1%
+            "sonnet": 1.0,
+            "opus": 0.2,     # Opus is ~5x more expensive per token, so ~5x fewer tokens per 1%
+            "other": 1.0,    # Treat unknown as Sonnet-equivalent.
+        }
+        # Bootstrap absolute rate (tokens per 1% of 5h window for Sonnet).
+        # Loose — refined as soon as real data arrives. ~6M tokens/5h →
+        # ~60k tokens/pct for Sonnet.
+        self._bootstrap_sonnet_rate = 60_000.0
+        self._tokens_per_pct_by_class: dict[str, float] = {}
+        self._estimator_obs_count: dict[str, int] = {
+            "haiku": 0, "sonnet": 0, "opus": 0, "other": 0,
+        }
+        # Reconciliation: log running discrepancy between our predicted
+        # subscription-pct burn (computed turn-by-turn from the estimator)
+        # and the actual delta on the 5h header. Big discrepancies trigger
+        # a recalibration nudge on the most-active class for the period.
+        self._predicted_pct_since_refresh: float = 0.0
+        self._predicted_tokens_by_class_since_refresh: dict[str, int] = {
+            "haiku": 0, "sonnet": 0, "opus": 0, "other": 0,
+        }
+        self._last_reconciliation: dict[str, Any] | None = None
+
     @property
     def name(self) -> str:
         return "claude_max"
@@ -324,6 +363,7 @@ class BridgeProvider(Provider):
         tool_executor: Callable[..., Any],
         on_chunk: Callable[..., Any] | None = None,
         session_id: str = "",
+        usage_recorder: Any = None,
         **kwargs,
     ) -> ProviderResponse:
         """Multi-turn orchestrator call through the bridge.
@@ -393,6 +433,14 @@ class BridgeProvider(Provider):
                 ) from exc
 
             log.info("Orchestrate request sent (tools=%d, max_turns=%d)", len(tools), max_turns)
+
+            # Shared state between the stream-events task and the outer
+            # orchestrate loop. budget_blocker carries the agent_id whose cap
+            # was crossed; if set, we treat the orchestration outcome as
+            # budget-exceeded rather than a normal end_turn.
+            budget_state = {"blocker": None}  # type: dict[str, Any]
+
+            from .base import _call_recorder, _maybe_await
 
             # Start streaming events to on_chunk concurrently
             stream_task: asyncio.Task | None = None
@@ -501,6 +549,37 @@ class BridgeProvider(Provider):
                                         "status": "in_progress",
                                     },
                                 ))
+                        elif event.get("type") == "usage":
+                            # Per-turn usage from the TS bridge. Roll into the
+                            # cascading budget; if the recorder vetoes, signal
+                            # the SDK to stop via interrupt().
+                            turn_total = (
+                                int(event.get("input_tokens", 0))
+                                + int(event.get("output_tokens", 0))
+                                + int(event.get("cache_read_input_tokens", 0))
+                                + int(event.get("cache_creation_input_tokens", 0))
+                            )
+                            turn_model = event.get("model", "")
+                            if turn_total > 0:
+                                # Update per-class cumulative counter for the estimator.
+                                self.record_turn_tokens(turn_total, turn_model)
+                                if usage_recorder is not None:
+                                    try:
+                                        ok, blocker = await _maybe_await(
+                                            _call_recorder(
+                                                usage_recorder, turn_total, turn_model
+                                            )
+                                        )
+                                        if not ok:
+                                            budget_state["blocker"] = blocker
+                                            log.warning(
+                                                "Bridge inner-loop budget exceeded "
+                                                "(blocker=%s) — interrupting SDK",
+                                                blocker,
+                                            )
+                                            await self.interrupt()
+                                    except Exception:
+                                        log.exception("usage_recorder failed; continuing")
                     except Exception:
                         log.exception("Error processing stream event: %s", event)
 
@@ -656,11 +735,34 @@ class BridgeProvider(Provider):
                     },
                 ))
 
+            # Inner-loop budget veto wins over the bridge's own stop_reason —
+            # the bridge sees an SDK interrupt and reports interrupted/end_turn,
+            # but the cause was a budget cap. Surface it explicitly.
+            stop_reason = final_resp.get("stop_reason", "end_turn")
+            if budget_state["blocker"]:
+                stop_reason = "budget_exceeded"
+                blocker = budget_state["blocker"]
+                bridge_text = final_resp.get("text", "")
+                final_text = (
+                    f"Aborted: bridge orchestration budget exceeded "
+                    f"(blocked by '{blocker}'). Adjust the budget on that "
+                    f"agent or wait for the next period."
+                )
+                return ProviderResponse(
+                    text=bridge_text or final_text,
+                    thinking=final_resp.get("thinking", []),
+                    tool_calls=[],
+                    stop_reason=stop_reason,
+                    usage=usage,
+                    model=final_resp.get("model", model or self._model),
+                    raw=final_resp,
+                )
+
             return ProviderResponse(
                 text=final_resp.get("text", ""),
                 thinking=final_resp.get("thinking", []),
                 tool_calls=[],  # Tools are handled inside the bridge
-                stop_reason=final_resp.get("stop_reason", "end_turn"),
+                stop_reason=stop_reason,
                 usage=usage,
                 model=final_resp.get("model", model or self._model),
                 raw=final_resp,
@@ -777,7 +879,227 @@ class BridgeProvider(Provider):
             windows.get("seven_day", {}).get("utilization") if windows.get("seven_day") else "?",
             windows.get("overage", {}).get("utilization") if windows.get("overage") else "?",
         )
+
+        # Estimator snapshot: pair the 5h utilization with the cumulative-tokens
+        # counter. Two consecutive non-reset snapshots give us a rolling
+        # tokens-per-percent factor.
+        five_h = self._rate_limits.get("five_hour")
+        if five_h and five_h.get("utilization") is not None:
+            self._record_usage_snapshot(float(five_h["utilization"]))
         return dict(self._rate_limits)
+
+    def _record_usage_snapshot(self, utilization: float) -> None:
+        """Pair the 5h utilization reading with the per-class cumulative-tokens
+        counters. Diffs across successive snapshots refine the per-class
+        tokens-per-percent rates via an EMA.
+
+        Anthropic only exposes one aggregate 5h utilization number, so when
+        the snapshot delta straddles multiple model classes we allocate the
+        utilization delta proportionally using the bootstrap multipliers (or,
+        once the EMA has data, the current rates themselves).
+
+        utilization is the fraction (0.0..1.0) of the 5h window consumed.
+        """
+        snap = {
+            "utilization": utilization,
+            "tokens_by_class": dict(self._cum_tokens_by_class),
+        }
+        prev = self._last_snapshot
+        if prev is not None:
+            util_delta = utilization - prev["utilization"]
+            class_deltas = {
+                k: self._cum_tokens_by_class[k] - prev["tokens_by_class"].get(k, 0)
+                for k in self._cum_tokens_by_class
+            }
+            total_delta = sum(class_deltas.values())
+            if util_delta > 0.005 and total_delta > 0:
+                # Allocate the util_delta across classes by their relative
+                # cost (tokens-per-pct ratio). Convention: lower
+                # tokens_per_pct = more expensive per pct = more pct burned
+                # for the same token count. So each class contributes:
+                #   pct_contributed = (tokens_in_class / rate_for_class)
+                # and we scale the contributions to match the observed util_delta.
+                per_class_rate = self._effective_rates()
+                contributions: dict[str, float] = {}
+                for cls, tokens in class_deltas.items():
+                    if tokens <= 0:
+                        contributions[cls] = 0.0
+                    else:
+                        rate = per_class_rate.get(cls, self._bootstrap_sonnet_rate)
+                        contributions[cls] = tokens / rate  # in pct units
+                contrib_sum = sum(contributions.values())
+                if contrib_sum > 0:
+                    # Scale so the contributions sum equals the observed util_delta * 100.
+                    scale = (util_delta * 100.0) / contrib_sum
+                    # Each class's actual rate this period = tokens / (contributed_pct * scale)
+                    for cls, tokens in class_deltas.items():
+                        if tokens > 0 and contributions[cls] > 0:
+                            actual_pct = contributions[cls] * scale
+                            if actual_pct > 0.05:  # skip near-zero attributions
+                                new_rate = tokens / actual_pct
+                                self._update_class_rate(cls, new_rate)
+            elif util_delta < -0.05:
+                # 5h window rolled over — wipe history so we start fresh.
+                self._last_snapshot = snap
+                return
+        self._last_snapshot = snap
+
+    def _effective_rates(self) -> dict[str, float]:
+        """Return the rates we'd use right now: EMA values where present,
+        bootstrap derivations elsewhere. Always returns a value per class.
+        """
+        out: dict[str, float] = {}
+        sonnet_rate = self._tokens_per_pct_by_class.get(
+            "sonnet", self._bootstrap_sonnet_rate
+        )
+        for cls in ("haiku", "sonnet", "opus", "other"):
+            if cls in self._tokens_per_pct_by_class:
+                out[cls] = self._tokens_per_pct_by_class[cls]
+            else:
+                out[cls] = sonnet_rate * self._bootstrap_relative[cls]
+        return out
+
+    def _update_class_rate(self, cls: str, new_rate: float) -> None:
+        """EMA update for the rate of a given class."""
+        if new_rate <= 0:
+            return
+        prior = self._tokens_per_pct_by_class.get(cls)
+        if prior is None:
+            self._tokens_per_pct_by_class[cls] = new_rate
+        else:
+            self._tokens_per_pct_by_class[cls] = 0.7 * prior + 0.3 * new_rate
+        self._estimator_obs_count[cls] = self._estimator_obs_count.get(cls, 0) + 1
+
+    def record_turn_tokens(self, tokens: int, model: str) -> None:
+        """Account a turn's tokens against the cumulative-by-class counter.
+
+        Called by the bridge stream-event handler on each per-turn `usage`
+        event so the estimator's snapshot has accurate per-class deltas.
+        Also accumulates a predicted pct burn for reconciliation.
+        """
+        if tokens <= 0:
+            return
+        from .base import classify_model
+        cls = classify_model(model)
+        self._cum_tokens_by_class[cls] = self._cum_tokens_by_class.get(cls, 0) + tokens
+        # Predicted pct burn at our current rate estimate (or bootstrap).
+        rates = self._effective_rates()
+        rate = rates.get(cls)
+        if rate and rate > 0:
+            self._predicted_pct_since_refresh += tokens / rate
+        self._predicted_tokens_by_class_since_refresh[cls] = (
+            self._predicted_tokens_by_class_since_refresh.get(cls, 0) + tokens
+        )
+
+    async def reconcile_after_orchestration(self) -> dict[str, Any]:
+        """Reconcile predicted vs actual subscription burn after an orchestration.
+
+        Refreshes subscription headers (which gives us the *actual* util_5h
+        delta from Anthropic), compares to ``_predicted_pct_since_refresh``
+        which we accumulated turn-by-turn at our current rate estimate.
+
+        If predicted is too high → our rates are too low (we're undercharging
+        per token; need higher tokens/pct... wait, that's reversed).
+        Predicted_pct = tokens / rate. So if predicted > actual, we
+        overestimated burn for given tokens, meaning rate is too low (we
+        thought each token burned more pct than it really did) → bump rate up.
+        If predicted < actual, we underestimated, rate too high → bump down.
+
+        Adjustment is applied to the class that consumed the most tokens in
+        this orchestration. Conservative: 30% of the discrepancy, blended via
+        EMA so a single odd reading can't whipsaw the estimator.
+        """
+        prev_5h = (self._rate_limits.get("five_hour") or {}).get("utilization")
+        await self.refresh_usage()  # populates self._rate_limits and runs snapshot
+        new_5h = (self._rate_limits.get("five_hour") or {}).get("utilization")
+
+        actual_pct_delta = None
+        if prev_5h is not None and new_5h is not None:
+            actual_pct_delta = (new_5h - prev_5h) * 100.0
+
+        predicted_pct = self._predicted_pct_since_refresh
+        report: dict[str, Any] = {
+            "predicted_pct": predicted_pct,
+            "actual_pct": actual_pct_delta,
+            "tokens_by_class": dict(self._predicted_tokens_by_class_since_refresh),
+            "adjusted_class": None,
+            "rate_before": None,
+            "rate_after": None,
+        }
+
+        if (
+            actual_pct_delta is not None
+            and actual_pct_delta > 0.5
+            and predicted_pct > 0
+        ):
+            ratio = actual_pct_delta / predicted_pct
+            if abs(ratio - 1.0) > 0.10:
+                # Pick the class with the most tokens this period.
+                tokens_by_class = self._predicted_tokens_by_class_since_refresh
+                dominant = max(tokens_by_class, key=lambda k: tokens_by_class[k])
+                if tokens_by_class.get(dominant, 0) > 0:
+                    rate_before = self._effective_rates().get(dominant, 0)
+                    # actual > predicted → ratio > 1 → our rate was too high
+                    # (we thought it took more tokens to burn 1pp than it did).
+                    # New rate = old rate / ratio.
+                    target_rate = rate_before / ratio
+                    # 30% blend via EMA.
+                    adjusted = 0.7 * rate_before + 0.3 * target_rate
+                    self._tokens_per_pct_by_class[dominant] = adjusted
+                    self._estimator_obs_count[dominant] = (
+                        self._estimator_obs_count.get(dominant, 0) + 1
+                    )
+                    report["adjusted_class"] = dominant
+                    report["rate_before"] = rate_before
+                    report["rate_after"] = adjusted
+                    log.info(
+                        "Reconciliation: %s rate %.1f → %.1f (predicted %.2fpp, "
+                        "actual %.2fpp, ratio %.3f)",
+                        dominant, rate_before, adjusted,
+                        predicted_pct, actual_pct_delta, ratio,
+                    )
+
+        # Reset per-orchestration counters.
+        self._predicted_pct_since_refresh = 0.0
+        self._predicted_tokens_by_class_since_refresh = {
+            k: 0 for k in self._predicted_tokens_by_class_since_refresh
+        }
+        self._last_reconciliation = report
+        return report
+
+    @property
+    def tokens_per_pct_by_class(self) -> dict[str, float]:
+        """Effective tokens-per-1%-of-5h rate for each model class.
+
+        Includes bootstrap fallbacks for classes that haven't been observed
+        yet, so callers can always look up a rate. Use ``estimator_obs_count``
+        to gauge confidence.
+        """
+        return self._effective_rates()
+
+    def tokens_per_pct_for_model(self, model_id: str) -> float:
+        """Resolve a tokens-per-pct rate for a specific model id.
+
+        Routes through the model store to find the class, then returns that
+        class's effective rate. All versions in a class share a rate because
+        Anthropic doesn't break out subscription utilization by version.
+        """
+        from ..model_specs import resolve as _resolve_model
+        spec = _resolve_model(model_id)
+        rates = self._effective_rates()
+        return rates.get(spec.klass, self._bootstrap_sonnet_rate)
+
+    def tokens_per_pct_by_model(self, model_ids: list[str]) -> dict[str, float]:
+        """Bulk version: rate per model id for the supplied list."""
+        return {m: self.tokens_per_pct_for_model(m) for m in model_ids}
+
+    @property
+    def tokens_per_percent(self) -> float | None:
+        """Backward-compat single rate (Sonnet-equivalent).
+
+        Returns the Sonnet rate from the EMA if observed, else None.
+        """
+        return self._tokens_per_pct_by_class.get("sonnet")
 
     async def send_user_message(self, content: str) -> None:
         """Inject a user message into the active orchestration session.
