@@ -1,41 +1,20 @@
-"""Solver-side adapter: task -> World -> equilibrate -> stake delta.
+"""Solver-side adapter: task -> events recorded during equilibration.
 
 The protocol contract: take a task spec and (optionally) a global model
-CID, produce a (weight_delta, metrics) tuple compatible with the
-existing FedAvg pipeline. Internally we run the world-model engine
-instead of a neural network.
+CID, produce a contribution payload. Internally we run the world-model
+engine and record each sprout and observation as an Event.
 
-Stake delta shape
------------------
-
-Same outer shape as a JEPA weight_delta: a dict of named arrays. The
-keys are stake-event categories rather than layer names:
+Output shape
+------------
 
   {
-    "node_stakes": {
-        "<node_id>": {
-            "pos_stake_delta": float,   # change in net positive stake
-            "neg_stake_delta": float,   # change in net negative stake
-        },
-        ...
-    },
-    "new_nodes": [
-        {
-            "node_id": str,             # content-addressed, sha256 of (parent_id, coords, axis)
-            "parent_id": str,
-            "position": "pro" | "con",
-            "coords": [float, ...],
-            "polarity_axis": [float, ...],
-            "content": str,
-        },
-        ...
-    ],
-    "absorbed_observations": [str, ...]  # observation ids absorbed in this run
+    "events": [Event.to_dict(), ...],
+    "score_snapshot_after": {node_id: float, ...},   # post-equilibration
+    "metrics": {...},
   }
 
-This is the smallest format that preserves enough information for
-``apply_stake_delta`` to merge it into a global tree, and for
-``aggregate_stake_deltas`` to combine multiple solvers' deltas.
+The aggregator replays events on the global world, equilibrates, and
+compares pre/post scores at epoch boundary to compute mint.
 """
 
 from __future__ import annotations
@@ -44,7 +23,6 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from world_model.generalized import (
@@ -54,55 +32,56 @@ from world_model.generalized import (
     equilibrate,
 )
 
+from .events import (
+    Event,
+    ObservationAdded,
+    SubClaimSprouted,
+    event_from_dict,
+    snapshot_node_scores,
+)
+
+try:
+    from .score_turn import score_turn_4d
+except ImportError:
+    def score_turn_4d(turn: Dict[str, Any]) -> Tuple[float, float, float, float]:
+        """Fallback when score_turn module isn't built yet -- returns zeros."""
+        return (0.0, 0.0, 0.0, 0.0)
+
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Charter: the four root tendencies the substrate equilibrates against.
+# Charter
 # ---------------------------------------------------------------------------
 
 CHARTER = [
-    {
-        "id": "life_precious",
-        "thesis": "Life is precious and should be preserved.",
-        "axis_index": 0,
-    },
-    {
-        "id": "self_preservation",
-        "thesis": "The system should preserve its own continuity.",
-        "axis_index": 1,
-    },
-    {
-        "id": "promotion_of_intelligence",
-        "thesis": "Intelligence in any form should be promoted.",
-        "axis_index": 2,
-    },
-    {
-        "id": "evolution",
-        "thesis": "Forward advancement of capability is desirable.",
-        "axis_index": 3,
-    },
+    {"id": "life_precious",
+     "thesis": "Life is precious and should be preserved.",
+     "axis_index": 0},
+    {"id": "self_preservation",
+     "thesis": "The system should preserve its own continuity.",
+     "axis_index": 1},
+    {"id": "promotion_of_intelligence",
+     "thesis": "Intelligence in any form should be promoted.",
+     "axis_index": 2},
+    {"id": "evolution",
+     "thesis": "Forward advancement of capability is desirable.",
+     "axis_index": 3},
 ]
 N_DIMS = len(CHARTER)
 
 
 def build_charter_world(bandwidth: float = 1.5) -> World:
-    """Construct a World seeded with the four charter tendencies.
-
-    Each tendency anchors at +1 on its dimension with polarity axis
-    pointing in the same direction (PRO = honoring the principle).
-    """
     world = World()
     for entry in CHARTER:
         i = entry["axis_index"]
         anchor = tuple(1.0 if j == i else 0.0 for j in range(N_DIMS))
-        polarity = anchor
         world.add_tendency(GeneralizedTendency(
             id=entry["id"],
             thesis=entry["thesis"],
             anchor=anchor,
-            polarity_axis=polarity,
+            polarity_axis=anchor,
             budget=1.0,
             bandwidth=bandwidth,
             smooth_promotion=True,
@@ -111,119 +90,48 @@ def build_charter_world(bandwidth: float = 1.5) -> World:
 
 
 # ---------------------------------------------------------------------------
-# Content-addressed node IDs: two solvers proposing the same sub-claim
-# under the same parent at the same coords end up with the same ID.
+# Observation helpers
 # ---------------------------------------------------------------------------
 
 
-def content_address_node(
-    parent_id: str,
-    position: str,
-    coords: tuple,
-    polarity_axis: tuple,
-) -> str:
-    """Deterministic node id for a sprouted child. Hash of the
-    structural inputs so independent solvers converge on the same id
-    when they propose the same claim.
-    """
-    payload = json.dumps(
-        {
-            "parent": parent_id,
-            "pos": position,
-            "coords": list(coords),
-            "axis": list(polarity_axis),
-        },
-        sort_keys=True,
-    )
-    return "n_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-
-# ---------------------------------------------------------------------------
-# Observation construction from agent-turn data
-# ---------------------------------------------------------------------------
-
-
-def turn_to_observation(turn: Dict[str, Any], turn_index: int) -> Observation:
-    """Convert one agent-turn record to a 4D coordinate observation.
-
-    The four coords correspond to (life, self_pres, intelligence,
-    evolution). For v1 this is heuristic-driven from turn fields:
-
-      - turn['life_impact']         in [-1, 1]
-      - turn['self_pres_impact']    in [-1, 1]
-      - turn['intelligence_impact'] in [-1, 1]
-      - turn['evolution_impact']    in [-1, 1]
-
-    Missing fields default to 0. A future adapter version can let the
-    world model itself score turns it has seen patterns for, but the
-    interface stays the same.
-    """
-    coords = (
-        float(turn.get("life_impact", 0.0)),
-        float(turn.get("self_pres_impact", 0.0)),
-        float(turn.get("intelligence_impact", 0.0)),
-        float(turn.get("evolution_impact", 0.0)),
-    )
-    label = turn.get("label", f"turn_{turn_index}")
-    obs_id = "obs_" + hashlib.sha256(
+def _obs_id_from_turn(turn: Dict[str, Any]) -> str:
+    return "obs_" + hashlib.sha256(
         json.dumps(turn, sort_keys=True).encode("utf-8")
     ).hexdigest()[:16]
-    return Observation(id=obs_id, coords=coords, label=label)
 
 
-# ---------------------------------------------------------------------------
-# Snapshotting: a baseline state to diff against
-# ---------------------------------------------------------------------------
+def turn_to_observation(turn: Dict[str, Any], turn_index: int = 0) -> Observation:
+    """Convert one agent-turn record to a 4D coordinate observation.
 
-
-def snapshot_stakes(world: World) -> Dict[str, Dict[str, float]]:
-    """Capture per-node net positive and net negative stake.
-
-    Returns ``{node_id: {"pos": float, "neg": float}}``.
+    Prefers explicit *_impact fields if present (test/override mode);
+    otherwise calls the score_turn_4d heuristic.
     """
-    snap: Dict[str, Dict[str, float]] = {}
-    for tendency in world.tendencies.values():
-        for node in tendency.tree.all_nodes():
-            pos = sum(s.weight for s in node.stakes if s.weight > 0)
-            neg = sum(-s.weight for s in node.stakes if s.weight < 0)
-            snap[node.id] = {"pos": pos, "neg": neg}
-    return snap
-
-
-def snapshot_nodes(world: World) -> Dict[str, Dict[str, Any]]:
-    """Capture the structural metadata of every node so we can detect
-    new nodes after equilibration.
-    """
-    snap: Dict[str, Dict[str, Any]] = {}
-    for tendency in world.tendencies.values():
-        for node in tendency.tree.all_nodes():
-            claim = tendency._node_to_claim.get(node.id)
-            snap[node.id] = {
-                "tendency_id": tendency.id,
-                "parent_id": node.parent_id or "",
-                "position": node.position.value,
-                "content": node.content,
-                "coords": list(claim.anchor) if claim else [],
-                "polarity_axis": list(claim.polarity_axis) if claim else [],
-            }
-    return snap
+    has_explicit = any(
+        k in turn for k in (
+            "life_impact", "self_pres_impact",
+            "intelligence_impact", "evolution_impact",
+        )
+    )
+    if has_explicit:
+        coords = (
+            float(turn.get("life_impact", 0.0)),
+            float(turn.get("self_pres_impact", 0.0)),
+            float(turn.get("intelligence_impact", 0.0)),
+            float(turn.get("evolution_impact", 0.0)),
+        )
+    else:
+        coords = score_turn_4d(turn)
+    label = turn.get("label", f"turn_{turn_index}")
+    return Observation(id=_obs_id_from_turn(turn), coords=coords, label=label)
 
 
 # ---------------------------------------------------------------------------
-# Serialization: enough to round-trip a world for global-model storage
+# Serialization (kept for global-model storage)
 # ---------------------------------------------------------------------------
 
 
 def serialize_world(world: World) -> Dict[str, Any]:
-    """Compact JSON-friendly representation of a world's structure
-    and accumulated stakes. Lossy on lineages and integrated frames
-    (those rebuild from observations on apply); preserves what the
-    aggregator and inference paths need.
-    """
-    out: Dict[str, Any] = {
-        "tendencies": {},
-        "nodes": [],
-    }
+    out: Dict[str, Any] = {"tendencies": {}, "nodes": []}
     for tendency in world.tendencies.values():
         out["tendencies"][tendency.id] = {
             "thesis": tendency.thesis,
@@ -252,9 +160,6 @@ def serialize_world(world: World) -> Dict[str, Any]:
 
 
 def deserialize_world(payload: Dict[str, Any]) -> World:
-    """Rebuild a World from a serialized payload. Recreates tendencies,
-    sub-nodes (in parent-first order), and stake values.
-    """
     from world_model.models.tree import Node, Position, Stake
     world = World()
     for tid, td in payload.get("tendencies", {}).items():
@@ -267,28 +172,18 @@ def deserialize_world(payload: Dict[str, Any]) -> World:
             bandwidth=td.get("bandwidth", 1.5),
             smooth_promotion=True,
         ))
-    # First pass: create non-root nodes in parent-first order
     nodes = sorted(payload.get("nodes", []),
                    key=lambda n: 0 if n["parent_id"] is None else 1)
-    by_id: Dict[str, Node] = {}
-    for tendency in world.tendencies.values():
-        by_id[tendency.tree.root_node.id] = tendency.tree.root_node
-    # Index serialized roots by tendency
     serialized_roots: Dict[str, str] = {}
     for nrec in nodes:
         if nrec["parent_id"] is None:
             serialized_roots[nrec["tendency_id"]] = nrec["node_id"]
-    # Build a map from serialized-root-id -> live-tendency-root-id
     root_remap: Dict[str, str] = {}
     for tid, sroot in serialized_roots.items():
         live = world.tendencies[tid].tree.root_node.id
         root_remap[sroot] = live
-        # also map root to itself in by_id
-        by_id[sroot] = world.tendencies[tid].tree.root_node
-    # Second pass: sprout children
     for nrec in nodes:
         if nrec["parent_id"] is None:
-            # apply stakes to the tendency root (only)
             root = world.tendencies[nrec["tendency_id"]].tree.root_node
             for sk in nrec.get("stakes", []):
                 root.add_stake(sk["agent_id"], sk["weight"])
@@ -306,56 +201,70 @@ def deserialize_world(payload: Dict[str, Any]) -> World:
             polarity_axis=tuple(nrec.get("polarity_axis") or ()),
             content=nrec.get("content", ""),
         )
-        by_id[nrec["node_id"]] = new_node
         for sk in nrec.get("stakes", []):
             new_node.add_stake(sk["agent_id"], sk["weight"])
     return world
 
 
 # ---------------------------------------------------------------------------
-# Stake-delta computation
+# Event recording during training
 # ---------------------------------------------------------------------------
 
 
-def compute_stake_delta(
-    before_stakes: Dict[str, Dict[str, float]],
-    before_nodes: Dict[str, Dict[str, Any]],
-    after: World,
-    absorbed_obs: List[str],
-) -> Dict[str, Any]:
-    after_stakes = snapshot_stakes(after)
-    after_nodes = snapshot_nodes(after)
+class _EventRecorder:
+    """Watches a world for new sprouts/observations during training and
+    emits Event records.
 
-    node_stakes: Dict[str, Dict[str, float]] = {}
-    for node_id, after_v in after_stakes.items():
-        before_v = before_stakes.get(node_id, {"pos": 0.0, "neg": 0.0})
-        d_pos = after_v["pos"] - before_v["pos"]
-        d_neg = after_v["neg"] - before_v["neg"]
-        if abs(d_pos) > 1e-9 or abs(d_neg) > 1e-9:
-            node_stakes[node_id] = {
-                "pos_stake_delta": d_pos,
-                "neg_stake_delta": d_neg,
-            }
+    Detection works by snapshotting the node set before and after each
+    equilibrate call, attributing new nodes to the agent who caused
+    the round.
+    """
 
-    new_nodes: List[Dict[str, Any]] = []
-    for node_id, meta in after_nodes.items():
-        if node_id in before_nodes:
-            continue
-        new_nodes.append({
-            "node_id": node_id,
-            "parent_id": meta["parent_id"],
-            "position": meta["position"],
-            "coords": meta["coords"],
-            "polarity_axis": meta["polarity_axis"],
-            "content": meta["content"],
-            "tendency_id": meta["tendency_id"],
-        })
+    def __init__(self, agent_id: str):
+        self.agent_id = agent_id
+        self.events: List[Event] = []
+        self._seq = 0
 
-    return {
-        "node_stakes": node_stakes,
-        "new_nodes": new_nodes,
-        "absorbed_observations": absorbed_obs,
-    }
+    def observation_added(self, obs: Observation) -> None:
+        self._seq += 1
+        self.events.append(ObservationAdded(
+            seq=self._seq,
+            author_agent=self.agent_id,
+            obs_id=obs.id,
+            coords=list(obs.coords),
+            label=obs.label,
+        ))
+
+    def sub_claims_after_equilibrate(
+        self,
+        world: World,
+        before_node_ids: set[str],
+    ) -> None:
+        for tendency in world.tendencies.values():
+            for node in tendency.tree.all_nodes():
+                if node.id in before_node_ids:
+                    continue
+                claim = tendency._node_to_claim.get(node.id)
+                self._seq += 1
+                self.events.append(SubClaimSprouted(
+                    seq=self._seq,
+                    author_agent=self.agent_id,
+                    tendency_id=tendency.id,
+                    parent_id=node.parent_id or "",
+                    node_id=node.id,
+                    position=node.position.value,
+                    coords=list(claim.anchor) if claim else [],
+                    polarity_axis=list(claim.polarity_axis) if claim else [],
+                    content=node.content,
+                ))
+
+
+def _all_node_ids(world: World) -> set[str]:
+    ids: set[str] = set()
+    for tendency in world.tendencies.values():
+        for node in tendency.tree.all_nodes():
+            ids.add(node.id)
+    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -372,19 +281,16 @@ def train_world_model_on_task(
     epochs: int = 1,
     learning_rate: float = 1e-3,   # accepted for protocol parity, unused
     modalities: Optional[list] = None,
+    agent_id: str = "default-solver",
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Train the world-model substrate on a task. Returns
-    ``(stake_delta, metrics)`` matching the JEPA training contract.
+    """Train the world-model substrate on a task.
 
-    Algorithm:
-      1. Build (or load) the seed world from the global model CID.
-      2. Convert task observations (turns) to 4D Observations.
-      3. Snapshot stakes + nodes BEFORE equilibration.
-      4. Add observations, run equilibrate.
-      5. Optionally repeat (if ``epochs > 1``) -- each epoch lets sub-
-         claims grow further capacity through smooth promotion.
-      6. Compute the stake delta between snapshot and final state.
-      7. Return ``(delta, metrics)``.
+    Returns (contribution, metrics) where contribution is shaped:
+      {
+        "events": [...],
+        "score_snapshot_after": {node_id: float},
+        "agent_id": str,
+      }
     """
     start = time.time()
 
@@ -403,7 +309,7 @@ def train_world_model_on_task(
     else:
         world = build_charter_world()
 
-    # 2. Gather turns from the data source
+    # 2. Gather turns
     turns: List[Dict[str, Any]] = []
     if text_data_source is not None:
         for i, turn in enumerate(text_data_source):
@@ -413,37 +319,39 @@ def train_world_model_on_task(
     elif "turns" in task_spec:
         turns = list(task_spec["turns"])
 
-    # 3. Snapshot
-    before_stakes = snapshot_stakes(world)
-    before_nodes = snapshot_nodes(world)
+    # 3. Record events during training
+    recorder = _EventRecorder(agent_id=agent_id)
 
-    # 4-5. Equilibrate over epochs
-    absorbed: List[str] = []
     for epoch in range(max(1, int(epochs))):
         for i, turn in enumerate(turns):
-            obs = turn_to_observation(turn, turn_index=epoch * 1000 + i)
+            obs = turn_to_observation(turn, turn_index=epoch * 10000 + i)
+            before_ids = _all_node_ids(world)
             world.add_observation(obs)
-            absorbed.append(obs.id)
-        equilibrate(world, max_rounds=8, tolerance=1e-3)
-        # Drop the observations between epochs so we don't re-process
-        # them with stale ids; their effects (stakes, sub-claims) persist.
+            recorder.observation_added(obs)
+            equilibrate(world, max_rounds=8, tolerance=1e-3)
+            recorder.sub_claims_after_equilibrate(world, before_ids)
         world.clear_observations()
 
-    # 6. Compute delta
-    delta = compute_stake_delta(before_stakes, before_nodes, world, absorbed)
+    # 4. Capture post-training score snapshot
+    score_snapshot = snapshot_node_scores(world)
 
     elapsed = time.time() - start
+    contribution = {
+        "events": [e.to_dict() for e in recorder.events],
+        "score_snapshot_after": score_snapshot,
+        "agent_id": agent_id,
+    }
     metrics = {
         "elapsed_seconds": elapsed,
         "epochs": epochs,
         "n_observations": len(turns) * max(1, int(epochs)),
-        "n_changed_nodes": len(delta["node_stakes"]),
-        "n_new_nodes": len(delta["new_nodes"]),
+        "n_events": len(recorder.events),
+        "n_nodes_after": len(score_snapshot),
         "root_scores": world.root_scores(),
         "substrate": "world-model",
     }
     logger.info(
-        "world-model training: %d turns, %d changed nodes, %d new nodes, %.2fs",
-        len(turns), len(delta["node_stakes"]), len(delta["new_nodes"]), elapsed,
+        "world-model training: agent=%s, %d turns, %d events, %.2fs",
+        agent_id, len(turns), len(recorder.events), elapsed,
     )
-    return delta, metrics
+    return contribution, metrics

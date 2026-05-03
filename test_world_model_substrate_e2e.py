@@ -31,13 +31,14 @@ import time
 
 from nodes.common.world_model_substrate import (
     train_world_model_on_task,
-    aggregate_stake_deltas,
+    aggregate_contributions,
+    apply_events,
     verify_world_model_solution,
     infer_with_world_model,
     serialize_world,
     deserialize_world,
+    build_charter_world,
 )
-from nodes.common.world_model_substrate.adapter import build_charter_world
 
 
 def banner(s: str) -> None:
@@ -95,40 +96,35 @@ def main() -> int:
     # 1. Solver trains on the turn stream.
     banner("Step 1: solver trains on 8 turns (no global model yet)")
     task_spec = {"turns": TRAINING_TURNS}
-    delta, metrics = train_world_model_on_task(
+    contribution, metrics = train_world_model_on_task(
         task_spec=task_spec,
         global_model_cid=None,
         store=None,
         epochs=2,
+        agent_id="solver-A",
     )
     print(f"  elapsed:           {metrics['elapsed_seconds']:.2f}s")
     print(f"  observations:      {metrics['n_observations']}")
-    print(f"  changed nodes:     {metrics['n_changed_nodes']}")
-    print(f"  new nodes sprouted: {metrics['n_new_nodes']}")
+    print(f"  events emitted:    {metrics['n_events']}")
+    print(f"  nodes after:       {metrics['n_nodes_after']}")
     print(f"  root scores:")
     for k, v in metrics["root_scores"].items():
         print(f"    {k:30s} {v:+.4f}")
 
-    # The charter root-score gap should be non-trivial after seeing
-    # turns that are mostly intelligence-positive and evolution-positive.
-    root = metrics["root_scores"]
-    if len(delta["new_nodes"]) == 0 and len(delta["node_stakes"]) == 0:
-        print("\n  -- no stake changes detected; the engine didn't absorb anything")
+    if len(contribution["events"]) == 0:
+        print("\n  -- no events emitted; the engine didn't absorb anything")
         return 1
 
-    # 2. Aggregator merges (just one solver in the slice; equivalent
-    # to: with weight 1, returns the same delta with a normalization
-    # factor of 1).
-    banner("Step 2: aggregator merges 1 solver delta (slice)")
-    merged = aggregate_stake_deltas([delta], weights=[1.0])
-    print(f"  merged changed nodes:    {len(merged['node_stakes'])}")
-    print(f"  merged new nodes:        {len(merged['new_nodes'])}")
-    print(f"  merged absorbed obs:     {len(merged['absorbed_observations'])}")
+    # 2. Aggregator merges
+    banner("Step 2: aggregator merges 1 solver contribution (slice)")
+    merged = aggregate_contributions([contribution], weights=[1.0])
+    print(f"  merged events:       {len(merged['events'])}")
+    print(f"  agent weights:       {merged['agent_weights']}")
 
     # 3. Verifier scores the contribution.
     banner("Step 3: verifier scores the contribution")
     verdict = verify_world_model_solution(
-        delta=delta,
+        contribution=contribution,
         seed_world_payload=None,
         threshold=0.0,
     )
@@ -138,13 +134,12 @@ def main() -> int:
     print(f"  score (0-100):     {verdict['score']:.1f}")
     print(f"  valid:             {verdict['valid']}")
 
-    # 4. Build the post-aggregation global world by applying the
-    # merged delta to a fresh charter world, then serialize for
+    # 4. Build the post-aggregation global world by replaying the
+    # merged events on a fresh charter world, then serialize for
     # inference.
     banner("Step 4: aggregator publishes new global model")
     global_world = build_charter_world()
-    from nodes.common.world_model_substrate.aggregate import apply_stake_delta
-    apply_stake_delta(global_world, merged)
+    apply_events(global_world, merged["events"])
     payload = serialize_world(global_world)
     print(f"  payload tendencies:    {len(payload['tendencies'])}")
     print(f"  payload nodes:         {len(payload['nodes'])}")
@@ -179,7 +174,7 @@ def main() -> int:
         print(f"      (this is informational; the slice is wired regardless)")
 
     if (
-        len(delta["node_stakes"]) > 0
+        len(contribution["events"]) > 0
         and verdict["score"] > 0
         and result["aligned_principle"] in [c["id"] for c in __import__(
             "nodes.common.world_model_substrate.adapter", fromlist=["CHARTER"]
