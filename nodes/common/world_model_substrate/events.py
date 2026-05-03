@@ -52,6 +52,11 @@ the live world. The `parents` list is there if a solver has
 explicit reason to emit a multi-parented event in one shot, but
 it's not required for the federation story to work.
 
+Don't "fix" the protocol by making multi-parent emission
+mandatory on SubClaimSprouted — single-parent is the correct
+shape for solvers, and the engine is what makes federation merge
+work.
+
 See world-model docs/substrate-architecture.md for the
 post-and-coparent + dedup mechanics on the engine side.
 """
