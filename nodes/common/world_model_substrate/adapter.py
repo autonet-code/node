@@ -72,11 +72,22 @@ CHARTER = [
 N_DIMS = len(CHARTER)
 
 
-def build_charter_world(bandwidth: float = 1.5) -> World:
+def build_charter_world(bandwidth: float = 1.5, embedding_dim: int = 0) -> World:
+    """Build a world with the four constitutional charter tendencies.
+
+    When ``embedding_dim > 0``, charter anchors are zero-padded into a
+    concatenated coordinate space ``[charter_4d | embedding_Nd]``. This
+    lets rootless usefulness nodes (which carry a high-D embedding
+    tail) coexist with charter roots in the same world without
+    distance-truncation bugs in locator/cross-tendency edge discovery.
+    """
+    if embedding_dim < 0:
+        raise ValueError(f"embedding_dim must be >= 0, got {embedding_dim}")
     world = World()
     for entry in CHARTER:
         i = entry["axis_index"]
-        anchor = tuple(1.0 if j == i else 0.0 for j in range(N_DIMS))
+        head = tuple(1.0 if j == i else 0.0 for j in range(N_DIMS))
+        anchor = head + (0.0,) * embedding_dim
         world.add_tendency(GeneralizedTendency(
             id=entry["id"],
             thesis=entry["thesis"],

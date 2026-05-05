@@ -26,10 +26,11 @@ DEFAULT_ADDRESSES_FILE = os.path.join(
     os.path.dirname(__file__), "..", "..", "deployment-addresses.json"
 )
 
-# Contract name -> artifact path mapping (autonomous path only)
+# Contract name -> artifact path mapping (substrate-native).
+# Phase 5.6a deleted the pre-substrate contracts (RPB, Registry, DAO,
+# etc.) in favor of a single substrate-native chain surface.
 CONTRACT_ARTIFACTS = {
-    "RPB": "core/RPB.sol/RPB.json",
-    "RPBFactory": "core/RPBFactory.sol/RPBFactory.json",
+    "Substrate": "core/Substrate.sol/Substrate.json",
 }
 
 

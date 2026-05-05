@@ -76,6 +76,9 @@ class EventType(Enum):
     AUTONET_STATUS = "autonet.status"
     AUTONET_WALLET = "autonet.wallet"
 
+    # World-model substrate
+    WORLD_EPOCH_CLOSED = "world.epoch_closed"
+
     # Budget
     BUDGET_EXCEEDED = "budget.exceeded"
 

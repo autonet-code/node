@@ -602,9 +602,13 @@ class AutonetBridge:
             if self.config.private_key:
                 self._autonet_config.blockchain.private_key = self.config.private_key
 
-            # Create and start the service in a background thread
-            # (AutonetService.start() is blocking)
+            # Create the service. Note: AutonetService.start() blocks,
+            # so we create here and start in an executor below. We wire
+            # the WorldService close subscriber BEFORE start so it's
+            # registered when the WorldService gets constructed inside
+            # start().
             self._service = AutonetService(self._autonet_config, data_dir=self._data_dir)
+            self._wire_world_epoch_subscriber()
             self._task = asyncio.create_task(self._run_service())
 
             self.state.status = AutonetStatus.RUNNING
@@ -627,6 +631,41 @@ class AutonetBridge:
             self.state.last_error = str(e)
             log.exception("Failed to start autonet service")
             return {"status": "error", "error": str(e)}
+
+    def _wire_world_epoch_subscriber(self) -> None:
+        """Forward WorldService epoch closes to the EventBus.
+
+        The subscriber runs in the autonet daemon's worker thread (under
+        the WorldService lock); we schedule the actual emit back on the
+        main event loop so async EventBus consumers see it.
+        """
+        if not self._service or not self._events:
+            return
+        loop = asyncio.get_running_loop()
+
+        def _on_close(record: dict) -> None:
+            # Slim payload: full record is durable on disk.
+            payload = {
+                "epoch_id": record.get("epoch_id"),
+                "rpb_address": record.get("rpb_address"),
+                "closed_at": record.get("closed_at"),
+                "n_events": record.get("n_events", 0),
+                "total_mint": record.get("total_mint", 0.0),
+                "total_novelty": record.get("total_novelty", 0.0),
+                "agent_mint": record.get("agent_mint", {}),
+                "authoritative": record.get("authoritative", False),
+                "scope": record.get("scope", "local"),
+            }
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._emit("WORLD_EPOCH_CLOSED", payload),
+                    loop,
+                )
+            except Exception:
+                # If the loop is gone, swallow — we're shutting down.
+                pass
+
+        self._service.add_epoch_close_subscriber(_on_close)
 
     async def _run_service(self) -> None:
         """Run the autonet service in a background thread."""

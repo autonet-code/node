@@ -72,6 +72,18 @@ class AutonetService:
         self._training_feed = None
         self._data_dir = data_dir  # ATN data dir (~/.atn), passed from AutonetBridge
 
+        # World-model substrate (Phase 2 of native integration).
+        # Long-lived persistent World fed by agent activity. Lives at the
+        # daemon level, one per RPB.
+        self._world_service = None
+        self._world_substrate_feed = None
+        # Phase 3: epoch scheduler ticks the World's reward windows.
+        self._epoch_scheduler = None
+        # Phase 4: external subscribers receive epoch close records.
+        # Installed before start() so they're attached when the
+        # WorldService is constructed.
+        self._external_epoch_subscribers: list = []
+
         # Blob store for uploading weight deltas
         self._blob_store = None
 
@@ -134,6 +146,14 @@ class AutonetService:
             if self._data_dir:
                 self._init_training_feed()
 
+            # Initialize world-model substrate (always available; feeding
+            # is gated by config and data dir presence).
+            self._init_world_service()
+            if self._world_service is not None:
+                self._init_epoch_scheduler()
+            if self._data_dir and self._world_service is not None:
+                self._init_world_substrate_feed()
+
             # Initialize blob store for weight delta uploads
             self._init_blob_store()
 
@@ -141,7 +161,8 @@ class AutonetService:
                 f"AutonetService initialized: "
                 f"device={self.config.device}, "
                 f"arch={self.config.model.architecture}, "
-                f"training_feed={'active' if self._training_feed else 'disabled'}"
+                f"training_feed={'active' if self._training_feed else 'disabled'}, "
+                f"world_substrate={'active' if self._world_substrate_feed else 'disabled'}"
             )
 
         except Exception as e:
@@ -171,6 +192,24 @@ class AutonetService:
                 self._node.stop()
             except Exception as e:
                 logger.error(f"Error stopping node: {e}")
+
+        # Force a final epoch close so any in-flight reward window
+        # is finalized rather than dropped silently.
+        if self._epoch_scheduler is not None:
+            try:
+                self._epoch_scheduler.force_tick()
+            except Exception as e:
+                logger.error(f"Error in final epoch tick: {e}")
+
+        # Flush + close WorldService so its persistent log is durable.
+        if self._world_service is not None:
+            try:
+                # Close any epoch the scheduler didn't reach.
+                if self._world_service.current_epoch_id is not None:
+                    self._world_service.close_epoch()
+                self._world_service.shutdown()
+            except Exception as e:
+                logger.error(f"Error shutting down WorldService: {e}")
 
         self._state = ServiceState.STOPPED
         uptime = time.time() - self._start_time
@@ -229,6 +268,31 @@ class AutonetService:
         if self._node and hasattr(self._node, "_run_cycle"):
             self._node._run_cycle()
             return
+
+        # World-substrate feed: convert agent traces into substrate
+        # events and feed them into the persistent World. Independent
+        # of the JEPA path; both can run side-by-side until JEPA is
+        # retired.
+        if self._world_substrate_feed:
+            try:
+                substrate_metrics = self._world_substrate_feed.run_cycle()
+                if substrate_metrics:
+                    logger.info(
+                        f"World-substrate cycle {self._cycles}: "
+                        f"units={substrate_metrics.get('units_processed', 0)}, "
+                        f"events={substrate_metrics.get('events_appended', 0)}"
+                    )
+            except Exception as e:
+                logger.warning("World-substrate cycle failed: %s", e)
+
+        # Epoch scheduler: tick to close+open reward windows on its
+        # configured interval. Phase 4 will surface the close result
+        # to the chain.
+        if self._epoch_scheduler:
+            try:
+                self._epoch_scheduler.maybe_tick()
+            except Exception as e:
+                logger.warning("Epoch scheduler tick failed: %s", e)
 
         # Training data feed: train on accumulated agent activity
         if self._training_feed:
@@ -543,16 +607,113 @@ class AutonetService:
             logger.warning("Failed to initialize training data feed: %s", e)
             self._training_feed = None
 
+    def _init_world_service(self):
+        """Initialize the persistent World service (Phase 2 native
+        integration). One ``WorldService`` per RPB address; lives at
+        the daemon level for the lifetime of this process.
+
+        The RPB address is currently derived from config (or governance
+        when wired up); for now we use a stable per-host id so each
+        daemon owns exactly one persistent world.
+        """
+        try:
+            from .common.world_service import WorldService
+            rpb_address = getattr(self.config, "rpb_address", None) \
+                or getattr(self.config, "node_id", None) \
+                or "default"
+            self._world_service = WorldService(rpb_address=str(rpb_address))
+            # Attach external subscribers registered before start().
+            for handler in self._external_epoch_subscribers:
+                self._world_service.subscribe_epoch_closed(handler)
+            logger.info(
+                "WorldService initialized for rpb=%s (embedding_dim=%d, %d subscribers)",
+                rpb_address,
+                self._world_service.embedding_dim,
+                len(self._external_epoch_subscribers),
+            )
+        except Exception as e:
+            logger.warning("Failed to initialize WorldService: %s", e)
+            self._world_service = None
+
+    def add_epoch_close_subscriber(self, handler) -> None:
+        """Register a handler that will be invoked on every epoch
+        close. Safe to call before start() — handlers attach to the
+        WorldService when it's constructed in start()."""
+        self._external_epoch_subscribers.append(handler)
+        if self._world_service is not None:
+            self._world_service.subscribe_epoch_closed(handler)
+
+    def _init_epoch_scheduler(self):
+        """Initialize the wall-clock epoch scheduler for reward windows.
+
+        Phase 3 of native integration. The scheduler doesn't run its
+        own thread by default — instead the daemon's main loop calls
+        ``maybe_tick`` each cycle. Phase 4 will hand the close result
+        off to a chain-reporting handler; for now we just log it.
+        """
+        try:
+            from .common.epoch_scheduler import (
+                EpochScheduler,
+                EpochSchedulerConfig,
+            )
+            interval = float(getattr(self.config, "epoch_interval_seconds", 60.0))
+
+            def _on_close(result: Dict[str, Any]) -> None:
+                logger.info(
+                    "Epoch closed: id=%s, n_events=%d, total_mint=%.4f, "
+                    "agents=%d",
+                    result.get("epoch_id"),
+                    result.get("n_events", 0),
+                    result.get("total_mint", 0.0),
+                    len(result.get("agent_mint", {})),
+                )
+
+            self._epoch_scheduler = EpochScheduler(
+                world_service=self._world_service,
+                config=EpochSchedulerConfig(interval_seconds=interval),
+                on_close=_on_close,
+            )
+            logger.info("Epoch scheduler initialized (interval=%.0fs)", interval)
+        except Exception as e:
+            logger.warning("Failed to initialize epoch scheduler: %s", e)
+            self._epoch_scheduler = None
+
+    def _init_world_substrate_feed(self):
+        """Initialize the substrate feed that converts agent traces
+        into substrate events bound for the persistent World."""
+        try:
+            from .common.world_substrate_feed import (
+                WorldSubstrateFeed,
+                WorldSubstrateFeedConfig,
+            )
+            feed_config = WorldSubstrateFeedConfig(
+                data_dir=str(self._data_dir) if self._data_dir else "",
+                agent_id=str(getattr(self.config, "node_id", "daemon")),
+            )
+            self._world_substrate_feed = WorldSubstrateFeed(
+                config=feed_config,
+                world_service=self._world_service,
+            )
+            logger.info(
+                "World substrate feed initialized (data_dir=%s)",
+                self._data_dir,
+            )
+        except Exception as e:
+            logger.warning("Failed to initialize world substrate feed: %s", e)
+            self._world_substrate_feed = None
+
     def notify_execution(self, agent_id: str, execution_id: str, status: str) -> None:
-        """Notify the training feed that an agent execution completed.
+        """Notify the feeds that an agent execution completed.
 
         Called by AutonetBridge when EXECUTION_COMPLETED events fire.
-        Thread-safe: the training feed's counter is incremented here
-        (from the async event loop thread), and read in _run_cycle()
-        (from the service's blocking thread).
+        Thread-safe: the feeds' counters are incremented here (from the
+        async event loop thread), and read in _run_cycle() (from the
+        service's blocking thread).
         """
         if self._training_feed:
             self._training_feed.notify_execution(agent_id, execution_id, status)
+        if self._world_substrate_feed:
+            self._world_substrate_feed.notify_execution(agent_id, execution_id, status)
 
     @staticmethod
     def _get_version() -> str:

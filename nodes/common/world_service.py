@@ -1,0 +1,891 @@
+"""Persistent World service — Phase 1 of native world-model integration.
+
+A long-lived holder of one ``World`` instance per RPB (jurisdiction). Lives
+at the node level for the lifetime of the deployment. Replaces the prior
+adapter pattern that created a fresh ``World`` per task and discarded it.
+
+Design contract
+---------------
+
+  - One ``WorldService`` per RPB address. Wired into ``AutonetService.start``.
+  - Thread-safe via ``RLock``. Single writer at a time; multiple readers
+    serialize through the same lock for now (will split into reader/writer
+    locks at Phase 6 if inference probe latency forces it).
+  - Persistence: atomic JSON snapshot to ``<root>/{rpb}/snapshot.json`` plus
+    append-only event log at ``<root>/{rpb}/events.jsonl``. On restart, load
+    snapshot then replay any events past the snapshot boundary.
+
+Phase 1 is deliberately scoped to single-node, no chain, no probe protocol.
+The ``submit_events`` method is the only mutating entry point and is shaped
+so that Phase 2's ``submit_probe`` can layer on top without changing it.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from world_model.generalized import (
+    Observation,
+    World,
+    default_locator,
+    equilibrate,
+)
+from world_model.models.tree import Position
+
+from .world_model_substrate.adapter import (
+    _all_node_ids,
+    _EventRecorder,
+    build_charter_world,
+)
+from .world_model_substrate.aggregate import apply_events
+from .world_model_substrate.events import snapshot_node_scores
+from .world_model_substrate.mint_gate import (
+    DEFAULT_CHARTER_IDS,
+    apply_mint_gate,
+)
+from .world_model_substrate.reconcile import (
+    EpochSnapshots,
+    reconcile_epoch,
+)
+from .world_persistence import (
+    PersistenceConfig,
+    WorldPersistence,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+_DEFAULT_BANDWIDTH = 1.5
+_DEFAULT_EMBEDDING_DIM = 1024
+_DEFAULT_EQUILIBRATE_ROUNDS = 8
+_DEFAULT_EQUILIBRATE_TOLERANCE = 1e-3
+
+
+def _hash_problem_resolution(problem: str, resolution: str) -> str:
+    import hashlib, json as _json
+    payload = _json.dumps(
+        {"p": (problem or "")[:200], "r": (resolution or "")[:200]},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+class WorldService:
+    """Long-lived holder of one persistent World, one per RPB."""
+
+    def __init__(
+        self,
+        rpb_address: str,
+        *,
+        data_root: Optional[Path] = None,
+        bandwidth: float = _DEFAULT_BANDWIDTH,
+        embedding_dim: int = _DEFAULT_EMBEDDING_DIM,
+        persistence: Optional[WorldPersistence] = None,
+        snapshot_every_n_events: int = 100,
+        snapshot_every_seconds: float = 60.0,
+    ):
+        self.rpb_address = rpb_address
+        self.bandwidth = bandwidth
+        self.embedding_dim = embedding_dim
+        self._lock = threading.RLock()
+        self._world: World = build_charter_world(
+            bandwidth=bandwidth, embedding_dim=embedding_dim,
+        )
+        self._created_at = time.time()
+        self._events_applied = 0
+        self._events_since_snapshot = 0
+        self._last_snapshot_time = self._created_at
+
+        # Epoch tracking (Phase 3). When an epoch is open, every event
+        # we apply gets buffered in ``self._epoch_events`` so it can be
+        # passed to reconcile_epoch at close.
+        self._current_epoch_id: Optional[str] = None
+        self._epoch_started_at: float = 0.0
+        self._epoch_snapshots: Optional[EpochSnapshots] = None
+        self._epoch_events: List[Dict[str, Any]] = []
+        self._epoch_history: List[Dict[str, Any]] = []  # closed epochs
+
+        # Phase 4: Subscribers receive close records (for WS push,
+        # logging, downstream chain reporters in Phase 5).
+        self._epoch_subscribers: List[Any] = []
+        # Phase 5.2: Subscribers receive events that the daemon has
+        # locally applied (for federation gossip).
+        self._local_event_subscribers: List[Any] = []
+
+        if persistence is None:
+            cfg = PersistenceConfig(
+                rpb_address=rpb_address,
+                data_root=data_root,
+                snapshot_every_n_events=snapshot_every_n_events,
+                snapshot_every_seconds=snapshot_every_seconds,
+                embedding_dim=embedding_dim,
+                bandwidth=bandwidth,
+            )
+            persistence = WorldPersistence(cfg)
+        self._persistence = persistence
+
+        # Try to recover from disk; if nothing exists, the fresh charter world
+        # we just built is what we use.
+        restored = self._persistence.try_restore()
+        if restored is not None:
+            self._world = restored.world
+            self._events_applied = restored.events_replayed
+            logger.info(
+                "WorldService restored from disk: rpb=%s, %d events replayed",
+                rpb_address, restored.events_replayed,
+            )
+        else:
+            logger.info(
+                "WorldService initialized fresh: rpb=%s, charter built",
+                rpb_address,
+            )
+
+    # ------------------------------------------------------------------
+    # Epoch boundaries (Phase 3)
+    # ------------------------------------------------------------------
+
+    def open_epoch(self, epoch_id: Optional[str] = None) -> Dict[str, Any]:
+        """Mark the start of a new reward window.
+
+        Captures a per-node score snapshot and begins buffering events
+        that arrive (via submit_events / submit_observation /
+        submit_work_units) until ``close_epoch`` is called.
+
+        Returns a small descriptor.
+        """
+        with self._lock:
+            if self._current_epoch_id is not None:
+                logger.warning(
+                    "open_epoch called while %s is still open; "
+                    "auto-closing the prior epoch first",
+                    self._current_epoch_id,
+                )
+                self._close_epoch_locked(apply_gate=True)
+
+            eid = epoch_id or f"epoch_{time.time_ns()}"
+            snapshots = EpochSnapshots()
+            snapshots.record_start(self._world)
+            self._current_epoch_id = eid
+            self._epoch_started_at = time.time()
+            self._epoch_snapshots = snapshots
+            self._epoch_events = []
+            logger.info(
+                "WorldService epoch opened: rpb=%s, epoch=%s",
+                self.rpb_address, eid,
+            )
+            return {
+                "epoch_id": eid,
+                "started_at": self._epoch_started_at,
+                "n_nodes_at_start": len(snapshots.start),
+            }
+
+    def checkpoint_epoch(self) -> Optional[Dict[str, Any]]:
+        """Record an intermediate score snapshot inside the current
+        epoch. Survival-factor computation in reconcile_epoch uses
+        these intermediate readings to detect ephemeral score moves."""
+        with self._lock:
+            if self._current_epoch_id is None:
+                return None
+            assert self._epoch_snapshots is not None
+            self._epoch_snapshots.record_checkpoint(self._world)
+            return {
+                "epoch_id": self._current_epoch_id,
+                "checkpoint_index": len(self._epoch_snapshots.checkpoints) - 1,
+                "n_nodes": len(self._epoch_snapshots.checkpoints[-1]),
+            }
+
+    def close_epoch(
+        self,
+        *,
+        apply_gate: bool = True,
+        gate_strength: float = 1.0,
+        agent_weights: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """Close the open epoch and produce a reward result.
+
+        - Records the close snapshot.
+        - Runs ``reconcile_epoch`` against buffered events.
+        - Optionally applies the charter mint gate (default: yes).
+        - Returns the per-agent mint, per-agent novelty, and per-node
+          breakdowns.
+        """
+        with self._lock:
+            return self._close_epoch_locked(
+                apply_gate=apply_gate,
+                gate_strength=gate_strength,
+                agent_weights=agent_weights,
+            )
+
+    @property
+    def current_epoch_id(self) -> Optional[str]:
+        """The id of the open epoch, or None if none is open."""
+        return self._current_epoch_id
+
+    @property
+    def epoch_history(self) -> List[Dict[str, Any]]:
+        """Closed-epoch records (id, mint totals, etc)."""
+        return list(self._epoch_history)
+
+    # ------------------------------------------------------------------
+    # Mutating entrypoints
+    # ------------------------------------------------------------------
+
+    def submit_events(
+        self,
+        events: List[Dict[str, Any]],
+        *,
+        equilibrate_after: bool = True,
+        equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
+        equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
+        origin: str = "local",
+    ) -> Dict[str, Any]:
+        """Append events to the world and (optionally) re-equilibrate.
+
+        Events are applied via the existing ``apply_events`` machinery so
+        content-addressed dedupe still works. Returns a receipt with
+        before/after root scores and the equilibration round count.
+
+        ``origin``: ``"local"`` events get fanned out to local-event
+        subscribers (gossip layer republishes them). ``"remote"`` events
+        skip the fan-out to prevent loops.
+        """
+        if not events:
+            return {
+                "events_applied": 0,
+                "rounds": 0,
+                "root_scores_before": self._read_root_scores_locked(),
+                "root_scores_after": self._read_root_scores_locked(),
+            }
+
+        with self._lock:
+            scores_before = self._world.root_scores()
+            apply_events(self._world, events)
+            rounds = 0
+            if equilibrate_after:
+                rounds = equilibrate(
+                    self._world,
+                    max_rounds=equilibrate_rounds,
+                    tolerance=equilibrate_tolerance,
+                )
+            scores_after = self._world.root_scores()
+
+            # Buffer for the open epoch, if any.
+            self._buffer_epoch_events_locked(events)
+
+            # Notify local-event subscribers (federation gossip).
+            # Remote-origin events skip the fan-out so peer ingest
+            # doesn't re-publish what it received.
+            if origin == "local":
+                self._broadcast_local_events_locked(events)
+
+            # Persist events + equilibrate marker to the append-only log,
+            # so restart can reproduce the same batch boundaries.
+            self._persistence.append_events(
+                events,
+                equilibrate_after=equilibrate_after,
+                equilibrate_rounds=equilibrate_rounds,
+                equilibrate_tolerance=equilibrate_tolerance,
+            )
+            self._events_applied += len(events)
+            self._events_since_snapshot += len(events)
+
+            self._maybe_snapshot_locked()
+
+            return {
+                "events_applied": len(events),
+                "rounds": rounds,
+                "root_scores_before": scores_before,
+                "root_scores_after": scores_after,
+            }
+
+    def equilibrate(
+        self,
+        *,
+        max_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
+        tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
+    ) -> int:
+        """Run equilibration on the current world. Returns rounds used."""
+        with self._lock:
+            return equilibrate(self._world, max_rounds=max_rounds, tolerance=tolerance)
+
+    def submit_observation(
+        self,
+        observation: Observation,
+        *,
+        agent_id: str = "default",
+        sprout_under_charter: bool = True,
+        sprout_rootless: bool = False,
+        equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
+        equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
+    ) -> Dict[str, Any]:
+        """Apply a single observation to the world.
+
+        - ``sprout_under_charter``: cross-tendency edge discovery picks up
+          the observation under whichever charter root is closest in the
+          first 4 dims (engine handles this automatically when the obs
+          has nontrivial charter projection).
+        - ``sprout_rootless``: also create a rootless usefulness node at
+          the observation's coordinates so the locator can retrieve it
+          later. Use this for work-unit observations whose charter
+          projection is incidental but whose embedding tail carries the
+          procedural signal.
+
+        Persists ONLY the causal events (observation_added,
+        explicit-sprout). The sub-claims derived during equilibration
+        are NOT persisted: replay re-runs equilibrate at the marker
+        and derives them deterministically.
+        """
+        with self._lock:
+            recorder = _EventRecorder(agent_id=agent_id)
+            seq_counter = [0]
+
+            def _next_seq() -> int:
+                seq_counter[0] += 1
+                return seq_counter[0]
+
+            # Snapshot node ids before any mutation so we can capture
+            # derived sprouts after equilibrate.
+            before_ids = _all_node_ids(self._world)
+
+            # 1. Add observation (causal event).
+            self._world.add_observation(observation)
+            recorder.observation_added(observation)
+
+            # 2. Explicit rootless sprout, if requested. Emit a
+            # SubClaimSprouted event for the explicit sprout so replay
+            # creates the same node before equilibrate runs.
+            from .world_model_substrate.events import SubClaimSprouted
+            if sprout_rootless:
+                target = self._closest_tendency_locked(observation.coords)
+                if target is not None:
+                    axis = self._axis_from_coords(observation.coords) \
+                        or target.polarity_axis
+                    new_node = target.sprout_child(
+                        parent_node_id=target.tree.root_node.id,
+                        position=Position.PRO,
+                        anchor=tuple(observation.coords),
+                        polarity_axis=tuple(axis),
+                        observation=observation,
+                        content=observation.label or "",
+                        world=self._world,
+                    )
+                    recorder._seq += 1
+                    recorder.events.append(SubClaimSprouted(
+                        seq=recorder._seq,
+                        author_agent=agent_id,
+                        tendency_id=target.id,
+                        parent_id=target.tree.root_node.id,
+                        node_id=new_node.id,
+                        position=Position.PRO.value,
+                        coords=list(observation.coords),
+                        polarity_axis=list(axis),
+                        content=observation.label or "",
+                    ))
+
+            # 3. Equilibrate. The events derived here are NOT persisted
+            # (replay's marker re-derives them), but they ARE captured
+            # for the open epoch's attribution buffer — that's how mint
+            # gets credited to the agent whose observation triggered
+            # the cross-tendency sprouts.
+            rounds = equilibrate(
+                self._world,
+                max_rounds=equilibrate_rounds,
+                tolerance=equilibrate_tolerance,
+            )
+            recorder.sub_claims_after_equilibrate(self._world, before_ids)
+
+            # 4. Split: causal_events go to the persistence log
+            # (the explicit sprout is causal, its consequences are not).
+            # The full event list (causal + derived) goes to the epoch
+            # attribution buffer.
+            full_events = [e.to_dict() for e in recorder.events]
+            causal_events = [
+                ev for ev in full_events
+                if ev.get("kind") == "observation_added"
+                or (
+                    ev.get("kind") == "sub_claim_sprouted"
+                    and sprout_rootless
+                    # The explicit sprout came right after the obs (seq 2)
+                    # — anything beyond that is derived.
+                    and ev.get("seq") == 2
+                )
+            ]
+            self._buffer_epoch_events_locked(full_events)
+            # Federation: republish causal events (the canonical record)
+            # to peers. submit_observation is always locally originated.
+            self._broadcast_local_events_locked(causal_events)
+            self._persistence.append_events(
+                causal_events,
+                equilibrate_after=True,
+                equilibrate_rounds=equilibrate_rounds,
+                equilibrate_tolerance=equilibrate_tolerance,
+            )
+            self._events_applied += len(causal_events)
+            self._events_since_snapshot += len(causal_events)
+            self._maybe_snapshot_locked()
+
+            return {
+                "events_applied": len(causal_events),
+                "rounds": rounds,
+                "root_scores": dict(self._world.root_scores()),
+            }
+
+    def submit_work_units(
+        self,
+        work_units: List[Any],
+        *,
+        agent_id: str = "default",
+        embedder: Optional[Any] = None,
+        equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
+        equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
+    ) -> Dict[str, Any]:
+        """Submit a list of (problem, resolution, outcome) tuples.
+
+        Each work unit is converted to an Observation in the
+        concatenated coordinate space:
+          - charter head: zeros (Phase 2 wires the LLM-binary-flag
+            adapter at a later step; for now usefulness signal only)
+          - embedding tail: from the usefulness embedder
+
+        Each observation is submitted via ``submit_observation`` with
+        ``sprout_rootless=True`` so the locator can find them later.
+        Outcome controls position (PRO when accepted+kept >= 0).
+
+        Returns a summary receipt with per-unit event counts and
+        score deltas.
+        """
+        from .world_model_substrate.usefulness_coords import (
+            default_usefulness_embedder,
+            coords_for_problem_resolution,
+        )
+
+        if not work_units:
+            return {
+                "units_processed": 0,
+                "events_appended": 0,
+                "rounds": 0,
+            }
+
+        if embedder is None:
+            embedder = default_usefulness_embedder(dim=self.embedding_dim)
+
+        with self._lock:
+            scores_before = self._world.root_scores()
+            total_events = 0
+            total_rounds = 0
+
+            for unit in work_units:
+                problem, resolution, outcome = unit
+                tail = coords_for_problem_resolution(
+                    problem, resolution, embedder=embedder,
+                )
+                # Pad/truncate the embedding to match self.embedding_dim.
+                tail_t = tuple(tail)[: self.embedding_dim]
+                if len(tail_t) < self.embedding_dim:
+                    tail_t = tail_t + (0.0,) * (self.embedding_dim - len(tail_t))
+                # Charter head: zeros for now. (Tier 3A LLM-binary-flag
+                # integration will fill this in at a follow-up.)
+                charter_head = (0.0, 0.0, 0.0, 0.0)
+                coords = charter_head + tail_t
+
+                obs_id = "wu_" + _hash_problem_resolution(problem, resolution)
+                label = (problem or "")[:80]
+                obs = Observation(id=obs_id, coords=coords, label=label)
+
+                receipt = self.submit_observation(
+                    obs,
+                    agent_id=agent_id,
+                    sprout_under_charter=True,
+                    sprout_rootless=True,
+                    equilibrate_rounds=equilibrate_rounds,
+                    equilibrate_tolerance=equilibrate_tolerance,
+                )
+                total_events += receipt["events_applied"]
+                total_rounds += receipt["rounds"]
+
+            scores_after = self._world.root_scores()
+            return {
+                "units_processed": len(work_units),
+                "events_appended": total_events,
+                "rounds": total_rounds,
+                "root_scores_before": scores_before,
+                "root_scores_after": scores_after,
+            }
+
+    def locate(
+        self,
+        coords: Any,
+        *,
+        max_results: int = 16,
+        max_distance: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Coordinate-distance retrieval against the persistent world.
+
+        Returns a list of dicts: ``{node_id, label, distance, score}``.
+        Uses the engine's ``default_locator`` (coordinate proximity with
+        a keyword fallback).
+        """
+        from world_model.generalized import CoordinateLocator
+        with self._lock:
+            locator = CoordinateLocator(
+                max_distance=max_distance,
+                max_results=max_results,
+            )
+            region = locator(self._world, tuple(coords))
+            out: List[Dict[str, Any]] = []
+            for tendency_id, node_id, distance in region:
+                tendency = self._world.tendencies.get(tendency_id)
+                if tendency is None:
+                    continue
+                node = tendency.tree.get_node(node_id)
+                if node is None:
+                    continue
+                out.append({
+                    "node_id": node_id,
+                    "tendency_id": tendency_id,
+                    "label": getattr(node, "content", "") or "",
+                    "distance": distance,
+                    "score": getattr(node, "net_score", 0.0),
+                })
+            return out
+
+    # ------------------------------------------------------------------
+    # Read-only views
+    # ------------------------------------------------------------------
+
+    def read_root_scores(self) -> Dict[str, float]:
+        with self._lock:
+            return self._read_root_scores_locked()
+
+    def read_node_scores(self) -> Dict[str, float]:
+        """All node-level scores (not just charter roots)."""
+        with self._lock:
+            return snapshot_node_scores(self._world)
+
+    # ------------------------------------------------------------------
+    # Epoch projection surface (Phase 4)
+    # ------------------------------------------------------------------
+
+    def subscribe_local_events(self, handler: Any) -> None:
+        """Register a handler invoked with each batch of events that this
+        daemon applies locally (via submit_events / submit_observation /
+        submit_work_units).
+
+        Used by the federation gossip layer (Phase 5.2) to publish
+        local activity to peer daemons. Handlers receive the list of
+        event dicts as they were applied; the gossip layer signs and
+        publishes them as an EventBatch.
+
+        Phase 5.2 only fires this for **locally originated** batches;
+        events arriving FROM peers (via remote submit_events) skip the
+        broadcast to avoid loops. The world_service tracks origin via
+        the ``_locally_originated`` flag on submit_events.
+        """
+        with self._lock:
+            self._local_event_subscribers.append(handler)
+
+    def unsubscribe_local_events(self, handler: Any) -> None:
+        with self._lock:
+            try:
+                self._local_event_subscribers.remove(handler)
+            except ValueError:
+                pass
+
+    def subscribe_epoch_closed(self, handler: Any) -> None:
+        """Register a handler invoked whenever an epoch closes.
+
+        Handler signature: ``handler(record: dict) -> None``. Exceptions
+        in handlers are logged and isolated; one bad handler doesn't
+        break others.
+        """
+        with self._lock:
+            self._epoch_subscribers.append(handler)
+
+    def unsubscribe_epoch_closed(self, handler: Any) -> None:
+        with self._lock:
+            try:
+                self._epoch_subscribers.remove(handler)
+            except ValueError:
+                pass
+
+    def read_epoch(self, epoch_id: str) -> Optional[Dict[str, Any]]:
+        """Read a closed-epoch record by id. Returns None if missing.
+
+        Returned record has ``authoritative=False`` until Phase 5
+        federation stamps it.
+        """
+        with self._lock:
+            # Prefer in-memory history (fastest path).
+            for rec in reversed(self._epoch_history):
+                if rec.get("epoch_id") == epoch_id:
+                    return dict(rec)
+            # Fall back to disk for older epochs.
+            return self._persistence.read_epoch_record(epoch_id)
+
+    def read_recent_epochs(self, n: int = 10) -> List[Dict[str, Any]]:
+        """Return up to ``n`` most recent closed epochs (latest first)."""
+        with self._lock:
+            recent = list(reversed(self._epoch_history[-n:]))
+        if len(recent) >= n:
+            return recent
+        # Fall back to disk for older records.
+        on_disk: List[Dict[str, Any]] = []
+        for path in reversed(self._persistence.list_epoch_records()):
+            if any(rec.get("epoch_id") == path.stem for rec in recent):
+                continue  # already in memory
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    on_disk.append(json.load(fh))
+            except Exception:
+                continue
+            if len(recent) + len(on_disk) >= n:
+                break
+        return recent + on_disk
+
+    def read_agent_projection(self, agent_id: str, *, last_n_epochs: int = 10) -> Dict[str, Any]:
+        """Aggregate this agent's projection (mint + novelty) across the
+        last N closed epochs.
+
+        Projection-level: not yet authoritative. Once Phase 5 federation
+        runs, agents read authoritative attributions from chain instead
+        of this surface.
+        """
+        epochs = self.read_recent_epochs(n=last_n_epochs)
+        total_mint = 0.0
+        total_novelty = 0.0
+        per_epoch: List[Dict[str, Any]] = []
+        for rec in epochs:
+            mint = float(rec.get("agent_mint", {}).get(agent_id, 0.0))
+            novelty = float(rec.get("agent_novelty", {}).get(agent_id, 0.0))
+            total_mint += mint
+            total_novelty += novelty
+            per_epoch.append({
+                "epoch_id": rec.get("epoch_id"),
+                "closed_at": rec.get("closed_at"),
+                "mint": mint,
+                "novelty": novelty,
+                "authoritative": rec.get("authoritative", False),
+            })
+        return {
+            "agent_id": agent_id,
+            "total_mint_projection": total_mint,
+            "total_novelty_projection": total_novelty,
+            "epochs_considered": len(per_epoch),
+            "per_epoch": per_epoch,
+        }
+
+    def _broadcast_epoch_closed(self, record: Dict[str, Any]) -> None:
+        """Invoke all registered subscribers with the close record.
+        Must be called under self._lock; handlers run synchronously."""
+        for handler in list(self._epoch_subscribers):
+            try:
+                handler(record)
+            except Exception as e:
+                logger.error(
+                    "epoch close subscriber failed: %s", e, exc_info=True,
+                )
+
+    def _broadcast_local_events_locked(self, events: List[Dict[str, Any]]) -> None:
+        """Notify local-event subscribers (federation gossip) of a
+        locally-applied batch. Must be called under self._lock."""
+        if not events:
+            return
+        for handler in list(self._local_event_subscribers):
+            try:
+                handler(events)
+            except Exception as e:
+                logger.error(
+                    "local event subscriber failed: %s", e, exc_info=True,
+                )
+
+    def stats(self) -> Dict[str, Any]:
+        """Cheap snapshot of service state for monitoring."""
+        with self._lock:
+            n_nodes = sum(
+                len(t.tree.all_nodes())
+                for t in self._world.tendencies.values()
+            )
+            return {
+                "rpb_address": self.rpb_address,
+                "events_applied": self._events_applied,
+                "events_since_snapshot": self._events_since_snapshot,
+                "n_tendencies": len(self._world.tendencies),
+                "n_nodes": n_nodes,
+                "uptime_seconds": time.time() - self._created_at,
+            }
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def snapshot_now(self) -> Optional[Path]:
+        """Force an immediate snapshot. Returns the snapshot path."""
+        with self._lock:
+            return self._snapshot_locked()
+
+    def shutdown(self) -> None:
+        """Graceful shutdown: snapshot world, close persistence handles."""
+        with self._lock:
+            try:
+                self._snapshot_locked()
+            except Exception as e:
+                logger.error("snapshot during shutdown failed: %s", e)
+            self._persistence.close()
+        logger.info("WorldService shut down: rpb=%s", self.rpb_address)
+
+    # ------------------------------------------------------------------
+    # Internal — must be called under self._lock
+    # ------------------------------------------------------------------
+
+    def _read_root_scores_locked(self) -> Dict[str, float]:
+        return dict(self._world.root_scores())
+
+    def _close_epoch_locked(
+        self,
+        *,
+        apply_gate: bool = True,
+        gate_strength: float = 1.0,
+        agent_weights: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """Internal: must be called under self._lock."""
+        if self._current_epoch_id is None:
+            logger.warning("close_epoch called with no open epoch; ignoring")
+            return {
+                "epoch_id": None,
+                "agent_mint": {},
+                "agent_novelty": {},
+                "node_mint": {},
+                "node_novelty": {},
+                "total_mint": 0.0,
+                "total_novelty": 0.0,
+                "n_events": 0,
+            }
+        assert self._epoch_snapshots is not None
+
+        snapshots = self._epoch_snapshots
+        snapshots.record_close(self._world)
+        events = list(self._epoch_events)
+
+        result = reconcile_epoch(
+            self._world,
+            snapshots,
+            events,
+            agent_weights=agent_weights,
+        )
+        if apply_gate:
+            result = apply_mint_gate(
+                result, self._world,
+                charter_ids=DEFAULT_CHARTER_IDS,
+                gate_strength=gate_strength,
+            )
+
+        eid = self._current_epoch_id
+        record = {
+            "epoch_id": eid,
+            "rpb_address": self.rpb_address,
+            "started_at": self._epoch_started_at,
+            "closed_at": time.time(),
+            "n_events": len(events),
+            "agent_mint": result.get("agent_mint", {}),
+            "agent_novelty": result.get("agent_novelty", {}),
+            "node_mint": result.get("node_mint", {}),
+            "node_novelty": result.get("node_novelty", {}),
+            "total_mint": result.get("total_mint", 0.0),
+            "total_novelty": result.get("total_novelty", 0.0),
+            "gate_applied": apply_gate,
+            # Phase 4 surfaces projection-level results only. Phase 5's
+            # federated close will stamp authoritative=True on the
+            # canonical version.
+            "authoritative": False,
+            "scope": "local",
+        }
+        self._epoch_history.append(record)
+        try:
+            self._persistence.write_epoch_record(record)
+        except Exception as e:
+            logger.warning("failed to persist epoch record: %s", e)
+        # Notify subscribers (e.g. the daemon's WS bridge).
+        self._broadcast_epoch_closed(record)
+
+        # Reset state
+        self._current_epoch_id = None
+        self._epoch_started_at = 0.0
+        self._epoch_snapshots = None
+        self._epoch_events = []
+
+        # Full result is returned for the caller; record kept in history
+        # is the slim version.
+        result.update({
+            "epoch_id": eid,
+            "n_events": len(events),
+        })
+        logger.info(
+            "WorldService epoch closed: rpb=%s, epoch=%s, "
+            "%d events, total mint=%.4f, total novelty=%.4f",
+            self.rpb_address, eid, len(events),
+            result["total_mint"], result["total_novelty"],
+        )
+        return result
+
+    def _buffer_epoch_events_locked(self, event_dicts: List[Dict[str, Any]]) -> None:
+        """If an epoch is open, accumulate the events for reconciliation."""
+        if self._current_epoch_id is not None and event_dicts:
+            self._epoch_events.extend(event_dicts)
+
+    def _closest_tendency_locked(self, coords):
+        """Tendency whose anchor has the highest cosine similarity to
+        the given coords (over the dims they share). Used by
+        submit_observation to pick where to anchor a sprout."""
+        best = None
+        best_score = -2.0
+        coords_t = tuple(coords)
+        for tendency in self._world.tendencies.values():
+            anchor = tuple(tendency.anchor)
+            n = min(len(coords_t), len(anchor))
+            if n == 0:
+                continue
+            dot = sum(coords_t[i] * anchor[i] for i in range(n))
+            mag_a = (sum(c * c for c in coords_t[:n])) ** 0.5
+            mag_b = (sum(a * a for a in anchor[:n])) ** 0.5
+            if mag_a == 0 or mag_b == 0:
+                cos = 0.0
+            else:
+                cos = dot / (mag_a * mag_b)
+            if cos > best_score:
+                best_score = cos
+                best = tendency
+        return best
+
+    @staticmethod
+    def _axis_from_coords(coords):
+        """L2-normalized direction from the origin to the coords. Used
+        as the polarity axis for new sprouts so neighbours along the
+        same direction align with them."""
+        coords_t = tuple(coords)
+        mag = (sum(c * c for c in coords_t)) ** 0.5
+        if mag == 0:
+            return None
+        return tuple(c / mag for c in coords_t)
+
+    def _maybe_snapshot_locked(self) -> None:
+        cfg = self._persistence.config
+        now = time.time()
+        time_due = (now - self._last_snapshot_time) >= cfg.snapshot_every_seconds
+        count_due = self._events_since_snapshot >= cfg.snapshot_every_n_events
+        if time_due or count_due:
+            self._snapshot_locked()
+
+    def _snapshot_locked(self) -> Path:
+        path = self._persistence.write_snapshot(
+            self._world,
+            events_applied=self._events_applied,
+        )
+        self._events_since_snapshot = 0
+        self._last_snapshot_time = time.time()
+        return path
