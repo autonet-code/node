@@ -618,6 +618,17 @@ class AutonetBridge:
             # Wire P2P host to the service so training cycles can update gossip
             if self._p2p_host and self._service:
                 self._service._p2p_host = self._p2p_host
+            # Phase 6.4: wire the daemon's WorldService into the ATN
+            # runtime's provider manager so the substrate provider can
+            # probe it. Lazy-resolver: AutonetService creates its
+            # WorldService inside start() (which runs in an executor),
+            # so the resolver pulls the current value at lookup time
+            # rather than capturing a possibly-None reference now.
+            if self._runtime and hasattr(self._runtime, "providers") and self._service:
+                svc_ref = self._service
+                self._runtime.providers._world_service_resolver = (
+                    lambda: getattr(svc_ref, "_world_service", None)
+                )
             await self._emit("AUTONET_STARTED")
             return {"status": "started"}
 

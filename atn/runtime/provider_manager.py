@@ -203,6 +203,13 @@ class ProviderManager:
             "orchestrator_capable": False,  # Not yet — will be True when mature
             "models": [],  # Dynamically discovered
         },
+        "substrate": {
+            "name": "World-Model Substrate",
+            "description": "Substrate retrieval + local LLM render. Phase 6 of native integration.",
+            "auth_type": "local",
+            "orchestrator_capable": False,
+            "models": [],
+        },
     }
 
     _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
@@ -235,6 +242,16 @@ class ProviderManager:
         self._custom_providers: set[str] = set()
         self._active_providers: dict[str, Any] = {}
         self._p2p_host: Any = None  # Set by runtime when P2P is available
+        # Phase 6.4: substrate provider needs the daemon's WorldService
+        # to probe. Two ways to attach it:
+        #   - direct reference: ``self._world_service = svc``
+        #   - lazy resolver: ``self._world_service_resolver = lambda: svc``
+        # The resolver path lets the autonet AutonetBridge wire the
+        # service even though autonet's WorldService is constructed
+        # inside an executor thread (start() blocks). Resolver is
+        # checked first; falls back to the direct reference.
+        self._world_service: Any = None
+        self._world_service_resolver: Any = None
         # Cache session stats when providers are removed, so the frontend
         # can still fetch stats after execution completes.
         self._cached_session_stats: dict[str, dict[str, Any]] = {}
@@ -332,6 +349,8 @@ class ProviderManager:
                 model=model,
                 p2p_host=self._p2p_host,
             )
+        if provider_name == "substrate":
+            return self._build_substrate_provider(model, agent_id)
         if provider_name in self._custom_providers:
             pconfig = self._config.providers.get(provider_name)
             if pconfig and pconfig.base_url:
@@ -343,6 +362,53 @@ class ProviderManager:
                     default_model=model,
                 )
         raise ProviderError(f"Unknown provider: {provider_name}")
+
+    def _build_substrate_provider(self, model: str, agent_id: str) -> Any:
+        """Build the SubstrateProvider composite.
+
+        Phase 6.4 wiring:
+          - The runtime must have attached a WorldService at
+            ``self._world_service`` (or a resolver) so the substrate
+            provider can probe it.
+          - The renderer is ollama configured for this daemon; the
+            substrate provider feeds the located region into ollama.
+          - ``model`` passed in is the *renderer model* (e.g.
+            "qwen3:4b") — the actual LLM call goes to ollama with
+            this id.
+        """
+        ws = self._resolve_world_service()
+        if ws is None:
+            raise ProviderError(
+                "substrate provider requires a WorldService; "
+                "the runtime hasn't attached one yet"
+            )
+        from ..providers.substrate import SubstrateProvider
+        ollama_defaults = self._PROVIDER_DEFAULTS.get("ollama", {})
+        ollama_pconfig = self._config.providers.get("ollama")
+        renderer = OllamaProvider(
+            base_url=(
+                (ollama_pconfig.base_url if ollama_pconfig else "")
+                or ollama_defaults.get("base_url", "http://localhost:11434")
+            ),
+            default_model=model,
+        )
+        return SubstrateProvider(
+            world_service=ws,
+            renderer=renderer,
+            renderer_model=model,
+        )
+
+    def _resolve_world_service(self) -> Any:
+        """Resolve the WorldService via direct reference or lazy
+        resolver. Resolver wins if set."""
+        if self._world_service_resolver is not None:
+            try:
+                ws = self._world_service_resolver()
+                if ws is not None:
+                    return ws
+            except Exception as e:
+                log.warning("world_service_resolver failed: %s", e)
+        return self._world_service
 
     def _resolve_provider_for_model(self, model_name: str, agent_id: str) -> Any:
         model_lower = model_name.lower()

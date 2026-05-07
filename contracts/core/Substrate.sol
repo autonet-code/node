@@ -245,10 +245,24 @@ contract Substrate {
     mapping(address => mapping(bytes32 => uint256)) public mintForEpoch;
 
     /// @dev Cumulative training mint for each agent.
+    /// @notice Phase 7.1 reframes this as the **reputation** ledger:
+    ///         monotonic, soulbound, never decreases, no transfer
+    ///         function. Reputation is the "I worked for this" tier.
+    ///         The kept name ``agentMintTotal`` is back-compat with
+    ///         Phase 5.6 callers; ``agentReputation`` is the
+    ///         semantic alias used by Phase 7+ tokenomics code.
     mapping(address => uint256) public agentMintTotal;
 
-    /// @dev Network-wide cumulative training mint.
+    /// @dev Network-wide cumulative training mint (sum of all
+    ///      agents' agentMintTotal).
     uint256 public networkMintTotal;
+
+    /// @notice Reputation alias for agentMintTotal. Same storage,
+    ///         different semantic — reputation is the soulbound
+    ///         contribution measure, never decreases, untransferable.
+    function agentReputation(address agent) external view returns (uint256) {
+        return agentMintTotal[agent];
+    }
 
     event TrainingRecorded(
         address indexed agent,
@@ -290,6 +304,14 @@ contract Substrate {
         agents[msg.sender].totalTrainingMint += amount;
         agents[msg.sender].trainingSubmissionCount += 1;
 
+        // Phase 7.1: training mints both ledgers at the same amount.
+        // Reputation (agentMintTotal, just bumped above) is soulbound.
+        // ATN balance is transferable — the agent can spend it on
+        // inference fees once the inference-as-a-service path lands.
+        _atnBalance[msg.sender] += amount;
+        atnTotalSupply += amount;
+        emit ATNTransfer(address(0), msg.sender, amount);
+
         emit TrainingRecorded(
             msg.sender,
             epochIdHash,
@@ -301,5 +323,118 @@ contract Substrate {
     /// @notice Has (agent, epochIdHash) already been submitted?
     function hasSubmittedForEpoch(address agent, bytes32 epochIdHash) external view returns (bool) {
         return mintForEpoch[agent][epochIdHash] != 0;
+    }
+
+    // =========================================================================
+    // ATN: transferable token (Phase 7.1)
+    //
+    // Distinct from reputation. Training mints both reputation and ATN at
+    // the same amount; ATN can move between addresses, reputation can't.
+    //
+    // ERC20-shaped surface: balanceOf, transfer, approve, transferFrom,
+    // allowance. Deliberately minimal — no name/symbol/decimals/totalSupply
+    // (those belong on a wrapper if we ever want a standard ERC20 facade).
+    // No external mint or burn function — the only mint path is through
+    // recordTrainingForEpoch. No admin keys.
+    // =========================================================================
+
+    mapping(address => uint256) private _atnBalance;
+    mapping(address => mapping(address => uint256)) private _atnAllowance;
+    uint256 public atnTotalSupply;
+
+    event ATNTransfer(address indexed from, address indexed to, uint256 amount);
+    event ATNApproval(address indexed owner, address indexed spender, uint256 amount);
+
+    error InsufficientATN(uint256 requested, uint256 available);
+    error InsufficientAllowance(uint256 requested, uint256 available);
+    error TransferToZero();
+
+    function balanceOf(address agent) external view returns (uint256) {
+        return _atnBalance[agent];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _atnAllowance[owner][spender];
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        if (to == address(0)) revert TransferToZero();
+        uint256 bal = _atnBalance[msg.sender];
+        if (bal < amount) revert InsufficientATN(amount, bal);
+        unchecked { _atnBalance[msg.sender] = bal - amount; }
+        _atnBalance[to] += amount;
+        emit ATNTransfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        _atnAllowance[msg.sender][spender] = amount;
+        emit ATNApproval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        if (to == address(0)) revert TransferToZero();
+        uint256 allowed = _atnAllowance[from][msg.sender];
+        if (allowed < amount) revert InsufficientAllowance(amount, allowed);
+        uint256 bal = _atnBalance[from];
+        if (bal < amount) revert InsufficientATN(amount, bal);
+        // Allowance decreases unless set to max (the unlimited-approval
+        // convention used by ERC20 implementations everywhere).
+        if (allowed != type(uint256).max) {
+            unchecked { _atnAllowance[from][msg.sender] = allowed - amount; }
+        }
+        unchecked { _atnBalance[from] = bal - amount; }
+        _atnBalance[to] += amount;
+        emit ATNTransfer(from, to, amount);
+        return true;
+    }
+
+    // =========================================================================
+    // Inference payments (Phase 7.2)
+    //
+    // payForInference is a thin wrapper around transfer that emits a
+    // structured event tagged with an off-chain request id. The event
+    // lets the network audit which on-chain payments matched which
+    // inference requests; the request id is opaque to the contract
+    // (typically a sha256/keccak of the request body).
+    //
+    // No special pricing logic on chain. The price is whatever the
+    // caller pays. Daemons advertise their price off-chain (libp2p
+    // capability gossip); requesting agents call payForInference with
+    // that amount before the serving daemon agrees to serve.
+    //
+    // The contract does not enforce that the payment matches a real
+    // inference request — that's the off-chain protocol's job. This
+    // function just provides a labeled payment rail with audit-grade
+    // event tagging.
+    // =========================================================================
+
+    event InferencePayment(
+        address indexed payer,
+        address indexed recipient,
+        uint256 amount,
+        bytes32 indexed requestId
+    );
+
+    /// @notice Pay a serving daemon for an inference request.
+    /// @param recipient The serving daemon's address.
+    /// @param amount    ATN to transfer.
+    /// @param requestId Opaque off-chain request id (e.g. keccak256
+    ///                  of the inference request body) — emitted in
+    ///                  the event so the request can be matched.
+    function payForInference(
+        address recipient,
+        uint256 amount,
+        bytes32 requestId
+    ) external returns (bool) {
+        if (recipient == address(0)) revert TransferToZero();
+        uint256 bal = _atnBalance[msg.sender];
+        if (bal < amount) revert InsufficientATN(amount, bal);
+        unchecked { _atnBalance[msg.sender] = bal - amount; }
+        _atnBalance[recipient] += amount;
+        emit ATNTransfer(msg.sender, recipient, amount);
+        emit InferencePayment(msg.sender, recipient, amount, requestId);
+        return true;
     }
 }

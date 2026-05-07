@@ -27,7 +27,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from world_model.generalized import (
     Observation,
@@ -516,6 +516,138 @@ class WorldService:
                 "rounds": total_rounds,
                 "root_scores_before": scores_before,
                 "root_scores_after": scores_after,
+            }
+
+    def coords_for_text(
+        self,
+        text: str,
+        *,
+        embedder: Optional[Any] = None,
+        charter_head: Optional[Tuple[float, float, float, float]] = None,
+    ) -> Tuple[float, ...]:
+        """Convert a free-form text query into a coord vector matching
+        this WorldService's embedding_dim.
+
+        The result is shaped ``[charter_head_4 | embedding_tail_N]``
+        where N == self.embedding_dim:
+
+          - ``charter_head``: optional 4-tuple to seed the alignment
+            axes. Defaults to all zeros (Tier 3A LLM-binary-flag
+            integration not yet wired). Phase 6.4+ may set non-zero
+            values here based on charter-axis classification of the
+            query text.
+          - ``embedding_tail``: from ``coords_for_query`` using the
+            project's default usefulness embedder. Truncated or
+            zero-padded to match self.embedding_dim.
+
+        Deterministic given the same embedder and text. Different
+        texts produce different coords assuming the embedder is
+        non-degenerate.
+        """
+        from .world_model_substrate.usefulness_coords import (
+            coords_for_query,
+            default_usefulness_embedder,
+        )
+        if embedder is None:
+            embedder = default_usefulness_embedder(dim=self.embedding_dim)
+        head = tuple(charter_head) if charter_head is not None else (0.0, 0.0, 0.0, 0.0)
+        if len(head) != 4:
+            raise ValueError(f"charter_head must be length 4, got {len(head)}")
+        tail = tuple(coords_for_query(text, embedder=embedder))
+        # Match self.embedding_dim: truncate or zero-pad.
+        if len(tail) > self.embedding_dim:
+            tail = tail[: self.embedding_dim]
+        elif len(tail) < self.embedding_dim:
+            tail = tail + (0.0,) * (self.embedding_dim - len(tail))
+        return head + tail
+
+    def probe_inference(
+        self,
+        coords: Any,
+        *,
+        mode: str = "general",
+        max_results: int = 16,
+        max_distance: Optional[float] = None,
+        descendants_per_node: int = 3,
+    ) -> Dict[str, Any]:
+        """Run a transient inference probe against the persistent world.
+
+        Phase 6.1: read-only. The general-mode probe locates the
+        query's region by coordinate distance and renders it. No
+        write side effects — the world isn't mutated, no observation
+        is added, no equilibration runs, no events are persisted, no
+        epoch buffer is touched.
+
+        Returns a dict with:
+          - mode: the mode used.
+          - region: the located ``Region`` as a list of
+            ``{node_id, tendency_id, distance, score, label}`` dicts.
+          - render: the ``render(world, region)`` structured output
+            (ancestors, descendants, scores per located node).
+          - n_results: how many nodes the locator returned.
+
+        Locator parameters (``max_results``, ``max_distance``,
+        ``descendants_per_node``) are passed through; defaults are
+        tuned for "give me up to 16 nearby nodes with their immediate
+        ancestor chain."
+
+        Latency: this path acquires the WorldService lock briefly for
+        a coordinate read but does not mutate state. Phase 6+ may
+        want a reader-writer lock if probe contention shows up.
+        """
+        if mode not in ("general", "alignment"):
+            raise ValueError(f"unknown inference mode: {mode!r}")
+
+        coords_t = tuple(coords)
+
+        from world_model.generalized import (
+            CoordinateLocator,
+            render as _render,
+        )
+
+        with self._lock:
+            if mode == "alignment":
+                # Phase 6.1: not yet implemented. Alignment mode needs
+                # a transient observation + brief equilibrate + rollback,
+                # which is more invasive. Coming when first needed.
+                raise NotImplementedError(
+                    "alignment mode probe is deferred — Phase 6.1 ships "
+                    "general mode only"
+                )
+
+            locator = CoordinateLocator(
+                max_distance=max_distance,
+                max_results=max_results,
+            )
+            region = locator(self._world, coords_t)
+            render_out = _render(
+                self._world, region,
+                descendants_per_node=descendants_per_node,
+            )
+
+            # Build the per-node region summary for callers that want
+            # something simpler than the full render output.
+            region_summary: List[Dict[str, Any]] = []
+            for tendency_id, node_id, distance in region:
+                tendency = self._world.tendencies.get(tendency_id)
+                if tendency is None:
+                    continue
+                node = tendency.tree.get_node(node_id)
+                if node is None:
+                    continue
+                region_summary.append({
+                    "node_id": node_id,
+                    "tendency_id": tendency_id,
+                    "distance": float(distance),
+                    "score": float(getattr(node, "net_score", 0.0)),
+                    "label": getattr(node, "content", "") or "",
+                })
+
+            return {
+                "mode": mode,
+                "n_results": len(region_summary),
+                "region": region_summary,
+                "render": render_out,
             }
 
     def locate(
