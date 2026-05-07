@@ -29,7 +29,7 @@ import struct
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, asdict
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 try:
     import trio
@@ -195,7 +195,7 @@ class NodeCapability:
     """A node's advertised capabilities."""
     peer_id: str
     node_id: str
-    roles: List[str] = field(default_factory=list)       # e.g. ["solver", "aggregator"]
+    roles: List[str] = field(default_factory=list)       # e.g. ["solver", "aggregator", "inference-provider"]
     gpu_type: str = ""                                    # e.g. "RTX 4090"
     gpu_memory_mb: int = 0
     bandwidth_mbps: float = 0.0
@@ -203,6 +203,18 @@ class NodeCapability:
     listen_addrs: List[str] = field(default_factory=list)
     agents: List[Dict] = field(default_factory=list)      # list of AgentAdvertisement dicts
     model_state: Dict = field(default_factory=dict)       # ModelState as dict
+    # Phase 7.4: substrate-backed inference advertisement.
+    # Loose dict so the wire format can evolve. Set when this node
+    # serves /rpb/inference/1.0.0 via SubstrateProvider. Empty dict
+    # means "this node is not advertising inference."
+    # Conventional keys (callers may add others):
+    #   - "renderer_model": str  (e.g. "qwen3:4b")
+    #   - "price_atn":      int  (ATN per probe, scaled to uint256
+    #                              like the chain side)
+    #   - "agent_address":  str  (0x address that should receive
+    #                              payForInference funds)
+    #   - "schema":         int  (1, for forward-compat)
+    inference: Dict = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
 
     def to_bytes(self) -> bytes:
@@ -1032,18 +1044,20 @@ class AutonetHost:
     # =========================================================================
 
     async def request_inference(self, target_peer_id: str, request: dict) -> dict:
-        """Send an inference request to a provider node.
+        """Send an inference request to a serving peer.
 
-        Uses the /rpb/inference/1.0.0 protocol. The provider node forwards
-        the request to its own centralized API subscription (Path A) and
-        returns the response.
+        Uses the /rpb/inference/1.0.0 protocol. The serving peer dispatches
+        the request through whatever handler it registered via
+        ``set_inference_handler`` — typically the substrate-backed handler
+        from Phase 7.3 (substrate locate + local LLM render).
 
         Args:
-            target_peer_id: Peer ID of the provider node.
-            request: Dict with messages, system, model, max_tokens, tools, temperature.
+            target_peer_id: Peer ID of the serving peer.
+            request: Dict with messages, system, model, max_tokens, tools,
+                temperature. The exact shape SubstrateProvider.send accepts.
 
         Returns:
-            Dict with text, tool_calls, usage, model fields from the provider.
+            Dict with text, tool_calls, stop_reason, usage, model fields.
 
         Raises:
             RuntimeError: If the provider returns an error or connection fails.
@@ -1103,32 +1117,154 @@ class AutonetHost:
             except Exception:
                 pass
 
+    def set_inference_handler(
+        self,
+        handler: Callable[[dict], Awaitable[dict]],
+    ) -> None:
+        """Register the coroutine that serves incoming /rpb/inference/1.0.0
+        requests.
+
+        The handler takes the request dict and returns the response dict
+        (or {"error": "..."}). Phase 7.3 wires the substrate-backed
+        handler from ``nodes.common.substrate_inference_handler``;
+        future phases may install other handlers on top of the same
+        protocol (e.g. the sponsor/dependent flow in Phase 8+)."""
+        self._inference_handler = handler
+
     async def _serve_inference_locally(self, request: dict) -> dict:
-        """Serve an inference request using this node's own provider.
+        """Serve an inference request using this node's registered
+        handler. Phase 7.3+: typically the substrate-backed handler.
 
-        This is the sponsor side of Path A — the sponsor node has a
-        centralized API subscription and uses it to serve dependent nodes.
-
-        Override this method or set self._inference_handler to customize.
-        """
+        Returns an error dict when no handler is registered."""
         handler = getattr(self, "_inference_handler", None)
         if handler:
             return await handler(request)
 
-        # Default: return error indicating no provider configured
-        return {"error": "This node has no inference provider configured for sponsorship"}
+        return {"error": "This node has no inference handler registered"}
+
+    def set_inference_advertisement(
+        self,
+        *,
+        renderer_model: str,
+        price_atn: int,
+        agent_address: str,
+        extras: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Mark this node as an inference provider with the given pricing.
+
+        Updates ``self._capability``: adds ``"inference-provider"`` to
+        ``roles`` (idempotent) and sets ``inference`` to a dict carrying
+        the renderer model id, the per-probe price, and the address that
+        should receive ``payForInference`` payments.
+
+        ``extras`` lets callers extend the dict with custom fields
+        (e.g. allowed model tiers, regional hints). The schema key is
+        always set so future format changes can fan out.
+
+        Call ``advertise_capability()`` afterwards (or rely on the
+        periodic advertisement loop) to push the new capability to
+        peers.
+        """
+        cap = self._capability
+        if "inference-provider" not in cap.roles:
+            cap.roles.append("inference-provider")
+        adv: Dict[str, Any] = {
+            "schema": 1,
+            "renderer_model": str(renderer_model),
+            "price_atn": int(price_atn),
+            "agent_address": str(agent_address),
+        }
+        if extras:
+            adv.update(extras)
+        cap.inference = adv
+
+    def clear_inference_advertisement(self) -> None:
+        """Remove this node's inference advertisement: drop the role
+        and clear the ``inference`` dict. Useful when the agent
+        served by this daemon stops offering inference (e.g. its
+        local renderer goes offline, or the agent deactivates)."""
+        cap = self._capability
+        if "inference-provider" in cap.roles:
+            cap.roles = [r for r in cap.roles if r != "inference-provider"]
+        cap.inference = {}
 
     async def advertise_models(self, models: List[str], agent_address: str) -> None:
-        """Advertise available models on the provider registry gossip topic.
+        """Backward-compatible shim — Phase 7.4 reframed advertisement
+        as a richer inference-capability record (see
+        ``set_inference_advertisement``). This shim wires the old
+        signature into the new path: the first model is treated as
+        the renderer model and price defaults to 0.
 
-        Publishes to PROVIDER_REGISTRY_TOPIC so that RPB provider nodes
-        can discover available inference endpoints.
+        Prefer ``set_inference_advertisement`` for new code.
         """
-        # TODO: Publish to PROVIDER_REGISTRY_TOPIC
-        # 1. Ensure GossipSub is initialized
-        # 2. Build advertisement message with models, peer_id, agent_address
-        # 3. Publish to PROVIDER_REGISTRY_TOPIC
-        pass
+        if not models:
+            return
+        self.set_inference_advertisement(
+            renderer_model=models[0],
+            price_atn=0,
+            agent_address=agent_address,
+        )
+        await self.advertise_capability()
+
+    def discover_inference_providers(
+        self,
+        *,
+        max_price_atn: Optional[int] = None,
+        renderer_model: Optional[str] = None,
+        require_agent_address: bool = True,
+    ) -> List[NodeCapability]:
+        """Find peers advertising inference capability.
+
+        Filters ``known_capabilities`` for entries that:
+          - have ``"inference-provider"`` in ``roles``,
+          - carry a non-empty ``inference`` advertisement dict,
+          - if ``max_price_atn`` is set, ``price_atn`` <= the cap,
+          - if ``renderer_model`` is set, exact match,
+          - if ``require_agent_address`` is True (default), the
+            advertised agent_address is non-empty (so payment can
+            actually route to a real address).
+
+        Returns a list of ``NodeCapability``, sorted by latency
+        ascending (peers we have measurements for) then by price
+        ascending (cheapest wins ties / unmeasured peers).
+        """
+        out: List[NodeCapability] = []
+        for cap in self._known_capabilities.values():
+            if "inference-provider" not in cap.roles:
+                continue
+            if not cap.inference:
+                continue
+            if require_agent_address and not cap.inference.get("agent_address"):
+                continue
+            if (
+                max_price_atn is not None
+                and int(cap.inference.get("price_atn", 0)) > int(max_price_atn)
+            ):
+                continue
+            if renderer_model is not None:
+                if str(cap.inference.get("renderer_model", "")) != str(renderer_model):
+                    continue
+            out.append(cap)
+
+        # Sort: known-latency peers ascending by latency, then by
+        # advertised price ascending. Peers without a latency reading
+        # land after all measured peers, sorted just by price.
+        def _sort_key(c: NodeCapability) -> Tuple[int, float, int]:
+            tracker = getattr(self, "_latency_tracker", None)
+            lat_obj = tracker.get_latency(c.peer_id) if tracker is not None else None
+            # PeerLatencyTracker.get_latency returns a PeerLatency
+            # object (or None). Use ema_rtt_ms when reachable; treat
+            # unreachable / missing as "unmeasured".
+            if (
+                lat_obj is not None
+                and getattr(lat_obj, "reachable", False)
+                and getattr(lat_obj, "samples", 0) > 0
+            ):
+                return (0, float(lat_obj.ema_rtt_ms), int(c.inference.get("price_atn", 0)))
+            return (1, float("inf"), int(c.inference.get("price_atn", 0)))
+
+        out.sort(key=_sort_key)
+        return out
 
     # =========================================================================
     # Embedding Exchange Protocol (two-speed inference architecture)

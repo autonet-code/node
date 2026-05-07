@@ -12,11 +12,12 @@ pragma solidity ^0.8.20;
 /// Two responsibilities live here, intentionally folded into one
 /// contract because they share state:
 ///
-///   1. **Epoch anchoring** — at each network epoch close, one daemon
-///      submits the canonical anchor (epoch_id, epoch_root,
-///      prev_epoch_root, prev_anchor_hash, agent_mint_cid, payload_hash).
-///      The chain verifies the anchor links into the chain correctly
-///      and rejects forgeries.
+///   1. **Epoch anchoring** — at each network epoch close, one
+///      participant (typically an agent acting as the rotating
+///      canonical-ordering coordinator) submits the canonical anchor
+///      (epoch_id, epoch_root, prev_epoch_root, prev_anchor_hash,
+///      agent_mint_cid, payload_hash). The chain verifies the anchor
+///      links into the chain correctly and rejects forgeries.
 ///
 ///   2. **Agent training records** — registered agents read their
 ///      authoritative mint from the off-chain agent_mint blob (CID is
@@ -402,7 +403,7 @@ contract Substrate {
     // No special pricing logic on chain. The price is whatever the
     // caller pays. Daemons advertise their price off-chain (libp2p
     // capability gossip); requesting agents call payForInference with
-    // that amount before the serving daemon agrees to serve.
+    // that amount before the serving agent agrees to serve.
     //
     // The contract does not enforce that the payment matches a real
     // inference request — that's the off-chain protocol's job. This
@@ -417,8 +418,11 @@ contract Substrate {
         bytes32 indexed requestId
     );
 
-    /// @notice Pay a serving daemon for an inference request.
-    /// @param recipient The serving daemon's address.
+    /// @notice Pay a serving agent for an inference request.
+    /// @param recipient The serving agent's address (the on-chain
+    ///                  identity of the agent that handled the
+    ///                  request — not the daemon process that
+    ///                  carried the bytes).
     /// @param amount    ATN to transfer.
     /// @param requestId Opaque off-chain request id (e.g. keccak256
     ///                  of the inference request body) — emitted in

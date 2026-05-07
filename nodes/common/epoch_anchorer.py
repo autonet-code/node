@@ -1,15 +1,21 @@
-"""Daemon-side anchor submitter for the substrate-native chain surface.
+"""Agent-side anchor submitter for the substrate-native chain surface.
+
+Runs inside a daemon process but signs from an agent's keypair —
+the on-chain submitter address is always an agent's, not a daemon's.
 
 Phase 5.5 of native world-model integration. Updated in 5.6a to
 target the consolidated ``Substrate.sol`` contract (which absorbed
 the standalone EpochAnchor.sol after the pre-substrate contract
 nuke).
 
-After a federated epoch close, one daemon (the coordinator-of-the-
-moment) submits the authoritative payload to ``Substrate.submitAnchor``.
-Other daemons verify the on-chain record matches their local
-computation; mismatches indicate a fork and trigger a dispute (later
-phase).
+After a federated epoch close, one agent (acting as the rotating
+canonical-ordering coordinator for that epoch) submits the
+authoritative payload to ``Substrate.submitAnchor`` from their own
+keypair. Other agents in the federation verify the on-chain record
+matches their local computation; mismatches indicate a fork and
+trigger a dispute (later phase). Daemons are the wire transport,
+not the consensus actor — the on-chain submitter is always an agent
+address.
 
 What this module does
 ---------------------
@@ -29,7 +35,7 @@ What this module does NOT do
   - Serve the off-chain blob — that's blob_store + libp2p in another
     layer.
   - Resolve forks. If the anchor submission reverts because another
-    daemon already submitted for this epoch, the caller treats that
+    agent already submitted for this epoch, the caller treats that
     as "I'm second; verify their anchor matches mine and accept it,
     else dispute". Phase 5+ wires that.
 """
