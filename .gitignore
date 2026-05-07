@@ -35,6 +35,7 @@ test_data_*/
 latest.txt
 deployment-addresses.json
 .claude-workers/
+.claude/
 
 # Project-specific
 FUNDING_LEADS.md
