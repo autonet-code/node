@@ -509,6 +509,49 @@ class AutonetHost:
     # Connection Management
     # =========================================================================
 
+    async def _reconcile_pubsub_peers(self) -> None:
+        """Periodically check that every connected libp2p peer is
+        registered with pubsub. PubsubNotifee.connected delivery has
+        been observed to lag on real networks; this loop catches the
+        gap.
+
+        Runs every 2s for the lifetime of the host nursery.
+        """
+        import trio
+        while True:
+            try:
+                if self._pubsub is not None and self._host is not None:
+                    connected = list(self._host.get_connected_peers())
+                    known = set(self._pubsub.peers.keys())
+                    for pid in connected:
+                        if pid not in known:
+                            self.logger.debug(
+                                f"reconciling pubsub peer {pid} (was missing)"
+                            )
+                            await self._pubsub._handle_new_peer_safe(pid)
+            except Exception as e:
+                self.logger.debug(f"_reconcile_pubsub_peers iter: {e}")
+            await trio.sleep(2.0)
+
+    async def _nudge_pubsub_peer(self, peer_id: Any) -> None:
+        """Manually invoke pubsub's new-peer handler.
+
+        py-libp2p's PubsubNotifee.connected() is supposed to fire on
+        every new connection (initiator or dialed-to), enqueueing the
+        peer for ``handle_peer_queue`` to consume. Empirically this
+        delivery can lag tens of seconds (or never fire) on real
+        networks like ZeroTier — observed in Phase 10.6 cross-machine
+        smoke. As a workaround, after we explicitly connect to a peer,
+        we directly call ``_handle_new_peer_safe`` to skip the queue
+        and immediately negotiate the meshsub stream.
+        """
+        if self._pubsub is None:
+            return
+        try:
+            await self._pubsub._handle_new_peer_safe(peer_id)
+        except Exception as e:
+            self.logger.debug(f"_nudge_pubsub_peer({peer_id}): {e}")
+
     async def connect_to_peer(self, multiaddr_str: str) -> bool:
         """Connect to a peer by multiaddr string."""
         if not self._host:
@@ -518,6 +561,10 @@ class AutonetHost:
             info = info_from_p2p_addr(maddr)
             await self._host.connect(info)
             self.logger.info(f"Connected to {str(info.peer_id)[:16]}...")
+            # Nudge pubsub to register the peer immediately. Workaround
+            # for Phase 10.6 cross-machine smoke finding: PubsubNotifee
+            # connected delivery can lag on real networks.
+            await self._nudge_pubsub_peer(info.peer_id)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to connect to {multiaddr_str}: {e}")
@@ -711,19 +758,28 @@ class AutonetHost:
             strict_signing=False,
         )
         # Both Pubsub AND GossipSub are async-services. Each has to be
-        # run via its own TrioManager:
-        #   - Pubsub.run() spawns handle_peer_queue (notifee → add_peer)
-        #   - GossipSub.run() spawns heartbeat (mesh GRAFT/PRUNE/IHAVE)
-        # Without these, peers connect but the gossipsub mesh never
-        # forms, so messages don't propagate. Phase 10.6.
+        # run via its own manager — Pubsub.run() spawns handle_peer_queue
+        # (notifee → add_peer); GossipSub.run() spawns heartbeat (mesh
+        # GRAFT/PRUNE/IHAVE). Without these, peers connect but the
+        # gossipsub mesh never forms. Phase 10.6.
+        #
+        # We use TrioManager.run_service via start_soon on the host's
+        # nursery rather than background_trio_service so the managers'
+        # lifetimes are bounded by the host (cancelled when the host
+        # nursery is cancelled).
         if self._nursery is not None:
             from libp2p.tools.async_service.trio_service import TrioManager
-            pubsub_manager = TrioManager(self._pubsub)
-            self._nursery.start_soon(pubsub_manager.run)
-            await pubsub_manager.wait_started()
-            gossipsub_manager = TrioManager(self._gossipsub)
-            self._nursery.start_soon(gossipsub_manager.run)
-            await gossipsub_manager.wait_started()
+            self._pubsub_manager = TrioManager(self._pubsub)
+            self._gossipsub_manager = TrioManager(self._gossipsub)
+            self._nursery.start_soon(self._pubsub_manager.run)
+            self._nursery.start_soon(self._gossipsub_manager.run)
+            await self._pubsub_manager.wait_started()
+            await self._gossipsub_manager.wait_started()
+            # Pubsub-peer reconciliation. PubsubNotifee.connected
+            # delivery can lag (or fail) on real networks; periodically
+            # check that every connected peer is registered with
+            # pubsub and nudge any that aren't. Cheap to run.
+            self._nursery.start_soon(self._reconcile_pubsub_peers)
 
     async def join_guild(
         self,

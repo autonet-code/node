@@ -181,9 +181,17 @@ def main():
             try:
                 svc.submit_observation(obs, agent_id=agent_id)
                 ev = gossip_holder["ev"]
+                # Diagnostic: inspect pubsub state.
+                ps = host._pubsub
+                gs = host._gossipsub
+                topic = ev.topic if hasattr(ev, "topic") else "?"
+                ps_peers = len(getattr(ps, "peers", {})) if ps else 0
+                pt = len(ps.peer_topics.get(topic, set())) if ps and hasattr(ps, "peer_topics") else 0
+                mesh = len(gs.mesh.get(topic, set())) if gs else 0
                 print(
                     f"[smoke] t={now-started:5.1f}s obs#{obs_counter} "
-                    f"axis={obs_axis} stats={ev.stats}",
+                    f"stats={ev.stats} ps_peers={ps_peers} "
+                    f"peer_topics={pt} mesh={mesh}",
                     flush=True,
                 )
             except Exception as e:
