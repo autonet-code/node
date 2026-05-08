@@ -82,35 +82,20 @@ def main():
 
     gossip_holder = {"ev": None, "driver": None}
 
+    host_started_event = threading.Event()
+
     def _run_host():
         async def _main():
             async with host.run():
-                print(
-                    f"[smoke] peer_id={host.peer_id}",
-                    flush=True,
-                )
+                print(f"[smoke] peer_id={host.peer_id}", flush=True)
                 print(f"[smoke] addrs={host.addrs}", flush=True)
-                # Once the host has a trio token, wire EventGossip.
-                transport = LibP2PTransport(host)
-                kp = Keypair.generate()
-                ev = EventGossip(
-                    rpb_address=rpb,
-                    keypair=kp,
-                    transport=transport,
-                    world_service=svc,
-                )
-                gossip_holder["ev"] = ev
-                gossip_holder["driver"] = FederatedCloseDriver(
-                    gossip=ev, embedding_dim=svc.embedding_dim,
-                )
-                print(
-                    f"[smoke] gossip pubkey={kp.public_key.hex()[:16]}",
-                    flush=True,
-                )
-
+                host_started_event.set()
+                # Sit and serve. The cross-thread EventGossip
+                # construction happens on the main thread below
+                # using subscribe_topic_threadsafe, so we just keep
+                # the host alive here.
                 if bootstrap:
-                    # Give the host a moment to settle, then dial.
-                    await trio.sleep(2.0)
+                    await trio.sleep(3.0)
                     for ma in bootstrap:
                         try:
                             ok = await host.connect_to_peer(ma)
@@ -120,8 +105,6 @@ def main():
                             )
                         except Exception as e:
                             print(f"[smoke] dial failed: {e}", flush=True)
-
-                # Sit and serve.
                 while True:
                     await trio.sleep(60)
         try:
@@ -132,9 +115,31 @@ def main():
     host_thread = threading.Thread(target=_run_host, daemon=True)
     host_thread.start()
 
-    # Wait for gossip to wire up
-    while gossip_holder["ev"] is None:
-        time.sleep(0.5)
+    # Wait for the host to be running (trio token captured) so the
+    # threadsafe pub/sub bridge is usable.
+    host_started_event.wait(timeout=30.0)
+    # And wait for the host's nursery + ready event (set when the
+    # nursery opens and trio_token is captured).
+    while not getattr(host, "_ready_event", None) or not host._ready_event.is_set():
+        time.sleep(0.2)
+
+    # Construct EventGossip from the main (non-trio) thread so the
+    # threadsafe pub/sub bridge works correctly. The transport's
+    # subscribe(topic, handler) will go through host.subscribe_topic_threadsafe
+    # which uses trio.from_thread.run — that requires being outside trio.
+    transport = LibP2PTransport(host)
+    kp = Keypair.generate()
+    ev = EventGossip(
+        rpb_address=rpb,
+        keypair=kp,
+        transport=transport,
+        world_service=svc,
+    )
+    gossip_holder["ev"] = ev
+    gossip_holder["driver"] = FederatedCloseDriver(
+        gossip=ev, embedding_dim=svc.embedding_dim,
+    )
+    print(f"[smoke] gossip pubkey={kp.public_key.hex()[:16]}", flush=True)
 
     # Autonomous loop: each daemon emits one obs every OBS_INTERVAL
     # and closes the epoch every CLOSE_INTERVAL, printing the

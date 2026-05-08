@@ -710,16 +710,20 @@ class AutonetHost:
             router=self._gossipsub,
             strict_signing=False,
         )
-        # Pubsub is an async-service; it has to be run via TrioManager
-        # so its peer-queue handler (which wires libp2p's notifee into
-        # router.add_peer / mesh GRAFT) actually starts. Without this,
-        # the mesh never forms and messages don't propagate.
-        # Phase 10.6.
+        # Both Pubsub AND GossipSub are async-services. Each has to be
+        # run via its own TrioManager:
+        #   - Pubsub.run() spawns handle_peer_queue (notifee → add_peer)
+        #   - GossipSub.run() spawns heartbeat (mesh GRAFT/PRUNE/IHAVE)
+        # Without these, peers connect but the gossipsub mesh never
+        # forms, so messages don't propagate. Phase 10.6.
         if self._nursery is not None:
             from libp2p.tools.async_service.trio_service import TrioManager
             pubsub_manager = TrioManager(self._pubsub)
             self._nursery.start_soon(pubsub_manager.run)
             await pubsub_manager.wait_started()
+            gossipsub_manager = TrioManager(self._gossipsub)
+            self._nursery.start_soon(gossipsub_manager.run)
+            await gossipsub_manager.wait_started()
 
     async def join_guild(
         self,
