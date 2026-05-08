@@ -693,12 +693,17 @@ class AutonetHost:
             return
 
         protocols = [TProtocol("/meshsub/1.1.0"), TProtocol("/meshsub/1.0.0")]
+        # heartbeat_interval=1 is the libp2p default and is required
+        # for mesh formation in any reasonable timeframe. The previous
+        # value of 120s meant no GRAFT for 2 minutes, so messages
+        # silently failed to propagate during that window. Phase 10.2
+        # cross-machine smoke test caught this.
         self._gossipsub = GossipSub(
             protocols=protocols,
             degree=6,
             degree_low=4,
             degree_high=12,
-            heartbeat_interval=120,
+            heartbeat_interval=1,
         )
         self._pubsub = Pubsub(
             host=self._host,
