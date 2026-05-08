@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonet-computer"
-version = "0.2.1"
+version = "0.2.2"
 description = "Decentralized AI alignment network with agent orchestration framework"
 requires-python = ">=3.11"
 license = "MIT"
@@ -30,11 +30,11 @@ dependencies = [
     "websockets>=13.0",
     "python-dotenv>=1.0.0",
     "requests>=2.28.0",
-    # World-model engine (substrate kernel). Runtime dep of
-    # nodes.common.federated_reconcile and friends. Not on PyPI;
-    # installed from the autonet-code/world-model GitHub repo.
-    "world-model @ git+https://github.com/autonet-code/world-model.git@master",
 ]
+# Note: the substrate runtime needs the world-model engine. It's
+# vendored under nodes/common/world_model_substrate/_engine/ so
+# `pip install autonet-computer` works without external git deps.
+# Source of truth: github.com/autonet-code/world-model (master).
 
 [project.urls]
 Homepage = "https://autonet.computer"
@@ -93,7 +93,7 @@ dev = [
 atn = "atn.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["atn*", "nodes*", "bridge"]
+include = ["atn*", "nodes*", "bridge", "world_model*"]
 
 [tool.setuptools.package-data]
 "atn.connectors" = ["*/connector.json"]
