@@ -319,3 +319,66 @@ def test_three_daemons_compute_same_canonical_order():
     assert res_1.epoch_root() == res_2.epoch_root() == res_3.epoch_root()
     # All four senders accepted.
     assert len(res_1.per_sender_root) == 4
+
+
+# ---------------------------------------------------------------------------
+# Phase 10.7: join-late tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_chain_starting_above_one_is_accepted():
+    """A daemon that joins after the network has been running sees a
+    sender's batches starting mid-stream (e.g. seq=5, 6, 7). The
+    chain is internally hash-linked but doesn't go back to seq=1.
+    Phase 10.7 accepts these."""
+    rpb = "rpb_canon_late_a"
+    kp = Keypair.generate()
+
+    # Build a full 1..7 chain, then drop the first 4 (simulating
+    # what a late-joining daemon actually sees).
+    full = _make_batch_chain(rpb, kp, 7, "alice")
+    suffix = full[4:]  # seq 5, 6, 7
+    assert suffix[0].batch_seq == 5
+    assert suffix[0].prev_batch_hash == full[3].content_hash()
+
+    res = canonical_order(suffix)
+    assert kp.public_key not in res.dropped_senders, res.dropped_senders
+    assert kp.public_key in res.per_sender_root
+    assert len(res.ordered_batches) == 3
+    assert [b.batch_seq for b in res.ordered_batches] == [5, 6, 7]
+
+
+def test_internal_gap_still_rejected():
+    """Sequence gaps WITHIN what we have are still rejected — the
+    sender's chain is broken in our window, not just truncated."""
+    rpb = "rpb_canon_late_b"
+    kp = Keypair.generate()
+    full = _make_batch_chain(rpb, kp, 5, "bob")
+    # Take seq 2, 3, 5 — gap at 4
+    gappy = [full[1], full[2], full[4]]
+
+    res = canonical_order(gappy)
+    assert kp.public_key in res.dropped_senders
+    assert "sequence gap" in res.dropped_senders[kp.public_key]
+
+
+def test_internal_hash_break_still_rejected():
+    """Even if the chain starts above 1, internal hash links are
+    still verified — a tampered prev_batch_hash within our window
+    drops the sender."""
+    rpb = "rpb_canon_late_c"
+    kp = Keypair.generate()
+    full = _make_batch_chain(rpb, kp, 5, "carol")
+    # Take suffix seq 3, 4, 5 but tamper batch 4's prev_batch_hash.
+    suffix = list(full[2:5])
+    suffix[1] = EventBatch(
+        rpb_address=suffix[1].rpb_address,
+        sender_pubkey=suffix[1].sender_pubkey,
+        batch_seq=suffix[1].batch_seq,
+        events=suffix[1].events,
+        prev_batch_hash=b"\xff" * 32,  # bogus
+        timestamp=suffix[1].timestamp,
+    )
+    res = canonical_order(suffix)
+    assert kp.public_key in res.dropped_senders
+    assert "prev_batch_hash mismatch" in res.dropped_senders[kp.public_key]

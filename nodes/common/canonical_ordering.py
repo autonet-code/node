@@ -157,10 +157,25 @@ def _validate_sender_chain(
     """Sort by batch_seq and validate prev_batch_hash linkage.
 
     Rules:
-      - Sequences must form a contiguous run starting at 1.
-      - The first batch must have prev_batch_hash == b"" (empty).
+      - Sequences must form a contiguous run within what we have for
+        this epoch. The lowest seq may be any value: a daemon that
+        joins after an epoch boundary will only see a sender's
+        batches starting from some point mid-stream, and dropping
+        the sender on that grounds would prevent any cross-daemon
+        federation in real networks.
+      - If the lowest seq is 1, the first batch's prev_batch_hash
+        must be b"" (genesis).
+      - If the lowest seq > 1, the earliest batch's prev_batch_hash
+        is recorded but not verified — we don't have the predecessor
+        to check against. Tampering with the earliest batch's prev
+        hash in our window is undetectable here, but every subsequent
+        batch's prev hash IS verified, so a malicious sender can't
+        forge an entire chain.
       - Each subsequent batch must have prev_batch_hash equal to the
         previous batch's content_hash.
+
+    Phase 10.7: previously required start-at-1. That broke the
+    real-world case of a daemon dialing into a long-running peer.
 
     Returns (chain, "") on success, (None, reason) on rejection.
     """
@@ -169,8 +184,9 @@ def _validate_sender_chain(
 
     sorted_batches = sorted(batches, key=lambda b: b.batch_seq)
 
-    # Sequence numbers must start at 1 and be contiguous.
-    expected = 1
+    # Sequence numbers must be contiguous within what we have.
+    first_seq = sorted_batches[0].batch_seq
+    expected = first_seq
     for b in sorted_batches:
         if b.batch_seq != expected:
             return (
@@ -179,8 +195,11 @@ def _validate_sender_chain(
             )
         expected += 1
 
-    # Hash chain must link.
-    prev_hash = b""
+    # Hash chain must link within what we have.
+    if first_seq == 1:
+        prev_hash: bytes = b""
+    else:
+        prev_hash = sorted_batches[0].prev_batch_hash
     for b in sorted_batches:
         if b.prev_batch_hash != prev_hash:
             return (
