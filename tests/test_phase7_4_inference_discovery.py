@@ -311,3 +311,211 @@ def test_advertise_models_shim_wires_into_new_path():
     assert inf["agent_address"] == "0xabc"
     # Old shim doesn't carry price; defaults to 0.
     assert inf["price_atn"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.5b: per-agent inference advertisement
+# ---------------------------------------------------------------------------
+
+
+def _populate_capability_with_agents(
+    host: AutonetHost,
+    *,
+    peer_id: str,
+    agents: list,
+    legacy_inference: dict = None,
+    latency_ms: float = None,
+) -> None:
+    """Drop a NodeCapability with per-agent advertisements into the
+    host's known_capabilities cache.
+
+    ``agents`` is a list of dicts shaped like AgentAdvertisement —
+    each may carry an ``inference`` dict.
+    """
+    cap = NodeCapability(
+        peer_id=peer_id,
+        node_id=f"node-{peer_id[:8]}",
+        roles=["inference-provider"],
+        agents=list(agents),
+        inference=dict(legacy_inference or {}),
+    )
+    host._known_capabilities[peer_id] = cap
+    if latency_ms is not None:
+        from nodes.common.p2p import PeerLatency, PeerLatencyTracker
+        if host._latency_tracker is None:
+            host._latency_tracker = PeerLatencyTracker(host=None)
+        host._latency_tracker._peers[peer_id] = PeerLatency(
+            peer_id=peer_id,
+            ema_rtt_ms=float(latency_ms),
+            samples=1,
+            reachable=True,
+        )
+
+
+def test_set_inference_advertisement_writes_to_matching_agent():
+    """When the agent's address matches an entry in cap.agents,
+    set_inference_advertisement writes into that entry's inference
+    dict, not cap.inference."""
+    h = AutonetHost(node_id="multi")
+    h._capability.agents = [
+        {"address": "0xAAA", "name": "alice"},
+        {"address": "0xBBB", "name": "bob"},
+    ]
+    h.set_inference_advertisement(
+        renderer_model="qwen3:4b",
+        price_atn=10,
+        agent_address="0xBBB",
+    )
+    # bob's entry got the advert; alice's didn't.
+    assert h._capability.agents[1]["inference"]["renderer_model"] == "qwen3:4b"
+    assert h._capability.agents[1]["inference"]["agent_address"] == "0xBBB"
+    assert h._capability.agents[0].get("inference", {}) == {}
+    # Daemon-wide field NOT set since we matched a per-agent entry.
+    assert h._capability.inference == {}
+    # Role still set.
+    assert "inference-provider" in h._capability.roles
+
+
+def test_set_inference_advertisement_falls_back_to_cap_inference():
+    """If no agent in cap.agents matches the address, populate the
+    legacy daemon-wide cap.inference for backward compat."""
+    h = AutonetHost(node_id="solo")
+    # No cap.agents entries at all.
+    h.set_inference_advertisement(
+        renderer_model="qwen3:4b",
+        price_atn=20,
+        agent_address="0xCCC",
+    )
+    assert h._capability.inference["agent_address"] == "0xCCC"
+    assert h._capability.inference["price_atn"] == 20
+
+
+def test_clear_inference_advertisement_per_agent():
+    """clear_inference_advertisement(address=...) clears just that
+    agent's entry; role remains if other agents still advertise."""
+    h = AutonetHost(node_id="multi")
+    h._capability.agents = [
+        {"address": "0xAAA", "name": "alice"},
+        {"address": "0xBBB", "name": "bob"},
+    ]
+    h.set_inference_advertisement(
+        renderer_model="m1", price_atn=1, agent_address="0xAAA",
+    )
+    h.set_inference_advertisement(
+        renderer_model="m2", price_atn=2, agent_address="0xBBB",
+    )
+    h.clear_inference_advertisement(agent_address="0xAAA")
+    assert h._capability.agents[0]["inference"] == {}
+    assert h._capability.agents[1]["inference"]["renderer_model"] == "m2"
+    # bob still advertises, so role stays.
+    assert "inference-provider" in h._capability.roles
+    # Now clear bob too -> role drops.
+    h.clear_inference_advertisement(agent_address="0xBBB")
+    assert "inference-provider" not in h._capability.roles
+
+
+def test_discover_returns_one_match_per_per_agent_advertisement():
+    """A daemon hosting two inference-providing agents shows up as
+    two InferenceProviderMatch entries, not one."""
+    h = AutonetHost(node_id="discoverer")
+    _populate_capability_with_agents(
+        h,
+        peer_id="peer_multi",
+        agents=[
+            {
+                "address": "0xAAA",
+                "inference": {
+                    "schema": 1,
+                    "renderer_model": "qwen3:4b",
+                    "price_atn": 10,
+                    "agent_address": "0xAAA",
+                },
+            },
+            {
+                "address": "0xBBB",
+                "inference": {
+                    "schema": 1,
+                    "renderer_model": "phi-3-mini",
+                    "price_atn": 5,
+                    "agent_address": "0xBBB",
+                },
+            },
+        ],
+    )
+    matches = h.discover_inference_providers()
+    assert len(matches) == 2
+    addrs = {m.agent_address for m in matches}
+    assert addrs == {"0xAAA", "0xBBB"}
+    # Cheaper one (bob, price=5) sorts first when no latency known.
+    assert matches[0].agent_address == "0xBBB"
+
+
+def test_discover_legacy_cap_inference_still_works():
+    """A daemon that only sets cap.inference (Phase 7.4-style) still
+    surfaces as a single match. Backward compat."""
+    h = AutonetHost(node_id="discoverer")
+    _populate_capability_with_agents(
+        h,
+        peer_id="peer_legacy",
+        agents=[],  # no per-agent ads
+        legacy_inference={
+            "schema": 1,
+            "renderer_model": "qwen3:4b",
+            "price_atn": 7,
+            "agent_address": "0xLEG",
+        },
+    )
+    matches = h.discover_inference_providers()
+    assert len(matches) == 1
+    assert matches[0].agent_address == "0xLEG"
+    assert matches[0].price_atn == 7
+
+
+def test_discover_does_not_double_count_when_legacy_matches_per_agent():
+    """If a daemon set BOTH cap.inference and a matching cap.agents
+    entry's inference (e.g. solo daemon with one agent), the agent
+    is included once, not twice."""
+    h = AutonetHost(node_id="discoverer")
+    adv = {
+        "schema": 1,
+        "renderer_model": "m",
+        "price_atn": 3,
+        "agent_address": "0xSOLO",
+    }
+    _populate_capability_with_agents(
+        h,
+        peer_id="peer_solo",
+        agents=[{"address": "0xSOLO", "inference": adv}],
+        legacy_inference=adv,
+    )
+    matches = h.discover_inference_providers()
+    assert len(matches) == 1
+    assert matches[0].agent_address == "0xSOLO"
+
+
+def test_discover_filters_per_agent_by_price_and_model():
+    h = AutonetHost(node_id="discoverer")
+    _populate_capability_with_agents(
+        h,
+        peer_id="peer_x",
+        agents=[
+            {
+                "address": "0xCHEAP",
+                "inference": {
+                    "schema": 1, "renderer_model": "small",
+                    "price_atn": 2, "agent_address": "0xCHEAP",
+                },
+            },
+            {
+                "address": "0xMEDIUM",
+                "inference": {
+                    "schema": 1, "renderer_model": "medium",
+                    "price_atn": 50, "agent_address": "0xMEDIUM",
+                },
+            },
+        ],
+    )
+    cheap = h.discover_inference_providers(max_price_atn=10)
+    assert {m.agent_address for m in cheap} == {"0xCHEAP"}
+    by_model = h.discover_inference_providers(renderer_model="medium")
+    assert {m.agent_address for m in by_model} == {"0xMEDIUM"}

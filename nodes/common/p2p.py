@@ -160,6 +160,40 @@ class AgentAdvertisement:
     is_root: bool = False
     parent_address: str = ""
     registered_on_chain: bool = False
+    # Phase 7.5b: per-agent substrate-backed inference advertisement.
+    # Same shape as NodeCapability.inference but scoped to one agent
+    # so a daemon hosting multiple agents can advertise different
+    # offers per agent. Empty dict = this agent doesn't serve
+    # inference. See discover_inference_providers for filtering.
+    inference: Dict = field(default_factory=dict)
+
+
+@dataclass
+class InferenceProviderMatch:
+    """A single agent on a remote peer offering inference. Phase 7.5b
+    discovery returns these instead of NodeCapability so that callers
+    can talk to a specific agent's offer rather than a daemon-wide
+    blob.
+
+    Attributes
+    ----------
+    peer_id:        libp2p peer id of the daemon hosting the agent
+    agent_address: 0x address of the agent (used for payment routing
+                    via Substrate.payForInference)
+    renderer_model: e.g. "qwen3:4b"; same field as in the inference dict
+    price_atn:      per-probe price scaled like the on-chain side
+    inference:      full inference dict (carries any extras)
+    capability:     the originating NodeCapability (peer-level info,
+                    listen_addrs, etc.)
+    latency_ms:     EMA RTT to the daemon, or None if unmeasured
+    """
+    peer_id: str
+    agent_address: str
+    renderer_model: str
+    price_atn: int
+    inference: Dict
+    capability: "NodeCapability"
+    latency_ms: Optional[float] = None
 
 
 @dataclass
@@ -1362,16 +1396,17 @@ class AutonetHost:
         agent_address: str,
         extras: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Mark this node as an inference provider with the given pricing.
+        """Mark a specific agent on this node as an inference provider.
 
-        Updates ``self._capability``: adds ``"inference-provider"`` to
-        ``roles`` (idempotent) and sets ``inference`` to a dict carrying
-        the renderer model id, the per-probe price, and the address that
-        should receive ``payForInference`` payments.
+        Phase 7.5b: writes the inference advertisement into the
+        matching ``cap.agents[i].inference`` dict so a daemon hosting
+        multiple agents can advertise per-agent offers. If no agent
+        with this address exists in ``cap.agents`` yet, also writes to
+        ``cap.inference`` for backward compatibility with single-agent
+        daemons.
 
-        ``extras`` lets callers extend the dict with custom fields
-        (e.g. allowed model tiers, regional hints). The schema key is
-        always set so future format changes can fan out.
+        Adds ``"inference-provider"`` to ``cap.roles`` (idempotent).
+        Includes a ``schema`` key so future format changes can fan out.
 
         Call ``advertise_capability()`` afterwards (or rely on the
         periodic advertisement loop) to push the new capability to
@@ -1388,17 +1423,52 @@ class AutonetHost:
         }
         if extras:
             adv.update(extras)
-        cap.inference = adv
+        # Try to find the matching agent in cap.agents and update its
+        # inference dict. Backward compat: also keep cap.inference
+        # populated when the matching agent isn't listed (single-agent
+        # daemons that don't populate cap.agents at all).
+        agent_addr_lower = str(agent_address).lower()
+        matched = False
+        for entry in cap.agents:
+            if str(entry.get("address", "")).lower() == agent_addr_lower:
+                entry["inference"] = adv
+                matched = True
+                break
+        if not matched:
+            # No agent record to attach to; daemon-wide fallback so
+            # peers that read only cap.inference still find it.
+            cap.inference = adv
 
-    def clear_inference_advertisement(self) -> None:
-        """Remove this node's inference advertisement: drop the role
-        and clear the ``inference`` dict. Useful when the agent
-        served by this daemon stops offering inference (e.g. its
-        local renderer goes offline, or the agent deactivates)."""
+    def clear_inference_advertisement(self, agent_address: Optional[str] = None) -> None:
+        """Remove inference advertisement.
+
+        ``agent_address`` is None: clears every per-agent inference
+        dict AND ``cap.inference``, drops the role.
+
+        ``agent_address`` set: clears only that agent's inference
+        dict; the role stays if any other agent still advertises.
+        """
         cap = self._capability
-        if "inference-provider" in cap.roles:
+        if agent_address is None:
+            if "inference-provider" in cap.roles:
+                cap.roles = [r for r in cap.roles if r != "inference-provider"]
+            cap.inference = {}
+            for entry in cap.agents:
+                entry["inference"] = {}
+            return
+        target = str(agent_address).lower()
+        for entry in cap.agents:
+            if str(entry.get("address", "")).lower() == target:
+                entry["inference"] = {}
+                break
+        if cap.inference and str(cap.inference.get("agent_address", "")).lower() == target:
+            cap.inference = {}
+        # Drop the role if nothing else still advertises.
+        any_advert = bool(cap.inference) or any(
+            entry.get("inference") for entry in cap.agents
+        )
+        if not any_advert and "inference-provider" in cap.roles:
             cap.roles = [r for r in cap.roles if r != "inference-provider"]
-        cap.inference = {}
 
     async def advertise_models(self, models: List[str], agent_address: str) -> None:
         """Backward-compatible shim — Phase 7.4 reframed advertisement
@@ -1424,56 +1494,91 @@ class AutonetHost:
         max_price_atn: Optional[int] = None,
         renderer_model: Optional[str] = None,
         require_agent_address: bool = True,
-    ) -> List[NodeCapability]:
-        """Find peers advertising inference capability.
+    ) -> List[InferenceProviderMatch]:
+        """Find agents advertising inference capability.
 
-        Filters ``known_capabilities`` for entries that:
-          - have ``"inference-provider"`` in ``roles``,
-          - carry a non-empty ``inference`` advertisement dict,
-          - if ``max_price_atn`` is set, ``price_atn`` <= the cap,
-          - if ``renderer_model`` is set, exact match,
-          - if ``require_agent_address`` is True (default), the
-            advertised agent_address is non-empty (so payment can
-            actually route to a real address).
+        Phase 7.5b: returns one ``InferenceProviderMatch`` per agent
+        offering inference, not one per daemon. A single daemon hosting
+        multiple inference-providing agents shows up as multiple
+        matches — callers can route to the specific agent by
+        ``agent_address`` rather than treating the whole daemon as one
+        offer.
 
-        Returns a list of ``NodeCapability``, sorted by latency
-        ascending (peers we have measurements for) then by price
-        ascending (cheapest wins ties / unmeasured peers).
+        Sources of inference advertisements (per peer cap):
+          1. Each entry in ``cap.agents`` with a non-empty ``inference``
+             dict — the per-agent advertisement.
+          2. ``cap.inference`` itself — daemon-wide fallback for
+             pre-Phase-7.5b daemons that only set the legacy field.
+
+        Filters:
+          - ``max_price_atn`` (optional): keep only matches with
+            ``price_atn`` <= this cap.
+          - ``renderer_model`` (optional): exact match on
+            ``inference["renderer_model"]``.
+          - ``require_agent_address`` (default True): keep only
+            matches with a non-empty agent_address.
+
+        Sorted: known-latency peers first, ascending by latency;
+        unmeasured peers after. Within each tier, cheapest price wins.
         """
-        out: List[NodeCapability] = []
+        out: List[InferenceProviderMatch] = []
+        tracker = getattr(self, "_latency_tracker", None)
+
+        def _consider(cap: NodeCapability, adv: Dict[str, Any]) -> None:
+            if not adv:
+                return
+            agent_addr = str(adv.get("agent_address", ""))
+            if require_agent_address and not agent_addr:
+                return
+            if (
+                max_price_atn is not None
+                and int(adv.get("price_atn", 0)) > int(max_price_atn)
+            ):
+                return
+            if renderer_model is not None:
+                if str(adv.get("renderer_model", "")) != str(renderer_model):
+                    return
+            lat_ms: Optional[float] = None
+            if tracker is not None:
+                lat_obj = tracker.get_latency(cap.peer_id)
+                if (
+                    lat_obj is not None
+                    and getattr(lat_obj, "reachable", False)
+                    and getattr(lat_obj, "samples", 0) > 0
+                ):
+                    lat_ms = float(lat_obj.ema_rtt_ms)
+            out.append(InferenceProviderMatch(
+                peer_id=cap.peer_id,
+                agent_address=agent_addr,
+                renderer_model=str(adv.get("renderer_model", "")),
+                price_atn=int(adv.get("price_atn", 0)),
+                inference=dict(adv),
+                capability=cap,
+                latency_ms=lat_ms,
+            ))
+
         for cap in self._known_capabilities.values():
             if "inference-provider" not in cap.roles:
                 continue
-            if not cap.inference:
-                continue
-            if require_agent_address and not cap.inference.get("agent_address"):
-                continue
-            if (
-                max_price_atn is not None
-                and int(cap.inference.get("price_atn", 0)) > int(max_price_atn)
-            ):
-                continue
-            if renderer_model is not None:
-                if str(cap.inference.get("renderer_model", "")) != str(renderer_model):
-                    continue
-            out.append(cap)
+            # Per-agent advertisements (preferred path).
+            seen_addrs: set = set()
+            for entry in cap.agents:
+                adv = entry.get("inference") or {}
+                if adv:
+                    _consider(cap, adv)
+                    addr = str(adv.get("agent_address", "")).lower()
+                    if addr:
+                        seen_addrs.add(addr)
+            # Legacy daemon-wide advertisement, only if it doesn't
+            # duplicate an already-included per-agent one.
+            legacy_addr = str(cap.inference.get("agent_address", "")).lower() if cap.inference else ""
+            if cap.inference and (not legacy_addr or legacy_addr not in seen_addrs):
+                _consider(cap, cap.inference)
 
-        # Sort: known-latency peers ascending by latency, then by
-        # advertised price ascending. Peers without a latency reading
-        # land after all measured peers, sorted just by price.
-        def _sort_key(c: NodeCapability) -> Tuple[int, float, int]:
-            tracker = getattr(self, "_latency_tracker", None)
-            lat_obj = tracker.get_latency(c.peer_id) if tracker is not None else None
-            # PeerLatencyTracker.get_latency returns a PeerLatency
-            # object (or None). Use ema_rtt_ms when reachable; treat
-            # unreachable / missing as "unmeasured".
-            if (
-                lat_obj is not None
-                and getattr(lat_obj, "reachable", False)
-                and getattr(lat_obj, "samples", 0) > 0
-            ):
-                return (0, float(lat_obj.ema_rtt_ms), int(c.inference.get("price_atn", 0)))
-            return (1, float("inf"), int(c.inference.get("price_atn", 0)))
+        def _sort_key(m: InferenceProviderMatch) -> Tuple[int, float, int]:
+            if m.latency_ms is not None:
+                return (0, m.latency_ms, m.price_atn)
+            return (1, float("inf"), m.price_atn)
 
         out.sort(key=_sort_key)
         return out
