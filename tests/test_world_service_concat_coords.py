@@ -1,8 +1,8 @@
 """Smoke test for charter+usefulness coexistence in one world.
 
-Validates the design point that charter roots (4 axes) and rootless
+Validates the design point that charter roots (N_DIMS axes) and rootless
 usefulness nodes (high-D semantic embedding) can live in one world
-when coordinates are concatenated as ``[charter_4d | embedding_Nd]``.
+when coordinates are concatenated as ``[charter_Nd | embedding_Md]``.
 
 Two assertions
 --------------
@@ -28,13 +28,21 @@ from typing import Tuple
 
 import pytest
 
+from nodes.common.world_model_substrate.adapter import N_DIMS
 from nodes.common.world_service import WorldService
 from world_model.generalized import Observation, default_locator, equilibrate
 from world_model.models.tree import Position
 
 
-def _coord(charter: Tuple[float, float, float, float], embed_tail: Tuple[float, ...]) -> Tuple[float, ...]:
-    return tuple(charter) + tuple(embed_tail)
+def _coord(charter: Tuple[float, ...], embed_tail: Tuple[float, ...]) -> Tuple[float, ...]:
+    """Build a coord vector. ``charter`` may be shorter than N_DIMS; it
+    is zero-padded so tests written for the 4-axis charter keep working
+    when N_DIMS grows.
+    """
+    head = tuple(charter)
+    if len(head) < N_DIMS:
+        head = head + (0.0,) * (N_DIMS - len(head))
+    return head + tuple(embed_tail)
 
 
 def test_charter_anchors_padded_to_full_dim(tmp_path):
@@ -48,12 +56,12 @@ def test_charter_anchors_padded_to_full_dim(tmp_path):
     )
     try:
         for tendency in svc._world.tendencies.values():
-            assert len(tendency.anchor) == 4 + embed_dim, (
+            assert len(tendency.anchor) == N_DIMS + embed_dim, (
                 f"tendency {tendency.id} has anchor of length "
-                f"{len(tendency.anchor)}, expected {4 + embed_dim}"
+                f"{len(tendency.anchor)}, expected {N_DIMS + embed_dim}"
             )
             # Embedding tail must be zeros; only the charter head is nonzero.
-            tail = tendency.anchor[4:]
+            tail = tendency.anchor[N_DIMS:]
             assert all(t == 0.0 for t in tail), \
                 f"tendency {tendency.id} has nonzero embedding tail: {tail}"
     finally:
@@ -164,14 +172,14 @@ def test_default_embedding_dim_is_full_usefulness_layer(tmp_path):
     svc = WorldService(rpb_address="rpb_concat_default", data_root=tmp_path)
     try:
         for tendency in svc._world.tendencies.values():
-            assert len(tendency.anchor) == 4 + 1024
+            assert len(tendency.anchor) == N_DIMS + 1024
     finally:
         svc.shutdown()
 
 
 def test_pure_charter_mode_via_embedding_dim_zero(tmp_path):
-    """Setting embedding_dim=0 explicitly returns the classic 4-D
-    charter-only world (back-compat path for callers who want it)."""
+    """Setting embedding_dim=0 explicitly returns the charter-only
+    world (back-compat path for callers who want it)."""
     svc = WorldService(
         rpb_address="rpb_concat_pure_charter",
         data_root=tmp_path,
@@ -179,6 +187,6 @@ def test_pure_charter_mode_via_embedding_dim_zero(tmp_path):
     )
     try:
         for tendency in svc._world.tendencies.values():
-            assert len(tendency.anchor) == 4
+            assert len(tendency.anchor) == N_DIMS
     finally:
         svc.shutdown()

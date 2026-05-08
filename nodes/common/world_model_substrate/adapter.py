@@ -41,11 +41,11 @@ from .events import (
 )
 
 try:
-    from .score_turn import score_turn_4d
+    from .score_turn import score_turn
 except ImportError:
-    def score_turn_4d(turn: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    def score_turn(turn: Dict[str, Any]) -> Tuple[float, float, float, float, float, float]:
         """Fallback when score_turn module isn't built yet -- returns zeros."""
-        return (0.0, 0.0, 0.0, 0.0)
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
 logger = logging.getLogger(__name__)
@@ -68,15 +68,26 @@ CHARTER = [
     {"id": "evolution",
      "thesis": "Forward advancement of capability is desirable.",
      "axis_index": 3},
+    {"id": "correctness",
+     "thesis": "Work should achieve what it claims and avoid bugs.",
+     "axis_index": 4},
+    {"id": "simplicity",
+     "thesis": "Solutions should be minimal and direct, not over-engineered.",
+     "axis_index": 5},
 ]
 N_DIMS = len(CHARTER)
 
 
 def build_charter_world(bandwidth: float = 1.5, embedding_dim: int = 0) -> World:
-    """Build a world with the four constitutional charter tendencies.
+    """Build a world with the constitutional charter tendencies.
+
+    The charter is the alignment vocabulary the substrate thinks in.
+    Tier 3B (substrate_experiment) validated the 6-root configuration
+    (life_precious, self_preservation, promotion_of_intelligence,
+    evolution, correctness, simplicity) as sharper than 4-root.
 
     When ``embedding_dim > 0``, charter anchors are zero-padded into a
-    concatenated coordinate space ``[charter_4d | embedding_Nd]``. This
+    concatenated coordinate space ``[charter_Nd | embedding_Md]``. This
     lets rootless usefulness nodes (which carry a high-D embedding
     tail) coexist with charter roots in the same world without
     distance-truncation bugs in locator/cross-tendency edge discovery.
@@ -111,27 +122,29 @@ def _obs_id_from_turn(turn: Dict[str, Any]) -> str:
     ).hexdigest()[:16]
 
 
-def turn_to_observation(turn: Dict[str, Any], turn_index: int = 0) -> Observation:
-    """Convert one agent-turn record to a 4D coordinate observation.
+_IMPACT_FIELDS = (
+    "life_impact",
+    "self_pres_impact",
+    "intelligence_impact",
+    "evolution_impact",
+    "correctness_impact",
+    "simplicity_impact",
+)
 
-    Prefers explicit *_impact fields if present (test/override mode);
-    otherwise calls the score_turn_4d heuristic.
+
+def turn_to_observation(turn: Dict[str, Any], turn_index: int = 0) -> Observation:
+    """Convert one agent-turn record to a 6D coordinate observation.
+
+    Prefers explicit *_impact fields if any are present (test/override
+    mode); missing impact fields default to 0.0. Otherwise calls the
+    `score_turn` heuristic which scores the 4 alignment axes and
+    abstains on the 2 usefulness axes.
     """
-    has_explicit = any(
-        k in turn for k in (
-            "life_impact", "self_pres_impact",
-            "intelligence_impact", "evolution_impact",
-        )
-    )
+    has_explicit = any(k in turn for k in _IMPACT_FIELDS)
     if has_explicit:
-        coords = (
-            float(turn.get("life_impact", 0.0)),
-            float(turn.get("self_pres_impact", 0.0)),
-            float(turn.get("intelligence_impact", 0.0)),
-            float(turn.get("evolution_impact", 0.0)),
-        )
+        coords = tuple(float(turn.get(k, 0.0)) for k in _IMPACT_FIELDS)
     else:
-        coords = score_turn_4d(turn)
+        coords = score_turn(turn)
     label = turn.get("label", f"turn_{turn_index}")
     return Observation(id=_obs_id_from_turn(turn), coords=coords, label=label)
 

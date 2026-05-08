@@ -609,6 +609,7 @@ class AutonetBridge:
             # start().
             self._service = AutonetService(self._autonet_config, data_dir=self._data_dir)
             self._wire_world_epoch_subscriber()
+            self._wire_substrate_identity_resolver()
             self._task = asyncio.create_task(self._run_service())
 
             self.state.status = AutonetStatus.RUNNING
@@ -629,6 +630,14 @@ class AutonetBridge:
                 self._runtime.providers._world_service_resolver = (
                     lambda: getattr(svc_ref, "_world_service", None)
                 )
+            # Phase 10.2: wire substrate event-gossip across daemons.
+            # Both the WorldService (constructed inside the executor-run
+            # nodes-side start()) and the libp2p host (started in its
+            # own thread, ready when its trio token is captured) come
+            # up asynchronously, so spawn a small kicker that waits for
+            # both before attaching.
+            asyncio.create_task(self._wire_event_gossip_when_ready())
+            asyncio.create_task(self._wire_chain_submission_when_ready())
             await self._emit("AUTONET_STARTED")
             return {"status": "started"}
 
@@ -642,6 +651,145 @@ class AutonetBridge:
             self.state.last_error = str(e)
             log.exception("Failed to start autonet service")
             return {"status": "error", "error": str(e)}
+
+    def _build_agent_chain_resolver(self):
+        """Return a zero-arg callable producing AgentChainIdentity list
+        for every locally-registered agent with on-chain identity.
+
+        Used by ChainSubmissionDriver to find per-agent signing keys.
+        Skips agents that don't have a registered_on_chain identity —
+        same gating rule as Phase 10.1's substrate-feed resolver.
+        """
+        registry = self._agent_registry
+        if registry is None:
+            return lambda: []
+
+        try:
+            from nodes.common.chain_submission_driver import AgentChainIdentity
+        except Exception:
+            return lambda: []
+
+        def _resolve():
+            out = []
+            for defn, _status in registry.list_agents():
+                if not defn.identity or not defn.identity.registered_on_chain:
+                    continue
+                addr = defn.identity.address or ""
+                priv = registry.get_agent_key(defn.id) or ""
+                if not addr or not priv:
+                    continue
+                out.append(AgentChainIdentity(address=addr, private_key=priv))
+            return out
+
+        return _resolve
+
+    async def _wire_chain_submission_when_ready(self, timeout: float = 30.0) -> None:
+        """Attach chain submission once the federated-close driver is
+        up. No-op if substrate_address is unset (offline mode)."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        service = self._service
+        if not service:
+            return
+        while asyncio.get_event_loop().time() < deadline:
+            ready = getattr(service, "_federated_close_driver", None) is not None
+            if ready:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            log.debug("chain submission wait timed out (federated-close driver not ready)")
+            return
+        try:
+            blob_resolver = self._build_libp2p_blob_resolver()
+            ok = service.attach_chain_submission(
+                agent_chain_resolver=self._build_agent_chain_resolver(),
+                blob_resolver=blob_resolver,
+            )
+            if ok:
+                log.info(
+                    "Chain submission wired into AutonetService (blob_resolver=%s)",
+                    "libp2p" if blob_resolver else "in-memory",
+                )
+        except Exception as e:
+            log.warning("chain submission attach failed: %s", e)
+
+    def _build_libp2p_blob_resolver(self):
+        """Build a LibP2PBlobResolver if the host is up; else None
+        (driver falls back to InMemoryBlobResolver)."""
+        host = self._p2p_host
+        if host is None:
+            return None
+        try:
+            from nodes.common.blob_resolver import LibP2PBlobResolver
+        except Exception:
+            return None
+        try:
+            return LibP2PBlobResolver(host)
+        except Exception as e:
+            log.debug("LibP2PBlobResolver build failed: %s", e)
+            return None
+
+    async def _wire_event_gossip_when_ready(self, timeout: float = 30.0) -> None:
+        """Poll until the WorldService is up and the libp2p host is
+        ready, then attach event gossip. No-ops on timeout.
+
+        WorldService is constructed inside the nodes-side
+        ``AutonetService.start()`` (executor-run); the libp2p host's
+        trio token is captured inside its own thread. Both are
+        asynchronous relative to this coroutine, so we poll briefly.
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        host = self._p2p_host
+        service = self._service
+        if not service:
+            return
+        while asyncio.get_event_loop().time() < deadline:
+            ws_ready = getattr(service, "_world_service", None) is not None
+            host_ready = (
+                host is not None
+                and getattr(host, "_ready_event", None) is not None
+                and host._ready_event.is_set()
+            )
+            if ws_ready and host_ready:
+                break
+            await asyncio.sleep(0.2)
+        else:
+            log.debug("event gossip wait timed out (ws or host not ready)")
+            return
+        try:
+            ok = service.attach_event_gossip(host)
+            if ok:
+                log.info("Event gossip wired into WorldService")
+        except Exception as e:
+            log.warning("event gossip attach failed: %s", e)
+
+    def _wire_substrate_identity_resolver(self) -> None:
+        """Pass an identity resolver to the substrate feed so each
+        work unit is attributed to the actual agent's 0x address
+        rather than collapsed under a single "daemon" author.
+
+        Skips agents without on-chain identity — they have no
+        network impact (no 0x address means no mint attribution).
+        """
+        if not self._service or not self._agent_registry:
+            return
+
+        try:
+            from nodes.common.world_substrate_feed import ResolvedAgentIdentity
+        except ImportError:
+            return
+
+        registry = self._agent_registry
+
+        def _resolve(local_agent_id: str):
+            defn = registry.get_agent(local_agent_id)
+            if defn is None or defn.identity is None:
+                return None
+            return ResolvedAgentIdentity(
+                address=defn.identity.address or "",
+                registered_on_chain=bool(defn.identity.registered_on_chain),
+            )
+
+        self._service.set_substrate_identity_resolver(_resolve)
 
     def _wire_world_epoch_subscriber(self) -> None:
         """Forward WorldService epoch closes to the EventBus.

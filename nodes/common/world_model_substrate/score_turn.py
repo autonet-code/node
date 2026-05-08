@@ -425,14 +425,22 @@ def _score_evolution(text: str, tool: str, ttype: str, turn: dict[str, Any]) -> 
 # ---------------------------------------------------------------------------
 
 
-def score_turn_4d(turn: dict[str, Any]) -> tuple[float, float, float, float]:
-    """Heuristic 4D scoring of a single agent turn against the charter.
+def score_turn(turn: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+    """Heuristic 6D scoring of a single agent turn against the charter.
 
-    Returns ``(life, self_pres, intelligence, evolution)``, each in
-    [-1, +1].
+    Returns ``(life, self_pres, intelligence, evolution, correctness,
+    simplicity)``, each in [-1, +1].
+
+    The heuristic is keyword-based and validated only on the 4 alignment
+    axes. The 2 usefulness axes (correctness, simplicity) abstain
+    (return 0.0) by design — Tier 3B (substrate_experiment) validated
+    those axes on LLM embedders only, and keyword matching is the wrong
+    tool for "is this code correct?" / "is this minimal?". Callers that
+    need usefulness signal should route through the LLM embedder
+    (see `llm_score_turn`).
     """
     if not isinstance(turn, dict):
-        return (0.0, 0.0, 0.0, 0.0)
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     text = _gather_text(turn)
     tool = _tool_name(turn)
@@ -443,4 +451,12 @@ def score_turn_4d(turn: dict[str, Any]) -> tuple[float, float, float, float]:
     intel = _score_intelligence(text, tool, ttype)
     evo = _score_evolution(text, tool, ttype, turn)
 
-    return (life, self_pres, intel, evo)
+    return (life, self_pres, intel, evo, 0.0, 0.0)
+
+
+def score_turn_4d(turn: dict[str, Any]) -> tuple[float, float, float, float]:
+    """Backwards-compatible 4-axis wrapper around `score_turn`.
+
+    Use `score_turn` for new code.
+    """
+    return score_turn(turn)[:4]

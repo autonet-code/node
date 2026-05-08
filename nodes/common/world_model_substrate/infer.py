@@ -55,9 +55,9 @@ def _softmax(values: List[float]) -> List[float]:
 
 def _looks_like_turn(input_data: Dict[str, Any]) -> bool:
     """Heuristic: is this input a charter-alignment query (i.e., does
-    it look like an agent turn we'd score against the four roots)?
+    it look like an agent turn we'd score against the charter roots)?
 
-    Markers: presence of 'turn', 'turns', or any of the four
+    Markers: presence of 'turn', 'turns', or any of the
     *_impact fields anywhere in the dict.
     """
     if not isinstance(input_data, dict):
@@ -67,6 +67,7 @@ def _looks_like_turn(input_data: Dict[str, Any]) -> bool:
     impact_keys = {
         "life_impact", "self_pres_impact",
         "intelligence_impact", "evolution_impact",
+        "correctness_impact", "simplicity_impact",
     }
     if any(k in input_data for k in impact_keys):
         return True

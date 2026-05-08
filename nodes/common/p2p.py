@@ -394,6 +394,17 @@ class AutonetHost:
         self._guild_subscriptions: Dict[str, Any] = {}
         self._known_capabilities: Dict[str, NodeCapability] = {}
         self._guilds: Dict[str, GuildMembership] = {}
+        # Generic topic gossip (Phase 10.2). Reader tasks for arbitrary
+        # gossipsub topics live in the host's main nursery; cross-thread
+        # callers schedule publishes via the captured trio token.
+        self._nursery: Optional["trio.Nursery"] = None
+        self._trio_token: Optional["trio.lowlevel.TrioToken"] = None
+        self._topic_subscriptions: Dict[str, Any] = {}
+        self._topic_handlers: Dict[str, List[Callable[[str, bytes], None]]] = {}
+        # Set inside run() once the trio token is captured so cross-thread
+        # callers can wait for "host is ready to accept publishes".
+        import threading as _threading
+        self._ready_event = _threading.Event()
 
         # Our capability
         self._capability = capability or NodeCapability(
@@ -441,11 +452,28 @@ class AutonetHost:
             # Initialize subsystems
             self._latency_tracker = PeerLatencyTracker(self._host)
             self._setup_stream_handlers()
-            # Note: GossipSub is initialized lazily in join_guild()
+            # Note: GossipSub is initialized lazily in join_guild() /
+            # subscribe_topic().
 
+            # Capture the trio token + open a long-lived nursery so
+            # background tasks (topic readers, etc.) can run for the
+            # lifetime of the host. Cross-thread callers schedule
+            # publishes via the captured token.
+            import trio
+            self._trio_token = trio.lowlevel.current_trio_token()
             try:
-                yield self
+                async with trio.open_nursery() as nursery:
+                    self._nursery = nursery
+                    self._ready_event.set()
+                    try:
+                        yield self
+                    finally:
+                        # Cancel background tasks (topic readers).
+                        nursery.cancel_scope.cancel()
             finally:
+                self._ready_event.clear()
+                self._nursery = None
+                self._trio_token = None
                 self._running = False
                 self.logger.info("P2P host shutting down")
 
@@ -729,6 +757,115 @@ class AutonetHost:
         self._guilds.pop(guild_id, None)
         self._guild_handlers.pop(guild_id, None)
         self.logger.info(f"Left guild: {guild_id}")
+
+    # =========================================================================
+    # Generic gossipsub topics (Phase 10.2)
+    # =========================================================================
+
+    async def publish_topic(self, topic: str, data: bytes) -> bool:
+        """Publish bytes to an arbitrary gossipsub topic.
+
+        Async — must be called from inside the host's trio loop. For
+        cross-thread callers, use ``publish_topic_threadsafe``.
+        """
+        await self._ensure_gossipsub()
+        if not self._pubsub:
+            return False
+        try:
+            await self._pubsub.publish(topic, data)
+            return True
+        except Exception as e:
+            self.logger.warning(f"publish_topic({topic}): {e}")
+            return False
+
+    def publish_topic_threadsafe(self, topic: str, data: bytes) -> None:
+        """Schedule a topic publish from a non-trio thread.
+
+        Returns immediately. Failures are logged, not raised.
+        """
+        token = self._trio_token
+        if token is None:
+            self.logger.debug("publish_topic_threadsafe before host run; dropping")
+            return
+        import trio
+
+        async def _do():
+            await self.publish_topic(topic, data)
+
+        try:
+            trio.from_thread.run(_do, trio_token=token)
+        except Exception as e:
+            self.logger.debug(f"publish_topic_threadsafe failed: {e}")
+
+    async def subscribe_topic(
+        self,
+        topic: str,
+        handler: Callable[[str, bytes], None],
+    ) -> None:
+        """Subscribe to a gossipsub topic. ``handler(topic, data)`` is
+        invoked (synchronously, in the host's trio task) for every
+        inbound message on that topic. Must be called from inside the
+        host's trio loop.
+
+        The reader task lives in the host's main nursery, so it stops
+        when the host shuts down.
+        """
+        await self._ensure_gossipsub()
+        if not self._pubsub or self._nursery is None:
+            return
+
+        self._topic_handlers.setdefault(topic, []).append(handler)
+        if topic in self._topic_subscriptions:
+            return  # reader already running
+        sub = await self._pubsub.subscribe(topic)
+        self._topic_subscriptions[topic] = sub
+        self._nursery.start_soon(self._topic_reader, topic, sub)
+
+    def subscribe_topic_threadsafe(
+        self,
+        topic: str,
+        handler: Callable[[str, bytes], None],
+    ) -> None:
+        """Cross-thread version of ``subscribe_topic``."""
+        token = self._trio_token
+        if token is None:
+            self.logger.debug("subscribe_topic_threadsafe before host run; dropping")
+            return
+        import trio
+
+        async def _do():
+            await self.subscribe_topic(topic, handler)
+
+        try:
+            trio.from_thread.run(_do, trio_token=token)
+        except Exception as e:
+            self.logger.debug(f"subscribe_topic_threadsafe failed: {e}")
+
+    async def _topic_reader(self, topic: str, sub: Any) -> None:
+        """Pump messages from a pubsub subscription to its handlers.
+
+        One reader per topic; multiple handlers per topic supported.
+        """
+        try:
+            while True:
+                msg = await sub.get()
+                # Skip messages we sent ourselves (gossipsub echoes).
+                try:
+                    if msg.from_id == self._host.get_id():
+                        continue
+                except AttributeError:
+                    pass
+                data = bytes(getattr(msg, "data", b""))
+                for h in list(self._topic_handlers.get(topic, [])):
+                    try:
+                        h(topic, data)
+                    except Exception as e:
+                        self.logger.warning(
+                            f"topic handler raised on {topic}: {e}"
+                        )
+        except Exception as e:
+            # Cancellation comes through here on shutdown.
+            self.logger.debug(f"topic reader for {topic} ended: {e}")
 
     # =========================================================================
     # Story 4.6: Cross-guild routing for inference pipeline

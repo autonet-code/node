@@ -523,17 +523,17 @@ class WorldService:
         text: str,
         *,
         embedder: Optional[Any] = None,
-        charter_head: Optional[Tuple[float, float, float, float]] = None,
+        charter_head: Optional[Tuple[float, ...]] = None,
     ) -> Tuple[float, ...]:
         """Convert a free-form text query into a coord vector matching
         this WorldService's embedding_dim.
 
-        The result is shaped ``[charter_head_4 | embedding_tail_N]``
-        where N == self.embedding_dim:
+        The result is shaped ``[charter_head_N | embedding_tail_M]``
+        where N == ``adapter.N_DIMS`` (the active charter dimensionality)
+        and M == self.embedding_dim:
 
-          - ``charter_head``: optional 4-tuple to seed the alignment
-            axes. Defaults to all zeros (Tier 3A LLM-binary-flag
-            integration not yet wired). Phase 6.4+ may set non-zero
+          - ``charter_head``: optional N-tuple to seed the alignment
+            axes. Defaults to all zeros. Phase 6.4+ may set non-zero
             values here based on charter-axis classification of the
             query text.
           - ``embedding_tail``: from ``coords_for_query`` using the
@@ -544,15 +544,16 @@ class WorldService:
         texts produce different coords assuming the embedder is
         non-degenerate.
         """
+        from .world_model_substrate.adapter import N_DIMS
         from .world_model_substrate.usefulness_coords import (
             coords_for_query,
             default_usefulness_embedder,
         )
         if embedder is None:
             embedder = default_usefulness_embedder(dim=self.embedding_dim)
-        head = tuple(charter_head) if charter_head is not None else (0.0, 0.0, 0.0, 0.0)
-        if len(head) != 4:
-            raise ValueError(f"charter_head must be length 4, got {len(head)}")
+        head = tuple(charter_head) if charter_head is not None else (0.0,) * N_DIMS
+        if len(head) != N_DIMS:
+            raise ValueError(f"charter_head must be length {N_DIMS}, got {len(head)}")
         tail = tuple(coords_for_query(text, embedder=embedder))
         # Match self.embedding_dim: truncate or zero-pad.
         if len(tail) > self.embedding_dim:

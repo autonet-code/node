@@ -26,6 +26,7 @@ import pytest
 
 from nodes.common.world_service import WorldService
 from nodes.common.world_substrate_feed import (
+    ResolvedAgentIdentity,
     WorldSubstrateFeed,
     WorldSubstrateFeedConfig,
 )
@@ -265,5 +266,130 @@ def test_feed_does_nothing_without_data_dir(tmp_path: Path):
             feed.notify_execution("test-agent", "exec-x", "completed")
         assert not feed.should_run()
         assert feed.run_cycle() is None
+    finally:
+        svc.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Phase 10.1: per-agent attribution via identity_resolver
+# ---------------------------------------------------------------------------
+
+
+def _build_atn_dir_for_agent(
+    atn_root: Path,
+    local_agent_id: str,
+    n_conversations: int = 1,
+    seed: int = 0,
+) -> None:
+    """Add conversations for one local agent_id under atn_root/agents/."""
+    conv_dir = atn_root / "agents" / local_agent_id / "conversations"
+    for i in range(n_conversations):
+        _write_conversation(
+            conv_dir / f"session_{seed:02d}_{i:03d}.jsonl",
+            [
+                {"role": "user", "content": f"problem #{seed}.{i} from {local_agent_id}"},
+                {"role": "assistant", "content": f"resolution #{seed}.{i} from {local_agent_id}"},
+            ],
+        )
+
+
+def test_resolver_attributes_to_onchain_address(tmp_path: Path):
+    """Registered agent's work units are submitted under the 0x
+    address, not under the YAML id or the daemon fallback."""
+    atn_root = tmp_path / "atn"
+    _build_atn_dir_for_agent(atn_root, "agent-alpha", n_conversations=2)
+
+    svc = WorldService(rpb_address="rpb_resolver_a", data_root=tmp_path / "world")
+    try:
+        feed = WorldSubstrateFeed(
+            config=WorldSubstrateFeedConfig(
+                data_dir=str(atn_root),
+                min_events_for_cycle=1,
+                min_cycle_interval=0.0,
+            ),
+            world_service=svc,
+            identity_resolver=lambda aid: (
+                ResolvedAgentIdentity(address="0xAAA", registered_on_chain=True)
+                if aid == "agent-alpha" else None
+            ),
+        )
+        feed.notify_execution("agent-alpha", "exec-1", "completed")
+        metrics = feed.run_cycle()
+        assert metrics is not None
+        assert metrics["units_processed"] == 2
+        assert metrics["agents_attributed"] == 1
+        # Verify the work was attributed to the 0x address, not to
+        # the YAML id or the daemon fallback.
+        proj_addr = svc.read_agent_projection("0xAAA", last_n_epochs=10)
+        proj_yaml = svc.read_agent_projection("agent-alpha", last_n_epochs=10)
+        proj_daemon = svc.read_agent_projection("daemon", last_n_epochs=10)
+        assert proj_addr["agent_id"] == "0xAAA"
+        # The YAML id and "daemon" fallback should not have any mint
+        # because no events are attributed under those names.
+        assert proj_yaml["total_mint_projection"] == 0.0
+        assert proj_daemon["total_mint_projection"] == 0.0
+    finally:
+        svc.shutdown()
+
+
+def test_resolver_skips_unregistered_agent(tmp_path: Path):
+    """Agent without registered_on_chain gets skipped — no events
+    flow into the world."""
+    atn_root = tmp_path / "atn"
+    _build_atn_dir_for_agent(atn_root, "agent-beta", n_conversations=2)
+
+    svc = WorldService(rpb_address="rpb_resolver_b", data_root=tmp_path / "world")
+    try:
+        nodes_before = svc.stats()["n_nodes"]
+        feed = WorldSubstrateFeed(
+            config=WorldSubstrateFeedConfig(
+                data_dir=str(atn_root),
+                min_events_for_cycle=1,
+                min_cycle_interval=0.0,
+            ),
+            world_service=svc,
+            identity_resolver=lambda aid: ResolvedAgentIdentity(
+                address="0xBBB", registered_on_chain=False,
+            ),
+        )
+        feed.notify_execution("agent-beta", "exec-1", "completed")
+        metrics = feed.run_cycle()
+        assert metrics is not None
+        assert metrics["units_processed"] == 0
+        nodes_after = svc.stats()["n_nodes"]
+        assert nodes_after == nodes_before, \
+            "unregistered agent should not have grown the world"
+    finally:
+        svc.shutdown()
+
+
+def test_resolver_groups_by_author_across_agents(tmp_path: Path):
+    """Two registered agents in the same daemon get distinct author
+    attribution; each produces its own per-agent mint."""
+    atn_root = tmp_path / "atn"
+    _build_atn_dir_for_agent(atn_root, "agent-1", n_conversations=2, seed=1)
+    _build_atn_dir_for_agent(atn_root, "agent-2", n_conversations=1, seed=2)
+
+    svc = WorldService(rpb_address="rpb_resolver_c", data_root=tmp_path / "world")
+    try:
+        addresses = {"agent-1": "0x111", "agent-2": "0x222"}
+        feed = WorldSubstrateFeed(
+            config=WorldSubstrateFeedConfig(
+                data_dir=str(atn_root),
+                min_events_for_cycle=1,
+                min_cycle_interval=0.0,
+            ),
+            world_service=svc,
+            identity_resolver=lambda aid: (
+                ResolvedAgentIdentity(address=addresses[aid], registered_on_chain=True)
+                if aid in addresses else None
+            ),
+        )
+        feed.notify_execution("agent-1", "exec-1", "completed")
+        feed.notify_execution("agent-2", "exec-2", "completed")
+        metrics = feed.run_cycle()
+        assert metrics is not None
+        assert metrics["units_processed"] == 3
+        assert metrics["agents_attributed"] == 2
     finally:
         svc.shutdown()

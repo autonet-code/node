@@ -38,6 +38,10 @@ class BlockchainConfig:
     chain_id: int = 31337
     private_key: Optional[str] = None
     gas_limit: int = 500000
+    # Address of the deployed Substrate.sol. Required for chain
+    # anchoring + authoritative mint submission (Phase 10.3b/c).
+    # Empty = chain submission disabled (offline mode).
+    substrate_address: str = ""
 
 
 @dataclass
@@ -231,6 +235,7 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_RPC_URL": ("blockchain.rpc_url", str),
         "AUTONET_CHAIN_ID": ("blockchain.chain_id", int),
         "AUTONET_PRIVATE_KEY": ("blockchain.private_key", str),
+        "AUTONET_SUBSTRATE_ADDRESS": ("blockchain.substrate_address", str),
         "AUTONET_BLOB_DIR": ("blob_store.data_dir", str),
         "AUTONET_DATA_DIR": ("data_dir", str),
         "AUTONET_LOG_LEVEL": ("log_level", str),

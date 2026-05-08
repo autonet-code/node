@@ -77,6 +77,26 @@ class AutonetService:
         # daemon level, one per RPB.
         self._world_service = None
         self._world_substrate_feed = None
+        # Identity resolver for the substrate feed. Set before start()
+        # so it's installed when _init_world_substrate_feed runs.
+        # Signature: Callable[[str], Optional[ResolvedAgentIdentity]].
+        self._substrate_identity_resolver: Any = None
+        # Event gossip for substrate federation across daemons.
+        # Constructed by attach_event_gossip() after the libp2p host
+        # is ready (Phase 10.2).
+        self._event_gossip = None
+        # Federated-close driver: runs canonical_order +
+        # federated_epoch_close on every epoch close, and decides
+        # whether this daemon is the chosen on-chain submitter for
+        # that epoch (Phase 10.3a). Subscribers fed the result land
+        # in self._federated_close_subscribers.
+        self._federated_close_driver = None
+        self._federated_close_subscribers: list = []
+        # Chain submission driver (Phase 10.3b/c): attached by
+        # attach_chain_submission() after the federated-close driver
+        # is up. Owns the EpochAnchorer (one) and per-agent
+        # AuthoritativeChainSubmitter cache.
+        self._chain_submission_driver = None
         # Phase 3: epoch scheduler ticks the World's reward windows.
         self._epoch_scheduler = None
         # Phase 4: external subscribers receive epoch close records.
@@ -693,6 +713,7 @@ class AutonetService:
             self._world_substrate_feed = WorldSubstrateFeed(
                 config=feed_config,
                 world_service=self._world_service,
+                identity_resolver=self._substrate_identity_resolver,
             )
             logger.info(
                 "World substrate feed initialized (data_dir=%s)",
@@ -714,6 +735,218 @@ class AutonetService:
             self._training_feed.notify_execution(agent_id, execution_id, status)
         if self._world_substrate_feed:
             self._world_substrate_feed.notify_execution(agent_id, execution_id, status)
+
+    def set_substrate_identity_resolver(self, resolver: Any) -> None:
+        """Attach an identity resolver to the substrate feed.
+
+        Resolver: ``Callable[[str], Optional[ResolvedAgentIdentity]]``.
+        Called once per agent dir per cycle to map local agent_id ->
+        on-chain identity. Agents without on-chain identity are
+        skipped (their work has no network impact).
+
+        Safe to call before or after start() — stored for the feed
+        to pick up at construction, and forwarded to the feed if it
+        already exists.
+        """
+        self._substrate_identity_resolver = resolver
+        if self._world_substrate_feed is not None:
+            self._world_substrate_feed.set_identity_resolver(resolver)
+
+    def attach_event_gossip(self, p2p_host: Any) -> bool:
+        """Wire the substrate event-gossip transport over libp2p.
+
+        Caller is responsible for waiting until ``p2p_host._ready_event``
+        is set (the host's trio loop is up and accepting publishes).
+        This method then constructs an ``EventGossip`` per RPB and
+        binds it to the WorldService's local-event stream.
+
+        Returns True on success, False otherwise.
+        """
+        if self._world_service is None:
+            logger.debug("attach_event_gossip: WorldService not yet initialized")
+            return False
+        if p2p_host is None:
+            logger.debug("attach_event_gossip: no p2p_host")
+            return False
+        if self._event_gossip is not None:
+            return True  # already wired
+        try:
+            from .common.event_gossip import (
+                EventGossip,
+                Keypair,
+                LibP2PTransport,
+            )
+        except Exception as e:
+            logger.warning("attach_event_gossip: import failed: %s", e)
+            return False
+
+        try:
+            keypair = self._load_or_create_gossip_keypair()
+            transport = LibP2PTransport(p2p_host)
+            self._event_gossip = EventGossip(
+                rpb_address=str(self._world_service.rpb_address),
+                keypair=keypair,
+                transport=transport,
+                world_service=self._world_service,
+            )
+            logger.info(
+                "Event gossip attached for rpb=%s (sender_pubkey=%s...)",
+                self._world_service.rpb_address,
+                keypair.public_key.hex()[:16],
+            )
+            self._init_federated_close_driver()
+            return True
+        except Exception as e:
+            logger.warning("attach_event_gossip: %s", e, exc_info=True)
+            self._event_gossip = None
+            return False
+
+    def _init_federated_close_driver(self) -> None:
+        """Construct the federated-close driver and subscribe it to
+        WorldService epoch-close events.
+
+        Runs after EventGossip is attached. Each local epoch close
+        triggers ``driver.run(local_close_result)`` which builds the
+        canonical order from gossiped batches, runs
+        ``federated_epoch_close``, and produces a deterministic
+        authoritative result. Subscribers (chain submitter, etc.)
+        receive the FederatedCloseResult.
+        """
+        if self._world_service is None or self._event_gossip is None:
+            return
+        try:
+            from .common.federated_close_driver import FederatedCloseDriver
+        except Exception as e:
+            logger.warning("federated_close_driver import failed: %s", e)
+            return
+        embedding_dim = getattr(self._world_service, "embedding_dim", 1024)
+        self._federated_close_driver = FederatedCloseDriver(
+            gossip=self._event_gossip,
+            embedding_dim=embedding_dim,
+        )
+
+        def _on_local_close(local_result):
+            try:
+                fed = self._federated_close_driver.run(local_result)
+            except Exception as e:
+                logger.error(
+                    "federated close driver failed: %s", e, exc_info=True,
+                )
+                return
+            if fed is None:
+                return
+            for sub in list(self._federated_close_subscribers):
+                try:
+                    sub(fed)
+                except Exception as e:
+                    logger.error(
+                        "federated-close subscriber failed: %s", e, exc_info=True,
+                    )
+
+        self._world_service.subscribe_epoch_closed(_on_local_close)
+        logger.info("Federated-close driver wired into WorldService")
+
+    def add_federated_close_subscriber(self, handler: Any) -> None:
+        """Register a callable invoked with the FederatedCloseResult
+        each time a federated close completes. Used by chain wiring
+        (Phase 10.3b/c) to anchor + submit per-agent mints.
+        """
+        self._federated_close_subscribers.append(handler)
+
+    def attach_chain_submission(
+        self,
+        agent_chain_resolver: Any,
+        *,
+        blob_resolver: Any = None,
+    ) -> bool:
+        """Wire on-chain anchor + per-agent mint submission.
+
+        Requires Phase 10.3a (federated-close driver) to be wired
+        first. Reads chain config from
+        ``self.config.blockchain.substrate_address`` etc.; if any
+        required field is empty, this is a no-op.
+
+        ``agent_chain_resolver`` is a zero-arg callable returning a
+        list of ``AgentChainIdentity(address, private_key)`` for every
+        currently-registered agent on this daemon. The atn-side
+        autonet_service walks ``agent_registry.list_agents()`` to
+        produce this.
+
+        Returns True when chain submission is now active.
+        """
+        if self._federated_close_driver is None:
+            logger.warning(
+                "attach_chain_submission: federated-close driver not wired"
+            )
+            return False
+        try:
+            from .common.chain_submission_driver import (
+                ChainSubmissionConfig,
+                ChainSubmissionDriver,
+            )
+        except Exception as e:
+            logger.warning("chain_submission_driver import failed: %s", e)
+            return False
+
+        bc = self.config.blockchain
+        cfg = ChainSubmissionConfig(
+            substrate_address=getattr(bc, "substrate_address", "") or "",
+            rpc_url=bc.rpc_url,
+            chain_id=bc.chain_id,
+            daemon_private_key=bc.private_key or "",
+        )
+        try:
+            driver = ChainSubmissionDriver(
+                config=cfg,
+                agent_chain_resolver=agent_chain_resolver,
+                blob_resolver=blob_resolver,
+            )
+        except Exception as e:
+            logger.warning("ChainSubmissionDriver build failed: %s", e)
+            return False
+        if not driver.enabled:
+            logger.info("Chain submission disabled (no substrate_address or key)")
+            return False
+
+        self._chain_submission_driver = driver
+        self.add_federated_close_subscriber(driver.handle_federated_close)
+        logger.info(
+            "Chain submission attached (substrate=%s)", cfg.substrate_address,
+        )
+        return True
+
+    def _load_or_create_gossip_keypair(self):
+        """Load this daemon's persistent ed25519 gossip keypair, or
+        create one and persist it under the data dir.
+
+        The key is per-daemon (not per-agent) — it identifies the
+        gossip-batch sender, separate from any on-chain agent identity.
+        """
+        from .common.event_gossip import Keypair
+        import json
+        if not self._data_dir:
+            return Keypair.generate()
+        key_dir = self._data_dir / "world" / "gossip"
+        key_dir.mkdir(parents=True, exist_ok=True)
+        key_path = key_dir / "keypair.json"
+        if key_path.exists():
+            try:
+                data = json.loads(key_path.read_text(encoding="utf-8"))
+                return Keypair(
+                    public_key=bytes.fromhex(data["public_key"]),
+                    private_key=bytes.fromhex(data["private_key"]),
+                )
+            except Exception as e:
+                logger.warning("gossip keypair load failed (regenerating): %s", e)
+        kp = Keypair.generate()
+        key_path.write_text(
+            json.dumps({
+                "public_key": kp.public_key.hex(),
+                "private_key": kp.private_key.hex(),
+            }),
+            encoding="utf-8",
+        )
+        return kp
 
     @staticmethod
     def _get_version() -> str:

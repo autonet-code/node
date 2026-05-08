@@ -92,6 +92,8 @@ def test_service_constructs_with_charter_roots(tmp_path: Path):
             "self_preservation",
             "promotion_of_intelligence",
             "evolution",
+            "correctness",
+            "simplicity",
         }
     finally:
         svc.shutdown()
@@ -251,10 +253,11 @@ def test_two_services_different_rpbs_dont_share_world(tmp_path: Path):
     try:
         events_a = _events_for_turns(_make_turns(count=3), agent_id="agent-a")
         svc_a.submit_events(events_a)
-        # B should have only the fresh charter (4 nodes).
-        assert svc_b.stats()["n_nodes"] == 4
+        # B should have only the fresh charter (one node per root).
+        from nodes.common.world_model_substrate.adapter import N_DIMS
+        assert svc_b.stats()["n_nodes"] == N_DIMS
         # A should have more.
-        assert svc_a.stats()["n_nodes"] > 4
+        assert svc_a.stats()["n_nodes"] > N_DIMS
     finally:
         svc_a.shutdown()
         svc_b.shutdown()

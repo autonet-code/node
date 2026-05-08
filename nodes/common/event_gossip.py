@@ -263,6 +263,52 @@ class InMemoryTransport:
         self.hub._unregister(self)
 
 
+class LibP2PTransport:
+    """Production transport: gossipsub via ``AutonetHost``.
+
+    Bridges the sync ``Transport`` Protocol to the host's async
+    publish/subscribe surface. Cross-thread safe — the substrate feed
+    runs in the daemon's blocking worker thread, the host runs in its
+    own trio thread.
+    """
+
+    def __init__(self, host: Any):
+        if host is None:
+            raise ValueError("LibP2PTransport requires an AutonetHost")
+        self._host = host
+        self._handlers: Dict[str, List[TransportHandler]] = {}
+        self._subscribed: set[str] = set()
+
+    def publish(self, topic: str, data: bytes) -> None:
+        self._host.publish_topic_threadsafe(topic, data)
+
+    def subscribe(self, topic: str, handler: TransportHandler) -> None:
+        self._handlers.setdefault(topic, []).append(handler)
+        if topic in self._subscribed:
+            return
+        self._subscribed.add(topic)
+
+        # The host invokes _dispatch on its trio thread; we forward to
+        # all registered handlers synchronously. Handlers are expected
+        # to be cheap (they enqueue or write to a thread-safe state).
+        def _dispatch(t: str, d: bytes) -> None:
+            for h in list(self._handlers.get(t, [])):
+                try:
+                    h(t, d)
+                except Exception as e:
+                    logger.error(
+                        "LibP2PTransport handler raised on %s: %s", t, e,
+                    )
+
+        self._host.subscribe_topic_threadsafe(topic, _dispatch)
+
+    def stop(self) -> None:
+        # Host shutdown cancels its nursery, which kills topic readers;
+        # nothing to do here.
+        self._handlers.clear()
+        self._subscribed.clear()
+
+
 class InMemoryHub:
     """Connect-everyone broker for InMemoryTransport instances.
 
@@ -339,6 +385,10 @@ class EventGossip:
         self._dedupe_cache_size = dedupe_cache_size
         self._stats = GossipStats()
         self._known_seq_by_sender: Dict[bytes, int] = {}
+        # Per-epoch buffer of accepted batches (own + peer). Drained
+        # by the federated-close driver at epoch boundaries to build
+        # the canonical order. Held under self._lock.
+        self._epoch_batches: List[EventBatch] = []
 
         # Subscribe to the topic so peers' batches reach us.
         self.transport.subscribe(self.topic, self._on_message)
@@ -403,6 +453,7 @@ class EventGossip:
         with self._lock:
             self._last_published_hash = batch.content_hash()
             self._note_seen_locked(batch.content_hash())
+            self._epoch_batches.append(batch)
             self._stats.batches_published += 1
 
         try:
@@ -462,6 +513,11 @@ class EventGossip:
             if signed.batch.batch_seq > prev_seq:
                 self._known_seq_by_sender[signed.batch.sender_pubkey] = signed.batch.batch_seq
 
+            # Buffer for the next epoch's canonical-order computation.
+            # Both peer batches and (in publish_events) own batches
+            # land here so the federated close sees the full set.
+            self._epoch_batches.append(signed.batch)
+
             # Don't ingest our own published batches: the local
             # WorldService already has them.
             if signed.batch.sender_pubkey == self.sender_pubkey:
@@ -491,6 +547,28 @@ class EventGossip:
         if len(self._seen) > self._dedupe_cache_size:
             # Trim oldest. List is small (FIFO), pop(0) is fine.
             self._seen = self._seen[-self._dedupe_cache_size:]
+
+    def drain_epoch_batches(self) -> List[EventBatch]:
+        """Return + clear the per-epoch batch buffer.
+
+        Called by the federated-close driver at epoch close to build
+        the canonical order. Atomic under self._lock.
+        """
+        with self._lock:
+            out = list(self._epoch_batches)
+            self._epoch_batches.clear()
+        return out
+
+    def known_senders(self) -> List[bytes]:
+        """All distinct sender pubkeys we've seen in this lifetime.
+
+        Includes our own pubkey. Used for deterministic-random
+        submitter selection.
+        """
+        with self._lock:
+            senders = set(self._known_seq_by_sender.keys())
+            senders.add(self.sender_pubkey)
+        return sorted(senders)
 
     def stop(self) -> None:
         """Tear down. Caller is responsible for transport.stop() if it

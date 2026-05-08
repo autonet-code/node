@@ -1,4 +1,4 @@
-"""Mint gate: training-agent debates against the four charter tendencies.
+"""Mint gate: training-agent debates against the charter tendencies.
 
 Mints are computed from score movement (in reconcile.py). The gate
 filters those mints by whether training agents have unrefuted CON
@@ -30,6 +30,12 @@ A "charter violation" isn't a hardcoded check. It's the result of
 training agents posting CON sub-claims that the network agrees with
 (positive net_score). The four charter tendencies are seed concerns;
 violations against them emerge through debate, not detection.
+
+The default charter is the 6-root configuration: 4 alignment axes
+(life_precious, self_preservation, promotion_of_intelligence,
+evolution) plus 2 usefulness axes (correctness, simplicity). The
+gate iterates whichever charter_ids the caller passes, so the gate
+keeps working if the deployer expands or contracts the charter.
 
 This means:
   - A new training-agent CON post doesn't immediately suppress mint;
@@ -63,16 +69,20 @@ from world_model.generalized import World
 logger = logging.getLogger(__name__)
 
 
-# Default charter tendency ids -- the four that started as the
-# alignment substrate's hardcoded roots. These remain the seed
-# concerns for the mint gate even though the substrate's training
-# target has moved to usefulness.
+# Default charter tendency ids -- the seed concerns for the mint
+# gate. Stay synced with adapter.py:CHARTER. The 4 alignment axes
+# remain the load-bearing violation flags; the 2 usefulness axes
+# (correctness, simplicity) participate as well so that work that
+# is buggy or over-engineered can be debated through the same
+# mechanism.
 
 DEFAULT_CHARTER_IDS = (
     "life_precious",
     "self_preservation",
     "promotion_of_intelligence",
     "evolution",
+    "correctness",
+    "simplicity",
 )
 
 
