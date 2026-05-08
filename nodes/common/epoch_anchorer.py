@@ -283,11 +283,26 @@ class EpochAnchorer:
         if w3 is None:
             raise RuntimeError("EpochAnchorer has no Web3 instance")
 
-        sender = (
-            from_address
-            or self._submitter_address
-            or (w3.eth.accounts[0] if w3.eth.accounts else None)
-        )
+        # Resolve sender: explicit override > previously-set address >
+        # derive from private key (production) > eth_accounts[0]
+        # (eth_tester only, where the RPC actually exposes a managed
+        # wallet).
+        sender = from_address or self._submitter_address
+        if sender is None and self.config.private_key:
+            from eth_account import Account
+            pk = self.config.private_key
+            if not pk.startswith("0x"):
+                pk = "0x" + pk
+            sender = Account.from_key(pk).address
+        if sender is None:
+            # eth_tester fallback. eth_accounts is disabled on most
+            # public RPCs (e.g. Etherlink shadownet), so we only
+            # call it when nothing else worked.
+            try:
+                accts = w3.eth.accounts
+            except Exception:
+                accts = []
+            sender = accts[0] if accts else None
         if sender is None:
             raise RuntimeError("no submitter address available")
 
@@ -309,7 +324,22 @@ class EpochAnchorer:
             )
             return tx_hash.hex()
 
-        # Production path: sign with private key.
+        # Production path: sign with private key. Estimate gas with a
+        # margin so we work on networks with higher actual costs (e.g.
+        # Etherlink shadownet reports ~1.2M for submitAnchor). A flat
+        # hardcode bites in real-world deployments.
+        try:
+            estimated = contract.functions.submitAnchor(
+                epoch_id,
+                epoch_root,
+                prev_epoch_root,
+                prev_anchor_hash,
+                agent_mint_cid,
+                payload_hash_bytes,
+            ).estimate_gas({"from": sender})
+            gas_limit = max(int(estimated * 12 // 10), 1_500_000)
+        except Exception:
+            gas_limit = 2_500_000
         tx = contract.functions.submitAnchor(
             epoch_id,
             epoch_root,
@@ -320,7 +350,7 @@ class EpochAnchorer:
         ).build_transaction({
             "from": sender,
             "nonce": w3.eth.get_transaction_count(sender),
-            "gas": 600_000,
+            "gas": gas_limit,
             "gasPrice": w3.eth.gas_price,
             "chainId": self.config.chain_id,
         })

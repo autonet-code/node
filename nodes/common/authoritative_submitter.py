@@ -302,19 +302,29 @@ class AuthoritativeChainSubmitter:
         if not self.config.private_key:
             tx_hash = contract.functions.recordTrainingForEpoch(
                 contribution, eid_hash,
-            ).transact({"from": self.agent_address, "gas": 300_000})
+            ).transact({"from": self.agent_address, "gas": 1_500_000})
             receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
             if receipt.status != 1:
                 raise RuntimeError(f"tx reverted: {receipt}")
             return tx_hash.hex()
 
-        # Production path
+        # Production path: estimate gas with a margin so we work on
+        # networks with higher actual gas costs (e.g. Etherlink shadownet
+        # reports ~700K for recordTrainingForEpoch). A flat hardcode
+        # bites in real-world deployments.
+        try:
+            estimated = contract.functions.recordTrainingForEpoch(
+                contribution, eid_hash,
+            ).estimate_gas({"from": self.agent_address})
+            gas_limit = max(int(estimated * 12 // 10), 1_500_000)
+        except Exception:
+            gas_limit = 2_000_000
         tx = contract.functions.recordTrainingForEpoch(
             contribution, eid_hash,
         ).build_transaction({
             "from": self.agent_address,
             "nonce": w3.eth.get_transaction_count(self.agent_address),
-            "gas": 300_000,
+            "gas": gas_limit,
             "gasPrice": w3.eth.gas_price,
             "chainId": self.config.chain_id,
         })

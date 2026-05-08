@@ -1,0 +1,9 @@
+{
+  "network": "shadownet",
+  "chainId": 127823,
+  "funder": "0x06E5b15Bc39f921e1503073dBb8A5dA2Fc6220E9",
+  "target_address": "0x2345520dBc38EaAe33e99b2538dC12861b12C800",
+  "target_private_key": "0x0a6da31c2353137a4e8eed9be71ac6fdb98889f314c1f4ac0d2e56b7a0fc4033",
+  "funded_at": "2026-05-08T21:13:02.400Z",
+  "final_balance_eth": "2.0"
+}
