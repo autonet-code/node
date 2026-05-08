@@ -710,6 +710,12 @@ class AutonetHost:
             router=self._gossipsub,
             strict_signing=False,
         )
+        # Pubsub.run() must be a long-lived task — it spawns
+        # handle_peer_queue which is what wires the libp2p notifee
+        # into router.add_peer (mesh GRAFT). Without this, the
+        # mesh never forms and messages don't propagate. Phase 10.6.
+        if self._nursery is not None:
+            self._nursery.start_soon(self._pubsub.run)
 
     async def join_guild(
         self,
