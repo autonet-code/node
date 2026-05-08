@@ -110,11 +110,22 @@ def _dimensional_overlap_sim(obs: Tuple[float, ...], anchor: Tuple[float, ...]) 
     """
     if not anchor:
         return 0.0
-    anchor_nonzero = [i for i, a in enumerate(anchor) if abs(a) > 1e-6]
-    if not anchor_nonzero:
+    obs_len = len(obs)
+    n_nonzero = 0
+    overlap = 0
+    # Single pass: count anchor's nonzeros and tally obs-side hits in one
+    # loop, replacing the original two-pass build-list-then-iterate.
+    # Manual ``a > 1e-6 or a < -1e-6`` saves the abs() function call.
+    for i, a in enumerate(anchor):
+        if a > 1e-6 or a < -1e-6:
+            n_nonzero += 1
+            if i < obs_len:
+                ov = obs[i]
+                if ov > 1e-6 or ov < -1e-6:
+                    overlap += 1
+    if n_nonzero == 0:
         return 0.0
-    overlap = sum(1 for i in anchor_nonzero if i < len(obs) and abs(obs[i]) > 1e-6)
-    return overlap / len(anchor_nonzero)
+    return overlap / n_nonzero
 
 
 def _project(x: Tuple[float, ...], anchor: Tuple[float, ...],

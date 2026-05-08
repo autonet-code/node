@@ -57,6 +57,7 @@ def main():
     data_dir = Path(os.environ.get("SUBSTRATE_DATA", "/tmp/sub_smoke")).expanduser()
     bootstrap_str = os.environ.get("SUBSTRATE_BOOTSTRAP", "").strip()
     bootstrap = [bootstrap_str] if bootstrap_str else []
+    embedding_dim = int(os.environ.get("SUBSTRATE_EMBEDDING_DIM", "32"))
 
     data_dir.mkdir(parents=True, exist_ok=True)
     print(f"[smoke] listen={listen_host}:{listen_port}", flush=True)
@@ -69,7 +70,11 @@ def main():
     from nodes.common.p2p import AutonetHost, NodeCapability
     from nodes.common.world_service import WorldService
 
-    svc = WorldService(rpb_address=rpb, data_root=data_dir / "world")
+    svc = WorldService(
+        rpb_address=rpb,
+        data_root=data_dir / "world",
+        embedding_dim=embedding_dim,
+    )
 
     cap = NodeCapability(peer_id="", node_id=f"smoke-{rpb}")
     host = AutonetHost(
