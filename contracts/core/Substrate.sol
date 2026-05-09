@@ -197,20 +197,39 @@ contract Substrate {
     mapping(bytes32 => address) public agentByLineage;
     address[] private registeredAgentList;
 
-    event AgentRegistered(address indexed agent, bytes32 indexed lineageHash, uint256 timestamp);
+    /// @dev libp2p PeerId bytes (multihash-encoded). Stored separately
+    ///      from the Agent struct so updates don't churn the struct's
+    ///      storage layout. Variable length to accommodate ed25519
+    ///      (~38 bytes) and secp256k1 keys.
+    mapping(address => bytes) private agentPeerId;
+
+    event AgentRegistered(
+        address indexed agent,
+        bytes32 indexed lineageHash,
+        bytes peerId,
+        uint256 timestamp
+    );
+
+    event PeerIdUpdated(address indexed agent, bytes peerId);
 
     error AlreadyRegistered();
     error LineageHashRequired();
     error LineageHashAlreadyUsed();
     error AgentNotActive();
+    error PeerIdRequired();
 
     /// @notice Register the caller as a substrate agent.
     /// @param lineageHash Caller-supplied identity hash (e.g.
     ///                    keccak256 of the agent's manifest CID).
-    function registerAgent(bytes32 lineageHash) external {
+    /// @param peerId libp2p PeerId bytes for off-chain discovery.
+    ///        Daemons resolve this to a current multiaddr via the
+    ///        libp2p Kademlia DHT — the chain stores *who*, the DHT
+    ///        stores *where right now*.
+    function registerAgent(bytes32 lineageHash, bytes calldata peerId) external {
         if (agents[msg.sender].registeredAt != 0) revert AlreadyRegistered();
         if (lineageHash == bytes32(0)) revert LineageHashRequired();
         if (agentByLineage[lineageHash] != address(0)) revert LineageHashAlreadyUsed();
+        if (peerId.length == 0) revert PeerIdRequired();
 
         agents[msg.sender] = Agent({
             lineageHash: lineageHash,
@@ -220,9 +239,25 @@ contract Substrate {
             trainingSubmissionCount: 0
         });
         agentByLineage[lineageHash] = msg.sender;
+        agentPeerId[msg.sender] = peerId;
         registeredAgentList.push(msg.sender);
 
-        emit AgentRegistered(msg.sender, lineageHash, block.timestamp);
+        emit AgentRegistered(msg.sender, lineageHash, peerId, block.timestamp);
+    }
+
+    /// @notice Update this agent's libp2p PeerId. Used when a daemon
+    ///         rotates its libp2p keypair (e.g. fresh install on a new
+    ///         box) without losing on-chain identity / reputation.
+    function updatePeerId(bytes calldata peerId) external {
+        if (agents[msg.sender].registeredAt == 0) revert AgentNotActive();
+        if (peerId.length == 0) revert PeerIdRequired();
+        agentPeerId[msg.sender] = peerId;
+        emit PeerIdUpdated(msg.sender, peerId);
+    }
+
+    /// @notice Read an agent's PeerId for DHT discovery.
+    function getAgentPeerId(address agent) external view returns (bytes memory) {
+        return agentPeerId[agent];
     }
 
     function isRegistered(address agent) external view returns (bool) {

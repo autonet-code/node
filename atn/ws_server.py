@@ -698,19 +698,23 @@ class WebSocketBridge:
                 log.info("Agent %s confirmed on-chain: tx=%s addr=%s", agent_id, tx_hash, agent_address)
             return {"msg_id": msg_id, "ok": True, "result": {"confirmed": True}}
 
-        # RPB on-chain state queries
+        # Substrate on-chain state queries (rpb_* names retained for
+        # frontend back-compat; map onto Substrate.sol reads).
         if msg_type == "rpb_state":
             try:
                 from .on_chain import OnChainService
                 svc = OnChainService(self.runtime._config.rpb)
                 if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                result = await svc.get_rpb_state()
+                    return {"msg_id": msg_id, "ok": False, "error": "Substrate not configured"}
+                result = await svc.get_substrate_state()
                 return {"msg_id": msg_id, "ok": True, "result": result or {}}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
         if msg_type == "rpb_agent_training":
+            # Substrate-native: returns reputation + ATN balance for the
+            # agent. The pre-substrate "training tokens / unclaimed rewards"
+            # split is gone — training mints both ledgers directly.
             address = msg.get("address", "")
             if not address:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'address'"}
@@ -718,8 +722,8 @@ class WebSocketBridge:
                 from .on_chain import OnChainService
                 svc = OnChainService(self.runtime._config.rpb)
                 if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                result = await svc.get_agent_training_info(address)
+                    return {"msg_id": msg_id, "ok": False, "error": "Substrate not configured"}
+                result = await svc.get_agent_balances(address)
                 return {"msg_id": msg_id, "ok": True, "result": result or {}}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
@@ -732,163 +736,36 @@ class WebSocketBridge:
                 from .on_chain import OnChainService
                 svc = OnChainService(self.runtime._config.rpb)
                 if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                    return {"msg_id": msg_id, "ok": False, "error": "Substrate not configured"}
                 result = await svc.get_agent_record(address)
                 return {"msg_id": msg_id, "ok": True, "result": result or {}}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
-        # RPB investment/funding pipeline
-        if msg_type == "rpb_investor_info":
-            address = msg.get("address", "")
-            if not address:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'address'"}
-            try:
-                from .on_chain import OnChainService
-                svc = OnChainService(self.runtime._config.rpb)
-                if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                result = await svc.get_investor_info(address)
-                return {"msg_id": msg_id, "ok": True, "result": result or {}}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "rpb_accepted_tokens":
-            try:
-                from .on_chain import OnChainService
-                svc = OnChainService(self.runtime._config.rpb)
-                if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                result = await svc.get_accepted_tokens()
-                return {"msg_id": msg_id, "ok": True, "result": {"tokens": result}}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "rpb_purchase_shares":
-            token = msg.get("token", "")
-            amount = msg.get("amount")
-            if not token:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'token'"}
-            if amount is None:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'amount'"}
-            try:
-                from .on_chain import OnChainService
-                svc = OnChainService(self.runtime._config.rpb)
-                if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                call_data = svc.build_purchase_shares_call_data(token, int(amount))
-                return {"msg_id": msg_id, "ok": True, "result": {
-                    "call_data": call_data,
-                    "to": self.runtime._config.rpb.rpb_contract_address,
-                }}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "rpb_fund_training":
-            token = msg.get("token", "")
-            amount = msg.get("amount")
-            if not token:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'token'"}
-            if amount is None:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'amount'"}
-            try:
-                from .on_chain import OnChainService
-                svc = OnChainService(self.runtime._config.rpb)
-                if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                call_data = svc.build_fund_training_call_data(token, int(amount))
-                return {"msg_id": msg_id, "ok": True, "result": {
-                    "call_data": call_data,
-                    "to": self.runtime._config.rpb.rpb_contract_address,
-                }}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "rpb_claim_training_reward":
-            token = msg.get("token", "")
-            if not token:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'token'"}
-            try:
-                from .on_chain import OnChainService
-                svc = OnChainService(self.runtime._config.rpb)
-                if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                call_data = svc.build_claim_training_reward_call_data(token)
-                return {"msg_id": msg_id, "ok": True, "result": {
-                    "call_data": call_data,
-                    "to": self.runtime._config.rpb.rpb_contract_address,
-                }}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "rpb_claim_dividends":
-            token = msg.get("token", "")
-            if not token:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'token'"}
-            try:
-                from .on_chain import OnChainService
-                svc = OnChainService(self.runtime._config.rpb)
-                if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                call_data = svc.build_claim_dividends_call_data(token)
-                return {"msg_id": msg_id, "ok": True, "result": {
-                    "call_data": call_data,
-                    "to": self.runtime._config.rpb.rpb_contract_address,
-                }}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        # RPB sponsorship / inference pipeline
-        if msg_type == "rpb_record_inference":
-            requester = msg.get("requester", "")
-            provider = msg.get("provider", "")
-            units = msg.get("units")
-            token = msg.get("token", "")
-            cost = msg.get("cost")
-            if not all([requester, provider, token]) or units is None or cost is None:
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "Missing required fields: requester, provider, units, token, cost"}
-            try:
-                from .on_chain import OnChainService
-                config = self.runtime._config.rpb
-                svc = OnChainService(config)
-                if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                if not config.private_key:
-                    return {"msg_id": msg_id, "ok": False,
-                            "error": "Owner private_key not configured (required for onlyOwner call)"}
-                result = await svc.record_inference(
-                    requester=requester,
-                    provider=provider,
-                    units=int(units),
-                    token_address=token,
-                    cost=int(cost),
-                    private_key=config.private_key,
-                )
-                return {"msg_id": msg_id, "ok": result.get("success", False), "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "rpb_sponsor_budget":
-            address = msg.get("address", "")
-            if not address:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'address'"}
-            try:
-                from .on_chain import OnChainService
-                svc = OnChainService(self.runtime._config.rpb)
-                if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
-                result = await svc.get_sponsor_budget(address)
-                return {"msg_id": msg_id, "ok": "error" not in result, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+        # Pre-substrate handlers — investment/share/dividend/sponsor surface
+        # was deleted with the contract nuke. These return an explicit
+        # deprecation error so the UI can hide the affected panels rather
+        # than silently fail. Substrate-native equivalents (if any) will
+        # land alongside their respective product features.
+        _DEPRECATED_RPB = {
+            "rpb_investor_info", "rpb_accepted_tokens",
+            "rpb_purchase_shares", "rpb_fund_training",
+            "rpb_claim_training_reward", "rpb_claim_dividends",
+            "rpb_record_inference", "rpb_sponsor_budget",
+        }
+        if msg_type in _DEPRECATED_RPB:
+            return {
+                "msg_id": msg_id, "ok": False,
+                "error": f"'{msg_type}' was removed with the pre-substrate contract nuke "
+                         "and has no Substrate.sol equivalent yet.",
+            }
 
         if msg_type == "rpb_registered_agents":
             try:
                 from .on_chain import OnChainService
                 svc = OnChainService(self.runtime._config.rpb)
                 if not svc.available:
-                    return {"msg_id": msg_id, "ok": False, "error": "RPB not configured"}
+                    return {"msg_id": msg_id, "ok": False, "error": "Substrate not configured"}
                 agents_list = await svc.get_all_registered_agents()
 
                 # Build lookup: on-chain address → local agent metadata
@@ -1103,9 +980,10 @@ class WebSocketBridge:
         svc = OnChainService(config)
 
         if not svc.available:
-            return {"success": False, "error": "On-chain not configured (missing rpb_contract_address or rpc_url)"}
+            return {"success": False,
+                    "error": "On-chain not configured (missing substrate_address or rpc_url)"}
 
-        # Look up the agent
+        # Look up the agent.
         agent_def = self.runtime.registry.get_agent(agent_id)
         if not agent_def:
             return {"success": False, "error": f"Agent '{agent_id}' not found"}
@@ -1113,50 +991,64 @@ class WebSocketBridge:
             return {"success": False, "error": f"Agent '{agent_id}' has no identity"}
 
         identity = agent_def.identity
-        system_prompt = agent_def.system_prompt or ""
 
-        # Determine parent's on-chain address
-        parent_address = ""
-        if agent_def.parent_id:
-            parent_def = self.runtime.registry.get_agent(agent_def.parent_id)
-            if parent_def and parent_def.identity:
-                parent_address = parent_def.identity.address
+        # Substrate-native registration flow (Phase 12):
+        #
+        # The agent has its own keypair generated at agent creation time
+        # (held by the daemon, not the user's wallet). Registration is
+        # ALWAYS daemon-signed from the agent's own key — this includes
+        # the root/orchestrator agent. The user's wallet only funds the
+        # agent's address; it never signs the registerAgent tx itself.
+        #
+        # This means consensus operations (anchor submission, training
+        # records) sign autonomously from the agent's key without
+        # involving the user's wallet on every epoch close.
+        key = self.runtime.registry.get_agent_key(agent_id)
+        if not key:
+            return {"success": False,
+                    "error": f"No private key stored for agent '{agent_id}' "
+                             "(daemon should have generated one at agent creation time)"}
 
-        if is_root and not private_key:
-            # Non-custodial: return call data for frontend wallet
-            try:
-                call_data = svc.build_register_call_data(
-                    identity=identity,
-                    system_prompt=system_prompt,
-                    parent_address=parent_address,
-                    sponsor_address=sponsor_address,
-                )
+        # Pre-flight: agent address needs gas to pay for registerAgent.
+        try:
+            w3 = svc._get_web3()
+            balance = w3.eth.get_balance(w3.to_checksum_address(identity.address))
+            if balance == 0:
                 return {
-                    "success": True,
-                    "mode": "sign_required",
-                    "call_data": call_data,
-                    "to": config.rpb_contract_address,
+                    "success": False,
+                    "mode": "needs_funding",
+                    "error": "Agent address has no gas balance — fund it first.",
                     "agent_address": identity.address,
+                    "chain_id": config.chain_id,
                 }
-            except Exception as e:
-                return {"success": False, "error": str(e)}
+        except Exception as e:
+            return {"success": False, "error": f"Could not check agent balance: {e}"}
 
-        # Custodial path: we have the private key
-        if is_root:
-            # Root agent — private_key was passed from frontend
-            key = private_key
-        else:
-            # Child agent — daemon holds the key
-            key = self.runtime.registry.get_agent_key(agent_id)
-            if not key:
-                return {"success": False, "error": f"No private key stored for agent '{agent_id}'"}
+        # Resolve the daemon's libp2p PeerId. Required by Substrate.sol
+        # so other daemons can DHT-resolve this agent's reachability.
+        # The autonet bridge holds the AutonetHost via _p2p_host (its
+        # ``peer_id`` property returns the running host's id, or "" if
+        # the libp2p host is not yet up).
+        peer_id = ""
+        autonet = getattr(self.runtime, "autonet", None)
+        if autonet is not None:
+            host = getattr(autonet, "_p2p_host", None)
+            if host is not None:
+                try:
+                    peer_id = getattr(host, "peer_id", "") or ""
+                except Exception:
+                    peer_id = ""
+        if not peer_id:
+            return {
+                "success": False,
+                "error": "libp2p host not running — start the autonet service first so "
+                         "the daemon has a PeerId to register.",
+            }
 
         result = await svc.register_agent(
             identity=identity,
             private_key=key,
-            system_prompt=system_prompt,
-            parent_address=parent_address,
-            sponsor_address=sponsor_address,
+            peer_id=peer_id,
         )
         if result.get("success"):
             identity.registered_on_chain = True

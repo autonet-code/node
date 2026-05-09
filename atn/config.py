@@ -128,7 +128,12 @@ class RPBConfig:
     dao_address: str = ""               # Defaults to jurisdiction.GOVERNOR_ADDRESS
     # RPB-specific fields
     jurisdiction_id: str = "autonet"    # First jurisdiction
-    rpb_contract_address: str = ""      # Discovered from Registry
+    rpb_contract_address: str = ""      # Legacy: pre-substrate RPB address (kept
+                                        # so existing configs still parse). New
+                                        # configs should use substrate_address.
+    substrate_address: str = ""         # Deployed Substrate.sol address. Read by
+                                        # OnChainService; falls back to
+                                        # rpb_contract_address if empty.
     registry_address: str = ""          # Discovered from RepToken.registryAddress()
     token_address: str = ""             # Discovered from Governor.token()
     economy_address: str = ""           # Discovered from RepToken.economyAddress()
@@ -228,10 +233,12 @@ def _load_registry_seed(jurisdiction_id: str = "autonet") -> dict[str, Any]:
             seed["dao_address"] = contracts["dao"]
         if contracts.get("rpb"):
             seed["rpb_contract_address"] = contracts["rpb"]
-        log.info("Registry seed for '%s': dao=%s, rpb=%s",
+        if contracts.get("substrate"):
+            seed["substrate_address"] = contracts["substrate"]
+        log.info("Registry seed for '%s': dao=%s, substrate=%s",
                  jurisdiction_id,
                  seed.get("dao_address", "")[:10] or "(none)",
-                 seed.get("rpb_contract_address", "")[:10] or "(none)")
+                 seed.get("substrate_address", "")[:10] or "(none)")
         return seed
     except Exception:
         log.warning("Failed to load registry.json", exc_info=True)
@@ -418,6 +425,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
         dao_address=resolved.get("dao_address", ""),
         jurisdiction_id=resolved.get("jurisdiction_id", "autonet"),
         rpb_contract_address=resolved.get("rpb_contract_address", ""),
+        substrate_address=resolved.get("substrate_address", ""),
         registry_address=resolved.get("registry_address", ""),
         token_address=resolved.get("token_address", ""),
         economy_address=resolved.get("economy_address", ""),

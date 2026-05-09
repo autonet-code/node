@@ -140,8 +140,11 @@ def main():
             continue
         print(f"[reg] {label} registering...")
         lineage = Web3.keccak(text=f"smoke-lineage-{label}-{int(time.time())}")
+        # Synthetic libp2p PeerId placeholder — real daemon registration
+        # will pass the actual PeerId bytes from libp2p_host.get_id().
+        peer_id = b"smoke-peer-" + label.encode() + b"-" + str(int(time.time())).encode()
         nonce = w3.eth.get_transaction_count(addr)
-        tx = contract.functions.registerAgent(lineage).build_transaction({
+        tx = contract.functions.registerAgent(lineage, peer_id).build_transaction({
             "from": addr,
             "nonce": nonce,
             "gas": 1_500_000,

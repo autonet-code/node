@@ -61,7 +61,8 @@ def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
 
 def _register_agent(w3: Web3, contract, agent_addr: str, lineage_seed: str) -> None:
     lineage = Web3.keccak(text=lineage_seed)
-    tx = contract.functions.registerAgent(lineage).transact({
+    peer_id = b"test-peer-" + lineage_seed.encode()
+    tx = contract.functions.registerAgent(lineage, peer_id).transact({
         "from": agent_addr, "gas": 300_000,
     })
     receipt = w3.eth.wait_for_transaction_receipt(tx)
