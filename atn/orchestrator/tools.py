@@ -848,21 +848,12 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
                 from ..on_chain import OnChainService
                 svc = OnChainService(runtime._config.rpb)
                 if svc.available:
-                    # Check both the agent's generated address and the connected wallet
-                    # (root agents register via the user's wallet, not the generated keypair)
-                    addrs_to_check = []
-                    if defn.identity.address:
-                        addrs_to_check.append(defn.identity.address)
-                    wallet = runtime.autonet.state.wallet_address
-                    if wallet and wallet not in addrs_to_check:
-                        addrs_to_check.append(wallet)
-                    for addr in addrs_to_check:
-                        if await svc.is_registered(addr):
-                            defn.identity.registered_on_chain = True
-                            if not defn.parent_id and wallet:
-                                defn.identity.address = wallet
-                            runtime.registry.persist_identity(defn.id)
-                            break
+                    # Phase 12: agents are always identified by their own
+                    # daemon-held keypair, never by the connected wallet.
+                    # Check only the agent's own address.
+                    if defn.identity.address and await svc.is_registered(defn.identity.address):
+                        defn.identity.registered_on_chain = True
+                        runtime.registry.persist_identity(defn.id)
             except Exception:
                 pass
         result["registered_on_chain"] = defn.identity.registered_on_chain

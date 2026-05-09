@@ -681,21 +681,23 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
-        # Confirm that a non-custodial registration tx landed on-chain
+        # Phase 12: registration is daemon-signed in one shot, so the
+        # frontend no longer needs a "confirm" round-trip. The handler
+        # is kept for back-compat with older clients but never overwrites
+        # identity.address — the agent's on-chain address is its own
+        # daemon-held key, never the user's wallet.
         if msg_type == "confirm_agent_registration":
             agent_id = msg.get("agent_id", "")
             tx_hash = msg.get("tx_hash", "")
-            agent_address = msg.get("agent_address", "")
             if not agent_id:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id'"}
             agent_def = self.runtime.registry.get_agent(agent_id)
             if agent_def and agent_def.identity:
                 agent_def.identity.registered_on_chain = True
-                agent_def.identity.registration_tx = tx_hash
-                if agent_address:
-                    agent_def.identity.address = agent_address
+                if tx_hash:
+                    agent_def.identity.registration_tx = tx_hash
                 self.runtime.registry.persist_identity(agent_id)
-                log.info("Agent %s confirmed on-chain: tx=%s addr=%s", agent_id, tx_hash, agent_address)
+                log.info("Agent %s confirmed on-chain: tx=%s", agent_id, tx_hash)
             return {"msg_id": msg_id, "ok": True, "result": {"confirmed": True}}
 
         # Substrate on-chain state queries (rpb_* names retained for
@@ -1070,40 +1072,26 @@ class WebSocketBridge:
         if not agent_def or not agent_def.identity:
             return {"registered": False, "error": "Agent has no identity"}
 
-        # Root agents register via the user's wallet, not the daemon-generated
-        # keypair.  After a daemon restart the keypair is regenerated, so the
-        # generated address will differ from the one that was actually
-        # registered.  Check both addresses (generated + connected wallet).
-        addrs_to_check = []
-        if agent_def.identity.address:
-            addrs_to_check.append(agent_def.identity.address)
-        wallet = self.runtime.autonet.state.wallet_address
-        if wallet and wallet not in addrs_to_check:
-            addrs_to_check.append(wallet)
-
+        # Phase 12: agents are always identified by their own
+        # daemon-held keypair (incl. the orchestrator). Check that
+        # one address only — never fall back to the user's wallet.
         registered = False
-        matched_address = ""
-        for addr in addrs_to_check:
-            if await svc.is_registered(addr):
-                registered = True
-                matched_address = addr
-                break
+        if agent_def.identity.address:
+            registered = await svc.is_registered(agent_def.identity.address)
 
         result: dict[str, Any] = {
             "registered": registered,
             "available": True,
-            "agent_address": matched_address or agent_def.identity.address,
+            "agent_address": agent_def.identity.address,
         }
 
-        # Sync daemon's in-memory flag with on-chain truth.
-        # This handles both directions: newly registered or contract redeployed.
+        # Sync daemon's in-memory flag with on-chain truth so a stale
+        # local flag (e.g. after a contract redeploy) gets reconciled.
         if registered != agent_def.identity.registered_on_chain:
             agent_def.identity.registered_on_chain = registered
-            if registered and matched_address:
-                agent_def.identity.address = matched_address
             self.runtime.registry.persist_identity(agent_id)
             log.info("Agent %s on-chain status synced to %s (address: %s)",
-                     agent_id, registered, matched_address or "n/a")
+                     agent_id, registered, agent_def.identity.address)
 
         if registered:
             record = await svc.get_agent_record(matched_address)

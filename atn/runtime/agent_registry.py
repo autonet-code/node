@@ -194,6 +194,31 @@ class AgentRegistry:
             if not private_key or not identity.address:
                 log.warning("Identity file for %s is incomplete, regenerating", agent_id)
                 return None
+
+            # Phase 12 sanity check: identity.address MUST be the
+            # address derived from private_key. Older identity files
+            # (pre-substrate) sometimes had address overwritten with
+            # the connected wallet — that breaks daemon signing.
+            try:
+                from eth_account import Account
+                pk = private_key if private_key.startswith("0x") else "0x" + private_key
+                derived = Account.from_key(pk).address
+                if derived.lower() != identity.address.lower():
+                    log.warning(
+                        "Identity for %s has address %s but key derives %s — "
+                        "regenerating (was likely overwritten by an old "
+                        "user-wallet-as-agent flow)",
+                        agent_id, identity.address, derived,
+                    )
+                    return None
+            except ImportError:
+                # eth_account not installed (offline/local-only mode);
+                # accept the file as-is.
+                pass
+            except Exception:
+                log.warning("Could not verify key/address match for %s; "
+                            "accepting file as-is", agent_id, exc_info=True)
+
             return identity, private_key
         except Exception:
             log.warning("Failed to load identity for %s from %s", agent_id, path, exc_info=True)
