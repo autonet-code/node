@@ -958,6 +958,20 @@ class WebSocketBridge:
     # On-chain registration helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _read_libp2p_peer_id(autonet: Any) -> str:
+        """Best-effort read of the autonet bridge's libp2p PeerId.
+
+        Returns an empty string when the host isn't running yet.
+        """
+        host = getattr(autonet, "_p2p_host", None)
+        if host is None:
+            return ""
+        try:
+            return getattr(host, "peer_id", "") or ""
+        except Exception:
+            return ""
+
     async def _handle_register_on_chain(
         self,
         agent_id: str,
@@ -1028,23 +1042,45 @@ class WebSocketBridge:
 
         # Resolve the daemon's libp2p PeerId. Required by Substrate.sol
         # so other daemons can DHT-resolve this agent's reachability.
-        # The autonet bridge holds the AutonetHost via _p2p_host (its
-        # ``peer_id`` property returns the running host's id, or "" if
-        # the libp2p host is not yet up).
-        peer_id = ""
+        #
+        # Phase 12: autonet is registration-driven. If the libp2p host
+        # isn't up yet, this is the moment to start it — clicking
+        # "register on chain" is the user signal that they want the
+        # daemon to participate in the wider consensus network.
         autonet = getattr(self.runtime, "autonet", None)
-        if autonet is not None:
-            host = getattr(autonet, "_p2p_host", None)
-            if host is not None:
-                try:
-                    peer_id = getattr(host, "peer_id", "") or ""
-                except Exception:
-                    peer_id = ""
+        if autonet is None:
+            return {"success": False, "error": "Autonet bridge not available"}
+
+        peer_id = self._read_libp2p_peer_id(autonet)
+        if not peer_id:
+            log.info("Starting autonet just-in-time for agent registration (%s)",
+                     agent_id)
+            try:
+                start_result = await autonet.start()
+                if start_result.get("status") == "error":
+                    return {
+                        "success": False,
+                        "error": f"Could not start autonet to register: "
+                                 f"{start_result.get('error', 'unknown')}",
+                    }
+            except Exception as e:
+                return {"success": False,
+                        "error": f"Failed to start autonet: {e}"}
+
+            # Poll briefly for the libp2p host to come up. AutonetHost
+            # publishes peer_id as soon as its ready_event fires.
+            import asyncio as _asyncio
+            for _ in range(60):  # ~30s
+                peer_id = self._read_libp2p_peer_id(autonet)
+                if peer_id:
+                    break
+                await _asyncio.sleep(0.5)
+
         if not peer_id:
             return {
                 "success": False,
-                "error": "libp2p host not running — start the autonet service first so "
-                         "the daemon has a PeerId to register.",
+                "error": "libp2p host did not come up in time — try again "
+                         "in a moment.",
             }
 
         result = await svc.register_agent(

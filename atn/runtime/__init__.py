@@ -282,14 +282,22 @@ class Runtime:
         if self._config.voice.enabled:
             await self.start_voice()
 
-        # Start autonet service if configured
+        # Phase 12: autonet (training + libp2p) is registration-driven,
+        # not boot-driven. The framework stays fully local until at
+        # least one agent is registered on chain. Two ways autonet
+        # starts:
+        #   (a) explicit ``autonet.enabled = true`` in config — for
+        #       users who want eager start (bootstrap nodes, services
+        #       that always participate),
+        #   (b) the user clicks "register on chain" on the first agent;
+        #       the registration handler starts autonet just-in-time
+        #       so it can read the libp2p PeerId before signing the tx.
         if self._config.autonet.enabled:
             await self.autonet.start()
-        # Always start p2p agent advertisement (even without training service)
-        self.autonet.start_p2p()
-        # Wire P2P host into provider manager for RPB provider discovery
-        if self.autonet._p2p_host:
-            self.providers._p2p_host = self.autonet._p2p_host
+            # Wire P2P host into provider manager for substrate
+            # provider discovery (only meaningful once p2p is up).
+            if self.autonet._p2p_host:
+                self.providers._p2p_host = self.autonet._p2p_host
 
         # Load constitution text (needed for prompt injection on registered agents)
         await self.autonet.load_constitution()
