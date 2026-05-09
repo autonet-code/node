@@ -455,6 +455,16 @@ async def run_cli() -> None:
     except Exception as exc:
         console.print(f"  [yellow]Orchestrator not available: {exc}[/]")
 
+    # Phase 12: if any loaded agent already has on-chain registration,
+    # auto-start autonet — the user opted in earlier and the daemon
+    # should reflect that on every boot, not require another click.
+    try:
+        started = await runtime.maybe_autostart_autonet_for_registered_agents()
+        if started:
+            console.print("  [green]Autonet auto-started for registered agent(s)[/]")
+    except Exception as exc:
+        console.print(f"  [yellow]Could not auto-start autonet: {exc}[/]")
+
     # Start WebSocket bridge so the Flutter frontend can connect.
     # If the port is held by a stale MCP server, attempt to reclaim it.
     ws_bridge: WebSocketBridge | None = None

@@ -298,6 +298,9 @@ class Runtime:
             # provider discovery (only meaningful once p2p is up).
             if self.autonet._p2p_host:
                 self.providers._p2p_host = self.autonet._p2p_host
+        # Note: a third trigger — "any locally-loaded agent has
+        # registered_on_chain = true" — runs after agents load. See
+        # ``maybe_autostart_autonet_for_registered_agents``.
 
         # Load constitution text (needed for prompt injection on registered agents)
         await self.autonet.load_constitution()
@@ -309,6 +312,33 @@ class Runtime:
             type=EventType.RUNTIME_STARTED,
             source="runtime",
         ))
+
+    async def maybe_autostart_autonet_for_registered_agents(self) -> bool:
+        """Auto-start autonet if any locally-loaded agent has
+        ``registered_on_chain = True``.
+
+        Phase 12: registration is the signal of intent to participate.
+        Once an agent is registered, the daemon should always run
+        autonet on subsequent boots — otherwise the user's network
+        identity sits dormant and consensus operations don't fire.
+
+        Returns True if autonet was started by this call.
+        """
+        if self.autonet.state.status.value in ("running", "paused"):
+            return False  # Already up.
+        # Walk the agent registry; bail early on the first registered.
+        for defn, _ in self.list_agents():
+            if defn.identity and defn.identity.registered_on_chain:
+                log.info("Auto-starting autonet: agent %s is registered on chain",
+                         defn.id)
+                result = await self.autonet.start()
+                if result.get("status") not in ("started", "already_running"):
+                    log.warning("Auto-start of autonet failed: %s", result)
+                    return False
+                if self.autonet._p2p_host:
+                    self.providers._p2p_host = self.autonet._p2p_host
+                return True
+        return False
 
     async def stop(self) -> None:
         self._shutdown_event.set()

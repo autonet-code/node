@@ -1223,6 +1223,13 @@ async def _init_and_serve(
     except Exception as exc:
         log.warning("Failed to register orchestrator: %s", exc)
 
+    # Phase 12: auto-start autonet for already-registered agents.
+    try:
+        if await rt.maybe_autostart_autonet_for_registered_agents():
+            log.info("Autonet auto-started for registered agent(s)")
+    except Exception as exc:
+        log.warning("Could not auto-start autonet: %s", exc)
+
     bridge = WebSocketBridge(rt, host=host, port=port)
     await bridge.start()
     return rt, bridge
