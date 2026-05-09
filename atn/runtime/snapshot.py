@@ -87,6 +87,8 @@ class SnapshotBuilder:
                 "last_output": _preview(last_output.data) if last_output else None,
                 "path": str(self._config.agents_dir / aid),
             }
+            if defn.identity and defn.identity.address:
+                agent_info["agent_address"] = defn.identity.address
             if defn.identity and defn.identity.registered_on_chain:
                 agent_info["registered_on_chain"] = True
             if defn.expose_as_tool:
