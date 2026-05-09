@@ -161,9 +161,10 @@ class AutonetBridge:
         if config.chain_id:
             self.state.chain_id = config.chain_id
 
-        # Discover jurisdiction contracts from DAO Governor address
-        if config.dao_address and config.rpc_url:
-            self._discover_jurisdiction()
+        # Always run the jurisdiction discovery hook so substrate_address
+        # gets surfaced. The Governor-discovery body inside is a no-op
+        # when dao_address/rpc_url are empty.
+        self._discover_jurisdiction()
 
         # Subscribe to execution events for training data feed
         if self._events:
@@ -193,6 +194,14 @@ class AutonetBridge:
 
     def _discover_jurisdiction(self) -> None:
         """Discover all contract addresses from the DAO Governor at startup."""
+        # Always surface substrate_address from config — it's seeded from
+        # registry.json and doesn't depend on the on-chain Governor being
+        # reachable. (The block below may fail if the Governor's Registry
+        # is unresponsive or the network is down; substrate visibility
+        # shouldn't depend on that.)
+        self.state.substrate_address = getattr(
+            self.config, "substrate_address", ""
+        )
         try:
             from .on_chain import discover_jurisdiction
             discovered = discover_jurisdiction(
