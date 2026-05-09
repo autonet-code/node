@@ -924,9 +924,11 @@ class AutonetService:
         """
         from .common.event_gossip import Keypair
         import json
+        from pathlib import Path
         if not self._data_dir:
             return Keypair.generate()
-        key_dir = self._data_dir / "world" / "gossip"
+        # _data_dir may arrive as either str or Path depending on caller.
+        key_dir = Path(self._data_dir) / "world" / "gossip"
         key_dir.mkdir(parents=True, exist_ok=True)
         key_path = key_dir / "keypair.json"
         if key_path.exists():
