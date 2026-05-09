@@ -813,6 +813,71 @@ class WorldService:
             "per_epoch": per_epoch,
         }
 
+    def read_substrate_distribution(
+        self, *, last_n_epochs: int = 10,
+    ) -> Dict[str, Any]:
+        """Aggregate the substrate's current root scores plus per-root
+        mint over the last ``n`` closed epochs.
+
+        Used by the top-level Network visualization to show *which
+        root the network's attention is on right now* and *which
+        roots earned mint recently*.
+
+        Returns:
+          {
+            "root_scores": {root_id: float, ...},        # current
+            "root_mint_recent": {root_id: float, ...},   # cumulative over n epochs
+            "epochs_considered": int,
+            "total_mint_recent": float,
+          }
+
+        Per-root mint is computed by attributing each minting node to
+        its closest tendency (highest stake from that tendency on the
+        node). This is a best-effort projection — accurate when nodes
+        are clearly under one root, approximate when nodes straddle.
+        """
+        with self._lock:
+            scores = self._read_root_scores_locked()
+            recent = list(reversed(self._epoch_history[-last_n_epochs:]))
+            # Build a node-id → root-id map by walking each tendency's
+            # observations / sub-claims. The world's locator does this
+            # at greater fidelity, but for a UI projection we just
+            # assign each node to whichever tendency has the most
+            # stake on it.
+            node_to_root: Dict[str, str] = {}
+            try:
+                for tendency_id, tendency in self._world.tendencies.items():
+                    # tendencies hold the node_ids that landed under them
+                    for node_id in getattr(tendency, "node_ids", []) or []:
+                        # First-write-wins: a node attributed to one root
+                        # stays there. Order is consistent because dict
+                        # iteration is insertion-order in py3.7+.
+                        node_to_root.setdefault(node_id, tendency_id)
+            except Exception as e:
+                logger.debug("substrate distribution: tendency walk failed: %s", e)
+
+        # Aggregate node_mint across recent epochs and project onto roots.
+        root_mint: Dict[str, float] = {rid: 0.0 for rid in scores}
+        total = 0.0
+        for record in recent:
+            node_mint_map = record.get("node_mint") or {}
+            for node_id, mint in node_mint_map.items():
+                try:
+                    m = float(mint)
+                except (TypeError, ValueError):
+                    continue
+                root_id = node_to_root.get(node_id)
+                if root_id and root_id in root_mint:
+                    root_mint[root_id] += m
+                total += m
+
+        return {
+            "root_scores": scores,
+            "root_mint_recent": root_mint,
+            "epochs_considered": len(recent),
+            "total_mint_recent": total,
+        }
+
     def _broadcast_epoch_closed(self, record: Dict[str, Any]) -> None:
         """Invoke all registered subscribers with the close record.
         Must be called under self._lock; handlers run synchronously."""

@@ -713,6 +713,28 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        # Phase 12.19: substrate distribution — current root scores +
+        # per-root mint over recent epochs. Powers the constellation
+        # visualization. Empty result is fine if autonet isn't running
+        # yet or no epochs have closed.
+        if msg_type == "rpb_substrate_distribution":
+            try:
+                last_n = int(msg.get("last_n_epochs", 10))
+                autonet = getattr(self.runtime, "autonet", None)
+                service = getattr(autonet, "_service", None) if autonet else None
+                world_service = getattr(service, "_world_service", None) if service else None
+                if world_service is None:
+                    return {"msg_id": msg_id, "ok": True, "result": {
+                        "root_scores": {},
+                        "root_mint_recent": {},
+                        "epochs_considered": 0,
+                        "total_mint_recent": 0.0,
+                    }}
+                result = world_service.read_substrate_distribution(last_n_epochs=last_n)
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         if msg_type == "rpb_agent_training":
             # Substrate-native: returns reputation + ATN balance for the
             # agent. The pre-substrate "training tokens / unclaimed rewards"
