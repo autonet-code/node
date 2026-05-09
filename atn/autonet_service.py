@@ -281,7 +281,11 @@ class AutonetBridge:
 
         listen_port = cfg.p2p.listen_port if cfg else 0
         listen_host = cfg.p2p.listen_host if cfg else "0.0.0.0"
-        bootstrap = cfg.p2p.bootstrap_peers if cfg else []
+        # Phase 12: a fresh install with no user-configured bootstrap
+        # falls back to community-published bootstrap peers, so daemons
+        # can join without manual multiaddr configuration.
+        from nodes.common.peer_attribution import resolve_bootstrap_peers
+        bootstrap = resolve_bootstrap_peers(cfg.p2p.bootstrap_peers if cfg else [])
         advertise_interval = cfg.p2p.capability_advertise_interval if cfg else 60
 
         node_id = f"atn-{self.state.wallet_address[:8]}" if self.state.wallet_address else "atn-daemon"
@@ -638,6 +642,7 @@ class AutonetBridge:
             # both before attaching.
             asyncio.create_task(self._wire_event_gossip_when_ready())
             asyncio.create_task(self._wire_chain_submission_when_ready())
+            asyncio.create_task(self._wire_peer_attribution_when_ready())
             await self._emit("AUTONET_STARTED")
             return {"status": "started"}
 
@@ -682,6 +687,71 @@ class AutonetBridge:
             return out
 
         return _resolve
+
+    async def _wire_peer_attribution_when_ready(self, timeout: float = 30.0) -> None:
+        """Build the libp2p-PeerId ↔ on-chain-agent attribution table
+        once the chain is reachable. No-op if substrate_address is
+        unset (offline mode).
+
+        The attribution table powers per-peer authorization: gossipped
+        peers whose PeerId isn't on the chain are unregistered and can
+        be ignored for consensus purposes.
+        """
+        rpb_cfg = self.config
+        substrate_addr = (
+            getattr(rpb_cfg, "substrate_address", "")
+            or getattr(rpb_cfg, "rpb_contract_address", "")
+        )
+        if not substrate_addr or not rpb_cfg.rpc_url:
+            log.debug("peer attribution: substrate_address/rpc_url unset, skipping")
+            return
+
+        # Wait briefly for the libp2p host to come up. Attribution can
+        # work without it (we can still read the chain) but storing
+        # it on the host is the natural place for downstream lookups.
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            host_ready = (
+                self._p2p_host is not None
+                and getattr(self._p2p_host, "_ready_event", None) is not None
+                and self._p2p_host._ready_event.is_set()
+            )
+            if host_ready:
+                break
+            await asyncio.sleep(0.5)
+
+        try:
+            from web3 import Web3
+            from pathlib import Path
+            import json as _json
+
+            w3 = Web3(Web3.HTTPProvider(rpb_cfg.rpc_url))
+            artifact_path = Path(
+                "C:/code/autonet/artifacts/contracts/core/Substrate.sol/Substrate.json"
+            )
+            try:
+                with artifact_path.open("r", encoding="utf-8") as fh:
+                    abi = _json.load(fh)["abi"]
+            except FileNotFoundError:
+                # Production install (no hardhat artifacts): fall back to the
+                # inline ABI from atn.on_chain.
+                from atn.on_chain import SUBSTRATE_ABI as abi  # type: ignore
+
+            contract = w3.eth.contract(
+                address=Web3.to_checksum_address(substrate_addr),
+                abi=abi,
+            )
+
+            from nodes.common.peer_attribution import PeerAttribution
+            attribution = PeerAttribution(contract)
+            n = attribution.refresh()
+            log.info("Peer attribution wired: %d agents on chain", n)
+
+            # Stash on the host so downstream consumers can use it.
+            if self._p2p_host is not None:
+                self._p2p_host._peer_attribution = attribution
+        except Exception as e:
+            log.warning("peer attribution attach failed: %s", e)
 
     async def _wire_chain_submission_when_ready(self, timeout: float = 30.0) -> None:
         """Attach chain submission once the federated-close driver is
