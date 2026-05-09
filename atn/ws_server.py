@@ -770,7 +770,10 @@ class WebSocketBridge:
                     return {"msg_id": msg_id, "ok": False, "error": "Substrate not configured"}
                 agents_list = await svc.get_all_registered_agents()
 
-                # Build lookup: on-chain address → local agent metadata
+                # Build lookup: on-chain address → local agent metadata.
+                # Phase 12: agents are always identified by their own
+                # daemon-held address — no special-case for the root
+                # agent or the connected wallet.
                 local_meta = {}
                 for defn in self.runtime.registry._agents.values():
                     if defn.identity and defn.identity.address:
@@ -782,26 +785,6 @@ class WebSocketBridge:
                             "model": defn.model or "",
                             "is_online": True,
                         }
-                # Also check the connected wallet (root agent's address may
-                # be the user's wallet, not the generated identity address)
-                connected_wallet = getattr(
-                    getattr(self.runtime, "autonet", None),
-                    "state", None
-                )
-                wallet_addr = getattr(connected_wallet, "wallet_address", "") if connected_wallet else ""
-                if wallet_addr:
-                    wallet_lower = wallet_addr.lower()
-                    if wallet_lower not in local_meta:
-                        # Root agent uses the wallet address on-chain
-                        root = self.runtime.registry._agents.get("orchestrator")
-                        if root:
-                            local_meta[wallet_lower] = {
-                                "display_name": root.name,
-                                "display_description": root.description,
-                                "agent_type": getattr(root, "agent_type", ""),
-                                "model": root.model or "",
-                                "is_online": True,
-                            }
 
                 # Enrich on-chain records with local metadata
                 for agent in agents_list:
