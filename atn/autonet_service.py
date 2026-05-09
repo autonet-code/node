@@ -78,6 +78,10 @@ class AutonetState:
     dao_address: str = ""
     rpb_contract_address: str = ""    # Legacy: pre-substrate RPB; empty post-redeploy
     substrate_address: str = ""        # Phase 12: deployed Substrate.sol
+    # Native gas token metadata (mirrored from config so the UI can label
+    # balances without hardcoding 'ETH').
+    gas_symbol: str = "XTZ"
+    gas_decimals: int = 18
     registry_address: str = ""
     token_address: str = ""
     economy_address: str = ""
@@ -120,6 +124,8 @@ class AutonetState:
             "dao_address": self.dao_address,
             "rpb_contract_address": self.rpb_contract_address,
             "substrate_address": self.substrate_address,
+            "gas_symbol": self.gas_symbol,
+            "gas_decimals": self.gas_decimals,
             "registry_address": self.registry_address,
             "token_address": self.token_address,
             "economy_address": self.economy_address,
@@ -194,14 +200,16 @@ class AutonetBridge:
 
     def _discover_jurisdiction(self) -> None:
         """Discover all contract addresses from the DAO Governor at startup."""
-        # Always surface substrate_address from config — it's seeded from
-        # registry.json and doesn't depend on the on-chain Governor being
-        # reachable. (The block below may fail if the Governor's Registry
-        # is unresponsive or the network is down; substrate visibility
-        # shouldn't depend on that.)
+        # Always surface substrate_address + gas token info from config —
+        # they're seeded from registry.json and don't depend on the
+        # on-chain Governor being reachable. (The block below may fail if
+        # the Governor's Registry is unresponsive or the network is down;
+        # these basics shouldn't depend on that.)
         self.state.substrate_address = getattr(
             self.config, "substrate_address", ""
         )
+        self.state.gas_symbol = getattr(self.config, "gas_symbol", "XTZ") or "XTZ"
+        self.state.gas_decimals = int(getattr(self.config, "gas_decimals", 18) or 18)
         try:
             from .on_chain import discover_jurisdiction
             discovered = discover_jurisdiction(

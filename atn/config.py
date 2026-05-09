@@ -121,6 +121,10 @@ class RPBConfig:
     # Blockchain connection — defaults from atn.jurisdiction
     rpc_url: str = ""                   # Defaults to jurisdiction.RPC_URL
     chain_id: int = 0                   # Defaults to jurisdiction.CHAIN_ID
+    # Native gas token — published so the UI can label balances correctly
+    # without hardcoding "ETH". Defaults match Etherlink Shadownet.
+    gas_symbol: str = "XTZ"
+    gas_decimals: int = 18
     private_key: str = ""               # Hex private key for signing attestation txns
     # Wallet is managed externally (MetaMask etc.) — we just track the address
     wallet_address: str = ""            # Connected wallet address (empty = not connected)
@@ -228,6 +232,10 @@ def _load_registry_seed(jurisdiction_id: str = "autonet") -> dict[str, Any]:
             seed["rpc_url"] = net["rpc_url"]
         if net.get("chain_id"):
             seed["chain_id"] = net["chain_id"]
+        if net.get("gas_symbol"):
+            seed["gas_symbol"] = net["gas_symbol"]
+        if net.get("gas_decimals") is not None:
+            seed["gas_decimals"] = int(net["gas_decimals"])
         contracts = entry.get("contracts", {})
         if contracts.get("dao"):
             seed["dao_address"] = contracts["dao"]
@@ -421,6 +429,8 @@ def load_config(path: Path | None = None) -> ATNConfig:
         config_path=resolved.get("config_path", ""),
         rpc_url=resolved.get("rpc_url", ""),
         chain_id=resolved.get("chain_id", 0),
+        gas_symbol=resolved.get("gas_symbol", "XTZ"),
+        gas_decimals=int(resolved.get("gas_decimals", 18)),
         private_key=resolved.get("private_key", ""),
         wallet_address=resolved.get("wallet_address", ""),
         dao_address=resolved.get("dao_address", ""),

@@ -457,11 +457,12 @@ class OnChainService:
             return None
 
     async def get_agent_balances(self, address: str) -> dict[str, Any] | None:
-        """Read reputation + ATN balance for an agent.
+        """Read reputation + ATN balance + native gas balance for an agent.
 
         Reputation is the soulbound ``agentMintTotal`` (renamed
         semantically). ATN is the transferable ERC20-shaped balance
-        on the same contract.
+        on the same contract. Native gas balance comes from the chain
+        directly — agents need it to pay for their own consensus txs.
         """
         try:
             w3 = self._get_web3()
@@ -469,10 +470,12 @@ class OnChainService:
             addr = w3.to_checksum_address(address)
             reputation = contract.functions.agentReputation(addr).call()
             atn = contract.functions.balanceOf(addr).call()
+            gas_balance = w3.eth.get_balance(addr)
             return {
                 "address": addr,
                 "reputation": str(reputation),
                 "atn_balance": str(atn),
+                "gas_balance": str(gas_balance),
             }
         except Exception as e:
             log.debug("Failed to read balances for %s: %s", address, e)
