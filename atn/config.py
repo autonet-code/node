@@ -411,10 +411,11 @@ def load_config(path: Path | None = None) -> ATNConfig:
     merged.update(rpb_raw)
     merged.update(autonet_raw)
     resolved = _resolve_env(merged)
-    # Enable automatically if dao_address + rpc_url are present
+    # Phase 12: autonet starts on registration, not on boot — having a
+    # dao_address/rpc_url configured is necessary but no longer sufficient.
+    # Users who want eager startup (bootstrap nodes, services that always
+    # participate) set ``autonet.enabled: true`` explicitly.
     enabled = resolved.get("enabled", False)
-    if not enabled and resolved.get("dao_address") and resolved.get("rpc_url"):
-        enabled = True
     config.autonet = RPBConfig(
         enabled=enabled,
         config_path=resolved.get("config_path", ""),
