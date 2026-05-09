@@ -76,7 +76,8 @@ class AutonetState:
     gpu_memory_mb: float = 0.0
     # Contract addresses (discovered from chain)
     dao_address: str = ""
-    rpb_contract_address: str = ""
+    rpb_contract_address: str = ""    # Legacy: pre-substrate RPB; empty post-redeploy
+    substrate_address: str = ""        # Phase 12: deployed Substrate.sol
     registry_address: str = ""
     token_address: str = ""
     economy_address: str = ""
@@ -118,6 +119,7 @@ class AutonetState:
             "gpu_memory_mb": self.gpu_memory_mb,
             "dao_address": self.dao_address,
             "rpb_contract_address": self.rpb_contract_address,
+            "substrate_address": self.substrate_address,
             "registry_address": self.registry_address,
             "token_address": self.token_address,
             "economy_address": self.economy_address,
@@ -205,6 +207,12 @@ class AutonetBridge:
             # Populate state for WS API
             self.state.dao_address = self.config.dao_address
             self.state.rpb_contract_address = self.config.rpb_contract_address
+            # substrate_address is set from registry.json by the config
+            # builder (not the on-chain Registry, since the Governor's
+            # registry doesn't index substrate yet). Mirror it here.
+            self.state.substrate_address = getattr(
+                self.config, "substrate_address", ""
+            )
             self.state.registry_address = self.config.registry_address
             self.state.token_address = self.config.token_address
             self.state.economy_address = self.config.economy_address
