@@ -657,12 +657,20 @@ class WorldService:
         *,
         max_results: int = 16,
         max_distance: Optional[float] = None,
+        include_visualization_fields: bool = False,
+        recent_mint_epochs: int = 5,
     ) -> List[Dict[str, Any]]:
         """Coordinate-distance retrieval against the persistent world.
 
-        Returns a list of dicts: ``{node_id, label, distance, score}``.
-        Uses the engine's ``default_locator`` (coordinate proximity with
-        a keyword fallback).
+        Returns a list of dicts. With ``include_visualization_fields``
+        the dict is enriched with the absolute charter coordinates,
+        ``parent_id``, and ``recent_mint`` aggregated across the last
+        ``recent_mint_epochs`` closed epochs — exactly what a 2D
+        projection layer needs to render a node without doing a second
+        round-trip per node.
+
+        Uses the engine's ``default_locator`` (coordinate proximity
+        with a keyword fallback).
         """
         from world_model.generalized import CoordinateLocator
         with self._lock:
@@ -671,6 +679,15 @@ class WorldService:
                 max_results=max_results,
             )
             region = locator(self._world, tuple(coords))
+            recent_mint_map: Dict[str, float] = {}
+            if include_visualization_fields and recent_mint_epochs > 0:
+                recent = list(reversed(self._epoch_history[-recent_mint_epochs:]))
+                for record in recent:
+                    for nid, mint in (record.get("node_mint") or {}).items():
+                        try:
+                            recent_mint_map[nid] = recent_mint_map.get(nid, 0.0) + float(mint)
+                        except (TypeError, ValueError):
+                            continue
             out: List[Dict[str, Any]] = []
             for tendency_id, node_id, distance in region:
                 tendency = self._world.tendencies.get(tendency_id)
@@ -679,14 +696,159 @@ class WorldService:
                 node = tendency.tree.get_node(node_id)
                 if node is None:
                     continue
-                out.append({
+                entry: Dict[str, Any] = {
                     "node_id": node_id,
                     "tendency_id": tendency_id,
                     "label": getattr(node, "content", "") or "",
                     "distance": distance,
                     "score": getattr(node, "net_score", 0.0),
-                })
+                }
+                if include_visualization_fields:
+                    # Absolute charter coordinates of the node's content.
+                    # Falls back to the tendency's anchor when the node
+                    # itself doesn't carry coords (rare; root claims).
+                    content = getattr(node, "content", None)
+                    node_coords = getattr(content, "coords", None)
+                    if node_coords is None:
+                        node_coords = getattr(tendency, "anchor", None)
+                    if node_coords is not None:
+                        entry["coords"] = list(node_coords)
+                    entry["parent_id"] = getattr(node, "parent_id", None)
+                    entry["recent_mint"] = recent_mint_map.get(node_id, 0.0)
+                out.append(entry)
             return out
+
+    def list_nodes_for_visualization(
+        self,
+        *,
+        max_nodes: int = 200,
+        recent_mint_epochs: int = 5,
+        bin_size: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Return all nodes (or spatial bins) suitable for rendering.
+
+        Unlike ``locate`` (which retrieves around a single coord point),
+        this returns a global view: the top-N nodes by recent mint plus
+        their charter coordinates and attribution-ready fields.
+
+        ``bin_size`` enables density-first LOD: when set, nodes are
+        grouped into spatial bins of side ``bin_size`` in charter
+        space; one aggregate marker is returned per non-empty bin
+        instead of individual nodes. Bin coords are the centroid of
+        their members; ``count`` and ``total_recent_mint`` are the
+        bin's aggregate. Used at low zoom levels to avoid sending
+        thousands of dots.
+
+        Returns:
+          {
+            "mode": "nodes" | "bins",
+            "items": [
+              {coords, recent_mint, score, parent_id, ...} for nodes
+              or {coords, count, total_recent_mint, ...} for bins
+            ],
+            "epochs_considered": int,
+          }
+        """
+        with self._lock:
+            recent = list(reversed(self._epoch_history[-recent_mint_epochs:]))
+            recent_mint_map: Dict[str, float] = {}
+            for record in recent:
+                for nid, mint in (record.get("node_mint") or {}).items():
+                    try:
+                        recent_mint_map[nid] = recent_mint_map.get(nid, 0.0) + float(mint)
+                    except (TypeError, ValueError):
+                        continue
+
+            # Walk every tendency's tree, collect node entries.
+            entries: List[Dict[str, Any]] = []
+            for tendency_id, tendency in self._world.tendencies.items():
+                tree = getattr(tendency, "tree", None)
+                if tree is None:
+                    continue
+                # Iterate all nodes in the tree. Different tree
+                # implementations expose iteration differently; try a
+                # few common shapes.
+                nodes_iter = (
+                    getattr(tree, "all_nodes", None)
+                    or getattr(tree, "nodes", None)
+                    or getattr(tree, "_nodes", None)
+                )
+                if callable(nodes_iter):
+                    try:
+                        node_list = list(nodes_iter())
+                    except Exception:
+                        node_list = []
+                elif nodes_iter is not None:
+                    try:
+                        node_list = list(nodes_iter.values()) if isinstance(nodes_iter, dict) else list(nodes_iter)
+                    except Exception:
+                        node_list = []
+                else:
+                    node_list = []
+                for node in node_list:
+                    if node is None:
+                        continue
+                    node_id = getattr(node, "id", None)
+                    if node_id is None:
+                        continue
+                    content = getattr(node, "content", None)
+                    coords = getattr(content, "coords", None)
+                    if coords is None:
+                        coords = getattr(tendency, "anchor", None)
+                    if coords is None:
+                        continue
+                    entries.append({
+                        "node_id": node_id,
+                        "tendency_id": tendency_id,
+                        "label": (content if isinstance(content, str) else getattr(content, "text", "")) or "",
+                        "coords": list(coords),
+                        "score": getattr(node, "net_score", 0.0),
+                        "parent_id": getattr(node, "parent_id", None),
+                        "recent_mint": recent_mint_map.get(node_id, 0.0),
+                    })
+
+        # Sort by recent mint desc, take top N for visualization.
+        entries.sort(key=lambda e: e["recent_mint"], reverse=True)
+        entries = entries[:max_nodes]
+
+        if bin_size is None or bin_size <= 0:
+            return {
+                "mode": "nodes",
+                "items": entries,
+                "epochs_considered": len(recent),
+            }
+
+        # Density-first LOD: bin in charter space.
+        bins: Dict[Tuple[int, ...], Dict[str, Any]] = {}
+        for entry in entries:
+            coords = entry["coords"]
+            key = tuple(int(c // bin_size) for c in coords)
+            bin_entry = bins.get(key)
+            if bin_entry is None:
+                bin_entry = {
+                    "coords": list(coords),  # running mean
+                    "count": 1,
+                    "total_recent_mint": entry["recent_mint"],
+                    "score_sum": entry["score"],
+                }
+                bins[key] = bin_entry
+            else:
+                n = bin_entry["count"]
+                bin_entry["coords"] = [
+                    (bin_entry["coords"][i] * n + coords[i]) / (n + 1)
+                    for i in range(len(coords))
+                ]
+                bin_entry["count"] = n + 1
+                bin_entry["total_recent_mint"] += entry["recent_mint"]
+                bin_entry["score_sum"] += entry["score"]
+        for bin_entry in bins.values():
+            bin_entry["mean_score"] = bin_entry["score_sum"] / bin_entry["count"]
+            del bin_entry["score_sum"]
+        return {
+            "mode": "bins",
+            "items": list(bins.values()),
+            "epochs_considered": len(recent),
+        }
 
     # ------------------------------------------------------------------
     # Read-only views

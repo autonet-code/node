@@ -713,6 +713,31 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        # Phase 12.20: substrate nodes — list visualization-ready nodes
+        # (coords, recent_mint, score, parent_id) with optional spatial
+        # binning for low-LOD views. Powers the substrate visualization.
+        if msg_type == "rpb_substrate_nodes":
+            try:
+                max_nodes = int(msg.get("max_nodes", 200))
+                bin_size_raw = msg.get("bin_size")
+                bin_size = float(bin_size_raw) if bin_size_raw is not None else None
+                recent_n = int(msg.get("recent_mint_epochs", 5))
+                autonet = getattr(self.runtime, "autonet", None)
+                service = getattr(autonet, "_service", None) if autonet else None
+                world_service = getattr(service, "_world_service", None) if service else None
+                if world_service is None:
+                    return {"msg_id": msg_id, "ok": True, "result": {
+                        "mode": "nodes", "items": [], "epochs_considered": 0,
+                    }}
+                result = world_service.list_nodes_for_visualization(
+                    max_nodes=max_nodes,
+                    recent_mint_epochs=recent_n,
+                    bin_size=bin_size,
+                )
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         # Phase 12.19: substrate distribution — current root scores +
         # per-root mint over recent epochs. Powers the constellation
         # visualization. Empty result is fine if autonet isn't running
