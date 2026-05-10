@@ -715,8 +715,32 @@ class WorldService:
                         entry["coords"] = list(node_coords)
                     entry["parent_id"] = getattr(node, "parent_id", None)
                     entry["recent_mint"] = recent_mint_map.get(node_id, 0.0)
+                    # Per-tendency scores: each charter root contributes
+                    # its own intrinsic score, computed via the tendency-
+                    # aware walk so cross-tendency edges don't pollute it.
+                    entry["scores"] = self._per_tendency_scores_locked(node)
                 out.append(entry)
             return out
+
+    def _per_tendency_scores_locked(self, node: Any) -> Dict[str, float]:
+        """Compute the node's score under each charter tendency.
+
+        Caller must hold ``self._lock``. Returns a dict keyed by
+        tendency_id with the tendency-tree-aware intrinsic score for
+        the node. Substrate-honest replacement for the single
+        ``net_score`` scalar — a node lives in 6D charter space and
+        has six concurrent verdicts.
+        """
+        from world_model.generalized.tendency import _intrinsic_score_in_tendency
+        scores: Dict[str, float] = {}
+        for tendency_id in self._world.tendencies:
+            try:
+                scores[tendency_id] = float(
+                    _intrinsic_score_in_tendency(node, tendency_id)
+                )
+            except Exception:
+                scores[tendency_id] = 0.0
+        return scores
 
     def list_nodes_for_visualization(
         self,
@@ -803,6 +827,7 @@ class WorldService:
                         "label": (content if isinstance(content, str) else getattr(content, "text", "")) or "",
                         "coords": list(coords),
                         "score": getattr(node, "net_score", 0.0),
+                        "scores": self._per_tendency_scores_locked(node),
                         "parent_id": getattr(node, "parent_id", None),
                         "recent_mint": recent_mint_map.get(node_id, 0.0),
                     })
