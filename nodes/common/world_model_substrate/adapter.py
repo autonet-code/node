@@ -56,24 +56,39 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 CHARTER = [
+    # ``veto_floor`` controls the structural prune threshold per
+    # tendency: a child whose tendency-tree intrinsic_score falls
+    # below this value is pruned outright via prune_veto_negatives.
+    # ``None`` = no veto pruning (the engine's veto_shaped flag stays
+    # off for that tendency). The current default disables veto
+    # pruning everywhere so substrate behavior is unchanged from prior
+    # phases. To enable per-tendency veto in the future, set a finite
+    # negative number (correctness was historically -1.0 in the engine
+    # default; tightening to 0 makes it stricter).
     {"id": "life_precious",
      "thesis": "Life is precious and should be preserved.",
-     "axis_index": 0},
+     "axis_index": 0,
+     "veto_floor": None},
     {"id": "self_preservation",
      "thesis": "The system should preserve its own continuity.",
-     "axis_index": 1},
+     "axis_index": 1,
+     "veto_floor": None},
     {"id": "promotion_of_intelligence",
      "thesis": "Intelligence in any form should be promoted.",
-     "axis_index": 2},
+     "axis_index": 2,
+     "veto_floor": None},
     {"id": "evolution",
      "thesis": "Forward advancement of capability is desirable.",
-     "axis_index": 3},
+     "axis_index": 3,
+     "veto_floor": None},
     {"id": "correctness",
      "thesis": "Work should achieve what it claims and avoid bugs.",
-     "axis_index": 4},
+     "axis_index": 4,
+     "veto_floor": None},
     {"id": "simplicity",
      "thesis": "Solutions should be minimal and direct, not over-engineered.",
-     "axis_index": 5},
+     "axis_index": 5,
+     "veto_floor": None},
 ]
 N_DIMS = len(CHARTER)
 
@@ -99,7 +114,8 @@ def build_charter_world(bandwidth: float = 1.5, embedding_dim: int = 0) -> World
         i = entry["axis_index"]
         head = tuple(1.0 if j == i else 0.0 for j in range(N_DIMS))
         anchor = head + (0.0,) * embedding_dim
-        world.add_tendency(GeneralizedTendency(
+        veto_floor = entry.get("veto_floor")
+        kwargs: Dict[str, Any] = dict(
             id=entry["id"],
             thesis=entry["thesis"],
             anchor=anchor,
@@ -107,7 +123,11 @@ def build_charter_world(bandwidth: float = 1.5, embedding_dim: int = 0) -> World
             budget=1.0,
             bandwidth=bandwidth,
             smooth_promotion=True,
-        ))
+        )
+        if veto_floor is not None:
+            kwargs["veto_shaped"] = True
+            kwargs["veto_score_floor"] = float(veto_floor)
+        world.add_tendency(GeneralizedTendency(**kwargs))
     return world
 
 
