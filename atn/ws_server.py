@@ -722,6 +722,26 @@ class WebSocketBridge:
                 bin_size_raw = msg.get("bin_size")
                 bin_size = float(bin_size_raw) if bin_size_raw is not None else None
                 recent_n = int(msg.get("recent_mint_epochs", 5))
+                # Phase 12.26b — viewport-scoped lazy load. The frontend
+                # passes (region_xy, region_radius) for the visible disk
+                # and/or parent_id when drilled into a subtree.
+                region_xy_raw = msg.get("region_xy")
+                region_xy = None
+                if isinstance(region_xy_raw, (list, tuple)) and len(region_xy_raw) == 2:
+                    try:
+                        region_xy = (float(region_xy_raw[0]), float(region_xy_raw[1]))
+                    except (TypeError, ValueError):
+                        region_xy = None
+                region_radius_raw = msg.get("region_radius")
+                region_radius = (
+                    float(region_radius_raw)
+                    if region_radius_raw is not None else None
+                )
+                parent_id_raw = msg.get("parent_id")
+                parent_id = (
+                    str(parent_id_raw)
+                    if isinstance(parent_id_raw, str) and parent_id_raw else None
+                )
                 autonet = getattr(self.runtime, "autonet", None)
                 service = getattr(autonet, "_service", None) if autonet else None
                 world_service = getattr(service, "_world_service", None) if service else None
@@ -733,6 +753,39 @@ class WebSocketBridge:
                     max_nodes=max_nodes,
                     recent_mint_epochs=recent_n,
                     bin_size=bin_size,
+                    region_xy=region_xy,
+                    region_radius=region_radius,
+                    parent_id=parent_id,
+                )
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        # Per-subtree PCA projection — returns the same shape as
+        # rpb_substrate_nodes (mode="nodes") but restricted to the
+        # transitive descendants of parent_id and projected onto axes
+        # fit on only that subset. Used by zoom-driven exploration:
+        # as the user dives into a cluster, the frontend swaps the
+        # network-level projection for this one.
+        if msg_type == "rpb_substrate_subtree_projection":
+            try:
+                parent_id_raw = msg.get("parent_id")
+                if not isinstance(parent_id_raw, str) or not parent_id_raw:
+                    return {"msg_id": msg_id, "ok": False, "error": "parent_id required"}
+                max_nodes = int(msg.get("max_nodes", 200))
+                recent_n = int(msg.get("recent_mint_epochs", 5))
+                autonet = getattr(self.runtime, "autonet", None)
+                service = getattr(autonet, "_service", None) if autonet else None
+                world_service = getattr(service, "_world_service", None) if service else None
+                if world_service is None:
+                    return {"msg_id": msg_id, "ok": True, "result": {
+                        "mode": "nodes", "items": [], "epochs_considered": 0,
+                        "parent_id": parent_id_raw,
+                    }}
+                result = world_service.compute_subtree_projection(
+                    parent_id_raw,
+                    max_nodes=max_nodes,
+                    recent_mint_epochs=recent_n,
                 )
                 return {"msg_id": msg_id, "ok": True, "result": result}
             except Exception as e:

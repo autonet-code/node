@@ -131,3 +131,77 @@ def project_topic_2d(
     for i, nid in enumerate(node_ids):
         out[nid] = (float(coords_2d[i, 0]), float(coords_2d[i, 1]))
     return out
+
+
+def assign_topic_clusters(
+    topic_xy: Dict[str, Tuple[float, float]],
+    *,
+    merge_radius: float = 0.28,
+    previous_clusters: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Single-link proximity merge in topic-xy space.
+
+    Each node falls into the existing cluster whose center is within
+    ``merge_radius`` (Euclidean, in normalized topic-xy units), or
+    seeds a new one. Iteration order is sorted by node_id so the
+    result is deterministic across calls with the same input.
+
+    ``previous_clusters`` keeps cluster ids stable across recomputes:
+    when a freshly seeded cluster contains nodes that previously
+    shared a cluster id, that id is reused instead of minting a new
+    one. Falls back to monotonically-increasing ``c0``, ``c1``, ...
+
+    Returns ``{node_id: cluster_id}``.
+    """
+    if not topic_xy:
+        return {}
+
+    sorted_ids = sorted(topic_xy.keys())
+    centers: Dict[str, Tuple[float, float]] = {}
+    members: Dict[str, list[str]] = {}
+    assignments: Dict[str, str] = {}
+    used_prev_ids: set[str] = set()
+    next_id = 0
+    r2 = merge_radius * merge_radius
+
+    def _new_cluster_id(seed_node: str) -> str:
+        """Pick a stable id — either the seed's prior cluster (if not
+        yet reused) or a fresh ``c{N}``."""
+        nonlocal next_id
+        if previous_clusters is not None:
+            prev = previous_clusters.get(seed_node)
+            if prev is not None and prev not in used_prev_ids:
+                used_prev_ids.add(prev)
+                return prev
+        while True:
+            cid = f"c{next_id}"
+            next_id += 1
+            if cid not in used_prev_ids:
+                return cid
+
+    for nid in sorted_ids:
+        x, y = topic_xy[nid]
+        best_cid = None
+        best_d2 = float("inf")
+        for cid, (cx, cy) in centers.items():
+            dx = x - cx
+            dy = y - cy
+            d2 = dx * dx + dy * dy
+            if d2 <= r2 and d2 < best_d2:
+                best_cid = cid
+                best_d2 = d2
+        if best_cid is None:
+            best_cid = _new_cluster_id(nid)
+            members[best_cid] = []
+            centers[best_cid] = (x, y)
+        members[best_cid].append(nid)
+        # Online mean update.
+        m = members[best_cid]
+        n = len(m)
+        cx, cy = centers[best_cid]
+        cx = cx + (x - cx) / n
+        cy = cy + (y - cy) / n
+        centers[best_cid] = (cx, cy)
+        assignments[nid] = best_cid
+
+    return assignments

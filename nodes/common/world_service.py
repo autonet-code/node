@@ -26,6 +26,7 @@ import json
 import logging
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -116,6 +117,16 @@ class WorldService:
         # stable across epochs (PCA's eigenvectors are unique up to a
         # sign, which would otherwise flip the layout).
         self._last_topic_xy: Dict[str, Any] = {}
+        # Stable cluster_id per node, recomputed alongside topic_xy.
+        # Persists across calls so the frontend can rely on the same
+        # cluster_id for the same node across viewport refreshes.
+        self._last_clusters: Dict[str, str] = {}
+
+        # Per-subtree PCA projections, keyed by (parent_id, epoch_count).
+        # Bounded LRU; epoch_count is len(self._epoch_history) at compute
+        # time, so a new close invalidates lookups by changing the key.
+        self._subtree_projection_cache: "OrderedDict[Tuple[str, int], Dict[str, Any]]" = OrderedDict()
+        self._subtree_projection_cache_max = 64
 
         # Phase 4: Subscribers receive close records (for WS push,
         # logging, downstream chain reporters in Phase 5).
@@ -719,6 +730,9 @@ class WorldService:
                     # its own intrinsic score, computed via the tendency-
                     # aware walk so cross-tendency edges don't pollute it.
                     entry["scores"] = self._per_tendency_scores_locked(node)
+                    cid = self._last_clusters.get(node_id)
+                    if cid is not None:
+                        entry["cluster_id"] = cid
                 out.append(entry)
             return out
 
@@ -740,6 +754,67 @@ class WorldService:
                     return list(coords)
         anchor = getattr(tendency, "anchor", None)
         return list(anchor) if anchor is not None else None
+
+    @staticmethod
+    def _iter_tree_nodes(tree: Any) -> List[Any]:
+        """Best-effort node enumeration across Tree implementations.
+
+        Tries ``all_nodes`` first (the canonical Tree class), then a
+        few fallback attribute names used by alternate implementations
+        and serialized stand-ins.
+        """
+        nodes_iter = (
+            getattr(tree, "all_nodes", None)
+            or getattr(tree, "iter_nodes", None)
+            or getattr(tree, "nodes", None)
+            or getattr(tree, "_nodes", None)
+        )
+        if callable(nodes_iter):
+            try:
+                return list(nodes_iter())
+            except Exception:
+                return []
+        if nodes_iter is None:
+            return []
+        try:
+            if isinstance(nodes_iter, dict):
+                return list(nodes_iter.values())
+            return list(nodes_iter)
+        except Exception:
+            return []
+
+    def _descendants_of_locked(self, parent_id: str) -> set[str]:
+        """Walk every tendency tree to collect transitive descendants
+        of ``parent_id``. Returns a set of node ids.
+
+        Used by the viewport-scoped query when the user has drilled
+        into a subtree. Caller must hold ``self._lock``.
+        """
+        descendants: set[str] = set()
+        parents: Dict[str, str] = {}
+        for tendency in self._world.tendencies.values():
+            tree = getattr(tendency, "tree", None)
+            if tree is None:
+                continue
+            for n in self._iter_tree_nodes(tree):
+                if n is None:
+                    continue
+                nid = getattr(n, "id", None)
+                pid = getattr(n, "parent_id", None)
+                if nid is not None and pid is not None:
+                    parents[nid] = pid
+        # BFS from parent_id through the parent_id -> children inverse.
+        children: Dict[str, list[str]] = {}
+        for nid, pid in parents.items():
+            children.setdefault(pid, []).append(nid)
+        frontier = list(children.get(parent_id, []))
+        while frontier:
+            nid = frontier.pop()
+            if nid in descendants:
+                continue
+            descendants.add(nid)
+            frontier.extend(children.get(nid, []))
+        return descendants
 
     def _per_tendency_scores_locked(self, node: Any) -> Dict[str, float]:
         """Compute the node's score under each charter tendency.
@@ -767,6 +842,9 @@ class WorldService:
         max_nodes: int = 200,
         recent_mint_epochs: int = 5,
         bin_size: Optional[float] = None,
+        region_xy: Optional[Tuple[float, float]] = None,
+        region_radius: Optional[float] = None,
+        parent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Return all nodes (or spatial bins) suitable for rendering.
 
@@ -782,12 +860,25 @@ class WorldService:
         bin's aggregate. Used at low zoom levels to avoid sending
         thousands of dots.
 
+        Lazy-loading hooks (Phase 12.26b):
+          * ``parent_id`` — restrict to direct + transitive descendants
+            of that node. Used when the user drills into a subtree.
+          * ``region_xy`` + ``region_radius`` — restrict to nodes whose
+            ``topic_xy`` falls within ``region_radius`` of ``region_xy``
+            in normalized topic-space. Used as the visualization pans
+            and zooms.
+
+          When both are set, ``parent_id`` is applied first (it's a
+          hard structural filter); the region disk applies on the
+          remaining set. When neither is set, the full top-N global
+          view is returned (legacy behavior).
+
         Returns:
           {
             "mode": "nodes" | "bins",
             "items": [
-              {coords, recent_mint, score, parent_id, ...} for nodes
-              or {coords, count, total_recent_mint, ...} for bins
+              {coords, recent_mint, score, parent_id, cluster_id, ...}
+              or bin aggregates
             ],
             "epochs_considered": int,
           }
@@ -802,33 +893,21 @@ class WorldService:
                     except (TypeError, ValueError):
                         continue
 
+            # Phase 12.26b parent_id filter — pre-compute the descendant
+            # set of the requested anchor so we can skip non-descendants
+            # during the tree walk. Walks the parent_id chain from each
+            # candidate up to either the requested parent or a root.
+            allowed_descendants: Optional[set[str]] = None
+            if parent_id:
+                allowed_descendants = self._descendants_of_locked(parent_id)
+
             # Walk every tendency's tree, collect node entries.
             entries: List[Dict[str, Any]] = []
             for tendency_id, tendency in self._world.tendencies.items():
                 tree = getattr(tendency, "tree", None)
                 if tree is None:
                     continue
-                # Iterate all nodes in the tree. Different tree
-                # implementations expose iteration differently; try a
-                # few common shapes.
-                nodes_iter = (
-                    getattr(tree, "all_nodes", None)
-                    or getattr(tree, "nodes", None)
-                    or getattr(tree, "_nodes", None)
-                )
-                if callable(nodes_iter):
-                    try:
-                        node_list = list(nodes_iter())
-                    except Exception:
-                        node_list = []
-                elif nodes_iter is not None:
-                    try:
-                        node_list = list(nodes_iter.values()) if isinstance(nodes_iter, dict) else list(nodes_iter)
-                    except Exception:
-                        node_list = []
-                else:
-                    node_list = []
-                for node in node_list:
+                for node in self._iter_tree_nodes(tree):
                     if node is None:
                         continue
                     node_id = getattr(node, "id", None)
@@ -838,6 +917,9 @@ class WorldService:
                     # anchor itself, not a substrate node users care to
                     # see in the visualization.
                     if getattr(node, "is_root", False):
+                        continue
+                    if allowed_descendants is not None \
+                            and node_id not in allowed_descendants:
                         continue
                     coords = self._node_coords_locked(node, tendency)
                     if coords is None:
@@ -865,18 +947,52 @@ class WorldService:
         # render nodes by content similarity. Anchor with the
         # previous projection so the layout doesn't flip across runs.
         if entries:
-            from .topic_projection import project_topic_2d
+            from .topic_projection import (
+                assign_topic_clusters,
+                project_topic_2d,
+            )
             topic_xy = project_topic_2d(
                 ((e["node_id"], e["coords"]) for e in entries),
                 charter_dim=6,
                 previous_xy=self._last_topic_xy,
             )
+            # Stable proximity-merge clustering on the projected
+            # coords. Reuses prior cluster ids when their members fall
+            # together again, so the frontend cluster identity persists
+            # across viewport refreshes.
+            clusters = assign_topic_clusters(
+                topic_xy,
+                previous_clusters=self._last_clusters,
+            )
             for entry in entries:
                 xy = topic_xy.get(entry["node_id"])
                 if xy is not None:
                     entry["topic_xy"] = [xy[0], xy[1]]
-            # Update cache for next call's stability anchor.
+                cid = clusters.get(entry["node_id"])
+                if cid is not None:
+                    entry["cluster_id"] = cid
+            # Update caches for the next call.
             self._last_topic_xy = dict(topic_xy)
+            self._last_clusters = dict(clusters)
+
+        # Phase 12.26b region filter — keep only nodes whose topic_xy
+        # falls within the requested disk. Applied AFTER projection
+        # so the cluster ids and topic positions remain consistent
+        # with what neighboring viewports see (we'd otherwise project
+        # different subsets onto different axes per viewport call).
+        if region_xy is not None and region_radius is not None:
+            cx, cy = float(region_xy[0]), float(region_xy[1])
+            r2 = float(region_radius) ** 2
+            kept: List[Dict[str, Any]] = []
+            for entry in entries:
+                xy = entry.get("topic_xy")
+                if xy is None:
+                    continue
+                dx = xy[0] - cx
+                dy = xy[1] - cy
+                if dx * dx + dy * dy <= r2:
+                    kept.append(entry)
+            entries = kept
 
         if bin_size is None or bin_size <= 0:
             return {
@@ -916,6 +1032,125 @@ class WorldService:
             "items": list(bins.values()),
             "epochs_considered": len(recent),
         }
+
+    def compute_subtree_projection(
+        self,
+        parent_id: str,
+        *,
+        max_nodes: int = 200,
+        recent_mint_epochs: int = 5,
+    ) -> Dict[str, Any]:
+        """Per-subtree PCA projection for zoom-driven exploration.
+
+        Returns the same shape as ``list_nodes_for_visualization``'s
+        ``mode="nodes"`` branch, but restricted to ``parent_id``'s
+        transitive descendants and projected onto a fresh PCA fit on
+        only that subset's embedding tails. The subtree's axes are
+        independent of the network-level projection — there's no
+        ``previous_xy`` anchor because the two coordinate systems are
+        not comparable.
+        """
+        with self._lock:
+            cache_key = (parent_id, len(self._epoch_history))
+            cached = self._subtree_projection_cache.get(cache_key)
+            if cached is not None:
+                self._subtree_projection_cache.move_to_end(cache_key)
+                return cached
+
+            recent = list(reversed(self._epoch_history[-recent_mint_epochs:]))
+            recent_mint_map: Dict[str, float] = {}
+            for record in recent:
+                for nid, mint in (record.get("node_mint") or {}).items():
+                    try:
+                        recent_mint_map[nid] = recent_mint_map.get(nid, 0.0) + float(mint)
+                    except (TypeError, ValueError):
+                        continue
+
+            descendants = self._descendants_of_locked(parent_id)
+            if not descendants:
+                empty = {
+                    "mode": "nodes",
+                    "items": [],
+                    "epochs_considered": len(recent),
+                    "parent_id": parent_id,
+                }
+                self._cache_subtree_projection_locked(cache_key, empty)
+                return empty
+
+            entries: List[Dict[str, Any]] = []
+            for tendency_id, tendency in self._world.tendencies.items():
+                tree = getattr(tendency, "tree", None)
+                if tree is None:
+                    continue
+                for node in self._iter_tree_nodes(tree):
+                    if node is None:
+                        continue
+                    node_id = getattr(node, "id", None)
+                    if node_id is None or node_id not in descendants:
+                        continue
+                    if getattr(node, "is_root", False):
+                        continue
+                    coords = self._node_coords_locked(node, tendency)
+                    if coords is None:
+                        continue
+                    label_text = getattr(node, "content", None)
+                    if not isinstance(label_text, str):
+                        label_text = getattr(label_text, "text", "") or ""
+                    entries.append({
+                        "node_id": node_id,
+                        "tendency_id": tendency_id,
+                        "label": label_text,
+                        "coords": coords,
+                        "score": getattr(node, "net_score", 0.0),
+                        "scores": self._per_tendency_scores_locked(node),
+                        "parent_id": getattr(node, "parent_id", None),
+                        "recent_mint": recent_mint_map.get(node_id, 0.0),
+                    })
+
+            entries.sort(key=lambda e: e["recent_mint"], reverse=True)
+            entries = entries[:max_nodes]
+
+            if entries:
+                from .topic_projection import (
+                    assign_topic_clusters,
+                    project_topic_2d,
+                )
+                topic_xy = project_topic_2d(
+                    ((e["node_id"], e["coords"]) for e in entries),
+                    charter_dim=6,
+                    previous_xy=None,
+                )
+                clusters = assign_topic_clusters(
+                    topic_xy,
+                    previous_clusters=None,
+                )
+                for entry in entries:
+                    xy = topic_xy.get(entry["node_id"])
+                    if xy is not None:
+                        entry["topic_xy"] = [xy[0], xy[1]]
+                    cid = clusters.get(entry["node_id"])
+                    if cid is not None:
+                        entry["cluster_id"] = cid
+
+            result = {
+                "mode": "nodes",
+                "items": entries,
+                "epochs_considered": len(recent),
+                "parent_id": parent_id,
+            }
+            self._cache_subtree_projection_locked(cache_key, result)
+            return result
+
+    def _cache_subtree_projection_locked(
+        self,
+        key: Tuple[str, int],
+        value: Dict[str, Any],
+    ) -> None:
+        cache = self._subtree_projection_cache
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > self._subtree_projection_cache_max:
+            cache.popitem(last=False)
 
     # ------------------------------------------------------------------
     # Read-only views
