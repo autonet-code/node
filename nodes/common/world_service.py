@@ -111,6 +111,12 @@ class WorldService:
         self._epoch_events: List[Dict[str, Any]] = []
         self._epoch_history: List[Dict[str, Any]] = []  # closed epochs
 
+        # Phase 12.25: cached 2D topic projection per node id, used to
+        # anchor PCA axes between recomputes so the layout stays
+        # stable across epochs (PCA's eigenvectors are unique up to a
+        # sign, which would otherwise flip the layout).
+        self._last_topic_xy: Dict[str, Any] = {}
+
         # Phase 4: Subscribers receive close records (for WS push,
         # logging, downstream chain reporters in Phase 5).
         self._epoch_subscribers: List[Any] = []
@@ -704,15 +710,9 @@ class WorldService:
                     "score": getattr(node, "net_score", 0.0),
                 }
                 if include_visualization_fields:
-                    # Absolute charter coordinates of the node's content.
-                    # Falls back to the tendency's anchor when the node
-                    # itself doesn't carry coords (rare; root claims).
-                    content = getattr(node, "content", None)
-                    node_coords = getattr(content, "coords", None)
-                    if node_coords is None:
-                        node_coords = getattr(tendency, "anchor", None)
+                    node_coords = self._node_coords_locked(node, tendency)
                     if node_coords is not None:
-                        entry["coords"] = list(node_coords)
+                        entry["coords"] = node_coords
                     entry["parent_id"] = getattr(node, "parent_id", None)
                     entry["recent_mint"] = recent_mint_map.get(node_id, 0.0)
                     # Per-tendency scores: each charter root contributes
@@ -721,6 +721,25 @@ class WorldService:
                     entry["scores"] = self._per_tendency_scores_locked(node)
                 out.append(entry)
             return out
+
+    def _node_coords_locked(self, node: Any, tendency: Any) -> Optional[list]:
+        """Resolve a node's full charter+embedding coordinates.
+
+        Caller must hold ``self._lock``. The node's coords live on its
+        underlying ``Observation``, looked up via ``observation_id`` —
+        ``node.content`` is just the label string. Falls back to the
+        tendency anchor (rare; only if the node sprouted without a
+        backing observation).
+        """
+        obs_id = getattr(node, "observation_id", None)
+        if obs_id:
+            obs = self._world.observations.get(obs_id)
+            if obs is not None:
+                coords = getattr(obs, "coords", None)
+                if coords is not None:
+                    return list(coords)
+        anchor = getattr(tendency, "anchor", None)
+        return list(anchor) if anchor is not None else None
 
     def _per_tendency_scores_locked(self, node: Any) -> Dict[str, float]:
         """Compute the node's score under each charter tendency.
@@ -815,17 +834,22 @@ class WorldService:
                     node_id = getattr(node, "id", None)
                     if node_id is None:
                         continue
-                    content = getattr(node, "content", None)
-                    coords = getattr(content, "coords", None)
-                    if coords is None:
-                        coords = getattr(tendency, "anchor", None)
+                    # Skip the tree root claim — it's the tendency
+                    # anchor itself, not a substrate node users care to
+                    # see in the visualization.
+                    if getattr(node, "is_root", False):
+                        continue
+                    coords = self._node_coords_locked(node, tendency)
                     if coords is None:
                         continue
+                    label_text = getattr(node, "content", None)
+                    if not isinstance(label_text, str):
+                        label_text = getattr(label_text, "text", "") or ""
                     entries.append({
                         "node_id": node_id,
                         "tendency_id": tendency_id,
-                        "label": (content if isinstance(content, str) else getattr(content, "text", "")) or "",
-                        "coords": list(coords),
+                        "label": label_text,
+                        "coords": coords,
                         "score": getattr(node, "net_score", 0.0),
                         "scores": self._per_tendency_scores_locked(node),
                         "parent_id": getattr(node, "parent_id", None),
@@ -835,6 +859,24 @@ class WorldService:
         # Sort by recent mint desc, take top N for visualization.
         entries.sort(key=lambda e: e["recent_mint"], reverse=True)
         entries = entries[:max_nodes]
+
+        # Phase 12.25: compute topic-space 2D projection (PCA on the
+        # embedding tail) so the topic-view sister visualization can
+        # render nodes by content similarity. Anchor with the
+        # previous projection so the layout doesn't flip across runs.
+        if entries:
+            from .topic_projection import project_topic_2d
+            topic_xy = project_topic_2d(
+                ((e["node_id"], e["coords"]) for e in entries),
+                charter_dim=6,
+                previous_xy=self._last_topic_xy,
+            )
+            for entry in entries:
+                xy = topic_xy.get(entry["node_id"])
+                if xy is not None:
+                    entry["topic_xy"] = [xy[0], xy[1]]
+            # Update cache for next call's stability anchor.
+            self._last_topic_xy = dict(topic_xy)
 
         if bin_size is None or bin_size <= 0:
             return {
