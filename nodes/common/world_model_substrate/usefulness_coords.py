@@ -40,7 +40,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Tuple
 
 
-DEFAULT_DIM = 16
+# Phase 2.2 (dim_sweep.py) measured categorical separation across
+# dims on the work_units corpus and found 64 retains 95% of native-384
+# separation while 32 collapses to 84% and 16 to 73%. Default raised
+# from 16 → 64 to match. The original 16-dim system was conservative
+# for early bootstrapping; with PCA/JL reduction at 64 the contest
+# has substantially more room to differentiate work units.
+DEFAULT_DIM = 64
 
 
 # ---------------------------------------------------------------------------

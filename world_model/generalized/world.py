@@ -45,7 +45,7 @@ class World:
     def clear_observations(self) -> None:
         self.observations.clear()
 
-    def apply_stakes(self) -> None:
+    def apply_stakes(self, scope: "set[str] | None" = None) -> None:
         """Walk every tendency's last_stakes and write unit-weight
         posts onto the relevant nodes.
 
@@ -59,19 +59,30 @@ class World:
 
         Existing posts attributed to any tendency in `self.tendencies`
         are removed first to avoid double-counting across rounds.
+
+        Scope: if provided, only strip + re-post stakes attributed to
+        tendencies whose ids are in `scope`. Posts from out-of-scope
+        tendencies on any node are left in place (they remain valid
+        because those tendencies didn't re-act this round). When
+        `scope` is None, behavior is identical to the unscoped path:
+        every tendency's stakes are stripped and re-posted.
         """
-        # 1. Remove existing posts attributed to any tendency in self.tendencies
-        all_tendency_ids = set(self.tendencies.keys())
+        if scope is None:
+            stripper_ids = set(self.tendencies.keys())
+            posters = list(self.tendencies.values())
+        else:
+            stripper_ids = set(scope) & set(self.tendencies.keys())
+            posters = [t for tid, t in self.tendencies.items() if tid in stripper_ids]
+
         for tendency in self.tendencies.values():
             for node in tendency.tree.all_nodes():
-                node.stakes = [s for s in node.stakes if s.agent_id not in all_tendency_ids]
+                node.stakes = [s for s in node.stakes if s.agent_id not in stripper_ids]
                 node.invalidate_cache()
 
-        # 2. Apply each tendency's recorded intents as unit-weight posts.
-        for tendency in self.tendencies.values():
+        for tendency in posters:
             for (target_tendency_id, node_id), signed in tendency.last_stakes.items():
                 if signed <= 0.0:
-                    continue   # disagreement is structural, not weight-based
+                    continue
                 target = self.tendencies.get(target_tendency_id)
                 if target is None:
                     continue

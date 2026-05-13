@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -36,6 +37,7 @@ from world_model.generalized import (
     default_locator,
     equilibrate,
 )
+from world_model.generalized.scope import scope_for_observation
 from world_model.models.tree import Position
 
 from .world_model_substrate.adapter import (
@@ -66,6 +68,16 @@ _DEFAULT_BANDWIDTH = 1.5
 _DEFAULT_EMBEDDING_DIM = 1024
 _DEFAULT_EQUILIBRATE_ROUNDS = 8
 _DEFAULT_EQUILIBRATE_TOLERANCE = 1e-3
+
+# Scoped equilibrate: on the per-observation hot path, only re-act
+# tendencies whose bandwidth the observation's coords fall within.
+# Drops per-event cost from O(T^2 * N) to O(T_local * K). See
+# POST_AUTONET_FINDINGS.md for the seed-time problem this fixes and
+# verify_scoped_tier3b.py for the H4-preserved verification.
+# Env override AUTONET_SCOPED_EQUILIBRATE=0 disables; default on.
+_SCOPED_EQUILIBRATE_ENABLED = (
+    os.environ.get("AUTONET_SCOPED_EQUILIBRATE", "1") != "0"
+)
 
 
 def _hash_problem_resolution(problem: str, resolution: str) -> str:
@@ -410,11 +422,23 @@ class WorldService:
             # for the open epoch's attribution buffer — that's how mint
             # gets credited to the agent whose observation triggered
             # the cross-tendency sprouts.
-            rounds = equilibrate(
-                self._world,
-                max_rounds=equilibrate_rounds,
-                tolerance=equilibrate_tolerance,
-            )
+            #
+            # Scoped equilibrate (POST_AUTONET_FINDINGS.md): when the
+            # observation's coords land inside one or more tendencies'
+            # bandwidth, only those tendencies re-act this round. Out-
+            # of-scope tendencies' state is preserved as-is. Drops
+            # per-event cost from O(T^2*N) to O(T_local*K).
+            scope = None
+            if _SCOPED_EQUILIBRATE_ENABLED:
+                scope = scope_for_observation(self._world, observation)
+            rounds = 0
+            if scope is None or scope:
+                rounds = equilibrate(
+                    self._world,
+                    max_rounds=equilibrate_rounds,
+                    tolerance=equilibrate_tolerance,
+                    scope=scope,
+                )
             recorder.sub_claims_after_equilibrate(self._world, before_ids)
 
             # 4. Split: causal_events go to the persistence log

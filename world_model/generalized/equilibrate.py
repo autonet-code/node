@@ -24,7 +24,7 @@ Also exposes:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -33,28 +33,42 @@ from .world import World
 from . import lindblad as _lb
 
 
-def equilibrate(world: World, max_rounds: int = 20, tolerance: float = 1e-3) -> int:
+def equilibrate(
+    world: World,
+    max_rounds: int = 20,
+    tolerance: float = 1e-3,
+    scope: Optional[Iterable[str]] = None,
+) -> int:
     """Run rounds of (act, apply_stakes) until intents stabilize.
 
     Returns the number of rounds executed.
+
+    Scope: if provided, only the tendencies whose ids are in `scope`
+    run `act` each round and contribute to the convergence check. Their
+    posts are written via the scoped `apply_stakes`. Out-of-scope
+    tendencies are untouched (their last_stakes, tree, and per-node
+    novelty are preserved as-is). When `scope` is None the behavior is
+    identical to the pre-scope kernel: every tendency in the world is
+    iterated.
     """
+    scope_set: Optional[Set[str]] = set(scope) if scope is not None else None
+    active = (
+        [t for tid, t in world.tendencies.items() if tid in scope_set]
+        if scope_set is not None
+        else list(world.tendencies.values())
+    )
     prev_intents: Dict[str, Dict[Tuple[str, str], float]] = {
-        tid: dict(t.last_stakes) for tid, t in world.tendencies.items()
+        t.id: dict(t.last_stakes) for t in active
     }
     for round_idx in range(1, max_rounds + 1):
-        # Each tendency computes its intents
-        for tendency in world.tendencies.values():
+        for tendency in active:
             tendency.act(world)
-        # Apply
-        world.apply_stakes()
-        # Update per-node persistent novelty (continuous-surprise state).
-        # See lindblad/NOVELTY_REFACTOR.md.
-        for tendency in world.tendencies.values():
+        world.apply_stakes(scope=scope_set)
+        for tendency in active:
             tendency.update_novelty(dt=1.0)
-        # Check convergence
         max_delta = 0.0
-        for tid, tendency in world.tendencies.items():
-            old = prev_intents.get(tid, {})
+        for tendency in active:
+            old = prev_intents.get(tendency.id, {})
             new = tendency.last_stakes
             keys = set(old.keys()) | set(new.keys())
             for k in keys:
@@ -63,7 +77,7 @@ def equilibrate(world: World, max_rounds: int = 20, tolerance: float = 1e-3) -> 
                     max_delta = d
         if max_delta < tolerance and round_idx >= 2:
             return round_idx
-        prev_intents = {tid: dict(t.last_stakes) for tid, t in world.tendencies.items()}
+        prev_intents = {t.id: dict(t.last_stakes) for t in active}
     return max_rounds
 
 
@@ -74,6 +88,7 @@ def equilibrate_with_growth(
     tolerance: float = 1e-3,
     contention_threshold: float = 0.15,
     offset: float = 0.5,
+    scope: Optional[Iterable[str]] = None,
 ) -> Tuple[int, int]:
     """Outer loop: equilibrate, grow, equilibrate, ... until no growth.
 
@@ -82,7 +97,9 @@ def equilibrate_with_growth(
     total_rounds = 0
     total_new = 0
     for outer in range(max_outer):
-        rounds = equilibrate(world, max_rounds=max_rounds, tolerance=tolerance)
+        rounds = equilibrate(
+            world, max_rounds=max_rounds, tolerance=tolerance, scope=scope,
+        )
         total_rounds += rounds
         new_nodes = propose_growth(
             world,
@@ -223,6 +240,58 @@ def _observation_jump_ops(
     return ops
 
 
+def equilibrate_continuous_exploration(
+    world: World,
+    *,
+    mu: float = 2.5,
+    t_total: float = 8.0,
+    dt: float = 1e-2,
+    bandwidth: float = 0.5,
+    kappa: float = 1.0,
+    lam: float = 1.0,
+    base_gamma: float = 0.5,
+    use_novelty_in_rho0: bool = True,
+    write_back: bool = True,
+    cross_link_threshold: float = 0.1,
+) -> Dict[str, Any]:
+    """Slow-path Lindblad pass tuned for cross-domain exploration.
+
+    Wraps `equilibrate_continuous` with boosted coupling (mu=2.5 vs
+    default 1.0) and longer evolution time (t_total=8.0 vs 1.0). Two
+    effects:
+
+      - Higher mu amplifies J_ab coupling between roots, so weak
+        cross-domain correlations that the discrete kernel's locality
+        gate skips have a chance to show up as entanglement.
+      - Longer t_total gives zz-coupling time to accumulate effect on
+        marginal populations.
+
+    Bandwidth is NOT widened (default 0.5). Boosting bandwidth would
+    also rescale the observation jump operators, which is the wrong
+    knob — we want to dial up coupling between root degrees of
+    freedom, not change how observations apply.
+
+    `cross_link_threshold`: when |J_ab| exceeds this after evolution,
+    the highest-coupled sub-claim pair (i in root_a, j in root_b)
+    gets a `_lindblad_cross_link` stake posted on each. Threading
+    that into the discrete kernel is Phase 3.2.
+    """
+    return equilibrate_continuous(
+        world,
+        t_total=t_total,
+        dt=dt,
+        bandwidth=bandwidth,
+        kappa=kappa,
+        lam=lam,
+        mu=mu,
+        base_gamma=base_gamma,
+        use_novelty_in_rho0=use_novelty_in_rho0,
+        write_back=write_back,
+        emit_cross_link_stakes=True,
+        cross_link_threshold=cross_link_threshold,
+    )
+
+
 def equilibrate_continuous(
     world: World,
     t_total: float = 1.0,
@@ -234,6 +303,8 @@ def equilibrate_continuous(
     base_gamma: float = 0.5,
     use_novelty_in_rho0: bool = True,
     write_back: bool = True,
+    emit_cross_link_stakes: bool = False,
+    cross_link_threshold: float = 0.1,
 ) -> Dict[str, Any]:
     """Continuous-time equilibration via Lindblad master-equation evolution.
 
@@ -289,7 +360,21 @@ def equilibrate_continuous(
         rho_i = _lb.marginal(rho_t, N=N, keep=idx)
         final_alpha.append(_lb.population_pro(rho_i))
 
-    if write_back:
+    # When running in exploration mode (emit_cross_link_stakes=True), the
+    # root-score writeback is suppressed by default. The Lindblad kernel
+    # produces equilibrium populations bounded in [0, 1] (logit-mapped to
+    # ~[-30, +30] root scores); the discrete kernel accumulates posts
+    # without that bound. Writing back from the bounded Lindblad value
+    # would overwrite ~99% of the discrete kernel's accumulated magnitude
+    # every time the slow pass fires. In exploration mode we want the
+    # Lindblad math to surface cross-domain coupling via stakes, not to
+    # re-decide the discrete kernel's verdict.
+    #
+    # In non-exploration mode (the original equilibrate_continuous call
+    # path for tests that compare classical-vs-Lindblad trajectories on
+    # a fresh world), write_back is honored as before.
+    do_root_writeback = write_back and not emit_cross_link_stakes
+    if do_root_writeback:
         for idx, tid in enumerate(root_ids):
             tendency = world.tendencies[tid]
             target_score = _score_from_alpha(final_alpha[idx])
@@ -299,6 +384,12 @@ def equilibrate_continuous(
                 tendency.tree.root_node.add_stake(
                     agent_id="_lindblad_continuous", weight=delta,
                 )
+
+    cross_links: List[Dict[str, Any]] = []
+    if emit_cross_link_stakes:
+        cross_links = _emit_cross_link_stakes(
+            world, root_ids, subs, Js, bandwidth, cross_link_threshold,
+        )
 
     return {
         "root_ids": root_ids,
@@ -312,4 +403,64 @@ def equilibrate_continuous(
         "final_alpha": final_alpha,
         "t_total": t_total,
         "dt": dt,
+        "cross_links": cross_links,
     }
+
+
+def _emit_cross_link_stakes(
+    world: World,
+    root_ids: List[str],
+    subs: Dict[str, List[Tuple[float, float, Tuple[float, ...]]]],
+    Js: Dict[Tuple[int, int], float],
+    bandwidth: float,
+    threshold: float,
+) -> List[Dict[str, Any]]:
+    """For each (root_a, root_b) pair with |J_ab| >= threshold, find
+    the dominant sub-claim pair (i, j) and post a unit-weight
+    `_lindblad_cross_link` stake on each. Returns descriptors of every
+    link emitted, for callers/tests to inspect.
+
+    "Dominant" = the pair that contributed most to the raw J_ab sum
+    in `hamiltonian_params_from_subclaims`: signed-stake product
+    weighted by capacities and the Gaussian locality kernel.
+    """
+    emitted: List[Dict[str, Any]] = []
+    for (a_idx, b_idx), J in Js.items():
+        if abs(J) < threshold:
+            continue
+        tid_a, tid_b = root_ids[a_idx], root_ids[b_idx]
+        sc_a, sc_b = subs[tid_a], subs[tid_b]
+        if not sc_a or not sc_b:
+            continue
+
+        children_a = world.tendencies[tid_a].tree.root_node.all_children
+        children_b = world.tendencies[tid_b].tree.root_node.all_children
+        if len(children_a) != len(sc_a) or len(children_b) != len(sc_b):
+            # Tree mutated between subclaim extraction and now; skip.
+            continue
+
+        best_score = 0.0
+        best_pair: Optional[Tuple[int, int]] = None
+        for i, (s_i, c_i, coords_i) in enumerate(sc_a):
+            for j, (s_j, c_j, coords_j) in enumerate(sc_b):
+                d = math.sqrt(sum(
+                    (x - y) ** 2 for x, y in zip(coords_i, coords_j)
+                ))
+                kern = math.exp(-d * d / (2.0 * bandwidth * bandwidth + 1e-12))
+                contrib = abs(s_i * s_j) * c_i * c_j * kern
+                if contrib > best_score:
+                    best_score = contrib
+                    best_pair = (i, j)
+        if best_pair is None or best_score <= 0.0:
+            continue
+
+        node_a = children_a[best_pair[0]]
+        node_b = children_b[best_pair[1]]
+        node_a.add_stake(agent_id="_lindblad_cross_link", weight=1.0)
+        node_b.add_stake(agent_id="_lindblad_cross_link", weight=1.0)
+        emitted.append({
+            "root_a": tid_a, "root_b": tid_b, "J": J,
+            "node_a": node_a.id, "node_b": node_b.id,
+            "contribution": best_score,
+        })
+    return emitted
