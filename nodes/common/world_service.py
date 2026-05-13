@@ -38,6 +38,7 @@ from world_model.generalized import (
     equilibrate,
 )
 from world_model.generalized.scope import scope_for_observation
+from world_model.generalized.equilibrate import equilibrate_continuous_exploration
 from world_model.models.tree import Position
 
 from .world_model_substrate.adapter import (
@@ -65,7 +66,15 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_BANDWIDTH = 1.5
-_DEFAULT_EMBEDDING_DIM = 1024
+# Phase 2.2 (dim_sweep): 64 retains 95% of native-384 categorical
+# separation, 32 drops to 84%, 16 to 73%. Previously 1024 — wasteful
+# without measurable gain. Persisted 1024-dim snapshots remain
+# replayable: the existing pad/truncate logic in submit_observation
+# / submit_work_units zero-pads or truncates incoming coords to
+# self.embedding_dim, so a service constructed at 64 reading old
+# 1024-dim events will truncate them at the boundary, and a service
+# constructed at 1024 reading new 64-dim events will zero-pad.
+_DEFAULT_EMBEDDING_DIM = 64
 _DEFAULT_EQUILIBRATE_ROUNDS = 8
 _DEFAULT_EQUILIBRATE_TOLERANCE = 1e-3
 
@@ -77,6 +86,19 @@ _DEFAULT_EQUILIBRATE_TOLERANCE = 1e-3
 # Env override AUTONET_SCOPED_EQUILIBRATE=0 disables; default on.
 _SCOPED_EQUILIBRATE_ENABLED = (
     os.environ.get("AUTONET_SCOPED_EQUILIBRATE", "1") != "0"
+)
+
+# Slow Lindblad exploration pass: surfaces cross-domain links between
+# sub-claims that aren't bandwidth-neighbors. Writeback to root scores
+# is suppressed inside the kernel — what it emits is cross-link stakes
+# between sub-claim pairs. Those are local enrichment, NOT part of the
+# canonical replay state that mint computation depends on, so it's
+# safe for daemons to run it adaptively without consensus divergence.
+#
+# Activity-based trigger: run after every N submitted observations.
+# Env: AUTONET_LINDBLAD_EXPLORE_EVERY=<int> (0 disables; default 0).
+_LINDBLAD_EXPLORE_EVERY = int(
+    os.environ.get("AUTONET_LINDBLAD_EXPLORE_EVERY", "0") or "0"
 )
 
 
@@ -114,6 +136,10 @@ class WorldService:
         self._events_applied = 0
         self._events_since_snapshot = 0
         self._last_snapshot_time = self._created_at
+        # Slow Lindblad exploration trigger: counts observations since
+        # the last exploration pass. Daemon-local; doesn't enter
+        # canonical state.
+        self._obs_since_explore = 0
 
         # Epoch tracking (Phase 3). When an epoch is open, every event
         # we apply gets buffered in ``self._epoch_events`` so it can be
@@ -343,6 +369,41 @@ class WorldService:
         with self._lock:
             return equilibrate(self._world, max_rounds=max_rounds, tolerance=tolerance)
 
+    def maybe_run_exploration_pass(
+        self,
+        *,
+        every: Optional[int] = None,
+        mu: float = 2.5,
+        t_total: float = 8.0,
+    ) -> Dict[str, Any]:
+        """Slow Lindblad exploration pass — daemon-local enrichment.
+
+        Surfaces cross-domain links between sub-claims that aren't
+        bandwidth-neighbors. Root-score writeback is suppressed inside
+        the kernel; what it produces is local cross-link annotation.
+        Not part of canonical replay → safe to run adaptively per
+        daemon without consensus divergence.
+
+        Caller is responsible for invoking this OUTSIDE the
+        per-observation hot path (no event recorder around it). The
+        per-observation counter ``_obs_since_explore`` ticks inside
+        ``submit_observation``; this method consults it.
+
+        Returns ``{"ran": bool, "obs_since_last": int, ...}``.
+        """
+        threshold = every if every is not None else _LINDBLAD_EXPLORE_EVERY
+        with self._lock:
+            obs_since = self._obs_since_explore
+            if threshold <= 0 or obs_since < threshold:
+                return {"ran": False, "obs_since_last": obs_since,
+                        "threshold": threshold}
+            equilibrate_continuous_exploration(
+                self._world, mu=mu, t_total=t_total,
+            )
+            self._obs_since_explore = 0
+            return {"ran": True, "obs_since_last": obs_since,
+                    "threshold": threshold}
+
     def submit_observation(
         self,
         observation: Observation,
@@ -469,6 +530,7 @@ class WorldService:
             )
             self._events_applied += len(causal_events)
             self._events_since_snapshot += len(causal_events)
+            self._obs_since_explore += 1
             self._maybe_snapshot_locked()
 
             return {
