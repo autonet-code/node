@@ -225,6 +225,95 @@ class AgentRegistry:
             return None
 
     # ------------------------------------------------------------------
+    # Chain reconciliation
+    # ------------------------------------------------------------------
+
+    def reconcile_chain_registrations(self) -> dict[str, Any]:
+        """Re-verify each agent's ``registered_on_chain`` flag against
+        ``Substrate.sol``.
+
+        Daemons cache registration state in each agent's ``identity.json``
+        so they don't re-hit chain on every read. That cache survives
+        contract redeploys, which can leave agents wrongly believing
+        they're still registered. This pass runs once at daemon boot —
+        after agents are loaded but before they're advertised — and uses
+        ``Substrate.areRegistered([...])`` in a single call to flip stale
+        flags back.
+
+        Returns a small summary dict for logging. No-op (and returns an
+        empty summary) when ``substrate_address`` or ``rpc_url`` is
+        unset, since the daemon is then running offline.
+        """
+        # Substrate config lives under `self._config.rpb`, populated from
+        # `registry.json` by the config loader.
+        rpb = getattr(self._config, "rpb", None)
+        substrate_addr = getattr(rpb, "substrate_address", "") or ""
+        rpc_url = getattr(rpb, "rpc_url", "") or ""
+        if not substrate_addr or not rpc_url:
+            log.debug("reconcile_chain_registrations: chain unset, skipping")
+            return {"checked": 0, "flipped": [], "skipped_reason": "chain_unset"}
+
+        # Collect agents that currently *think* they're registered.
+        cached: list[tuple[str, str]] = []  # (agent_id, address)
+        for agent_id, defn in self._agents.items():
+            identity = getattr(defn, "identity", None)
+            if not identity or not identity.registered_on_chain:
+                continue
+            address = getattr(identity, "address", "") or ""
+            if not address:
+                continue
+            cached.append((agent_id, address))
+
+        if not cached:
+            return {"checked": 0, "flipped": []}
+
+        # Single batched chain call. Failure is non-fatal — the daemon
+        # can still operate offline; reconciliation will retry next boot.
+        try:
+            from web3 import Web3
+            from ..on_chain import SUBSTRATE_ABI
+            w3 = Web3(Web3.HTTPProvider(rpc_url))
+            c = w3.eth.contract(
+                address=Web3.to_checksum_address(substrate_addr),
+                abi=SUBSTRATE_ABI,
+            )
+            addrs = [Web3.to_checksum_address(a) for _, a in cached]
+            results = c.functions.areRegistered(addrs).call()
+        except Exception:
+            log.warning(
+                "reconcile_chain_registrations: chain read failed; "
+                "leaving cached registration flags untouched",
+                exc_info=True,
+            )
+            return {"checked": len(cached), "flipped": [], "error": "rpc_failed"}
+
+        flipped: list[str] = []
+        for (agent_id, _addr), still_registered in zip(cached, results):
+            if still_registered:
+                continue
+            defn = self._agents.get(agent_id)
+            if defn is None or defn.identity is None:
+                continue
+            log.info(
+                "reconcile_chain_registrations: %s no longer registered on "
+                "chain (likely a contract redeploy); flipping flag",
+                agent_id,
+            )
+            defn.identity.registered_on_chain = False
+            defn.identity.registration_tx = None
+            try:
+                self.persist_identity(agent_id)
+            except Exception:
+                log.warning(
+                    "reconcile_chain_registrations: could not persist "
+                    "identity for %s; flag is updated in memory only",
+                    agent_id, exc_info=True,
+                )
+            flipped.append(agent_id)
+
+        return {"checked": len(cached), "flipped": flipped}
+
+    # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
 

@@ -143,6 +143,7 @@ def _print_help() -> None:
         "  [cyan]deactivate[/] <id>     Deactivate an agent\n"
         "  [cyan]agents[/]              List registered agents\n"
         "  [cyan]reload[/]              Reload agent definitions from YAML files\n"
+        "  [cyan]reconcile[/]           Re-verify each agent's on-chain registration (run after a contract redeploy)\n"
         "  [cyan]history[/] <id>        Show execution history for an agent\n"
         "  [cyan]logs[/]                Show on-disk execution log summary\n"
         "  [cyan]clear[/] <id>          Clear execution history for an agent\n"
@@ -192,6 +193,33 @@ async def _handle_command(line: str, runtime: Runtime) -> bool:
 
     elif cmd == "reload":
         await _load_agents(runtime, runtime._config)
+
+    elif cmd == "reconcile":
+        try:
+            report = runtime.reconcile_chain_registrations()
+        except Exception as exc:
+            console.print(f"  [red]Reconcile failed: {exc}[/]")
+            return True
+        if report.get("skipped_reason") == "chain_unset":
+            console.print("  [yellow]Chain not configured — nothing to reconcile.[/]")
+            return True
+        if report.get("error") == "rpc_failed":
+            console.print(
+                f"  [red]RPC failed (checked={report.get('checked', 0)}) — "
+                f"local flags untouched. See logs for details.[/]"
+            )
+            return True
+        checked = report.get("checked", 0)
+        flipped = report.get("flipped", [])
+        if checked == 0:
+            console.print("  [dim]No agents currently marked as registered on chain.[/]")
+        elif not flipped:
+            console.print(f"  [green]All {checked} agent(s) still registered on chain.[/]")
+        else:
+            console.print(
+                f"  [yellow]Flipped {len(flipped)} of {checked} agent(s) to unregistered: "
+                f"{', '.join(flipped)}[/]"
+            )
 
     elif cmd == "run" and args:
         try:

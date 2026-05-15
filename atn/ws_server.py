@@ -896,6 +896,18 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        # Phase 13.3: re-verify cached registered_on_chain flags against
+        # Substrate.areRegistered. Manual trigger because the contract is
+        # only redeployed during dev — boot-time auto-reconcile would burn
+        # an RPC every start for the vast majority of runs where nothing
+        # has changed.
+        if msg_type == "rpb_reconcile_registrations":
+            try:
+                report = self.runtime.reconcile_chain_registrations()
+                return {"msg_id": msg_id, "ok": True, "result": report}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         # Local model selection (LLM backbone for JEPA training)
         if msg_type == "local_models":
             try:

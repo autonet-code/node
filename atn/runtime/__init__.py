@@ -459,6 +459,9 @@ class Runtime:
     def list_agents(self) -> list[tuple[AgentDefinition, AgentStatus]]:
         return self.registry.list_agents()
 
+    def reconcile_chain_registrations(self) -> dict[str, Any]:
+        return self.registry.reconcile_chain_registrations()
+
     def get_children(self, agent_id: str) -> list[AgentDefinition]:
         return self.registry.get_children(agent_id)
 
