@@ -264,6 +264,16 @@ contract Substrate {
         return agents[agent].registeredAt != 0;
     }
 
+    /// @notice Batch variant of ``isRegistered`` for daemons reconciling
+    ///         many cached agents against chain in a single call.
+    function areRegistered(address[] calldata addrs) external view returns (bool[] memory) {
+        bool[] memory out = new bool[](addrs.length);
+        for (uint256 i = 0; i < addrs.length; i++) {
+            out[i] = agents[addrs[i]].registeredAt != 0;
+        }
+        return out;
+    }
+
     function registeredAgentCount() external view returns (uint256) {
         return registeredAgentList.length;
     }

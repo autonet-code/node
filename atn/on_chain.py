@@ -69,6 +69,13 @@ SUBSTRATE_ABI = [
         "type": "function",
     },
     {
+        "inputs": [{"internalType": "address[]", "name": "addrs", "type": "address[]"}],
+        "name": "areRegistered",
+        "outputs": [{"internalType": "bool[]", "name": "", "type": "bool[]"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
         "inputs": [{"internalType": "address", "name": "agent", "type": "address"}],
         "name": "getAgentPeerId",
         "outputs": [{"internalType": "bytes", "name": "", "type": "bytes"}],
