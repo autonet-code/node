@@ -46,3 +46,12 @@ rpb_speaker_notes.md
 share.md
 /agents/
 PLAN.md
+
+# Secrets (service account files etc.)
+/secrets/
+
+# Firestore indexer — will move to a separate project
+/scripts/indexer/
+
+# Diagnostic output from instrumented seed runs
+/scripts/.instrument_seed_results.json
