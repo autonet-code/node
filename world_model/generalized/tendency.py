@@ -158,6 +158,30 @@ class GeneralizedTendency:
     # Negative = CON, positive = PRO. Used by World to apply stakes.
     last_stakes: dict[tuple[str, str], float] = field(default_factory=dict)
 
+    # Cross-tendency evaluation memoization.
+    # Key: target_obs_id_or_anchor_node_id -> term.
+    # `evaluate(target)` is a pure function of (self.frame, target.coords).
+    # The frame is immutable (absorb returns a NEW frame). When this
+    # tendency replaces self.frame, _replace_frame() explicitly clears
+    # this cache; so any entry present here corresponds to the CURRENT
+    # frame. Node anchors / observation coords don't mutate after
+    # sprout, so target_id fully determines `term` under the current
+    # frame.
+    #
+    # NOTE on id() safety: we previously keyed on id(frame), but CPython
+    # can reuse object ids after gc, causing collisions between an old
+    # frame's stale entries and a new frame at the same address. The
+    # current design avoids this entirely by clearing on absorb.
+    _cross_term_cache: dict[str, object] = field(default_factory=dict)
+
+    # Loop-A (own observations) eval cache.
+    # Key: obs_id -> (term, parent_node_id) | (None, None).
+    # Separate from _cross_term_cache because the value carries the
+    # parent_node_id (a Loop-A-specific resolution step) and the storage
+    # shape differs. Cleared together with _cross_term_cache when the
+    # frame changes.
+    _own_term_cache: dict[str, tuple] = field(default_factory=dict)
+
     # Observation ids that have already been positioned as CON children
     # in our tree. Prevents re-sprouting deeper descendants on every
     # round; the CON-position is the persistent record of "this
@@ -447,14 +471,14 @@ class GeneralizedTendency:
             other.tree._node_index[node.id] = node
 
     def _refresh_frame(self) -> None:
-        self.frame = CoordinateFrame(
+        self._replace_frame(CoordinateFrame(
             claims=[self._root_claim],
             integrated=dict(self.frame.integrated),
             bandwidth=self.bandwidth,
             topic_threshold=self.frame.topic_threshold,
             pro_threshold=self.frame.pro_threshold,
             contain_distance=self.frame.contain_distance,
-        )
+        ))
 
     # ----- Action -----
 
@@ -503,6 +527,7 @@ class GeneralizedTendency:
         self._update_capacities()
 
         # 1. Stake on / sprout from incoming observations against own tree
+        own_cache = self._own_term_cache
         for obs in world.observations.values():
             # If we've already CON-positioned this obs in a prior round,
             # don't re-evaluate -- just re-post on the existing CON
@@ -512,18 +537,33 @@ class GeneralizedTendency:
                 if existing_id is not None:
                     intents[(self.id, existing_id)] = intents.get((self.id, existing_id), 0.0) + 1.0
                     continue
-            term, novelty, claim = self.evaluate(obs)
-            if claim is None:
-                continue
-            parent_node_id = self._claim_to_node_id(claim)
-            if parent_node_id is None:
-                continue
+            # Try memoized term under the current frame. Cache is cleared
+            # in `_replace_frame` whenever absorb runs, so any entry here
+            # is valid for the current frame. Hits skip evaluate +
+            # find_claims entirely.
+            cached = own_cache.get(obs.id)
+            if cached is not None:
+                term, parent_node_id = cached
+                if term is None or parent_node_id is None:
+                    continue
+            else:
+                term, novelty, claim = self.evaluate(obs)
+                if claim is None:
+                    own_cache[obs.id] = (None, None)
+                    continue
+                parent_node_id = self._claim_to_node_id(claim)
+                if parent_node_id is None:
+                    own_cache[obs.id] = (None, None)
+                    continue
+                own_cache[obs.id] = (term, parent_node_id)
 
             if term == Termination.INTEGRATED:
                 child_id = self._ensure_obs_child(parent_node_id, obs, position=Position.PRO, world=world)
                 intents[(self.id, child_id)] = intents.get((self.id, child_id), 0.0) + 1.0
                 # Absorb only on PRO -- this obs *fits* our worldview.
-                self.frame = self.frame.absorb(obs)
+                # `_replace_frame` clears the eval caches so subsequent
+                # obs in this round re-evaluate against the new frame.
+                self._replace_frame(self.frame.absorb(obs))
 
             elif term in (Termination.CONTRADICTS_ROOT, Termination.DISRUPTS):
                 child_id = self._ensure_obs_child(parent_node_id, obs, position=Position.CON, world=world)
@@ -534,6 +574,14 @@ class GeneralizedTendency:
         # Under the post-only model these are unit-magnitude intents
         # signed by stance: +1 if INTEGRATED, -1 if
         # CONTRADICTS/DISRUPTS, 0 otherwise.
+        #
+        # Memoization: `evaluate(target)` is a pure function of
+        # (self.frame, target.coords). The frame is immutable; cross-
+        # tendency node anchors and observation coords are likewise
+        # immutable after creation. So we cache `term` keyed by
+        # target_id under the current frame; the cache is cleared in
+        # `_replace_frame` whenever absorb runs.
+        cache = self._cross_term_cache
         for other in world.tendencies.values():
             if other.id == self.id:
                 continue
@@ -542,6 +590,7 @@ class GeneralizedTendency:
                     target = world.observations.get(node.observation_id)
                     if target is None:
                         continue
+                    cache_key = target.id
                 else:
                     foreign_claim = other._node_to_claim.get(node.id)
                     if foreign_claim is None or not foreign_claim.anchor:
@@ -551,7 +600,13 @@ class GeneralizedTendency:
                         coords=foreign_claim.anchor,
                         label=f"anchor:{foreign_claim.content}",
                     )
-                term, _novelty, _claim = self.evaluate(target)
+                    cache_key = target.id
+                cached_term = cache.get(cache_key)
+                if cached_term is not None:
+                    term = cached_term
+                else:
+                    term, _novelty, _claim = self.evaluate(target)
+                    cache[cache_key] = term
                 if term == Termination.INTEGRATED:
                     signed = +1.0
                 elif term in (Termination.CONTRADICTS_ROOT, Termination.DISRUPTS):
@@ -567,6 +622,21 @@ class GeneralizedTendency:
         # budget=1.0 leaves intents as-is.
         intents = {k: v * self.budget for k, v in intents.items()}
         self.last_stakes = intents
+
+    def _replace_frame(self, new_frame: CoordinateFrame) -> None:
+        """Swap in a new frame and invalidate eval caches.
+
+        The discrete kernel only mutates the frame via absorb() during
+        `act()`. Routing the swap through this method guarantees that
+        cached `evaluate()` results — which are valid only under the
+        prior frame — are cleared in lock-step with the swap. Without
+        this clear, lookups under the new frame could collide with old
+        entries (frame instances are short-lived; we previously keyed
+        by id(frame) and got bit by CPython id-reuse).
+        """
+        self.frame = new_frame
+        self._own_term_cache.clear()
+        self._cross_term_cache.clear()
 
     def _update_capacities(self) -> None:
         """Blend each node's accumulated positive stake into its
