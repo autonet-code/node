@@ -1,0 +1,37 @@
+name: GA PyPI pipe
+
+on:
+  schedule:
+    # 07:30 UTC daily. pypistats refreshes its previous-day numbers
+    # roughly every few hours; this gives them plenty of time.
+    - cron: '30 7 * * *'
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Send every date in the pypistats series instead of just yesterday'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+
+jobs:
+  pipe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Send PyPI counts to GA4
+        env:
+          GA_MEASUREMENT_ID: ${{ secrets.GA_MEASUREMENT_ID }}
+          GA_API_SECRET: ${{ secrets.GA_API_SECRET }}
+        run: |
+          if [ "${{ github.event.inputs.backfill }}" = "true" ]; then
+            python scripts/ga_pypi_pipe.py --backfill
+          else
+            python scripts/ga_pypi_pipe.py
+          fi
