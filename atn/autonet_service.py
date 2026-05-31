@@ -266,21 +266,34 @@ class AutonetBridge:
             return
         try:
             ads = self._agent_registry.build_agent_advertisements()
+            # When this daemon is a sponsor (work-AI employer), mark its
+            # agents as sponsors so dependents on other daemons can discover
+            # them and target by address. Over-advertising is safe: the
+            # handler still authorizes per-dependent against the binding
+            # store, so an unbound requester is rejected regardless.
+            if getattr(self.config, "sponsor_inference", False):
+                sponsor_model = getattr(self.config, "sponsor_model", "") or ""
+                for ad in ads:
+                    ad["is_sponsor"] = True
+                    if sponsor_model and not ad.get("model"):
+                        ad["model"] = sponsor_model
             # Also include the connected wallet as a root agent if present
             if self.state.wallet_address and not any(
                 a["address"].lower() == self.state.wallet_address.lower() for a in ads
             ):
-                rpb_cfg = self.config.rpb if hasattr(self.config, 'rpb') else None
+                # self.config IS the RPBConfig (sponsor_* fields live directly
+                # on it — there is no nested .rpb attribute).
+                rpb_cfg = self.config
                 ads.insert(0, {
                     "address": self.state.wallet_address,
                     "name": "root",
                     "description": "",
                     "agent_type": "orchestrator",
-                    "model": getattr(rpb_cfg, "sponsor_model", "") if rpb_cfg else "",
+                    "model": getattr(rpb_cfg, "sponsor_model", "") or "",
                     "is_root": True,
                     "parent_address": "",
                     "registered_on_chain": False,
-                    "is_sponsor": getattr(rpb_cfg, "sponsor_inference", False) if rpb_cfg else False,
+                    "is_sponsor": getattr(rpb_cfg, "sponsor_inference", False),
                 })
             self._p2p_host.update_capability(agents=ads)
             log.debug("P2P capability updated with %d agent(s)", len(ads))
@@ -326,9 +339,10 @@ class AutonetBridge:
         self._p2p_host = host
         self._p2p_stop.clear()
 
-        # Wire sponsor-side inference handler (Path A)
-        rpb_cfg = self.config.rpb if hasattr(self.config, 'rpb') else None
-        if rpb_cfg and getattr(rpb_cfg, 'sponsor_inference', False):
+        # Wire sponsor-side inference handler (Path A). self.config IS the
+        # RPBConfig — sponsor_* fields are directly on it.
+        rpb_cfg = self.config
+        if getattr(rpb_cfg, 'sponsor_inference', False):
             host._inference_handler = self._create_sponsor_handler(rpb_cfg)
             log.info("Sponsor inference handler wired (provider=%s, model=%s)",
                      rpb_cfg.sponsor_provider or "auto", rpb_cfg.sponsor_model or "any")
@@ -366,9 +380,29 @@ class AutonetBridge:
         service = self  # closure reference
 
         async def _handle_sponsor_inference(request: dict) -> dict:
-            # No-chaining rule: reject requests that already came through RPB
-            if request.get("via_rpb"):
-                return {"error": "No-chaining: cannot re-route RPB inference through RPB"}
+            # Authorization: the sponsor is the resource owner and only serves
+            # dependents it has explicitly bound (work-AI). The dependent's
+            # on-chain address travels in the request body. Everything the
+            # dependent spawns presents as this same address and draws on the
+            # same budget — one single thread per dependent, no tree.
+            dependent = request.get("agent_address", "")
+            if not dependent:
+                return {"error": "Missing agent_address — sponsor only serves bound dependents"}
+
+            bindings = getattr(service._runtime, "sponsor_bindings", None) if service._runtime else None
+            if bindings is None:
+                return {"error": "Sponsor has no binding store"}
+
+            binding = bindings.get(dependent)
+            if binding is None:
+                return {"error": "not an authorized dependent"}
+            if not binding.unlimited and binding.remaining() <= 0:
+                return {"error": "budget exhausted"}
+
+            # Note: the via_rpb no-chaining guard is intentionally NOT applied
+            # here. Under the single-thread model this is a bound dependent
+            # consuming its own grant, not a relay chain. Only bound addresses
+            # are served at all, which is the real safety boundary.
 
             model = request.get("model", rpb_cfg.sponsor_model or "")
             messages = request.get("messages", [])
@@ -404,15 +438,23 @@ class AutonetBridge:
                     temperature=temperature,
                 )
 
+                # Meter the dependent's grant: spend = input + output tokens.
+                in_tok = resp.usage.input_tokens if resp.usage else 0
+                out_tok = resp.usage.output_tokens if resp.usage else 0
+                bindings.record_spend(dependent, in_tok + out_tok)
+
                 # Serialize ProviderResponse back to dict for P2P transport
                 result = {
                     "text": resp.text or "",
                     "model": resp.model or model,
                     "stop_reason": resp.stop_reason or "end_turn",
                     "usage": {
-                        "input_tokens": resp.usage.input_tokens if resp.usage else 0,
-                        "output_tokens": resp.usage.output_tokens if resp.usage else 0,
+                        "input_tokens": in_tok,
+                        "output_tokens": out_tok,
                     },
+                    # -1 signals unlimited; lets the dependent warn/stop as the
+                    # grant runs low without exposing other dependents' budgets.
+                    "remaining_budget_tokens": bindings.remaining(dependent),
                 }
                 if resp.tool_calls:
                     result["tool_calls"] = [
@@ -486,6 +528,35 @@ class AutonetBridge:
             log.debug("Failed to create sponsor provider directly", exc_info=True)
 
         return None
+
+    def enable_sponsor_inference(self, provider: str = "", model: str = "") -> dict:
+        """Turn this daemon into a sponsor (work-AI employer).
+
+        Sets the sponsor_* config flags and, if the p2p host is already
+        running, wires the sponsor handler + refreshes the advertisement so
+        the change takes effect without a restart. Idempotent.
+        """
+        self.config.sponsor_inference = True
+        if provider:
+            self.config.sponsor_provider = provider
+        if model:
+            self.config.sponsor_model = model
+
+        host = self._p2p_host
+        if host is not None:
+            host._inference_handler = self._create_sponsor_handler(self.config)
+            self._refresh_p2p_agents()
+            log.info("Sponsor inference enabled at runtime (provider=%s, model=%s)",
+                     self.config.sponsor_provider or "auto",
+                     self.config.sponsor_model or "any")
+        else:
+            log.info("Sponsor inference enabled; handler wires when p2p starts")
+        return {
+            "sponsor_inference": True,
+            "sponsor_provider": self.config.sponsor_provider,
+            "sponsor_model": self.config.sponsor_model,
+            "p2p_running": host is not None,
+        }
 
     def stop_p2p(self) -> None:
         """Stop the p2p background thread."""
@@ -745,7 +816,10 @@ class AutonetBridge:
                 break
             await asyncio.sleep(0.5)
 
-        try:
+        def _blocking_build_attribution():
+            """Synchronous web3 work — connect, build contract, refresh.
+            Runs in an executor so the blocking RPC never stalls the event
+            loop (which would freeze the WS server's accept path)."""
             from web3 import Web3
             from pathlib import Path
             import json as _json
@@ -758,18 +832,20 @@ class AutonetBridge:
                 with artifact_path.open("r", encoding="utf-8") as fh:
                     abi = _json.load(fh)["abi"]
             except FileNotFoundError:
-                # Production install (no hardhat artifacts): fall back to the
-                # inline ABI from atn.on_chain.
                 from atn.on_chain import SUBSTRATE_ABI as abi  # type: ignore
 
             contract = w3.eth.contract(
                 address=Web3.to_checksum_address(substrate_addr),
                 abi=abi,
             )
-
             from nodes.common.peer_attribution import PeerAttribution
             attribution = PeerAttribution(contract)
             n = attribution.refresh()
+            return attribution, n
+
+        try:
+            loop = asyncio.get_event_loop()
+            attribution, n = await loop.run_in_executor(None, _blocking_build_attribution)
             log.info("Peer attribution wired: %d agents on chain", n)
 
             # Stash on the host so downstream consumers can use it.

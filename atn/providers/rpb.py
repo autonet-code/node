@@ -41,12 +41,17 @@ class RPBNetworkProvider(Provider):
         agent_address: str = "",
         p2p_host: Any = None,
         model: str = "",
+        sponsor_address: str = "",
     ):
         self._agent_id = agent_id
         self._agent_address = agent_address
         self._p2p = p2p_host
         self._model = model
+        # When set, the dependent routes only to this specific sponsor agent
+        # (the employer named in config), instead of any is_sponsor peer.
+        self._sponsor_address = (sponsor_address or "").strip().lower()
         self._discovered_providers: list[dict] = []
+        self._remaining_budget_tokens: int = -1
 
     async def discover_providers(self, model: str = "") -> list[dict]:
         """Discover sponsor nodes offering the requested model via gossip.
@@ -66,10 +71,31 @@ class RPBNetworkProvider(Provider):
         for peer_id, cap in capabilities.items():
             # Check if this peer advertises the target model
             for agent_ad in getattr(cap, "agents", []):
-                ad_model = getattr(agent_ad, "model", "") if hasattr(agent_ad, "model") else agent_ad.get("model", "")
-                ad_is_sponsor = getattr(agent_ad, "is_sponsor", False) if hasattr(agent_ad, "is_sponsor") else agent_ad.get("is_sponsor", False)
+                def _field(name, default=""):
+                    if hasattr(agent_ad, name):
+                        return getattr(agent_ad, name)
+                    if isinstance(agent_ad, dict):
+                        return agent_ad.get(name, default)
+                    return default
 
-                if ad_model == target_model or not target_model:
+                ad_model = _field("model", "")
+                ad_is_sponsor = _field("is_sponsor", False)
+                ad_address = (_field("address", "") or "").strip().lower()
+
+                # If the dependent named a specific sponsor, only that one
+                # qualifies — employment is bound, not market-discovered.
+                if self._sponsor_address and ad_address != self._sponsor_address:
+                    continue
+
+                # When targeting a named sponsor, the employer dictates the
+                # model: accept the sponsor regardless of the dependent's
+                # requested model. Otherwise fall back to model matching.
+                model_ok = (
+                    bool(self._sponsor_address and ad_address == self._sponsor_address)
+                    or ad_model == target_model
+                    or not target_model
+                )
+                if model_ok:
                     latency = 9999.0
                     if latency_tracker:
                         lat = latency_tracker.get_latency(peer_id)
@@ -79,6 +105,7 @@ class RPBNetworkProvider(Provider):
                     providers.append({
                         "peer_id": peer_id,
                         "model": ad_model,
+                        "address": ad_address,
                         "is_sponsor": ad_is_sponsor,
                         "latency_ms": latency,
                         "remaining_budget": agent_ad.get("remaining_budget", 0) if isinstance(agent_ad, dict) else 0,
@@ -88,7 +115,9 @@ class RPBNetworkProvider(Provider):
         providers.sort(key=lambda p: (not p.get("is_sponsor", False), p.get("latency_ms", 9999)))
         self._discovered_providers = providers
 
-        logger.info("RPB: Discovered %d providers for model=%s", len(providers), target_model)
+        logger.info("RPB: Discovered %d providers for model=%s%s",
+                    len(providers), target_model,
+                    f" (sponsor={self._sponsor_address[:10]})" if self._sponsor_address else "")
         return providers
 
     async def send(
@@ -153,6 +182,14 @@ class RPBNetworkProvider(Provider):
             ))
 
         usage_data = response.get("usage", {})
+
+        # Track how much of the sponsor's grant remains (-1 = unlimited).
+        self._remaining_budget_tokens = response.get("remaining_budget_tokens", -1)
+        if 0 <= self._remaining_budget_tokens < 10_000:
+            logger.warning(
+                "RPB: sponsor grant low — %d tokens remaining",
+                self._remaining_budget_tokens,
+            )
 
         return ProviderResponse(
             text=response.get("text", ""),

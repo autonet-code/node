@@ -233,6 +233,10 @@ class AgentDefinition:
     # Sponsor relationship
     sponsor_agent_id: str | None = None       # ID of sponsor agent funding this agent
     training_charter: str = ""                # Charter defining allowed work scope
+    sponsor_address: str = ""                 # On-chain address of the sponsor agent
+                                              # (other daemon) this dependent routes
+                                              # provider="rpb" inference to. Empty =
+                                              # any is_sponsor peer offering the model.
 
     @property
     def model(self) -> str | None:

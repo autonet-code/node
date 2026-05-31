@@ -34,6 +34,7 @@ from ..config import ATNConfig
 from ..connectors_manager import ConnectorManager, ConnectorSpec
 from ..conversation import ConversationStore
 from ..credit_budget import CreditBudgetStore
+from ..sponsor_bindings import SponsorBindingStore
 from ..credentials import CredentialStore
 from ..agent_registry import DelegateRegistry
 from ..store import ExecutionLog, OutputStore
@@ -78,6 +79,7 @@ class Runtime:
         self.credential_store = CredentialStore(self._config.data_dir)
         self.user_profile = UserProfileStore(self._config.data_dir)
         self.credit_budget = CreditBudgetStore(self._config.data_dir)
+        self.sponsor_bindings = SponsorBindingStore(self._config.data_dir)
 
         # Shutdown event
         self._shutdown_event: asyncio.Event = asyncio.Event()

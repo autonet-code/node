@@ -889,6 +889,17 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         defn.cognitive_model = input["model"]
         defn.provider = input["model"]
         changed.append("model")
+    if "provider" in input:
+        # Explicit provider override (e.g. "rpb" for a dependent agent that
+        # routes inference to a sponsor). Set after "model" so it wins when
+        # both are present.
+        defn.provider = input["provider"]
+        changed.append("provider")
+    if "sponsor_address" in input:
+        # The on-chain address of the sponsor agent this dependent routes to.
+        # Empty string clears it (falls back to any is_sponsor peer).
+        defn.sponsor_address = input["sponsor_address"] or ""
+        changed.append("sponsor_address")
     if "notify_parent" in input:
         defn.notify_parent = input["notify_parent"]
         changed.append("notify_parent")
