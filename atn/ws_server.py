@@ -108,11 +108,18 @@ class WebSocketBridge:
 
         # Send initial snapshot so the UI has state immediately
         try:
+            _t0 = asyncio.get_event_loop().time()
             snapshot = self.runtime.snapshot()
+            _t1 = asyncio.get_event_loop().time()
             await ws.send(json.dumps({
                 "type": "snapshot",
                 "data": snapshot,
             }, default=str))
+            _t2 = asyncio.get_event_loop().time()
+            log.info(
+                "Initial snapshot sent to %s (build=%.2fs send=%.2fs)",
+                remote, _t1 - _t0, _t2 - _t1,
+            )
         except Exception:
             log.exception("Failed to send initial snapshot")
 
@@ -651,6 +658,67 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": True, "result": result}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        # ---------------------------------------------------------------
+        # Sponsor / dependent inference ("work AI")
+        # ---------------------------------------------------------------
+        # A sponsor agent supplies LLM inference to a dependent agent on a
+        # different daemon, capped by a per-dependent token budget. The
+        # sponsor is the resource owner and the authority: bindings live in
+        # sponsor-local state (runtime.sponsor_bindings), keyed by the
+        # dependent's on-chain address.
+        if msg_type == "create_sponsor_agent":
+            dependent_address = msg.get("dependent_address", "")
+            budget_tokens = msg.get("budget_tokens", 0)
+            label = msg.get("label", "")
+            provider = msg.get("provider", "")
+            model = msg.get("model", "")
+            if not dependent_address:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'dependent_address'"}
+            try:
+                budget_tokens = int(budget_tokens)
+            except (TypeError, ValueError):
+                return {"msg_id": msg_id, "ok": False, "error": "'budget_tokens' must be an integer"}
+            try:
+                binding = self.runtime.sponsor_bindings.add(
+                    dependent_address, budget_tokens=budget_tokens, label=label,
+                )
+                enable = self.runtime.autonet.enable_sponsor_inference(
+                    provider=provider, model=model,
+                )
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "binding": binding.to_dict(),
+                    "sponsor": enable,
+                }}
+            except ValueError as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
+        if msg_type == "list_sponsor_bindings":
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "bindings": self.runtime.sponsor_bindings.to_summary_list(),
+            }}
+
+        if msg_type == "update_sponsor_budget":
+            dependent_address = msg.get("dependent_address", "")
+            budget_tokens = msg.get("budget_tokens")
+            if not dependent_address or budget_tokens is None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Missing 'dependent_address' or 'budget_tokens'"}
+            try:
+                budget_tokens = int(budget_tokens)
+            except (TypeError, ValueError):
+                return {"msg_id": msg_id, "ok": False, "error": "'budget_tokens' must be an integer"}
+            binding = self.runtime.sponsor_bindings.update_budget(dependent_address, budget_tokens)
+            if binding is None:
+                return {"msg_id": msg_id, "ok": False, "error": "No binding for that address"}
+            return {"msg_id": msg_id, "ok": True, "result": {"binding": binding.to_dict()}}
+
+        if msg_type == "remove_sponsor_binding":
+            dependent_address = msg.get("dependent_address", "")
+            if not dependent_address:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'dependent_address'"}
+            removed = self.runtime.sponsor_bindings.remove(dependent_address)
+            return {"msg_id": msg_id, "ok": True, "result": {"removed": removed}}
 
         # On-chain agent registration
         if msg_type == "register_agent_on_chain":

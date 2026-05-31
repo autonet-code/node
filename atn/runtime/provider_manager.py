@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -23,6 +24,18 @@ if TYPE_CHECKING:
     from ..store import ExecutionLog
 
 log = logging.getLogger(__name__)
+
+
+def _sdk_platform_tag() -> str:
+    """The @anthropic-ai/claude-code optional-dep platform suffix, e.g.
+    'win32-x64', 'darwin-arm64', 'linux-x64'. Used to locate the bundled
+    claude binary in node_modules when `claude` isn't on PATH."""
+    import platform as _plat
+    plat = sys.platform  # 'win32' | 'darwin' | 'linux'
+    machine = _plat.machine().lower()
+    arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
+    return f"{plat}-{arch}"
+
 
 # ---------------------------------------------------------------------------
 # Model capability tiers
@@ -277,22 +290,40 @@ class ProviderManager:
         providers = defn.provider
         model = defn.cognitive_model or self._config.orchestrator.model or "claude-sonnet-4-6"
 
+        # For the rpb (dependent) provider, the agent routes inference to a
+        # sponsor on another daemon. The sponsor authorizes on the dependent's
+        # own on-chain address and (optionally) the dependent targets a named
+        # sponsor address. Pull both from the definition.
+        agent_address = ""
+        if defn.identity and getattr(defn.identity, "address", ""):
+            agent_address = defn.identity.address
+        sponsor_address = getattr(defn, "sponsor_address", "") or ""
+
         if isinstance(providers, list):
             for provider_name in providers:
                 try:
-                    return self._resolve_provider_by_name(provider_name, model, defn.id)
+                    return self._resolve_provider_by_name(
+                        provider_name, model, defn.id,
+                        agent_address=agent_address, sponsor_address=sponsor_address)
                 except Exception:
                     log.info("Provider '%s' not available for %s, trying next", provider_name, defn.id)
             first = providers[0] if providers else "claude_max"
-            return self._resolve_provider_by_name(first, model, defn.id)
+            return self._resolve_provider_by_name(
+                first, model, defn.id,
+                agent_address=agent_address, sponsor_address=sponsor_address)
         elif providers:
             if providers in self._KNOWN_PROVIDERS or providers in self._custom_providers:
-                return self._resolve_provider_by_name(providers, model, defn.id)
+                return self._resolve_provider_by_name(
+                    providers, model, defn.id,
+                    agent_address=agent_address, sponsor_address=sponsor_address)
             return self._resolve_provider_for_model(providers, defn.id)
         else:
             return self._resolve_provider_for_model(model, defn.id)
 
-    def _resolve_provider_by_name(self, provider_name: str, model: str, agent_id: str) -> Any:
+    def _resolve_provider_by_name(
+        self, provider_name: str, model: str, agent_id: str,
+        *, agent_address: str = "", sponsor_address: str = "",
+    ) -> Any:
         if provider_name == "claude_max":
             return BridgeProvider(model=model)
         if provider_name == "codex_max":
@@ -346,8 +377,10 @@ class ProviderManager:
             from ..providers.rpb import RPBNetworkProvider
             return RPBNetworkProvider(
                 agent_id=agent_id,
+                agent_address=agent_address,
                 model=model,
                 p2p_host=self._p2p_host,
+                sponsor_address=sponsor_address,
             )
         if provider_name == "substrate":
             return self._build_substrate_provider(model, agent_id)
@@ -769,6 +802,18 @@ class ProviderManager:
                 raise ValueError(
                     "Bridge setup failed. Ensure 'bun' is installed "
                     "(npm i -g bun) and try again."
+                )
+            # Guard: only launch the browser login when we DEFINITIVELY know
+            # the user is not logged in. If the status probe couldn't verify
+            # (timeout / unexpected output), surface a retry error instead of
+            # popping a login — a valid token may already exist, and an
+            # unverified probe must never trigger a re-auth.
+            if not auth["logged_in"] and not auth.get("verified", False):
+                raise ValueError(
+                    "Couldn't verify Claude Code auth status (the check timed "
+                    "out or returned unexpected output). Your existing login is "
+                    "likely still valid — try connecting again. If it persists, "
+                    "run 'claude auth status' in a terminal to check."
                 )
             if not auth["logged_in"]:
                 log.info("Claude Code not authenticated — launching browser login")
@@ -1202,15 +1247,36 @@ class ProviderManager:
         the legacy bundled cli.js for older SDK installs.
         """
         import shutil
-        claude_bin = shutil.which("claude")
-        if claude_bin:
-            return Path(claude_bin)
         try:
             import bridge as _bridge_pkg
             bridge_dir = Path(_bridge_pkg.__file__).resolve().parent
         except ImportError:
             bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
-        cli_js = bridge_dir / "node_modules" / "@anthropic-ai" / "claude-agent-sdk" / "cli.js"
+        nm = bridge_dir / "node_modules" / "@anthropic-ai"
+
+        # Prefer a TRUE executable (.exe / native binary). On Windows the npm
+        # global `claude` is a .CMD shim, and spawning a .cmd via
+        # create_subprocess_exec from the daemon's running asyncio loop hangs
+        # (no shell to interpret it). The bundled claude-code binary is a real
+        # .exe and is always present after `bun install`, regardless of PATH.
+        bin_name = "claude.exe" if sys.platform == "win32" else "claude"
+        for candidate in (
+            nm / "claude-code" / "bin" / bin_name,
+            nm / f"claude-code-{_sdk_platform_tag()}" / bin_name,
+        ):
+            if candidate.exists():
+                return candidate
+
+        # PATH lookup. On Windows, skip shell-shim extensions (.cmd/.bat) —
+        # those can't be exec'd directly; the bundled .exe above is preferred.
+        claude_bin = shutil.which("claude")
+        if claude_bin:
+            p = Path(claude_bin)
+            if sys.platform != "win32" or p.suffix.lower() not in (".cmd", ".bat"):
+                return p
+
+        # Legacy fallback: bundled cli.js (pre-0.2.119 SDK installs).
+        cli_js = nm / "claude-agent-sdk" / "cli.js"
         if cli_js.exists():
             return cli_js
         return None
@@ -1233,20 +1299,34 @@ class ProviderManager:
             return {"installed": False, "logged_in": False}
         try:
             argv = self._build_claude_cmd(cli, "auth", "status")
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-            text = stdout.decode("utf-8", errors="replace").strip()
+            # Run the CLI in a worker thread with synchronous subprocess.run.
+            # On Windows the Proactor event loop's create_subprocess_exec +
+            # communicate() can hang for these child processes; a plain
+            # subprocess.run off the loop is reliable and never blocks it.
+            import subprocess
+            def _run_sync():
+                return subprocess.run(
+                    list(argv), capture_output=True, timeout=15,
+                    # CRITICAL: close stdin. The claude CLI blocks waiting on
+                    # stdin when it inherits a non-TTY pipe (the daemon's
+                    # stdin), hanging `auth status` indefinitely.
+                    stdin=subprocess.DEVNULL,
+                )
+            completed = await asyncio.to_thread(_run_sync)
+            text = completed.stdout.decode("utf-8", errors="replace").strip()
             # Newer claude CLI emits human-readable output by default; older
             # cli.js emits JSON. Try JSON first, fall back to keyword sniffing.
+            # `verified` distinguishes a definitive answer (we parsed real auth
+            # status) from a probe that couldn't complete. Callers must only
+            # launch the browser login when verified AND not logged in —
+            # never on a failure-to-verify (that would re-pop a login even
+            # though a valid token may already exist).
             try:
                 data = json.loads(text)
                 return {
                     "installed": True,
                     "logged_in": bool(data.get("loggedIn", False)),
+                    "verified": True,
                     "email": data.get("email", ""),
                     "subscription": data.get("subscriptionType", ""),
                 }
@@ -1260,15 +1340,20 @@ class ProviderManager:
                 return {
                     "installed": True,
                     "logged_in": logged_in,
+                    "verified": True,
                     "email": "",
                     "subscription": "",
                 }
-        except (asyncio.TimeoutError, FileNotFoundError) as exc:
-            log.debug("Claude auth status check failed: %s", exc)
-            return {"installed": True, "logged_in": False}
+        except FileNotFoundError as exc:
+            log.debug("Claude CLI not found: %s", exc)
+            return {"installed": False, "logged_in": False, "verified": False}
         except Exception as exc:
-            log.debug("Claude auth status check error: %s", exc)
-            return {"installed": False, "logged_in": False}
+            import subprocess
+            if isinstance(exc, (asyncio.TimeoutError, subprocess.TimeoutExpired)):
+                log.warning("Claude auth status timed out: %s", exc)
+                return {"installed": True, "logged_in": False, "verified": False}
+            log.debug("Claude auth status error (%s): %s", type(exc).__name__, exc)
+            return {"installed": False, "logged_in": False, "verified": False}
 
     async def _trigger_claude_login(self) -> bool:
         cli = self._resolve_sdk_cli()

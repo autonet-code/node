@@ -30,6 +30,22 @@ def _preview(obj: Any, max_len: int = 120) -> str:
     return s[:max_len] + "..." if len(s) > max_len else s
 
 
+# Voice availability is resolved once and cached. Importing voice_service
+# pulls in numpy/sounddevice at module top, which contends on the global
+# import lock. Doing that lazily *inside* snapshot() (a synchronous call on
+# the event-loop thread) could deadlock against a background thread that is
+# mid-import of the same heavy deps — wedging the WS handshake's initial
+# snapshot send. Resolve it here, eagerly, so the request path never imports.
+try:
+    from ..voice_service import VOICE_AVAILABLE as _VOICE_AVAILABLE
+except Exception:
+    _VOICE_AVAILABLE = False
+
+
+def _voice_available() -> bool:
+    return _VOICE_AVAILABLE
+
+
 class SnapshotBuilder:
     """Builds the full dashboard snapshot from all runtime modules."""
 
@@ -281,8 +297,4 @@ class SnapshotBuilder:
         voice = self._voice_ref
         if voice:
             return voice.get_status()
-        try:
-            from ..voice_service import VOICE_AVAILABLE
-        except ImportError:
-            VOICE_AVAILABLE = False
-        return {"running": False, "available": VOICE_AVAILABLE}
+        return {"running": False, "available": _voice_available()}
