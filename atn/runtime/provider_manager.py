@@ -1267,12 +1267,13 @@ class ProviderManager:
             if candidate.exists():
                 return candidate
 
-        # PATH lookup. On Windows, skip shell-shim extensions (.cmd/.bat) —
-        # those can't be exec'd directly; the bundled .exe above is preferred.
+        # PATH lookup. On Windows, skip shell-shim extensions (.cmd/.bat/.ps1)
+        # — those can't be exec'd directly via create_subprocess_exec /
+        # subprocess.run; the bundled .exe above is preferred anyway.
         claude_bin = shutil.which("claude")
         if claude_bin:
             p = Path(claude_bin)
-            if sys.platform != "win32" or p.suffix.lower() not in (".cmd", ".bat"):
+            if sys.platform != "win32" or p.suffix.lower() not in (".cmd", ".bat", ".ps1"):
                 return p
 
         # Legacy fallback: bundled cli.js (pre-0.2.119 SDK installs).
