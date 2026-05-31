@@ -411,6 +411,15 @@ class BridgeProvider(Provider):
                 "max_turns": max_turns,
                 "native_tools": kwargs.get("native_tools", False),
             }
+            _allowlist = kwargs.get("native_tool_allowlist")
+            if _allowlist:
+                request["native_tool_allowlist"] = list(_allowlist)
+            _thinking = kwargs.get("thinking")
+            if _thinking is not None:
+                request["thinking"] = _thinking
+            _budget = kwargs.get("thinking_budget_tokens")
+            if _budget is not None:
+                request["thinking_budget_tokens"] = int(_budget)
             if session_id:
                 request["session_id"] = session_id
 

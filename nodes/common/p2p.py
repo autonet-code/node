@@ -1315,10 +1315,18 @@ class AutonetHost:
             stream = await self._host.new_stream(
                 target_peer_id, [INFERENCE_REQUEST_PROTOCOL]
             )
-            await _write_framed(stream, req_bytes)
+            # Request-response on one stream: write the request WITHOUT
+            # closing (a full close tears down the read half on py-libp2p,
+            # so the response could never come back), read the response,
+            # then close.
+            await _write_frame_no_close(stream, req_bytes)
 
             # Read response
-            resp_bytes = await _read_framed(stream)
+            resp_bytes = await _read_frame_no_close(stream)
+            try:
+                await stream.close()
+            except Exception:
+                pass
             response = json.loads(resp_bytes.decode("utf-8"))
 
             if "error" in response:
@@ -1344,7 +1352,10 @@ class AutonetHost:
         import json
 
         try:
-            data = await _read_framed(stream)
+            # Request-response on one stream: read the request without
+            # closing, serve, write the response, then close. (Closing on
+            # the read tears down the stream before the response is sent.)
+            data = await _read_frame_no_close(stream)
             request = json.loads(data.decode("utf-8"))
 
             self.logger.info("Received inference request (%d bytes)", len(data))
@@ -1353,13 +1364,18 @@ class AutonetHost:
             response = await self._serve_inference_locally(request)
 
             resp_bytes = json.dumps(response).encode("utf-8")
-            await _write_framed(stream, resp_bytes)
+            await _write_frame_no_close(stream, resp_bytes)
+            try:
+                await stream.close()
+            except Exception:
+                pass
 
         except Exception as e:
             self.logger.warning("Failed to handle inference request: %s", e)
             try:
                 error_resp = json.dumps({"error": str(e)}).encode("utf-8")
-                await _write_framed(stream, error_resp)
+                await _write_frame_no_close(stream, error_resp)
+                await stream.close()
             except Exception:
                 pass
 
