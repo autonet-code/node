@@ -112,6 +112,9 @@ class SnapshotBuilder:
                 agent_info["tool_name"] = f"pipeline_{aid}"
             if defn.connector_ids:
                 agent_info["connector_ids"] = defn.connector_ids
+            agent_type = getattr(defn, "agent_type", "") or ""
+            if agent_type and agent_type != "general":
+                agent_info["agent_type"] = agent_type
             if defn.parent_id:
                 agent_info["parent_id"] = self.registry._resolve_parent_agent_id(defn.parent_id)
             children_count = sum(
