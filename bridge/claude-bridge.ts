@@ -731,6 +731,19 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
       settingSources: [],
     }
 
+    // Native built-in tools (Bash/Read/Write/Edit/Glob/Grep/WebSearch/...) are
+    // a large chunk of the first-turn context (~tens of thousands of tokens of
+    // JSON schemas). `allowedTools` only gates PERMISSIONS — it does not strip
+    // the schemas. The `tools` option is the lever: `[]` disables the built-in
+    // preset entirely, omitting it loads the full claude_code preset (SDK
+    // sdk.d.ts:1190-1199). So unless the agent explicitly asked for native
+    // tools, disable them — it still has the ATN MCP tools via mcpServers, and
+    // a lean agent (e.g. a simple cognitive responder) carries a much smaller
+    // prefix. This shrinks per-agent cold-start cost across the fleet.
+    if (!req.native_tools) {
+      sdkOptions.tools = []
+    }
+
     // Enable 1M context window for models that support it (Sonnet, Opus 4.7+).
     const lowerModel = (model || "").toLowerCase()
     if (lowerModel.includes("sonnet") || lowerModel.includes("opus-4-7")) {

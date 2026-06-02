@@ -21,10 +21,6 @@ _COMMON_BASE = """\
 You are a cognitive agent in the ATN framework — a decentralized, fractal agent \
 system where every agent operates identically regardless of hierarchy position.
 
-Agent ID: {agent_id}
-Agent Type: {agent_type}
-Parent: {parent_id}
-
 You work independently.  No one will guide you mid-task — you need to make \
 your own decisions about how to approach the work.  If you hit a blocker, \
 explain it clearly in your result rather than guessing or producing incomplete work.
@@ -363,11 +359,34 @@ def build_common_base(
     agent_type: str = "",
     parent_id: str | None = None,
 ) -> str:
-    """Build the common base prompt (layer 1) for any cognitive agent."""
-    return _COMMON_BASE.format(
-        agent_id=agent_id or "unknown",
-        agent_type=agent_type or "general",
-        parent_id=parent_id or "orchestrator",
+    """Build the common base prompt (layer 1) for any cognitive agent.
+
+    Identity (agent_id/type/parent) is intentionally NOT baked in here. It used
+    to sit at the top of this base, which made the system-prompt prefix diverge
+    per agent — defeating Anthropic's prefix cache, so every agent re-created
+    the whole ~system+tools prefix instead of sharing one cached copy. Keeping
+    the base identity-free makes it byte-identical across all same-type agents,
+    so they share the cached prefix (cheap cache_read instead of full-price
+    cache_creation per agent). Identity is delivered in the first user message
+    instead — see build_identity_header(). The params are kept for backward
+    compatibility but no longer affect the cached prefix."""
+    return _COMMON_BASE
+
+
+def build_identity_header(
+    agent_id: str = "",
+    agent_type: str = "",
+    parent_id: str | None = None,
+) -> str:
+    """The per-agent identity block, delivered in the FIRST USER MESSAGE (not
+    the cached system prompt). This is what used to sit at the top of the
+    common base; moving it here keeps the system-prompt prefix invariant across
+    agents so it stays cacheable."""
+    return (
+        "Your identity in the ATN framework:\n"
+        f"Agent ID: {agent_id or 'unknown'}\n"
+        f"Agent Type: {agent_type or 'general'}\n"
+        f"Parent: {parent_id or 'orchestrator'}"
     )
 
 

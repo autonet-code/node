@@ -386,12 +386,19 @@ class ExecutionEngine:
                 raise _BudgetExceeded()
 
             # --- System prompt ---
+            # When we build the prompt from the delegate template, identity is
+            # NOT in the (cacheable) system prompt — it's delivered in the first
+            # user message so the prefix stays byte-identical across agents and
+            # hits the prompt cache. Agents with a custom system_prompt own
+            # their identity, so we don't inject for them.
+            _inject_identity = False
             if defn.system_prompt:
                 system_prompt = defn.system_prompt
             else:
                 system_prompt = build_delegate_prompt(
                     defn.agent_type, defn.id, defn.parent_id,
                 )
+                _inject_identity = True
 
             # --- Constitutional preamble (registered agents only) ---
             # Injected by the runtime, not user-modifiable.  The constitution
@@ -408,6 +415,13 @@ class ExecutionEngine:
 
             # --- Tool surface ---
             agent_tools = resolve_tool_surface(defn.tools or [])
+
+            # Whether this agent should also get the SDK's native built-in
+            # tools (Bash/Read/Write/Edit/Glob/Grep/WebSearch/...). These are
+            # heavy in first-turn context, so they're OFF unless the agent's
+            # definition explicitly asks via "sdk_builtin". A lean agent (no
+            # sdk_builtin) runs with just the ATN MCP tools, much smaller prefix.
+            native_tools = "sdk_builtin" in (defn.tools or [])
 
             from ..providers.bridge import BridgeProvider as _BP
             if not isinstance(sub_provider, _BP):
@@ -453,6 +467,19 @@ class ExecutionEngine:
             if not prompt_parts:
                 prompt_parts.append(defn.description or defn.name)
             user_message = "\n\n".join(prompt_parts)
+
+            # Prepend the identity header to the FIRST user message only (fresh
+            # session, no prior turns) — keeps it out of the cached system
+            # prefix while still orienting the agent. On resumed sessions the
+            # agent already has it in history.
+            if _inject_identity and not getattr(sub_provider, "_session_id", ""):
+                from ..delegate_prompts import build_identity_header
+                _ident = build_identity_header(
+                    agent_id=defn.id,
+                    agent_type=defn.agent_type,
+                    parent_id=defn.parent_id,
+                )
+                user_message = f"{_ident}\n\n{user_message}"
 
             # --- Session resume / history (unified for all agents) ---
             agent_convo = self.session_manager.get_agent_conversation_store(defn.id)
@@ -535,7 +562,7 @@ class ExecutionEngine:
             _recorded_inflight: dict[str, int] = {}
 
             def _per_turn_recorder(
-                turn_tokens: int,
+                turn_tokens: float,
                 model: str = "",
             ) -> tuple[bool, str | None]:
                 if turn_tokens <= 0:
@@ -568,6 +595,7 @@ class ExecutionEngine:
                 "message": user_message,
                 "system": system_prompt,
                 "tools": agent_tools,
+                "native_tools": native_tools,
                 "max_turns": defn.max_turns,
                 "tool_executor": _tool_executor,
                 "on_chunk": _on_chunk,
@@ -596,8 +624,18 @@ class ExecutionEngine:
                 record.status = ExecutionStatus.KILLED
                 record.error = "Interrupted"
             elif response.stop_reason == "budget_exceeded":
-                record.status = ExecutionStatus.FAILED
-                record.error = response.text or "Budget exceeded mid-orchestration"
+                # Budget was hit. Distinguish "produced an answer, then went
+                # over" from "aborted mid-orchestration with nothing to show".
+                # A run that actually answered is COMPLETED — don't bury the
+                # answer in the error field and report it as FAILED. The budget
+                # breach is surfaced separately (BUDGET_EXCEEDED event +
+                # BUDGET_PAUSED status in the reconciliation block below).
+                if result_text.strip():
+                    record.status = ExecutionStatus.COMPLETED
+                    record.error = None
+                else:
+                    record.status = ExecutionStatus.FAILED
+                    record.error = "Budget exceeded before any output was produced"
             else:
                 record.status = ExecutionStatus.COMPLETED
 
@@ -672,8 +710,12 @@ class ExecutionEngine:
 
             # Record usage in cascading budget system. Subtract anything the
             # inner-loop recorder already booked so we don't double-count.
+            # Meter REAL SPEND (Usage.budget_tokens), consistent with the
+            # inner-loop recorder — NOT the raw 4-bucket total, which is context
+            # size and would re-introduce the cache_read we deliberately
+            # down-weight (and false-fail sane caps).
             for provider_key, usage in record.token_usage.items():
-                total = usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_creation_tokens
+                total = usage.budget_tokens()
                 already_recorded = _recorded_inflight.get(provider_key, 0)
                 remainder = total - already_recorded
                 if remainder > 0:

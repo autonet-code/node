@@ -146,6 +146,36 @@ class Usage:
     cache_read_tokens: int = 0       # tokens served from cache (cheap)
     cache_creation_tokens: int = 0   # tokens written to cache (one-time cost)
 
+    def total_tokens(self) -> int:
+        """All four buckets summed — the raw context/EIT figure. This is
+        context SIZE, not spend: cache_read can dominate it while costing ~10%.
+        Use for snapshots/telemetry, NOT for budget enforcement."""
+        return (self.input_tokens + self.output_tokens
+                + self.cache_read_tokens + self.cache_creation_tokens)
+
+    def budget_tokens(self) -> int:
+        """Tokens to meter against a budget cap — REAL NEW tokens, not context
+        size.
+
+        The defect this fixes: a cached system+tools prefix is re-sent on every
+        turn as ``cache_read`` (Anthropic bills it at ~10% and it is no new
+        work), yet the old meter summed all four buckets at full weight. That
+        made an agent which spent $0.009 trip a 5,000-token cap, because its
+        47k of cache_read dwarfed the ~3.3k of tokens it actually generated.
+
+        We exclude cache_read and count the rest at 1:1 — i.e. tokens the agent
+        genuinely produced/consumed this run:
+            input          (fresh prompt tokens)
+            cache_creation (one-time prefix write)
+            output         (generated tokens)
+        This keeps a "tokens" budget meaning *token count* (not a cost-weighted
+        unit, which would silently change the meaning of every existing cap);
+        it simply stops charging the cheap cached re-read. For test-simple this
+        is 489 + 2840 + 63 = 3392, comfortably under a 5,000 cap."""
+        return (self.input_tokens
+                + self.cache_creation_tokens
+                + self.output_tokens)
+
 
 @dataclass
 class ProviderResponse:
@@ -414,12 +444,11 @@ class Provider(ABC):
             # the loop early instead of running all max_turns.
             if usage_recorder is not None:
                 try:
-                    turn_total = (
-                        response.usage.input_tokens
-                        + response.usage.output_tokens
-                        + response.usage.cache_read_tokens
-                        + response.usage.cache_creation_tokens
-                    )
+                    # Meter REAL SPEND, not context size: a large cached prefix
+                    # (cache_read) is re-sent every turn but costs ~10% and is
+                    # no new work — counting it at full weight false-fails sane
+                    # caps. See Usage.budget_tokens().
+                    turn_total = response.usage.budget_tokens()
                     if turn_total > 0:
                         rec_model = response.model or model or self._active_model
                         ok, blocker = await _maybe_await(

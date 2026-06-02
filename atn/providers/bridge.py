@@ -562,12 +562,19 @@ class BridgeProvider(Provider):
                             # Per-turn usage from the TS bridge. Roll into the
                             # cascading budget; if the recorder vetoes, signal
                             # the SDK to stop via interrupt().
-                            turn_total = (
-                                int(event.get("input_tokens", 0))
-                                + int(event.get("output_tokens", 0))
-                                + int(event.get("cache_read_input_tokens", 0))
-                                + int(event.get("cache_creation_input_tokens", 0))
-                            )
+                            _u_in = int(event.get("input_tokens", 0))
+                            _u_out = int(event.get("output_tokens", 0))
+                            _u_cr = int(event.get("cache_read_input_tokens", 0))
+                            _u_cc = int(event.get("cache_creation_input_tokens", 0))
+                            # Context size (all buckets) — for the context-%
+                            # estimator only.
+                            turn_total = _u_in + _u_out + _u_cr + _u_cc
+                            # Real new tokens — for budget enforcement. Exclude
+                            # cache_read: it's the cached prefix re-sent every
+                            # turn (bills ~10%, no new work) and full-weighting
+                            # it false-fails sane caps. Mirrors
+                            # Usage.budget_tokens().
+                            turn_spend = _u_in + _u_cc + _u_out
                             turn_model = event.get("model", "")
                             if turn_total > 0:
                                 # Update per-class cumulative counter for the estimator.
@@ -576,7 +583,7 @@ class BridgeProvider(Provider):
                                     try:
                                         ok, blocker = await _maybe_await(
                                             _call_recorder(
-                                                usage_recorder, turn_total, turn_model
+                                                usage_recorder, turn_spend, turn_model
                                             )
                                         )
                                         if not ok:

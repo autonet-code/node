@@ -1014,10 +1014,13 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         elif not agent_id:
             agent_id = input.get("name", "agent").lower().replace(" ", "-")
 
-        # Build system prompt — use provided or generate from agent_type
+        # System prompt: keep ONLY a caller-provided custom prompt. Do NOT
+        # pre-render the delegate template here — leaving it empty lets the
+        # execution engine build the (identity-free, byte-identical) cacheable
+        # prompt fresh each run and deliver identity via the first user message.
+        # Pre-rendering froze a per-agent prompt into the YAML, which defeated
+        # cross-agent prefix caching (every agent re-created the ~50k prefix).
         system_prompt = input.get("system_prompt", "")
-        if not system_prompt and prompt and parent_id:
-            system_prompt = build_delegate_prompt(agent_type, agent_id, parent_id)
 
         effective_model = model or runtime._config.orchestrator.model or "sonnet"
         model_tier = get_model_tier(effective_model)
