@@ -649,7 +649,39 @@ class ChatService:
             except Exception:
                 log.debug("kk context reply failed", exc_info=True)
             return True
+        if "notify" in low:
+            # kk notify on|off  — toggle this agent's parent-completion
+            # notification. Bare `kk notify` reports the current setting.
+            reg = getattr(self.runtime, "registry", None)
+            defn = reg.get_agent(target) if reg is not None else None
+            words = low.split()
+            if defn is None:
+                reply = f"⚠️ `{target}`: no such agent."
+            elif "on" in words:
+                defn.notify_parent = True
+                self._persist_agent(defn)
+                reply = f"🔔 `{target}`: parent notifications ON."
+            elif "off" in words:
+                defn.notify_parent = False
+                self._persist_agent(defn)
+                reply = f"🔕 `{target}`: parent notifications OFF."
+            else:
+                state = "ON" if getattr(defn, "notify_parent", True) else "OFF"
+                reply = f"`{target}`: parent notifications {state}. Use `kk notify on|off`."
+            try:
+                await self.client.reply(message.id, message.channel.id, content=reply)
+            except Exception:
+                log.debug("kk notify reply failed", exc_info=True)
+            return True
         return False
+
+    def _persist_agent(self, defn) -> None:
+        """Persist an agent def change to its YAML (so it survives restart)."""
+        try:
+            from ..loader import save_agent
+            save_agent(defn, self.runtime._config.agents_dir)
+        except Exception:
+            log.debug("save_agent failed for %s", getattr(defn, "id", "?"), exc_info=True)
 
     async def handle_inbound(self, message: "Message") -> bool:
         """Route an inbound platform message into the right agent session.
