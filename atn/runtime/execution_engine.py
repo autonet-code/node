@@ -546,7 +546,11 @@ class ExecutionEngine:
                 return result
 
             # --- Streaming callback ---
+            _streamed = {"text": False}
+
             async def _on_chunk(text: str) -> None:
+                if text:
+                    _streamed["text"] = True
                 self.session_manager.append_delegate_output(defn.id, text)
                 await self.events.emit(Event(
                     type=EventType.STEP_OUTPUT,
@@ -670,6 +674,23 @@ class ExecutionEngine:
                     "cache_creation_tokens": response.usage.cache_creation_tokens,
                 },
             }
+
+            # If the answer never streamed as chunks (short single-block replies
+            # often arrive only in the final response), emit it once as a text
+            # event so live consumers (chat Surface embed, voice) get the full
+            # answer instead of "(no text output)".
+            if result_text and not _streamed["text"]:
+                await self.events.emit(Event(
+                    type=EventType.STEP_OUTPUT,
+                    source=defn.id,
+                    data={
+                        "agent_id": defn.id,
+                        "channel": "text",
+                        "content": result_text,
+                        "cognitive": True,
+                        "final": True,
+                    },
+                ))
 
             provider_key = getattr(sub_provider, 'name', 'claude_max')
             if provider_key not in record.token_usage:

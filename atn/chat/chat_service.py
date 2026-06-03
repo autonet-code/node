@@ -526,6 +526,14 @@ class ChatService:
         target = self.resolve_target(message)
         if target is None:
             return False
+        # In the bound CHANNEL, only respond when @-mentioned — so people can
+        # chat naturally there without the bot butting in. Inside a THREAD the
+        # bot owns, respond to everything (it's a dedicated conversation, no
+        # re-tagging needed). Commands (kk …) work either way.
+        in_channel = message.channel.id == self.channel_id
+        is_command = "kk " in (message.content or "").lower()
+        if in_channel and not message.mentions_bot and not is_command:
+            return False
         # Surface commands (kk …) are handled here, not relayed to the agent and
         # not credit-gated — they're meta, about the surface itself.
         if await self._maybe_handle_command(message, target):

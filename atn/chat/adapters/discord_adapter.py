@@ -244,11 +244,18 @@ class DiscordAdapter:
         if m.reference is not None and m.reference.message_id is not None:
             reply_to_id = str(m.reference.message_id)
         mentions_bot = bool(self._client.user and self._client.user in m.mentions)
+        # Strip the bot's own @mention from the content — the agent shouldn't
+        # see "<@984…> what's up", just "what's up". (Discord uses <@id> and the
+        # legacy <@!id> nickname form.)
+        content = m.content or ""
+        if self._client.user:
+            bid = self._client.user.id
+            content = content.replace(f"<@{bid}>", "").replace(f"<@!{bid}>", "").strip()
         return Message(
             id=str(m.id),
             channel=channel,
             author=author,
-            content=m.content or "",
+            content=content,
             ts=m.created_at or datetime.now(timezone.utc),
             mentions_bot=mentions_bot,
             reply_to_id=reply_to_id,

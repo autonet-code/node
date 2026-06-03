@@ -69,7 +69,8 @@ def _registered(agent_id: str, parent_id: str, name: str) -> Event:
                 agent_id=agent_id, parent_id=parent_id, name=name)
 
 
-def _inbound(content, channel_id, author_id, reply_to_id=None, parent_id=None) -> Message:
+def _inbound(content, channel_id, author_id, reply_to_id=None, parent_id=None,
+             mentions_bot=False) -> Message:
     kind = ChannelKind.THREAD if parent_id else ChannelKind.TEXT
     return Message(
         id="in-" + author_id,
@@ -78,6 +79,7 @@ def _inbound(content, channel_id, author_id, reply_to_id=None, parent_id=None) -
         content=content,
         ts=datetime.now(timezone.utc),
         reply_to_id=reply_to_id,
+        mentions_bot=mentions_bot,
     )
 
 
@@ -151,12 +153,17 @@ async def main() -> int:
               svc.resolve_target(_inbound("x", thread_id, OPERATOR,
                                           reply_to_id=tile.message_id, parent_id=CHANNEL)) == "orchestrator.1.1")
 
-    # operator relays through to runtime.send_agent_message
-    relayed = await svc.handle_inbound(_inbound("do the thing", CHANNEL, OPERATOR))
-    check("operator message relayed to runtime", relayed and rt.relayed[-1][0] == "orchestrator")
-    # non-operator declined, not relayed
+    # operator relays through to runtime.send_agent_message (tagged in channel)
+    relayed = await svc.handle_inbound(
+        _inbound("do the thing", CHANNEL, OPERATOR, mentions_bot=True))
+    check("operator (tagged) relayed to runtime", relayed and rt.relayed[-1][0] == "orchestrator")
+    # untagged channel message is ignored (people can chat without the bot butting in)
     before = len(rt.relayed)
-    declined = await svc.handle_inbound(_inbound("hi", CHANNEL, "rando"))
+    ignored = await svc.handle_inbound(_inbound("just chatting", CHANNEL, OPERATOR))
+    check("untagged channel message ignored", (not ignored) and len(rt.relayed) == before)
+    # non-operator, even tagged, declined by policy (not relayed)
+    before = len(rt.relayed)
+    declined = await svc.handle_inbound(_inbound("hi", CHANNEL, "rando", mentions_bot=True))
     check("non-operator declined (not relayed)", (not declined) and len(rt.relayed) == before)
 
     await svc.stop()
