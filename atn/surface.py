@@ -90,3 +90,22 @@ class Surface(Protocol):
     async def stop(self) -> None:
         """Tear down: unsubscribe, close the connection."""
         ...
+
+    # -- surface tools (optional) -------------------------------------------
+    # A Surface is the only thing that can let an agent ACT BACK on the
+    # external channel (e.g. read the channel's history to "read the room").
+    # It contributes tools to the agents it binds and executes them itself.
+    # This is what makes "give this agent a Discord presence" a capability
+    # rather than a special case. Default: a surface contributes nothing.
+
+    def agent_tools(self, agent_id: str) -> list[dict]:
+        """Tool definitions ({name, description, input_schema}) this surface
+        offers to `agent_id`. Tool names are prefixed `surface_` so the engine
+        routes their calls back here. Return [] if the agent isn't bound to
+        this surface or the surface offers no tools."""
+        return []
+
+    async def call_surface_tool(self, name: str, tool_input: dict, agent_id: str) -> dict:
+        """Execute a surface tool (the `surface_`-prefixed name) for `agent_id`.
+        Returns a result dict (or {"error": …})."""
+        return {"error": f"surface tool {name} not handled"}

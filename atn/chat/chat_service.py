@@ -202,6 +202,58 @@ class ChatService:
                 pass
         self._running = False
 
+    # -- surface tools: let a bound agent read the room -----------------------
+
+    # Which agents may use surface tools: the bound agent and its rendered
+    # descendants (the ones with a channel/thread on this surface).
+    def _agent_channel(self, agent_id: str) -> "ChannelId | None":
+        if agent_id == self.bound_agent:
+            return self.channel_id
+        return self._render_channel.get(agent_id) or self._threads.get(agent_id)
+
+    def agent_tools(self, agent_id: str) -> list[dict]:
+        if self._agent_channel(agent_id) is None:
+            return []
+        return [{
+            "name": "surface_read_channel_history",
+            "description": (
+                "Read recent messages from your Discord channel/thread, oldest "
+                "first — to catch up on the surrounding conversation you weren't "
+                "part of (e.g. when someone asks 'what do you make of all this?'). "
+                "Returns sender + text per message."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many recent messages to fetch (1-100, default 30).",
+                    },
+                },
+            },
+        }]
+
+    async def call_surface_tool(self, name: str, tool_input: dict, agent_id: str) -> dict:
+        if name != "surface_read_channel_history":
+            return {"error": f"unknown surface tool: {name}"}
+        ch = self._agent_channel(agent_id)
+        if ch is None:
+            return {"error": "no channel bound to this agent"}
+        limit = int(tool_input.get("limit", 30) or 30)
+        limit = max(1, min(limit, 100))
+        try:
+            history = await self.client.get_history(ch, limit=limit)
+        except Exception as exc:
+            return {"error": f"could not read channel history: {exc}"}
+        return {
+            "messages": [
+                {"from": f"<@{h.author.id}>", "name": h.author.display_name,
+                 "text": h.content, "ts": h.ts.isoformat()}
+                for h in history
+            ],
+            "count": len(history),
+        }
+
     def _seed_from_registry(self) -> None:
         """Learn current lineage/titles from the runtime registry so routing
         works for agents that already exist (replaces the WS connect-snapshot).

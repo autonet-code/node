@@ -526,6 +526,12 @@ class Runtime:
             return CreditPolicy(store, ops)
         return AllowAll()
 
+    def active_surfaces(self) -> list:
+        """Currently-running Surfaces (chat, voice, …). Used by the execution
+        engine to collect surface-contributed tools for an agent and to route
+        surface tool calls back."""
+        return [s for s in (self.chat, self.voice) if s is not None]
+
     async def stop_chat(self) -> dict:
         if self.chat is None:
             return {"status": "not_running"}

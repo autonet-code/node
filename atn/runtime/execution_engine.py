@@ -159,6 +159,18 @@ class ExecutionEngine:
 
         if name in _SHELL_TOOL_EXECUTORS:
             return await _SHELL_TOOL_EXECUTORS[name](tool_input)
+        # Surface-contributed tools (read channel history, etc.) route back to
+        # whichever active surface offers them.
+        if name.startswith("surface_"):
+            rt_ref = getattr(self, "_runtime_ref", None)
+            if rt_ref is not None and hasattr(rt_ref, "active_surfaces"):
+                for surface in rt_ref.active_surfaces():
+                    try:
+                        if any(t.get("name") == name for t in (surface.agent_tools(agent_id) or [])):
+                            return await surface.call_surface_tool(name, tool_input, agent_id)
+                    except Exception as exc:
+                        return {"error": f"surface tool {name} failed: {exc}"}
+            return {"error": f"no surface offers tool: {name}"}
         if name.startswith("mcp_") and self.connectors:
             parsed = self.connectors.parse_tool_name(name)
             if parsed:
@@ -456,6 +468,18 @@ class ExecutionEngine:
                      "input_schema": td.input_schema}
                     for td in self.connectors.get_all_tools(defn.connector_ids)
                 )
+
+            # Surface-contributed tools — a Surface (e.g. the chat Surface) can
+            # give an agent it binds the ability to act back on its channel
+            # (e.g. read channel history). surface_-prefixed; routed back to the
+            # surface in route_tool_call.
+            rt_ref = getattr(self, "_runtime_ref", None)
+            if rt_ref is not None and hasattr(rt_ref, "active_surfaces"):
+                for surface in rt_ref.active_surfaces():
+                    try:
+                        agent_tools.extend(surface.agent_tools(defn.id) or [])
+                    except Exception:
+                        log.debug("surface.agent_tools failed", exc_info=True)
 
             # --- Drain inbox ---
             all_messages = self.inbox.drain(defn.id)
