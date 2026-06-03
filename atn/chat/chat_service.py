@@ -187,7 +187,7 @@ class ChatService:
         if self._running:
             return
         self._seed_from_registry()
-        await self._backfill_history()
+        await self._reconcile_all_history()
         for et in _SUBSCRIBED:
             self.events.subscribe(et, self._on_bus_event)
         self._running = True
@@ -212,16 +212,25 @@ class ChatService:
     # Backfilled once on start (via get_history) and appended on every inbound
     # message. The agent is told the path in its prompt; no surface tool needed.
 
-    def _history_path(self, channel_id: "ChannelId | None" = None) -> "Path | None":
-        """History file for a space (a channel or thread id). One file per
-        space — fractal: the main channel and each delegate thread each get
-        their own log, named by the space's id."""
+    # Max size per history file; prune oldest lines past this on write.
+    _HISTORY_MAX_BYTES = 500_000
+
+    def _history_dir(self) -> "Path | None":
         data_dir = getattr(getattr(self.runtime, "_config", None), "data_dir", None)
         if not data_dir:
             return None
         from pathlib import Path
         d = Path(data_dir) / "chat_history"
         d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _history_path(self, channel_id: "ChannelId | None" = None) -> "Path | None":
+        """History file for a space (a channel or thread id). One file per
+        space — fractal: the main channel and each delegate thread each get
+        their own log, named by the space's id."""
+        d = self._history_dir()
+        if d is None:
+            return None
         cid = channel_id if channel_id is not None else self.channel_id
         safe = "".join(c for c in str(cid) if c.isalnum() or c in "-_")
         return d / f"{safe}.log"
@@ -231,36 +240,53 @@ class ChatService:
         text = (text or "").replace("\n", " ").strip()
         return f"[{ts}] <@{author_id}> {name}: {text}\n"
 
-    async def _backfill_history(self) -> None:
-        """On start, reconcile the channel history file with Discord: append any
-        recent messages newer than what we already have. Runs every start (not
-        just first), so messages sent while the daemon was DOWN get caught up —
-        otherwise the file has a silent gap and the agent reports stale data."""
-        path = self._history_path()
+    @staticmethod
+    def _last_ts_in(path) -> "datetime | None":
+        """Newest timestamp recorded in a history file (None if empty/absent)."""
+        if not path.exists():
+            return None
+        from datetime import datetime as _dt
+        try:
+            for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+                if line.startswith("[") and "]" in line:
+                    try:
+                        return _dt.fromisoformat(line[1:line.index("]")])
+                    except ValueError:
+                        continue
+        except Exception:
+            log.debug("history read-back failed for %s", path, exc_info=True)
+        return None
+
+    def _prune_history(self, path) -> None:
+        """Keep a history file under the size cap by dropping OLDEST lines."""
+        try:
+            if not path.exists() or path.stat().st_size <= self._HISTORY_MAX_BYTES:
+                return
+            data = path.read_bytes()
+            # Drop from the front to ~80% of cap, then realign to a line start.
+            keep = data[-int(self._HISTORY_MAX_BYTES * 0.8):]
+            nl = keep.find(b"\n")
+            if nl != -1:
+                keep = keep[nl + 1:]
+            path.write_bytes(keep)
+        except Exception:
+            log.debug("history prune failed for %s", path, exc_info=True)
+
+    async def _reconcile_space(self, channel_id: "ChannelId") -> None:
+        """Catch a space's history file up with Discord: append messages newer
+        than its newest recorded line. Skips embed-only / empty-content
+        messages (the noise — bot status cards, link previews have no text)."""
+        path = self._history_path(channel_id)
         if path is None:
             return
-        # Newest timestamp already recorded (to avoid duplicating).
-        last_ts = None
-        if path.exists():
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-                for line in reversed(lines):
-                    if line.startswith("[") and "]" in line:
-                        from datetime import datetime as _dt
-                        try:
-                            last_ts = _dt.fromisoformat(line[1:line.index("]")])
-                            break
-                        except ValueError:
-                            continue
-            except Exception:
-                log.debug("history read-back failed", exc_info=True)
+        last_ts = self._last_ts_in(path)
         try:
-            history = await self.client.get_history(self.channel_id, limit=100)
+            history = await self.client.get_history(channel_id, limit=100)
         except Exception:
-            log.debug("history backfill failed", exc_info=True)
+            log.debug("history reconcile fetch failed for %s", channel_id, exc_info=True)
             return
-        # Append only entries strictly newer than what we have.
-        fresh = [h for h in history if last_ts is None or h.ts > last_ts]
+        fresh = [h for h in history
+                 if (last_ts is None or h.ts > last_ts) and (h.content or "").strip()]
         if not fresh:
             return
         try:
@@ -268,14 +294,36 @@ class ChatService:
                 for h in fresh:
                     f.write(self._history_line(
                         h.ts.isoformat(), h.author.id, h.author.display_name, h.content))
-            log.info("history backfill: +%d message(s) for channel %s",
-                     len(fresh), self.channel_id)
+            self._prune_history(path)
+            log.info("history reconcile: +%d for space %s", len(fresh), channel_id)
         except Exception:
-            log.debug("history backfill write failed", exc_info=True)
+            log.debug("history reconcile write failed for %s", channel_id, exc_info=True)
+
+    async def _reconcile_all_history(self) -> None:
+        """On init: reconcile EVERY known space against Discord. Known spaces =
+        the bound channel + every existing history file (each .log is a space
+        we've logged before — covers threads without persisting bindings).
+        Catches up anything sent while the daemon was down."""
+        seen: set[str] = {str(self.channel_id)}
+        await self._reconcile_space(self.channel_id)
+        d = self._history_dir()
+        if d is None:
+            return
+        try:
+            for f in d.glob("*.log"):
+                cid = f.stem
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                await self._reconcile_space(cid)
+        except Exception:
+            log.debug("reconcile-all enumerate failed", exc_info=True)
 
     def _append_history(self, message: "Message") -> None:
         """Append one inbound message to its space's history file (main channel
-        or a thread — one file per space)."""
+        or a thread — one file per space). Skips empty/embed-only messages."""
+        if not (message.content or "").strip():
+            return
         path = self._history_path(message.channel.id)
         if path is None:
             return
@@ -285,6 +333,7 @@ class ChatService:
                     message.ts.isoformat(), message.author.id,
                     message.author.display_name or message.author.handle,
                     message.content))
+            self._prune_history(path)
         except Exception:
             log.debug("history append failed", exc_info=True)
 
