@@ -476,8 +476,11 @@ class ExecutionEngine:
             rt_ref = getattr(self, "_runtime_ref", None)
             if rt_ref is not None and hasattr(rt_ref, "active_surfaces"):
                 for surface in rt_ref.active_surfaces():
+                    fn = getattr(surface, "agent_tools", None)
+                    if fn is None:
+                        continue
                     try:
-                        agent_tools.extend(surface.agent_tools(defn.id) or [])
+                        agent_tools.extend(fn(defn.id) or [])
                     except Exception:
                         log.debug("surface.agent_tools failed", exc_info=True)
 

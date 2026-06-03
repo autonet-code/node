@@ -187,6 +187,7 @@ class ChatService:
         if self._running:
             return
         self._seed_from_registry()
+        await self._backfill_history()
         for et in _SUBSCRIBED:
             self.events.subscribe(et, self._on_bus_event)
         self._running = True
@@ -202,57 +203,63 @@ class ChatService:
                 pass
         self._running = False
 
-    # -- surface tools: let a bound agent read the room -----------------------
+    # -- channel history as a FILE (read/grep, not a one-shot fetch) ----------
+    #
+    # The Surface materializes the bound channel's conversation to a plain text
+    # file the agent reads/greps with its native Read/Grep tools — like reading
+    # any file, rather than a bespoke fetch tool. One line per message:
+    #   [ISO ts] <@id> name: text
+    # Backfilled once on start (via get_history) and appended on every inbound
+    # message. The agent is told the path in its prompt; no surface tool needed.
 
-    # Which agents may use surface tools: the bound agent and its rendered
-    # descendants (the ones with a channel/thread on this surface).
-    def _agent_channel(self, agent_id: str) -> "ChannelId | None":
-        if agent_id == self.bound_agent:
-            return self.channel_id
-        return self._render_channel.get(agent_id) or self._threads.get(agent_id)
+    def _history_path(self) -> "Path | None":
+        data_dir = getattr(getattr(self.runtime, "_config", None), "data_dir", None)
+        if not data_dir:
+            return None
+        from pathlib import Path
+        d = Path(data_dir) / "chat_history"
+        d.mkdir(parents=True, exist_ok=True)
+        # Sanitize the channel id for a filename (ids are numeric, but be safe).
+        safe = "".join(c for c in str(self.channel_id) if c.isalnum() or c in "-_")
+        return d / f"{safe}.log"
 
-    def agent_tools(self, agent_id: str) -> list[dict]:
-        if self._agent_channel(agent_id) is None:
-            return []
-        return [{
-            "name": "surface_read_channel_history",
-            "description": (
-                "Read recent messages from your Discord channel/thread, oldest "
-                "first — to catch up on the surrounding conversation you weren't "
-                "part of (e.g. when someone asks 'what do you make of all this?'). "
-                "Returns sender + text per message."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "description": "How many recent messages to fetch (1-100, default 30).",
-                    },
-                },
-            },
-        }]
+    @staticmethod
+    def _history_line(ts: str, author_id: str, name: str, text: str) -> str:
+        text = (text or "").replace("\n", " ").strip()
+        return f"[{ts}] <@{author_id}> {name}: {text}\n"
 
-    async def call_surface_tool(self, name: str, tool_input: dict, agent_id: str) -> dict:
-        if name != "surface_read_channel_history":
-            return {"error": f"unknown surface tool: {name}"}
-        ch = self._agent_channel(agent_id)
-        if ch is None:
-            return {"error": "no channel bound to this agent"}
-        limit = int(tool_input.get("limit", 30) or 30)
-        limit = max(1, min(limit, 100))
+    async def _backfill_history(self) -> None:
+        """One-time: pull recent channel history into the file on start, so the
+        agent has prior context, not just messages seen since boot."""
+        path = self._history_path()
+        if path is None or path.exists():
+            return  # already have a file; don't re-pull / clobber appends
         try:
-            history = await self.client.get_history(ch, limit=limit)
-        except Exception as exc:
-            return {"error": f"could not read channel history: {exc}"}
-        return {
-            "messages": [
-                {"from": f"<@{h.author.id}>", "name": h.author.display_name,
-                 "text": h.content, "ts": h.ts.isoformat()}
-                for h in history
-            ],
-            "count": len(history),
-        }
+            history = await self.client.get_history(self.channel_id, limit=100)
+        except Exception:
+            log.debug("history backfill failed", exc_info=True)
+            return
+        try:
+            with path.open("w", encoding="utf-8") as f:
+                for h in history:
+                    f.write(self._history_line(
+                        h.ts.isoformat(), h.author.id, h.author.display_name, h.content))
+        except Exception:
+            log.debug("history backfill write failed", exc_info=True)
+
+    def _append_history(self, message: "Message") -> None:
+        """Append one inbound message to the channel history file."""
+        path = self._history_path()
+        if path is None:
+            return
+        try:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(self._history_line(
+                    message.ts.isoformat(), message.author.id,
+                    message.author.display_name or message.author.handle,
+                    message.content))
+        except Exception:
+            log.debug("history append failed", exc_info=True)
 
     def _seed_from_registry(self) -> None:
         """Learn current lineage/titles from the runtime registry so routing
@@ -578,6 +585,10 @@ class ChatService:
         target = self.resolve_target(message)
         if target is None:
             return False
+        # Record EVERY inbound message to the channel-history file (even
+        # untagged chatter the bot won't answer) so the agent can read the room.
+        if message.channel.id == self.channel_id:
+            self._append_history(message)
         # In the bound CHANNEL, only respond when @-mentioned — so people can
         # chat naturally there without the bot butting in. Inside a THREAD the
         # bot owns, respond to everything (it's a dedicated conversation, no
