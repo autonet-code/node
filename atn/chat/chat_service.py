@@ -232,21 +232,44 @@ class ChatService:
         return f"[{ts}] <@{author_id}> {name}: {text}\n"
 
     async def _backfill_history(self) -> None:
-        """One-time: pull recent channel history into the file on start, so the
-        agent has prior context, not just messages seen since boot."""
+        """On start, reconcile the channel history file with Discord: append any
+        recent messages newer than what we already have. Runs every start (not
+        just first), so messages sent while the daemon was DOWN get caught up —
+        otherwise the file has a silent gap and the agent reports stale data."""
         path = self._history_path()
-        if path is None or path.exists():
-            return  # already have a file; don't re-pull / clobber appends
+        if path is None:
+            return
+        # Newest timestamp already recorded (to avoid duplicating).
+        last_ts = None
+        if path.exists():
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+                for line in reversed(lines):
+                    if line.startswith("[") and "]" in line:
+                        from datetime import datetime as _dt
+                        try:
+                            last_ts = _dt.fromisoformat(line[1:line.index("]")])
+                            break
+                        except ValueError:
+                            continue
+            except Exception:
+                log.debug("history read-back failed", exc_info=True)
         try:
             history = await self.client.get_history(self.channel_id, limit=100)
         except Exception:
             log.debug("history backfill failed", exc_info=True)
             return
+        # Append only entries strictly newer than what we have.
+        fresh = [h for h in history if last_ts is None or h.ts > last_ts]
+        if not fresh:
+            return
         try:
-            with path.open("w", encoding="utf-8") as f:
-                for h in history:
+            with path.open("a", encoding="utf-8") as f:
+                for h in fresh:
                     f.write(self._history_line(
                         h.ts.isoformat(), h.author.id, h.author.display_name, h.content))
+            log.info("history backfill: +%d message(s) for channel %s",
+                     len(fresh), self.channel_id)
         except Exception:
             log.debug("history backfill write failed", exc_info=True)
 

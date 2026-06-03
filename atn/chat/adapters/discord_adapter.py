@@ -371,8 +371,12 @@ class DiscordAdapter:
         ch = await self._resolve(channel_id)
         if ch is None:
             return []
+        # Fetch the most RECENT `limit` messages (Discord default = newest
+        # first), then return them oldest->newest. oldest_first=True would
+        # instead return the channel's FIRST messages ever — wrong for "recent
+        # history".
         out: list[HistoryMessage] = []
-        async for m in ch.history(limit=limit, oldest_first=True):
+        async for m in ch.history(limit=limit):
             out.append(HistoryMessage(
                 id=str(m.id),
                 author=Author(id=str(m.author.id),
@@ -381,6 +385,7 @@ class DiscordAdapter:
                 content=m.content or "",
                 ts=m.created_at or datetime.now(timezone.utc),
             ))
+        out.reverse()  # newest-first -> chronological
         return out
 
     async def add_reaction(self, message_id: MessageId, channel_id: ChannelId,
