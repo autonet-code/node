@@ -404,11 +404,11 @@ class ChatService:
     async def _on_step_output(self, agent_id: str, data: dict) -> None:
         channel = data.get("channel")
         if channel == "usage":
-            usage = data.get("usage") or {}
-            n = int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
             r = self._renders.get(agent_id)
             if r is not None:
-                r.on_tokens(n)
+                # Pass the full split so the render meters REAL SPEND
+                # (cache_creation + output + $), not context size.
+                r.on_usage(data.get("usage") or {}, data.get("cumulative") or {})
             return
         content = data.get("content") or ""
         if not content:
@@ -482,6 +482,40 @@ class ChatService:
                 return delegate_id
         return None
 
+    async def _maybe_handle_command(self, message: "Message", target: str) -> bool:
+        """Handle `kk …` surface commands. Returns True if handled (so the
+        message is not relayed to the agent). Commands are about the surface,
+        not prompts for the agent."""
+        text = (message.content or "").strip()
+        # Strip a leading bot @mention so "@K3V|N kk context" works too.
+        low = text.lower()
+        if "kk context" not in low and not low.startswith("kk "):
+            return False
+        if "context" in low:
+            stats = {}
+            try:
+                stats = self.runtime.get_session_stats(target) or {}
+            except Exception:
+                log.debug("get_session_stats failed for %s", target, exc_info=True)
+            pct = stats.get("context_used_pct")
+            turns = stats.get("num_turns")
+            ctx = stats.get("context_window")
+            cost = stats.get("total_cost_usd")
+            parts = []
+            if pct is not None:
+                parts.append(f"context {pct:.0f}% used" + (f" of {ctx:,}" if ctx else ""))
+            if turns is not None:
+                parts.append(f"{turns} turns")
+            if isinstance(cost, (int, float)) and cost > 0:
+                parts.append(f"${cost:.4f} so far")
+            reply = f"📊 `{target}`: " + (" · ".join(parts) if parts else "no session yet")
+            try:
+                await self.client.reply(message.id, message.channel.id, content=reply)
+            except Exception:
+                log.debug("kk context reply failed", exc_info=True)
+            return True
+        return False
+
     async def handle_inbound(self, message: "Message") -> bool:
         """Route an inbound platform message into the right agent session.
 
@@ -492,6 +526,10 @@ class ChatService:
         target = self.resolve_target(message)
         if target is None:
             return False
+        # Surface commands (kk …) are handled here, not relayed to the agent and
+        # not credit-gated — they're meta, about the surface itself.
+        if await self._maybe_handle_command(message, target):
+            return True
         decision = self.policy.evaluate(message.author, target, message.content)
         if not decision.allow:
             if decision.reason:

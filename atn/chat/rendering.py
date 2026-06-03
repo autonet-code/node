@@ -75,7 +75,8 @@ class AgentExecutionRender:
     _thinking: str = field(default="", init=False)
     _tools: list[str] = field(default_factory=list, init=False)
     _current_tool: str | None = field(default=None, init=False)
-    _tokens: int = field(default=0, init=False)
+    _tokens: int = field(default=0, init=False)        # real spend (cache_creation + output)
+    _cost_usd: float = field(default=0.0, init=False)  # cumulative $ from the bridge
     _finalized: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -131,9 +132,21 @@ class AgentExecutionRender:
         except Exception:
             log.debug("render on_thinking failed (%s)", self.agent_id, exc_info=True)
 
-    def on_tokens(self, n: int) -> None:
-        if n:
-            self._tokens += n
+    def on_usage(self, usage: dict, cumulative: dict | None = None) -> None:
+        """Accumulate REAL SPEND for this execution, not context size.
+
+        The usage event's input_tokens is the full context sent (≈ the cached
+        prefix), which is occupancy, not cost. Spend = fresh work this turn:
+        cache_creation + output. cache_read (the prefix re-read at ~10%) and the
+        context-size input are excluded. We also track the cumulative dollar
+        cost the bridge reports, which is the truest figure."""
+        cc = int(usage.get("cache_creation_tokens", 0) or 0)
+        out = int(usage.get("output_tokens", 0) or 0)
+        self._tokens += cc + out
+        if cumulative:
+            cost = cumulative.get("total_cost_usd")
+            if isinstance(cost, (int, float)):
+                self._cost_usd = float(cost)
 
     async def finalize(self, status: str = "completed", elapsed_s: float | None = None) -> None:
         if self._finalized or self._handle is None:
@@ -147,8 +160,12 @@ class AgentExecutionRender:
             bits.append("used " + ", ".join(self._tools))
         if elapsed_s is not None:
             bits.append(f"{elapsed_s:.0f}s")
+        # Real spend for this message — NOT context size. Show $ when we have
+        # it (truest), plus the real-spend token count (cache_creation+output).
         if self._tokens:
             bits.append(f"{self._tokens:,} tok")
+        if self._cost_usd > 0:
+            bits.append(f"${self._cost_usd:.4f}")
         footer = ("-# " + " · ".join(bits)) if bits else ""
         final_text = f"{body}\n\n{footer}" if footer else body
         try:
