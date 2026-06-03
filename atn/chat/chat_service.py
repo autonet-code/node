@@ -540,7 +540,12 @@ class ChatService:
                 except Exception:
                     log.debug("policy-deny reply failed", exc_info=True)
             return False
-        ok = await self.runtime.send_agent_message(target, message.content)
+        # Stamp the sender as a TAGGABLE id, not a name. The agent only ever
+        # learns people as ids it can ping — so any reference it makes is a tag
+        # (a notification), never talking about someone behind their back.
+        sender_id = str(getattr(message.author, "id", "") or "")
+        stamped = f"[from <@{sender_id}>]: {message.content}" if sender_id else message.content
+        ok = await self.runtime.send_agent_message(target, stamped)
         if ok:
             log.info("relayed inbound -> %s (%d chars)", target, len(message.content))
         return ok
