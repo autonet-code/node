@@ -42,6 +42,15 @@ def _is_root(pid: AgentId | None, of: AgentId) -> bool:
     return pid is None or pid == "" or pid == of or pid == ORCHESTRATOR
 
 
+def _is_root_id(node: AgentId, parent_of: ParentOf) -> bool:
+    """A node is a root if it has no parent (empty/None) in the map, or is the
+    orchestrator. Roots own the channel; their children are thread owners."""
+    if node == ORCHESTRATOR:
+        return True
+    p = parent_of(node)
+    return p == "" or p is None
+
+
 def agent_depth(agent_id: AgentId, parent_of: ParentOf | None = None) -> int:
     """Depth in the delegate tree. orchestrator=0, its children=1, ...
 
@@ -55,15 +64,22 @@ def agent_depth(agent_id: AgentId, parent_of: ParentOf | None = None) -> int:
     if agent_id == ORCHESTRATOR:
         return 0
     if parent_of is not None and parent_of(agent_id) is not None:
-        # Known to the resolver -> count steps from the agent up to the root.
+        # Count edges from the agent up until we reach a node whose parent
+        # denotes root. A root node (parent == "" / None) is depth 0; its
+        # children depth 1; etc. "Root" is defined by an empty parent, which is
+        # how a channel's bound agent is rooted — so a subtree under any bound
+        # agent gets the same 0/1/2 depths as the orchestrator's subtree.
+        if _is_root_id(agent_id, parent_of):
+            return 0
         depth = 0
         cur = agent_id
         for _ in range(_MAX_LINEAGE):
-            p = parent_of(cur)
-            depth += 1
-            if _is_root(p, cur):
+            if _is_root_id(cur, parent_of):
                 return depth
-            cur = p
+            depth += 1
+            cur = parent_of(cur)
+            if cur is None:
+                return depth
         return depth
     return agent_id.count(".")
 
@@ -88,11 +104,16 @@ def top_level_delegate(agent_id: AgentId, parent_of: ParentOf | None = None) -> 
     falls back to dotted parsing. Returns None for the orchestrator.
     """
     if parent_of is not None and parent_of(agent_id) is not None:
+        # The agent is itself a root (bound agent / orchestrator) -> no thread.
+        if _is_root_id(agent_id, parent_of):
+            return None
+        # Walk up until cur's parent is a root: cur is then the depth-1 node
+        # (the thread owner).
         cur = agent_id
         for _ in range(_MAX_LINEAGE):
             p = parent_of(cur)
-            if _is_root(p, cur):
-                return None if cur == ORCHESTRATOR else cur
+            if p is None or _is_root_id(p, parent_of):
+                return cur
             cur = p
         return cur
     depth = agent_id.count(".")

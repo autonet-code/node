@@ -21,8 +21,9 @@ from ..surface import InputPolicy, PolicyDecision
 
 if TYPE_CHECKING:
     from .protocol import Author
+    from .credits import CreditStore
 
-__all__ = ["InputPolicy", "PolicyDecision", "AllowAll", "OperatorGate"]
+__all__ = ["InputPolicy", "PolicyDecision", "AllowAll", "OperatorGate", "CreditPolicy"]
 
 
 class AllowAll:
@@ -53,3 +54,41 @@ class OperatorGate:
         if getattr(author, "id", None) in self.operator_ids:
             return PolicyDecision(allow=True)
         return PolicyDecision(allow=False, reason=self.DENY_MESSAGE)
+
+
+class CreditPolicy:
+    """Rolling-credit gate backed by a Surface-owned CreditStore.
+
+    Encodes the whole member-vs-operator distinction as credits — there is no
+    separate operator flag:
+      - operator(s): unlimited (never blocked, never consumes a credit),
+      - explicitly blocked users: denied,
+      - everyone else: a rolling-window allowance; allowed (one credit consumed)
+        while credits remain, denied with a "credits return at…" hint when out.
+    """
+
+    def __init__(self, store: "CreditStore",
+                 operator_ids: frozenset[str] | set[str] | None = None) -> None:
+        self.store = store
+        self.operator_ids = frozenset(operator_ids or set())
+
+    def evaluate(self, author: Any, agent_id: str, content: str) -> PolicyDecision:
+        if getattr(author, "is_bot", False):
+            return PolicyDecision(allow=False, reason="(bot author ignored)")
+        uid = str(getattr(author, "id", "") or "")
+        if not uid:
+            return PolicyDecision(allow=False, reason="(no author id)")
+        # Operator: unlimited.
+        if uid in self.operator_ids:
+            return PolicyDecision(allow=True)
+        if self.store.is_blocked(uid):
+            return PolicyDecision(
+                allow=False,
+                reason="Sorry — you don't have access to this assistant right now.")
+        if self.store.remaining(uid) <= 0:
+            when = self.store.next_return(uid)
+            hint = f" Your next credit frees up around {when:%H:%M UTC}." if when else ""
+            return PolicyDecision(
+                allow=False, reason=f"You're out of credits for now.{hint}")
+        self.store.consume(uid)
+        return PolicyDecision(allow=True)

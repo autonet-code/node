@@ -202,6 +202,7 @@ class Runtime:
         # of platform SDKs and deployment-specific policy.
         self.chat = None  # type: Any
         self._chat_task = None  # background task running the chat adapter's client
+        self.chat_credits = None  # type: Any  # CreditStore when policy=credit
 
         # Autonet service (Story 3.2: pass data_dir for training data feed)
         from ..autonet_service import AutonetBridge
@@ -292,8 +293,10 @@ class Runtime:
             await self.start_voice()
 
         # Start chat service if configured (Discord etc)
-        if getattr(self._config, "chat", None) and self._config.chat.enabled:
-            await self.start_chat()
+        _chat_cfg = getattr(self._config, "chat", None)
+        if _chat_cfg and _chat_cfg.enabled:
+            res = await self.start_chat()
+            log.info("chat service: %s", res)
 
         # Phase 12: autonet (training + libp2p) is registration-driven,
         # not boot-driven. The framework stays fully local until at
@@ -431,6 +434,7 @@ class Runtime:
         client: Any = None,
         channel_id: str = "",
         *,
+        bound_agent: str | None = None,
         policy: Any = None,
         orchestrator_label: str | None = None,
         excluded_agents: set[str] | None = None,
@@ -449,17 +453,18 @@ class Runtime:
         self._chat_task = None
         try:
             from ..chat import ChatService
-            from ..chat.policy import OperatorGate, AllowAll
 
             # Resolve adapter + binding from config unless explicitly supplied.
             if client is None:
                 client, channel_id = self._build_chat_adapter(cfg, channel_id)
             if policy is None and cfg is not None:
-                policy = OperatorGate(frozenset(cfg.operator_ids)) if cfg.operator_ids else AllowAll()
+                policy = self._build_chat_policy(cfg)
             if orchestrator_label is None:
                 orchestrator_label = (cfg.orchestrator_label if cfg else "K3V|N")
             if excluded_agents is None and cfg is not None and cfg.excluded_agents:
                 excluded_agents = set(cfg.excluded_agents)
+            if bound_agent is None:
+                bound_agent = (cfg.bound_agent if cfg else "orchestrator")
 
             # If the adapter owns a connection (Discord), bring it online first.
             if hasattr(client, "start") and hasattr(client, "wait_ready"):
@@ -468,6 +473,7 @@ class Runtime:
 
             self.chat = ChatService(
                 self.events, self, client, channel_id,
+                bound_agent=bound_agent,
                 policy=policy,
                 orchestrator_label=orchestrator_label,
                 excluded_agents=excluded_agents,
@@ -478,7 +484,7 @@ class Runtime:
             await self.chat.start()
             return {"status": "started", "channel_id": channel_id}
         except Exception as exc:
-            log.warning("Failed to start chat service: %s", exc)
+            log.warning("Failed to start chat service: %s", exc, exc_info=True)
             self.chat = None
             if getattr(self, "_chat_task", None):
                 self._chat_task.cancel()
@@ -500,6 +506,25 @@ class Runtime:
                 raise RuntimeError(f"chat token env {cfg.token_env} not set")
             return DiscordAdapter(token, allowed_channel_ids={channel_id}), channel_id
         raise RuntimeError(f"unknown chat platform: {cfg.platform}")
+
+    def _build_chat_policy(self, cfg: Any) -> Any:
+        """Construct the input-seam policy from config: open / operator / credit."""
+        from ..chat.policy import AllowAll, OperatorGate, CreditPolicy
+        ops = frozenset(getattr(cfg, "operator_ids", []) or [])
+        kind = getattr(cfg, "policy", "open")
+        if kind == "operator":
+            return OperatorGate(ops)
+        if kind == "credit":
+            from ..chat.credits import CreditStore
+            store = CreditStore(
+                self._config.data_dir,
+                window_secs=getattr(cfg, "credit_window_secs", None),
+                default_limit=getattr(cfg, "credit_default_limit", None),
+            )
+            # Expose the store so operators can manage allowances at runtime.
+            self.chat_credits = store
+            return CreditPolicy(store, ops)
+        return AllowAll()
 
     async def stop_chat(self) -> dict:
         if self.chat is None:

@@ -104,8 +104,14 @@ class ChatConfig:
     enabled: bool = False           # chat service active on startup
     platform: str = "discord"       # adapter to use (discord; more later)
     token_env: str = "DISCORD_BOT_TOKEN"  # env var holding the bot token
-    channel_id: str = ""            # THE channel bound to the orchestrator
-    operator_ids: list[str] = field(default_factory=list)  # input-gate allow-list ([] = open)
+    channel_id: str = ""            # THE channel bound to the agent below
+    bound_agent: str = "orchestrator"  # agent this channel is bound to
+    # Input-seam gating policy: "open" (AllowAll), "operator" (only operator_ids),
+    # or "credit" (rolling per-user credits; operators unlimited).
+    policy: str = "open"
+    operator_ids: list[str] = field(default_factory=list)
+    credit_window_secs: int = 86400   # credit: rolling window
+    credit_default_limit: int = 5     # credit: requests/window for an unconfigured user
     orchestrator_label: str = "K3V|N"
     excluded_agents: list[str] = field(default_factory=list)  # agents never rendered
 
@@ -414,7 +420,11 @@ def load_config(path: Path | None = None) -> ATNConfig:
             platform=chat_raw.get("platform", "discord"),
             token_env=chat_raw.get("token_env", "DISCORD_BOT_TOKEN"),
             channel_id=str(chat_raw.get("channel_id", "")),
+            bound_agent=str(chat_raw.get("bound_agent", "orchestrator")),
+            policy=str(chat_raw.get("policy", "open")),
             operator_ids=[str(x) for x in chat_raw.get("operator_ids", [])],
+            credit_window_secs=int(chat_raw.get("credit_window_secs", 86400)),
+            credit_default_limit=int(chat_raw.get("credit_default_limit", 5)),
             orchestrator_label=chat_raw.get("orchestrator_label", "K3V|N"),
             excluded_agents=[str(x) for x in chat_raw.get("excluded_agents", [])],
         )
