@@ -241,9 +241,18 @@ class DiscordAdapter:
             handle=m.author.name,
         )
         reply_to_id = None
+        reply_to_bot = False
         if m.reference is not None and m.reference.message_id is not None:
             reply_to_id = str(m.reference.message_id)
-        mentions_bot = bool(self._client.user and self._client.user in m.mentions)
+            # A reply to one of the bot's own messages counts as engaging the
+            # bot even if the reply-ping was toggled off (so it won't show up
+            # in m.mentions). resolved is the cached replied-to message.
+            resolved = getattr(m.reference, "resolved", None)
+            ra = getattr(resolved, "author", None)
+            if ra is not None and self._client.user is not None and ra.id == self._client.user.id:
+                reply_to_bot = True
+        mentions_bot = bool(
+            (self._client.user and self._client.user in m.mentions) or reply_to_bot)
         # Strip the bot's own @mention from the content — the agent shouldn't
         # see "<@984…> what's up", just "what's up". (Discord uses <@id> and the
         # legacy <@!id> nickname form.)
