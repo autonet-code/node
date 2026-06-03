@@ -308,9 +308,12 @@ class ConnectorManager:
         self, connector_id: str, spec: ConnectorSpec,
     ) -> StdioServerParameters:
         """Build the StdioServerParameters for launching a connector."""
-        # Merge: base OS env + spec.env (from config) + runtime_env (credentials)
+        # Merge: base OS env + spec.env (from config) + runtime_env (credentials).
+        # Also merge when the connector declares env_required: those vars live in
+        # the daemon's os.environ and must reach the subprocess (else a connector
+        # that only needs a required env var gets an empty environment).
         runtime_env = self._runtime_env.get(connector_id, {})
-        if spec.env or runtime_env:
+        if spec.env or runtime_env or spec.env_required:
             env_extra = {**os.environ, **spec.env, **runtime_env}
         else:
             env_extra = None

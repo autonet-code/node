@@ -427,14 +427,22 @@ class ExecutionEngine:
             if not isinstance(sub_provider, _BP):
                 agent_tools.extend(_SHELL_TOOLS)
 
-            if self.connectors:
-                for cid, session in self.connectors._sessions.items():
-                    if session and session.tools:
-                        agent_tools.extend(
-                            {"name": t["name"], "description": t.get("description", ""),
-                             "input_schema": t.get("inputSchema", t.get("input_schema", {}))}
-                            for t in session.tools
-                        )
+            # Start this agent's declared connectors and add their tools. The
+            # pipeline path does this too; cognitive agents need it for the
+            # same reason — e.g. the support agent's dorg_members connector.
+            # get_all_tools returns ToolDefinition objects; the bridge surface
+            # is list[dict], so convert.
+            if self.connectors and defn.connector_ids:
+                try:
+                    await self.connectors.ensure_started(defn.connector_ids)
+                except Exception:
+                    log.warning("connector start failed for %s (ids=%s)",
+                                defn.id, defn.connector_ids, exc_info=True)
+                agent_tools.extend(
+                    {"name": td.name, "description": td.description,
+                     "input_schema": td.input_schema}
+                    for td in self.connectors.get_all_tools(defn.connector_ids)
+                )
 
             # --- Drain inbox ---
             all_messages = self.inbox.drain(defn.id)
