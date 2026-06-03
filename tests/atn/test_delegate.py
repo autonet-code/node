@@ -184,10 +184,18 @@ class TestDelegateRegistry:
 
 class TestDelegatePrompts:
     def test_all_agent_types(self):
+        # The type specialization layer is still in the system prompt; agent
+        # IDENTITY (agent_id/parent) is deliberately NOT — it moved to the
+        # first user message (build_identity_header) so the system-prompt
+        # prefix stays byte-identical across agents and hits the prompt cache.
+        from atn.delegate_prompts import build_identity_header
         for agent_type in ("explore", "implement", "research", "debug", "review"):
             prompt = build_delegate_prompt(agent_type, "orch.1", "orch")
-            assert "orch.1" in prompt
             assert agent_type in prompt.lower() or agent_type.title() in prompt
+            assert "orch.1" not in prompt  # identity is no longer in the prefix
+            header = build_identity_header(
+                agent_id="orch.1", agent_type=agent_type, parent_id="orch")
+            assert "orch.1" in header and agent_type in header
 
     def test_includes_common_tools(self):
         prompt = build_delegate_prompt("implement", "orch.1", "orch")

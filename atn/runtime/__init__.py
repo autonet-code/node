@@ -196,6 +196,12 @@ class Runtime:
         # Voice service (lazy)
         self.voice = None  # type: Any
 
+        # Chat service (lazy) — binds agent conversations to a chat platform
+        # (Discord etc). Started by the deployment via start_chat(), which
+        # supplies the platform adapter + input policy; autonet core stays free
+        # of platform SDKs and deployment-specific policy.
+        self.chat = None  # type: Any
+
         # Autonet service (Story 3.2: pass data_dir for training data feed)
         from ..autonet_service import AutonetBridge
         self.autonet = AutonetBridge(
@@ -409,6 +415,50 @@ class Runtime:
             return {"status": "not_running"}
         await self.voice.stop()
         self.voice = None
+        return {"status": "stopped"}
+
+    # ==================================================================
+    # Chat service — bind agent conversations to a chat platform
+    # ==================================================================
+
+    async def start_chat(
+        self,
+        client: Any,
+        channel_id: str,
+        *,
+        policy: Any = None,
+        orchestrator_label: str = "K3V|N",
+        excluded_agents: set[str] | None = None,
+    ) -> dict:
+        """Start the chat service against a platform adapter.
+
+        The deployment constructs the adapter (e.g. a Discord MessagingClient,
+        which owns the bot connection/token) and the input policy
+        (operator gate / credits / consensus), then hands them in here. autonet
+        core stays free of platform SDKs and deployment-specific policy.
+        """
+        if self.chat is not None:
+            return {"status": "already_running"}
+        try:
+            from ..chat import ChatService
+            self.chat = ChatService(
+                self.events, self, client, channel_id,
+                policy=policy,
+                orchestrator_label=orchestrator_label,
+                excluded_agents=excluded_agents,
+            )
+            await self.chat.start()
+            return {"status": "started", "channel_id": channel_id}
+        except Exception as exc:
+            log.warning("Failed to start chat service: %s", exc)
+            self.chat = None
+            return {"status": "failed", "error": str(exc)}
+
+    async def stop_chat(self) -> dict:
+        if self.chat is None:
+            return {"status": "not_running"}
+        await self.chat.stop()
+        self.chat = None
         return {"status": "stopped"}
 
     # ==================================================================
