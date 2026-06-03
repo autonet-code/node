@@ -307,6 +307,13 @@ class TokenUsage:
     def total(self) -> int:
         return self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens + self.output_tokens
 
+    def budget_tokens(self) -> int:
+        """Real new tokens to meter against a budget cap — excludes cache_read
+        (the cached prefix re-sent each turn, billed ~10%, no new work). Mirrors
+        providers.base.Usage.budget_tokens so the inner-loop recorder and the
+        post-loop reconciliation meter the same thing."""
+        return self.input_tokens + self.cache_creation_tokens + self.output_tokens
+
 
 # ---------------------------------------------------------------------------
 # Execution records

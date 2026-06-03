@@ -126,6 +126,19 @@ class ExecutionEngine:
             task = asyncio.create_task(self._execute_pipeline(defn, record, cancel))
         self._tasks[eid] = task
 
+        # These tasks are fire-and-forget; without this, an exception escaping
+        # the body (e.g. inside the finally, after the except clauses have run)
+        # is silently swallowed by asyncio and the execution hangs with no
+        # completion event. Surface it.
+        def _log_task_exc(t: asyncio.Task, _aid: str = agent_id, _eid: str = eid) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                log.error("execution task for %s (%s) crashed: %r", _aid, _eid, exc,
+                          exc_info=(type(exc), exc, exc.__traceback__))
+        task.add_done_callback(_log_task_exc)
+
         await self.events.emit(Event(
             type=EventType.EXECUTION_STARTED,
             source=agent_id,
