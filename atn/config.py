@@ -93,6 +93,24 @@ class VoiceConfig:
 
 
 @dataclass
+class ChatConfig:
+    """Configuration for the chat service (Discord etc).
+
+    Binds agent conversations to a chat platform. The daemon constructs the
+    platform adapter from this config and auto-starts the service when enabled,
+    same as the voice service. The bot token is read from an env var (named
+    here) rather than stored in config — secrets stay out of the file.
+    """
+    enabled: bool = False           # chat service active on startup
+    platform: str = "discord"       # adapter to use (discord; more later)
+    token_env: str = "DISCORD_BOT_TOKEN"  # env var holding the bot token
+    channel_id: str = ""            # THE channel bound to the orchestrator
+    operator_ids: list[str] = field(default_factory=list)  # input-gate allow-list ([] = open)
+    orchestrator_label: str = "K3V|N"
+    excluded_agents: list[str] = field(default_factory=list)  # agents never rendered
+
+
+@dataclass
 class OrchestratorConfig:
     """Configuration for the orchestrator's LLM usage."""
     provider: str = ""          # provider name (e.g. "anthropic", "gemini")
@@ -194,6 +212,7 @@ class ATNConfig:
     agents_dir: Path = field(default_factory=lambda: Path("agents"))
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
+    chat: ChatConfig = field(default_factory=ChatConfig)
     autonet: AutonetConfig = field(default_factory=AutonetConfig)
     trace_logging: TraceLoggingConfig = field(default_factory=TraceLoggingConfig)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
@@ -386,6 +405,18 @@ def load_config(path: Path | None = None) -> ATNConfig:
             input_device=voice_raw.get("input_device"),
             kokoro_model_dir=voice_raw.get("kokoro_model_dir"),
             piper_module_dir=voice_raw.get("piper_module_dir"),
+        )
+
+    chat_raw = raw.get("chat", {})
+    if isinstance(chat_raw, dict):
+        config.chat = ChatConfig(
+            enabled=chat_raw.get("enabled", False),
+            platform=chat_raw.get("platform", "discord"),
+            token_env=chat_raw.get("token_env", "DISCORD_BOT_TOKEN"),
+            channel_id=str(chat_raw.get("channel_id", "")),
+            operator_ids=[str(x) for x in chat_raw.get("operator_ids", [])],
+            orchestrator_label=chat_raw.get("orchestrator_label", "K3V|N"),
+            excluded_agents=[str(x) for x in chat_raw.get("excluded_agents", [])],
         )
 
     # Autonet / RPB network layer

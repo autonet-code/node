@@ -201,6 +201,7 @@ class Runtime:
         # supplies the platform adapter + input policy; autonet core stays free
         # of platform SDKs and deployment-specific policy.
         self.chat = None  # type: Any
+        self._chat_task = None  # background task running the chat adapter's client
 
         # Autonet service (Story 3.2: pass data_dir for training data feed)
         from ..autonet_service import AutonetBridge
@@ -289,6 +290,10 @@ class Runtime:
         # Start voice service if configured
         if self._config.voice.enabled:
             await self.start_voice()
+
+        # Start chat service if configured (Discord etc)
+        if getattr(self._config, "chat", None) and self._config.chat.enabled:
+            await self.start_chat()
 
         # Phase 12: autonet (training + libp2p) is registration-driven,
         # not boot-driven. The framework stays fully local until at
@@ -423,42 +428,94 @@ class Runtime:
 
     async def start_chat(
         self,
-        client: Any,
-        channel_id: str,
+        client: Any = None,
+        channel_id: str = "",
         *,
         policy: Any = None,
-        orchestrator_label: str = "K3V|N",
+        orchestrator_label: str | None = None,
         excluded_agents: set[str] | None = None,
     ) -> dict:
-        """Start the chat service against a platform adapter.
+        """Start the chat service, binding agents to a chat platform.
 
-        The deployment constructs the adapter (e.g. a Discord MessagingClient,
-        which owns the bot connection/token) and the input policy
-        (operator gate / credits / consensus), then hands them in here. autonet
-        core stays free of platform SDKs and deployment-specific policy.
+        With no args, builds the adapter + policy from ``config.chat`` (the
+        normal daemon-boot path). A caller may instead pass a prebuilt
+        ``client`` (MessagingClient) / ``policy`` to override — e.g. a custom
+        deployment policy (credits/consensus) or a test stub. The bot token is
+        read from the env var named in config (secrets stay out of the file).
         """
         if self.chat is not None:
             return {"status": "already_running"}
+        cfg = getattr(self._config, "chat", None)
+        self._chat_task = None
         try:
             from ..chat import ChatService
+            from ..chat.policy import OperatorGate, AllowAll
+
+            # Resolve adapter + binding from config unless explicitly supplied.
+            if client is None:
+                client, channel_id = self._build_chat_adapter(cfg, channel_id)
+            if policy is None and cfg is not None:
+                policy = OperatorGate(frozenset(cfg.operator_ids)) if cfg.operator_ids else AllowAll()
+            if orchestrator_label is None:
+                orchestrator_label = (cfg.orchestrator_label if cfg else "K3V|N")
+            if excluded_agents is None and cfg is not None and cfg.excluded_agents:
+                excluded_agents = set(cfg.excluded_agents)
+
+            # If the adapter owns a connection (Discord), bring it online first.
+            if hasattr(client, "start") and hasattr(client, "wait_ready"):
+                self._chat_task = asyncio.create_task(client.start())
+                await client.wait_ready()
+
             self.chat = ChatService(
                 self.events, self, client, channel_id,
                 policy=policy,
                 orchestrator_label=orchestrator_label,
                 excluded_agents=excluded_agents,
             )
+            # Wire inbound platform messages into the service's input seam.
+            if hasattr(client, "on_message"):
+                client.on_message = self.chat.handle_inbound
             await self.chat.start()
             return {"status": "started", "channel_id": channel_id}
         except Exception as exc:
             log.warning("Failed to start chat service: %s", exc)
             self.chat = None
+            if getattr(self, "_chat_task", None):
+                self._chat_task.cancel()
+                self._chat_task = None
             return {"status": "failed", "error": str(exc)}
+
+    def _build_chat_adapter(self, cfg: Any, channel_id: str) -> tuple[Any, str]:
+        """Construct the platform adapter from config. Discord for now."""
+        if cfg is None:
+            raise RuntimeError("no chat config")
+        channel_id = channel_id or cfg.channel_id
+        if not channel_id:
+            raise RuntimeError("chat.channel_id not set")
+        if cfg.platform == "discord":
+            import os
+            from ..chat.adapters.discord_adapter import DiscordAdapter
+            token = os.environ.get(cfg.token_env, "")
+            if not token:
+                raise RuntimeError(f"chat token env {cfg.token_env} not set")
+            return DiscordAdapter(token, allowed_channel_ids={channel_id}), channel_id
+        raise RuntimeError(f"unknown chat platform: {cfg.platform}")
 
     async def stop_chat(self) -> dict:
         if self.chat is None:
             return {"status": "not_running"}
         await self.chat.stop()
         self.chat = None
+        task = getattr(self, "_chat_task", None)
+        if task is not None:
+            try:
+                client = getattr(self.chat, "client", None)
+                if client is not None and hasattr(client, "close"):
+                    await client.close()
+            except Exception:
+                pass
+            task.cancel()
+            self._chat_task = None
         return {"status": "stopped"}
 
     # ==================================================================
