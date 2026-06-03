@@ -56,13 +56,17 @@ async def test_pipeline_no_budget_allowed(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cognitive_child_without_budget_rejected(tmp_path):
+async def test_cognitive_child_without_budget_allowed(tmp_path):
+    # A per-agent budget is OPTIONAL: a child without one is still bounded by
+    # the subtree root's cap (usage rolls up the parent chain). Requiring one
+    # blocked conversational spawning and pushed the LLM to invent tiny caps
+    # that false-failed the child.
     rt = _make_runtime(tmp_path)
     await rt.registry.register_agent(
         _agent("root", None, budgets={"claude_max": 10_000}),
     )
-    with pytest.raises(ValueError, match="must declare a budget"):
-        await rt.registry.register_agent(_agent("root.child", "root"))
+    await rt.registry.register_agent(_agent("root.child", "root"))  # no raise
+    assert "root.child" in rt.registry._agents
 
 
 @pytest.mark.asyncio

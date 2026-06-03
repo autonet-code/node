@@ -450,27 +450,24 @@ class AgentRegistry:
             )
 
     def _enforce_budget_required(self, defn: AgentDefinition) -> None:
-        """Cognitive non-root agents must declare at least one budget.
+        """Validate a cognitive agent's budget IF it declares one.
 
-        Roots (parent_id=None) are exempt — they SET the cap for the subtree.
-        Pipeline-mode agents are exempt — they don't drive LLM calls.
-        Re-registration (already in registry) is also exempt.
+        A per-agent budget is OPTIONAL: a child without one is still bounded by
+        its subtree's root cap (token usage rolls up the parent chain), so a
+        missing budget can't burn unbounded. Requiring one here was a footgun —
+        it blocked conversational spawning (create_agent's schema didn't even
+        expose budgets) and pushed the LLM to invent caps, which tended to be
+        too small and false-fail the child. So: no budget => fine. If a budget
+        IS declared, it must have a positive limit (catch typos / zero caps).
         """
         if defn.id in self._agents:
             return
         from ..models import AgentMode
         if defn.mode != AgentMode.COGNITIVE:
             return
-        if defn.parent_id is None:
-            return  # root agents set the cap; budget optional
         if not defn.budgets:
-            raise ValueError(
-                f"Cognitive agent '{defn.id}' must declare a budget "
-                f"(AgentDefinition.budgets={{provider: limit}}). "
-                f"This is a hard requirement so runaway children can't burn "
-                f"the parent's headroom unbounded."
-            )
-        # At least one entry must resolve to a positive limit.
+            return  # bounded by the subtree root; per-agent cap optional
+        # A declared budget must resolve to a positive limit somewhere.
         for provider in defn.budgets:
             limit, _period, _unit = _resolve_budget(defn, provider)
             if limit > 0:
@@ -478,7 +475,8 @@ class AgentRegistry:
         raise ValueError(
             f"Agent '{defn.id}' declared budgets={defn.budgets!r} but no "
             f"entry has a positive limit. Use a positive int or "
-            f"{{'limit': N, 'period': '...'}} per provider."
+            f"{{'limit': N, 'period': '...'}} per provider, or omit budgets "
+            f"to inherit the subtree's cap."
         )
 
     def _enforce_budget_cascade(self, defn: AgentDefinition) -> None:

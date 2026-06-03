@@ -186,6 +186,15 @@ _TOOLS: list[ToolDefinition] = [
                         "Or 'atn_full' for all. Default: delegation + messaging + observation."
                     ),
                 },
+                "budgets": {
+                    "type": "object",
+                    "description": (
+                        "Optional per-provider token cap for this child, e.g. "
+                        "{'claude_max': 200000}. Omit to leave the child bounded by the "
+                        "subtree's root budget (recommended for normal sub-agents)."
+                    ),
+                    "additionalProperties": {"type": "integer"},
+                },
             },
             "required": ["id", "name"],
         },
@@ -996,7 +1005,11 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     log.info("create_agent input: %s", json.dumps(input, default=str)[:2000])
 
-    mode_str = input.get("mode", "pipeline")
+    # Default to cognitive — matches the tool schema's advertised default and
+    # the common case ("most agents are cognitive — just id, name, prompt").
+    # The server previously defaulted to pipeline, contradicting the schema, so
+    # an agent that omitted mode hit "must have at least one step".
+    mode_str = input.get("mode", "cognitive")
     caller_id = input.pop("_caller_id", None)
 
     if mode_str == "cognitive":
