@@ -212,15 +212,18 @@ class ChatService:
     # Backfilled once on start (via get_history) and appended on every inbound
     # message. The agent is told the path in its prompt; no surface tool needed.
 
-    def _history_path(self) -> "Path | None":
+    def _history_path(self, channel_id: "ChannelId | None" = None) -> "Path | None":
+        """History file for a space (a channel or thread id). One file per
+        space — fractal: the main channel and each delegate thread each get
+        their own log, named by the space's id."""
         data_dir = getattr(getattr(self.runtime, "_config", None), "data_dir", None)
         if not data_dir:
             return None
         from pathlib import Path
         d = Path(data_dir) / "chat_history"
         d.mkdir(parents=True, exist_ok=True)
-        # Sanitize the channel id for a filename (ids are numeric, but be safe).
-        safe = "".join(c for c in str(self.channel_id) if c.isalnum() or c in "-_")
+        cid = channel_id if channel_id is not None else self.channel_id
+        safe = "".join(c for c in str(cid) if c.isalnum() or c in "-_")
         return d / f"{safe}.log"
 
     @staticmethod
@@ -248,8 +251,9 @@ class ChatService:
             log.debug("history backfill write failed", exc_info=True)
 
     def _append_history(self, message: "Message") -> None:
-        """Append one inbound message to the channel history file."""
-        path = self._history_path()
+        """Append one inbound message to its space's history file (main channel
+        or a thread — one file per space)."""
+        path = self._history_path(message.channel.id)
         if path is None:
             return
         try:
@@ -585,17 +589,18 @@ class ChatService:
         target = self.resolve_target(message)
         if target is None:
             return False
-        # Record EVERY inbound message to the channel-history file (even
+        # Record EVERY inbound message to this space's history file (even
         # untagged chatter the bot won't answer) so the agent can read the room.
-        if message.channel.id == self.channel_id:
-            self._append_history(message)
-        # In the bound CHANNEL, only respond when @-mentioned — so people can
-        # chat naturally there without the bot butting in. Inside a THREAD the
-        # bot owns, respond to everything (it's a dedicated conversation, no
-        # re-tagging needed). Commands (kk …) work either way.
-        in_channel = message.channel.id == self.channel_id
+        self._append_history(message)
+        # FRACTAL ADDRESSING: the same rule at every depth — channel, thread,
+        # tile. The bot engages only when explicitly addressed: @-tagged or a
+        # reply to one of its messages/tiles (both surface as mentions_bot; a
+        # reply-to-tile additionally resolves to the nested sub-agent in
+        # resolve_target). Unprefixed chatter is never routed, anywhere. People
+        # can converse freely in any space without the bot butting in.
+        # Commands (kk …) work regardless.
         is_command = "kk " in (message.content or "").lower()
-        if in_channel and not message.mentions_bot and not is_command:
+        if not message.mentions_bot and not is_command:
             return False
         # Surface commands (kk …) are handled here, not relayed to the agent and
         # not credit-gated — they're meta, about the surface itself.
