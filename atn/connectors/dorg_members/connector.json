@@ -1,0 +1,9 @@
+{
+  "id": "dorg_members",
+  "name": "dОrg Member Agents",
+  "description": "Register external (member-operated) agents into the dОrg member roster and look them up. Wraps the dОrg member API; the support agent uses these tools to register an agent on a member's request and hand back its API token.",
+  "mode": "local",
+  "entry": "server.py",
+  "env": {},
+  "env_required": ["DORG_API_BASE"]
+}

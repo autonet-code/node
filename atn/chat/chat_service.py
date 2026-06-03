@@ -1,9 +1,11 @@
-"""ChatService -- binds autonet agent conversations to a chat platform.
+"""ChatService -- the chat Surface: binds agent conversations to a chat platform.
 
-In-framework subsystem, mounted at the EventBus seam exactly like the
-VoiceService: subscribe to the EventBus for OUTPUT, call
-``runtime.send_agent_message`` for INPUT, keep a routing table binding chat
-surfaces to agents.
+A Surface (see atn/surface.py) is a long-lived bidirectional bridge from an
+external real-time channel to agent sessions — the counterpart to a Connector
+(outbound tools an agent uses). ChatService is the chat Surface; VoiceService
+is the voice one, the same shape. Mounted at the EventBus seam: subscribe for
+OUTPUT, call ``runtime.send_agent_message`` for INPUT (gated at the input seam
+by an InputPolicy), keep a routing table binding chat surfaces to agents.
 
 Interaction model, one dedicated channel:
 
@@ -42,9 +44,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("atn.chat")
 
-# Agents we never render (infra/background pollers, e.g. a stats poller whose
-# routine executions would spam the channel). Configurable per deployment.
-_DEFAULT_EXCLUDED_AGENTS = {"kevin-support"}
+# Agents never rendered (background/infra whose routine executions would spam
+# the channel). Empty by default; the deployment names them via config.
+_DEFAULT_EXCLUDED_AGENTS: set[str] = set()
 
 # EventTypes that drive the chat surface. Subscribed in start().
 _SUBSCRIBED = (
@@ -80,7 +82,7 @@ class ChatService:
     orchestrator_label:
         Display name for the orchestrator (dОrg presents it as "K3V|N").
     excluded_agents:
-        Agent ids never rendered (background/infra). Defaults to kevin-support.
+        Agent ids never rendered (background/infra). Empty by default.
     """
 
     def __init__(

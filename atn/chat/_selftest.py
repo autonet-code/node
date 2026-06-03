@@ -85,7 +85,7 @@ async def main() -> int:
     bus = EventBus()
     rt = _FakeRuntime()
     adapter = StubAdapter()
-    svc = ChatService(bus, rt, adapter, CHANNEL, policy=OperatorGate())
+    svc = ChatService(bus, rt, adapter, CHANNEL, policy=OperatorGate({OPERATOR}))
     await svc.start()
 
     async def emit(e: Event) -> None:
