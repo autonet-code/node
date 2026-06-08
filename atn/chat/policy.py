@@ -16,21 +16,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-# Canonical contract lives with the Surface entity.
-from ..surface import InputPolicy, PolicyDecision
+# Canonical contract + the channel-neutral default gate live with the Surface
+# entity. AllowAll is re-exported here so chat callers have one import site.
+from ..surface import AllowAll, InputPolicy, PolicyDecision
 
 if TYPE_CHECKING:
     from .protocol import Author
     from .credits import CreditStore
 
 __all__ = ["InputPolicy", "PolicyDecision", "AllowAll", "OperatorGate", "CreditPolicy"]
-
-
-class AllowAll:
-    """No gating -- single-user / dev / stub use."""
-
-    def evaluate(self, author: Any, agent_id: str, content: str) -> PolicyDecision:
-        return PolicyDecision(allow=True)
 
 
 class OperatorGate:

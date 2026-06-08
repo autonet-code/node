@@ -46,6 +46,20 @@ def _voice_available() -> bool:
     return _VOICE_AVAILABLE
 
 
+def _daemon_version() -> str:
+    """The ATN daemon's version. Prefers installed package metadata (accurate
+    for pip installs); falls back to the in-tree __version__."""
+    try:
+        from importlib.metadata import version
+        return version("autonet-computer")
+    except Exception:
+        try:
+            from .. import __version__
+            return __version__
+        except Exception:
+            return "unknown"
+
+
 class SnapshotBuilder:
     """Builds the full dashboard snapshot from all runtime modules."""
 
@@ -83,9 +97,19 @@ class SnapshotBuilder:
         self._voice_ref = voice_ref
         self._autonet_ref = autonet_ref
 
-    def snapshot(self) -> dict:
+    def snapshot(self, scope_ids: set[str] | None = None) -> dict:
+        """Build the dashboard snapshot.
+
+        ``scope_ids`` scopes the view to a subtree: when provided, only agents
+        (and their executions / children counts) whose id is in the set are
+        included. None (the default) = full fleet — preserving the localhost /
+        orchestrator-root behavior byte-for-byte. Global daemon sections
+        (providers, connectors, voice, autonet, planning) are not per-agent and
+        are returned unchanged regardless of scope."""
         agents = {}
         for aid, defn in self.registry._agents.items():
+            if scope_ids is not None and aid not in scope_ids:
+                continue
             last_output = self.output_store.read(aid)
             agent_info: dict = {
                 "name": defn.name,
@@ -118,8 +142,10 @@ class SnapshotBuilder:
             if defn.parent_id:
                 agent_info["parent_id"] = self.registry._resolve_parent_agent_id(defn.parent_id)
             children_count = sum(
-                1 for d in self.registry._agents.values()
-                if d.parent_id and self.registry._resolve_parent_agent_id(d.parent_id) == aid
+                1 for cid, d in self.registry._agents.items()
+                if d.parent_id
+                and self.registry._resolve_parent_agent_id(d.parent_id) == aid
+                and (scope_ids is None or cid in scope_ids)
             )
             if children_count:
                 agent_info["children_count"] = children_count
@@ -127,6 +153,8 @@ class SnapshotBuilder:
 
         executions = {}
         for eid, rec in self.engine._executions.items():
+            if scope_ids is not None and rec.agent_id not in scope_ids:
+                continue
             defn = self.registry._agents.get(rec.agent_id)
             step_label = ""
             if defn and rec.current_step < len(defn.steps):
@@ -240,7 +268,8 @@ class SnapshotBuilder:
         return {
             "system": {
                 "os": platform.system(),
-                "version": platform.version(),
+                "version": platform.version(),       # OS version (legacy field)
+                "daemon_version": _daemon_version(),  # the ATN daemon's version
                 "arch": platform.machine(),
                 "python": platform.python_version(),
                 "shell": "powershell" if platform.system() == "Windows" else "bash",

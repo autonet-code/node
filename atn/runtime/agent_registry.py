@@ -552,8 +552,14 @@ class AgentRegistry:
             self._schedule_table[defn.id] = parse_interval(defn.schedule)
             self._heartbeat_table.pop(defn.id, None)
             self._last_idle[defn.id] = datetime.now(timezone.utc)
-        # Load or generate identity for persistent agents
-        if defn.identity is None and defn.system_prompt:
+        # Load or generate identity for persistent agents. Every agent gets a
+        # keypair — the identity is its on-chain self, independent of whether it
+        # has a task prompt yet. (The prompt only seasons the lineage hash, and
+        # generate_agent_identity handles an empty one.) Gating identity on a
+        # non-empty system_prompt used to leave prompt-less agents — e.g. ones
+        # provisioned deterministically via the Add-Agent form — with no
+        # identity, so they could never register on-chain.
+        if defn.identity is None:
             loaded = self._load_identity(defn.id)
             if loaded:
                 identity, private_key = loaded
@@ -690,6 +696,41 @@ class AgentRegistry:
     def get_agent_key(self, agent_id: str) -> str | None:
         """Get the private key for an agent (parent holds child's key)."""
         return self._agent_keys.get(agent_id)
+
+    def get_agent_id_by_address(self, address: str) -> str | None:
+        """Reverse lookup: on-chain/identity address -> agent id, or None.
+
+        Case-insensitive (Ethereum addresses are checksummed but compared
+        lowercase). The only existing direction is agent_id -> identity.address
+        (build_agent_advertisements); this is the inverse, used to turn a
+        signed-challenge signer address back into the agent it roots at.
+        Linear scan — fleets are tens of agents, not thousands."""
+        if not address:
+            return None
+        target = address.lower()
+        for aid, defn in self._agents.items():
+            ident = defn.identity
+            if ident and ident.address and ident.address.lower() == target:
+                return aid
+        return None
+
+    def get_subtree_ids(self, root_id: str) -> set[str]:
+        """The set of agent ids in root_id's subtree: {root} ∪ descendants.
+
+        Used for scoping a connection's view (snapshot + event stream) to an
+        agent and everything beneath it. Cycle-guarded: a malformed parent
+        cycle terminates instead of looping. Includes root_id even if it has
+        no children; returns just {root_id} for an unknown id (caller decides
+        whether that's an error)."""
+        seen: set[str] = {root_id}
+        queue = [root_id]
+        while queue:
+            current = queue.pop(0)
+            for child in self.get_children(current):
+                if child.id not in seen:
+                    seen.add(child.id)
+                    queue.append(child.id)
+        return seen
 
     def _require_agent(self, agent_id: str) -> None:
         if agent_id not in self._agents:

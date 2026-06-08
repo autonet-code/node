@@ -509,11 +509,24 @@ async def run_cli() -> None:
     # Start WebSocket bridge so the Flutter frontend can connect.
     # If the port is held by a stale MCP server, attempt to reclaim it.
     ws_bridge: WebSocketBridge | None = None
+    _an = getattr(runtime._config, "autonet", None)
+    _remote_host = getattr(_an, "remote_ws_host", "") if _an else ""
+    _remote_port = getattr(_an, "remote_ws_port", 0) if _an else 0
+    _owner_wallet = getattr(_an, "owner_wallet", "") if _an else ""
     for _attempt in range(2):
-        ws_bridge = WebSocketBridge(runtime, host="localhost", port=DEFAULT_PORT)
+        ws_bridge = WebSocketBridge(
+            runtime, host="localhost", port=DEFAULT_PORT,
+            remote_host=_remote_host, remote_port=_remote_port,
+            owner_wallet=_owner_wallet,
+        )
         try:
             await ws_bridge.start()
             console.print(f"  [green]WebSocket server listening on ws://localhost:{DEFAULT_PORT}[/]")
+            if _remote_host:
+                _modes = ("owner+agent-self" if _owner_wallet else "agent-self")
+                console.print(
+                    f"  [green]Remote (auth: {_modes}) WS on "
+                    f"ws://{_remote_host}:{ws_bridge.remote_port}[/]")
             break
         except OSError as exc:
             ws_bridge = None

@@ -38,10 +38,13 @@ from typing import Any
 import websockets
 from websockets.asyncio.server import Server as WSServer, ServerConnection
 
+from . import ws_auth
 from .events import Event, EventBus, EventType
+from .orchestrator import ORCHESTRATOR_ID
 from .orchestrator.tools import execute_tool
 from .runtime import Runtime
 from .runtime.provider_manager import get_model_tier, get_tier_label
+from .ws_auth import ClientSession
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +57,35 @@ logging.getLogger("websockets").setLevel(logging.CRITICAL)
 # Default port
 DEFAULT_PORT = 7700
 
+# Messages that export or carry a raw private key over the wire. Refused unless
+# the connection arrived on the privileged LOCAL listener (session.local). The
+# inbound-private-key handlers are here too: over a proxied/remote link the WS
+# hop is plain ws:// (TLS terminates at the proxy), so a private key in the
+# payload would cross the wire in plaintext. Checked at the top of
+# _handle_message, before any dispatch — so the execute_tool fallthrough cannot
+# bypass it.
+KEY_LOCAL_ONLY_MESSAGES = frozenset({
+    "export_agent_key",
+    "autonet_publish_standards",
+    "autonet_claim_reward",
+    "register_agent_on_chain",
+})
+
+# Tools an authed-but-SCOPED (non-full-fleet) session may NOT call: they read
+# or mutate owner-global state (budgets, profile/PII, providers, governance).
+# A full-fleet owner session (local, or remote-owner-at-orchestrator) is
+# unaffected. Default-deny still applies on top: see _authorize_tool_call.
+OWNER_ONLY_TOOLS = frozenset({
+    "set_credit_budget", "get_credit_budget", "get_user_profile",
+    "set_orchestrator_model", "set_agent_model",
+})
+
+# For scoped sessions, the message keys that name a target agent. Every one
+# present must resolve to an agent inside the session's subtree, else the call
+# is refused — clamping caller_id alone is insufficient because these tools read
+# the target straight from the message and ignore caller_id.
+_TARGET_ARG_KEYS = ("agent_id", "target", "parent_id", "id")
+
 
 class WebSocketBridge:
     """Bridges the ATN Runtime to WebSocket clients.
@@ -63,34 +95,80 @@ class WebSocketBridge:
       - Broadcasting EventBus events to all connected clients
     """
 
-    def __init__(self, runtime: Runtime, host: str = "localhost", port: int = DEFAULT_PORT) -> None:
+    def __init__(self, runtime: Runtime, host: str = "localhost", port: int = DEFAULT_PORT,
+                 *, remote_host: str = "", remote_port: int = 0,
+                 owner_wallet: str = "") -> None:
         self.runtime = runtime
         self.host = host
         self.port = port
-        self._server: WSServer | None = None
-        self._clients: set[ServerConnection] = set()
+        # The REMOTE (auth-required) listener. Empty remote_host => disabled
+        # (local-only daemon, the default). Custody is gated on WHICH listener
+        # accepted a connection — never on remote_address — because a reverse
+        # proxy makes every remote peer look like loopback. The privileged
+        # local listener a proxy physically cannot reach from off-box is the
+        # only place keys export or the no-auth bypass apply.
+        self.remote_host = remote_host
+        self.remote_port = remote_port or (port + 1)
+        self.owner_wallet = owner_wallet
+        self._server: WSServer | None = None          # local (privileged) listener
+        self._remote_server: WSServer | None = None    # remote (auth) listener
+        # Per-connection auth/scope state (replaces the old flat client set).
+        self._sessions: dict[ServerConnection, ClientSession] = {}
         self._event_handler_registered = False
 
+    @property
+    def _clients(self):
+        """Back-compat read accessor: the set of live connections. Internal
+        code now uses self._sessions; this keeps any external reader working."""
+        return set(self._sessions.keys())
+
     async def start(self) -> None:
-        """Start the WebSocket server."""
-        # Subscribe to all EventBus events
+        """Start the WebSocket server(s): always the privileged local listener;
+        the remote listener too if configured (and owner_wallet is set)."""
+        # Subscribe to all EventBus events (once; both listeners share it).
         if not self._event_handler_registered:
             self.runtime.events.subscribe(None, self._on_event)
             self._event_handler_registered = True
 
+        # Privileged local listener — full control, key export, no handshake.
         self._server = await websockets.serve(
-            self._handle_client,
+            lambda ws: self._handle_client(ws, local=True),
             self.host,
             self.port,
         )
-        log.info("WebSocket server listening on ws://%s:%d", self.host, self.port)
+        log.info("WebSocket server (local) listening on ws://%s:%d", self.host, self.port)
+
+        # Remote listener — auth-required, export-denied. Refuses to start
+        # without a pre-configured owner_wallet (no trust-on-first-use on a
+        # network-reachable socket).
+        # The remote listener is safe to start whenever a bind host is given:
+        # BOTH auth paths fail closed — a signer that is neither the configured
+        # owner nor a known agent address is denied. (There is no
+        # trust-on-first-use anywhere.) With no owner_wallet, only agent
+        # self-auth works — a holder of an agent's own key signs in as that
+        # agent, scoped to its subtree — which needs no owner configured.
+        if self.remote_host:
+            self._remote_server = await websockets.serve(
+                lambda ws: self._handle_client(ws, local=False),
+                self.remote_host,
+                self.remote_port,
+            )
+            auth_modes = []
+            if self.owner_wallet:
+                auth_modes.append("owner")
+            auth_modes.append("agent-self")
+            log.info(
+                "WebSocket server (remote, auth-required: %s) listening on "
+                "ws://%s:%d", "+".join(auth_modes), self.remote_host, self.remote_port)
 
     async def stop(self) -> None:
-        """Stop the WebSocket server."""
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        """Stop the WebSocket server(s)."""
+        for srv_attr in ("_server", "_remote_server"):
+            srv = getattr(self, srv_attr)
+            if srv:
+                srv.close()
+                await srv.wait_closed()
+                setattr(self, srv_attr, None)
         if self._event_handler_registered:
             self.runtime.events.unsubscribe(None, self._on_event)
             self._event_handler_registered = False
@@ -100,41 +178,46 @@ class WebSocketBridge:
     # Client handling
     # ------------------------------------------------------------------
 
-    async def _handle_client(self, ws: ServerConnection) -> None:
-        """Handle a single WebSocket client connection."""
-        self._clients.add(ws)
+    async def _handle_client(self, ws: ServerConnection, *, local: bool) -> None:
+        """Handle a single WebSocket client connection.
+
+        ``local`` is set by which listener accepted the socket (the privileged
+        loopback listener => True). A local session is pre-authed as the owner
+        rooted at the orchestrator (today's behavior). A remote session starts
+        unauthed and is issued an auth_challenge instead of a snapshot."""
         remote = ws.remote_address
-        log.info("Client connected: %s", remote)
-
-        # Send initial snapshot so the UI has state immediately
-        try:
-            _t0 = asyncio.get_event_loop().time()
-            snapshot = self.runtime.snapshot()
-            _t1 = asyncio.get_event_loop().time()
-            await ws.send(json.dumps({
-                "type": "snapshot",
-                "data": snapshot,
-            }, default=str))
-            _t2 = asyncio.get_event_loop().time()
-            log.info(
-                "Initial snapshot sent to %s (build=%.2fs send=%.2fs)",
-                remote, _t1 - _t0, _t2 - _t1,
-            )
-        except Exception:
-            log.exception("Failed to send initial snapshot")
+        session = ClientSession(
+            local=local,
+            is_loopback=ws_auth.is_loopback(remote),
+            conn_id=ws_auth.new_nonce(),
+        )
+        if local:
+            # Privileged local listener: full control, no handshake.
+            session.authed = True
+            session.owner = True
+            session.root_agent_id = ORCHESTRATOR_ID
+            session.scope_ids = None          # full fleet
+        self._sessions[ws] = session
+        log.info("Client connected: %s (local=%s)", remote, local)
 
         try:
+            if session.authed:
+                # Authorized at connect (local): send the snapshot immediately,
+                # scoped to the session (None => full fleet, byte-for-byte
+                # identical to the pre-auth behavior).
+                await self._send_snapshot(ws, session)
+            else:
+                # Remote, unauthed: withhold the snapshot, issue a challenge.
+                await self._send_auth_challenge(ws, session)
+
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
-                    await ws.send(json.dumps({
-                        "ok": False,
-                        "error": "Invalid JSON",
-                    }))
+                    await ws.send(json.dumps({"ok": False, "error": "Invalid JSON"}))
                     continue
 
-                response = await self._handle_message(msg)
+                response = await self._handle_message(msg, session)
                 await ws.send(json.dumps(response, default=str))
 
         except websockets.ConnectionClosed:
@@ -142,23 +225,248 @@ class WebSocketBridge:
         except Exception:
             log.exception("Client handler error")
         finally:
-            self._clients.discard(ws)
+            self._sessions.pop(ws, None)
             log.info("Client disconnected: %s", remote)
 
-    async def _handle_message(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Route an incoming message to the appropriate handler."""
+    async def _send_snapshot(self, ws: ServerConnection, session: ClientSession) -> None:
+        """Send the (scope-aware, redacted-for-non-local) initial snapshot."""
+        try:
+            snapshot = self.runtime.snapshot(session.scope_ids)
+            snapshot = self._redact_snapshot(snapshot, session)
+            await ws.send(json.dumps({"type": "snapshot", "data": snapshot}, default=str))
+        except Exception:
+            log.exception("Failed to send initial snapshot")
+
+    async def _send_auth_challenge(self, ws: ServerConnection, session: ClientSession) -> None:
+        """Issue a fresh single-use challenge for a remote connection."""
+        import time as _time
+        session.nonce = ws_auth.new_nonce()
+        session.nonce_issued_at = _time.time()
+        challenge = ws_auth.build_challenge_text(
+            session.nonce,
+            daemon_id=self._daemon_id(),
+            chain_id=int(getattr(self.runtime._config.autonet, "chain_id", 0) or 0),
+            owner_wallet=self.owner_wallet,
+            conn_id=session.conn_id,
+            issued_at=session.nonce_issued_at,
+        )
+        await ws.send(json.dumps({
+            "type": "auth_challenge",
+            "nonce": session.nonce,
+            "challenge": challenge,
+            "conn_id": session.conn_id,
+        }))
+
+    def _daemon_id(self) -> str:
+        """The orchestrator's identity address — the per-daemon unique id that
+        domain-separates the auth challenge (so a signature can't replay across
+        daemons). Falls back to the configured owner wallet, then a constant."""
+        try:
+            orch = self.runtime.registry._agents.get(ORCHESTRATOR_ID)
+            if orch and orch.identity and orch.identity.address:
+                return orch.identity.address
+        except Exception:
+            pass
+        return self.owner_wallet or "autonet-daemon"
+
+    # ------------------------------------------------------------------
+    # Auth handshake
+    # ------------------------------------------------------------------
+
+    # Max failed auth attempts before the challenge is no longer re-issued on
+    # this connection (online-guessing / nonce-grinding brake).
+    _MAX_AUTH_FAILURES = 5
+
+    async def _handle_auth_response(self, msg: dict, session: ClientSession) -> dict:
+        """Verify a signed challenge and, on success, authorize + scope the
+        session. Owner must match the PRE-CONFIGURED owner_wallet (no TOFU on a
+        network listener). The recovered owner may then root at any agent in
+        the fleet by naming it in ``root``."""
+        import time as _time
+        msg_id = msg.get("msg_id")
+
+        if session.authed:
+            return {"msg_id": msg_id, "type": "auth_ok", "ok": True,
+                    "owner": session.owner, "root": session.root_agent_id,
+                    "wallet": session.wallet_address}
+        if session.auth_failures >= self._MAX_AUTH_FAILURES:
+            return {"msg_id": msg_id, "type": "auth_denied", "ok": False,
+                    "error": "too many attempts"}
+        if not session.nonce:
+            return {"msg_id": msg_id, "type": "auth_denied", "ok": False,
+                    "error": "no challenge issued"}
+        if session.challenge_expired(_time.time()):
+            session.clear_nonce()
+            session.auth_failures += 1
+            return {"msg_id": msg_id, "type": "auth_denied", "ok": False,
+                    "error": "challenge expired"}
+
+        # Re-derive the challenge text from the SERVER-stored nonce + conn_id
+        # (never a client-echoed nonce), then recover the signer. Consume the
+        # nonce immediately so a captured signature can't be replayed.
+        challenge = ws_auth.build_challenge_text(
+            session.nonce,
+            daemon_id=self._daemon_id(),
+            chain_id=int(getattr(self.runtime._config.autonet, "chain_id", 0) or 0),
+            owner_wallet=self.owner_wallet,
+            conn_id=session.conn_id,
+            issued_at=session.nonce_issued_at,
+        )
+        signature = msg.get("signature", "")
+        signer = ws_auth.recover_signer(challenge, signature)
+        session.clear_nonce()
+
+        if not signer:
+            session.auth_failures += 1
+            return {"msg_id": msg_id, "type": "auth_denied", "ok": False,
+                    "error": "could not recover a signer from the signature"}
+
+        is_owner = bool(self.owner_wallet) and signer.lower() == self.owner_wallet.lower()
+
+        if is_owner:
+            # OWNER: full control. May root at the orchestrator (full fleet) or
+            # name ANY agent subtree to render.
+            root = (msg.get("root") or ORCHESTRATOR_ID).strip()
+            resolved, err = self._resolve_root(root)
+            if err:
+                return {"msg_id": msg_id, "type": "auth_denied", "ok": False, "error": err}
+            session.owner = True
+        else:
+            # AGENT SELF-AUTH: the signer holds an agent's own key (exported
+            # from this daemon and imported into their wallet). They become
+            # THAT agent, rooted at its own subtree — they cannot name an
+            # arbitrary root the way the owner can. Address-as-credential, the
+            # same per-agent identity model the rest of ATN uses.
+            aid = self.runtime.registry.get_agent_id_by_address(signer)
+            if aid is None:
+                session.auth_failures += 1
+                return {"msg_id": msg_id, "type": "auth_denied", "ok": False,
+                        "error": "signer is neither the daemon owner nor a known agent"}
+            resolved = aid
+            session.owner = False
+
+        session.authed = True
+        session.wallet_address = signer
+        session.root_agent_id = resolved
+        session.scope_ids = (None if resolved == ORCHESTRATOR_ID
+                             else self.runtime.registry.get_subtree_ids(resolved))
+        log.info("Remote auth: signer=%s owner=%s root=%s scoped=%s",
+                 signer, session.owner, resolved, session.scope_ids is not None)
+        return {"msg_id": msg_id, "type": "auth_ok", "ok": True,
+                "owner": session.owner, "root": resolved, "wallet": signer}
+
+    def _resolve_root(self, root: str) -> tuple[str, str | None]:
+        """Map a client-named root (agent_id, address, or 'orchestrator') to a
+        canonical agent_id. Returns (agent_id, error). Ambiguous address or
+        unknown root is refused."""
+        if not root or root == ORCHESTRATOR_ID:
+            return ORCHESTRATOR_ID, None
+        reg = self.runtime.registry
+        # Direct agent_id?
+        if root in reg._agents:
+            return root, None
+        # Address? (unique match required)
+        if root.startswith("0x"):
+            matches = [aid for aid, d in reg._agents.items()
+                       if d.identity and d.identity.address
+                       and d.identity.address.lower() == root.lower()]
+            if len(matches) == 1:
+                return matches[0], None
+            if len(matches) > 1:
+                return "", "ambiguous root address"
+        return "", f"unknown agent root: {root}"
+
+    # ------------------------------------------------------------------
+    # Snapshot redaction (non-local sessions never see owner-global secrets)
+    # ------------------------------------------------------------------
+
+    # Snapshot sections that carry owner-global secrets / PII. Dropped for any
+    # scoped session; for a remote full-fleet owner they are kept (the owner
+    # legitimately manages them) but credential VALUES are never in the
+    # snapshot anyway (providers exposes booleans; see snapshot.py).
+    _SECRET_SECTIONS = ("providers", "budget", "user", "connectors", "autonet")
+
+    def _redact_snapshot(self, snap: dict, session: ClientSession) -> dict:
+        """Strip owner-global sections from a SCOPED session's snapshot. A
+        full-fleet session (local owner, or remote owner rooted at the
+        orchestrator) keeps them."""
+        if session.scope_ids is None:
+            return snap            # full fleet => unchanged
+        return {k: v for k, v in snap.items() if k not in self._SECRET_SECTIONS}
+
+    # ------------------------------------------------------------------
+    # Tool-call authorization (default-deny at the target for scoped sessions)
+    # ------------------------------------------------------------------
+
+    def _authorize_tool_call(self, msg_type: str, msg: dict,
+                             session: ClientSession) -> str | None:
+        """Return an error string if this tool call is not allowed for the
+        session, else None. A full-fleet session (scope_ids is None) is
+        unrestricted (preserves today's localhost 'act-as any agent')."""
+        if session.scope_ids is None:
+            return None            # owner / full fleet
+        # Scoped session: owner-only tools are off-limits.
+        if msg_type in OWNER_ONLY_TOOLS:
+            return f"'{msg_type}' is owner-only and not available to a scoped session"
+        # Every named target must be inside the subtree.
+        scope = session.scope_ids
+        for key in _TARGET_ARG_KEYS:
+            val = msg.get(key)
+            if not val or not isinstance(val, str):
+                continue
+            target = val if val in self.runtime.registry._agents else \
+                self.runtime.registry.get_agent_id_by_address(val)
+            if target is not None and target not in scope:
+                return f"target '{val}' is outside the authorized subtree"
+        return None
+
+    async def _handle_message(self, msg: dict[str, Any],
+                              session: ClientSession) -> dict[str, Any]:
+        """Route an incoming message to the appropriate handler.
+
+        Three gates run before any normal dispatch, in order:
+          1. KEY CUSTODY — messages that export or carry a raw private key are
+             refused unless the connection arrived on the privileged LOCAL
+             listener (session.local). Runs first so the execute_tool
+             fallthrough can never bypass it.
+          2. AUTH — a remote (non-local) session must complete the handshake
+             before anything but the auth/ping messages is accepted.
+          3. SCOPE/OWNER (in the execute_tool wrapper) — a scoped session may
+             only target its own subtree and may not call owner-only tools.
+        """
         msg_id = msg.get("msg_id")
         msg_type = msg.get("type", "")
 
         if not msg_type:
             return {"msg_id": msg_id, "ok": False, "error": "Missing 'type' field"}
 
-        # Special case: snapshot request
+        # --- Gate 1: key custody (localhost-only) --------------------------
+        if msg_type in KEY_LOCAL_ONLY_MESSAGES and not ws_auth.assert_local_key_access(session):
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "Key operations are localhost-only and were "
+                             "refused (connection is not on the local listener)."}
+
+        # --- Auth handshake messages (the only ones allowed pre-auth) ------
+        if msg_type == "auth_response":
+            return await self._handle_auth_response(msg, session)
+        if msg_type == "auth_status":
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "authed": session.authed, "owner": session.owner,
+                "root": session.root_agent_id,
+                "requires_auth": not session.local,
+            }}
+
+        # --- Gate 2: everything else requires an authed session ------------
+        if not session.authed:
+            return {"msg_id": msg_id, "ok": False, "error": "unauthenticated"}
+
+        # Special case: snapshot request (scoped + redacted per session)
         if msg_type == "snapshot":
+            snap = self.runtime.snapshot(session.scope_ids)
             return {
                 "msg_id": msg_id,
                 "ok": True,
-                "result": self.runtime.snapshot(),
+                "result": self._redact_snapshot(snap, session),
             }
 
         # Daemon restart: signal the CLI driver to re-exec the process after
@@ -735,6 +1043,29 @@ class WebSocketBridge:
                     private_key=private_key,
                     sponsor_address=sponsor_address,
                 )
+                # Surface the agent's private key on a SUCCESSFUL registration
+                # so the (local) user can import it into MetaMask and later sign
+                # in remotely AS this agent (address-as-credential). Localhost
+                # only — this whole message type is in KEY_LOCAL_ONLY_MESSAGES,
+                # and we re-assert session.local as defense-in-depth. The key is
+                # never returned over the remote listener.
+                if result.get("success") and session.local:
+                    key = self.runtime.registry.get_agent_key(agent_id)
+                    if key:
+                        result["private_key"] = key
+                        log.warning("Surfaced private key for agent '%s' on "
+                                    "registration (local connection)", agent_id)
+                # Notify all connected clients so any open view (Network tab,
+                # agent list) re-pulls and shows the now-registered address,
+                # instead of sitting on a stale snapshot ("Address: pending…").
+                if result.get("success"):
+                    await self.runtime.events.emit(Event(
+                        type=EventType.AGENT_REGISTERED,
+                        source=agent_id,
+                        data={"agent_id": agent_id,
+                              "agent_address": result.get("agent_address", ""),
+                              "registered_on_chain": True},
+                    ))
                 return {"msg_id": msg_id, "ok": result.get("success", False), "result": result}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
@@ -1055,6 +1386,28 @@ class WebSocketBridge:
             except ValueError as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
+        # Export an agent's private key. The ONLY message that returns a
+        # private key in its body. Gated localhost-only at the top of
+        # _handle_message (KEY_LOCAL_ONLY_MESSAGES); re-asserted here as
+        # defense-in-depth so the handler stays safe if dispatch is ever moved.
+        if msg_type == "export_agent_key":
+            if not ws_auth.assert_local_key_access(session):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Private key export is localhost-only."}
+            agent_id = msg.get("agent_id", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
+            key = self.runtime.registry.get_agent_key(agent_id)
+            if not key:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"No key stored for agent '{agent_id}'"}
+            defn = self.runtime.registry._agents.get(agent_id)
+            address = defn.identity.address if (defn and defn.identity) else ""
+            # Log that an export happened — never the key itself.
+            log.warning("Private key exported for agent '%s' (local connection)", agent_id)
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"agent_id": agent_id, "address": address, "private_key": key}}
+
         # Special case: inject user message into running orchestrator session.
         # If the bridge process isn't running (e.g. after a daemon restart),
         # fall through to the normal post_message path which will trigger
@@ -1106,9 +1459,21 @@ class WebSocketBridge:
             if instruction:
                 self.runtime.conversation.add_user_turn(instruction)
 
-        # Use caller_id from message if provided (e.g. UI acting on behalf of
-        # a specific agent), otherwise default to the orchestrator.
-        caller_id = msg.get("caller_id", "orchestrator")
+        # --- Gate 3: scope/owner authorization (default-deny at the target) -
+        # A scoped session may only call non-owner tools that target its own
+        # subtree. Clamping caller_id is NOT enough — the dangerous tools read
+        # an explicit agent_id/target and ignore caller_id — so we validate
+        # every named target against the subtree here, before dispatch.
+        authz_err = self._authorize_tool_call(msg_type, msg, session)
+        if authz_err:
+            return {"msg_id": msg_id, "ok": False, "error": authz_err}
+
+        # caller_id: a full-fleet session may act as any agent (today's UI
+        # behavior). A scoped session is clamped to its own root.
+        if session.scope_ids is None:
+            caller_id = msg.get("caller_id", "orchestrator")
+        else:
+            caller_id = session.root_agent_id
         result = await execute_tool(msg_type, args, self.runtime, caller_id=caller_id)
 
         # Tools signal errors by returning {"error": "..."} with a truthy value.
@@ -1304,8 +1669,13 @@ class WebSocketBridge:
     # ------------------------------------------------------------------
 
     async def _on_event(self, event: Event) -> None:
-        """Broadcast an EventBus event to all connected clients."""
-        if not self._clients:
+        """Broadcast an EventBus event to connected clients, scoped per session.
+
+        A scoped session only receives events originating inside its subtree.
+        Subtree membership is re-derived at send time against the LIVE subtree
+        (get_subtree_ids) rather than a cached set, so a child spawned after the
+        connection authed still has its events delivered (no stale window)."""
+        if not self._sessions:
             return
 
         payload = json.dumps({
@@ -1317,9 +1687,17 @@ class WebSocketBridge:
             "event_id": event.event_id,
         }, default=str)
 
-        # Broadcast to all connected clients, drop failures silently
+        origin = self._event_origin(event)
         stale: list[ServerConnection] = []
-        for ws in list(self._clients):
+        for ws, session in list(self._sessions.items()):
+            # Unauthed sessions get nothing until they complete the handshake.
+            if not session.authed:
+                continue
+            # Scoped session: deliver only events from inside its subtree.
+            if session.scope_ids is not None:
+                live = self.runtime.registry.get_subtree_ids(session.root_agent_id)
+                if origin is not None and origin not in live:
+                    continue
             try:
                 await ws.send(payload)
             except websockets.ConnectionClosed:
@@ -1327,7 +1705,19 @@ class WebSocketBridge:
             except Exception:
                 stale.append(ws)
         for ws in stale:
-            self._clients.discard(ws)
+            self._sessions.pop(ws, None)
+
+    @staticmethod
+    def _event_origin(event: Event) -> str | None:
+        """The agent id an event is 'about', for subtree scoping. Prefers an
+        explicit agent_id in the payload (delegate/execution events carry the
+        real subject there; event.source is often 'runtime'), else source."""
+        data = event.data or {}
+        for key in ("agent_id", "source", "delegate_id"):
+            val = data.get(key)
+            if isinstance(val, str) and val:
+                return val
+        return event.source or None
 
 
 

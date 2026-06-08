@@ -68,6 +68,16 @@ class InputPolicy(Protocol):
         ...
 
 
+class AllowAll:
+    """No gating — single-user / dev / stub use. The channel-neutral default
+    every Surface falls back to when a deployment supplies no policy. Concrete
+    gates (operator, credits, consensus) live next to the surface that uses
+    them (e.g. atn/chat/policy.py); this one is generic enough to live here."""
+
+    def evaluate(self, author: Any, agent_id: str, content: str) -> PolicyDecision:
+        return PolicyDecision(allow=True)
+
+
 # ---------------------------------------------------------------------------
 # Surface — the lifecycle contract the runtime drives.
 # ---------------------------------------------------------------------------

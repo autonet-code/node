@@ -1,5 +1,12 @@
 """Voice service — gives ATN a voice.
 
+The voice Surface (see atn/surface.py). Like the chat Surface, it is a
+long-lived bidirectional bridge from an external real-time channel (here,
+audio) to agent sessions: it owns a persistent connection (the audio device),
+reacts to inbound events (push-to-talk), routes them to agents through an INPUT
+SEAM gated by an InputPolicy, and streams agent output back out via the
+EventBus. VoiceService and ChatService are the same shape, different channel.
+
 Optional module — install with ``pip install atn[voice]``.
 
 Subscribes to the EventBus and speaks agent output aloud, plays tool
@@ -36,8 +43,11 @@ import time
 import wave
 from typing import Any, Callable, TYPE_CHECKING
 
+from dataclasses import dataclass
+
 from .config import VoiceConfig
 from .events import Event, EventBus, EventType
+from .surface import AllowAll, InputPolicy
 
 if TYPE_CHECKING:
     import numpy as np
@@ -797,6 +807,20 @@ def _tool_narration(name: str, inp: dict) -> str:
 #  VoiceService — the main integration point
 # ==============================================================
 
+@dataclass(frozen=True)
+class VoiceAuthor:
+    """The platform-neutral sender for voice input at the input seam.
+
+    Voice has no per-message platform identity the way chat does (a Discord
+    user). The local human at the mic is one speaker; the policy sees them as
+    a stable id. Exposes the minimum the InputPolicy contract needs —
+    ``id`` and ``is_bot`` — so the same gates that govern chat (operator,
+    credits, …) can govern voice unchanged."""
+
+    id: str = "voice:local"
+    is_bot: bool = False
+
+
 class VoiceService:
     """ATN voice service — EventBus-driven TTS/STT with audio mixing.
 
@@ -820,10 +844,17 @@ class VoiceService:
     """
 
     def __init__(self, event_bus: EventBus, runtime: Any,
-                 config: VoiceConfig | None = None) -> None:
+                 config: VoiceConfig | None = None,
+                 *, policy: InputPolicy | None = None) -> None:
         self.events = event_bus
         self.runtime = runtime
         self.config = config or VoiceConfig()
+        # Input-seam policy — gates voice input before it reaches an agent, the
+        # same contract the chat Surface uses. Defaults to AllowAll (today's
+        # behavior: PTT goes straight through). A deployment can pass a shared
+        # gate (e.g. the chat surface's CreditPolicy) to govern both channels.
+        self.policy: InputPolicy = policy or AllowAll()
+        self._author = VoiceAuthor()
 
         # Focus — which agent_id the user is listening to (per channel)
         self.voice_focus: str = "orchestrator"   # agent whose TTS plays on "voice"
@@ -1414,12 +1445,25 @@ class VoiceService:
     async def _send_to_agent(self, agent_id: str, text: str) -> None:
         """Send voice input to any agent (orchestrator or delegate).
 
+        This is the voice Surface's INPUT SEAM — the one place inbound voice
+        becomes runtime.send_agent_message. The InputPolicy is evaluated here,
+        before delivery, exactly as the chat Surface gates handle_inbound.
+
         Uses send_agent_message which handles all cases correctly:
         - Records user turn in conversation store
         - Injects mid-session if agent is running (via bridge)
         - Re-activates COMPLETED/ERROR agents and triggers new execution
         """
         from .orchestrator import ORCHESTRATOR_ID
+
+        # Input-seam gate. A denied utterance is dropped (optionally spoken back
+        # as the deny reason) and never reaches an agent.
+        decision = self.policy.evaluate(self._author, agent_id, text)
+        if not decision.allow:
+            log.info("[voice] input denied for %s: %s", agent_id, decision.reason)
+            if decision.reason and self._voice_enabled:
+                self._speak(decision.reason, is_final=True)
+            return
 
         tagged = f"🎤 [Voice Input] {text}"
 

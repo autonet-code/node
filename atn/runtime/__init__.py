@@ -202,6 +202,12 @@ class Runtime:
         # of platform SDKs and deployment-specific policy.
         self.chat = None  # type: Any
         self._chat_task = None  # background task running the chat adapter's client
+
+        # Agent directory publisher (lazy) — writes this daemon's
+        # browser-reachable wss:// endpoint into the Firestore agent directory
+        # so a remote frontend can find it by an agent's 0x address. Started in
+        # start() only when autonet.public_ws_endpoint is configured.
+        self.agent_directory = None  # type: Any
         self.chat_credits = None  # type: Any  # CreditStore when policy=credit
 
         # Autonet service (Story 3.2: pass data_dir for training data feed)
@@ -324,6 +330,22 @@ class Runtime:
         # Attach trace logger to event bus (subscribes to AGENT_TOOL_USE_* events)
         self.trace_logger.attach(self.events)
 
+        # Publish browser-reachable reachability to the Firestore agent
+        # directory (so a remote frontend can find this daemon by an agent's 0x
+        # address). Only when an endpoint is configured; best-effort — never
+        # blocks boot.
+        endpoint = getattr(self._config.autonet, "public_ws_endpoint", "")
+        if endpoint:
+            try:
+                from ..agent_directory import AgentDirectoryPublisher
+                self.agent_directory = AgentDirectoryPublisher(
+                    self, endpoint=endpoint,
+                    project=getattr(self._config.autonet, "firestore_project", ""))
+                await self.agent_directory.start()
+            except Exception:
+                log.debug("Agent directory publisher failed to start", exc_info=True)
+                self.agent_directory = None
+
         await self.events.emit(Event(
             type=EventType.RUNTIME_STARTED,
             source="runtime",
@@ -359,6 +381,10 @@ class Runtime:
     async def stop(self) -> None:
         self._shutdown_event.set()
         await self.control.kill_all()
+
+        if self.agent_directory is not None:
+            await self.agent_directory.stop()
+            self.agent_directory = None
 
         if self.voice is not None:
             await self.voice.stop()
@@ -399,7 +425,7 @@ class Runtime:
     # Voice Service
     # ==================================================================
 
-    async def start_voice(self) -> dict:
+    async def start_voice(self, *, policy: Any = None) -> dict:
         if self.voice is not None:
             return {"status": "already_running"}
         try:
@@ -410,7 +436,10 @@ class Runtime:
                     "error": "Voice extras not installed.  "
                              "Install with: pip install atn[voice]",
                 }
-            self.voice = VoiceService(self.events, self, self._config.voice)
+            # Voice is a Surface; it gates input at the same seam chat does.
+            # No policy supplied → AllowAll (today's pass-through behavior).
+            self.voice = VoiceService(
+                self.events, self, self._config.voice, policy=policy)
             await self.voice.start()
             return {"status": "started", "backend": self._config.voice.backend}
         except Exception as exc:
@@ -752,8 +781,8 @@ class Runtime:
     # Snapshot — delegate to snapshot builder
     # ==================================================================
 
-    def snapshot(self) -> dict:
-        return self._get_snapshot_builder().snapshot()
+    def snapshot(self, scope_ids: set[str] | None = None) -> dict:
+        return self._get_snapshot_builder().snapshot(scope_ids)
 
     # ==================================================================
     # Planning tasks

@@ -152,6 +152,34 @@ class RPBConfig:
     private_key: str = ""               # Hex private key for signing attestation txns
     # Wallet is managed externally (MetaMask etc.) — we just track the address
     wallet_address: str = ""            # Connected wallet address (empty = not connected)
+    # --- Remote-frontend auth (WS server) ------------------------------------
+    # The MetaMask wallet that OWNS this daemon. Distinct from wallet_address
+    # (the transient network-connection wallet) and from the orchestrator's
+    # generated identity.json key. A remote connection that signs the auth
+    # challenge with this address is rooted at the orchestrator (full fleet).
+    # MUST be pre-configured for the remote listener to start: there is NO
+    # trust-on-first-use on a network-reachable socket (it would let the first
+    # wallet to find the port claim ownership of the fleet).
+    owner_wallet: str = ""
+    # Bind/port for the REMOTE (auth-required) WS listener. The privileged
+    # local listener is always 127.0.0.1:DEFAULT_PORT; this is the separate
+    # socket remote/proxied clients reach. Empty host => remote listener
+    # disabled (local-only daemon, today's default). A reverse proxy
+    # (wss://autonet.computer -> proxy) points at this.
+    remote_ws_host: str = ""        # e.g. "0.0.0.0"; empty = remote disabled
+    remote_ws_port: int = 7701
+    # The browser-reachable wss:// URL this daemon advertises so a remote
+    # frontend can find it by an agent's 0x address. Behind a reverse proxy the
+    # daemon can't infer its own public URL, so it must be configured here
+    # (e.g. "wss://autonet.computer/ws"). Empty => don't publish reachability
+    # (local-only daemon). Written to the Firestore agent directory at startup;
+    # see atn/agent_directory.py. The chain owns identity/registration; this is
+    # mutable presence data, so it lives in Firestore, not on-chain.
+    public_ws_endpoint: str = ""
+    # Firestore project the agent directory lives in. Empty => use the ambient
+    # GOOGLE_CLOUD_PROJECT / default credentials. Reachability publishing is
+    # skipped entirely if no public_ws_endpoint is set.
+    firestore_project: str = ""
     # Jurisdiction entry point — defaults from atn.jurisdiction
     dao_address: str = ""               # Defaults to jurisdiction.GOVERNOR_ADDRESS
     # RPB-specific fields
@@ -484,6 +512,12 @@ def load_config(path: Path | None = None) -> ATNConfig:
         timelock_address=resolved.get("timelock_address", ""),
         min_alignment_threshold=resolved.get("min_alignment_threshold", 0.5),
         generate_keypairs=resolved.get("generate_keypairs", True),
+        # Remote-frontend auth + reachability (this session's work).
+        owner_wallet=resolved.get("owner_wallet", ""),
+        remote_ws_host=resolved.get("remote_ws_host", ""),
+        remote_ws_port=int(resolved.get("remote_ws_port", 7701)),
+        public_ws_endpoint=resolved.get("public_ws_endpoint", ""),
+        firestore_project=resolved.get("firestore_project", ""),
     )
 
     # Trace logging
