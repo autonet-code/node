@@ -203,6 +203,15 @@ contract Substrate {
     ///      (~38 bytes) and secp256k1 keys.
     mapping(address => bytes) private agentPeerId;
 
+    /// @dev Browser-reachable WebSocket endpoint (wss://...) the daemon
+    ///      hosting this agent currently answers on. DISTINCT from peerId:
+    ///      peerId is the libp2p mesh identity (daemon↔daemon, ~immutable);
+    ///      this is where a *web app* dials (mutable presence — changes on
+    ///      every daemon restart when fronted by an ephemeral tunnel). Stored
+    ///      as a string (it's a URL). Off-chain indexers mirror EndpointUpdated
+    ///      to the agent directory so a browser can resolve agent → wss.
+    mapping(address => string) private agentEndpoint;
+
     event AgentRegistered(
         address indexed agent,
         bytes32 indexed lineageHash,
@@ -211,6 +220,10 @@ contract Substrate {
     );
 
     event PeerIdUpdated(address indexed agent, bytes peerId);
+
+    /// @notice Emitted when an agent's browser-reachable wss endpoint changes.
+    ///         Indexers mirror this to the off-chain agent directory.
+    event EndpointUpdated(address indexed agent, string wsEndpoint);
 
     error AlreadyRegistered();
     error LineageHashRequired();
@@ -258,6 +271,24 @@ contract Substrate {
     /// @notice Read an agent's PeerId for DHT discovery.
     function getAgentPeerId(address agent) external view returns (bytes memory) {
         return agentPeerId[agent];
+    }
+
+    /// @notice Publish/refresh this agent's browser-reachable wss endpoint.
+    ///         Agent-signed (msg.sender), so no one can set another agent's
+    ///         endpoint — this is what makes the off-chain directory
+    ///         hijack-proof. An empty string clears it (going dark).
+    ///         Daemons that expose a remote listener call this on startup when
+    ///         the endpoint differs from what's on-chain (ephemeral tunnels
+    ///         change it every restart).
+    function updateEndpoint(string calldata wsEndpoint) external {
+        if (agents[msg.sender].registeredAt == 0) revert AgentNotActive();
+        agentEndpoint[msg.sender] = wsEndpoint;
+        emit EndpointUpdated(msg.sender, wsEndpoint);
+    }
+
+    /// @notice Read an agent's current browser-reachable wss endpoint.
+    function getAgentEndpoint(address agent) external view returns (string memory) {
+        return agentEndpoint[agent];
     }
 
     function isRegistered(address agent) external view returns (bool) {

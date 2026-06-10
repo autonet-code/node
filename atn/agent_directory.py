@@ -1,55 +1,51 @@
 """Agent directory — publish this daemon's browser-reachable WS endpoint.
 
-The chain (via the indexer) owns the permanent half of an agent's record:
-0x address, lineage, registration. But a daemon's reachable wss:// URL is
-*presence* data — it changes on restart / IP change / proxy move, and nobody
-verifies it on-chain. So the daemon writes it directly to the Firestore agent
-directory (collection `agents`, doc id = checksum address), the same collection
-the frontend already reads for the network roster.
+The chain owns identity (address, lineage, peerId — the libp2p mesh id). The
+browser-reachable wss:// URL is *presence*: it changes every daemon restart
+when fronted by an ephemeral tunnel. We publish it ON-CHAIN via the agent's own
+`updateEndpoint` tx (msg.sender == agent, so no one can set another agent's
+endpoint — the directory is hijack-proof). An off-chain indexer mirrors the
+`EndpointUpdated` event into the agent directory (Firestore `agents`
+collection) that the browser reads to resolve an agent's 0x address -> wss.
 
-This is what lets a remote frontend connect by an agent's 0x address alone:
-resolve address -> wsEndpoint in Firestore -> dial that WS -> sign the auth
-challenge -> get scoped to that agent. The browser can reach Firestore (HTTPS)
-but not the libp2p mesh, which is why peerId in the directory isn't enough.
+Why on-chain and not a direct Firestore write: a Firestore security rule can't
+verify a 0x signature, so a daemon writing Firestore directly can't be stopped
+from overwriting another agent's endpoint. The chain verifies the signer
+natively (it IS msg.sender). The daemon therefore never touches Firestore.
 
-Two disjoint writers on one doc:
-  - indexer: address, lineageHash, peerId, registration metadata (chain-derived)
-  - daemon (here): wsEndpoint, lastSeen (mutable presence)
-Both use merge writes, so neither clobbers the other's fields.
+Each call costs gas, so we publish only when the endpoint actually CHANGED
+(read the current on-chain value first). With an ephemeral tunnel the URL
+changes every restart, so expect one tx per restart while remote access is on;
+with a static URL it's rare.
 
-Best-effort by construction: a missing dependency, missing credentials, or a
-Firestore error must NEVER block daemon boot or agent work. Publishing is
-skipped entirely unless ``public_ws_endpoint`` is configured.
+Best-effort by construction: a missing dependency, an unconfigured chain, an
+unregistered agent, or an RPC error must NEVER block daemon boot or agent work.
+Publishing is skipped entirely unless ``public_ws_endpoint`` is configured.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from typing import Any
 
 log = logging.getLogger(__name__)
 
-_COLLECTION = "agents"
-
 
 class AgentDirectoryPublisher:
-    """Writes {wsEndpoint, lastSeen} into each hosted agent's Firestore doc.
+    """Publishes this daemon's wss endpoint on-chain for each hosted agent.
 
     Constructed by the runtime when ``public_ws_endpoint`` is set. ``start()``
-    publishes once — reachability only changes on a daemon restart (new IP /
-    proxy move), and a restart re-runs start(), so a single write per boot
-    covers every event that changes the endpoint. No heartbeat: a dead daemon
-    is discovered when the WS dial fails, not by polling lastSeen. All Firestore
-    access is lazy and guarded — if anything is unavailable the publisher logs
-    once and becomes a no-op.
+    publishes once per boot, per hosted registered agent, only when the
+    endpoint differs from what's already on-chain (an ephemeral tunnel makes
+    that every restart). The indexer mirrors the resulting EndpointUpdated
+    event to the off-chain directory.
     """
 
     def __init__(self, runtime: Any, *, endpoint: str, project: str = "") -> None:
         self.runtime = runtime
         self.endpoint = endpoint
+        # project kept for signature compatibility with the prior Firestore
+        # implementation; no longer used (no direct Firestore access).
         self.project = project
-        self._client: Any = None
         self._enabled = bool(endpoint)
 
     # -- lifecycle ----------------------------------------------------------
@@ -57,9 +53,10 @@ class AgentDirectoryPublisher:
     async def start(self) -> None:
         if not self._enabled:
             return
-        if not self._connect():
-            return                              # logged; stays a no-op
-        await self._publish_once()
+        try:
+            await self._publish_once()
+        except Exception:
+            log.debug("Agent directory: publish failed (non-fatal)", exc_info=True)
 
     async def stop(self) -> None:
         # Nothing to tear down — the publish is one-shot at start().
@@ -67,65 +64,45 @@ class AgentDirectoryPublisher:
 
     # -- internals ----------------------------------------------------------
 
-    def _connect(self) -> bool:
-        """Lazily build the Firestore client. Returns False (and disables the
-        publisher) on any failure — never raises into the caller."""
+    def _svc(self) -> Any:
+        """The on-chain service, or None if the chain isn't configured/usable."""
         try:
-            from google.cloud import firestore
-        except ImportError:
-            log.info("Agent directory: google-cloud-firestore not installed; "
-                     "reachability will not be published.")
-            self._enabled = False
-            return False
-        try:
-            self._client = (firestore.Client(project=self.project)
-                            if self.project else firestore.Client())
-            return True
-        except Exception as exc:
-            log.warning("Agent directory: could not init Firestore (%s); "
-                        "reachability will not be published.", exc)
-            self._enabled = False
-            return False
-
-    def _hosted_agents(self) -> list[dict]:
-        """Advertisement dicts for agents this daemon hosts that have an
-        identity. Carries address + name + agent_type (the indexer can't know
-        name/type — they aren't on-chain — so the daemon publishes them so the
-        directory can show a real name, not just an address)."""
-        try:
-            ads = self.runtime.registry.build_agent_advertisements()
+            from .on_chain import OnChainService
+            svc = OnChainService(self.runtime._config.autonet)
+            return svc if svc.available else None
         except Exception:
-            log.debug("Agent directory: advertisement enumeration failed",
-                      exc_info=True)
-            return []
-        return [a for a in ads if a.get("address")]
+            return None
 
     async def _publish_once(self) -> None:
-        """Merge reachability + display fields into every hosted agent's doc.
-        Runs the blocking Firestore calls off the event loop."""
-        if self._client is None:
+        """For each hosted, on-chain-registered agent whose on-chain endpoint
+        differs from ours, sign an updateEndpoint tx with that agent's key."""
+        svc = self._svc()
+        if svc is None:
+            log.info("Agent directory: chain not configured; endpoint not published.")
             return
-        agents = self._hosted_agents()
-        if not agents:
-            return
-        now = int(time.time())
-        try:
-            await asyncio.to_thread(self._write_batch, agents, now)
-            log.info("Agent directory: published directory entry for %d agent(s)",
-                     len(agents))
-        except Exception as exc:
-            log.warning("Agent directory: publish failed (%s)", exc)
-
-    def _write_batch(self, agents: list[dict], now: int) -> None:
-        """Blocking: one merge-set per agent. Merge so the indexer's
-        chain-derived fields (address/peerId/registration) are untouched; we
-        only write the daemon-owned fields: reachability + display name/type."""
-        for ad in agents:
-            payload = {
-                "wsEndpoint": self.endpoint,
-                "lastSeen": now,
-                "displayName": ad.get("name", ""),
-                "agentType": ad.get("agent_type", ""),
-            }
-            self._client.collection(_COLLECTION).document(ad["address"]).set(
-                payload, merge=True)
+        reg = self.runtime.registry
+        published = 0
+        for defn, _status in reg.list_agents():
+            ident = getattr(defn, "identity", None)
+            if not ident or not ident.address:
+                continue
+            if not getattr(ident, "registered_on_chain", False):
+                continue            # only registered agents have an on-chain slot
+            key = reg.get_agent_key(defn.id)
+            if not key:
+                continue
+            try:
+                current = await svc.get_agent_endpoint(ident.address)
+                if current == self.endpoint:
+                    continue        # unchanged — no tx, no gas
+                result = await svc.update_endpoint(key, self.endpoint)
+                if result.get("success"):
+                    published += 1
+                else:
+                    log.warning("Agent directory: updateEndpoint failed for %s: %s",
+                                defn.id, result.get("error"))
+            except Exception:
+                log.debug("Agent directory: publish error for %s", defn.id, exc_info=True)
+        if published:
+            log.info("Agent directory: published wss endpoint on-chain for %d agent(s)",
+                     published)

@@ -82,6 +82,22 @@ SUBSTRATE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # Browser-reachable wss endpoint — agent-signed presence, mirrored to the
+    # off-chain directory by the indexer (EndpointUpdated event).
+    {
+        "inputs": [{"internalType": "string", "name": "wsEndpoint", "type": "string"}],
+        "name": "updateEndpoint",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "agent", "type": "address"}],
+        "name": "getAgentEndpoint",
+        "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     {
         "inputs": [{"internalType": "address", "name": "", "type": "address"}],
         "name": "agents",
@@ -413,6 +429,51 @@ class OnChainService:
                     "tx_hash": tx_hash.hex()}
         except Exception as e:
             log.exception("Failed to update peer id on chain")
+            return {"success": False, "error": str(e)}
+
+    async def get_agent_endpoint(self, address: str) -> str:
+        """Read an agent's current on-chain wss endpoint ('' if unset)."""
+        try:
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            checksum = w3.to_checksum_address(address)
+            return contract.functions.getAgentEndpoint(checksum).call() or ""
+        except Exception:
+            log.debug("getAgentEndpoint read failed for %s", address, exc_info=True)
+            return ""
+
+    async def update_endpoint(
+        self,
+        private_key: str,
+        ws_endpoint: str,
+    ) -> dict[str, Any]:
+        """Sign and submit an ``updateEndpoint`` transaction (agent-signed
+        presence). The indexer mirrors the EndpointUpdated event to the
+        off-chain agent directory so browsers can resolve agent -> wss."""
+        try:
+            from eth_account import Account
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            account = Account.from_key(private_key)
+            nonce = w3.eth.get_transaction_count(account.address)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+            tx = contract.functions.updateEndpoint(ws_endpoint).build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": 200_000,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": chain_id,
+            })
+            signed = account.sign_transaction(tx)
+            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            tx_hash = w3.eth.send_raw_transaction(raw)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            if receipt.status == 1:
+                return {"success": True, "tx_hash": tx_hash.hex()}
+            return {"success": False, "error": "Transaction reverted",
+                    "tx_hash": tx_hash.hex()}
+        except Exception as e:
+            log.exception("Failed to update endpoint on chain")
             return {"success": False, "error": str(e)}
 
     # ------------------------------------------------------------------
