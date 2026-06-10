@@ -209,10 +209,15 @@ def _events_under_node(
         target = tendency.tree.get_node(target_node_id)
         if target is None:
             continue
-        # BFS down
+        # BFS down. Co-parented graphs can contain cycles (two nodes
+        # cross-parented into each other's trees), so the visited set
+        # must gate RE-QUEUING, not just record ids — otherwise the
+        # queue grows without bound until MemoryError.
         queue = [target]
         while queue:
             n = queue.pop()
+            if n.id in descendant_ids:
+                continue
             descendant_ids.add(n.id)
             queue.extend(n.pro_children)
             queue.extend(n.con_children)

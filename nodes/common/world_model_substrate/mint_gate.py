@@ -93,9 +93,14 @@ def _node_descendants(world: World, target_id: str) -> set[str]:
         target = tendency.tree.get_node(target_id)
         if target is None:
             continue
+        # Visited check gates RE-QUEUING: co-parented graphs can hold
+        # cycles, and an unguarded walk grows the queue until
+        # MemoryError (seen live in reconcile's twin of this loop).
         queue = [target]
         while queue:
             n = queue.pop()
+            if n.id in out:
+                continue
             out.add(n.id)
             queue.extend(n.pro_children)
             queue.extend(n.con_children)
