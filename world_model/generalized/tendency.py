@@ -231,12 +231,17 @@ class GeneralizedTendency:
             anchor=self.anchor,
             polarity_axis=self.polarity_axis,
         )
-        # Deterministic root id: derived from the tendency id so two
-        # constructions of the same tendency (across processes, or a
-        # serialize/deserialize round-trip) agree on the root node's
-        # identity. Child nodes are already content-addressed from
-        # coordinates; this closes the last unstable-id gap.
-        self.tree = Tree(root_value=self.thesis, root_id=f"root_{self.id}")
+        # Deterministic ids: tree and root node derive from the
+        # tendency id so two constructions of the same tendency
+        # (across processes, or a serialize/deserialize round-trip)
+        # agree on the tree's and root's identity. Child nodes are
+        # already content-addressed from coordinates; this closes the
+        # last unstable-id gaps.
+        self.tree = Tree(
+            id=f"tree_{self.id}",
+            root_value=self.thesis,
+            root_id=f"root_{self.id}",
+        )
         # Bind root node's content to the thesis label (already done by Tree)
         # and link it in the index
         self._node_to_claim[self.tree.root_node.id] = self._root_claim

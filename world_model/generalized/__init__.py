@@ -53,6 +53,7 @@ from .locate import (
 )
 from .render import render
 from .decay import StabilityTracker, is_decayed
+from .serialize import snapshot_world, restore_world, worlds_equal
 
 __all__ = [
     "CoordinateClaim",
@@ -78,4 +79,7 @@ __all__ = [
     "render",
     "StabilityTracker",
     "is_decayed",
+    "snapshot_world",
+    "restore_world",
+    "worlds_equal",
 ]
