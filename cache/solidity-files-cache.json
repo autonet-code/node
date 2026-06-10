@@ -2,8 +2,8 @@
   "_format": "hh-sol-cache-2",
   "files": {
     "C:\\code\\autonet\\contracts\\core\\Substrate.sol": {
-      "lastModificationDate": 1781014686691,
-      "contentHash": "96d7421b18ea9c59841d87e78ffad206",
+      "lastModificationDate": 1781122901712,
+      "contentHash": "ab5b3784bbf9516d4611b700ff02a32b",
       "sourceName": "contracts/core/Substrate.sol",
       "solcConfig": {
         "version": "0.8.20",

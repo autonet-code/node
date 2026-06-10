@@ -165,7 +165,9 @@ def test_training_mints_reputation_and_atn_at_same_amount(chain):
     w3 = chain["w3"]
     contract = chain["contract"]
     addr = chain["agent_addrs"][0]
-    agent_ids = [f"agent_{i}" for i in range(len(chain["agent_addrs"]))]
+    # Agent ids ARE addresses: merkle mint proofs are keyed by
+    # msg.sender, so claimable mint-map entries must be address-keyed.
+    agent_ids = list(chain["agent_addrs"])
 
     rep_before = contract.functions.agentReputation(addr).call()
     bal_before = contract.functions.balanceOf(addr).call()
@@ -230,7 +232,9 @@ def test_atn_transfer_moves_balance_does_not_affect_reputation(chain):
     on both sides unchanged."""
     w3 = chain["w3"]
     contract = chain["contract"]
-    agent_ids = [f"agent_{i}" for i in range(len(chain["agent_addrs"]))]
+    # Agent ids ARE addresses: merkle mint proofs are keyed by
+    # msg.sender, so claimable mint-map entries must be address-keyed.
+    agent_ids = list(chain["agent_addrs"])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_71_xfer",
     )
@@ -323,7 +327,9 @@ def test_atn_approve_and_transfer_from(chain):
     """Standard ERC20 approve / transferFrom flow."""
     w3 = chain["w3"]
     contract = chain["contract"]
-    agent_ids = [f"agent_{i}" for i in range(len(chain["agent_addrs"]))]
+    # Agent ids ARE addresses: merkle mint proofs are keyed by
+    # msg.sender, so claimable mint-map entries must be address-keyed.
+    agent_ids = list(chain["agent_addrs"])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_71_allow",
     )
@@ -397,7 +403,9 @@ def test_unlimited_approval_does_not_decrease(chain):
     decrement it (matches ERC20 unlimited-approval convention)."""
     w3 = chain["w3"]
     contract = chain["contract"]
-    agent_ids = [f"agent_{i}" for i in range(len(chain["agent_addrs"]))]
+    # Agent ids ARE addresses: merkle mint proofs are keyed by
+    # msg.sender, so claimable mint-map entries must be address-keyed.
+    agent_ids = list(chain["agent_addrs"])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_71_unlim",
     )
@@ -449,7 +457,9 @@ def test_atn_total_supply_tracks_minted(chain):
 
     assert contract.functions.atnTotalSupply().call() == 0
 
-    agent_ids = [f"agent_{i}" for i in range(len(chain["agent_addrs"]))]
+    # Agent ids ARE addresses: merkle mint proofs are keyed by
+    # msg.sender, so claimable mint-map entries must be address-keyed.
+    agent_ids = list(chain["agent_addrs"])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_71_supply",
     )

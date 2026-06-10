@@ -285,6 +285,7 @@ def test_anchor_chain_rejects_wrong_prev_epoch_root(chain):
             bogus_prev_anchor,
             "0" * 64,
             ph,
+            b"\x00" * 32,
         ).transact({"from": deployer, "gas": 600_000})
         receipt = w3.eth.wait_for_transaction_receipt(tx)
         if receipt.status != 1:
@@ -331,6 +332,7 @@ def test_anchor_chain_rejects_wrong_prev_anchor_hash(chain):
             bogus_prev_anchor,
             "0" * 64,
             ph,
+            b"\x00" * 32,
         ).transact({"from": deployer, "gas": 600_000})
         receipt = w3.eth.wait_for_transaction_receipt(tx)
         if receipt.status != 1:

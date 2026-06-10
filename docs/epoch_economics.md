@@ -96,16 +96,30 @@ Implementation state (2026-06-11):
   sequence at T_cut before replay — post-cut batches join the next
   epoch's canonical set).
 
-## Pre-mainnet contract change (flagged 2026-06-11)
+## Merkle mint proofs (implemented 2026-06-11)
 
-`recordTrainingForEpoch(amount, ...)` currently accepts a self-reported
-amount — the contract checks anchoring + idempotency, not that the
-amount matches the anchored agent_mint blob. Any registered agent can
-over-report into an anchored epoch. Fix before mainnet: make
-`epoch_root` (or a dedicated field in the anchor) a merkle root over
-sorted `(agent, amount)` pairs and require a merkle proof in
-`recordTrainingForEpoch`. Cheap on-chain (one keccak path), turns the
-anchor into an enforced commitment instead of an honor-system record.
+Mint amounts are no longer self-reported. `submitAnchor` commits
+`agentMintRoot` — a merkle root over the epoch's `(agent address,
+scaled amount)` map (sorted-pair hashing, double-hashed leaves,
+OZ-compatible) — and `recordTrainingForEpoch(amount, epochIdHash,
+proof)` verifies the caller's leaf against it. Anchors with no
+claimable entries carry the zero root; the contract rejects all
+nonzero claims against those (`MintRootMissing`).
+
+Python side: `nodes/common/mint_merkle.py` (tree/proof/scaling —
+both the anchorer and the agent submitter MUST route the float→int
+truncation through `scale_mint`, or the leaf is unprovable). Only
+address-parsing mint-map keys enter the tree — which makes explicit
+the standing identity requirement: **the substrate feed must author
+events with the agent's 0x address** (today it uses the atn agent id;
+non-address authors accrue mint that nobody can claim on-chain).
+Wire the feed's `author_agent` to the agent registry address before
+real mint flows.
+
+NOT yet redeployed to shadownet — redeploy wipes registrations and
+anchors, so it's bundled with the next deliberate reset
+(`scripts/deploy_substrate.js` + publish_network_config.py + indexer
+restart per the shadownet runbook).
 
 ## Startup replay cost (known debt, separate from economics)
 

@@ -60,6 +60,7 @@ from typing import Any, Dict, Optional
 
 from .authoritative_encoding import cid_for_blob, decode_agent_mint_blob
 from .blob_resolver import BlobIntegrityError, BlobResolver
+from .mint_merkle import mint_merkle_proof, scale_mint
 
 
 logger = logging.getLogger(__name__)
@@ -226,10 +227,13 @@ class AuthoritativeChainSubmitter:
                     f"blob CID mismatch: expected {cid}, got {actual_cid}"
                 )
 
-            # 4. Decode this agent's share.
+            # 4. Decode this agent's share. Scaling MUST route through
+            # mint_merkle.scale_mint — the anchor's agentMintRoot was
+            # built from the same truncation, and a mismatched integer
+            # is an unprovable leaf.
             mint_map = decode_agent_mint_blob(blob)
             raw_mint = float(mint_map.get(self.agent_id, 0.0))
-            scaled = int(raw_mint * self.config.mint_scale)
+            scaled = scale_mint(raw_mint, self.config.mint_scale)
 
             # 5. Skip zero submissions if configured.
             if scaled == 0 and self.config.skip_zero:
@@ -243,10 +247,28 @@ class AuthoritativeChainSubmitter:
                     raw_mint=raw_mint,
                 )
 
-            # 6. Submit on chain.
+            # 6. Build the merkle proof from the full mint map and
+            # submit on chain. The proof is keyed by the agent's
+            # ADDRESS (the contract verifies msg.sender).
+            proof = mint_merkle_proof(
+                mint_map, self.agent_address, self.config.mint_scale,
+            )
+            if proof is None:
+                return AuthoritativeSubmissionResult(
+                    success=False,
+                    epoch_id=epoch_id,
+                    cid=cid,
+                    cid_verified=True,
+                    raw_mint=raw_mint,
+                    contribution_scaled=scaled,
+                    error=(
+                        f"no provable mint leaf for {self.agent_address} "
+                        "(agent_id/address mismatch in the mint map?)"
+                    ),
+                )
             eid_hash = epoch_id_hash(epoch_id)
             try:
-                tx_hash = self._send_record(scaled, eid_hash)
+                tx_hash = self._send_record(scaled, eid_hash, proof)
             except Exception as e:
                 # Contract-side dedupe: if our seen-set was empty after a
                 # process restart and the contract already saw this
@@ -292,7 +314,9 @@ class AuthoritativeChainSubmitter:
                 cid_verified=True,
             )
 
-    def _send_record(self, contribution: int, eid_hash: bytes) -> str:
+    def _send_record(
+        self, contribution: int, eid_hash: bytes, proof: list,
+    ) -> str:
         contract = self._get_contract()
         w3 = self._w3
         if w3 is None:
@@ -301,7 +325,7 @@ class AuthoritativeChainSubmitter:
         # Test path: account is unlocked in eth_tester.
         if not self.config.private_key:
             tx_hash = contract.functions.recordTrainingForEpoch(
-                contribution, eid_hash,
+                contribution, eid_hash, proof,
             ).transact({"from": self.agent_address, "gas": 1_500_000})
             receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
             if receipt.status != 1:
@@ -314,13 +338,13 @@ class AuthoritativeChainSubmitter:
         # bites in real-world deployments.
         try:
             estimated = contract.functions.recordTrainingForEpoch(
-                contribution, eid_hash,
+                contribution, eid_hash, proof,
             ).estimate_gas({"from": self.agent_address})
             gas_limit = max(int(estimated * 12 // 10), 1_500_000)
         except Exception:
             gas_limit = 2_000_000
         tx = contract.functions.recordTrainingForEpoch(
-            contribution, eid_hash,
+            contribution, eid_hash, proof,
         ).build_transaction({
             "from": self.agent_address,
             "nonce": w3.eth.get_transaction_count(self.agent_address),

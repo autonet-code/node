@@ -47,9 +47,12 @@ pragma solidity ^0.8.20;
 /// 2. Per epoch close it minted in:
 ///      a. Off-chain: read EpochAnchored event for the epoch_id.
 ///      b. Off-chain: fetch agent_mint blob via the cid.
-///      c. Off-chain: decode own mint amount, scale to uint256.
-///      d. On-chain: ``recordTrainingForEpoch(amount, epochIdHash)``.
-///         Reverts if (msg.sender, epochIdHash) already submitted.
+///      c. Off-chain: decode own mint amount, scale to uint256, and
+///         build the merkle proof from the full mint map.
+///      d. On-chain: ``recordTrainingForEpoch(amount, epochIdHash,
+///         proof)``. Reverts if (msg.sender, epochIdHash) already
+///         submitted, or if (msg.sender, amount) doesn't verify
+///         against the anchor's agentMintRoot.
 ///
 /// 3. Anytime: read ``agentMintTotal(address)`` for cumulative or
 ///    ``mintForEpoch(address, bytes32)`` for per-epoch.
@@ -68,6 +71,11 @@ contract Substrate {
         address submitter;
         uint256 blockNumber;
         uint256 timestamp;
+        // Merkle root over (agent address, scaled mint amount) leaves
+        // for this epoch. recordTrainingForEpoch verifies the caller's
+        // claim against it — mint amounts are federation-ratified, not
+        // self-reported. Appended last so prior tuple indexes hold.
+        bytes32 agentMintRoot;
     }
 
     /// @dev Sequential storage of anchors as submitted.
@@ -95,13 +103,17 @@ contract Substrate {
     error PrevAnchorHashMismatch(bytes32 expected, bytes32 got);
 
     /// @notice Submit an anchor for a network epoch close.
+    /// @param agentMintRoot Merkle root over the epoch's
+    ///        (agent, scaledAmount) mint map; sorted-pair hashing,
+    ///        double-hashed leaves (see recordTrainingForEpoch).
     function submitAnchor(
         string calldata epochId,
         bytes32 epochRoot,
         bytes32 prevEpochRoot,
         bytes32 prevAnchorHash,
         string calldata agentMintCid,
-        bytes32 payloadHash
+        bytes32 payloadHash,
+        bytes32 agentMintRoot
     ) external {
         if (bytes(epochId).length == 0) revert EpochIdEmpty();
         if (anchorIndexByEpochId[epochId] != 0) {
@@ -125,7 +137,8 @@ contract Substrate {
             payloadHash: payloadHash,
             submitter: msg.sender,
             blockNumber: block.number,
-            timestamp: block.timestamp
+            timestamp: block.timestamp,
+            agentMintRoot: agentMintRoot
         }));
         anchorIndexByEpochId[epochId] = anchors.length;
         epochIdByHash[epochIdHash] = epochId;
@@ -137,6 +150,7 @@ contract Substrate {
             prevAnchorHash,
             agentMintCid,
             payloadHash,
+            agentMintRoot,
             msg.sender,
             block.number
         ));
@@ -350,18 +364,33 @@ contract Substrate {
 
     error EpochNotAnchored(bytes32 epochIdHash);
     error AlreadySubmittedForEpoch(bytes32 epochIdHash);
+    error MintRootMissing(bytes32 epochIdHash);
+    error MintProofInvalid(bytes32 epochIdHash);
 
     /// @notice Record this agent's authoritative mint for an
     ///         already-anchored epoch.
     /// @dev    Per-(agent, epochIdHash) idempotent. The epoch must
     ///         have been anchored via submitAnchor() first — this
-    ///         binds the record to a federation-ratified close.
+    ///         binds the record to a federation-ratified close. The
+    ///         amount is NOT self-reported: it must verify against
+    ///         the anchor's agentMintRoot, so the only claimable
+    ///         amount is the one the federation ratified.
     /// @param amount The mint amount, integer-scaled (default ×1e6
     ///               at the agent-side submitter, see Phase 5.6 docs).
     /// @param epochIdHash keccak256 of the epoch_id string.
-    function recordTrainingForEpoch(uint256 amount, bytes32 epochIdHash) external {
+    /// @param proof Merkle proof for the leaf
+    ///              keccak256(bytes.concat(keccak256(abi.encode(
+    ///              msg.sender, amount)))) under the anchor's
+    ///              agentMintRoot (sorted-pair hashing; a single-leaf
+    ///              tree has root == leaf and an empty proof).
+    function recordTrainingForEpoch(
+        uint256 amount,
+        bytes32 epochIdHash,
+        bytes32[] calldata proof
+    ) external {
         if (!agents[msg.sender].active) revert AgentNotActive();
-        if (bytes(epochIdByHash[epochIdHash]).length == 0) {
+        string storage epochId = epochIdByHash[epochIdHash];
+        if (bytes(epochId).length == 0) {
             revert EpochNotAnchored(epochIdHash);
         }
         if (mintForEpoch[msg.sender][epochIdHash] != 0) {
@@ -370,9 +399,18 @@ contract Substrate {
         // Allow zero submissions to be skipped silently — the agent
         // had no mint share for this epoch but may still want a
         // marker on chain. Here we treat zero as a no-op (no event,
-        // no state change).
+        // no state change). Zero shares are not in the mint tree.
         if (amount == 0) {
             return;
+        }
+
+        bytes32 root = anchors[anchorIndexByEpochId[epochId] - 1].agentMintRoot;
+        if (root == bytes32(0)) revert MintRootMissing(epochIdHash);
+        bytes32 leaf = keccak256(
+            bytes.concat(keccak256(abi.encode(msg.sender, amount)))
+        );
+        if (!_verifyMintProof(proof, root, leaf)) {
+            revert MintProofInvalid(epochIdHash);
         }
 
         mintForEpoch[msg.sender][epochIdHash] = amount;
@@ -400,6 +438,24 @@ contract Substrate {
     /// @notice Has (agent, epochIdHash) already been submitted?
     function hasSubmittedForEpoch(address agent, bytes32 epochIdHash) external view returns (bool) {
         return mintForEpoch[agent][epochIdHash] != 0;
+    }
+
+    /// @dev Sorted-pair merkle verification (OpenZeppelin-compatible):
+    ///      at each level the pair is hashed in ascending byte order,
+    ///      so proofs carry no left/right index bits.
+    function _verifyMintProof(
+        bytes32[] calldata proof,
+        bytes32 root,
+        bytes32 leaf
+    ) private pure returns (bool) {
+        bytes32 computed = leaf;
+        for (uint256 i = 0; i < proof.length; i++) {
+            bytes32 p = proof[i];
+            computed = computed <= p
+                ? keccak256(abi.encodePacked(computed, p))
+                : keccak256(abi.encodePacked(p, computed));
+        }
+        return computed == root;
     }
 
     // =========================================================================

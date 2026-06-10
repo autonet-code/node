@@ -205,7 +205,10 @@ def test_agent_reads_anchor_and_submits_authoritative_mint(chain):
     on-chain mintForEpoch matches the authoritative blob."""
     agent_addrs = chain["agent_addrs"]
     contract = chain["contract"]
-    agent_ids = ["alice", "bob", "carol"]
+    # Agent ids ARE addresses: the merkle mint proof is keyed by
+    # msg.sender, so claimable mint-map entries must be address-keyed
+    # (matches ChainSubmissionDriver, which uses agent_id=address).
+    agent_ids = list(agent_addrs)
 
     result, epoch_id, resolver = _build_close_and_anchor(chain, agent_ids)
     expected_blob_mint = decode_agent_mint_blob(resolver.get(
@@ -256,7 +259,7 @@ def test_contract_dedupes_double_submit(chain):
     via the contract's AlreadySubmittedForEpoch revert."""
     agent_addrs = chain["agent_addrs"]
     contract = chain["contract"]
-    agent_ids = ["alice", "bob"]
+    agent_ids = list(agent_addrs[:2])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_idem",
     )
@@ -294,7 +297,7 @@ def test_restart_does_not_double_submit(chain):
     unchanged."""
     agent_addrs = chain["agent_addrs"]
     contract = chain["contract"]
-    agent_ids = ["alice", "bob"]
+    agent_ids = list(agent_addrs[:2])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_restart",
     )
@@ -340,7 +343,7 @@ def test_three_agents_each_submit_independently(chain):
     payload."""
     agent_addrs = chain["agent_addrs"]
     contract = chain["contract"]
-    agent_ids = ["alice", "bob", "carol"]
+    agent_ids = list(agent_addrs)
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_three",
     )

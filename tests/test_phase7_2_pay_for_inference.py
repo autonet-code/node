@@ -159,7 +159,7 @@ def test_pay_for_inference_moves_balance_and_emits_event(chain):
     payer_addr = chain["agent_addrs"][0]
     recipient = chain["agent_addrs"][1]
 
-    payer_initial = _give_agent_some_atn(chain, "agent_0", payer_addr)
+    payer_initial = _give_agent_some_atn(chain, payer_addr, payer_addr)
     assert payer_initial > 0
     recipient_before = contract.functions.balanceOf(recipient).call()
     supply_before = contract.functions.atnTotalSupply().call()
@@ -217,7 +217,7 @@ def test_multiple_payments_accumulate_on_recipient(chain):
     payer_addr = chain["agent_addrs"][0]
     recipient = chain["agent_addrs"][1]
 
-    payer_initial = _give_agent_some_atn(chain, "agent_0", payer_addr)
+    payer_initial = _give_agent_some_atn(chain, payer_addr, payer_addr)
     recipient_before = contract.functions.balanceOf(recipient).call()
 
     pay_each = payer_initial // 8
@@ -271,7 +271,7 @@ def test_pay_to_zero_address_reverts(chain):
     w3 = chain["w3"]
     contract = chain["contract"]
     payer_addr = chain["agent_addrs"][0]
-    _give_agent_some_atn(chain, "agent_0", payer_addr)
+    _give_agent_some_atn(chain, payer_addr, payer_addr)
 
     rid = Web3.keccak(text="zero-target")
     rejected = False
@@ -298,7 +298,7 @@ def test_payment_does_not_change_reputation_on_either_side(chain):
     payer_addr = chain["agent_addrs"][0]
     recipient = chain["agent_addrs"][1]
 
-    _give_agent_some_atn(chain, "agent_0", payer_addr)
+    _give_agent_some_atn(chain, payer_addr, payer_addr)
 
     payer_rep_before = contract.functions.agentReputation(payer_addr).call()
     recip_rep_before = contract.functions.agentReputation(recipient).call()
@@ -337,7 +337,7 @@ def test_payment_to_unregistered_address_works(chain):
     unregistered_recipient = w3.eth.accounts[5]
     assert not contract.functions.isRegistered(unregistered_recipient).call()
 
-    _give_agent_some_atn(chain, "agent_0", payer_addr)
+    _give_agent_some_atn(chain, payer_addr, payer_addr)
     pay_amount = 12345
     rid = Web3.keccak(text="anon-recipient")
 
@@ -360,7 +360,7 @@ def test_self_payment_is_a_no_op_in_balance_terms(chain):
     w3 = chain["w3"]
     contract = chain["contract"]
     payer_addr = chain["agent_addrs"][0]
-    initial = _give_agent_some_atn(chain, "agent_0", payer_addr)
+    initial = _give_agent_some_atn(chain, payer_addr, payer_addr)
 
     rid = Web3.keccak(text="self-pay")
     pay = initial // 4

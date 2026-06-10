@@ -53,6 +53,7 @@ from .authoritative_encoding import (
     encode_authoritative_payload,
     payload_hash,
 )
+from .mint_merkle import mint_merkle_root
 
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class AnchorResult:
     agent_mint_blob: bytes = b""
     payload_bytes: bytes = b""
     payload_hash_hex: str = ""
+    agent_mint_root_hex: str = ""
     error: str = ""
 
 
@@ -232,6 +234,10 @@ class EpochAnchorer:
             mint_blob = encode_agent_mint_blob(agent_mint)
             cid = cid_for_blob(mint_blob)
 
+            # Merkle root over the mint map: agents prove their share
+            # against this when claiming (recordTrainingForEpoch).
+            mint_root = mint_merkle_root(agent_mint)
+
             try:
                 tx_hash = self._submit(
                     epoch_id=epoch_id,
@@ -240,6 +246,7 @@ class EpochAnchorer:
                     prev_anchor_hash=prev_anchor_bytes,
                     agent_mint_cid=cid,
                     payload_hash_bytes=ph,
+                    agent_mint_root=mint_root,
                     from_address=from_address,
                 )
             except Exception as e:
@@ -253,6 +260,7 @@ class EpochAnchorer:
                     agent_mint_blob=mint_blob,
                     payload_bytes=payload_bytes,
                     payload_hash_hex=ph.hex(),
+                    agent_mint_root_hex=mint_root.hex(),
                 )
 
             return AnchorResult(
@@ -265,6 +273,7 @@ class EpochAnchorer:
                 agent_mint_blob=mint_blob,
                 payload_bytes=payload_bytes,
                 payload_hash_hex=ph.hex(),
+                agent_mint_root_hex=mint_root.hex(),
             )
 
     def _submit(
@@ -276,6 +285,7 @@ class EpochAnchorer:
         prev_anchor_hash: bytes,
         agent_mint_cid: str,
         payload_hash_bytes: bytes,
+        agent_mint_root: bytes,
         from_address: Optional[str] = None,
     ) -> str:
         contract = self._get_contract()
@@ -315,6 +325,7 @@ class EpochAnchorer:
                 prev_anchor_hash,
                 agent_mint_cid,
                 payload_hash_bytes,
+                agent_mint_root,
             ).transact({"from": sender})
             receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
             if receipt.status != 1:
@@ -336,6 +347,7 @@ class EpochAnchorer:
                 prev_anchor_hash,
                 agent_mint_cid,
                 payload_hash_bytes,
+                agent_mint_root,
             ).estimate_gas({"from": sender})
             gas_limit = max(int(estimated * 12 // 10), 1_500_000)
         except Exception:
@@ -347,6 +359,7 @@ class EpochAnchorer:
             prev_anchor_hash,
             agent_mint_cid,
             payload_hash_bytes,
+            agent_mint_root,
         ).build_transaction({
             "from": sender,
             "nonce": w3.eth.get_transaction_count(sender),
