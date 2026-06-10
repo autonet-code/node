@@ -312,12 +312,13 @@ def federated_epoch_close(
 
     # The on-chain anchor (Phase 5.5) commits the merkle of an
     # ``authoritative_payload`` dict. Only fields whose keys are
-    # deterministic across daemons can live here. Per-node fields
-    # use ephemeral UUID node ids (charter root nodes get fresh
-    # ``uuid.uuid4()`` in build_charter_world), so the chain payload
-    # carries only ``agent_mint`` + ``agent_novelty`` (keyed by
-    # user-supplied agent_id, deterministic) plus ``epoch_root``.
-    # Per-node fields stay in ``result`` for local diagnostics only.
+    # deterministic across daemons can live here. Node ids are now
+    # fully deterministic (content-addressed children; roots are
+    # ``root_<tendency_id>``), but per-node score maps are unbounded
+    # in size, so the chain payload still carries only ``agent_mint``
+    # + ``agent_novelty`` (keyed by user-supplied agent_id) plus
+    # ``epoch_root``. Per-node fields stay in ``result`` for local
+    # diagnostics only.
     result["authoritative_payload"] = {
         "schema": 1,
         "epoch_root": result["epoch_root"],

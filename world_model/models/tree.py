@@ -357,6 +357,13 @@ class Tree:
     root_value: str = ""          # The core concern (e.g., "decentralized coordination")
     description: str = ""
     root_node: Optional[Node] = None
+    # Deterministic id for the auto-created root node. When set, the
+    # root's id is stable across process restarts, which is what lets
+    # a serialized world snapshot round-trip without remapping root
+    # references. When None (default), the root gets a fresh UUID as
+    # before. Non-root nodes are unaffected (the substrate content-
+    # addresses those from coordinates).
+    root_id: Optional[str] = None
 
     # Index for fast lookup
     _node_index: dict[str, Node] = field(default_factory=dict, repr=False)
@@ -364,10 +371,17 @@ class Tree:
     def __post_init__(self):
         if self.root_node is None:
             # Create root node from root_value. No parents = root.
-            self.root_node = Node(
-                tree_id=self.id,
-                content=self.root_value,
-            )
+            if self.root_id:
+                self.root_node = Node(
+                    id=self.root_id,
+                    tree_id=self.id,
+                    content=self.root_value,
+                )
+            else:
+                self.root_node = Node(
+                    tree_id=self.id,
+                    content=self.root_value,
+                )
         self._index_nodes(self.root_node)
 
     def _index_nodes(self, node: Node):

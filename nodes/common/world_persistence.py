@@ -22,9 +22,10 @@ So restore does:
      if missing or stale we still arrive at the right state via replay.
 
 This means the snapshot doesn't need to round-trip the world topology
-losslessly — and it doesn't, because the engine's roots use ephemeral
-UUIDs that ``serialize_world``/``deserialize_world`` cannot fully
-reconstruct. Replay-from-events sidesteps that entirely.
+losslessly. Historically it couldn't anyway (the engine's roots used
+ephemeral UUIDs); node ids are now fully deterministic (content-
+addressed children, ``root_<tendency_id>`` roots), which is what makes
+checkpoint-restore-from-snapshot possible as a fast-boot path.
 
 Format choice
 -------------
