@@ -162,6 +162,155 @@ class SentenceTransformersEmbedder:
 
 
 # ---------------------------------------------------------------------------
+# Subprocess embedder (default): torch never enters the daemon process
+# ---------------------------------------------------------------------------
+
+
+class SubprocessEmbedder:
+    """Embeds via an out-of-process worker (embed_worker.py).
+
+    Rationale: importing sentence_transformers/torch from a daemon
+    worker thread has WEDGED on Windows — the import deadlocks during
+    extension-DLL initialization (loader-lock interaction) and poisons
+    the import machinery for every other thread. A repro matrix
+    (2026-06-11) shows the same import is reliable on the main thread
+    of a fresh process across asyncio/trio/thread contexts, so the
+    structural fix is to keep torch out of the daemon process
+    entirely.
+
+    Behavior: the worker is spawned lazily; ``ready_within`` reports
+    whether the model finished loading. Calls have a per-request
+    timeout; a dead or timed-out worker raises and is restarted at
+    most once per call. Thread-safe via a lock (the substrate feed is
+    single-threaded; the lock is cheap insurance).
+    """
+
+    def __init__(
+        self,
+        dim: int = DEFAULT_DIM,
+        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        backend: str = "st",
+        request_timeout: float = 60.0,
+    ):
+        self.dim = dim
+        self.model_name = model_name
+        self.backend = backend
+        self.request_timeout = request_timeout
+        self._proc = None
+        self._ready = False
+        self._lock = None  # created lazily (threading import kept local)
+
+    def _ensure_proc(self):
+        import subprocess
+        import sys as _sys
+        import threading
+        from pathlib import Path
+        if self._lock is None:
+            self._lock = threading.RLock()
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc
+        worker = Path(__file__).resolve().parent / "embed_worker.py"
+        self._proc = subprocess.Popen(
+            [_sys.executable, "-u", str(worker), str(self.dim),
+             self.model_name, self.backend],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+        )
+        self._ready = False
+        return self._proc
+
+    def ready_within(self, timeout: float) -> bool:
+        """Spawn (if needed) and wait up to ``timeout`` for the READY
+        line. Non-blocking beyond the timeout: the worker keeps
+        loading and a later call can find it ready."""
+        import json as _json
+        import threading
+        proc = self._ensure_proc()
+        if self._ready:
+            return True
+
+        result: list = []
+
+        def _read():
+            line = proc.stdout.readline()
+            result.append(line)
+
+        reader = threading.Thread(target=_read, daemon=True)
+        reader.start()
+        reader.join(timeout=timeout)
+        if not result or not result[0]:
+            return False
+        try:
+            self._ready = bool(_json.loads(result[0]).get("ready"))
+        except Exception:
+            self._ready = False
+        return self._ready
+
+    def __call__(self, text: str) -> Tuple[float, ...]:
+        import json as _json
+        import threading
+        if not text:
+            return tuple([0.0] * self.dim)
+        if self._lock is None:
+            self._lock = threading.RLock()
+        with self._lock:
+            proc = self._ensure_proc()
+            if not self._ready and not self.ready_within(self.request_timeout):
+                raise RuntimeError("embed worker not ready")
+            proc.stdin.write(_json.dumps({"text": text}) + "\n")
+            proc.stdin.flush()
+
+            result: list = []
+
+            def _read():
+                result.append(proc.stdout.readline())
+
+            reader = threading.Thread(target=_read, daemon=True)
+            reader.start()
+            reader.join(timeout=self.request_timeout)
+            if not result or not result[0]:
+                # Wedged or dead worker: kill so the next call respawns.
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                self._proc = None
+                self._ready = False
+                raise RuntimeError("embed worker timed out")
+            resp = _json.loads(result[0])
+            if "error" in resp:
+                raise RuntimeError(f"embed worker error: {resp['error']}")
+            return tuple(float(v) for v in resp["coords"])
+
+    def close(self) -> None:
+        if self._proc is not None:
+            try:
+                self._proc.stdin.close()
+                self._proc.terminate()
+            except Exception:
+                pass
+            self._proc = None
+            self._ready = False
+
+
+_subprocess_embedder: Optional[SubprocessEmbedder] = None
+
+
+def _shared_subprocess_embedder(dim: int) -> SubprocessEmbedder:
+    """One worker per daemon process (model load is ~20s; per-batch
+    spawning would dominate)."""
+    global _subprocess_embedder
+    if _subprocess_embedder is None or _subprocess_embedder.dim != dim:
+        if _subprocess_embedder is not None:
+            _subprocess_embedder.close()
+        _subprocess_embedder = SubprocessEmbedder(dim=dim)
+    return _subprocess_embedder
+
+
+# ---------------------------------------------------------------------------
 # Default factory
 # ---------------------------------------------------------------------------
 
@@ -198,10 +347,18 @@ def _import_st_async() -> "threading.Thread":
 def default_usefulness_embedder(dim: int = DEFAULT_DIM):
     """Return the best available embedder.
 
-    Prefers SentenceTransformersEmbedder; falls back to HashingEmbedder
-    if sentence-transformers isn't importable — or doesn't finish
-    importing within the timeout (it keeps loading in the background,
-    so later calls upgrade to the real embedder automatically).
+    Default: SubprocessEmbedder — semantic embeddings from an
+    out-of-process worker, so torch never enters the daemon process
+    (in-process imports have deadlocked on Windows worker threads).
+    Falls back to HashingEmbedder for the current batch while the
+    worker's model is still loading; later batches upgrade.
+
+    ``ATN_USEFULNESS_EMBEDDER`` overrides:
+      hashing     dependency-free hashing embedder, no subprocess
+      inprocess   legacy in-process sentence-transformers (background
+                  import + timeout fallback) — for platforms where
+                  the in-process import is known safe
+      subprocess  explicit default
 
     Embedder choice is NOT consensus-relevant: coords are computed by
     the authoring daemon and serialized into the event payload, so
@@ -209,20 +366,32 @@ def default_usefulness_embedder(dim: int = DEFAULT_DIM):
     """
     import os
     import sys
-    # Hard opt-out for deployments where the torch import deadlocks
-    # in-process (observed on Windows daemons: the import wedges and
-    # poisons the import lock for every other thread).
-    if os.environ.get("ATN_USEFULNESS_EMBEDDER", "").lower() == "hashing":
+    choice = os.environ.get("ATN_USEFULNESS_EMBEDDER", "subprocess").lower()
+
+    if choice == "hashing":
         return HashingEmbedder(dim=dim)
-    if "sentence_transformers" in sys.modules:
-        return SentenceTransformersEmbedder(dim=dim)
-    thread = _import_st_async()
-    thread.join(timeout=_ST_IMPORT_TIMEOUT_SECONDS)
-    if "sentence_transformers" in sys.modules:
-        return SentenceTransformersEmbedder(dim=dim)
+
+    if choice == "inprocess":
+        if "sentence_transformers" in sys.modules:
+            return SentenceTransformersEmbedder(dim=dim)
+        thread = _import_st_async()
+        thread.join(timeout=_ST_IMPORT_TIMEOUT_SECONDS)
+        if "sentence_transformers" in sys.modules:
+            return SentenceTransformersEmbedder(dim=dim)
+        logger.warning(
+            "sentence_transformers not ready after %.0fs — using hashing "
+            "embedder for this batch (will upgrade when the import lands)",
+            _ST_IMPORT_TIMEOUT_SECONDS,
+        )
+        return HashingEmbedder(dim=dim)
+
+    # Default: out-of-process worker.
+    embedder = _shared_subprocess_embedder(dim)
+    if embedder.ready_within(_ST_IMPORT_TIMEOUT_SECONDS):
+        return embedder
     logger.warning(
-        "sentence_transformers not ready after %.0fs — using hashing "
-        "embedder for this batch (will upgrade when the import lands)",
+        "embed worker not ready after %.0fs — using hashing embedder "
+        "for this batch (worker keeps loading; later batches upgrade)",
         _ST_IMPORT_TIMEOUT_SECONDS,
     )
     return HashingEmbedder(dim=dim)
