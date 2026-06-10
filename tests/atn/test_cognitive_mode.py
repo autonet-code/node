@@ -64,6 +64,20 @@ def _make_runtime(bus: EventBus, tmp_path: Path):
     return rt
 
 
+async def _wait_runs(rt, timeout: float = 5.0):
+    """Wait for every in-flight execution task to finish.
+
+    Mocked providers return instantly, but the completion path
+    (persist, registry sync, parent notify) spans many awaits — a
+    fixed one-tick sleep races it. Must be called INSIDE the
+    provider patch so a still-running agent can never construct a
+    real provider after the mock goes away.
+    """
+    tasks = list(rt.engine._tasks.values())
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
+
+
 class TestGenerateChildId:
     """Tests for Runtime.generate_child_id."""
 
@@ -74,6 +88,20 @@ class TestGenerateChildId:
         assert rt.generate_child_id("orch.1") == "orch.1.1"
         assert rt.generate_child_id("orch") == "orch.3"
         assert rt.generate_child_id("orch.1") == "orch.1.2"
+
+    @pytest.mark.asyncio
+    async def test_counters_rebuild_from_registered_agents(self, bus, tmp_path):
+        """Restart safety: re-registering persisted hierarchical ids
+        must push the counters past them, or the next spawned child
+        collides with (and shadows) an existing agent."""
+        rt = _make_runtime(bus, tmp_path)
+        for aid in ("orch.1", "orch.2", "orch.1.3"):
+            await rt.register_agent(AgentDefinition(
+                id=aid, name=aid, mode=AgentMode.COGNITIVE,
+                provider="sonnet", description="restored",
+            ))
+        assert rt.generate_child_id("orch") == "orch.3"
+        assert rt.generate_child_id("orch.1") == "orch.1.4"
 
     def test_independent_counters(self, bus, tmp_path):
         rt = _make_runtime(bus, tmp_path)
@@ -120,7 +148,7 @@ class TestCognitiveAgentExecution:
             eid = await rt.trigger_run("cog-1", source="test")
             assert eid is not None
             # Wait for execution
-            await asyncio.sleep(0.05)  # mocked provider completes instantly
+            await _wait_runs(rt)
 
         # Check agent reached COMPLETED status
         assert rt.get_status("cog-1") == AgentStatus.COMPLETED
@@ -156,7 +184,7 @@ class TestCognitiveAgentExecution:
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             eid = await rt.trigger_run("cog-fail", source="test")
-            await asyncio.sleep(0.05)  # mocked provider completes instantly
+            await _wait_runs(rt)
 
         assert rt.get_status("cog-fail") == AgentStatus.ERROR
 
@@ -226,11 +254,14 @@ class TestCognitiveAgentExecution:
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             eid = await rt.trigger_run("cog-track", source="test")
             await proceed.wait()
-            await asyncio.sleep(0.05)  # yield for event loop cleanup
+            await _wait_runs(rt)
 
         assert provider_captured["during"] is True
-        # After completion, cleaned up
-        assert "cog-track" not in rt._active_providers
+        # After completion the provider STAYS registered: sessions are
+        # sticky so delegate_message / follow-up injection can reach a
+        # completed-but-resumable agent. Release happens on session
+        # reset (session_manager / orchestrator_setup), not per-run.
+        assert rt._active_providers.get("cog-track") is mock_provider
 
 
 class TestInnateWakeUp:
@@ -275,16 +306,19 @@ class TestInnateWakeUp:
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             eid = await rt.trigger_run("child-1", source="test")
-            await asyncio.sleep(0.05)  # mocked provider completes instantly
+            await _wait_runs(rt)
 
-        # Parent should have a HIGH-priority WORK message in its inbox
+        # Parent should have a HIGH-priority WORK message in its inbox.
+        # The notification is LEAN by design: no result blob — the
+        # parent pulls details via get_children_status / get_output.
         msgs = rt.inbox.peek("parent-1")
         assert len(msgs) >= 1
         child_msg = [m for m in msgs if m.data.get("type") == "child_completed"]
         assert len(child_msg) == 1
         assert child_msg[0].priority == MessagePriority.HIGH
         assert child_msg[0].data["child_id"] == "child-1"
-        assert "Child result here" in child_msg[0].data["result_preview"]
+        assert child_msg[0].data["status"] == "completed"
+        assert "get_children_status" in child_msg[0].data["instruction"]
 
     @pytest.mark.asyncio
     async def test_no_notification_without_parent(self, bus, tmp_path):
@@ -312,7 +346,7 @@ class TestInnateWakeUp:
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             await rt.trigger_run("orphan", source="test")
-            await asyncio.sleep(0.05)  # mocked provider completes instantly
+            await _wait_runs(rt)
 
         # No messages should be posted (no parent to notify)
         # Check all registered agents' inboxes
@@ -362,13 +396,16 @@ class TestInnateWakeUp:
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             await rt.trigger_run("child-2", source="test")
-            await asyncio.sleep(0.05)  # mocked provider completes instantly
+            await _wait_runs(rt)
 
-        # Parent bridge should have had send_user_message called
-        parent_bridge.send_user_message.assert_called_once()
-        call_arg = parent_bridge.send_user_message.call_args[0][0]
-        assert "[CHILD COMPLETED]" in call_arg
-        assert "child-2" in call_arg
+        # Bridge injection was removed: completion notifies via the
+        # inbox ONLY, even when the parent has an active session
+        # (on_agent_completed docstring — "No bridge injection").
+        parent_bridge.send_user_message.assert_not_called()
+        msgs = rt.inbox.peek("parent-2")
+        child_msg = [m for m in msgs if m.data.get("type") == "child_completed"]
+        assert len(child_msg) == 1
+        assert child_msg[0].data["child_id"] == "child-2"
 
 
 class TestDelegateToolsUnified:
@@ -513,7 +550,7 @@ class TestCompletionCallbacks:
             # Completion callbacks may be tracked via delegate registry or done events
             assert agent_id in rt._delegate_done or agent_id in getattr(rt, '_completion_callbacks', {})
 
-            await asyncio.sleep(0.05)  # mocked provider completes instantly
+            await _wait_runs(rt)
 
 
 class TestDelegateRegistryBackwardCompat:
@@ -758,10 +795,12 @@ class TestInnateWakeUpInstruction:
 
         data = child_msgs[0].data
         assert "instruction" in data
-        assert "get_output('child-inst')" in data["instruction"]
+        # Lean-notification contract: the instruction points the parent
+        # at the pull tools; no result/output preview blobs ride along.
+        assert "get_children_status" in data["instruction"]
         assert "Worker Child" in data["instruction"]
-        assert "output_preview" in data
-        assert data["output_preview"] == data["result_preview"][:2000]
+        assert data["child_id"] == "child-inst"
+        assert "result_preview" not in data
 
     @pytest.mark.asyncio
     async def test_failed_child_instruction(self, bus, tmp_path):

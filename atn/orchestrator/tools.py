@@ -1009,7 +1009,11 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     # the common case ("most agents are cognitive — just id, name, prompt").
     # The server previously defaulted to pipeline, contradicting the schema, so
     # an agent that omitted mode hit "must have at least one step".
-    mode_str = input.get("mode", "cognitive")
+    # EXCEPTION: explicit steps with no mode unambiguously describe a
+    # pipeline — defaulting those to cognitive would silently DISCARD
+    # the steps (callers predating the cognitive default do exactly this).
+    default_mode = "pipeline" if input.get("steps") else "cognitive"
+    mode_str = input.get("mode", default_mode)
     caller_id = input.pop("_caller_id", None)
 
     if mode_str == "cognitive":

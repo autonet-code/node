@@ -75,19 +75,11 @@ class TestDelegateNode:
 class TestDelegateRegistryRegistration:
     """Tests for register, unregister, and ID generation."""
 
-    def test_generate_child_id_sequential(self):
-        reg = DelegateRegistry()
-        assert reg.generate_child_id("orch") == "orch.1"
-        assert reg.generate_child_id("orch") == "orch.2"
-        assert reg.generate_child_id("orch") == "orch.3"
-
-    def test_generate_child_id_nested(self):
-        reg = DelegateRegistry()
-        assert reg.generate_child_id("orch") == "orch.1"
-        assert reg.generate_child_id("orch.1") == "orch.1.1"
-        assert reg.generate_child_id("orch.1") == "orch.1.2"
-        # Parent counter is independent
-        assert reg.generate_child_id("orch") == "orch.2"
+    # NOTE: child-id generation moved off DelegateRegistry to the
+    # runtime AgentRegistry (rt.generate_child_id). Sequential/nested
+    # coverage lives in test_cognitive_mode.TestGenerateChildId, and
+    # restart-rebuild coverage in
+    # TestGenerateChildId.test_counters_rebuild_from_registered_agents.
 
     def test_register_creates_node(self):
         reg = DelegateRegistry()
@@ -245,12 +237,9 @@ class TestDelegateRegistryCleanup:
         reg = DelegateRegistry()
         reg.register("a.1", "a", "implement", "Task", "T")
         reg.register("a.2", "a", "explore", "Task 2", "T2")
-        reg.generate_child_id("a")  # increment counter
         reg.clear()
         assert reg.get_node("a.1") is None
         assert reg.get_node("a.2") is None
-        # Counter is also reset
-        assert reg.generate_child_id("a") == "a.1"
 
 
 class TestDelegateRegistryPersistence:
@@ -275,17 +264,10 @@ class TestDelegateRegistryPersistence:
         assert reg2.get_node("a.1").status == DelegateStatus.COMPLETED
         assert reg2.get_node("a.2") is not None
 
-    def test_load_rebuilds_child_counters(self, tmp_path: Path):
-        store = tmp_path / "delegates.json"
-        reg = DelegateRegistry(store_path=store)
-        reg.register("a.1", "a", "implement", "T1", "T1")
-        reg.register("a.2", "a", "explore", "T2", "T2")
-        reg.register("a.3", "a", "debug", "T3", "T3")
-        reg.save()
-
-        reg2 = DelegateRegistry(store_path=store)
-        reg2.load()
-        assert reg2.generate_child_id("a") == "a.4"
+    # NOTE: counter-rebuild-on-load moved with child-id generation to
+    # the runtime AgentRegistry (register_agent bumps counters past
+    # hierarchical ids); see test_counters_rebuild_from_registered_agents
+    # in test_cognitive_mode.py.
 
     def test_save_without_store_path_is_noop(self):
         reg = DelegateRegistry(store_path=None)

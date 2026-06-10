@@ -307,8 +307,10 @@ async def test_delegate_tool_executor(tmp_path: Path):
     event_types = [e.type for e in events_captured]
     assert EventType.DELEGATE_SPAWNED in event_types
 
-    # Verify bridge was closed
-    mock_provider.close.assert_called_once()
+    # Bridge is NOT closed at run end anymore: sessions are sticky so
+    # delegate_message / follow-ups can reach the agent; release
+    # happens on session reset, not per-run.
+    mock_provider.close.assert_not_called()
 
     # Verify send_orchestrate was called with correct args
     call_args = mock_provider.send_orchestrate.call_args

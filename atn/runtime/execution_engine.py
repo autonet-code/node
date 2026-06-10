@@ -403,7 +403,7 @@ class ExecutionEngine:
             self.register_interrupt_hook(record.execution_id, sub_provider.interrupt)
 
             # Pre-execution budget check
-            provider_name = getattr(sub_provider, 'name', 'claude_max')
+            provider_name = _provider_name(sub_provider)
             ok, blocker = self.registry.check_budget(defn.id, provider_name)
             if not ok:
                 record.status = ExecutionStatus.FAILED
@@ -621,11 +621,7 @@ class ExecutionEngine:
             # Wired into send_orchestrate so each turn's tokens roll into the
             # cascading budget immediately. Returns (ok, blocker_id); on
             # ok=False the provider aborts the loop with stop_reason=budget_exceeded.
-            _budget_provider_key = getattr(sub_provider, "name", "claude_max")
-            if not isinstance(_budget_provider_key, str):
-                # Mocked/odd providers: a non-string key would poison every
-                # JSON roll-up downstream (budget state, execution store).
-                _budget_provider_key = "claude_max"
+            _budget_provider_key = _provider_name(sub_provider)
             # Track tokens recorded mid-loop so the post-loop reconciliation
             # only adds the *unrecorded* remainder. The base provider calls
             # this every turn; the bridge provider's stream events also call it
@@ -741,7 +737,7 @@ class ExecutionEngine:
                     },
                 ))
 
-            provider_key = getattr(sub_provider, 'name', 'claude_max')
+            provider_key = _provider_name(sub_provider)
             if provider_key not in record.token_usage:
                 record.token_usage[provider_key] = TokenUsage(provider=provider_key)
             record.token_usage[provider_key].input_tokens += response.usage.input_tokens
@@ -762,9 +758,13 @@ class ExecutionEngine:
             all_turns = agent_convo.get_turns()
             sub_provider._cumulative_turns = len(all_turns)
 
-            # Persist session stats to disk so they survive restarts
-            if hasattr(sub_provider, 'session_stats'):
-                agent_convo.save_session_stats(sub_provider.session_stats)
+            # Persist session stats to disk so they survive restarts.
+            # The isinstance gate matters: on mocked providers the
+            # attribute is itself a mock, and persisting it poisons the
+            # stats JSON (same class of bug as non-string provider keys).
+            _stats = getattr(sub_provider, 'session_stats', None)
+            if isinstance(_stats, dict):
+                agent_convo.save_session_stats(_stats)
 
             # Reconciliation: subscription providers (bridge) compare predicted
             # vs actual subscription burn after each orchestration to keep the
@@ -1067,6 +1067,14 @@ def _preview(obj: Any, max_len: int = 120) -> str:
         return ""
     s = str(obj)
     return s[:max_len] + "..." if len(s) > max_len else s
+
+
+def _provider_name(provider: Any) -> str:
+    """Provider's budget/usage key. ALWAYS a string: a non-string key
+    (e.g. an AsyncMock attribute in tests) poisons every JSON roll-up
+    downstream — budget state, execution store, usage snapshots."""
+    name = getattr(provider, "name", "claude_max")
+    return name if isinstance(name, str) else "claude_max"
 
 
 def _accumulate_usage(record: ExecutionRecord, provider: str, output: dict) -> None:

@@ -361,7 +361,9 @@ async def test():
         "propose_task", "list_tasks", "get_user_profile",
         # Delegation
         "delegate_status", "delegate_message", "delegate_collect",
-        "get_latest_thought",
+        "get_latest_thought", "get_children_status",
+        # Budgets & chain
+        "get_my_budget_status", "register_on_chain",
     }
     assert tool_names == expected, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
     # Each tool has a name, description, and input_schema

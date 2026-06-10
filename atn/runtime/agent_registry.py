@@ -543,6 +543,7 @@ class AgentRegistry:
         self._agents[defn.id] = defn
         self._status[defn.id] = AgentStatus.REGISTERED
         self._running_count[defn.id] = 0
+        self._note_child_id(defn.id)
         # Heartbeat and legacy schedule are mutually exclusive.
         if defn.heartbeat:
             self._heartbeat_table[defn.id] = parse_interval(defn.heartbeat.interval)
@@ -774,6 +775,23 @@ class AgentRegistry:
         count = self._child_counters.get(parent_id, 0) + 1
         self._child_counters[parent_id] = count
         return f"{parent_id}.{count}"
+
+    def _note_child_id(self, agent_id: str) -> None:
+        """Bump the parent's child counter past a hierarchical id.
+
+        Counters are in-memory only; without this, a daemon restart
+        that re-registers persisted agents (orch.1, orch.2, …) would
+        reset generation to orch.1 and the next spawned child would
+        COLLIDE with (and silently shadow) an existing agent. The old
+        DelegateRegistry rebuilt counters in load(); this is that
+        behavior at the new owner.
+        """
+        parent, sep, tail = agent_id.rpartition(".")
+        if not sep or not tail.isdigit():
+            return
+        n = int(tail)
+        if n > self._child_counters.get(parent, 0):
+            self._child_counters[parent] = n
 
     # ------------------------------------------------------------------
     # Budget tracking

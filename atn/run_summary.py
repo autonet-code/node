@@ -279,15 +279,17 @@ def _git_commits(records: list[_ToolCallRecord]) -> list[str]:
 
 def _extract_commit_message(cmd: str) -> str:
     """Extract commit message from a git commit command."""
+    # HEREDOC style FIRST: git commit -m "$(cat <<'EOF'\nmessage\nEOF\n)".
+    # The plain -m regex would otherwise match the heredoc's opening
+    # `$(cat <<` as the message.
+    m = re.search(r"cat\s+<<['\"]?EOF['\"]?\n(.*?)EOF", cmd, re.DOTALL)
+    if m:
+        msg = m.group(1).strip().split("\n")[0]
+        return msg[:80] if len(msg) > 80 else msg
     # git commit -m "message"
     m = re.search(r'git\s+commit\s+.*-m\s+["\']([^"\']+)["\']', cmd)
     if m:
         msg = m.group(1)
-        return msg[:80] if len(msg) > 80 else msg
-    # HEREDOC style: git commit -m "$(cat <<'EOF'\nmessage\nEOF\n)"
-    m = re.search(r"cat\s+<<['\"]?EOF['\"]?\n(.*?)EOF", cmd, re.DOTALL)
-    if m:
-        msg = m.group(1).strip().split("\n")[0]
         return msg[:80] if len(msg) > 80 else msg
     return ""
 
