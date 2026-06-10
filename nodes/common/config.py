@@ -355,9 +355,50 @@ def load_config(path: Optional[str] = None) -> AutonetConfig:
     # Convert to typed config
     cfg = _dict_to_config(raw)
 
+    # Seed the substrate address from registry.json when yaml/env left
+    # it empty. registry.json is the single source of truth the atn
+    # config loader and publish_network_config.py already share, so a
+    # contract redeploy only has to touch one file for the chain
+    # candle seed and chain submission to follow.
+    if not cfg.blockchain.substrate_address:
+        seeded = _registry_substrate_address(path)
+        if seeded:
+            cfg.blockchain.substrate_address = seeded
+            logger.info(
+                "blockchain.substrate_address seeded from registry.json: %s…",
+                seeded[:10],
+            )
+
     logger.info(
         f"Config: device={cfg.device}, arch={cfg.model.architecture}, "
         f"task_type={cfg.training.task_type}, rpc={cfg.blockchain.rpc_url}"
     )
 
     return cfg
+
+
+def _registry_substrate_address(config_path: Optional[str]) -> str:
+    """Resolve the deployed Substrate.sol address from registry.json.
+
+    Looks next to the loaded config file first, then the repo root
+    (two levels up from this module), then the CWD.
+    """
+    import json as _json
+
+    candidates = []
+    if config_path:
+        candidates.append(Path(config_path).resolve().parent / "registry.json")
+    candidates.append(Path(__file__).resolve().parents[2] / "registry.json")
+    candidates.append(Path("registry.json"))
+    for candidate in candidates:
+        try:
+            if not candidate.exists():
+                continue
+            data = _json.loads(candidate.read_text(encoding="utf-8"))
+            for entry in data.get("jurisdictions", {}).values():
+                addr = entry.get("contracts", {}).get("substrate", "")
+                if addr:
+                    return str(addr)
+        except Exception as e:
+            logger.warning("registry.json read failed at %s: %s", candidate, e)
+    return ""
