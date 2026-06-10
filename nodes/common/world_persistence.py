@@ -4,6 +4,7 @@ Layout (one tree per RPB address):
 
   <data_root>/<rpb>/events.jsonl        append-only event log (source of truth)
   <data_root>/<rpb>/scores.json         equilibrated score snapshot (cache only)
+  <data_root>/<rpb>/checkpoint.json     full world state at an event offset
 
 Recovery rules
 --------------
@@ -13,19 +14,27 @@ The **event log is the source of truth**. Per the substrate's design
 of the events that have landed; the world topology can be reconstructed
 deterministically by replaying events on a fresh charter.
 
-So restore does:
+Full replay is O(events) and gets slow fast (the equilibrate cost per
+event grows with world size — a ~2000-event log took >1h to boot), so
+restore works like a chain indexer:
 
-  1. Build a fresh charter world.
-  2. If events.jsonl exists, replay every event on top.
-  3. Re-equilibrate.
-  4. The score cache (``scores.json``) is read for sanity-checking only;
-     if missing or stale we still arrive at the right state via replay.
+  1. If ``checkpoint.json`` exists and is consistent with the event
+     log (same rpb, log holds at least the checkpointed event count),
+     restore the world exactly from the checkpoint and replay only the
+     tail events past its offset, honoring ``__equilibrate__`` markers.
+  2. On ANY checkpoint problem (missing, corrupt, foreign, claims more
+     events than the log has), fall back to full replay on a fresh
+     charter — the pre-checkpoint behavior, always correct.
+  3. The score cache (``scores.json``) remains a display/sanity cache.
 
-This means the snapshot doesn't need to round-trip the world topology
-losslessly. Historically it couldn't anyway (the engine's roots used
-ephemeral UUIDs); node ids are now fully deterministic (content-
-addressed children, ``root_<tendency_id>`` roots), which is what makes
-checkpoint-restore-from-snapshot possible as a fast-boot path.
+The checkpoint fast path is exact, not approximate: node ids are fully
+deterministic (content-addressed children, ``root_<tendency_id>``
+roots, ``tree_<tendency_id>`` trees) and
+``world_model.generalized.serialize`` round-trips every piece of
+evolution-relevant state, including score caches (net_score reads in
+cyclic co-parented graphs are evaluation-order dependent). The
+``tests/test_world_snapshot_roundtrip.py`` harness pins the
+checkpoint-equals-full-replay contract on the production rail.
 
 Format choice
 -------------
@@ -47,7 +56,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from world_model.generalized import World, equilibrate
+from world_model.generalized import (
+    World,
+    equilibrate,
+    restore_world,
+    snapshot_world,
+)
 
 from .world_model_substrate.adapter import build_charter_world
 from .world_model_substrate.aggregate import apply_events
@@ -80,7 +94,9 @@ class PersistenceConfig:
 @dataclass
 class RestoredWorld:
     world: World
-    events_replayed: int
+    events_replayed: int            # total events represented in the world
+    from_checkpoint: bool = False
+    tail_events: int = 0            # events replayed past the checkpoint
 
 
 class WorldPersistence:
@@ -93,6 +109,7 @@ class WorldPersistence:
         self._dir.mkdir(parents=True, exist_ok=True)
         self.events_path = self._dir / "events.jsonl"
         self.scores_path = self._dir / "scores.json"
+        self.checkpoint_path = self._dir / "checkpoint.json"
         self.epochs_dir = self._dir / "epochs"
         self.epochs_dir.mkdir(exist_ok=True)
         self._events_handle = None
@@ -103,8 +120,9 @@ class WorldPersistence:
     # ------------------------------------------------------------------
 
     def write_snapshot(self, world: World, *, events_applied: int) -> Path:
-        """Write the equilibrated score cache. The event log stays as-is —
-        it's the source of truth, not invalidated by snapshots.
+        """Write the equilibrated score cache AND the full world
+        checkpoint. The event log stays as-is — it's the source of
+        truth, not invalidated by snapshots.
         """
         payload = {
             "schema": 2,
@@ -114,25 +132,42 @@ class WorldPersistence:
             "node_scores": snapshot_node_scores(world),
         }
         with self._lock:
-            fd, tmp_path = tempfile.mkstemp(
-                prefix="scores.", suffix=".json.tmp", dir=str(self._dir)
-            )
+            self._write_json_atomic(payload, self.scores_path, prefix="scores.")
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump(payload, fh)
-                os.replace(tmp_path, self.scores_path)
-            except Exception:
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-                raise
+                self.write_checkpoint(world, events_applied=events_applied)
+            except Exception as e:
+                # A failed checkpoint must never take down the caller:
+                # boot falls back to full replay without it.
+                logger.error("checkpoint write failed: %s", e)
 
         logger.info(
             "score snapshot written: %s (events_applied=%d)",
             self.scores_path, events_applied,
         )
         return self.scores_path
+
+    def write_checkpoint(self, world: World, *, events_applied: int) -> Path:
+        """Write the full world state at an event offset (atomic).
+
+        ``try_restore`` uses this as the indexer-style fast path:
+        restore the checkpointed world exactly, then replay only the
+        events past ``events_applied``.
+        """
+        payload = {
+            "schema": 1,
+            "rpb_address": self.config.rpb_address,
+            "events_applied": int(events_applied),
+            "world": snapshot_world(world),
+        }
+        with self._lock:
+            self._write_json_atomic(
+                payload, self.checkpoint_path, prefix="checkpoint.",
+            )
+        logger.info(
+            "world checkpoint written: %s (events_applied=%d)",
+            self.checkpoint_path, events_applied,
+        )
+        return self.checkpoint_path
 
     def append_events(
         self,
@@ -168,9 +203,12 @@ class WorldPersistence:
                 pass
 
     def try_restore(self) -> Optional[RestoredWorld]:
-        """Restore by replaying the event log onto a fresh charter.
+        """Restore the world from disk.
 
-        Honors ``__equilibrate__`` markers between event batches so
+        Fast path: load ``checkpoint.json`` and replay only the events
+        past its offset. Falls back to full event-log replay onto a
+        fresh charter on any checkpoint inconsistency. Both paths honor
+        ``__equilibrate__`` markers between event batches so
         equilibration history (and therefore per-node score) reproduces
         bit-for-bit.
 
@@ -178,6 +216,17 @@ class WorldPersistence:
         """
         with self._lock:
             log = self._read_events_log()
+
+            checkpoint = self._read_checkpoint()
+            if checkpoint is not None:
+                try:
+                    return self._restore_from_checkpoint(checkpoint, log)
+                except Exception as e:
+                    logger.warning(
+                        "checkpoint restore failed (%s); falling back to "
+                        "full event replay", e,
+                    )
+
             if not log:
                 return None
 
@@ -212,10 +261,86 @@ class WorldPersistence:
                 _flush()
 
             logger.info(
-                "restored world from %d events for rpb=%s",
+                "restored world from %d events for rpb=%s (full replay)",
                 event_count, self.config.rpb_address,
             )
             return RestoredWorld(world=world, events_replayed=event_count)
+
+    def _restore_from_checkpoint(
+        self,
+        checkpoint: Dict[str, Any],
+        log: List[Dict[str, Any]],
+    ) -> RestoredWorld:
+        """Exact restore from a checkpoint + tail replay.
+
+        Raises on any inconsistency; the caller falls back to full
+        replay. The event log stays authoritative: a checkpoint that
+        claims more events than the log holds is treated as foreign.
+        """
+        offset = int(checkpoint["events_applied"])
+        total_events = sum(
+            1 for e in log if e.get("kind") != "__equilibrate__"
+        )
+        if total_events < offset:
+            raise ValueError(
+                f"event log has {total_events} events but checkpoint "
+                f"claims {offset}"
+            )
+
+        world = restore_world(checkpoint["world"])
+
+        # Tail replay past the checkpoint offset. Markers before the
+        # boundary are no-ops (their batches are inside the checkpoint);
+        # markers after it flush batches exactly like a full replay.
+        batch: List[Dict[str, Any]] = []
+        seen = 0
+        for entry in log:
+            if entry.get("kind") == "__equilibrate__":
+                if batch:
+                    apply_events(world, batch)
+                    batch = []
+                continue
+            seen += 1
+            if seen <= offset:
+                continue
+            batch.append(entry)
+        if batch:
+            apply_events(world, batch)
+
+        tail = total_events - offset
+        logger.info(
+            "restored world from checkpoint at offset %d + %d tail "
+            "events for rpb=%s", offset, tail, self.config.rpb_address,
+        )
+        return RestoredWorld(
+            world=world,
+            events_replayed=total_events,
+            from_checkpoint=True,
+            tail_events=tail,
+        )
+
+    def _read_checkpoint(self) -> Optional[Dict[str, Any]]:
+        """Load checkpoint.json if present, valid, and ours."""
+        if not self.checkpoint_path.exists():
+            return None
+        try:
+            with open(self.checkpoint_path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("unreadable checkpoint %s: %s",
+                           self.checkpoint_path, e)
+            return None
+        if payload.get("schema") != 1:
+            logger.warning("unsupported checkpoint schema: %r",
+                           payload.get("schema"))
+            return None
+        if payload.get("rpb_address") != self.config.rpb_address:
+            logger.warning(
+                "checkpoint rpb mismatch: %r != %r",
+                payload.get("rpb_address"), self.config.rpb_address,
+            )
+            return None
+        return payload
 
     # ------------------------------------------------------------------
     # Epoch records (Phase 4: projection-level surface)
@@ -279,6 +404,23 @@ class WorldPersistence:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _write_json_atomic(
+        self, payload: Dict[str, Any], path: Path, *, prefix: str,
+    ) -> None:
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=prefix, suffix=".json.tmp", dir=str(self._dir)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def _read_events_log(self) -> List[Dict[str, Any]]:
         if not self.events_path.exists():
