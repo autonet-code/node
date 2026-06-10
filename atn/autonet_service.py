@@ -997,6 +997,38 @@ class AutonetBridge:
 
         self._service.add_epoch_close_subscriber(_on_close)
 
+        def _on_federated_close(fed) -> None:
+            # FederatedCloseResult → the winner-reveal payload the
+            # epochs UI animates (EPOCH_OBSERVABILITY_SPEC.md §4b).
+            try:
+                payload_auth = (
+                    fed.close_result.get("authoritative_payload") or {}
+                )
+                payload = {
+                    "epoch_id": fed.epoch_id,
+                    "n_batches": fed.n_batches,
+                    "senders": [s.hex() for s in fed.senders],
+                    "winner": fed.winner.hex() if fed.winner else "",
+                    "is_us": bool(fed.is_winner),
+                    "epoch_root": str(fed.close_result.get("epoch_root", "")),
+                    "world_cid": getattr(fed, "world_cid", ""),
+                    "total_mint": fed.close_result.get("total_mint", 0.0),
+                    "agent_mint": fed.close_result.get("agent_mint", {}),
+                    "gate_applied": bool(payload_auth.get("gate_applied", False)),
+                }
+            except Exception:
+                log.exception("federated close payload build failed")
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._emit("WORLD_FEDERATED_CLOSE", payload),
+                    loop,
+                )
+            except Exception:
+                pass
+
+        self._service.add_federated_close_subscriber(_on_federated_close)
+
     async def _run_service(self) -> None:
         """Run the autonet service in a background thread."""
         try:

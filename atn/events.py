@@ -78,6 +78,7 @@ class EventType(Enum):
 
     # World-model substrate
     WORLD_EPOCH_CLOSED = "world.epoch_closed"
+    WORLD_FEDERATED_CLOSE = "world.federated_close"
 
     # Budget
     BUDGET_EXCEEDED = "budget.exceeded"

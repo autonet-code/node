@@ -222,6 +222,25 @@ class WorldService:
                 rpb_address,
             )
 
+        # Rehydrate closed-epoch history from the per-epoch records on
+        # disk so observability (epoch_history surface) survives daemon
+        # restarts — with multi-day candle epochs, since-boot-only
+        # history would usually be empty.
+        try:
+            loaded = []
+            for path in self._persistence.list_epoch_records():
+                rec = self._persistence.read_epoch_record(path.stem)
+                if rec is not None:
+                    loaded.append(rec)
+            loaded.sort(key=lambda r: r.get("closed_at", 0.0))
+            self._epoch_history = loaded
+            if loaded:
+                logger.info(
+                    "rehydrated %d closed-epoch records from disk", len(loaded),
+                )
+        except Exception as e:
+            logger.warning("epoch-history rehydration failed: %s", e)
+
     # ------------------------------------------------------------------
     # Epoch boundaries (Phase 3)
     # ------------------------------------------------------------------
@@ -323,6 +342,19 @@ class WorldService:
     def current_epoch_id(self) -> Optional[str]:
         """The id of the open epoch, or None if none is open."""
         return self._current_epoch_id
+
+    def epoch_status(self) -> Dict[str, Any]:
+        """World-side half of the epoch_status surface (the scheduler
+        owns timing config; see EpochScheduler.status)."""
+        with self._lock:
+            return {
+                "epoch_id": self._current_epoch_id,
+                "opened_at": self._epoch_started_at or None,
+                "buffered_events": len(self._epoch_events),
+                "emission_rate": self.epoch_emission_rate,
+                "emission_clock": self._emission_clock or None,
+                "rpb_address": self.rpb_address,
+            }
 
     @property
     def epoch_history(self) -> List[Dict[str, Any]]:

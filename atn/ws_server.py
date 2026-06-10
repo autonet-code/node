@@ -1157,6 +1157,51 @@ class WebSocketBridge:
             except Exception as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
+        # Epoch mechanics observability (EPOCH_OBSERVABILITY_SPEC.md in
+        # atn_web): live status of the open epoch. Combines the
+        # WorldService half (epoch id, buffered events, emission) with
+        # the EpochScheduler half (mode, candle window, T_max, seed
+        # source).
+        if msg_type == "epoch_status":
+            autonet = getattr(self.runtime, "autonet", None)
+            service = getattr(autonet, "_service", None) if autonet else None
+            world_service = getattr(service, "_world_service", None) if service else None
+            scheduler = getattr(service, "_epoch_scheduler", None) if service else None
+            if world_service is None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "autonet world service not running"}
+            try:
+                epoch = world_service.epoch_status()
+                if scheduler is not None:
+                    sched = scheduler.status()
+                    # World's opened_at wins when both exist (same value
+                    # in practice; the world is the source of truth).
+                    sched.pop("opened_at", None)
+                    epoch.update(sched)
+                return {"msg_id": msg_id, "ok": True, "epoch": epoch}
+            except Exception as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
+        # Closed-epoch records, newest last. Full close-record shape
+        # (cutoff_ts, events_rolled_forward, emission_pool, per-agent
+        # and per-node mint) — the slim WORLD_EPOCH_CLOSED push event
+        # is the refresh trigger; this is the detail read.
+        if msg_type == "epoch_history":
+            autonet = getattr(self.runtime, "autonet", None)
+            service = getattr(autonet, "_service", None) if autonet else None
+            world_service = getattr(service, "_world_service", None) if service else None
+            if world_service is None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "autonet world service not running"}
+            try:
+                last_n = max(1, min(int(msg.get("last_n", 20)), 200))
+                history = world_service.epoch_history
+                return {"msg_id": msg_id, "ok": True,
+                        "epochs": history[-last_n:],
+                        "total_closed": len(history)}
+            except Exception as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
         if msg_type == "rpb_substrate_nodes":
             try:
                 max_nodes = int(msg.get("max_nodes", 200))

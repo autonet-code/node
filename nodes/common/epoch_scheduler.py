@@ -183,6 +183,34 @@ class EpochScheduler:
     def closed_count(self) -> int:
         return self._n_closed
 
+    def status(self) -> Dict[str, Any]:
+        """Scheduler-side half of the epoch_status surface (the
+        WorldService owns the other half). All times are unix seconds.
+
+        ``t_max`` is when the close fires: in candle mode that's the
+        moment the cutoff is DRAWN (the effective end lands earlier,
+        somewhere inside the window — by design unknowable until then).
+        """
+        cfg = self.config
+        mode = "candle" if cfg.candle_min_seconds > 0 else "interval"
+        opened = self._last_open_at or None
+        t_max = None
+        if opened:
+            if mode == "candle":
+                t_max = opened + cfg.candle_min_seconds + cfg.candle_window_seconds
+            else:
+                t_max = opened + cfg.interval_seconds
+        return {
+            "mode": mode,
+            "opened_at": opened,
+            "t_max": t_max,
+            "candle_min_seconds": cfg.candle_min_seconds if mode == "candle" else None,
+            "candle_window_seconds": cfg.candle_window_seconds if mode == "candle" else None,
+            "interval_seconds": cfg.interval_seconds if mode == "interval" else None,
+            "seed_source": "chain" if self._candle_seed_source is not None else "local",
+            "closed_count": self._n_closed,
+        }
+
     # ------------------------------------------------------------------
     # Background thread mode
     # ------------------------------------------------------------------
