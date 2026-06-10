@@ -82,8 +82,16 @@ Implementation state (2026-06-11):
   buffer, and runs the emission clock to the cutoff so the window
   remainder accrues forward. Local seed: hash of (prev epoch id,
   prev close ts, current epoch id) — fine single-daemon.
-- PENDING for federation/mainnet: seed from canonical chain data
-  (prevAnchorHash + post-window block hash, later VRF), and exact
+- Chain-derived seed DONE: `nodes/common/candle_seed.py`
+  (`ChainCandleSeed`): `sha256(latestAnchorHash@B ‖ hash(B))` where
+  `B` = first block with `timestamp ≥ T_max`. Anchor hash is read AS
+  OF that block so late-sampling daemons agree even if a new anchor
+  lands meanwhile. Wired into `EpochScheduler` via
+  `candle_seed_source` (nodes/service.py builds it from blockchain
+  config); falls back to the local seed when chain is unreachable.
+- PENDING for federation/mainnet: VRF (or commit-reveal w/ slash)
+  instead of blockhash; chain-time epoch opens so daemons agree on
+  `T_max` exactly (today it's synced wall clocks); and the exact
   cutoff in the federated close (truncate the canonical batch
   sequence at T_cut before replay — post-cut batches join the next
   epoch's canonical set).

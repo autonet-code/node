@@ -70,12 +70,18 @@ class EpochScheduler:
         world_service: Any,
         config: Optional[EpochSchedulerConfig] = None,
         on_close: Optional[EpochResultHandler] = None,
+        candle_seed_source: Optional[Callable[[float], Optional[bytes]]] = None,
     ):
         if world_service is None:
             raise ValueError("EpochScheduler requires a world_service")
         self.world_service = world_service
         self.config = config or EpochSchedulerConfig()
         self._on_close = on_close
+        # Optional shared-randomness source for the candle cut (see
+        # candle_seed.ChainCandleSeed). Called with the window's end
+        # timestamp; returns 32 bytes every daemon agrees on, or None
+        # to fall back to the local hash seed (single-daemon dev).
+        self._candle_seed_source = candle_seed_source
         self._last_open_at: float = 0.0
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -120,27 +126,48 @@ class EpochScheduler:
     def _draw_candle_cut(self) -> float:
         """Retroactively draw the effective cutoff inside the window.
 
-        Seed: hash of (previous epoch's identity, this epoch's id) —
-        agreed by construction on a single daemon, and unknowable
-        before the window because the draw only happens at T_max.
-        UPGRADE PATH (multi-daemon / mainnet): derive the seed from
-        canonical chain data (prevAnchorHash + a block hash after the
-        window) or a VRF — see docs/epoch_economics.md. The cut
-        function is source-agnostic: it just consumes 32 bytes.
+        Seed preference order:
+
+          1. ``candle_seed_source`` (chain-derived; see
+             candle_seed.ChainCandleSeed): latestAnchorHash + the hash
+             of the first block past the window's end. Shared across
+             daemons AND unknowable while the epoch was open.
+          2. Local fallback: hash of (previous epoch's identity, this
+             epoch's id) — agreed by construction on a single daemon,
+             unknowable before the window because the draw only
+             happens at T_max. Fine for dev; NOT federation-safe.
+
+        The cut function is source-agnostic: it just consumes 32 bytes.
+        VRF remains the pre-mainnet upgrade path if block-producer
+        grinding becomes a concern.
         """
         import hashlib
-        prev_id, prev_closed = "", 0.0
-        try:
-            history = self.world_service.epoch_history
-            if history:
-                prev_id = str(history[-1].get("epoch_id", ""))
-                prev_closed = float(history[-1].get("closed_at", 0.0))
-        except Exception:
-            pass
         current_id = str(getattr(self.world_service, "current_epoch_id", "") or "")
-        seed = hashlib.sha256(
-            f"{prev_id}|{prev_closed}|{current_id}".encode("utf-8")
-        ).digest()
+
+        seed: Optional[bytes] = None
+        if self._candle_seed_source is not None:
+            window_end = self._last_open_at + (
+                self.config.candle_min_seconds + self.config.candle_window_seconds
+            )
+            try:
+                seed = self._candle_seed_source(window_end)
+            except Exception as e:
+                logger.warning("candle seed source failed: %s", e)
+            if seed is not None:
+                logger.info("candle cut seeded from chain for epoch=%s", current_id)
+
+        if seed is None:
+            prev_id, prev_closed = "", 0.0
+            try:
+                history = self.world_service.epoch_history
+                if history:
+                    prev_id = str(history[-1].get("epoch_id", ""))
+                    prev_closed = float(history[-1].get("closed_at", 0.0))
+            except Exception:
+                pass
+            seed = hashlib.sha256(
+                f"{prev_id}|{prev_closed}|{current_id}".encode("utf-8")
+            ).digest()
         frac = int.from_bytes(seed[:8], "big") / float(2 ** 64)
         offset = self.config.candle_min_seconds + frac * self.config.candle_window_seconds
         t_cut = self._last_open_at + offset

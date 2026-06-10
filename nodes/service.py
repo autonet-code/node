@@ -681,6 +681,25 @@ class AutonetService:
             candle_window = float(
                 getattr(self.config, "epoch_candle_window_seconds", 0.0) or 0.0
             )
+            # Chain-derived candle seed (federation-safe cutoff). Falls
+            # back to the scheduler's local seed when chain config is
+            # absent or the RPC is unreachable.
+            seed_source = None
+            if candle_min > 0:
+                try:
+                    from .common.candle_seed import build_chain_candle_seed
+                    bc = self.config.blockchain
+                    chain_seed = build_chain_candle_seed(
+                        substrate_address=getattr(bc, "substrate_address", "") or "",
+                        rpc_url=bc.rpc_url,
+                        chain_id=bc.chain_id,
+                    )
+                    if chain_seed is not None:
+                        seed_source = chain_seed.seed_for
+                        logger.info("Candle cut will use chain-derived seed")
+                except Exception as e:
+                    logger.warning("chain candle seed unavailable: %s", e)
+
             self._epoch_scheduler = EpochScheduler(
                 world_service=self._world_service,
                 config=EpochSchedulerConfig(
@@ -689,6 +708,7 @@ class AutonetService:
                     candle_window_seconds=candle_window,
                 ),
                 on_close=_on_close,
+                candle_seed_source=seed_source,
             )
             if candle_min > 0:
                 logger.info(
