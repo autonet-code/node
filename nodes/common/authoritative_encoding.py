@@ -9,7 +9,7 @@ Spec
 
 The authoritative payload is a dict with these fields, in this order:
 
-  1. schema:           int (currently 1)
+  1. schema:           int (currently 2)
   2. epoch_id:         str
   3. epoch_root:       64-char lowercase hex string (sha256 digest)
   4. prev_epoch_root:  64-char lowercase hex string (sha256 digest)
@@ -21,6 +21,10 @@ The authoritative payload is a dict with these fields, in this order:
   10. gate_applied:    bool
   11. n_batches:       int
   12. n_events:        int
+  13. world_cid:       str — sha256 cid of the canonical-world checkpoint
+                       blob for this epoch (state sync), or "" when no
+                       canonical tracker is wired. Added in schema 2;
+                       schema-1 anchors on chain predate it.
 
 Float formatting
 ----------------
@@ -65,7 +69,7 @@ import math
 from typing import Any, Dict, List, Tuple
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_DECIMALS = 10
 
 # The fixed top-level field order. Encoding will lay these out in
@@ -83,6 +87,7 @@ _FIELD_ORDER = [
     "gate_applied",
     "n_batches",
     "n_events",
+    "world_cid",
 ]
 
 
@@ -149,6 +154,7 @@ def encode_authoritative_payload(
         "gate_applied": bool(payload.get("gate_applied", False)),
         "n_batches": int(payload.get("n_batches", 0)),
         "n_events": int(payload.get("n_events", 0)),
+        "world_cid": str(payload.get("world_cid", "")),
     }
 
     # Canonical order: NOT alphabetical, but the explicit _FIELD_ORDER.

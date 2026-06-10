@@ -146,6 +146,16 @@ class ChainSubmissionDriver:
         if not self.enabled:
             return out
 
+        # State sync: every daemon computed the same canonical-world
+        # checkpoint blob — publish it so rejoining peers can fetch it
+        # from anyone, not just the anchor winner.
+        if fed.world_checkpoint_blob:
+            try:
+                self._blob_resolver.put(fed.world_checkpoint_blob)
+                out["world_cid"] = fed.world_cid
+            except Exception as e:
+                logger.warning("world checkpoint blob put failed: %s", e)
+
         if fed.is_winner:
             anchor_result = self._anchor(fed)
             out["anchored"] = anchor_result.success
@@ -174,6 +184,14 @@ class ChainSubmissionDriver:
                 self._blob_resolver.put(result.agent_mint_blob)
             except Exception as e:
                 logger.warning("blob_resolver.put failed: %s", e)
+        if result.success and result.payload_bytes:
+            # Publish the encoded authoritative payload too: its cid
+            # equals the on-chain payloadHash, which is how rejoining
+            # daemons discover world_cid during anchored catch-up.
+            try:
+                self._blob_resolver.put(result.payload_bytes)
+            except Exception as e:
+                logger.warning("payload blob put failed: %s", e)
         if result.success:
             logger.info(
                 "anchor success: epoch=%s tx=%s cid=%s",

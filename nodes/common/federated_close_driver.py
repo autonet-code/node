@@ -49,6 +49,13 @@ class FederatedCloseResult:
     winner: bytes
     is_winner: bool
     n_batches: int
+    # State sync (task: anchored catch-up). When a canonical tracker
+    # is wired, every daemon computes the same cumulative-canonical-
+    # world checkpoint blob; its cid rides in the authoritative
+    # payload's world_cid field, and the blob itself is published to
+    # the blob resolver by the chain submission driver.
+    world_cid: str = ""
+    world_checkpoint_blob: bytes = b""
 
 
 def pick_submitter(
@@ -86,10 +93,17 @@ class FederatedCloseDriver:
         *,
         bandwidth: float = 1.5,
         embedding_dim: int = 1024,
+        canonical_tracker: Optional[Any] = None,
     ):
         self.gossip = gossip
         self.bandwidth = bandwidth
         self.embedding_dim = embedding_dim
+        # Optional state_sync.CanonicalWorldTracker. When present, each
+        # close also advances the cumulative canonical world and embeds
+        # its checkpoint cid in the authoritative payload (world_cid).
+        # Must be constructed with the SAME bandwidth/embedding_dim so
+        # the tracker's replay matches the federated kernel.
+        self.canonical_tracker = canonical_tracker
 
     def run(self, local_close_result: Dict[str, Any]) -> Optional[FederatedCloseResult]:
         """Drive one federated close given the local close's result.
@@ -130,6 +144,29 @@ class FederatedCloseDriver:
         epoch_id = str(local_close_result.get("epoch_id") or "")
         close_result["epoch_id"] = epoch_id
 
+        # State sync: advance the cumulative canonical world and embed
+        # its checkpoint cid in the payload BEFORE the payload gets
+        # encoded/anchored. Deterministic across daemons, so the
+        # payload stays consensus-identical.
+        world_cid = ""
+        world_blob = b""
+        if self.canonical_tracker is not None:
+            try:
+                ckpt = self.canonical_tracker.on_close(
+                    epoch_id,
+                    str(close_result.get("epoch_root", "")),
+                    [list(b.events or []) for b in canonical.ordered_batches],
+                )
+                world_cid = ckpt.cid
+                world_blob = ckpt.blob
+                payload = close_result.get("authoritative_payload")
+                if payload is not None:
+                    payload["world_cid"] = world_cid
+            except Exception as e:
+                logger.error(
+                    "canonical world tracker failed: %s", e, exc_info=True,
+                )
+
         senders = self.gossip.known_senders()
         canonical_root = canonical.epoch_root() if hasattr(canonical, "epoch_root") else b""
         winner = pick_submitter(epoch_id, senders, canonical_root)
@@ -151,4 +188,6 @@ class FederatedCloseDriver:
             winner=winner or b"",
             is_winner=is_winner,
             n_batches=len(canonical.ordered_batches),
+            world_cid=world_cid,
+            world_checkpoint_blob=world_blob,
         )

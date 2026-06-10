@@ -824,9 +824,18 @@ class AutonetService:
             logger.warning("federated_close_driver import failed: %s", e)
             return
         embedding_dim = getattr(self._world_service, "embedding_dim", 1024)
+        canonical_tracker = None
+        try:
+            from .common.state_sync import CanonicalWorldTracker
+            canonical_tracker = CanonicalWorldTracker(
+                embedding_dim=embedding_dim,
+            )
+        except Exception as e:
+            logger.warning("canonical world tracker unavailable: %s", e)
         self._federated_close_driver = FederatedCloseDriver(
             gossip=self._event_gossip,
             embedding_dim=embedding_dim,
+            canonical_tracker=canonical_tracker,
         )
 
         def _on_local_close(local_result):
