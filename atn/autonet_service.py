@@ -1073,8 +1073,14 @@ class AutonetBridge:
         return self.state.to_dict()
 
     def _sync_training_metrics(self) -> None:
-        """Pull real-time training metrics from the training feed into state."""
-        feed = getattr(self._service, "_training_feed", None)
+        """Pull real-time training metrics into state.
+
+        Substrate-native: the world substrate feed is the live training
+        path (JEPA feed retired). Falls back to the legacy feed attribute
+        only if a deployment still has one wired.
+        """
+        feed = (getattr(self._service, "_world_substrate_feed", None)
+                or getattr(self._service, "_training_feed", None))
         if not feed:
             return
         self.state.pending_events = feed._pending_events

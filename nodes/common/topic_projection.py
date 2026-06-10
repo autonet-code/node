@@ -79,6 +79,15 @@ def project_topic_2d(
     if len(rows) < 3:
         return {nid: (0.0, 0.0) for nid in node_ids}
 
+    # The world legitimately mixes coord widths: charter-only nodes (6D)
+    # coexist with [charter | embedding] nodes (6+M). Zero-pad short rows
+    # to the widest — the same convention the adapter uses when it pads
+    # charter anchors into the concatenated space. Without this, one
+    # mismatched node makes np.asarray raise ("inhomogeneous shape") and
+    # the entire visualization endpoint 500s.
+    width = max(len(r) for r in rows)
+    rows = [r + [0.0] * (width - len(r)) if len(r) < width else r for r in rows]
+
     arr = np.asarray(rows, dtype=np.float64)
     # Drop the charter dimensions so the projection reflects topic.
     if arr.shape[1] > charter_dim:

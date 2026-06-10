@@ -124,8 +124,9 @@ class PrivacyConfig:
 @dataclass
 class ResourceConfig:
     """Resource limits for the node (Epic 6)."""
-    max_cpu_percent: float = 80.0        # Pause training above this
-    max_memory_mb: int = 4096            # Pause training above this
+    max_cpu_percent: float = 80.0        # Pause training above this (system-wide)
+    max_memory_mb: int = 4096            # Pause when THE DAEMON's RSS exceeds this
+    min_free_memory_mb: int = 512        # Pause when system free memory dips below
     active_hours_start: int = 0          # 0-23 hour (0 = always active)
     active_hours_end: int = 24           # 0-24 hour (24 = always active)
     check_interval: float = 10.0         # Seconds between checks
@@ -169,6 +170,16 @@ class AutonetConfig:
     data_dir: str = "./data"
     log_level: str = "INFO"
     seed: Optional[int] = None
+    # Fixed-emission economics: tokens minted per second of epoch duration,
+    # split pro-rata by post-gate contribution at epoch close. None = legacy
+    # uncapped mint. Consensus-relevant: all daemons in a network must agree.
+    epoch_emission_rate: Optional[float] = None
+    # Candle close (anti last-second-spam; docs/epoch_economics.md): epochs
+    # run the full min+window, then close at a retroactively drawn cutoff
+    # inside the window; post-cutoff events roll forward. 0 = disabled
+    # (plain interval epochs). Consensus-relevant like the rate.
+    epoch_min_seconds: float = 0.0
+    epoch_candle_window_seconds: float = 0.0
 
     blockchain: BlockchainConfig = field(default_factory=BlockchainConfig)
     blob_store: BlobStoreConfig = field(default_factory=BlobStoreConfig)
@@ -267,7 +278,8 @@ def _dict_to_config(raw: dict) -> AutonetConfig:
     cfg = AutonetConfig()
 
     # Top-level scalars
-    for key in ("device", "data_dir", "log_level", "seed"):
+    for key in ("device", "data_dir", "log_level", "seed", "epoch_emission_rate",
+                "epoch_min_seconds", "epoch_candle_window_seconds"):
         if key in raw:
             setattr(cfg, key, raw[key])
 

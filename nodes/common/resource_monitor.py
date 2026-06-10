@@ -20,10 +20,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ResourceSnapshot:
-    """Point-in-time resource usage reading."""
+    """Point-in-time resource usage reading.
+
+    ``memory_mb`` is THIS PROCESS's RSS — the thing the configured
+    ``max_memory_mb`` budget bounds. ``system_available_mb`` is the
+    host's free headroom, used as a pressure floor. (Comparing total
+    system-used memory against the budget — the old behavior — paused
+    training forever on any desktop where other apps held >4GB.)
+    """
     cpu_percent: float = 0.0
     memory_mb: float = 0.0
     memory_percent: float = 0.0
+    system_available_mb: float = 0.0
     gpu_percent: float = 0.0
     gpu_memory_mb: float = 0.0
     timestamp: float = 0.0
@@ -59,8 +67,9 @@ class ResourceMonitor:
             import psutil
             snap.cpu_percent = psutil.cpu_percent(interval=0.1)
             mem = psutil.virtual_memory()
-            snap.memory_mb = mem.used / (1024 * 1024)
+            snap.memory_mb = psutil.Process().memory_info().rss / (1024 * 1024)
             snap.memory_percent = mem.percent
+            snap.system_available_mb = mem.available / (1024 * 1024)
         except ImportError:
             logger.debug("psutil not available, CPU/memory monitoring disabled")
         except Exception as e:
@@ -109,9 +118,22 @@ class ResourceMonitor:
             logger.debug(f"Training paused: {self._paused_reason}")
             return False
 
-        # Check memory
+        # Check memory: the budget bounds OUR process; a system-pressure
+        # floor protects the host overall (and self-recovers when other
+        # apps release RAM).
         if snap.memory_mb > self.resource_config.max_memory_mb:
-            self._paused_reason = f"Memory {snap.memory_mb:.0f}MB > {self.resource_config.max_memory_mb}MB"
+            self._paused_reason = (
+                f"Daemon memory {snap.memory_mb:.0f}MB > "
+                f"{self.resource_config.max_memory_mb}MB"
+            )
+            logger.debug(f"Training paused: {self._paused_reason}")
+            return False
+        min_free_mb = float(getattr(self.resource_config, "min_free_memory_mb", 512))
+        if snap.system_available_mb and snap.system_available_mb < min_free_mb:
+            self._paused_reason = (
+                f"System memory low ({snap.system_available_mb:.0f}MB free "
+                f"< {min_free_mb:.0f}MB)"
+            )
             logger.debug(f"Training paused: {self._paused_reason}")
             return False
 

@@ -52,6 +52,14 @@ class EpochSchedulerConfig:
     # If True, the scheduler opens the first epoch on construction so
     # the daemon starts buffering events immediately.
     open_first_epoch_on_start: bool = True
+    # Candle close (anti last-second-spam; see docs/epoch_economics.md):
+    # when candle_min_seconds > 0, an epoch runs the FULL
+    # min+window duration, then closes at a cutoff drawn retroactively
+    # inside the window — unknowable while the epoch is open. Events
+    # after the cutoff roll into the next epoch. interval_seconds is
+    # ignored in candle mode.
+    candle_min_seconds: float = 0.0
+    candle_window_seconds: float = 0.0
 
 
 class EpochScheduler:
@@ -81,7 +89,13 @@ class EpochScheduler:
     # ------------------------------------------------------------------
 
     def maybe_tick(self) -> Optional[Dict[str, Any]]:
-        """Close+reopen if the interval has elapsed. No-op otherwise.
+        """Close+reopen if the epoch's time is up. No-op otherwise.
+
+        Plain mode: closes after ``interval_seconds``. Candle mode
+        (``candle_min_seconds > 0``): closes only after the FULL
+        ``min + window`` has elapsed, at a cutoff drawn retroactively
+        inside the window — so while the epoch is open, nobody can
+        know which moment will turn out to have been the last.
 
         Returns the close result if a tick happened, else None.
         """
@@ -89,6 +103,11 @@ class EpochScheduler:
             self._open_epoch()
             return None
         elapsed = time.time() - self._last_open_at
+        if self.config.candle_min_seconds > 0:
+            full = self.config.candle_min_seconds + self.config.candle_window_seconds
+            if elapsed < full:
+                return None
+            return self._tick(cutoff_ts=self._draw_candle_cut())
         if elapsed < self.config.interval_seconds:
             return None
         return self._tick()
@@ -97,6 +116,41 @@ class EpochScheduler:
         """Close the current epoch immediately and open the next.
         Useful for tests and end-of-shutdown handling."""
         return self._tick()
+
+    def _draw_candle_cut(self) -> float:
+        """Retroactively draw the effective cutoff inside the window.
+
+        Seed: hash of (previous epoch's identity, this epoch's id) —
+        agreed by construction on a single daemon, and unknowable
+        before the window because the draw only happens at T_max.
+        UPGRADE PATH (multi-daemon / mainnet): derive the seed from
+        canonical chain data (prevAnchorHash + a block hash after the
+        window) or a VRF — see docs/epoch_economics.md. The cut
+        function is source-agnostic: it just consumes 32 bytes.
+        """
+        import hashlib
+        prev_id, prev_closed = "", 0.0
+        try:
+            history = self.world_service.epoch_history
+            if history:
+                prev_id = str(history[-1].get("epoch_id", ""))
+                prev_closed = float(history[-1].get("closed_at", 0.0))
+        except Exception:
+            pass
+        current_id = str(getattr(self.world_service, "current_epoch_id", "") or "")
+        seed = hashlib.sha256(
+            f"{prev_id}|{prev_closed}|{current_id}".encode("utf-8")
+        ).digest()
+        frac = int.from_bytes(seed[:8], "big") / float(2 ** 64)
+        offset = self.config.candle_min_seconds + frac * self.config.candle_window_seconds
+        t_cut = self._last_open_at + offset
+        logger.info(
+            "candle cut drawn: epoch=%s, offset=%.0fs into the window "
+            "(min=%.0fs, window=%.0fs)",
+            current_id, offset - self.config.candle_min_seconds,
+            self.config.candle_min_seconds, self.config.candle_window_seconds,
+        )
+        return t_cut
 
     @property
     def closed_count(self) -> int:
@@ -138,10 +192,11 @@ class EpochScheduler:
         self.world_service.open_epoch()
         self._last_open_at = time.time()
 
-    def _tick(self) -> Dict[str, Any]:
+    def _tick(self, cutoff_ts: Optional[float] = None) -> Dict[str, Any]:
         result = self.world_service.close_epoch(
             apply_gate=self.config.apply_gate,
             gate_strength=self.config.gate_strength,
+            cutoff_ts=cutoff_ts,
         )
         self._n_closed += 1
         if self._on_close is not None:

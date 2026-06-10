@@ -274,6 +274,7 @@ def reconcile_epoch(
     snapshots: EpochSnapshots,
     events: List[Dict[str, Any]],
     agent_weights: Optional[Dict[str, float]] = None,
+    emission_pool: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Compute per-agent mint and per-agent novelty for the epoch.
 
@@ -285,6 +286,20 @@ def reconcile_epoch(
       events: the merged event list from aggregator.aggregate_contributions.
       agent_weights: optional per-agent multipliers (e.g., from
         alignment scoring). Defaults to 1.0 for all.
+      emission_pool: when set, the epoch mints exactly this many tokens
+        TOTAL and each agent receives a share proportional to its raw
+        (score-movement-derived) mint. This flips the economics from
+        "every claim prints new tokens" (supply scales with activity,
+        junk dilutes all holders invisibly) to "fixed pie per epoch"
+        (junk takes its share directly from this epoch's other
+        contributors — who therefore have a live incentive to debate
+        it down via the mint gate). ``None`` preserves the legacy
+        uncapped behavior. The caller typically computes the pool as
+        ``emission_rate × epoch_duration`` so emission stays a pure
+        time schedule no matter how often epochs close. NOTE: if you
+        also run ``apply_mint_gate``, leave this None and call
+        ``apply_emission_pool`` after the gate instead — post-gate
+        normalization redistributes suppressed junk to the survivors.
 
     Returns:
       {
@@ -334,11 +349,7 @@ def reconcile_epoch(
     total_mint = sum(agent_mint.values())
     total_novelty = sum(agent_novelty.values())
 
-    logger.info(
-        "epoch reconciliation: %d nodes, %d agents, total mint %.4f, total novelty %.4f",
-        len(node_mint), len(agent_mint), total_mint, total_novelty,
-    )
-    return {
+    result = {
         "agent_mint": agent_mint,
         "agent_novelty": agent_novelty,
         "node_mint": node_mint,
@@ -346,3 +357,49 @@ def reconcile_epoch(
         "total_mint": total_mint,
         "total_novelty": total_novelty,
     }
+    if emission_pool is not None:
+        result = apply_emission_pool(result, emission_pool)
+
+    logger.info(
+        "epoch reconciliation: %d nodes, %d agents, total mint %.4f (pool %s), "
+        "total novelty %.4f",
+        len(node_mint), len(agent_mint), result["total_mint"],
+        "uncapped" if emission_pool is None else f"{emission_pool:.4f}",
+        total_novelty,
+    )
+    return result
+
+
+def apply_emission_pool(result: Dict[str, Any], emission_pool: float) -> Dict[str, Any]:
+    """Normalize a reconcile result's mints to shares of a fixed pool.
+
+    Flips the economics from "every claim prints new tokens" (supply
+    scales with activity; junk dilutes all holders invisibly) to
+    "fixed pie per epoch": junk takes its share directly from this
+    epoch's other contributors, who therefore have a live incentive
+    to debate it down via the mint gate.
+
+    Call this AFTER the mint gate: mint suppressed by debate is then
+    redistributed to the surviving contributors — winning a CON debate
+    literally increases the winner's share of the pool.
+
+    Deterministic given (result, pool): values are scaled in sorted-key
+    order, so every federated daemon computes the same map. The caller
+    is responsible for deriving ``emission_pool`` from canonical data
+    (e.g. emission_rate x epoch duration from anchored timestamps) —
+    never from a daemon-local clock — when the result must be
+    bit-identical across daemons.
+    """
+    out = dict(result)
+    agent_mint = result.get("agent_mint", {}) or {}
+    node_mint = result.get("node_mint", {}) or {}
+    raw_total = sum(agent_mint[a] for a in sorted(agent_mint))
+    out["raw_mint_total"] = raw_total
+    out["emission_pool"] = float(emission_pool)
+    if raw_total <= 0:
+        return out
+    scale = float(emission_pool) / raw_total
+    out["agent_mint"] = {a: agent_mint[a] * scale for a in sorted(agent_mint)}
+    out["node_mint"] = {n: node_mint[n] * scale for n in sorted(node_mint)}
+    out["total_mint"] = sum(out["agent_mint"][a] for a in sorted(out["agent_mint"]))
+    return out

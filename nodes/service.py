@@ -162,9 +162,10 @@ class AutonetService:
             self._resource_monitor._last_check = now
             self._updater._last_check = now
 
-            # Initialize training data feed if ATN data dir is available
-            if self._data_dir:
-                self._init_training_feed()
+            # JEPA training feed retired — the world-model substrate is the
+            # only training path. TrainingDataFeed remains on disk but is no
+            # longer initialized; self._training_feed stays None and every
+            # reference is guarded.
 
             # Initialize world-model substrate (always available; feeding
             # is gated by config and data dir presence).
@@ -290,9 +291,8 @@ class AutonetService:
             return
 
         # World-substrate feed: convert agent traces into substrate
-        # events and feed them into the persistent World. Independent
-        # of the JEPA path; both can run side-by-side until JEPA is
-        # retired.
+        # events and feed them into the persistent World. This is the
+        # only training path (JEPA retired).
         if self._world_substrate_feed:
             try:
                 substrate_metrics = self._world_substrate_feed.run_cycle()
@@ -314,25 +314,6 @@ class AutonetService:
             except Exception as e:
                 logger.warning("Epoch scheduler tick failed: %s", e)
 
-        # Training data feed: train on accumulated agent activity
-        if self._training_feed:
-            result = self._training_feed.run_cycle()
-            if result:
-                weight_delta, metrics = result
-                logger.info(
-                    f"Training cycle {self._cycles}: "
-                    f"loss={metrics.get('loss', 0):.4f}, "
-                    f"batches={metrics.get('num_batches', 0)}"
-                )
-
-                # Upload delta to blob store and record on-chain
-                delta_cid = self._submit_training_delta(weight_delta, metrics)
-
-                # Update model state in P2P gossip so peers can surface stats
-                self._update_gossip_model_state(metrics, delta_cid=delta_cid)
-            return
-
-        # Fallback: no node and no training feed
         logger.debug(f"Service cycle {self._cycles}")
 
     def _init_blob_store(self):
@@ -641,7 +622,15 @@ class AutonetService:
             rpb_address = getattr(self.config, "rpb_address", None) \
                 or getattr(self.config, "node_id", None) \
                 or "default"
-            self._world_service = WorldService(rpb_address=str(rpb_address))
+            # Token-economics knob: tokens minted per second of epoch
+            # duration (fixed-emission). Unset/None = legacy uncapped.
+            emission_rate = getattr(self.config, "epoch_emission_rate", None)
+            self._world_service = WorldService(
+                rpb_address=str(rpb_address),
+                epoch_emission_rate=(
+                    float(emission_rate) if emission_rate is not None else None
+                ),
+            )
             # Attach external subscribers registered before start().
             for handler in self._external_epoch_subscribers:
                 self._world_service.subscribe_epoch_closed(handler)
@@ -688,12 +677,26 @@ class AutonetService:
                     len(result.get("agent_mint", {})),
                 )
 
+            candle_min = float(getattr(self.config, "epoch_min_seconds", 0.0) or 0.0)
+            candle_window = float(
+                getattr(self.config, "epoch_candle_window_seconds", 0.0) or 0.0
+            )
             self._epoch_scheduler = EpochScheduler(
                 world_service=self._world_service,
-                config=EpochSchedulerConfig(interval_seconds=interval),
+                config=EpochSchedulerConfig(
+                    interval_seconds=interval,
+                    candle_min_seconds=candle_min,
+                    candle_window_seconds=candle_window,
+                ),
                 on_close=_on_close,
             )
-            logger.info("Epoch scheduler initialized (interval=%.0fs)", interval)
+            if candle_min > 0:
+                logger.info(
+                    "Epoch scheduler initialized (candle: min=%.0fs window=%.0fs)",
+                    candle_min, candle_window,
+                )
+            else:
+                logger.info("Epoch scheduler initialized (interval=%.0fs)", interval)
         except Exception as e:
             logger.warning("Failed to initialize epoch scheduler: %s", e)
             self._epoch_scheduler = None
@@ -710,11 +713,12 @@ class AutonetService:
                 data_dir=str(self._data_dir) if self._data_dir else "",
                 agent_id=str(getattr(self.config, "node_id", "daemon")),
             )
-            self._world_substrate_feed = WorldSubstrateFeed(
+            feed = WorldSubstrateFeed(
                 config=feed_config,
                 world_service=self._world_service,
                 identity_resolver=self._substrate_identity_resolver,
             )
+            self._world_substrate_feed = feed
             logger.info(
                 "World substrate feed initialized (data_dir=%s)",
                 self._data_dir,

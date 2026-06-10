@@ -33,11 +33,14 @@ The substrate uses 16D by default.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import random
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 # Phase 2.2 (dim_sweep.py) measured categorical separation across
@@ -163,17 +166,66 @@ class SentenceTransformersEmbedder:
 # ---------------------------------------------------------------------------
 
 
+_ST_IMPORT_TIMEOUT_SECONDS = 30.0
+_st_import_thread = None
+
+
+def _import_st_async() -> "threading.Thread":
+    """Start (once) a background import of sentence_transformers.
+
+    The import is heavy (~30s cold: torch + transformers) and has been
+    observed to WEDGE indefinitely when first triggered from a daemon
+    worker thread (loader-lock interaction). Running it on a dedicated
+    thread lets callers wait with a timeout instead of blocking the
+    feed cycle forever; once it lands in sys.modules every later call
+    is instant.
+    """
+    import threading
+    global _st_import_thread
+    if _st_import_thread is None:
+        def _do_import() -> None:
+            try:
+                import sentence_transformers  # type: ignore  # noqa: F401
+            except Exception:
+                pass
+        _st_import_thread = threading.Thread(
+            target=_do_import, name="st-embedder-import", daemon=True,
+        )
+        _st_import_thread.start()
+    return _st_import_thread
+
+
 def default_usefulness_embedder(dim: int = DEFAULT_DIM):
     """Return the best available embedder.
 
     Prefers SentenceTransformersEmbedder; falls back to HashingEmbedder
-    if sentence-transformers isn't importable.
+    if sentence-transformers isn't importable — or doesn't finish
+    importing within the timeout (it keeps loading in the background,
+    so later calls upgrade to the real embedder automatically).
+
+    Embedder choice is NOT consensus-relevant: coords are computed by
+    the authoring daemon and serialized into the event payload, so
+    replays reproduce them regardless of the replayer's embedder.
     """
-    try:
-        import sentence_transformers  # type: ignore  # noqa: F401
-        return SentenceTransformersEmbedder(dim=dim)
-    except ImportError:
+    import os
+    import sys
+    # Hard opt-out for deployments where the torch import deadlocks
+    # in-process (observed on Windows daemons: the import wedges and
+    # poisons the import lock for every other thread).
+    if os.environ.get("ATN_USEFULNESS_EMBEDDER", "").lower() == "hashing":
         return HashingEmbedder(dim=dim)
+    if "sentence_transformers" in sys.modules:
+        return SentenceTransformersEmbedder(dim=dim)
+    thread = _import_st_async()
+    thread.join(timeout=_ST_IMPORT_TIMEOUT_SECONDS)
+    if "sentence_transformers" in sys.modules:
+        return SentenceTransformersEmbedder(dim=dim)
+    logger.warning(
+        "sentence_transformers not ready after %.0fs — using hashing "
+        "embedder for this batch (will upgrade when the import lands)",
+        _ST_IMPORT_TIMEOUT_SECONDS,
+    )
+    return HashingEmbedder(dim=dim)
 
 
 # ---------------------------------------------------------------------------

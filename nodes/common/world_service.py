@@ -54,6 +54,7 @@ from .world_model_substrate.mint_gate import (
 )
 from .world_model_substrate.reconcile import (
     EpochSnapshots,
+    apply_emission_pool,
     reconcile_epoch,
 )
 from .world_persistence import (
@@ -124,10 +125,17 @@ class WorldService:
         persistence: Optional[WorldPersistence] = None,
         snapshot_every_n_events: int = 100,
         snapshot_every_seconds: float = 60.0,
+        epoch_emission_rate: Optional[float] = None,
     ):
         self.rpb_address = rpb_address
         self.bandwidth = bandwidth
         self.embedding_dim = embedding_dim
+        # Fixed-emission economics: tokens minted per SECOND of epoch
+        # duration, split pro-rata by post-gate contribution. None =
+        # legacy uncapped mint (every claim prints). The pool for an
+        # epoch is rate x (close - open) so emission is a pure time
+        # schedule regardless of how often epochs close.
+        self.epoch_emission_rate = epoch_emission_rate
         self._lock = threading.RLock()
         self._world: World = build_charter_world(
             bandwidth=bandwidth, embedding_dim=embedding_dim,
@@ -148,6 +156,19 @@ class WorldService:
         self._epoch_started_at: float = 0.0
         self._epoch_snapshots: Optional[EpochSnapshots] = None
         self._epoch_events: List[Dict[str, Any]] = []
+        # Wall-clock arrival time per buffered event (parallel list) —
+        # the candle close partitions the buffer at a retroactively
+        # drawn cutoff, so each event needs an arrival stamp.
+        self._epoch_event_ts: List[float] = []
+        # Events that arrived after a candle cutoff roll into the next
+        # epoch's buffer (they are NOT lost — paid next window).
+        self._carry_events: List[Dict[str, Any]] = []
+        self._carry_event_ts: List[float] = []
+        # Emission accounting clock: advances to each close's effective
+        # end (the cutoff, under candle close). The next epoch's pool
+        # covers [clock, next cutoff], so the unminted remainder of a
+        # candle window accrues to the next epoch automatically.
+        self._emission_clock: float = 0.0
         self._epoch_history: List[Dict[str, Any]] = []  # closed epochs
 
         # Phase 12.25: cached 2D topic projection per node id, used to
@@ -228,11 +249,21 @@ class WorldService:
             snapshots.record_start(self._world)
             self._current_epoch_id = eid
             self._epoch_started_at = time.time()
+            if self._emission_clock <= 0:
+                self._emission_clock = self._epoch_started_at
             self._epoch_snapshots = snapshots
-            self._epoch_events = []
+            # Events rolled forward from a candle cutoff seed the new
+            # epoch's buffer (already applied to the world; counted in
+            # this epoch's attribution).
+            self._epoch_events = list(self._carry_events)
+            self._epoch_event_ts = list(self._carry_event_ts)
+            self._carry_events = []
+            self._carry_event_ts = []
             logger.info(
-                "WorldService epoch opened: rpb=%s, epoch=%s",
+                "WorldService epoch opened: rpb=%s, epoch=%s%s",
                 self.rpb_address, eid,
+                f" ({len(self._epoch_events)} events rolled forward)"
+                if self._epoch_events else "",
             )
             return {
                 "epoch_id": eid,
@@ -261,6 +292,7 @@ class WorldService:
         apply_gate: bool = True,
         gate_strength: float = 1.0,
         agent_weights: Optional[Dict[str, float]] = None,
+        cutoff_ts: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Close the open epoch and produce a reward result.
 
@@ -269,12 +301,22 @@ class WorldService:
         - Optionally applies the charter mint gate (default: yes).
         - Returns the per-agent mint, per-agent novelty, and per-node
           breakdowns.
+
+        ``cutoff_ts`` (candle close): only events that arrived at or
+        before this wall-clock time count for THIS epoch; later ones
+        roll into the next epoch's buffer. The emission pool covers
+        time up to the cutoff, with the remainder accruing forward.
+        Note the local cutoff is attribution-level (the world state
+        itself is continuous); the authoritative federated close
+        applies the cutoff exactly by truncating the canonical
+        sequence before replay.
         """
         with self._lock:
             return self._close_epoch_locked(
                 apply_gate=apply_gate,
                 gate_strength=gate_strength,
                 agent_weights=agent_weights,
+                cutoff_ts=cutoff_ts,
             )
 
     @property
@@ -1500,6 +1542,7 @@ class WorldService:
         apply_gate: bool = True,
         gate_strength: float = 1.0,
         agent_weights: Optional[Dict[str, float]] = None,
+        cutoff_ts: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Internal: must be called under self._lock."""
         if self._current_epoch_id is None:
@@ -1518,7 +1561,24 @@ class WorldService:
 
         snapshots = self._epoch_snapshots
         snapshots.record_close(self._world)
-        events = list(self._epoch_events)
+
+        # Candle cutoff: partition the buffer at the retroactively
+        # drawn cut. Post-cut events roll forward to the next epoch.
+        events_rolled = 0
+        if cutoff_ts is not None and self._epoch_events:
+            kept: List[Dict[str, Any]] = []
+            kept_ts: List[float] = []
+            for ev, ts in zip(self._epoch_events, self._epoch_event_ts):
+                if ts <= cutoff_ts:
+                    kept.append(ev)
+                    kept_ts.append(ts)
+                else:
+                    self._carry_events.append(ev)
+                    self._carry_event_ts.append(ts)
+            events_rolled = len(self._epoch_events) - len(kept)
+            events = kept
+        else:
+            events = list(self._epoch_events)
 
         result = reconcile_epoch(
             self._world,
@@ -1532,6 +1592,21 @@ class WorldService:
                 charter_ids=DEFAULT_CHARTER_IDS,
                 gate_strength=gate_strength,
             )
+        # Fixed-emission normalization (post-gate, so suppressed junk
+        # redistributes to survivors). The pool covers the time from
+        # the emission clock (last close's effective end) to this
+        # close's effective end — the cutoff under candle close, so a
+        # candle window's unminted remainder accrues to the next epoch.
+        # Local closes are projection-level (authoritative=False), so
+        # local clocks are fine HERE; the federated close must derive
+        # its pool from canonical/anchored timestamps instead.
+        pool_end = cutoff_ts if cutoff_ts is not None else time.time()
+        if self.epoch_emission_rate is not None and self._emission_clock > 0:
+            duration = max(0.0, pool_end - self._emission_clock)
+            result = apply_emission_pool(
+                result, self.epoch_emission_rate * duration,
+            )
+        self._emission_clock = max(self._emission_clock, pool_end)
 
         eid = self._current_epoch_id
         record = {
@@ -1547,6 +1622,9 @@ class WorldService:
             "total_mint": result.get("total_mint", 0.0),
             "total_novelty": result.get("total_novelty", 0.0),
             "gate_applied": apply_gate,
+            "cutoff_ts": cutoff_ts,
+            "events_rolled_forward": events_rolled,
+            "emission_pool": result.get("emission_pool"),
             # Phase 4 surfaces projection-level results only. Phase 5's
             # federated close will stamp authoritative=True on the
             # canonical version.
@@ -1561,11 +1639,12 @@ class WorldService:
         # Notify subscribers (e.g. the daemon's WS bridge).
         self._broadcast_epoch_closed(record)
 
-        # Reset state
+        # Reset state (carry buffers survive — open_epoch consumes them)
         self._current_epoch_id = None
         self._epoch_started_at = 0.0
         self._epoch_snapshots = None
         self._epoch_events = []
+        self._epoch_event_ts = []
 
         # Full result is returned for the caller; record kept in history
         # is the slim version.
@@ -1585,6 +1664,8 @@ class WorldService:
         """If an epoch is open, accumulate the events for reconciliation."""
         if self._current_epoch_id is not None and event_dicts:
             self._epoch_events.extend(event_dicts)
+            now = time.time()
+            self._epoch_event_ts.extend([now] * len(event_dicts))
 
     def _closest_tendency_locked(self, coords):
         """Tendency whose anchor has the highest cosine similarity to

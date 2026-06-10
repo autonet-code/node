@@ -74,12 +74,19 @@ def federated_reconcile_epoch(
     apply_gate: bool = True,
     gate_strength: float = 1.0,
     output_decimals: int = OUTPUT_DECIMALS,
+    emission_pool: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run reconcile_epoch deterministically.
 
     Same inputs (world topology, snapshots, events list, optional
     agent_weights) at every honest daemon produce **bit-identical**
     output dicts.
+
+    ``emission_pool``: when set, post-gate mints are normalized to
+    shares of this fixed pool (see reconcile.apply_emission_pool).
+    MUST be derived from canonical data (e.g. emission_rate x the
+    epoch duration measured between anchored timestamps), never from
+    a daemon-local clock, or the bit-identical guarantee breaks.
 
     Returns the same shape as ``reconcile_epoch`` plus:
       - ``output_decimals``: the rounding precision used.
@@ -177,6 +184,22 @@ def federated_reconcile_epoch(
         )
         result["gate_applied"] = True
 
+    # Fixed-emission normalization — AFTER the gate, so mint suppressed
+    # by debate is redistributed to the surviving contributors. Scaling
+    # runs over sorted keys and is re-rounded, so determinism holds.
+    if emission_pool is not None:
+        from .world_model_substrate.reconcile import apply_emission_pool
+        result = apply_emission_pool(result, emission_pool)
+        result["agent_mint"] = dict(sorted(
+            _round_dict(result.get("agent_mint", {}), output_decimals).items()
+        ))
+        result["node_mint"] = dict(sorted(
+            _round_dict(result.get("node_mint", {}), output_decimals).items()
+        ))
+        result["total_mint"] = round(
+            sum(result["agent_mint"].values()), output_decimals,
+        )
+
     logger.info(
         "federated reconciliation: %d nodes, %d agents, "
         "total mint %.6f, total novelty %.6f",
@@ -199,6 +222,7 @@ def federated_epoch_close(
     output_decimals: int = OUTPUT_DECIMALS,
     equilibrate_rounds: int = 8,
     equilibrate_tolerance: float = 1e-3,
+    emission_pool: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -278,6 +302,7 @@ def federated_epoch_close(
         apply_gate=apply_gate,
         gate_strength=gate_strength,
         output_decimals=output_decimals,
+        emission_pool=emission_pool,
     )
     result["epoch_root"] = canonical.epoch_root().hex()
     result["n_batches"] = len(canonical.ordered_batches)

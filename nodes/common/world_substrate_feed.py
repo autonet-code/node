@@ -113,6 +113,16 @@ class WorldSubstrateFeed:
         """
         self._identity_resolver = resolver
 
+    def prewarm(self) -> None:
+        """Kick off heavy lazy imports (the usefulness embedder) in the
+        background so the first feed cycle doesn't pay — or wedge on —
+        a ~30s sentence_transformers import."""
+        try:
+            from .world_model_substrate.usefulness_coords import _import_st_async
+            _import_st_async()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Counters
     # ------------------------------------------------------------------

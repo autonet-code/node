@@ -1,6 +1,12 @@
 device: auto
 data_dir: ./data
 log_level: INFO
+# Fixed-emission economics: 100 ATN per day, split pro-rata per epoch.
+epoch_emission_rate: 0.0011574074   # 100 / 86400 seconds
+# Candle close: dev epochs run 2 days minimum + 1-day random-cut window
+# (dev > prod duration deliberately — less activity needs longer windows).
+epoch_min_seconds: 172800
+epoch_candle_window_seconds: 86400
 orchestrator:
   model: claude-opus-4-6
 blockchain:
@@ -45,8 +51,9 @@ staking:
   coordinator: 500
   aggregator: 1000
 node:
-  max_cycles: 10
-  cycle_delay: 3.0
+  max_cycles: 0          # 0 = run forever (10 was a sim-era leftover that
+                         # silently stopped the service loop after 30s)
+  cycle_delay: 30.0
   task_mode: ground_truth
   aggregation_method: fedavg
   trim_ratio: 0.2
