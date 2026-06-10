@@ -109,12 +109,12 @@ nonzero claims against those (`MintRootMissing`).
 Python side: `nodes/common/mint_merkle.py` (tree/proof/scaling —
 both the anchorer and the agent submitter MUST route the float→int
 truncation through `scale_mint`, or the leaf is unprovable). Only
-address-parsing mint-map keys enter the tree — which makes explicit
-the standing identity requirement: **the substrate feed must author
-events with the agent's 0x address** (today it uses the atn agent id;
-non-address authors accrue mint that nobody can claim on-chain).
-Wire the feed's `author_agent` to the agent registry address before
-real mint flows.
+address-parsing mint-map keys enter the tree. Production already
+satisfies this: the substrate feed resolves every local agent id to
+its 0x address at event-authoring time (`_resolve_author` via the
+identity resolver wired in `atn/autonet_service.py`), and skips
+agents with no on-chain identity. The non-address filter is defense
+in depth for test fixtures and legacy logs, not a production gap.
 
 NOT yet redeployed to shadownet — redeploy wipes registrations and
 anchors, so it's bundled with the next deliberate reset
