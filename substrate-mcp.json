@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "substrate": {
+      "command": "python",
+      "args": ["C:/code/autonet/atn/substrate_mcp.py"],
+      "env": {
+        "ATN_SUBSTRATE_AGENT": "claude-code",
+        "CLAUDE_NAME": "${CLAUDE_NAME}"
+      }
+    }
+  }
+}

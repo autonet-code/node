@@ -542,6 +542,7 @@ class ExecutionEngine:
 
             # Non-session providers need history injected (session providers
             # have it in the SDK's conversation already).
+            history_messages: list[dict[str, Any]] | None = None
             if not session_id:
                 prior_turns = agent_convo.get_turns()
                 # Exclude the current message so it doesn't appear twice
@@ -550,7 +551,22 @@ class ExecutionEngine:
                         and prior_turns[-1].content == user_message):
                     prior_turns = prior_turns[:-1]
                 if prior_turns:
-                    system_prompt = self._append_history_to_prompt(system_prompt, prior_turns)
+                    # Providers running the generic base-class loop take
+                    # history as real messages — this keeps the system prompt
+                    # byte-stable across executions so the provider prompt
+                    # cache hits on the static prefix AND on the unchanged
+                    # part of the history. Bridge providers (which override
+                    # send_orchestrate and own their session state) keep the
+                    # legacy system-prompt append.
+                    from ..providers.base import Provider as _BaseProvider
+                    _generic_loop = (
+                        type(sub_provider).send_orchestrate
+                        is _BaseProvider.send_orchestrate
+                    )
+                    if _generic_loop:
+                        history_messages = self._build_history_messages(defn.id, prior_turns)
+                    else:
+                        system_prompt = self._append_history_to_prompt(system_prompt, prior_turns)
 
             # --- Inject UTC time ---
             from datetime import timezone as _tz
@@ -606,6 +622,10 @@ class ExecutionEngine:
             # cascading budget immediately. Returns (ok, blocker_id); on
             # ok=False the provider aborts the loop with stop_reason=budget_exceeded.
             _budget_provider_key = getattr(sub_provider, "name", "claude_max")
+            if not isinstance(_budget_provider_key, str):
+                # Mocked/odd providers: a non-string key would poison every
+                # JSON roll-up downstream (budget state, execution store).
+                _budget_provider_key = "claude_max"
             # Track tokens recorded mid-loop so the post-loop reconciliation
             # only adds the *unrecorded* remainder. The base provider calls
             # this every turn; the bridge provider's stream events also call it
@@ -655,6 +675,8 @@ class ExecutionEngine:
             }
             if session_id:
                 send_kwargs["session_id"] = session_id
+            if history_messages:
+                send_kwargs["history"] = history_messages
             # Long-horizon safeguards — providers that support them honour these;
             # bridge providers ignore unknown kwargs in their override.
             if defn.per_turn_input_max is not None:
@@ -952,8 +974,57 @@ class ExecutionEngine:
         self._interrupt_hooks.pop(execution_id, None)
 
     # ------------------------------------------------------------------
-    # History helper
+    # History helpers
     # ------------------------------------------------------------------
+
+    # Heartbeat wake-ups inject ~60 tokens of identical boilerplate per
+    # occurrence; long-lived agents accumulate hundreds of them. In injected
+    # history the boilerplate carries no information — compress it to a marker.
+    _HEARTBEAT_HISTORY_MARKER = "[heartbeat wake-up]"
+
+    def _build_history_messages(self, agent_id: str, prior_turns: list) -> list[dict[str, Any]]:
+        """Prior turns as canonical message dicts, oldest first, trimmed from
+        the front to a ~100k-token budget. Roles pass through; the provider
+        normalizes (merging, role mapping) at request time.
+
+        The trim boundary is STICKY per agent: it only advances when the
+        kept suffix itself outgrows the budget, and then it jumps deep (to
+        60% of budget). Recomputing the boundary fresh each execution would
+        slide the window every run once an agent's history passes the
+        budget — changing the message prefix every time and permanently
+        defeating the provider prompt cache.
+        """
+        _HISTORY_CHAR_BUDGET = 400_000
+        trim_map: dict[str, int] = getattr(self, "_history_trim_start", None) or {}
+        self._history_trim_start = trim_map
+
+        start = trim_map.get(agent_id, 0)
+        if start >= len(prior_turns):
+            start = 0          # conversation was reset/shrunk — start over
+
+        msgs: list[dict[str, Any]] = []
+        for turn in prior_turns[start:]:
+            content = turn.content
+            if turn.role == "user" and content.startswith("[HEARTBEAT]"):
+                content = self._HEARTBEAT_HISTORY_MARKER
+            msgs.append({"role": turn.role, "content": content})
+
+        total = sum(len(m["content"]) for m in msgs)
+        if total > _HISTORY_CHAR_BUDGET:
+            target = int(_HISTORY_CHAR_BUDGET * 0.6)
+            drop = 0
+            while drop < len(msgs) and total > target:
+                total -= len(msgs[drop]["content"])
+                drop += 1
+            start += drop
+            msgs = msgs[drop:]
+        trim_map[agent_id] = start
+
+        if not msgs:
+            return []
+        if start > 0:
+            msgs.insert(0, {"role": "user", "content": "[Earlier conversation trimmed]"})
+        return msgs
 
     @staticmethod
     def _append_history_to_prompt(system_prompt: str, prior_turns: list) -> str:

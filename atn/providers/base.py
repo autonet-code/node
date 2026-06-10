@@ -315,6 +315,7 @@ class Provider(ABC):
         per_turn_input_max: int | None = None,
         repeat_call_limit: int | None = None,
         usage_recorder: Any = None,
+        history: list[dict[str, Any]] | None = None,
         **_unused: Any,
     ) -> ProviderResponse:
         """Multi-turn orchestration with tool relay.
@@ -360,7 +361,13 @@ class Provider(ABC):
                 for t in tools
             ]
 
-        messages: list[dict[str, Any]] = [{"role": "user", "content": message}]
+        # Prior conversation as real messages (NOT baked into the system
+        # prompt). Keeping the system prompt byte-stable across executions
+        # and the history a growing message prefix is what lets provider
+        # prompt caches hit: the static prefix is cached forever, and only
+        # the appended tail is fresh input.
+        messages: list[dict[str, Any]] = _normalize_history(history) if history else []
+        messages.append({"role": "user", "content": message})
         cumulative_usage = Usage()
 
         # Long-horizon safeguards (None = use defaults defined here).
@@ -604,10 +611,22 @@ class Provider(ABC):
                         },
                     ))
 
+                result_json = json.dumps(result, default=str)
+                # Cap oversized tool results. An untruncated multi-MB result
+                # would not only blow this turn's input — it gets re-sent on
+                # EVERY subsequent turn of the loop. The cap bounds that to
+                # ~10k tokens per result while telling the model how to get
+                # the rest if it genuinely needs it.
+                if len(result_json) > _TOOL_RESULT_CHAR_MAX:
+                    result_json = (
+                        result_json[:_TOOL_RESULT_CHAR_MAX]
+                        + f'... [truncated: result was {len(result_json)} chars; '
+                        f're-invoke the tool with a narrower query if more is needed]'
+                    )
                 tool_result_content.append({
                     "type": "tool_result",
                     "tool_use_id": tc.id,
-                    "content": json.dumps(result, default=str),
+                    "content": result_json,
                 })
             messages.append({"role": "user", "content": tool_result_content})
 
@@ -615,7 +634,9 @@ class Provider(ABC):
             # summarize the conversation to free space.
             ctx_window = get_context_window(self._active_model) if self._active_model else 0
             if ctx_window > 0 and self._last_input_tokens > ctx_window * self._COMPACTION_THRESHOLD:
-                messages = await self._compact_messages(messages, system, model)
+                messages = await self._compact_messages(
+                    messages, system, model, original_request=message,
+                )
 
         # Exhausted max_turns — return last response with accumulated usage
         response.usage = cumulative_usage
@@ -626,6 +647,7 @@ class Provider(ABC):
         messages: list[dict[str, Any]],
         system: str,
         model: str,
+        original_request: str = "",
     ) -> list[dict[str, Any]]:
         """Summarize conversation history to free context space.
 
@@ -673,8 +695,10 @@ class Provider(ABC):
             log.warning("Compaction summary failed: %s — continuing without compaction", exc)
             return messages
 
-        # Extract the original user request (first message)
-        original_request = messages[0]["content"] if messages else ""
+        # The live task prompt (passed by the caller; messages[0] may be an
+        # old history turn now that history rides as messages).
+        if not original_request:
+            original_request = messages[0]["content"] if messages else ""
 
         # Rebuild messages: summary + original request
         compacted: list[dict[str, Any]] = [
@@ -742,6 +766,41 @@ class Provider(ABC):
         if on_chunk and response.text:
             await on_chunk(response.text)
         return response
+
+
+# ---------------------------------------------------------------------------
+# Module helpers
+# ---------------------------------------------------------------------------
+
+# Hard cap on a single tool result fed back into the loop (~10k tokens).
+_TOOL_RESULT_CHAR_MAX = 40_000
+
+
+def _normalize_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shape prior-conversation dicts into valid Messages-API history.
+
+    - roles other than user/assistant (e.g. "system" turns) become user
+      turns tagged ``[system]``;
+    - consecutive same-role turns are merged (the API requires alternation);
+    - the list must start with a user turn — a leading assistant turn gets
+      a synthetic resume marker in front of it.
+    """
+    out: list[dict[str, Any]] = []
+    for h in history:
+        role = h.get("role", "user")
+        content = h.get("content", "")
+        if not content:
+            continue
+        if role not in ("user", "assistant"):
+            content = f"[system] {content}"
+            role = "user"
+        if out and out[-1]["role"] == role:
+            out[-1] = {"role": role, "content": out[-1]["content"] + "\n\n" + content}
+        else:
+            out.append({"role": role, "content": content})
+    if out and out[0]["role"] == "assistant":
+        out.insert(0, {"role": "user", "content": "[Conversation resumed]"})
+    return out
 
 
 # ---------------------------------------------------------------------------

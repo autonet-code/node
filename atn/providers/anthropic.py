@@ -110,7 +110,7 @@ class AnthropicProvider(Provider):
         body: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
-            "messages": messages,
+            "messages": _with_moving_breakpoint(messages),
             "temperature": temperature,
         }
         if system:
@@ -156,7 +156,7 @@ class AnthropicProvider(Provider):
         body: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
-            "messages": messages,
+            "messages": _with_moving_breakpoint(messages),
             "temperature": temperature,
             "stream": True,
         }
@@ -376,6 +376,45 @@ def _tool_to_api(tool: ToolDefinition) -> dict:
         "description": tool.description,
         "input_schema": tool.input_schema,
     }
+
+
+def _with_moving_breakpoint(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return messages with ``cache_control`` on the final content block.
+
+    The moving-breakpoint pattern for agentic loops: marking the last block
+    of each request lets the next request (same prefix + new turns) read all
+    prior turns from cache instead of re-processing them at full input price.
+    Without it, a tool loop pays for turn 1..N-1 again on every turn N —
+    quadratic burn over the loop.
+
+    Non-destructive: the caller's message list is reused and appended to
+    across turns, so the mark must exist only in the request body we build
+    here (marks accumulating on the shared list would exceed the API's
+    4-breakpoint limit).
+    """
+    if not messages:
+        return messages
+    out = list(messages)
+    last = dict(out[-1])
+    content = last.get("content")
+    if isinstance(content, str):
+        if not content:
+            return messages
+        last["content"] = [{
+            "type": "text",
+            "text": content,
+            "cache_control": {"type": "ephemeral"},
+        }]
+    elif isinstance(content, list) and content:
+        blocks = list(content)
+        final = dict(blocks[-1])
+        final["cache_control"] = {"type": "ephemeral"}
+        blocks[-1] = final
+        last["content"] = blocks
+    else:
+        return messages
+    out[-1] = last
+    return out
 
 
 def _parse_response(data: dict, model: str) -> ProviderResponse:

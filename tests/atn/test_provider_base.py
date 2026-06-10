@@ -271,3 +271,184 @@ class TestSendOrchestrate:
         )
         # Should have accumulated usage from all 3 turns
         assert resp.usage.input_tokens == 15
+
+
+# ---------------------------------------------------------------------------
+# History-as-messages (cache-stable prompts)
+# ---------------------------------------------------------------------------
+
+class RecordingProvider(Provider):
+    """Captures the messages list passed to each send() call."""
+
+    def __init__(self, responses: list[ProviderResponse]):
+        self._responses = list(responses)
+        self.seen_messages: list[list[dict]] = []
+
+    @property
+    def name(self) -> str:
+        return "recording"
+
+    async def send(self, *, messages, system="", model="", max_tokens=1024,
+                   tools=None, temperature=0.0) -> ProviderResponse:
+        # Deep-enough copy: the loop appends to the same list across turns.
+        self.seen_messages.append([dict(m) for m in messages])
+        return self._responses.pop(0)
+
+
+class TestNormalizeHistory:
+    def test_role_mapping_and_merge(self):
+        from atn.providers.base import _normalize_history
+        out = _normalize_history([
+            {"role": "system", "content": "status briefing"},
+            {"role": "user", "content": "do the thing"},
+            {"role": "user", "content": "and another"},
+            {"role": "assistant", "content": "done"},
+        ])
+        # system → user-tagged; consecutive user turns merged
+        assert [m["role"] for m in out] == ["user", "assistant"]
+        assert "[system] status briefing" in out[0]["content"]
+        assert "and another" in out[0]["content"]
+
+    def test_assistant_first_gets_resume_marker(self):
+        from atn.providers.base import _normalize_history
+        out = _normalize_history([
+            {"role": "assistant", "content": "earlier reply"},
+            {"role": "user", "content": "next"},
+        ])
+        assert out[0]["role"] == "user"
+        assert out[1]["role"] == "assistant"
+
+    def test_empty_turns_skipped(self):
+        from atn.providers.base import _normalize_history
+        out = _normalize_history([
+            {"role": "user", "content": ""},
+            {"role": "user", "content": "real"},
+        ])
+        assert len(out) == 1
+
+
+class TestOrchestrateHistory:
+    @pytest.mark.asyncio
+    async def test_history_precedes_user_message(self):
+        p = RecordingProvider([
+            ProviderResponse(text="ok", stop_reason="end_turn",
+                             usage=Usage(input_tokens=5, output_tokens=2)),
+        ])
+        await p.send_orchestrate(
+            message="now do X",
+            tools=[],
+            history=[
+                {"role": "user", "content": "earlier ask"},
+                {"role": "assistant", "content": "earlier answer"},
+            ],
+        )
+        msgs = p.seen_messages[0]
+        assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
+        assert msgs[0]["content"] == "earlier ask"
+        assert msgs[-1]["content"] == "now do X"
+
+    @pytest.mark.asyncio
+    async def test_oversized_tool_result_truncated(self):
+        from atn.providers.base import _TOOL_RESULT_CHAR_MAX
+        tc = ToolCall(id="tc1", name="big", input={})
+        p = RecordingProvider([
+            ProviderResponse(tool_calls=[tc], stop_reason="tool_use",
+                             usage=Usage(input_tokens=5, output_tokens=2)),
+            ProviderResponse(text="done", stop_reason="end_turn",
+                             usage=Usage(input_tokens=5, output_tokens=2)),
+        ])
+
+        async def executor(name, inp):
+            return {"blob": "x" * (_TOOL_RESULT_CHAR_MAX * 2)}
+
+        await p.send_orchestrate(
+            message="go",
+            tools=[{"name": "big", "description": "", "input_schema": {"type": "object"}}],
+            tool_executor=executor,
+            max_turns=3,
+        )
+        # Second send's last message carries the tool_result block
+        second = p.seen_messages[1]
+        block = second[-1]["content"][0]
+        assert block["type"] == "tool_result"
+        assert len(block["content"]) <= _TOOL_RESULT_CHAR_MAX + 200
+        assert "[truncated" in block["content"]
+
+
+class TestAnthropicMovingBreakpoint:
+    def test_string_content_marked(self):
+        from atn.providers.anthropic import _with_moving_breakpoint
+        msgs = [{"role": "user", "content": "hello"}]
+        out = _with_moving_breakpoint(msgs)
+        assert out[-1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        # Non-destructive: original untouched
+        assert msgs[-1]["content"] == "hello"
+
+    def test_block_content_marked_on_last_block_only(self):
+        from atn.providers.anthropic import _with_moving_breakpoint
+        msgs = [
+            {"role": "user", "content": "q"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "a", "content": "r1"},
+                {"type": "tool_result", "tool_use_id": "b", "content": "r2"},
+            ]},
+        ]
+        out = _with_moving_breakpoint(msgs)
+        blocks = out[-1]["content"]
+        assert "cache_control" not in blocks[0]
+        assert blocks[1]["cache_control"] == {"type": "ephemeral"}
+        # Original blocks untouched
+        assert "cache_control" not in msgs[-1]["content"][1]
+
+    def test_empty_messages_passthrough(self):
+        from atn.providers.anthropic import _with_moving_breakpoint
+        assert _with_moving_breakpoint([]) == []
+
+
+class TestStickyHistoryTrim:
+    def test_trim_boundary_sticky_across_calls(self):
+        from types import SimpleNamespace
+        from atn.runtime.execution_engine import ExecutionEngine
+
+        eng = ExecutionEngine.__new__(ExecutionEngine)
+
+        def turn(role, content):
+            return SimpleNamespace(role=role, content=content)
+
+        # ~50k chars per turn; budget 400k, trim target 240k
+        big = "y" * 50_000
+        turns = [turn("user" if i % 2 == 0 else "assistant", big) for i in range(10)]
+        out1 = eng._build_history_messages("agent1", turns)
+        # 10 * 50k = 500k > 400k → trims to <= 240k (4 turns) + marker
+        kept1 = [m for m in out1 if m["content"] != "[Earlier conversation trimmed]"]
+        assert len(kept1) <= 5
+        start_after_first = eng._history_trim_start["agent1"]
+        assert start_after_first > 0
+
+        # Two more turns: kept suffix still under budget → boundary unchanged
+        turns += [turn("user", big), turn("assistant", big)]
+        eng._build_history_messages("agent1", turns)
+        assert eng._history_trim_start["agent1"] == start_after_first
+
+    def test_heartbeat_boilerplate_compressed(self):
+        from types import SimpleNamespace
+        from atn.runtime.execution_engine import ExecutionEngine
+
+        eng = ExecutionEngine.__new__(ExecutionEngine)
+        turns = [
+            SimpleNamespace(role="user", content="[HEARTBEAT] This is an automatic heartbeat wake-up from the runtime (interval: 300s). Check on active goals."),
+            SimpleNamespace(role="assistant", content="Nothing to do."),
+        ]
+        out = eng._build_history_messages("a2", turns)
+        assert out[0]["content"] == ExecutionEngine._HEARTBEAT_HISTORY_MARKER
+
+    def test_reset_conversation_resets_boundary(self):
+        from types import SimpleNamespace
+        from atn.runtime.execution_engine import ExecutionEngine
+
+        eng = ExecutionEngine.__new__(ExecutionEngine)
+        eng._history_trim_start = {"a3": 50}
+        turns = [SimpleNamespace(role="user", content="fresh start")]
+        out = eng._build_history_messages("a3", turns)
+        assert out == [{"role": "user", "content": "fresh start"}]
+        assert eng._history_trim_start["a3"] == 0

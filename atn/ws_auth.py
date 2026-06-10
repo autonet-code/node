@@ -155,6 +155,11 @@ class ClientSession:
     nonce_issued_at: float = 0.0
     conn_id: str = ""                      # server-random, binds a sig to this socket
     auth_failures: int = 0                 # rate-limit / lockout counter
+    # Outbound event delivery (set by the WS server on connect). Events are
+    # queued and written by a per-connection writer task so a slow client's
+    # TCP backpressure can never stall the runtime's EventBus.
+    event_queue: object | None = None      # asyncio.Queue[str]
+    dropped_events: int = 0                # count of events dropped on overflow
 
     def challenge_expired(self, now: float | None = None) -> bool:
         now = now if now is not None else time.time()

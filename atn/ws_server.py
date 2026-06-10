@@ -200,6 +200,13 @@ class WebSocketBridge:
         self._sessions[ws] = session
         log.info("Client connected: %s (local=%s)", remote, local)
 
+        # Per-connection outbound event queue + writer task. _on_event enqueues
+        # (non-blocking); the writer drains to the socket. A slow client fills
+        # its own queue and drops its own events — it cannot backpressure the
+        # EventBus and stall every agent's streaming output.
+        session.event_queue = asyncio.Queue(maxsize=2000)
+        writer_task = asyncio.create_task(self._event_writer(ws, session))
+
         try:
             if session.authed:
                 # Authorized at connect (local): send the snapshot immediately,
@@ -225,8 +232,25 @@ class WebSocketBridge:
         except Exception:
             log.exception("Client handler error")
         finally:
+            writer_task.cancel()
             self._sessions.pop(ws, None)
+            if session.dropped_events:
+                log.warning("Client %s: %d event(s) dropped (slow consumer)",
+                            remote, session.dropped_events)
             log.info("Client disconnected: %s", remote)
+
+    @staticmethod
+    async def _event_writer(ws: ServerConnection, session: "ClientSession") -> None:
+        """Drain a session's event queue to its socket until cancelled."""
+        queue = session.event_queue
+        try:
+            while True:
+                payload = await queue.get()
+                await ws.send(payload)
+        except (websockets.ConnectionClosed, asyncio.CancelledError):
+            pass
+        except Exception:
+            log.debug("Event writer error", exc_info=True)
 
     async def _send_snapshot(self, ws: ServerConnection, session: ClientSession) -> None:
         """Send the (scope-aware, redacted-for-non-local) initial snapshot."""
@@ -1115,6 +1139,24 @@ class WebSocketBridge:
         # Phase 12.20: substrate nodes — list visualization-ready nodes
         # (coords, recent_mint, score, parent_id) with optional spatial
         # binning for low-LOD views. Powers the substrate visualization.
+        # External capsule writers (e.g. the substrate MCP server used by
+        # Claude Code) drop conversation files directly into the agents dir.
+        # This nudge bumps the substrate feed's pending counter so the
+        # capsule counts toward the next ingestion cycle instead of waiting
+        # for unrelated agent executions to cross the threshold.
+        if msg_type == "substrate_feed_nudge":
+            agent_id = str(msg.get("agent_id", "") or "external")
+            autonet = getattr(self.runtime, "autonet", None)
+            service = getattr(autonet, "_service", None) if autonet else None
+            if service is None or not hasattr(service, "notify_execution"):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "autonet service not running"}
+            try:
+                service.notify_execution(agent_id, "capsule", "completed")
+                return {"msg_id": msg_id, "ok": True, "result": {"nudged": True}}
+            except Exception as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
         if msg_type == "rpb_substrate_nodes":
             try:
                 max_nodes = int(msg.get("max_nodes", 200))
@@ -1688,7 +1730,6 @@ class WebSocketBridge:
         }, default=str)
 
         origin = self._event_origin(event)
-        stale: list[ServerConnection] = []
         for ws, session in list(self._sessions.items()):
             # Unauthed sessions get nothing until they complete the handshake.
             if not session.authed:
@@ -1698,14 +1739,19 @@ class WebSocketBridge:
                 live = self.runtime.registry.get_subtree_ids(session.root_agent_id)
                 if origin is not None and origin not in live:
                     continue
+            queue = session.event_queue
+            if queue is None:
+                continue
             try:
-                await ws.send(payload)
-            except websockets.ConnectionClosed:
-                stale.append(ws)
-            except Exception:
-                stale.append(ws)
-        for ws in stale:
-            self._sessions.pop(ws, None)
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Slow consumer: drop ITS event rather than stall the bus.
+                session.dropped_events += 1
+                if session.dropped_events in (1, 100, 1000):
+                    log.warning(
+                        "WS client queue full (%d dropped so far) — slow consumer",
+                        session.dropped_events,
+                    )
 
     @staticmethod
     def _event_origin(event: Event) -> str | None:

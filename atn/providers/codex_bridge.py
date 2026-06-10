@@ -22,6 +22,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -52,6 +53,13 @@ _BRIDGE_SCRIPT = _BRIDGE_DIR / "codex-bridge.ts"
 
 _EVENT_PREFIX = "@@EVENT@@"
 
+# Wedge-guard knobs — same rationale as the Claude bridge (bridge.py):
+# "wedged" means no stdout line AND no stderr event for the ceiling.
+_ORCH_IDLE_CEILING = float(os.environ.get("ATN_BRIDGE_IDLE_CEILING", "1800"))
+_ORCH_PROBE_INTERVAL = 120.0
+_STDIN_DRAIN_TIMEOUT = 60.0
+_TOOL_RESULT_CHAR_MAX = 40_000
+
 
 class CodexBridgeProvider(Provider):
     """OpenAI Codex provider via the TypeScript bridge subprocess.
@@ -74,7 +82,8 @@ class CodexBridgeProvider(Provider):
         self._request_id = 0
         self._lock = asyncio.Lock()
         self._stderr_task: asyncio.Task | None = None
-        self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=10_000)
+        self._last_subprocess_activity: float = time.monotonic()
 
         # Optional EventBus for emitting tool use events.
         self.event_bus: EventBus | None = None
@@ -352,6 +361,8 @@ class CodexBridgeProvider(Provider):
                     f"Codex bridge stdin broken during orchestrate: {exc}",
                     provider="codex_max",
                 ) from exc
+            # Reset the wedge clock — see bridge.py.
+            self._last_subprocess_activity = time.monotonic()
 
             log.info("Codex orchestrate request sent (tools=%d, max_turns=%d)", len(tools), max_turns)
 
@@ -432,12 +443,13 @@ class CodexBridgeProvider(Provider):
                 final_resp: dict[str, Any] | None = None
 
                 while True:
-                    raw = await self._process.stdout.readline()
+                    raw = await self._read_stdout_guarded()
                     if not raw:
                         raise ProviderError(
                             "Codex bridge stdout closed during orchestrate",
                             provider="codex_max",
                         )
+                    self._last_subprocess_activity = time.monotonic()
 
                     try:
                         msg = json.loads(raw)
@@ -474,19 +486,39 @@ class CodexBridgeProvider(Provider):
                                 },
                             ))
 
+                        # Cap oversized results — same rationale as bridge.py
+                        result_payload: Any = result
+                        _probe = json.dumps(result, default=str)
+                        if len(_probe) > _TOOL_RESULT_CHAR_MAX:
+                            result_payload = (
+                                _probe[:_TOOL_RESULT_CHAR_MAX]
+                                + f"... [truncated: result was {len(_probe)} chars; "
+                                "re-invoke the tool with a narrower query if more is needed]"
+                            )
                         result_msg = json.dumps({
                             "type": "tool_result",
                             "call_id": call_id,
-                            "result": result,
+                            "result": result_payload,
                         }, default=str) + "\n"
                         try:
                             self._process.stdin.write(result_msg.encode())
-                            await self._process.stdin.drain()
+                            await asyncio.wait_for(
+                                self._process.stdin.drain(),
+                                timeout=_STDIN_DRAIN_TIMEOUT,
+                            )
+                        except asyncio.TimeoutError as exc:
+                            raise ProviderError(
+                                f"Codex bridge stdin flush stalled >{int(_STDIN_DRAIN_TIMEOUT)}s "
+                                "sending tool_result (pipe deadlock?)",
+                                provider="codex_max",
+                            ) from exc
                         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
                             raise ProviderError(
                                 f"Codex bridge stdin broken sending tool_result: {exc}",
                                 provider="codex_max",
                             ) from exc
+                        # Our own write counts as activity — see bridge.py.
+                        self._last_subprocess_activity = time.monotonic()
                         continue
 
                     # Final response (has 'id' field)
@@ -637,7 +669,7 @@ class CodexBridgeProvider(Provider):
                 provider="codex_max",
             )
 
-        self._event_queue = asyncio.Queue()
+        self._event_queue = asyncio.Queue(maxsize=10_000)
 
         # Resolve JS runtime: prefer bun, fall back to node
         import shutil
@@ -684,6 +716,40 @@ class CodexBridgeProvider(Provider):
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         log.info("Codex bridge process started (pid=%s)", self._process.pid)
 
+    async def _read_stdout_guarded(self) -> bytes:
+        """``stdout.readline()`` with a wedge guard — see bridge.py for the
+        full rationale. Kills the subprocess and raises instead of holding
+        the provider lock forever when both pipes go silent."""
+        assert self._process and self._process.stdout
+        while True:
+            try:
+                return await asyncio.wait_for(
+                    self._process.stdout.readline(), timeout=_ORCH_PROBE_INTERVAL,
+                )
+            except asyncio.TimeoutError:
+                if self._process.returncode is not None:
+                    raise ProviderError(
+                        f"Codex bridge process exited ({self._process.returncode}) "
+                        "during orchestrate",
+                        provider="codex_max",
+                    )
+                silent_for = time.monotonic() - self._last_subprocess_activity
+                if silent_for < _ORCH_IDLE_CEILING:
+                    continue
+                log.error(
+                    "Codex bridge wedged: no activity for %.0fs — killing "
+                    "subprocess (pid=%s)", silent_for, self._process.pid,
+                )
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    pass
+                raise ProviderError(
+                    f"Codex bridge unresponsive (no activity for {int(silent_for)}s) — "
+                    "subprocess killed; it will respawn on the next request",
+                    provider="codex_max",
+                )
+
     async def _drain_stderr(self) -> None:
         """Read bridge stderr, routing @@EVENT@@ lines to the event queue."""
         assert self._process and self._process.stderr
@@ -691,6 +757,7 @@ class CodexBridgeProvider(Provider):
             raw = await self._process.stderr.readline()
             if not raw:
                 break
+            self._last_subprocess_activity = time.monotonic()
             text = raw.decode(errors="replace").rstrip()
             if not text:
                 continue
@@ -701,7 +768,10 @@ class CodexBridgeProvider(Provider):
                     etype = event.get("type", "")
                     if etype not in ("text_delta",):
                         log.info("codex-bridge stderr event: type=%s", etype)
-                    await self._event_queue.put(event)
+                    try:
+                        self._event_queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        log.warning("codex bridge event queue full — dropping %s event", etype)
                 except json.JSONDecodeError:
                     log.debug("codex-bridge: bad event JSON: %s", payload[:200])
             else:

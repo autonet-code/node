@@ -21,6 +21,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,6 +52,20 @@ _BRIDGE_SCRIPT = _BRIDGE_DIR / "claude-bridge.ts"
 
 _EVENT_PREFIX = "@@EVENT@@"
 
+# Wedge guard for the orchestrate stdout loop. The SDK can legitimately go
+# a long time without stdout traffic (its built-in tools run inside the
+# subprocess), but stderr events keep flowing while it works. "Wedged" is
+# therefore TOTAL silence — no stdout line AND no stderr event — for this
+# long. Overridable for unusual deployments.
+_ORCH_IDLE_CEILING = float(os.environ.get("ATN_BRIDGE_IDLE_CEILING", "1800"))
+# How often the guarded readline wakes up to re-check liveness/activity.
+_ORCH_PROBE_INTERVAL = 120.0
+# Timeout for stdin write flushes (pipe-deadlock guard).
+_STDIN_DRAIN_TIMEOUT = 60.0
+# Cap on a single tool result relayed to the SDK (~10k tokens). Oversized
+# results inflate every subsequent SDK turn and can wedge the stdin pipe.
+_TOOL_RESULT_CHAR_MAX = 40_000
+
 
 class BridgeProvider(Provider):
     """Claude Max provider via the TypeScript bridge subprocess.
@@ -71,7 +86,14 @@ class BridgeProvider(Provider):
         self._request_id = 0
         self._lock = asyncio.Lock()
         self._stderr_task: asyncio.Task | None = None
-        self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        # Bounded: a slow/stuck consumer must not let the queue grow without
+        # limit in a long-lived daemon. The producer drops (with a log) when
+        # full rather than blocking — blocking would stop the stderr drain
+        # and stall the SDK subprocess on its next stderr write.
+        self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=10_000)
+        # Monotonic timestamp of the last line seen from the subprocess
+        # (stdout or stderr). The orchestrate wedge guard keys off this.
+        self._last_subprocess_activity: float = time.monotonic()
 
         # Optional EventBus for emitting tool use events.
         # Set by the caller (e.g. runtime) after construction.
@@ -440,6 +462,10 @@ class BridgeProvider(Provider):
                     f"Bridge stdin broken during orchestrate: {exc}",
                     provider="claude_max",
                 ) from exc
+            # Reset the wedge clock: the process may have sat idle since the
+            # previous orchestration, and a stale timestamp would get a
+            # healthy-but-thinking bridge killed on the first probe.
+            self._last_subprocess_activity = time.monotonic()
 
             log.info("Orchestrate request sent (tools=%d, max_turns=%d)", len(tools), max_turns)
 
@@ -606,12 +632,13 @@ class BridgeProvider(Provider):
                 final_resp: dict[str, Any] | None = None
 
                 while True:
-                    raw = await self._process.stdout.readline()
+                    raw = await self._read_stdout_guarded()
                     if not raw:
                         raise ProviderError(
                             "Bridge stdout closed during orchestrate",
                             provider="claude_max",
                         )
+                    self._last_subprocess_activity = time.monotonic()
 
                     try:
                         msg = json.loads(raw)
@@ -649,20 +676,44 @@ class BridgeProvider(Provider):
                                 },
                             ))
 
-                        # Send tool_result back to bridge
+                        # Send tool_result back to bridge. Cap oversized
+                        # results: they inflate every subsequent SDK turn,
+                        # and a multi-MB line can wedge the stdin pipe
+                        # against an SDK that is mid-write on stdout.
+                        result_payload: Any = result
+                        _probe = json.dumps(result, default=str)
+                        if len(_probe) > _TOOL_RESULT_CHAR_MAX:
+                            result_payload = (
+                                _probe[:_TOOL_RESULT_CHAR_MAX]
+                                + f"... [truncated: result was {len(_probe)} chars; "
+                                "re-invoke the tool with a narrower query if more is needed]"
+                            )
                         result_msg = json.dumps({
                             "type": "tool_result",
                             "call_id": call_id,
-                            "result": result,
+                            "result": result_payload,
                         }, default=str) + "\n"
                         try:
                             self._process.stdin.write(result_msg.encode())
-                            await self._process.stdin.drain()
+                            await asyncio.wait_for(
+                                self._process.stdin.drain(),
+                                timeout=_STDIN_DRAIN_TIMEOUT,
+                            )
+                        except asyncio.TimeoutError as exc:
+                            raise ProviderError(
+                                f"Bridge stdin flush stalled >{int(_STDIN_DRAIN_TIMEOUT)}s "
+                                "sending tool_result (pipe deadlock?)",
+                                provider="claude_max",
+                            ) from exc
                         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
                             raise ProviderError(
                                 f"Bridge stdin broken sending tool_result: {exc}",
                                 provider="claude_max",
                             ) from exc
+                        # Our own write counts as activity — a tool that ran
+                        # longer than the idle ceiling must not leave a stale
+                        # timestamp that gets a healthy bridge killed.
+                        self._last_subprocess_activity = time.monotonic()
                         continue
 
                     # Final response (has 'id' field matching our request)
@@ -1225,8 +1276,8 @@ class BridgeProvider(Provider):
                 provider="claude_max",
             )
 
-        # Fresh queue for new process
-        self._event_queue = asyncio.Queue()
+        # Fresh queue for new process (bounded — see __init__)
+        self._event_queue = asyncio.Queue(maxsize=10_000)
 
         # Resolve JS runtime: prefer bun, fall back to node
         import shutil
@@ -1286,6 +1337,50 @@ class BridgeProvider(Provider):
         # Give it a generous timeout for first cold start
         log.info("Bridge process started (pid=%s)", self._process.pid)
 
+    async def _read_stdout_guarded(self) -> bytes:
+        """``stdout.readline()`` with a wedge guard.
+
+        Waits in short slices so it can notice (a) the subprocess exiting
+        without closing stdout, and (b) total silence — no stdout line and
+        no stderr event — exceeding ``_ORCH_IDLE_CEILING``. Long quiet
+        stretches on stdout alone are NORMAL (the SDK's built-in tools run
+        in-process and only stderr events flow), so silence is measured
+        against ``_last_subprocess_activity``, which both pipes update.
+
+        On a wedge: kill the subprocess (the next call respawns it) and
+        raise ProviderError instead of blocking the agent — and the
+        provider lock — forever.
+        """
+        assert self._process and self._process.stdout
+        while True:
+            try:
+                return await asyncio.wait_for(
+                    self._process.stdout.readline(), timeout=_ORCH_PROBE_INTERVAL,
+                )
+            except asyncio.TimeoutError:
+                if self._process.returncode is not None:
+                    raise ProviderError(
+                        f"Bridge process exited ({self._process.returncode}) "
+                        "during orchestrate",
+                        provider="claude_max",
+                    )
+                silent_for = time.monotonic() - self._last_subprocess_activity
+                if silent_for < _ORCH_IDLE_CEILING:
+                    continue        # stderr is still flowing — SDK is busy, not wedged
+                log.error(
+                    "Bridge wedged: no stdout/stderr activity for %.0fs — killing "
+                    "subprocess (pid=%s)", silent_for, self._process.pid,
+                )
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    pass
+                raise ProviderError(
+                    f"Bridge unresponsive (no activity for {int(silent_for)}s) — "
+                    "subprocess killed; it will respawn on the next request",
+                    provider="claude_max",
+                )
+
     async def _drain_stderr(self) -> None:
         """Read bridge stderr, routing @@EVENT@@ lines to the event queue.
 
@@ -1297,6 +1392,7 @@ class BridgeProvider(Provider):
             raw = await self._process.stderr.readline()
             if not raw:
                 break
+            self._last_subprocess_activity = time.monotonic()
             text = raw.decode(errors="replace").rstrip()
             if not text:
                 continue
@@ -1318,7 +1414,12 @@ class BridgeProvider(Provider):
                         continue
                     if etype not in ("text_delta",):
                         log.info("bridge stderr event: type=%s", etype)
-                    await self._event_queue.put(event)
+                    try:
+                        self._event_queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        # Drop rather than block: blocking here stops the
+                        # stderr drain and stalls the SDK on its next write.
+                        log.warning("bridge event queue full — dropping %s event", etype)
                 except json.JSONDecodeError:
                     log.debug("bridge: bad event JSON: %s", payload[:200])
             else:
