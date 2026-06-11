@@ -1202,6 +1202,46 @@ class WebSocketBridge:
             except Exception as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
+        # Targeted dispute: attach a CON child under a specific
+        # substrate node. The claim text is the dispute's referent and
+        # the embedder input; the author must be an on-chain-registered
+        # agent (same attribution policy as the substrate feed).
+        if msg_type == "substrate_post_con":
+            autonet = getattr(self.runtime, "autonet", None)
+            service = getattr(autonet, "_service", None) if autonet else None
+            world_service = getattr(service, "_world_service", None) if service else None
+            if world_service is None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "autonet world service not running"}
+            target_node_id = str(msg.get("target_node_id", "") or "")
+            claim = str(msg.get("claim", "") or "")
+            local_agent_id = str(msg.get("agent_id", "") or "")
+            if not target_node_id or not claim:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "target_node_id and claim are required"}
+            agent_def = self.runtime.registry.get_agent(local_agent_id) \
+                if local_agent_id else None
+            identity = getattr(agent_def, "identity", None)
+            if (identity is None or not identity.address
+                    or not identity.registered_on_chain):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "agent_id must name an on-chain-registered "
+                                 "agent (disputes are attributed to its 0x "
+                                 "address)"}
+            try:
+                receipt = await asyncio.to_thread(
+                    world_service.submit_con,
+                    target_node_id,
+                    claim,
+                    agent_id=identity.address,
+                )
+                return {"msg_id": msg_id, "ok": True, **receipt}
+            except ValueError as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            except Exception as exc:
+                log.error("substrate_post_con failed: %s", exc, exc_info=True)
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
         if msg_type == "rpb_substrate_nodes":
             try:
                 max_nodes = int(msg.get("max_nodes", 200))

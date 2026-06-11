@@ -112,6 +112,36 @@ def _hash_problem_resolution(problem: str, resolution: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+# Maximum characters of claim text carried on a substrate event. The
+# claim is the post's disputable referent AND the embedder input, so it
+# must be a complete condensed conclusion — not a teaser — while staying
+# small enough for a gossiped, replayed-forever log.
+CLAIM_MAX_CHARS = 300
+
+
+def _claim_text(problem: str, resolution: str, max_chars: int = CLAIM_MAX_CHARS) -> str:
+    """Condense a work unit to its on-wire claim text.
+
+    V1 condensation: the head of the resolution (answers lead with the
+    conclusion), prefixed with a one-line problem cue when it fits.
+    The claim — not the problem/resolution pair — is what gets
+    embedded, so coords are recomputable by any peer from the event
+    alone.
+    """
+    resolution = " ".join((resolution or "").split())
+    problem = " ".join((problem or "").split())
+    cue_budget = max_chars // 3
+    cue = problem[:cue_budget]
+    body_budget = max_chars - len(cue) - 4 if cue else max_chars
+    body = resolution[:body_budget]
+    return f"{cue} :: {body}" if cue else body
+
+
+def _hash_claim(claim: str) -> str:
+    import hashlib
+    return hashlib.sha256(claim.encode("utf-8")).hexdigest()[:16]
+
+
 class WorldService:
     """Long-lived holder of one persistent World, one per RPB."""
 
@@ -550,6 +580,12 @@ class WorldService:
                         coords=list(observation.coords),
                         polarity_axis=list(axis),
                         content=observation.label or "",
+                        # Without this, replayed nodes lose their
+                        # observation link and cross-tendency evaluation
+                        # silently takes the anchor path — replayed
+                        # worlds drift from the live one (seen as 5-vs-30
+                        # stakes on the same node).
+                        observation_id=observation.id,
                     ))
 
             # 3. Equilibrate. The events derived here are NOT persisted
@@ -624,22 +660,28 @@ class WorldService:
     ) -> Dict[str, Any]:
         """Submit a list of (problem, resolution, outcome) tuples.
 
-        Each work unit is converted to an Observation in the
-        concatenated coordinate space:
-          - charter head: zeros (Phase 2 wires the LLM-binary-flag
-            adapter at a later step; for now usefulness signal only)
-          - embedding tail: from the usefulness embedder
+        Each work unit is condensed to a claim text (``_claim_text``)
+        which serves three roles at once:
+          - the event's ``label``: the human-readable, disputable
+            record of what was concluded;
+          - the embedder input: the coordinate tail is derived from
+            the claim alone, so any peer can recompute the embedding
+            from the event and prove fabricated coords;
+          - the observation id: content-addressed from the claim, so
+            identical conclusions dedup.
+
+        Charter head is zeros: alignment placement is not self-graded;
+        it emerges from subsequent network activity (targeted PRO/CON
+        posts — see ``submit_con``).
 
         Each observation is submitted via ``submit_observation`` with
         ``sprout_rootless=True`` so the locator can find them later.
-        Outcome controls position (PRO when accepted+kept >= 0).
 
         Returns a summary receipt with per-unit event counts and
         score deltas.
         """
         from .world_model_substrate.usefulness_coords import (
             default_usefulness_embedder,
-            coords_for_problem_resolution,
         )
 
         if not work_units:
@@ -659,21 +701,11 @@ class WorldService:
 
             for unit in work_units:
                 problem, resolution, outcome = unit
-                tail = coords_for_problem_resolution(
-                    problem, resolution, embedder=embedder,
-                )
-                # Pad/truncate the embedding to match self.embedding_dim.
-                tail_t = tuple(tail)[: self.embedding_dim]
-                if len(tail_t) < self.embedding_dim:
-                    tail_t = tail_t + (0.0,) * (self.embedding_dim - len(tail_t))
-                # Charter head: zeros for now. (Tier 3A LLM-binary-flag
-                # integration will fill this in at a follow-up.)
-                charter_head = (0.0, 0.0, 0.0, 0.0)
-                coords = charter_head + tail_t
+                claim = _claim_text(problem, resolution)
+                coords = self.coords_for_text(claim, embedder=embedder)
 
-                obs_id = "wu_" + _hash_problem_resolution(problem, resolution)
-                label = (problem or "")[:80]
-                obs = Observation(id=obs_id, coords=coords, label=label)
+                obs_id = "wu_" + _hash_claim(claim)
+                obs = Observation(id=obs_id, coords=coords, label=claim)
 
                 receipt = self.submit_observation(
                     obs,
@@ -693,6 +725,152 @@ class WorldService:
                 "rounds": total_rounds,
                 "root_scores_before": scores_before,
                 "root_scores_after": scores_after,
+            }
+
+    def submit_con(
+        self,
+        target_node_id: str,
+        claim: str,
+        *,
+        agent_id: str = "default",
+        embedder: Optional[Any] = None,
+        equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
+        equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
+    ) -> Dict[str, Any]:
+        """Post a targeted CON: dispute a specific existing claim.
+
+        The dispute attaches as a CON child *under* ``target_node_id``,
+        so it directly subtracts from the target's net_score — and
+        therefore from the target's mint (mint is the target's own
+        score rise). This is the missing reply-to primitive: before
+        this, CONs could only land at thesis level as siblings, which
+        a specific entry's mint never felt.
+
+        Mechanics:
+          - ``claim`` (capped at CLAIM_MAX_CHARS) is the dispute's
+            referent text; coords derive from it, so peers can verify.
+          - The event carries ``author_post=True``: replay adds one
+            unit-weight post by ``agent_id`` on the CON node, giving
+            the dispute immediate standing of 1. Further standing
+            accrues organically (other agents posting PRO on the CON,
+            or their own CONs).
+          - Both events are causal and gossip to peers; federated
+            replay resolves the live parent id (deterministic node
+            ids) and reproduces the same structure bit-identically.
+
+        Returns a receipt with the CON node id and the target's score
+        before/after local equilibration.
+        """
+        from .world_model_substrate.events import SubClaimSprouted
+
+        claim = " ".join((claim or "").split())[:CLAIM_MAX_CHARS]
+        if not claim:
+            raise ValueError("claim text is required")
+
+        coords = self.coords_for_text(claim, embedder=embedder)
+
+        with self._lock:
+            # Locate the target node and its owning tendency.
+            owner = None
+            target = None
+            for tendency in self._world.tendencies.values():
+                node = tendency.tree.get_node(target_node_id)
+                if node is not None:
+                    owner, target = tendency, node
+                    break
+            if target is None:
+                raise ValueError(f"unknown target node: {target_node_id}")
+            if target.id == owner.tree.root_node.id:
+                raise ValueError(
+                    "target is a charter root; thesis-level CONs flow "
+                    "through ordinary observations, not submit_con"
+                )
+
+            score_before = target.net_score
+
+            # Polarity: oppose the target. Mirrors _ensure_obs_child's
+            # CON handling — negate the parent claim's axis when known,
+            # else oppose the dispute's own direction.
+            parent_claim = owner._node_to_claim.get(target_node_id)
+            if parent_claim is not None and parent_claim.polarity_axis:
+                polarity = tuple(-u for u in parent_claim.polarity_axis)
+            else:
+                axis = self._axis_from_coords(coords)
+                polarity = tuple(-u for u in axis) if axis else ()
+
+            obs_id = "con_" + _hash_claim(f"{target_node_id}|{claim}")
+            obs = Observation(id=obs_id, coords=coords, label=claim)
+
+            recorder = _EventRecorder(agent_id=agent_id)
+            before_ids = _all_node_ids(self._world)
+
+            self._world.add_observation(obs)
+            recorder.observation_added(obs)
+
+            con_node = owner.sprout_child(
+                parent_node_id=target_node_id,
+                position=Position.CON,
+                anchor=tuple(coords),
+                polarity_axis=polarity,
+                observation=obs,
+                content=claim,
+                world=self._world,
+            )
+            con_node.add_post(agent_id)
+
+            recorder._seq += 1
+            recorder.events.append(SubClaimSprouted(
+                seq=recorder._seq,
+                author_agent=agent_id,
+                tendency_id=owner.id,
+                parent_id=target_node_id,
+                node_id=con_node.id,
+                position=Position.CON.value,
+                coords=list(coords),
+                polarity_axis=list(polarity),
+                content=claim,
+                observation_id=obs_id,
+                author_post=True,
+            ))
+
+            scope = None
+            if _SCOPED_EQUILIBRATE_ENABLED:
+                scope = scope_for_observation(self._world, obs)
+            rounds = 0
+            if scope is None or scope:
+                rounds = equilibrate(
+                    self._world,
+                    max_rounds=equilibrate_rounds,
+                    tolerance=equilibrate_tolerance,
+                    scope=scope,
+                )
+            recorder.sub_claims_after_equilibrate(self._world, before_ids)
+
+            full_events = [e.to_dict() for e in recorder.events]
+            # Both authored events are causal: the observation and the
+            # explicit targeted sprout (seq 1 and 2). Derived sprouts
+            # past those replay from the equilibrate marker.
+            causal_events = [ev for ev in full_events if ev.get("seq", 0) <= 2]
+            self._buffer_epoch_events_locked(full_events)
+            self._broadcast_local_events_locked(causal_events)
+            self._persistence.append_events(
+                causal_events,
+                equilibrate_after=True,
+                equilibrate_rounds=equilibrate_rounds,
+                equilibrate_tolerance=equilibrate_tolerance,
+            )
+            self._events_applied += len(causal_events)
+            self._events_since_snapshot += len(causal_events)
+            self._maybe_snapshot_locked()
+
+            return {
+                "con_node_id": con_node.id,
+                "target_node_id": target_node_id,
+                "tendency_id": owner.id,
+                "events_applied": len(causal_events),
+                "rounds": rounds,
+                "target_score_before": score_before,
+                "target_score_after": target.net_score,
             }
 
     def coords_for_text(

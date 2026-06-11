@@ -425,3 +425,75 @@ def coords_for_query(
     if embedder is None:
         embedder = default_usefulness_embedder()
     return embedder(f"PROBLEM: {query}")
+
+
+# ---------------------------------------------------------------------------
+# Claim-coords verification
+# ---------------------------------------------------------------------------
+
+
+def _cosine(a, b) -> float:
+    n = min(len(a), len(b))
+    if n == 0:
+        return 0.0
+    dot = sum(a[i] * b[i] for i in range(n))
+    ma = sum(x * x for x in a[:n]) ** 0.5
+    mb = sum(x * x for x in b[:n]) ** 0.5
+    if ma == 0.0 or mb == 0.0:
+        return 1.0 if ma == mb else 0.0
+    return dot / (ma * mb)
+
+
+def verify_claim_coords(
+    coords,
+    label: str,
+    *,
+    head_dims: Optional[int] = None,
+    cosine_min: float = 0.995,
+    dim: Optional[int] = None,
+) -> dict:
+    """Check that an event's coordinate tail really embeds its claim text.
+
+    The claim (event ``label``) is the embedder input by protocol, so
+    any peer can recompute the tail and compare. A post whose tail
+    matches neither backend is carrying fabricated coordinates —
+    text parked at an address its content doesn't embed to.
+
+    Both backends are tried because authoring daemons legitimately
+    fall back to the hashing embedder while the semantic model loads
+    (hashing is bit-deterministic; the semantic model is pinned but
+    floats may jitter across platforms, hence the cosine threshold).
+
+    Returns {valid, cosine, backend} — backend is which embedder
+    matched best.
+    """
+    if head_dims is None:
+        from .adapter import N_DIMS
+        head_dims = N_DIMS
+    tail = tuple(coords)[head_dims:]
+    if dim is None:
+        dim = len(tail) or DEFAULT_DIM
+
+    candidates = [("hashing", HashingEmbedder(dim=dim))]
+    try:
+        semantic = default_usefulness_embedder(dim=dim)
+        if not isinstance(semantic, HashingEmbedder):
+            candidates.append(("semantic", semantic))
+    except Exception:
+        pass
+
+    best_backend, best_cos = "", -1.0
+    for name, embedder in candidates:
+        try:
+            recomputed = tuple(coords_for_query(label, embedder=embedder))
+        except Exception:
+            continue
+        cos = _cosine(tail, recomputed)
+        if cos > best_cos:
+            best_backend, best_cos = name, cos
+
+    return {
+        "valid": best_cos >= cosine_min,
+        "cosine": best_cos,
+        "backend": best_backend,
+    }

@@ -166,13 +166,17 @@ def test_locator_retrieves_on_embedding_tail(tmp_path):
 
 
 def test_default_embedding_dim_is_full_usefulness_layer(tmp_path):
-    """The daemon defaults to embedding_dim=1024 so the usefulness
-    layer is on out of the box. Pure-charter mode is opt-in via
-    embedding_dim=0."""
+    """The daemon defaults to a non-zero embedding_dim so the
+    usefulness layer is on out of the box (64 since the Phase 2.2
+    dim_sweep — 95% of native-384 categorical separation). Pure-
+    charter mode is opt-in via embedding_dim=0."""
+    from nodes.common.world_service import _DEFAULT_EMBEDDING_DIM
+
     svc = WorldService(rpb_address="rpb_concat_default", data_root=tmp_path)
     try:
+        assert _DEFAULT_EMBEDDING_DIM > 0
         for tendency in svc._world.tendencies.values():
-            assert len(tendency.anchor) == N_DIMS + 1024
+            assert len(tendency.anchor) == N_DIMS + _DEFAULT_EMBEDDING_DIM
     finally:
         svc.shutdown()
 

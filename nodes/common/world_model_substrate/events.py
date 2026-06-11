@@ -97,6 +97,12 @@ class SubClaimSprouted:
     # When non-empty, takes precedence; each entry has keys
     # parent_id, position, tendency_id.
     parents: List[Dict[str, str]] = field(default_factory=list)
+    # Targeted-dispute support: when True, replay adds one unit-weight
+    # post by `author_agent` on the sprouted node. This is what gives
+    # an authored CON immediate standing against its target instead of
+    # waiting for tendencies to organically stake it. Deterministic:
+    # same event -> same post on every daemon.
+    author_post: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

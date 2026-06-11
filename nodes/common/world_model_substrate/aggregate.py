@@ -110,6 +110,13 @@ def apply_events(world: World, events: List[Dict[str, Any]]) -> World:
         if tendency is None:
             return None
         if parent_id not in sprouts_by_id:
+            # Targeted events (e.g. a CON disputing a specific claim)
+            # reference an existing live node by its deterministic id
+            # (content-addressed children, root_<tendency_id> roots).
+            # Honor that before assuming "unknown parent == root".
+            if tendency.tree.get_node(parent_id) is not None:
+                remap[parent_id] = parent_id
+                return parent_id
             # Solver's parent_id refers to the tendency's root.
             live_root_id = tendency.tree.root_node.id
             remap[parent_id] = live_root_id
@@ -211,6 +218,11 @@ def apply_events(world: World, events: List[Dict[str, Any]]) -> World:
                 obs_id = ev.get("observation_id", "")
                 if obs_id:
                     new_node.observation_id = obs_id
+                # Authored post (targeted disputes): one unit-weight
+                # post by the event's author. Idempotent across replay
+                # waves because each event is applied exactly once.
+                if ev.get("author_post") and ev.get("author_agent"):
+                    new_node.add_post(ev["author_agent"])
                 remap[ev["node_id"]] = new_node.id
             except Exception as e:
                 logger.warning("sprout failed: %s", e)
