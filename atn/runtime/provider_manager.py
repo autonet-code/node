@@ -56,8 +56,10 @@ TIER_LABELS: dict[int, str] = {
 # that matches wins.  Unknown models default to tier 2.
 _MODEL_TIERS: dict[str, int] = {
     # Anthropic
+    "claude-fable-5": 4,
+    "claude-mythos-5": 4,
+    "claude-opus-4-8": 4,
     "claude-opus-4-7": 4,
-    "claude-sonnet-4-7": 4,
     "claude-opus-4": 4,
     "claude-sonnet-4": 3,
     "claude-haiku-4": 2,
@@ -101,6 +103,8 @@ _DEFAULT_TIER = 2
 # and context window are looked up from _MODEL_TIERS and model_specs.
 _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
     "claude_max": [
+        {"id": "claude-fable-5",    "name": "Claude Fable 5"},
+        {"id": "claude-opus-4-8",   "name": "Claude Opus 4.8"},
         {"id": "claude-opus-4-7",   "name": "Claude Opus 4.7"},
         {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
         {"id": "claude-opus-4-6",   "name": "Claude Opus 4.6"},
@@ -113,6 +117,8 @@ _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "o4-mini",  "name": "o4-mini"},
     ],
     "anthropic": [
+        {"id": "claude-fable-5",    "name": "Claude Fable 5"},
+        {"id": "claude-opus-4-8",   "name": "Claude Opus 4.8"},
         {"id": "claude-opus-4-7",   "name": "Claude Opus 4.7"},
         {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
         {"id": "claude-opus-4-6",   "name": "Claude Opus 4.6"},

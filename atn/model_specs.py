@@ -53,17 +53,35 @@ _DEFAULT_SPEC = ModelSpec(
 # Curated list — extend here, not in scattered files.
 _MODELS: tuple[ModelSpec, ...] = (
     # ---- Anthropic / Claude ----
+    # Mythos-class (above Opus tier). Fable 5 is the GA model; Mythos 5 is the
+    # same underlying model gated to Project Glasswing. Both 1M context / 128K
+    # output. relative_cost reflects pricing above Opus tier ($10/$50 per MTok
+    # vs Opus $5/$25 → ~2x Opus → 10x Sonnet). Adjust if the economics change.
     ModelSpec(
-        id="claude-opus-4-7", family="claude", klass="opus",
-        display_name="Claude Opus 4.7",
-        context_window=1_000_000, max_output_tokens=64_000,
+        id="claude-fable-5", family="claude", klass="opus",
+        display_name="Claude Fable 5",
+        context_window=1_000_000, max_output_tokens=128_000,
+        relative_cost=10.0, default_channel="claude_max",
+        aliases=("fable", "fable-5"),
+    ),
+    ModelSpec(
+        id="claude-mythos-5", family="claude", klass="opus",
+        display_name="Claude Mythos 5",
+        context_window=1_000_000, max_output_tokens=128_000,
+        relative_cost=10.0, default_channel="claude_max",
+        aliases=("mythos", "mythos-5"),
+    ),
+    ModelSpec(
+        id="claude-opus-4-8", family="claude", klass="opus",
+        display_name="Claude Opus 4.8",
+        context_window=1_000_000, max_output_tokens=128_000,
         relative_cost=5.0, default_channel="claude_max",
     ),
     ModelSpec(
-        id="claude-sonnet-4-7", family="claude", klass="sonnet",
-        display_name="Claude Sonnet 4.7",
-        context_window=1_000_000, max_output_tokens=64_000,
-        relative_cost=1.0, default_channel="claude_max",
+        id="claude-opus-4-7", family="claude", klass="opus",
+        display_name="Claude Opus 4.7",
+        context_window=1_000_000, max_output_tokens=128_000,
+        relative_cost=5.0, default_channel="claude_max",
     ),
     ModelSpec(
         id="claude-sonnet-4-6", family="claude", klass="sonnet",
@@ -74,7 +92,7 @@ _MODELS: tuple[ModelSpec, ...] = (
     ModelSpec(
         id="claude-opus-4-6", family="claude", klass="opus",
         display_name="Claude Opus 4.6",
-        context_window=200_000, max_output_tokens=32_000,
+        context_window=1_000_000, max_output_tokens=128_000,
         relative_cost=5.0, default_channel="claude_max",
     ),
     ModelSpec(

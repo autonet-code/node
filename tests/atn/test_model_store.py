@@ -75,7 +75,7 @@ def test_list_by_family():
 def test_list_by_class():
     sonnets = list_by_class("sonnet")
     assert all(s.klass == "sonnet" for s in sonnets)
-    assert any(s.id == "claude-sonnet-4-7" for s in sonnets)
+    assert any(s.id == "claude-sonnet-4-6" for s in sonnets)
 
 
 def test_list_models_returns_curated_set():
@@ -99,12 +99,12 @@ def test_context_window_shim_matches_spec():
 
 
 def test_max_output_tokens_shim_matches_spec():
-    assert max_output_tokens("claude-opus-4-7") == 64_000
+    assert max_output_tokens("claude-opus-4-7") == 128_000
     assert max_output_tokens("claude-haiku-4-5") == 8_192
 
 
 def test_relative_cost_for_classes():
     """Bootstrap multipliers used by the per-model estimator."""
     assert relative_cost("claude-haiku-4-5") < 1.0  # cheaper than sonnet
-    assert relative_cost("claude-sonnet-4-7") == pytest.approx(1.0)
+    assert relative_cost("claude-sonnet-4-6") == pytest.approx(1.0)
     assert relative_cost("claude-opus-4-7") > 1.0   # pricier than sonnet

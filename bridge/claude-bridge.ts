@@ -147,12 +147,35 @@ const claudeExecutable = resolveClaudeExecutable()
 log("resolved claude executable", { path: claudeExecutable })
 
 function mapModelToClaudeModel(model: string): string {
-  // Accept full model IDs (e.g. "claude-sonnet-4-20250514") or family
-  // names (e.g. "sonnet").  Full IDs are passed through as-is.
+  // Accept full model IDs (e.g. "claude-sonnet-4-20250514", "claude-fable-5")
+  // or family names (e.g. "sonnet", "opus", "fable").  Full IDs are passed
+  // through as-is — the Agent SDK resolves whatever string we hand it, so new
+  // model IDs never need a mapping entry here.  Family names map to the SDK's
+  // short aliases.
   if (model.startsWith("claude-")) return model
-  if (model.includes("opus")) return "opus"
-  if (model.includes("haiku")) return "haiku"
+  const m = model.toLowerCase()
+  if (m.includes("fable")) return "fable"
+  if (m.includes("mythos")) return "mythos"
+  if (m.includes("opus")) return "opus"
+  if (m.includes("haiku")) return "haiku"
   return "sonnet"
+}
+
+// Capability rules, version-aware so new point releases in a family work with
+// no edit here.  Returns true when the model carries a 1M-token context window
+// (and therefore needs the context-1m beta on the orchestrate path).
+function modelHasLargeContext(model: string): boolean {
+  const m = (model || "").toLowerCase()
+  // Fable/Mythos 5 and all Sonnet 4.x are 1M.
+  if (m.includes("fable") || m.includes("mythos")) return true
+  if (m.includes("sonnet")) return true
+  // Opus is 1M from 4.7 onward (4.6 and earlier are 200k).  Match any
+  // opus-4-<minor> with minor >= 7, or opus-<major>-* with major >= 5.
+  const opusMinor = m.match(/opus-4-(\d+)/)
+  if (opusMinor && Number(opusMinor[1]) >= 7) return true
+  const opusMajor = m.match(/opus-(\d+)/)
+  if (opusMajor && Number(opusMajor[1]) >= 5) return true
+  return false
 }
 
 // -- AsyncQueue --
@@ -744,9 +767,9 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
       sdkOptions.tools = []
     }
 
-    // Enable 1M context window for models that support it (Sonnet, Opus 4.7+).
-    const lowerModel = (model || "").toLowerCase()
-    if (lowerModel.includes("sonnet") || lowerModel.includes("opus-4-7")) {
+    // Enable 1M context window for models that support it (Sonnet 4.x,
+    // Opus 4.7+, Fable/Mythos 5).  Version-aware so new releases work unedited.
+    if (modelHasLargeContext(model)) {
       sdkOptions.betas = ["context-1m-2025-08-07"]
       log("request.orchestrate.beta", { betas: sdkOptions.betas })
     }
@@ -932,9 +955,10 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
           // Fallback: if SDK didn't populate contextWindow, derive from model name
           if (contextWindow === 0 && resolvedModel) {
             const m = resolvedModel.toLowerCase()
-            if (m.includes("claude")) {
-              // Sonnet with 1M beta gets 1M, otherwise 200k
-              contextWindow = m.includes("sonnet") ? 1_000_000 : 200_000
+            if (m.includes("claude") || m.includes("fable") || m.includes("mythos")) {
+              // 1M-context families (Sonnet 4.x, Opus 4.7+, Fable/Mythos 5)
+              // get 1M; older Opus/Haiku get 200k.
+              contextWindow = modelHasLargeContext(m) ? 1_000_000 : 200_000
               maxOutputTokens = maxOutputTokens || (m.includes("opus") ? 32_000 : 16_000)
             }
           }
