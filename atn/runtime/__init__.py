@@ -163,9 +163,31 @@ class Runtime:
         # Give engine a reference back to the full Runtime for tool execution
         self.engine._runtime_ref = self
 
+        # --- Agent process-isolation supervisor (P3, flag-gated) ---------
+        # The single per-Runtime holder of worker PID handles + kill/monitor/
+        # orphan logic. Constructed unconditionally (cheap, side-effect free)
+        # so ExecutionControl can consult it; but it only acts against a real
+        # process when ATN_WORKER_ISOLATION is ON *and* a worker is registered.
+        # With the flag OFF nothing here touches an OS process. The two security
+        # hooks are injected as NO-OPs here (P3) — the vault track fills them.
+        from .worker_manager import WorkerManager
+        from .agent_supervisor import AgentSupervisor
+        _wi_cfg = getattr(self._config, "worker_isolation", None)
+        _wi_cap = int(getattr(_wi_cfg, "memory_cap_mb", 0) or 0)
+        self.supervisor = AgentSupervisor(
+            worker_manager=WorkerManager(memory_cap_mb=_wi_cap),
+            finalize_fn=self.engine._finalize_execution,
+            on_pid_bound=self._on_pid_bound,
+            on_pid_revoked=self._on_pid_revoked,
+            workers_dir=self._config.data_dir / "workers",
+        )
+        # Let the engine reach the supervisor (P4 registers workers there).
+        self.engine.supervisor = self.supervisor
+
         self.control = ExecutionControl(
             engine=self.engine,
             provider_manager=self.providers,
+            supervisor=self.supervisor,
         )
 
         self.sessions = SessionManager(
@@ -295,11 +317,47 @@ class Runtime:
     # Lifecycle
     # ==================================================================
 
+    # ------------------------------------------------------------------
+    # Worker-isolation security seam (P3 no-op hooks).
+    # Injected into AgentSupervisor so agent_supervisor.py never imports vault
+    # code. Fired _on_pid_bound after spawn+ready (BEFORE "go") and _on_pid_revoked
+    # in _reap. The vault/secrets track fills these later; they are pure no-ops now.
+    # ------------------------------------------------------------------
+
+    def _on_pid_bound(self, agent_id: str, pid: int, parent_agent_id: str | None) -> None:
+        """Fired when a worker PID is bound to an agent identity (before "go").
+        No-op in P3; the secrets track hangs PID-bound grant issuance here."""
+        return None
+
+    def _on_pid_revoked(self, pid: int) -> None:
+        """Fired when a worker PID is reaped. No-op in P3; the secrets track
+        hangs grant revocation here."""
+        return None
+
     async def start(self) -> None:
         # Recover crashed executions
         recovered = self.execution_log.recover_running()
         if recovered:
             log.warning("Recovered %d crashed execution(s) from previous run", len(recovered))
+
+        # Worker-isolation orphan recovery (P3). Reap any worker processes left
+        # behind by a previously-crashed daemon (verified via the
+        # (pid, create_time, cmdline) triple to defeat PID reuse), then start the
+        # monitor loop when the flag is ON. recover_orphans() ONLY reaps OS
+        # processes + pid files; the crashed executions themselves are already
+        # marked FAILED above by recover_running() (which owns the terminal
+        # event) — the two paths are coordinated so exactly one terminal event
+        # fires per execution. With the flag OFF there are no pid files, so this
+        # is a no-op and the monitor never starts.
+        try:
+            orphans = self.supervisor.recover_orphans()
+            if orphans:
+                log.warning("Reaped %d orphan worker(s) from previous daemon: %s",
+                            len(orphans), orphans)
+        except Exception:
+            log.debug("supervisor orphan recovery failed", exc_info=True)
+        if self._config.worker_isolation.enabled:
+            self.supervisor.start_monitor()
 
         self.delegate_registry.cleanup_orphans()
         self.delegate_registry.save()
@@ -397,6 +455,12 @@ class Runtime:
     async def stop(self) -> None:
         self._shutdown_event.set()
         await self.control.kill_all()
+
+        # Stop the supervisor monitor loop (idempotent; no-op if never started).
+        try:
+            await self.supervisor.stop_monitor()
+        except Exception:
+            log.debug("supervisor stop_monitor failed", exc_info=True)
 
         if self.agent_directory is not None:
             await self.agent_directory.stop()

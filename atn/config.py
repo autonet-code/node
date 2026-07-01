@@ -289,6 +289,32 @@ class AutoUpdateConfig:
 
 
 @dataclass
+class WorkerIsolationConfig:
+    """Agent per-PID process isolation (phases 0-3 foundation, default OFF).
+
+    When ``enabled`` (env ``ATN_WORKER_ISOLATION`` or config
+    ``worker_isolation.enabled``), the execution engine will spawn each
+    cognitive agent in its OWN OS process (``atn.agent_worker``) so the kernel
+    PID becomes a real security identity for PID-bound secret access control.
+
+    In the current phase (P2) this ONLY proves the spawn + handshake path: with
+    the flag ON, ``trigger_run`` spawns a worker, completes the ready handshake,
+    then IMMEDIATELY falls back to the existing in-process task (the cognitive
+    loop does NOT yet run in the worker — that is P4). With the flag OFF
+    (default) ``trigger_run`` is byte-identical to today.
+
+    The flag is read at ``load_config`` time from EITHER the env var (takes
+    precedence, so an operator can force it without editing config) OR the
+    config file. Any truthy string ("1", "true", "yes", "on") enables it.
+    """
+    enabled: bool = False
+    # Optional per-worker memory cap (MiB) enforced via the Win32 Job Object
+    # (JOB_OBJECT_LIMIT_PROCESS_MEMORY). 0 => no cap. POSIX: advisory only in
+    # this phase (no Job Object).
+    memory_cap_mb: int = 0
+
+
+@dataclass
 class ATNConfig:
     """Top-level ATN configuration."""
     data_dir: Path = field(default_factory=lambda: _DEFAULT_DIR)
@@ -299,6 +325,7 @@ class ATNConfig:
     autonet: AutonetConfig = field(default_factory=AutonetConfig)
     trace_logging: TraceLoggingConfig = field(default_factory=TraceLoggingConfig)
     auto_update: AutoUpdateConfig = field(default_factory=AutoUpdateConfig)
+    worker_isolation: WorkerIsolationConfig = field(default_factory=WorkerIsolationConfig)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     connectors: dict[str, ConnectorConfig] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -427,6 +454,24 @@ def _expand_path(p: str | Path) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(str(p))))
 
 
+def _load_worker_isolation(wi_raw: dict[str, Any]) -> WorkerIsolationConfig:
+    """Build the worker-isolation config, with env override taking precedence.
+
+    ``ATN_WORKER_ISOLATION`` (if set) wins over the config file so an operator
+    can force the flag on/off without editing config.yaml. Any truthy string
+    ("1"/"true"/"yes"/"on", case-insensitive) enables it.
+    """
+    wi_enabled = bool(wi_raw.get("enabled", False))
+    env_iso = os.environ.get("ATN_WORKER_ISOLATION")
+    if env_iso is not None:
+        wi_enabled = env_iso.strip().lower() in ("1", "true", "yes", "on")
+    try:
+        memory_cap_mb = int(wi_raw.get("memory_cap_mb", 0))
+    except (TypeError, ValueError):
+        memory_cap_mb = 0
+    return WorkerIsolationConfig(enabled=wi_enabled, memory_cap_mb=memory_cap_mb)
+
+
 def load_config(path: Path | None = None) -> ATNConfig:
     """Load configuration from a YAML file.
 
@@ -439,6 +484,10 @@ def load_config(path: Path | None = None) -> ATNConfig:
     _load_dotenv()
 
     config = ATNConfig()
+    # Env var ATN_WORKER_ISOLATION is authoritative and must apply even with no
+    # config file (the early-return path below). The file-load path re-applies
+    # it with the same precedence.
+    config.worker_isolation = _load_worker_isolation({})
 
     if not path.exists():
         log.info("No config file at %s — using defaults", path)
@@ -591,6 +640,11 @@ def load_config(path: Path | None = None) -> ATNConfig:
             pypi_index_url=auto_update_raw.get("pypi_index_url", ""),
             package_name=auto_update_raw.get("package_name", "autonet-computer"),
         )
+
+    # Worker isolation (agent per-PID process isolation, default OFF).
+    wi_raw = raw.get("worker_isolation", {})
+    config.worker_isolation = _load_worker_isolation(
+        wi_raw if isinstance(wi_raw, dict) else {})
 
     # Connectors
     for name, craw in raw.get("connectors", {}).items():

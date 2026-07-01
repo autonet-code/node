@@ -120,6 +120,22 @@ class ExecutionEngine:
         self.registry._status[agent_id] = AgentStatus.RUNNING
         self.execution_log.record(record)
 
+        # ---- Worker isolation liveness proof (P2, flag-gated, default OFF) ----
+        # When ATN_WORKER_ISOLATION is ON, prove the spawn+handshake path for a
+        # cognitive agent by launching a real worker process, awaiting its ready
+        # handshake, then IMMEDIATELY shutting it down and falling through to the
+        # existing in-process task. The cognitive loop does NOT yet run in the
+        # worker — that cutover is P4. With the flag OFF this block is skipped
+        # entirely and behavior is byte-identical to today.
+        # TODO(P4): replace the in-process task below with the worker running the
+        # cognitive loop; the AgentSupervisor (P3) will own the handle + kill
+        # ladder instead of this fire-and-forget proof.
+        if defn.mode == AgentMode.COGNITIVE and self._worker_isolation_enabled():
+            asyncio.create_task(
+                self._worker_liveness_proof(agent_id),
+                name=f"worker-liveness-{agent_id}",
+            )
+
         if defn.mode == AgentMode.COGNITIVE:
             task = asyncio.create_task(self._execute_cognitive_agent(defn, record, cancel))
         else:
@@ -149,14 +165,79 @@ class ExecutionEngine:
         return eid
 
     # ------------------------------------------------------------------
+    # Worker isolation (P2 — spawn+handshake liveness proof, flag-gated)
+    # ------------------------------------------------------------------
+
+    def _worker_isolation_enabled(self) -> bool:
+        """Whether ATN_WORKER_ISOLATION is on. Default OFF => in-process today."""
+        wi = getattr(self._config, "worker_isolation", None)
+        return bool(getattr(wi, "enabled", False))
+
+    async def _worker_liveness_proof(self, agent_id: str) -> None:
+        """P2 proof: spawn a worker, complete the ready handshake, shut it down.
+
+        Fire-and-forget and fully isolated from the real (in-process) execution:
+        any failure here is logged and swallowed so the flag can NEVER change
+        agent behavior in P2. This exists only to exercise the spawn+handshake
+        +kill path on the live daemon. Removed in P4 when the loop moves into
+        the worker for real.
+        """
+        try:
+            from .worker_manager import WorkerManager
+            wi = getattr(self._config, "worker_isolation", None)
+            cap = int(getattr(wi, "memory_cap_mb", 0) or 0)
+            mgr = WorkerManager(memory_cap_mb=cap)
+            handle = await mgr.ensure_worker(agent_id, {"agent_label": agent_id})
+            log.info("worker-isolation liveness proof OK: agent=%s pid=%s",
+                     agent_id, handle.pid)
+            # Prove the kill path too: cooperative shutdown, then hard-kill if it
+            # doesn't exit on its own.
+            exited = await mgr.graceful_close(handle)
+            if not exited:
+                await mgr.hard_kill(handle)
+        except Exception:
+            log.warning("worker-isolation liveness proof failed for %s "
+                        "(flag ON, in-process execution unaffected)", agent_id,
+                        exc_info=True)
+
+    # ------------------------------------------------------------------
     # Tool routing
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def is_authority_tool(name: str) -> bool:
+        """Declarative LOCAL-vs-AUTHORITY classification (P0: split made
+        explicit for P4's in-worker/RPC-to-daemon dispatch; dispatch itself is
+        UNCHANGED here).
+
+        LOCAL (returns False)  → touches only worker-local / per-agent state,
+        must run WORKER-SIDE for perf: the local sandboxed shell tools
+        (Bash/Read/Write/Edit/... in _SHELL_TOOL_EXECUTORS).
+
+        AUTHORITY (returns True) → mutates shared daemon state or reaches an
+        authority object (surfaces, ConnectorManager/MCP, the framework tools
+        that hit registries/stores/on-chain/credentials). In P4 these become
+        rpc_req back to the daemon; for now they still execute in-process.
+
+        This predicate MUST stay in lockstep with route_tool_call's dispatch
+        below: every branch route_tool_call handles locally is a LOCAL tool,
+        every branch it routes to an authority is an AUTHORITY tool.
+        """
+        if name in _SHELL_TOOL_EXECUTORS:
+            return False
+        # surface_* → surfaces; mcp_* → ConnectorManager; everything else →
+        # framework tools (execute_tool → registries/stores/on-chain/creds).
+        return True
 
     async def route_tool_call(
         self, name: str, tool_input: dict, agent_id: str,
     ) -> dict:
         from ..orchestrator.tools import execute_tool
 
+        # Dispatch is UNCHANGED (P0). is_authority_tool() above is the
+        # declarative statement of the same split for P4 to key off; the
+        # concrete routing below still decides the exact authority target
+        # (surface vs connector vs framework tool).
         if name in _SHELL_TOOL_EXECUTORS:
             return await _SHELL_TOOL_EXECUTORS[name](tool_input)
         # Surface-contributed tools (read channel history, etc.) route back to
@@ -787,179 +868,228 @@ class ExecutionEngine:
             record.error = str(exc)
             log.exception("Cognitive agent error for %s", defn.id)
         finally:
-            record.completed_at = datetime.now(timezone.utc)
-            self.execution_log.record(record)
-            self.execution_log.persist(record)
+            # Completion bookkeeping extracted to _finalize_execution so it can
+            # be run by BOTH this clean in-task path AND the supervisor
+            # on-behalf-of a hard-killed worker (P0 extraction). record.status /
+            # record.error are already set by the try/except above; pass them
+            # through explicitly so the method never has to inspect this frame.
+            await self._finalize_execution(
+                defn,
+                record,
+                record.status,
+                error=record.error,
+                recorded_inflight=_recorded_inflight,
+                accumulated_tool_calls=_accumulated_tool_calls,
+            )
 
-            if record.status == ExecutionStatus.COMPLETED:
-                self.output_store.write(AgentOutput(
-                    agent_id=defn.id,
-                    data=record.output,
-                    status=record.status,
-                    execution_id=record.execution_id,
-                ))
+    async def _finalize_execution(
+        self,
+        defn: AgentDefinition,
+        record: ExecutionRecord,
+        status: ExecutionStatus,
+        error: str | None = None,
+        recorded_inflight: dict[str, int] | None = None,
+        accumulated_tool_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Run the completion bookkeeping for a cognitive execution.
 
-            # Record usage in cascading budget system. Subtract anything the
-            # inner-loop recorder already booked so we don't double-count.
-            # Meter REAL SPEND (Usage.budget_tokens), consistent with the
-            # inner-loop recorder — NOT the raw 4-bucket total, which is context
-            # size and would re-introduce the cache_read we deliberately
-            # down-weight (and false-fail sane caps).
-            for provider_key, usage in record.token_usage.items():
-                total = usage.budget_tokens()
-                already_recorded = _recorded_inflight.get(provider_key, 0)
-                remainder = total - already_recorded
-                if remainder > 0:
-                    exceeded = self.registry.record_token_usage(defn.id, provider_key, remainder)
-                    if exceeded:
-                        # Auto-pause the exceeded agent
-                        self.registry._status[exceeded] = AgentStatus.BUDGET_PAUSED
-                        await self.events.emit(Event(
-                            type=EventType.BUDGET_EXCEEDED,
-                            source=exceeded,
-                            data={
-                                "agent_id": exceeded,
-                                "triggered_by": defn.id,
-                                "provider": provider_key,
-                            },
-                        ))
+        This is the ONLY place the terminal side effects live so the exact
+        same sequence runs whether the agent finished cleanly in its own task
+        (today's path) OR the supervisor finalizes on its behalf after a hard
+        PID kill (P4+). It therefore must NOT read anything that only exists
+        inside the running agent task's frame — everything it needs is passed
+        in:
+          - ``status`` / ``error``: the terminal outcome (the caller has
+            already decided these). Applied to ``record`` up front so all the
+            downstream branches read a consistent record.
+          - ``recorded_inflight``: per-provider tokens the inner loop already
+            booked, so the post-loop reconciliation only adds the remainder.
+            On the supervisor path (no inner-loop bookkeeping survived) this is
+            simply empty → the full ``record.token_usage`` remainder is booked.
+          - ``accumulated_tool_calls``: for the deterministic run summary.
+            Empty on the supervisor path → run summary is derived from status.
+        """
+        recorded_inflight = recorded_inflight or {}
+        accumulated_tool_calls = accumulated_tool_calls or []
 
-            # --- Trace logging: finalise trace ---
-            if self.trace_logger is not None:
-                _trace_result = ""
-                if isinstance(record.output, dict):
-                    _trace_result = record.output.get("result", "")
-                elif record.output:
-                    _trace_result = str(record.output)
-                self.trace_logger.end_execution(
-                    agent_id=defn.id,
-                    execution_id=record.execution_id,
-                    result_text=_trace_result,
-                    status=record.status.value,
-                    error=record.error,
-                    completed_at=record.completed_at,
-                )
+        # Apply the terminal outcome to the record. Idempotent: on the clean
+        # path status/error already equal record.status/record.error.
+        record.status = status
+        record.error = error
 
-            # Record error in conversation if the try block didn't get to
-            # record the assistant turn (exception path).
-            if record.error and record.status != ExecutionStatus.COMPLETED:
-                try:
-                    _err_store = self.session_manager.get_agent_conversation_store(defn.id)
-                    _err_store.add_assistant_turn(
-                        f"Error: {record.error}", execution_id=record.execution_id,
-                    )
-                except Exception:
-                    log.warning("Failed to record error turn for %s", defn.id)
+        record.completed_at = datetime.now(timezone.utc)
+        self.execution_log.record(record)
+        self.execution_log.persist(record)
 
-            # Sync delegate registry
-            result_text = ""
-            total_tokens = 0
+        if record.status == ExecutionStatus.COMPLETED:
+            self.output_store.write(AgentOutput(
+                agent_id=defn.id,
+                data=record.output,
+                status=record.status,
+                execution_id=record.execution_id,
+            ))
+
+        # Record usage in cascading budget system. Subtract anything the
+        # inner-loop recorder already booked so we don't double-count.
+        # Meter REAL SPEND (Usage.budget_tokens), consistent with the
+        # inner-loop recorder — NOT the raw 4-bucket total, which is context
+        # size and would re-introduce the cache_read we deliberately
+        # down-weight (and false-fail sane caps).
+        for provider_key, usage in record.token_usage.items():
+            total = usage.budget_tokens()
+            already_recorded = recorded_inflight.get(provider_key, 0)
+            remainder = total - already_recorded
+            if remainder > 0:
+                exceeded = self.registry.record_token_usage(defn.id, provider_key, remainder)
+                if exceeded:
+                    # Auto-pause the exceeded agent
+                    self.registry._status[exceeded] = AgentStatus.BUDGET_PAUSED
+                    await self.events.emit(Event(
+                        type=EventType.BUDGET_EXCEEDED,
+                        source=exceeded,
+                        data={
+                            "agent_id": exceeded,
+                            "triggered_by": defn.id,
+                            "provider": provider_key,
+                        },
+                    ))
+
+        # --- Trace logging: finalise trace ---
+        if self.trace_logger is not None:
+            _trace_result = ""
             if isinstance(record.output, dict):
-                result_text = record.output.get("result", "")
-                total_tokens = record.output.get("tokens_used", 0)
+                _trace_result = record.output.get("result", "")
+            elif record.output:
+                _trace_result = str(record.output)
+            self.trace_logger.end_execution(
+                agent_id=defn.id,
+                execution_id=record.execution_id,
+                result_text=_trace_result,
+                status=record.status.value,
+                error=record.error,
+                completed_at=record.completed_at,
+            )
 
-            # Build deterministic run summary from accumulated tool calls
-            run_summary = ""
+        # Record error in conversation if the try block didn't get to
+        # record the assistant turn (exception path).
+        if record.error and record.status != ExecutionStatus.COMPLETED:
             try:
-                run_summary = extract_run_summary(
-                    tool_calls=_accumulated_tool_calls,
-                    max_turns=defn.max_turns,
-                    actual_turns=len([
-                        tc for tc in _accumulated_tool_calls
-                    ]) if _accumulated_tool_calls else None,
-                    status=record.status.value if record.status else "",
-                    error=record.error,
+                _err_store = self.session_manager.get_agent_conversation_store(defn.id)
+                _err_store.add_assistant_turn(
+                    f"Error: {record.error}", execution_id=record.execution_id,
                 )
             except Exception:
-                log.debug("Failed to extract run summary for %s", defn.id, exc_info=True)
+                log.warning("Failed to record error turn for %s", defn.id)
 
-            # Store run summary in output for downstream consumers
-            if run_summary and isinstance(record.output, dict):
-                record.output["run_summary"] = run_summary
+        # Sync delegate registry
+        result_text = ""
+        total_tokens = 0
+        if isinstance(record.output, dict):
+            result_text = record.output.get("result", "")
+            total_tokens = record.output.get("tokens_used", 0)
 
-            # Combine: deterministic summary + agent's last response
-            if run_summary and result_text:
-                combined_preview = f"{run_summary}\n\n---\n{result_text}"
-            elif run_summary:
-                combined_preview = run_summary
+        # Build deterministic run summary from accumulated tool calls
+        run_summary = ""
+        try:
+            run_summary = extract_run_summary(
+                tool_calls=accumulated_tool_calls,
+                max_turns=defn.max_turns,
+                actual_turns=len([
+                    tc for tc in accumulated_tool_calls
+                ]) if accumulated_tool_calls else None,
+                status=record.status.value if record.status else "",
+                error=record.error,
+            )
+        except Exception:
+            log.debug("Failed to extract run summary for %s", defn.id, exc_info=True)
+
+        # Store run summary in output for downstream consumers
+        if run_summary and isinstance(record.output, dict):
+            record.output["run_summary"] = run_summary
+
+        # Combine: deterministic summary + agent's last response
+        if run_summary and result_text:
+            combined_preview = f"{run_summary}\n\n---\n{result_text}"
+        elif run_summary:
+            combined_preview = run_summary
+        else:
+            combined_preview = result_text
+
+        delegate_node = self.delegate_registry.get_node(defn.id)
+        if delegate_node is not None:
+            from ..agent_registry import DelegateStatus
+            if record.status == ExecutionStatus.COMPLETED:
+                self.delegate_registry.update_status(
+                    defn.id, DelegateStatus.COMPLETED,
+                    result_preview=combined_preview[:2000],
+                    tokens_used=total_tokens,
+                )
+            elif record.status == ExecutionStatus.KILLED:
+                self.delegate_registry.update_status(
+                    defn.id, DelegateStatus.KILLED,
+                    result_preview=combined_preview[:2000],
+                    tokens_used=total_tokens,
+                )
             else:
-                combined_preview = result_text
+                self.delegate_registry.update_status(
+                    defn.id, DelegateStatus.FAILED,
+                    error=record.error,
+                )
+            self.delegate_registry.save()
 
-            delegate_node = self.delegate_registry.get_node(defn.id)
-            if delegate_node is not None:
-                from ..agent_registry import DelegateStatus
-                if record.status == ExecutionStatus.COMPLETED:
-                    self.delegate_registry.update_status(
-                        defn.id, DelegateStatus.COMPLETED,
-                        result_preview=combined_preview[:2000],
-                        tokens_used=total_tokens,
-                    )
-                elif record.status == ExecutionStatus.KILLED:
-                    self.delegate_registry.update_status(
-                        defn.id, DelegateStatus.KILLED,
-                        result_preview=combined_preview[:2000],
-                        tokens_used=total_tokens,
-                    )
-                else:
-                    self.delegate_registry.update_status(
-                        defn.id, DelegateStatus.FAILED,
-                        error=record.error,
-                    )
-                self.delegate_registry.save()
+        # Bookkeeping
+        self.registry._running_count[defn.id] = max(0, self.registry._running_count.get(defn.id, 1) - 1)
+        self._executions.pop(record.execution_id, None)
+        self._tasks.pop(record.execution_id, None)
+        self._cancels.pop(record.execution_id, None)
+        self._interrupt_hooks.pop(record.execution_id, None)
 
-            # Bookkeeping
-            self.registry._running_count[defn.id] = max(0, self.registry._running_count.get(defn.id, 1) - 1)
-            self._executions.pop(record.execution_id, None)
-            self._tasks.pop(record.execution_id, None)
-            self._cancels.pop(record.execution_id, None)
-            self._interrupt_hooks.pop(record.execution_id, None)
+        # Provider lifecycle: keep the provider alive in _active_providers
+        # so it is reused across executions. This preserves session state,
+        # prompt caching, and allows session_stats to be fetched after
+        # execution completes. Cleanup happens on explicit reset
+        # (new_conversation, agent unregistered) not after each execution.
 
-            # Provider lifecycle: keep the provider alive in _active_providers
-            # so it is reused across executions. This preserves session state,
-            # prompt caching, and allows session_stats to be fetched after
-            # execution completes. Cleanup happens on explicit reset
-            # (new_conversation, agent unregistered) not after each execution.
+        if self.registry._running_count.get(defn.id, 0) == 0:
+            self.registry._last_idle[defn.id] = datetime.now(timezone.utc)
+            if record.status == ExecutionStatus.FAILED:
+                self.registry._status[defn.id] = AgentStatus.ERROR
+            elif self.registry._status.get(defn.id) == AgentStatus.RUNNING:
+                self.registry._status[defn.id] = AgentStatus.ACTIVE
 
-            if self.registry._running_count.get(defn.id, 0) == 0:
-                self.registry._last_idle[defn.id] = datetime.now(timezone.utc)
-                if record.status == ExecutionStatus.FAILED:
-                    self.registry._status[defn.id] = AgentStatus.ERROR
-                elif self.registry._status.get(defn.id) == AgentStatus.RUNNING:
-                    self.registry._status[defn.id] = AgentStatus.ACTIVE
+        # Signal delegate_done
+        done_event = self._delegate_done.get(defn.id)
+        if done_event:
+            done_event.set()
 
-            # Signal delegate_done
-            done_event = self._delegate_done.get(defn.id)
-            if done_event:
-                done_event.set()
+        # Innate wake-up
+        await self.registry.on_agent_completed(
+            defn.id, record, self.provider_manager._active_providers,
+        )
 
-            # Innate wake-up
-            await self.registry.on_agent_completed(
+        if record.status == ExecutionStatus.FAILED:
+            await self.registry.notify_parent_of_failure(
                 defn.id, record, self.provider_manager._active_providers,
             )
 
-            if record.status == ExecutionStatus.FAILED:
-                await self.registry.notify_parent_of_failure(
-                    defn.id, record, self.provider_manager._active_providers,
-                )
+        etype = {
+            ExecutionStatus.COMPLETED: EventType.EXECUTION_COMPLETED,
+            ExecutionStatus.FAILED: EventType.EXECUTION_FAILED,
+            ExecutionStatus.KILLED: EventType.EXECUTION_KILLED,
+        }.get(record.status, EventType.EXECUTION_FAILED)
 
-            etype = {
-                ExecutionStatus.COMPLETED: EventType.EXECUTION_COMPLETED,
-                ExecutionStatus.FAILED: EventType.EXECUTION_FAILED,
-                ExecutionStatus.KILLED: EventType.EXECUTION_KILLED,
-            }.get(record.status, EventType.EXECUTION_FAILED)
-
-            await self.events.emit(Event(
-                type=etype,
-                source=defn.id,
-                data={
-                    "agent_id": defn.id,
-                    "execution_id": record.execution_id,
-                    "status": record.status.value,
-                    "mode": "cognitive",
-                    "output_preview": _preview(record.output) if record.output else None,
-                    "error": record.error,
-                },
-            ))
+        await self.events.emit(Event(
+            type=etype,
+            source=defn.id,
+            data={
+                "agent_id": defn.id,
+                "execution_id": record.execution_id,
+                "status": record.status.value,
+                "mode": "cognitive",
+                "output_preview": _preview(record.output) if record.output else None,
+                "error": record.error,
+            },
+        ))
 
     # ------------------------------------------------------------------
     # Interrupt hooks (shared with ExecutionControl)
