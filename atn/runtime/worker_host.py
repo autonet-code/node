@@ -23,7 +23,14 @@ pipe-bound ``agent_id`` (the worker's body never carries identity):
                       "already booked" (P0 risk #1: survives a hard worker kill).
     inbox_drain    -> InboxManager.drain(agent_id) -> [InboxMessage.dict...]
     inbox_post     -> InboxManager.post(InboxMessage(...))    -> {message_id}
-    spawn_child    -> structured "not supported under isolation yet" (P6)
+    spawn_child    -> the REAL create_agent, run DAEMON-SIDE (P6): the daemon is
+                      the trusted launcher; it clamps the requested spec against
+                      daemon-held parent state (the D5 binding seam, no-op here),
+                      derives parent_id from the AUTHORITATIVE pipe-bound
+                      agent_id, registers the child + triggers its run (which
+                      recurses through trigger_run -> the child becomes its OWN
+                      isolated worker under the flag). Returns child agent_id/
+                      handle to the parent worker.
 
 EVENTS (worker -> daemon, droppable): re-emitted on the real EventBus with
 ``source`` OVERWRITTEN to the pipe-bound agent_id, so surfaces/WS/trace receive
@@ -56,12 +63,44 @@ from ..models import (
 log = logging.getLogger(__name__)
 
 
-# Refusal returned for any spawn attempt from an isolated worker (delegate spawn
-# is P6). Kept in lockstep with the worker-side ``_SPAWN_REFUSAL``.
-_SPAWN_REFUSAL = {
-    "error": "agent spawning is not yet supported under process isolation (P6). "
-             "Run this agent with worker isolation OFF to spawn delegates."
-}
+# ---------------------------------------------------------------------------
+# BINDING SEAM (design D5) — allowance intersection. NO-OP in P6.
+#
+# ``resolve_spec`` turns a parent's requested child spec into the allowance it
+# is ASKING for; ``resolve_parent_allowance`` returns the parent's OWN allowance
+# (held daemon-side, keyed by the authoritative pipe-bound parent id); the child
+# grant is their INTERSECTION. In P6 both are stubs (sentinel ALL / passthrough),
+# so no allowance is enforced — but the CALL SITE and the data flow are real and
+# run DAEMON-SIDE at spawn_child. Task 16 (secret-allowance/vault track) replaces
+# the two stubs + the intersection with the real grant algebra; nothing else in
+# this seam moves.
+#
+# FRACTAL GUARANTEE (why this MUST run daemon-side): the parent worker's
+# requested spec is only an UPPER-BOUND WISH. The daemon clamps it (intersection)
+# using daemon-held parent state. The parent never holds L_parent as a token,
+# never mints the child's nonce, never sees the child's grant — so a compromised
+# or buggy parent worker can only ever REQUEST a narrower-or-equal grant, never
+# widen one. That clamp is the entire reason process isolation makes the fractal
+# allowance safe.
+_ALLOWANCE_ALL = object()  # sentinel: "unrestricted" — P6 placeholder for L_parent
+
+
+def _resolve_parent_allowance(agent_id: str) -> Any:  # TASK 16 fills this
+    """STUB: return the parent's own allowance (L_parent). P6 => sentinel ALL."""
+    return _ALLOWANCE_ALL
+
+
+def _resolve_spec_allowance(payload: dict) -> Any:  # TASK 16 fills this
+    """STUB: turn the requested child spec into the allowance it asks for.
+    P6 => sentinel ALL (the request is not narrowed)."""
+    return _ALLOWANCE_ALL
+
+
+def _intersect_allowance(requested: Any, parent: Any) -> Any:  # TASK 16 fills this
+    """STUB: L_child = requested INTERSECT L_parent. P6 => passthrough (no clamp).
+    Task 16 replaces this with the real grant-intersection; the RESULT is what
+    the pid-bound seam (_on_pid_bound) will register against the child's pid."""
+    return _ALLOWANCE_ALL
 
 
 # Callback the host invokes exactly once when the worker reports execution_done.
@@ -257,10 +296,69 @@ class WorkerHost:
         return {"message_id": msg.id}
 
     async def _rpc_spawn_child(self, agent_id: str, payload: dict) -> dict:
-        # P6 implements real in-isolation spawn. For P4 refuse cleanly so a
-        # worker that tries to delegate gets a tool-result, not a crash.
-        log.info("spawn_child refused for isolated worker %s (P6 not yet wired)", agent_id)
-        return dict(_SPAWN_REFUSAL)
+        """Spawn a delegate for an isolated worker — the REAL create_agent, run
+        in the daemon's shared context (P6).
+
+        ``agent_id`` is the AUTHORITATIVE pipe-bound PARENT id. It is the caller
+        the daemon trusts; the child's parent_id is derived from it, never from
+        the payload. The payload is the parent's requested child spec (name/
+        prompt/model/mode/tools/… — JSON-only, per the P6 audit) and is treated
+        as an UPPER-BOUND WISH only.
+
+        Flow:
+          1. BINDING SEAM (D5, no-op in P6): clamp the requested spec against the
+             parent's daemon-held allowance. The intersection is what task 16
+             will register against the child's pid at ``_on_pid_bound`` (fired
+             inside the CHILD's own _run_cognitive_in_worker, after child-ready,
+             before child-"go"). Here it computes but does not enforce.
+          2. Run the daemon-side create_agent via ``execute_tool`` with
+             ``caller_id`` FORCED to the pipe-bound parent id, so _create_agent
+             derives ``parent_id = caller_id`` (tools.py). This reuses the exact
+             dispatch route_tool_call already uses — no forked spawn logic — and
+             therefore preserves create_agent's existing depth/spawn-count guards
+             (register_agent -> _enforce_spawn_limits raises on over-depth/
+             over-count; _create_agent turns that into a clean {"error": ...}
+             tool-result). create_agent then triggers the child's run, which
+             recurses through trigger_run: under the flag an API/bridge cognitive
+             child spawns as ITS OWN worker (own PID), and the supervisor's
+             _children map (populated with this parent id at that child's
+             register) gives the leaf-first subtree kill.
+
+        The child agent_id/status/execution_id dict is returned verbatim to the
+        parent worker as the tool-result. The parent never receives L_parent, a
+        nonce, or the child's grant — see the module-level FRACTAL GUARANTEE.
+        """
+        # --- BINDING SEAM (D5) — NO-OP in P6; task 16 fills the three stubs. ---
+        # Runs DAEMON-SIDE with daemon-held parent state; a parent worker can
+        # never widen a child's grant because it never participates in this clamp.
+        l_parent = _resolve_parent_allowance(agent_id)
+        l_requested = _resolve_spec_allowance(payload)
+        l_child = _intersect_allowance(l_requested, l_parent)  # noqa: F841 (task 16 registers this at _on_pid_bound)
+
+        if not isinstance(payload, dict):
+            return {"error": "spawn_child payload must be an object"}
+
+        from ..orchestrator.tools import execute_tool
+
+        runtime = getattr(self._engine, "_runtime_ref", None)
+        if runtime is None:
+            return {"error": "spawn_child unavailable: no runtime bound to engine"}
+
+        try:
+            # caller_id = the AUTHORITATIVE pipe-bound parent id. execute_tool
+            # injects it as input["_caller_id"]; _create_agent pops it and sets
+            # parent_id = caller_id. Any parent/_caller_id in the body is ignored.
+            result = await execute_tool(
+                "create_agent", dict(payload), runtime, caller_id=agent_id,
+            )
+        except Exception as exc:
+            log.debug("spawn_child create_agent for parent %s failed",
+                      agent_id, exc_info=True)
+            return {"error": f"spawn_child failed: {exc}"}
+
+        log.info("spawn_child: parent=%s -> child=%s status=%s", agent_id,
+                 (result or {}).get("agent_id"), (result or {}).get("status"))
+        return result if isinstance(result, dict) else {"result": result}
 
     def _bump_wedge_clock(self, agent_id: str) -> None:
         """Bump the supervisor's per-worker heartbeat clock on any inbound frame

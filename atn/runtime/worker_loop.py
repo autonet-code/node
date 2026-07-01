@@ -45,14 +45,14 @@ from ..shell_tools import SHELL_TOOL_EXECUTORS as _SHELL_TOOL_EXECUTORS
 log = logging.getLogger("atn.agent_worker.loop")
 
 
-# Spawn-family tools refused under isolation (delegate spawn = P6). A worker that
-# tries to create a child gets a clean tool-result, never a crash. Kept in
-# lockstep with the daemon-side refusal.
+# Spawn-family tools (delegate spawn). Under isolation these DO NOT run in the
+# worker — the worker is not a trusted launcher and must never mint a child's
+# identity/grant. Instead the worker issues a ``spawn_child`` RPC and the DAEMON
+# runs the real create_agent logic in its own context, deriving the child's
+# parent_id from the AUTHORITATIVE pipe-bound agent_id (never a body field). The
+# child then recurses through trigger_run and, under the flag, becomes its own
+# isolated worker. See ``worker_host.WorkerHost._rpc_spawn_child``.
 _SPAWN_TOOLS = frozenset({"create_agent"})
-_SPAWN_REFUSAL = {
-    "error": "agent spawning is not yet supported under process isolation (P6). "
-             "Run this agent with worker isolation OFF to spawn delegates."
-}
 
 
 def _is_authority_tool(name: str) -> bool:
@@ -345,9 +345,20 @@ async def run_cognitive_loop(
 
 async def _route_tool(client: Any, name: str, tool_input: dict, agent_label: str) -> dict:
     """Route one tool call: LOCAL executors run here; AUTHORITY tools RPC out."""
-    # Spawn family: refuse cleanly (P6), before the LOCAL/AUTHORITY split.
+    # Spawn family (P6): issue a dedicated ``spawn_child`` RPC BEFORE the
+    # LOCAL/AUTHORITY split. The daemon is the trusted launcher — it runs the
+    # real create_agent logic and derives parent_id from the pipe-bound agent_id.
+    # We deliberately do NOT send parent_agent_id (or any identity) in the body:
+    # the worker's requested spec is only an UPPER-BOUND WISH; the daemon clamps
+    # it against daemon-held parent state and the parent worker never holds its
+    # own or the child's grant. The daemon's result (child agent_id/status/…) is
+    # returned verbatim as this tool's result.
     if name in _SPAWN_TOOLS:
-        return dict(_SPAWN_REFUSAL)
+        try:
+            result = await client.rpc("spawn_child", dict(tool_input))
+        except Exception as exc:
+            return {"error": f"{name} (rpc spawn_child) failed: {exc}"}
+        return result if isinstance(result, dict) else {"result": result}
 
     if not _is_authority_tool(name):
         try:
