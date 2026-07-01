@@ -196,10 +196,10 @@ async def test_flag_on_api_provider_runs_in_worker(bus, tmp_path, captured):
 
 
 @pytest.mark.asyncio
-async def test_flag_on_bridge_provider_stays_in_process(bus, tmp_path):
-    """A bridge (Claude-Max SDK) provider must NOT be routed to a worker even
-    with the flag ON (that's P5). _worker_eligible returns False; the in-process
-    send_orchestrate path runs."""
+async def test_flag_on_bridge_provider_is_worker_eligible(bus, tmp_path):
+    """P5: a bridge (Claude-Max SDK) provider IS routed to a worker with the flag
+    ON. _worker_eligible returns True and _build_provider_config emits a
+    ``kind="bridge"`` manifest carrying model + bridge_script and NO api_key."""
     rt = _make_runtime(bus, tmp_path, isolation=True)
     defn = _cog_defn("cog-bridge")
     await rt.register_agent(defn)
@@ -208,35 +208,47 @@ async def test_flag_on_bridge_provider_stays_in_process(bus, tmp_path):
     from unittest.mock import AsyncMock
     from atn.providers.bridge import BridgeProvider
 
-    # A real-typed bridge provider instance (spec) so isinstance checks hold,
-    # with send_orchestrate mocked so no SDK subprocess launches.
+    # A real-typed bridge provider instance (spec) so isinstance checks hold.
     bridge = AsyncMock(spec=BridgeProvider)
     bridge.name = "claude_max"
-    bridge.send_orchestrate = AsyncMock(return_value=ProviderResponse(
-        text="in-process answer", usage=Usage(input_tokens=10, output_tokens=5),
-        stop_reason="end_turn", model="sonnet"))
-    bridge.close = AsyncMock()
-    bridge.interrupt = AsyncMock()
-    bridge._session_id = ""
-    bridge.session_stats = {}
+    bridge._model = "opus"
+    bridge._bridge_script = "/some/where/claude-bridge.ts"
     rt.engine.provider_manager._active_providers[defn.id] = bridge
 
-    # eligibility must be False for the bridge provider.
-    assert rt.engine._worker_eligible(defn, bridge) is False
+    # P5: bridge is now worker-eligible.
+    assert rt.engine._worker_eligible(defn, bridge) is True
 
-    # A fake worker manager that would EXPLODE if the worker path were taken.
-    class _Boom:
-        async def ensure_worker(self, *a, **k):
-            raise AssertionError("bridge provider must not spawn a worker")
-    rt.engine._worker_mgr = _Boom()
+    cfg = rt.engine._build_provider_config(bridge)
+    assert cfg["kind"] == "bridge"
+    assert cfg["name"] == "claude_max"
+    assert cfg["model"] == "opus"
+    assert cfg["bridge_script"] == "/some/where/claude-bridge.ts"
+    # No secret rides for bridge — auth is the node SDK reading credentials
+    # off disk, so api_key/base_url must be absent from the manifest.
+    assert "api_key" not in cfg
+    assert "base_url" not in cfg
 
-    eid = await rt.trigger_run(defn.id, source="test")
-    assert eid is not None
-    await asyncio.wait(list(rt.engine._tasks.values()), timeout=10)
 
-    bridge.send_orchestrate.assert_awaited()   # in-process loop ran
-    out = rt.output_store.read(defn.id)
-    assert out is not None and out.data["result"] == "in-process answer"
+@pytest.mark.asyncio
+async def test_flag_on_codex_bridge_stays_in_process(bus, tmp_path):
+    """codex_max is NOT in P5 scope: it must stay in-process even with the flag
+    ON. _worker_eligible returns False; classify refuses it."""
+    rt = _make_runtime(bus, tmp_path, isolation=True)
+    defn = _cog_defn("cog-codex")
+    await rt.register_agent(defn)
+    await rt.activate_agent(defn.id)
+
+    from unittest.mock import AsyncMock
+    try:
+        from atn.providers.codex_bridge import CodexBridgeProvider
+    except Exception:
+        pytest.skip("codex bridge provider unavailable")
+
+    codex = AsyncMock(spec=CodexBridgeProvider)
+    codex.name = "codex_max"
+    rt.engine.provider_manager._active_providers[defn.id] = codex
+
+    assert rt.engine._worker_eligible(defn, codex) is False
 
 
 class _CrashChannel(_FakeChannel):

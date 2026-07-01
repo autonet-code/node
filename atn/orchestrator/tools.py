@@ -1922,6 +1922,50 @@ async def _get_my_budget_status(runtime: Runtime, input: dict[str, Any]) -> dict
     except Exception:
         pass
 
+    # P5: an isolated bridge agent's provider lives in the WORKER, not in
+    # ``_active_providers``, so the live-provider scan above finds nothing for it.
+    # The worker reports its subscription snapshot (rate_limits +
+    # tokens_per_pct_by_class) on execution_done; WorkerHost caches it under the
+    # agent_id in ``provider_manager._cached_session_stats``. Consult that cache
+    # for the CALLER so get_my_budget_status answers for isolated bridge agents.
+    # The snapshot is as-of the last completed orchestration (see WorkerHost).
+    try:
+        pmgr = getattr(runtime, "providers", None)
+        cache = getattr(pmgr, "_cached_session_stats", None)
+        cached = cache.get(caller_id) if isinstance(cache, dict) else None
+        key = "claude_max"
+        rl = cached.get("rate_limits") if isinstance(cached, dict) else None
+        if rl and key not in subscription:
+            subscription[key] = {
+                "rate_limits": dict(rl),
+                "tokens_per_percent": cached.get("tokens_per_percent"),
+                "tokens_per_pct_by_class": cached.get(
+                    "tokens_per_pct_by_class", {}),
+                "source": "worker-snapshot",
+            }
+        elif not rl and key not in subscription:
+            # Supervised bridge agent but no usable snapshot yet — either no
+            # cache entry at all (common: first turn hasn't completed) or an
+            # entry with empty rate_limits. Answer "known-unknown" rather than
+            # silently empty so the caller can tell the difference. This must
+            # fire even when ``cached is None``, so it lives OUTSIDE the
+            # isinstance(cached, dict) guard.
+            is_supervised = False
+            sup = getattr(runtime, "supervisor", None)
+            if sup is not None:
+                try:
+                    is_supervised = bool(sup.is_supervised(caller_id))
+                except Exception:
+                    is_supervised = False
+            if is_supervised:
+                subscription[key] = {
+                    "status": "at-worker",
+                    "rate_limits": {},
+                    "source": "worker-snapshot-pending",
+                }
+    except Exception:
+        pass
+
     return {
         "caller_id": caller_id,
         "own": own,

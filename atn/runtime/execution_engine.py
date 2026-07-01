@@ -221,10 +221,11 @@ class ExecutionEngine:
         True iff ALL of:
           - the flag is ON;
           - a supervisor exists (Runtime wired it);
-          - the provider is a worker-eligible API provider — NOT the bridge /
-            Claude-Max SDK provider (that stays in-process, P5) and NOT an
-            rpb/substrate composite. ``classify_manifest_provider`` is the single
-            source of that decision (it raises for non-eligible providers).
+          - the provider is worker-eligible: an API provider (P4) OR the
+            Claude-Max bridge (P5, ``claude_max`` — the worker owns its node SDK
+            child). NOT ``codex_max`` and NOT an rpb/substrate composite.
+            ``classify_manifest_provider`` is the single source of that decision
+            (it raises for non-eligible providers).
 
         Delegate-SPAWN isolation is P6, handled elsewhere: a worker that tries to
         create a child gets a clean refusal over the spawn_child RPC. A delegate
@@ -259,6 +260,21 @@ class ExecutionEngine:
         """
         from .worker_provider import classify_manifest_provider
         cfg = classify_manifest_provider(provider)   # {kind, name}; raises if not eligible
+
+        # P5: the Claude-Max bridge uses a DIFFERENT constructor surface
+        # (model + bridge_script, NO api_key/base_url — auth is the node SDK
+        # reading ~/.claude/.credentials.json off disk). Special-case it so the
+        # worker rebuilds the SAME bridge the daemon picked.
+        if cfg.get("kind") == "bridge":
+            cfg["model"] = str(getattr(provider, "_model", "") or "sonnet")
+            # Ship the resolved script path so the worker uses the same one the
+            # daemon chose (a configured bridge_script from pconfig.extra, if
+            # any). "" => worker falls back to its own _find_bridge_dir(), which
+            # resolves identically because the package layout is shared.
+            bscript = getattr(provider, "_bridge_script", "")
+            cfg["bridge_script"] = str(bscript) if bscript else ""
+            return cfg
+
         cfg["default_model"] = str(getattr(provider, "_default_model", "") or "")
         cfg["api_key"] = str(getattr(provider, "_api_key", "") or "")
         # Raw (un-normalised) base_url the provider was built with, so the

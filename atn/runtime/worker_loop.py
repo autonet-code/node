@@ -192,9 +192,12 @@ async def run_cognitive_loop(
         from ..model_specs import resolve as _resolve_model
         spec = _resolve_model(model_str)
         # API providers don't implement tokens_per_pct_for_model (that's a
-        # bridge method), so the subscription-rate path is inert here: send
-        # tokens_per_pct=None and only the raw token unit is booked. Kept for
-        # shape-parity with the in-process recorder.
+        # bridge method), so for them the subscription-rate path is inert:
+        # tokens_per_pct stays None and only the raw token unit is booked.
+        # For the P5 bridge this IS live — tokens_per_pct_for_model resolves the
+        # per-class 5h-window rate; the pct math runs here (worker-side, provider
+        # is local) and crosses to the DAEMON ledger via the budget_record RPC
+        # under the same reconciliation rule as P4.
         rate_for_model = None
         fn = getattr(provider, "tokens_per_pct_for_model", None)
         if fn is not None:
@@ -291,13 +294,39 @@ async def run_cognitive_loop(
         }
     }
 
+    # Post-loop reconciliation (P5, bridge subscription providers). The
+    # in-process path runs this at ExecutionEngine finalize (execution_engine.py
+    # ~:1136); worker_loop omitted it in P4 because API providers don't
+    # implement it. For bridge it MUST run WORKER-SIDE: refresh_usage() reads
+    # ~/.claude/.credentials.json off disk and makes the API call from the
+    # provider, so it can only happen where the provider lives. It also freshens
+    # ``_rate_limits`` for the subscription snapshot below. Best-effort — a
+    # reconcile failure never affects the user-visible result.
+    if hasattr(provider, "reconcile_after_orchestration"):
+        try:
+            await provider.reconcile_after_orchestration()
+        except Exception:
+            log.debug("[%s] reconcile_after_orchestration failed; continuing",
+                      agent_label, exc_info=True)
+
     # Session-stat sync (the daemon owns the conversation store; it records the
     # assistant turn and persists stats after execution_done). We surface
-    # session_stats so the daemon can persist them if it wants.
+    # session_stats so the daemon can persist them if it wants. For bridge,
+    # ``session_stats["rate_limits"]`` is the subscription snapshot the daemon
+    # caches so get_my_budget_status can answer for this now-isolated agent
+    # (the provider is in the worker, not the daemon's _active_providers).
     session_stats = None
     _stats = getattr(provider, "session_stats", None)
     if isinstance(_stats, dict):
-        session_stats = _stats
+        session_stats = dict(_stats)
+        # Attach the per-class tokens-per-pct table (bridge only) so the daemon
+        # can answer the full subscription block, not just raw rate_limits.
+        tpbc = getattr(provider, "tokens_per_pct_by_class", None)
+        if isinstance(tpbc, dict):
+            session_stats["tokens_per_pct_by_class"] = dict(tpbc)
+        tpp = getattr(provider, "tokens_per_percent", None)
+        if tpp is not None:
+            session_stats["tokens_per_percent"] = tpp
 
     return {
         "status": status,

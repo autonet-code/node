@@ -352,6 +352,27 @@ class WorkerHost:
                     cache_creation_tokens=int(u.get("cache_creation_tokens", 0) or 0),
                 )
 
+        # P5 subscription-budget snapshot: an isolated bridge agent's provider
+        # lives in the WORKER, so it is NOT in the daemon's _active_providers and
+        # get_my_budget_status (orchestrator/tools.py) would answer empty. Cache
+        # the worker's last session_stats (which carries ``rate_limits`` +
+        # ``tokens_per_pct_by_class`` for bridge) under this agent_id, reusing the
+        # SAME dict the "provider is gone, answer from cache" path already reads.
+        # Tradeoff: this is as-of the last completed orchestration, not live
+        # mid-run — correct + non-empty, but a long single run shows slightly
+        # stale subscription util. A live provider_status RPC per turn would
+        # close that gap (heavier); the piggyback is the light correct option.
+        sstats = payload.get("session_stats")
+        if isinstance(sstats, dict):
+            try:
+                pmgr = getattr(self._engine, "provider_manager", None)
+                cache = getattr(pmgr, "_cached_session_stats", None)
+                if isinstance(cache, dict):
+                    cache[agent_id] = sstats
+            except Exception:
+                log.debug("caching worker session_stats for %s failed",
+                          agent_id, exc_info=True)
+
         status = _STATUS_BY_NAME.get(
             str(payload.get("status") or "").lower(), ExecutionStatus.FAILED)
         error = payload.get("error")
