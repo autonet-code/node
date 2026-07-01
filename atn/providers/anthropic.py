@@ -88,6 +88,10 @@ class AnthropicProvider(Provider):
             raise ProviderError("Anthropic API key is required", provider="anthropic")
         self._api_key = api_key
         self._default_model = default_model or _DEFAULT_MODEL
+        # Raw base_url as passed in (before path normalisation) so an isolated
+        # worker can rebuild this provider identically from a manifest — see
+        # ExecutionEngine._build_provider_config. "" means the default endpoint.
+        self._config_base_url = base_url or ""
         self._base_url = (base_url.rstrip("/") + "/v1/messages") if base_url else _API_URL
 
     @property

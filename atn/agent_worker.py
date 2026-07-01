@@ -1,34 +1,47 @@
-"""Per-agent worker process entry point (Phase 1 — dark library).
+"""Per-agent worker process entry point (Phase 4 — cognitive loop in-worker).
 
-Each cognitive agent will (P4) run in its OWN OS process spawned as::
+Each cognitive agent that uses an API provider (Anthropic / OpenAI-compatible)
+runs in its OWN OS process, spawned by the daemon as::
 
     subprocess.Popen([sys.executable, "-u", "-m", "atn.agent_worker", ...])
 
-so its kernel PID becomes a real security identity. THIS FILE IS NOT SPAWNED BY
-THE DAEMON YET. It exists now so the connect + manifest + handshake + recv-loop
-scaffolding is real and importable, and so ``python -m atn.agent_worker`` can be
-driven by a smoke harness. The actual provider/cognitive loop is a TODO(P4) — for
-now the worker connects, reads its manifest, waits for "go", and answers with a
-ready status + heartbeats, then shuts down cleanly on the shutdown cmd.
+so its kernel PID becomes a real security identity. On "go" the worker rebuilds
+its provider LOCALLY from the run manifest and drives the SAME cognitive loop the
+in-process path drives (``Provider.send_orchestrate`` + the streaming/tool
+cycle), with one split:
 
-HANDSHAKE (P1 subset)
----------------------
-1. connect the inherited duplex pipe end (handle passed on argv; scrubbed of any
-   secret — see the security note below).
-2. read the MANIFEST frame: a ``cmd`` named ``manifest`` carrying non-secret spawn
-   context (agent_id label for logging only, protocol version). Identity is
-   pipe-bound on the daemon side; the manifest is informational.
+  - LOCAL tools (the 5 sandboxed shell executors) execute IN this process.
+  - AUTHORITY tools (``is_authority_tool``) become an RPC back to the daemon
+    (``framework_tool`` / ``surface_tool`` / ``mcp_tool``). A spawn attempt
+    returns a clean "not supported under isolation" tool-result (P6), never a
+    crash.
+  - budget_check before the run, budget_record as usage accrues — over RPC, so
+    the DAEMON ledger stays the single source of truth (P0 risk #1).
+  - step.output + agent.tool_use_* stream to the daemon via ``emit``.
+  - on completion/error the worker sends ``execution_done`` carrying the final
+    ProviderResponse-derived dict so the daemon can populate ``record.output``
+    BEFORE it finalizes.
+
+HANDSHAKE
+---------
+1. connect the inherited duplex pipe end (handle on argv; env scrubbed of
+   secrets by the daemon).
+2. read the MANIFEST ``cmd`` (protocol version + logging label). Identity is
+   pipe-bound on the daemon side; the manifest is informational for identity.
 3. send ``status: ready``.
-4. block on the ``go`` field of a ``run`` cmd (P4 runs the loop here; P1 just
-   acknowledges and idles emitting heartbeats).
-5. on ``shutdown`` cmd, stop cleanly.
+4. block on the ``go`` field of a ``run`` cmd, which carries the full run
+   manifest (provider_config, defn, prebuilt message/system/tools/history).
+5. run the loop, send ``execution_done``.
+6. on ``shutdown`` cmd (or pipe EOF), stop cleanly.
 
 SECURITY
 --------
 - The worker NEVER receives a secret in its env or argv. The pipe handle and a
-  logging label are the only things passed. Secret access (P4+) is mediated by
-  the daemon over RPC (``request_secret`` becomes an authority RPC), gated by the
-  PID the daemon recorded at spawn.
+  logging label are the only things on argv. The provider API key travels in
+  ``provider_config`` on the (local, private, non-pickled) pipe — isolated in
+  one place so the vault track can later replace it with a PID-gated RPC fetch
+  (see worker_provider.py SECRETS note). Secret allowance is explicitly NOT
+  implemented here.
 - All IPC uses length-prefixed JSON via send_bytes/recv_bytes (see worker_rpc).
   Never pickle.
 """
@@ -39,7 +52,7 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from .runtime.worker_rpc import (
     DaemonClient,
@@ -52,10 +65,11 @@ log = logging.getLogger("atn.agent_worker")
 
 
 class AgentWorker:
-    """The worker-side runtime. P1: handshake + idle heartbeat + clean shutdown.
+    """The worker-side runtime: handshake + in-worker cognitive loop + clean
+    shutdown.
 
-    P4 will replace ``_run_execution`` with the real provider/cognitive loop
-    (recreated locally in this process; the daemon graph is NOT shared).
+    The provider is recreated LOCALLY in this process from the run manifest; the
+    daemon object graph is NOT shared. Authority tools cross the pipe as RPCs.
     """
 
     def __init__(self, client: DaemonClient, *, heartbeat_secs: float = 30.0) -> None:
@@ -65,6 +79,14 @@ class AgentWorker:
         self._ready = False
         self._shutdown = asyncio.Event()
         self._heartbeat_task: Optional[asyncio.Task] = None
+        # The background task running the current execution (spawned from the
+        # "run" cmd so the recv loop stays free to resolve RPC replies).
+        self._run_task: Optional[asyncio.Task] = None
+        # Live provider for the current run (set inside _run_execution). Held so
+        # send_user_message / interrupt cmds can reach the running loop.
+        self._provider: Any = None
+        # Extra user messages injected mid-run (delegate_message live-inject).
+        self._injected_messages: list[str] = []
 
     # -- inbound cmd handling ---------------------------------------------
     async def on_cmd(self, env: Envelope) -> None:
@@ -72,13 +94,47 @@ class AgentWorker:
         if name == "manifest":
             await self._on_manifest(env.payload)
         elif name == "run":
-            await self._on_run(env.payload)
+            # CRITICAL: run in a BACKGROUND task, not inline. The cognitive loop
+            # issues RPCs (budget_check/budget_record/authority tools) whose
+            # rpc_res frames are read by THIS SAME recv loop — running the loop
+            # inline here would block the reader and deadlock every RPC. A
+            # background task keeps the reader free to resolve rpc futures and to
+            # service concurrent send_user_message/interrupt/shutdown cmds.
+            payload = env.payload
+            if not payload.get("go", False):
+                log.debug("[%s] run without go — holding", self._agent_label)
+            elif self._run_task is not None and not self._run_task.done():
+                log.warning("[%s] run already in progress — ignoring duplicate",
+                            self._agent_label)
+            else:
+                self._run_task = asyncio.create_task(
+                    self._on_run(payload), name=f"worker-run-{self._agent_label}")
         elif name == "send_user_message":
-            # P4: inject into the running loop. P1: no-op ack.
-            log.debug("[%s] send_user_message (P1 no-op)", self._agent_label)
+            # Live-inject a user message into the running loop. The generic
+            # base-class loop doesn't expose a mid-flight injection point, so we
+            # stage it: a provider that supports send_user_message gets it now;
+            # otherwise it's queued for the daemon to re-post to the inbox on the
+            # next run (the daemon's send_delegate_message handles that fallback).
+            content = str((env.payload or {}).get("content", ""))
+            if content:
+                self._injected_messages.append(content)
+                prov = self._provider
+                inject = getattr(prov, "send_user_message", None) if prov else None
+                if inject is not None:
+                    try:
+                        await inject(content)
+                    except Exception:
+                        log.debug("[%s] live send_user_message failed", self._agent_label,
+                                  exc_info=True)
         elif name == "interrupt":
-            # Cooperative interrupt. P4: signal the loop. P1: no-op.
-            log.debug("[%s] interrupt (P1 no-op)", self._agent_label)
+            # Cooperative interrupt: signal the provider loop to stop after the
+            # current turn (matches ExecutionControl.interrupt semantics).
+            prov = self._provider
+            if prov is not None and hasattr(prov, "interrupt"):
+                try:
+                    await prov.interrupt()
+                except Exception:
+                    log.debug("[%s] interrupt failed", self._agent_label, exc_info=True)
         elif name == "shutdown":
             log.info("[%s] shutdown requested", self._agent_label)
             self._shutdown.set()
@@ -101,20 +157,58 @@ class AgentWorker:
 
     async def _on_run(self, payload: dict) -> None:
         # The daemon fires the manifest -> ready, then (after _on_pid_bound on
-        # its side) sends run with go=True. P1 just acknowledges.
+        # its side) sends run with go=True carrying the full run manifest.
         if not payload.get("go", False):
             log.debug("[%s] run without go — holding", self._agent_label)
             return
-        result = await self._run_execution(payload)
-        # execution_done carries the final ProviderResponse (P4). P1: minimal.
+        try:
+            result = await self._run_execution(payload)
+        except Exception as exc:
+            log.exception("[%s] run failed", self._agent_label)
+            result = {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "output": None,
+                "token_usage": {},
+            }
+        # execution_done carries the ProviderResponse-derived dict so the daemon
+        # can populate record.output BEFORE finalize. Always sent (even on
+        # error) so the daemon's clean path runs instead of the kill path.
         await self._client.send_status("execution_done", result)
 
     async def _run_execution(self, payload: dict) -> dict:
-        # TODO(P4): recreate the provider locally and run the real cognitive
-        # loop here (route_tool_call splits LOCAL in-worker vs AUTHORITY RPC).
-        # P1 stand-in: echo that we would have run.
-        log.info("[%s] (P1) run acknowledged; provider loop is TODO(P4)", self._agent_label)
-        return {"status": "noop", "detail": "P1 worker: provider loop not implemented", "output": None}
+        """Run the cognitive loop IN this worker process.
+
+        ``payload`` is the run manifest (see agent_worker module docstring for
+        the schema). Returns the ProviderResponse-derived dict the daemon uses
+        to populate ``record.output`` + reconcile the budget.
+
+        The split:
+          - provider is rebuilt locally from ``payload["provider_config"]``;
+          - LOCAL shell tools run here; AUTHORITY tools RPC to the daemon;
+          - budget_check pre-flight + budget_record per turn, both over RPC;
+          - step.output / tool events stream to the daemon via ``emit``.
+        """
+        from .runtime.worker_provider import build_provider_from_manifest
+        from .runtime.worker_loop import run_cognitive_loop
+
+        provider = build_provider_from_manifest(payload.get("provider_config") or {})
+        self._provider = provider
+        self._injected_messages = []
+        try:
+            result = await run_cognitive_loop(
+                client=self._client,
+                provider=provider,
+                manifest=payload,
+                agent_label=self._agent_label,
+            )
+            return result
+        finally:
+            self._provider = None
+            try:
+                await provider.close()
+            except Exception:
+                pass
 
     async def _heartbeat_loop(self) -> None:
         try:
@@ -130,6 +224,14 @@ class AgentWorker:
     async def run(self) -> None:
         self._client.start()
         await self._shutdown.wait()
+        # Cancel any in-flight run so a cooperative shutdown mid-execution
+        # doesn't leave the loop dangling (the daemon finalizes on-behalf).
+        if self._run_task is not None and not self._run_task.done():
+            self._run_task.cancel()
+            try:
+                await self._run_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
             try:

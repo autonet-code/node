@@ -2212,11 +2212,18 @@ async def _delegate_message(runtime: Runtime, input: dict[str, Any]) -> dict[str
     if not content:
         return {"error": "Missing 'content'."}
 
-    # Try active bridge session (direct injection for immediate delivery)
-    provider = runtime._active_providers.get(agent_id)
-    if provider is not None:
-        await provider.send_user_message(content)
-        return {"status": "delivered", "agent_id": agent_id}
+    # Try live injection (direct delivery). Dual-mode: for an in-process agent
+    # this hits the daemon-resident provider; for an ISOLATED worker the
+    # provider lives in the worker, so control.send_delegate_message routes the
+    # injection over the IPC "send_user_message" cmd. Either way a True return
+    # means the running loop received it.
+    control = getattr(runtime, "control", None)
+    if control is not None:
+        try:
+            if await control.send_delegate_message(agent_id, content):
+                return {"status": "delivered", "agent_id": agent_id}
+        except Exception:
+            pass  # fall through to the inbox fallback below
 
     # Fallback: post to inbox for agents not actively running
     # (e.g. between scheduled runs or not yet started)

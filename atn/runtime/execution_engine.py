@@ -76,6 +76,24 @@ class ExecutionEngine:
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancels: dict[str, asyncio.Event] = {}
 
+        # Daemon-authoritative "already booked this execution" tally, keyed by
+        # execution_id -> {provider_key: tokens}. Populated ONLY by the isolated
+        # worker path (WorkerHost._rpc_budget_record) so the post-loop
+        # reconciliation in _finalize_execution survives a hard worker kill
+        # (P0 risk #1). Empty on the in-process path => finalize falls back to
+        # the passed-in recorded_inflight dict => byte-identical when the flag
+        # is OFF.
+        self._booked_by_execution: dict[str, dict[str, float]] = {}
+
+        # Per-execution "finalize done" events for the isolated-worker path.
+        # A worker run's driver task (``_run_cognitive_in_worker``) parks on the
+        # event for its execution_id; ``_finalize_execution`` sets it at the very
+        # end so the driver returns only after ALL terminal side effects have
+        # run — whether finalize came from the clean execution_done callback or
+        # the supervisor's on-behalf reap. Empty on the in-process path
+        # (never registered) => byte-identical when the flag is OFF.
+        self._finalize_events: dict[str, asyncio.Event] = {}
+
         # Completion callbacks: child_id -> parent_id
         self._completion_callbacks: dict[str, str] = {}
         # Events for signalling delegate completion
@@ -120,22 +138,24 @@ class ExecutionEngine:
         self.registry._status[agent_id] = AgentStatus.RUNNING
         self.execution_log.record(record)
 
-        # ---- Worker isolation liveness proof (P2, flag-gated, default OFF) ----
-        # When ATN_WORKER_ISOLATION is ON, prove the spawn+handshake path for a
-        # cognitive agent by launching a real worker process, awaiting its ready
-        # handshake, then IMMEDIATELY shutting it down and falling through to the
-        # existing in-process task. The cognitive loop does NOT yet run in the
-        # worker — that cutover is P4. With the flag OFF this block is skipped
-        # entirely and behavior is byte-identical to today.
-        # TODO(P4): replace the in-process task below with the worker running the
-        # cognitive loop; the AgentSupervisor (P3) will own the handle + kill
-        # ladder instead of this fire-and-forget proof.
-        if defn.mode == AgentMode.COGNITIVE and self._worker_isolation_enabled():
-            asyncio.create_task(
-                self._worker_liveness_proof(agent_id),
-                name=f"worker-liveness-{agent_id}",
-            )
-
+        # ---- Worker isolation cutover (P4, flag-gated, default OFF) -----------
+        # When ATN_WORKER_ISOLATION is ON, a COGNITIVE agent whose provider is
+        # worker-eligible (an API provider — NOT the bridge/Claude-Max SDK, NOT
+        # a delegate that would spawn a child) runs its provider loop + local
+        # sandboxed tools IN ITS OWN OS PROCESS. Authority tools + events +
+        # status cross the IPC seam; the AgentSupervisor (P3) owns the PID handle
+        # + kill ladder. With the flag OFF (or a non-eligible provider) this
+        # branch is not taken and the exact in-process asyncio path below runs —
+        # byte-identical to today.
+        #
+        # The eligibility decision needs the resolved provider, which lives in
+        # _execute_cognitive_agent's provider-lifecycle block. Rather than
+        # duplicate that resolution here, the in-worker cutover is driven from
+        # INSIDE _execute_cognitive_agent (it builds the shared context — prompt,
+        # inbox drain, history, tool surface — then, for an eligible provider,
+        # dispatches to the worker instead of calling send_orchestrate locally).
+        # So the task we create is the same one either way; the fork is internal
+        # and gated on the resolved provider type + flag.
         if defn.mode == AgentMode.COGNITIVE:
             task = asyncio.create_task(self._execute_cognitive_agent(defn, record, cancel))
         else:
@@ -165,7 +185,7 @@ class ExecutionEngine:
         return eid
 
     # ------------------------------------------------------------------
-    # Worker isolation (P2 — spawn+handshake liveness proof, flag-gated)
+    # Worker isolation (P4 — in-worker cognitive loop, flag-gated)
     # ------------------------------------------------------------------
 
     def _worker_isolation_enabled(self) -> bool:
@@ -173,32 +193,256 @@ class ExecutionEngine:
         wi = getattr(self._config, "worker_isolation", None)
         return bool(getattr(wi, "enabled", False))
 
-    async def _worker_liveness_proof(self, agent_id: str) -> None:
-        """P2 proof: spawn a worker, complete the ready handshake, shut it down.
+    def _worker_manager(self):
+        """The WorkerManager used to spawn workers. Prefers the SUPERVISOR's
+        manager (Runtime wires one into AgentSupervisor) so spawn and the kill
+        ladder share a single Job-Object / memory-cap policy and operate on the
+        same primitives. Falls back to a lazily-built engine-local manager only
+        in bare-engine tests with no supervisor. An explicit ``_worker_mgr``
+        override (tests) always wins. Never touched on the in-process path."""
+        override = getattr(self, "_worker_mgr", None)
+        if override is not None:
+            return override
+        sup = getattr(self, "supervisor", None)
+        sup_mgr = getattr(sup, "_worker_manager", None)
+        if sup_mgr is not None:
+            self._worker_mgr = sup_mgr
+            return sup_mgr
+        from .worker_manager import WorkerManager
+        wi = getattr(self._config, "worker_isolation", None)
+        cap = int(getattr(wi, "memory_cap_mb", 0) or 0)
+        mgr = WorkerManager(memory_cap_mb=cap)
+        self._worker_mgr = mgr
+        return mgr
 
-        Fire-and-forget and fully isolated from the real (in-process) execution:
-        any failure here is logged and swallowed so the flag can NEVER change
-        agent behavior in P2. This exists only to exercise the spawn+handshake
-        +kill path on the live daemon. Removed in P4 when the loop moves into
-        the worker for real.
+    def _worker_eligible(self, defn: AgentDefinition, provider: Any) -> bool:
+        """Should THIS cognitive execution run in an isolated worker?
+
+        True iff ALL of:
+          - the flag is ON;
+          - a supervisor exists (Runtime wired it);
+          - the provider is a worker-eligible API provider — NOT the bridge /
+            Claude-Max SDK provider (that stays in-process, P5) and NOT an
+            rpb/substrate composite. ``classify_manifest_provider`` is the single
+            source of that decision (it raises for non-eligible providers).
+
+        Delegate-SPAWN isolation is P6, handled elsewhere: a worker that tries to
+        create a child gets a clean refusal over the spawn_child RPC. A delegate
+        AGENT that already exists and simply runs its own API-provider loop is
+        eligible here — history rebuilds from disk and there is no node-child to
+        supervise, which is exactly why API providers were chosen first.
         """
+        if not self._worker_isolation_enabled():
+            return False
+        if getattr(self, "supervisor", None) is None:
+            return False
         try:
-            from .worker_manager import WorkerManager
-            wi = getattr(self._config, "worker_isolation", None)
-            cap = int(getattr(wi, "memory_cap_mb", 0) or 0)
-            mgr = WorkerManager(memory_cap_mb=cap)
-            handle = await mgr.ensure_worker(agent_id, {"agent_label": agent_id})
-            log.info("worker-isolation liveness proof OK: agent=%s pid=%s",
-                     agent_id, handle.pid)
-            # Prove the kill path too: cooperative shutdown, then hard-kill if it
-            # doesn't exit on its own.
-            exited = await mgr.graceful_close(handle)
-            if not exited:
-                await mgr.hard_kill(handle)
+            from .worker_provider import classify_manifest_provider
+            classify_manifest_provider(provider)
         except Exception:
-            log.warning("worker-isolation liveness proof failed for %s "
-                        "(flag ON, in-process execution unaffected)", agent_id,
-                        exc_info=True)
+            # UnsupportedProviderError (bridge/rpb/substrate/unknown) or any
+            # import hiccup => stay in-process. Never fail the run over this.
+            return False
+        return True
+
+    def _build_provider_config(self, provider: Any) -> dict:
+        """Derive the JSON-safe ``provider_config`` the worker uses to rebuild an
+        equivalent API provider LOCALLY (clients aren't serializable).
+
+        SECRET SEAM: ``api_key`` rides here on the private, non-pickled pipe (the
+        worker's env is scrubbed of secrets). Isolated in this one place so the
+        vault track can later swap it for a PID-gated RPC fetch without touching
+        the loop. We pass the ORIGINAL (un-normalised) base_url so the worker's
+        provider constructor re-applies the same URL normalisation the daemon
+        did — never the post-normalised ``_url``/``_base_url`` (that would
+        double-append the path suffix).
+        """
+        from .worker_provider import classify_manifest_provider
+        cfg = classify_manifest_provider(provider)   # {kind, name}; raises if not eligible
+        cfg["default_model"] = str(getattr(provider, "_default_model", "") or "")
+        cfg["api_key"] = str(getattr(provider, "_api_key", "") or "")
+        # Raw (un-normalised) base_url the provider was built with, so the
+        # worker's constructor re-applies the SAME normalisation — never the
+        # post-normalised ``_url``/``_base_url`` (that would double-append the
+        # path suffix). "" => default endpoint.
+        cfg["base_url"] = str(getattr(provider, "_config_base_url", "") or "")
+        return cfg
+
+    async def _run_cognitive_in_worker(
+        self,
+        defn: AgentDefinition,
+        record: ExecutionRecord,
+        cancel: asyncio.Event,
+        *,
+        provider: Any,
+        user_message: str,
+        system_prompt: str,
+        agent_tools: list,
+        native_tools: bool,
+        session_id: str,
+        history_messages: list | None,
+    ) -> bool:
+        """Dispatch this cognitive execution to an isolated worker process.
+
+        Called from INSIDE ``_execute_cognitive_agent`` AFTER the shared context
+        (prompt, drained inbox, history, tool surface, conversation-store
+        user-turn) is built. Returns:
+          - ``True``  => the worker path OWNS finalize (clean: the WorkerHost
+            execution_done callback runs ``_finalize_execution``; crash: the
+            supervisor's ``_reap`` runs ``_finalize_on_behalf``). The caller MUST
+            skip its shared ``finally`` finalize.
+          - ``False`` => the worker could not be spawned; the caller falls
+            through to the in-process ``send_orchestrate`` path (a spawn failure
+            must never strand the agent).
+
+        This method returns only after finalize has fully completed (it parks on
+        the per-execution finalize event) so the driver task's lifetime brackets
+        the whole execution, exactly like the in-process path.
+        """
+        from .worker_host import WorkerHost
+
+        agent_id = defn.id
+        eid = record.execution_id
+        provider_name = _provider_name(provider)
+
+        # Build the run manifest (all JSON-safe; the worker rebuilds its provider
+        # + drives send_orchestrate from these). Everything shared-context has
+        # already been computed by the caller.
+        try:
+            provider_config = self._build_provider_config(provider)
+        except Exception:
+            log.warning("worker cutover: provider_config build failed for %s "
+                        "— falling back to in-process", agent_id, exc_info=True)
+            return False
+
+        manifest = {
+            "agent_label": agent_id,
+            "agent_id": agent_id,
+            "provider_config": provider_config,
+            "provider_name": provider_name,
+            "model": "",
+            "message": user_message,
+            "system": system_prompt,
+            "tools": list(agent_tools or []),
+            "native_tools": bool(native_tools),
+            "max_turns": defn.max_turns,
+            "session_id": session_id or "",
+            "history": history_messages or None,
+            "per_turn_input_max": defn.per_turn_input_max,
+            "repeat_call_limit": defn.repeat_call_limit,
+        }
+
+        # The finalize-done event this driver parks on. Set by
+        # _finalize_execution at the very end (clean OR on-behalf path).
+        done_evt = asyncio.Event()
+        self._finalize_events[eid] = done_evt
+
+        # WorkerHost: the clean-path execution_done callback populates
+        # record.output/token_usage (inside WorkerHost) then calls
+        # _finalize_execution here. recorded_inflight=None: the daemon-side
+        # _booked_by_execution tally is authoritative (P0 risk #1).
+        async def _on_done(status: ExecutionStatus, error: str | None,
+                           tool_calls: list) -> None:
+            await self._finalize_execution(
+                defn, record, status, error=error,
+                recorded_inflight=None,
+                accumulated_tool_calls=tool_calls,
+            )
+
+        host = WorkerHost(
+            engine=self, agent_id=agent_id, record=record,
+            on_execution_done=_on_done,
+        )
+
+        mgr = self._worker_manager()
+        handle = None
+        try:
+            handle = await mgr.ensure_worker(
+                agent_id, manifest,
+                rpc_handlers=host.rpc_handlers(),
+                event_sink=host.event_sink(),
+                status_sink=host.status_sink(),
+            )
+        except Exception:
+            log.warning("worker cutover: ensure_worker failed for %s — falling "
+                        "back to in-process", agent_id, exc_info=True)
+            self._finalize_events.pop(eid, None)
+            return False
+
+        # Register with the supervisor (sole PID-handle holder). This captures
+        # defn/record/execution_id so the supervisor can finalize ON BEHALF if
+        # the worker is hard-killed, fires _on_pid_bound BEFORE "go", and wires
+        # the wedge clock. Root agent (orchestrator) auto-restarts; delegates
+        # don't — mark is_root off the parent link.
+        parent_id = getattr(defn, "parent_id", None)
+        try:
+            self.supervisor.register(
+                agent_id, handle.pid, handle,
+                parent_agent_id=parent_id,
+                execution_id=eid,
+                defn=defn,
+                record=record,
+                is_root=(parent_id is None),
+            )
+        except Exception:
+            log.warning("worker cutover: supervisor.register failed for %s — "
+                        "killing worker and falling back", agent_id, exc_info=True)
+            try:
+                await mgr.hard_kill(handle)
+            except Exception:
+                pass
+            self._finalize_events.pop(eid, None)
+            return False
+
+        # If a kill arrived while we were spawning, honour it before "go".
+        if cancel.is_set():
+            log.info("worker cutover: cancel set pre-go for %s — killing", agent_id)
+            await self.supervisor.kill(agent_id, reason="kill_before_go")
+            await self._await_finalize(eid, done_evt)
+            return True
+
+        # PID is bound + granted → tell the worker to run. From here the worker
+        # owns the loop; we park until finalize completes (clean or on-behalf).
+        try:
+            await handle.channel.send_cmd("run", {**manifest, "go": True})
+        except Exception:
+            log.warning("worker cutover: send 'go' failed for %s — killing + "
+                        "on-behalf finalize", agent_id, exc_info=True)
+            await self.supervisor.kill(agent_id, reason="go_send_failed")
+            await self._await_finalize(eid, done_evt)
+            return True
+
+        await self._await_finalize(eid, done_evt)
+        # Per-execution teardown (conservative default): after a CLEAN
+        # execution_done the worker process stays alive (its run() parks on
+        # shutdown), so the supervisor would otherwise hold an idle worker until
+        # the wedge timer kills it. Tear it down now. On the crash path the
+        # supervisor already reaped it (is_supervised => False), so this is a
+        # no-op. Keep-warm reuse (inject the next run over IPC) is a future
+        # optimisation; per-execution teardown is the safe baseline.
+        await self._teardown_worker_if_supervised(agent_id)
+        return True
+
+    async def _teardown_worker_if_supervised(self, agent_id: str) -> None:
+        """Cooperatively shut down + reap a still-supervised worker after its
+        clean finalize. No-op if already reaped (crash path)."""
+        sup = getattr(self, "supervisor", None)
+        if sup is None or not sup.is_supervised(agent_id):
+            return
+        try:
+            await sup.kill(agent_id, reason="execution_complete")
+        except Exception:
+            log.debug("worker teardown for %s raised", agent_id, exc_info=True)
+
+    async def _await_finalize(self, eid: str, done_evt: asyncio.Event) -> None:
+        """Park until _finalize_execution has run for this execution. The event
+        is set at the very end of finalize (both the clean callback path and the
+        supervisor on-behalf path converge there), so returning here means every
+        terminal side effect is complete."""
+        try:
+            await done_evt.wait()
+        finally:
+            self._finalize_events.pop(eid, None)
 
     # ------------------------------------------------------------------
     # Tool routing
@@ -466,6 +710,17 @@ class ExecutionEngine:
 
         sub_provider = None
         owns_provider = True
+        # When the flag-ON worker path takes over (see below), the worker OWNS
+        # finalize (clean: WorkerHost execution_done callback; crash: supervisor
+        # _reap). This flag tells the shared ``finally`` to skip its own
+        # _finalize_execution so terminal side effects never run twice. Stays
+        # False on the in-process path => byte-identical when the flag is OFF.
+        _worker_owns_finalize = False
+        # Bound up-front so the shared ``finally`` is always safe even if an
+        # exception fires before the in-process path (below the worker cutover)
+        # assigns them. On the in-process path they are reassigned in place.
+        _recorded_inflight: dict[str, int] = {}
+        _accumulated_tool_calls: list[dict[str, Any]] = []
 
         try:
             # --- Provider lifecycle (unified: all agents reuse existing provider) ---
@@ -654,6 +909,33 @@ class ExecutionEngine:
             now = datetime.now(_tz.utc)
             time_line = f"Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')} ({now.strftime('%A, %B %d, %Y')})"
             user_message = f"[{time_line}]\n\n{user_message}"
+
+            # --- P4 worker-isolation cutover (flag-gated, API providers only) ---
+            # The shared context above (system prompt, drained inbox, prompt
+            # cache-stable history, resolved tool surface, conversation-store
+            # user-turn) is built IDENTICALLY for both paths. For a worker-
+            # eligible provider under the flag, dispatch the provider loop +
+            # local sandboxed tools to the worker process instead of running
+            # send_orchestrate here. Everything below (in-process tool executor,
+            # streaming callback, per-turn recorder, send_orchestrate, result
+            # block) is the in-process path and is UNTOUCHED when the flag is
+            # OFF. The worker path owns finalize, so we skip the shared finally.
+            if self._worker_eligible(defn, sub_provider):
+                worker_took_over = await self._run_cognitive_in_worker(
+                    defn, record, cancel,
+                    provider=sub_provider,
+                    user_message=user_message,
+                    system_prompt=system_prompt,
+                    agent_tools=agent_tools,
+                    native_tools=native_tools,
+                    session_id=session_id,
+                    history_messages=history_messages,
+                )
+                if worker_took_over:
+                    _worker_owns_finalize = True
+                    return
+                # Worker could not be spawned — fall through to in-process so a
+                # spawn failure never strands the agent.
 
             # --- Tool executor (with call accumulation for run summary) ---
             _accumulated_tool_calls: list[dict[str, Any]] = []
@@ -873,14 +1155,21 @@ class ExecutionEngine:
             # on-behalf-of a hard-killed worker (P0 extraction). record.status /
             # record.error are already set by the try/except above; pass them
             # through explicitly so the method never has to inspect this frame.
-            await self._finalize_execution(
-                defn,
-                record,
-                record.status,
-                error=record.error,
-                recorded_inflight=_recorded_inflight,
-                accumulated_tool_calls=_accumulated_tool_calls,
-            )
+            #
+            # SKIP when the worker path took over: it owns finalize (clean:
+            # WorkerHost execution_done callback; crash: supervisor _reap), so
+            # running it here too would double-emit terminal events. This also
+            # avoids referencing _recorded_inflight/_accumulated_tool_calls,
+            # which are only bound on the in-process path below the cutover.
+            if not _worker_owns_finalize:
+                await self._finalize_execution(
+                    defn,
+                    record,
+                    record.status,
+                    error=record.error,
+                    recorded_inflight=_recorded_inflight,
+                    accumulated_tool_calls=_accumulated_tool_calls,
+                )
 
     async def _finalize_execution(
         self,
@@ -908,7 +1197,23 @@ class ExecutionEngine:
             simply empty → the full ``record.token_usage`` remainder is booked.
           - ``accumulated_tool_calls``: for the deterministic run summary.
             Empty on the supervisor path → run summary is derived from status.
+
+        IDEMPOTENT per execution_id: the isolated-worker path has two potential
+        finalize callers (the clean execution_done callback and the supervisor's
+        on-behalf ``_reap``) plus, under ``kill_all``, a racing task-cancel. The
+        first call wins; later calls are no-ops. On the in-process path finalize
+        is called exactly once, so this guard never trips there — byte-identical.
         """
+        finalized = getattr(self, "_finalized_ids", None)
+        if finalized is None:
+            finalized = set()
+            self._finalized_ids = finalized
+        if record.execution_id in finalized:
+            log.debug("finalize already ran for %s — skipping duplicate",
+                      record.execution_id)
+            return
+        finalized.add(record.execution_id)
+
         recorded_inflight = recorded_inflight or {}
         accumulated_tool_calls = accumulated_tool_calls or []
 
@@ -935,9 +1240,17 @@ class ExecutionEngine:
         # inner-loop recorder — NOT the raw 4-bucket total, which is context
         # size and would re-introduce the cache_read we deliberately
         # down-weight (and false-fail sane caps).
+        # "already booked" source of truth: the daemon-side per-execution tally
+        # (isolated worker path) takes precedence over the passed-in dict, since
+        # it survives a hard worker kill. When empty (in-process path), fall
+        # back to recorded_inflight => byte-identical to today.
+        daemon_booked = self._booked_by_execution.get(record.execution_id)
         for provider_key, usage in record.token_usage.items():
             total = usage.budget_tokens()
-            already_recorded = recorded_inflight.get(provider_key, 0)
+            if daemon_booked is not None:
+                already_recorded = daemon_booked.get(provider_key, 0)
+            else:
+                already_recorded = recorded_inflight.get(provider_key, 0)
             remainder = total - already_recorded
             if remainder > 0:
                 exceeded = self.registry.record_token_usage(defn.id, provider_key, remainder)
@@ -1043,6 +1356,9 @@ class ExecutionEngine:
         self._tasks.pop(record.execution_id, None)
         self._cancels.pop(record.execution_id, None)
         self._interrupt_hooks.pop(record.execution_id, None)
+        # Drop the isolated-worker budget tally for this execution so the map
+        # doesn't leak (no-op on the in-process path where it was never set).
+        self._booked_by_execution.pop(record.execution_id, None)
 
         # Provider lifecycle: keep the provider alive in _active_providers
         # so it is reused across executions. This preserves session state,
@@ -1090,6 +1406,17 @@ class ExecutionEngine:
                 "error": record.error,
             },
         ))
+
+        # Isolated-worker path: release the driver task parked in
+        # _run_cognitive_in_worker now that ALL terminal side effects have run.
+        # Also drop the per-execution dedup marker so the set doesn't grow
+        # unbounded. Both are no-ops on the in-process path (never registered).
+        done_evt = self._finalize_events.pop(record.execution_id, None)
+        if done_evt is not None:
+            done_evt.set()
+        finalized = getattr(self, "_finalized_ids", None)
+        if finalized is not None:
+            finalized.discard(record.execution_id)
 
     # ------------------------------------------------------------------
     # Interrupt hooks (shared with ExecutionControl)

@@ -167,6 +167,22 @@ class ExecutionControl:
     # ------------------------------------------------------------------
 
     async def send_delegate_message(self, agent_id: str, content: str) -> bool:
+        # Dual-mode (C1): a supervised worker's provider object lives IN THE
+        # WORKER, not in the daemon's _active_providers map. Route the injection
+        # over the IPC "send_user_message" cmd (the worker's on_cmd handles it:
+        # live-inject if the provider supports it, else stage for the inbox
+        # fallback). Mirrors interrupt_delegate's worker branch.
+        if self._supervised(agent_id):
+            worker = self.supervisor.get(agent_id)
+            channel = getattr(getattr(worker, "handle", None), "channel", None)
+            if channel is not None:
+                try:
+                    await channel.send_cmd("send_user_message", {"content": content})
+                    return True
+                except Exception:
+                    log.debug("send_user_message cmd failed for %s", agent_id, exc_info=True)
+                    return False
+            return False
         provider = self.provider_manager._active_providers.get(agent_id)
         if provider is None:
             return False

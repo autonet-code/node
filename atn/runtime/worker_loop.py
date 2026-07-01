@@ -1,0 +1,363 @@
+"""The in-worker cognitive loop (Phase 4).
+
+This is the worker-side mirror of ``ExecutionEngine._execute_cognitive_agent``'s
+inner body — the part that, under isolation, runs in the WORKER process. It
+drives ``provider.send_orchestrate`` with:
+
+  - a ``_tool_executor`` that splits LOCAL shell tools (run here) from AUTHORITY
+    tools (RPC to the daemon over ``DaemonClient.rpc``);
+  - an ``_on_chunk`` streaming callback that forwards text deltas to the daemon
+    via ``DaemonClient.emit`` (the daemon re-emits on the real EventBus with the
+    source overwritten to the pipe-bound agent_id);
+  - a ``_per_turn_recorder`` that books usage over the ``budget_record`` RPC so
+    the DAEMON ledger stays the single source of truth (P0 risk #1);
+  - a pre-flight ``budget_check`` RPC.
+
+What DOESN'T run here (stays daemon-side, shipped in the manifest or done after
+``execution_done``): building the system prompt, draining the inbox, reading
+conversation history from disk, resolving the tool surface, writing the output
+store, updating the delegate registry, and the budget reconciliation. The worker
+receives the already-built ``message`` / ``system`` / ``tools`` / ``history`` and
+returns the ProviderResponse-derived dict.
+
+The manifest keys this reads (all JSON-safe, all built daemon-side):
+    provider_config : dict  — for worker_provider.build_provider_from_manifest
+    agent_id        : str   — logging only; identity is pipe-bound on the daemon
+    provider_name   : str   — budget key (matches record.token_usage key)
+    message         : str   — the fully-assembled first user message
+    system          : str   — the system prompt (constitutional preamble folded in)
+    tools           : list[dict]        — the resolved tool surface (name/desc/schema)
+    native_tools    : bool  — SDK builtins flag (inert for API providers)
+    max_turns       : int
+    session_id      : str   — "" for API providers (they rebuild from history)
+    history         : list[dict] | None — prior turns as canonical messages
+    per_turn_input_max : int | None
+    repeat_call_limit  : int | None
+    model           : str   — model override for send_orchestrate
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from ..shell_tools import SHELL_TOOL_EXECUTORS as _SHELL_TOOL_EXECUTORS
+
+log = logging.getLogger("atn.agent_worker.loop")
+
+
+# Spawn-family tools refused under isolation (delegate spawn = P6). A worker that
+# tries to create a child gets a clean tool-result, never a crash. Kept in
+# lockstep with the daemon-side refusal.
+_SPAWN_TOOLS = frozenset({"create_agent"})
+_SPAWN_REFUSAL = {
+    "error": "agent spawning is not yet supported under process isolation (P6). "
+             "Run this agent with worker isolation OFF to spawn delegates."
+}
+
+
+def _is_authority_tool(name: str) -> bool:
+    """Worker-side copy of ExecutionEngine.is_authority_tool.
+
+    LOCAL (False): the sandboxed shell executors — run in this process.
+    AUTHORITY (True): everything else (surface_*, mcp_*, framework tools) —
+    RPC back to the daemon.
+    """
+    if name in _SHELL_TOOL_EXECUTORS:
+        return False
+    return True
+
+
+def _rpc_kind_for(name: str) -> str:
+    """Which RPC name carries this authority tool to the daemon.
+
+    Mirrors ExecutionEngine.route_tool_call's authority-target selection:
+      surface_* -> surface_tool ; mcp_* -> mcp_tool ; else -> framework_tool.
+    The daemon-side handler resolves the concrete target using the pipe-bound
+    agent_id (the worker never sends agent_id in the body).
+    """
+    if name.startswith("surface_"):
+        return "surface_tool"
+    if name.startswith("mcp_"):
+        return "mcp_tool"
+    return "framework_tool"
+
+
+async def run_cognitive_loop(
+    *,
+    client: Any,
+    provider: Any,
+    manifest: dict[str, Any],
+    agent_label: str = "?",
+) -> dict[str, Any]:
+    """Drive one cognitive orchestration in the worker; return the output dict.
+
+    Returns a JSON-safe dict shaped for the daemon's ``execution_done`` handler::
+
+        {
+          "status": "completed" | "failed" | "killed",
+          "error": <str|None>,
+          "output": {                     # -> record.output verbatim
+             "result": <str>,
+             "tokens_used": <int>,
+             "usage": {input_tokens, output_tokens,
+                       cache_read_tokens, cache_creation_tokens},
+          },
+          "token_usage": {                # -> record.token_usage[provider_name]
+             <provider_name>: {input_tokens, output_tokens,
+                               cache_read_tokens, cache_creation_tokens},
+          },
+          "tool_calls": [ {tool, args, result, success}, ... ],  # run summary
+          "streamed_text": <bool>,        # did any text stream as chunks
+        }
+    """
+    provider_name = str(manifest.get("provider_name") or provider.name or "")
+    model = str(manifest.get("model", "") or "")
+    message = str(manifest.get("message", "") or "")
+    system = str(manifest.get("system", "") or "")
+    tools = list(manifest.get("tools") or [])
+    native_tools = bool(manifest.get("native_tools", False))
+    max_turns = int(manifest.get("max_turns", 20) or 20)
+    session_id = str(manifest.get("session_id", "") or "")
+    history = manifest.get("history") or None
+    per_turn_input_max = manifest.get("per_turn_input_max")
+    repeat_call_limit = manifest.get("repeat_call_limit")
+
+    # --- Wire the provider's event bus to the daemon over the pipe. The base
+    # provider emits AGENT_TOOL_USE_* + usage events on ``event_bus``; we bridge
+    # those to ``client.emit`` so the daemon re-emits them (source overwritten to
+    # the pipe-bound agent_id). Text deltas come through ``on_chunk`` below.
+    provider.event_bus = _PipeEventBus(client)
+    provider.source_agent_id = manifest.get("agent_id", "") or agent_label
+
+    # --- Pre-flight budget check (daemon ledger authoritative). ---
+    try:
+        chk = await client.rpc("budget_check", {
+            "provider": provider_name, "model_id": model,
+        })
+        if isinstance(chk, dict) and chk.get("ok") is False:
+            blocker = chk.get("blocker")
+            return {
+                "status": "failed",
+                "error": f"Budget exceeded (blocked by {blocker})",
+                "output": None,
+                "token_usage": {},
+                "tool_calls": [],
+                "streamed_text": False,
+            }
+    except Exception:
+        # A failed pre-flight RPC must not silently run an unbudgeted agent.
+        log.exception("[%s] budget_check RPC failed", agent_label)
+        return {
+            "status": "failed",
+            "error": "budget_check RPC failed",
+            "output": None,
+            "token_usage": {},
+            "tool_calls": [],
+            "streamed_text": False,
+        }
+
+    # --- Tool executor (LOCAL vs AUTHORITY split). ---
+    accumulated_tool_calls: list[dict[str, Any]] = []
+
+    async def _tool_executor(name: str, tool_input: dict) -> dict:
+        result = await _route_tool(client, name, tool_input, agent_label)
+        is_error = isinstance(result, dict) and "error" in result
+        accumulated_tool_calls.append({
+            "tool": name,
+            "args": tool_input,
+            "result": str(result)[:4000],
+            "success": not is_error,
+        })
+        return result
+
+    # --- Streaming callback: forward text deltas to the daemon. ---
+    streamed = {"text": False}
+
+    async def _on_chunk(text: str) -> None:
+        if text:
+            streamed["text"] = True
+        await client.emit("step.output", {
+            "channel": "text",
+            "content": text,
+            "cognitive": True,
+        })
+
+    # --- Per-turn budget recorder (books over RPC; daemon ledger is truth). ---
+    # Async: the base loop calls this via ``_call_recorder`` then awaits the
+    # result through ``_maybe_await`` (see providers/base.py), so returning a
+    # coroutine is the supported path — no nested event loop.
+    async def _per_turn_recorder(turn_tokens: float, model_str: str = "") -> tuple[bool, str | None]:
+        if turn_tokens <= 0:
+            return True, None
+        from ..model_specs import resolve as _resolve_model
+        spec = _resolve_model(model_str)
+        # API providers don't implement tokens_per_pct_for_model (that's a
+        # bridge method), so the subscription-rate path is inert here: send
+        # tokens_per_pct=None and only the raw token unit is booked. Kept for
+        # shape-parity with the in-process recorder.
+        rate_for_model = None
+        fn = getattr(provider, "tokens_per_pct_for_model", None)
+        if fn is not None:
+            try:
+                rate_for_model = fn(spec.id)
+            except Exception:
+                rate_for_model = None
+        tpp = {spec.klass: rate_for_model} if rate_for_model else None
+        try:
+            res = await client.rpc("budget_record", {
+                "provider": provider_name,
+                "tokens": turn_tokens,
+                "model_class": spec.klass,
+                "model_id": spec.id if spec.id != "default" else "",
+                "tokens_per_pct": tpp,
+            })
+        except Exception:
+            # A failed record RPC shouldn't kill the turn; the daemon's
+            # post-loop reconciliation still books the real spend from the
+            # returned token_usage. Continue.
+            log.debug("[%s] budget_record RPC failed", agent_label, exc_info=True)
+            return True, None
+        exceeded = res.get("exceeded") if isinstance(res, dict) else None
+        if exceeded:
+            return False, exceeded
+        return True, None
+
+    # --- Run the orchestration. ---
+    send_kwargs: dict[str, Any] = {
+        "message": message,
+        "system": system,
+        "tools": tools,
+        "native_tools": native_tools,
+        "max_turns": max_turns,
+        "tool_executor": _tool_executor,
+        "on_chunk": _on_chunk,
+        "usage_recorder": _per_turn_recorder,
+        "model": model,
+    }
+    if session_id:
+        send_kwargs["session_id"] = session_id
+    if history:
+        send_kwargs["history"] = history
+    if per_turn_input_max is not None:
+        send_kwargs["per_turn_input_max"] = per_turn_input_max
+    if repeat_call_limit is not None:
+        send_kwargs["repeat_call_limit"] = repeat_call_limit
+
+    response = await provider.send_orchestrate(**send_kwargs)
+
+    # --- Derive the output + status (mirrors the in-process result block). ---
+    result_text = response.text or ""
+    u = response.usage
+    total_tokens = u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_creation_tokens
+
+    if response.stop_reason == "interrupted":
+        status = "killed"
+        error: str | None = "Interrupted"
+    elif response.stop_reason == "budget_exceeded":
+        if result_text.strip():
+            status, error = "completed", None
+        else:
+            status, error = "failed", "Budget exceeded before any output was produced"
+    else:
+        status, error = "completed", None
+
+    output = {
+        "result": result_text,
+        "tokens_used": total_tokens,
+        "usage": {
+            "input_tokens": u.input_tokens,
+            "output_tokens": u.output_tokens,
+            "cache_read_tokens": u.cache_read_tokens,
+            "cache_creation_tokens": u.cache_creation_tokens,
+        },
+    }
+
+    # If the answer never streamed, emit it once as a final text event so live
+    # consumers get the full text (matches the in-process fallback).
+    if result_text and not streamed["text"]:
+        await client.emit("step.output", {
+            "channel": "text",
+            "content": result_text,
+            "cognitive": True,
+            "final": True,
+        })
+
+    token_usage = {
+        provider_name: {
+            "input_tokens": u.input_tokens,
+            "output_tokens": u.output_tokens,
+            "cache_read_tokens": u.cache_read_tokens,
+            "cache_creation_tokens": u.cache_creation_tokens,
+        }
+    }
+
+    # Session-stat sync (the daemon owns the conversation store; it records the
+    # assistant turn and persists stats after execution_done). We surface
+    # session_stats so the daemon can persist them if it wants.
+    session_stats = None
+    _stats = getattr(provider, "session_stats", None)
+    if isinstance(_stats, dict):
+        session_stats = _stats
+
+    return {
+        "status": status,
+        "error": error,
+        "output": output,
+        "token_usage": token_usage,
+        "tool_calls": accumulated_tool_calls,
+        "streamed_text": streamed["text"],
+        "session_stats": session_stats,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool routing
+# ---------------------------------------------------------------------------
+
+async def _route_tool(client: Any, name: str, tool_input: dict, agent_label: str) -> dict:
+    """Route one tool call: LOCAL executors run here; AUTHORITY tools RPC out."""
+    # Spawn family: refuse cleanly (P6), before the LOCAL/AUTHORITY split.
+    if name in _SPAWN_TOOLS:
+        return dict(_SPAWN_REFUSAL)
+
+    if not _is_authority_tool(name):
+        try:
+            return await _SHELL_TOOL_EXECUTORS[name](tool_input)
+        except Exception as exc:
+            return {"error": f"{name} failed: {exc}"}
+
+    rpc_kind = _rpc_kind_for(name)
+    try:
+        result = await client.rpc(rpc_kind, {"name": name, "input": tool_input})
+    except Exception as exc:
+        return {"error": f"{name} (rpc {rpc_kind}) failed: {exc}"}
+    return result if isinstance(result, dict) else {"result": result}
+
+
+# ---------------------------------------------------------------------------
+# Pipe-backed EventBus shim
+# ---------------------------------------------------------------------------
+
+class _PipeEventBus:
+    """A drop-in for the provider's ``event_bus`` that forwards emitted Events to
+    the daemon over ``DaemonClient.emit`` instead of a real in-process EventBus.
+
+    The provider constructs ``Event`` objects (see providers/base.py); we only
+    need ``.type`` (an EventType) and ``.data`` (a dict). We forward the event's
+    type value as the emit name and the data as the payload. The daemon's
+    WorkerChannel re-emits on the real bus with the source overwritten to the
+    pipe-bound agent_id, so ``data["agent_id"]`` from the worker is advisory
+    only.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def emit(self, event: Any) -> None:
+        try:
+            etype = getattr(event, "type", None)
+            name = getattr(etype, "value", None) or str(etype)
+            data = getattr(event, "data", None) or {}
+            await self._client.emit(name, dict(data))
+        except Exception:
+            log.debug("event forward failed", exc_info=True)

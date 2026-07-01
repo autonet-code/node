@@ -297,11 +297,13 @@ class WorkerIsolationConfig:
     cognitive agent in its OWN OS process (``atn.agent_worker``) so the kernel
     PID becomes a real security identity for PID-bound secret access control.
 
-    In the current phase (P2) this ONLY proves the spawn + handshake path: with
-    the flag ON, ``trigger_run`` spawns a worker, completes the ready handshake,
-    then IMMEDIATELY falls back to the existing in-process task (the cognitive
-    loop does NOT yet run in the worker — that is P4). With the flag OFF
-    (default) ``trigger_run`` is byte-identical to today.
+    As of P4 this is a real cutover for cognitive agents that use an API
+    provider (Anthropic / OpenAI-compatible): with the flag ON the provider loop
+    + local sandboxed tools run IN THE WORKER PROCESS, while authority tools,
+    events, status, and budget booking cross the IPC seam back to the daemon.
+    The bridge/Claude-Max SDK provider (P5) and delegate SPAWN (P6) still run
+    in-process even under the flag. With the flag OFF (default) ``trigger_run``
+    is byte-identical to today — the in-process asyncio path is untouched.
 
     The flag is read at ``load_config`` time from EITHER the env var (takes
     precedence, so an operator can force it without editing config) OR the

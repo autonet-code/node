@@ -53,6 +53,11 @@ class OpenAICompatibleProvider(Provider):
         self._api_key = api_key
         self._default_model = default_model
 
+        # Raw base_url as passed in (before path normalisation) so an isolated
+        # worker can rebuild this provider identically from a manifest — see
+        # ExecutionEngine._build_provider_config.
+        self._config_base_url = base_url
+
         # Normalise base URL to end with /chat/completions
         base_url = base_url.rstrip("/")
         if not base_url.endswith("/chat/completions"):
