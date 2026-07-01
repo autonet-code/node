@@ -292,6 +292,13 @@ async def _amain(ns: argparse.Namespace) -> int:
         log.info("no --pipe-handle: nothing to connect (P1 smoke exit)")
         return 0
 
+    # Mark this process as a worker so the secret_* tool handlers (P5) will run
+    # (they are fail-closed refused outside a worker). Set only here — a real
+    # spawn always reaches this line; the smoke/no-pipe path above returns first.
+    # The env-scrub that builds a grandchild's environment runs from the DAEMON's
+    # env (not this worker's), so this marker never leaks down a spawn chain.
+    os.environ["ATN_IS_WORKER"] = "1"
+
     conn = _connection_from_handle(ns.pipe_handle)
     transport = PipeTransport(conn)
     # DaemonClient and AgentWorker reference each other: build the client first,

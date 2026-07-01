@@ -30,7 +30,7 @@ SECURITY HANDOFF SEAM
 ---------------------
 Two no-op hooks, injected by Runtime so this module never imports vault code:
 ``_on_pid_bound(agent_id, pid, parent_agent_id)`` fired after spawn+ready but
-BEFORE the worker is told "go"; ``_on_pid_revoked(pid)`` fired in ``_reap``.
+BEFORE the worker is told "go"; ``_on_pid_revoked(pid, agent_id)`` fired in ``_reap``.
 The vault/secrets track fills them later. They are pure callbacks here.
 """
 from __future__ import annotations
@@ -55,7 +55,10 @@ log = logging.getLogger(__name__)
 # Type aliases for the injected callables.
 FinalizeFn = Callable[..., Awaitable[None]]     # _finalize_execution(defn, record, status, ...)
 PidBoundHook = Callable[[str, int, Optional[str]], None]
-PidRevokedHook = Callable[[int], None]
+# (pid, agent_id) — widened for the secret track so the revoke hook can drain the
+# per-agent grant stash and drop the agent's monitor tail. ``agent_id`` may be
+# None if the PID was never bound to an identity.
+PidRevokedHook = Callable[[int, Optional[str]], None]
 
 
 # Default limits (mirrors chevin's defaults; overridable per-register).
@@ -132,7 +135,7 @@ class AgentSupervisor:
         # Security seam — default to no-ops so agent_supervisor never needs to
         # import vault code. Runtime injects the real hooks (still no-op in P3).
         self._on_pid_bound: PidBoundHook = on_pid_bound or (lambda aid, pid, parent: None)
-        self._on_pid_revoked: PidRevokedHook = on_pid_revoked or (lambda pid: None)
+        self._on_pid_revoked: PidRevokedHook = on_pid_revoked or (lambda pid, agent_id: None)
 
         self._workers_dir = workers_dir
         self._monitor_interval_s = monitor_interval_s
@@ -296,9 +299,12 @@ class AgentSupervisor:
             return
         w.reaped = True
 
-        # Security seam: PID revoked → drop grant. No-op in P3.
+        # Security seam: PID revoked → drop grant. Widened to (pid, agent_id) so
+        # the secret track can release the broker session, drop the monitor
+        # exposure, and drain the stale grant stash keyed by agent_id. agent_id
+        # is the pipe-bound identity captured at register (may be None).
         try:
-            self._on_pid_revoked(pid)
+            self._on_pid_revoked(pid, agent_id)
         except Exception:
             log.debug("on_pid_revoked hook error for pid=%s", pid, exc_info=True)
 

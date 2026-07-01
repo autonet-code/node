@@ -148,9 +148,9 @@ def _instrument_hooks(rt):
         bound.append((agent_id, pid, parent_agent_id))
         return orig_bound(agent_id, pid, parent_agent_id)
 
-    def _r(pid):
+    def _r(pid, agent_id=None):
         revoked.append(pid)
-        return orig_revoked(pid)
+        return orig_revoked(pid, agent_id)
 
     # Re-inject onto the already-constructed supervisor.
     rt.supervisor._on_pid_bound = _b

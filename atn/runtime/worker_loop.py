@@ -38,11 +38,84 @@ The manifest keys this reads (all JSON-safe, all built daemon-side):
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from ..shell_tools import SHELL_TOOL_EXECUTORS as _SHELL_TOOL_EXECUTORS
 
 log = logging.getLogger("atn.agent_worker.loop")
+
+
+# ---------------------------------------------------------------------------
+# Secret tool surface (P5 — worker-side broker access from the worker's PID)
+# ---------------------------------------------------------------------------
+#
+# A GRANTED isolated worker (double-gated daemon-side: it has a non-empty
+# ``runtime._pending_grants`` entry AND ``worker_isolation.enabled``) is handed
+# these three tools in its manifest ``tools`` list. They let the worker MODEL:
+#   - see WHICH services it may reach (names only);
+#   - REQUEST a secret — which stages the raw value to a nameless 128-bit file
+#     owned by the broker and returns ONLY {var_name, path}. The VALUE is never
+#     returned to the worker; it reaches the daemon monitor via the broker's
+#     owner-authenticated value-push (P2), where the tripwire scans for it.
+#   - RELEASE a service it no longer needs.
+#
+# The worker reaches the broker over its OWN kernel PID (WorkerBrokerClient holds
+# no secret; the broker authenticates the PID directly). An UNGRANTED or
+# flag-off worker never sees these schemas at all (the daemon only appends them
+# when the double gate passes), so the model cannot even name the tools.
+SECRET_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "name": "secret_list_services",
+        "description": (
+            "List the secret services this agent is allowed to request. "
+            "Returns names only (never values). Use this to discover which "
+            "credentials are available before requesting one."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "secret_request_secret",
+        "description": (
+            "Request a granted secret by service name. The secret VALUE is "
+            "staged to a private file on disk and is NOT returned to you. You "
+            "receive only {var_name, path}: read the file at 'path' at the "
+            "moment of use (e.g. pass it to a subprocess). Do NOT echo the file "
+            "contents or the path into your reply — doing so trips a security "
+            "alarm. Requesting a service you were not granted is denied."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service": {"type": "string", "description": "The service name to request."},
+            },
+            "required": ["service"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "secret_release",
+        "description": (
+            "Release a secret you previously requested (unstages its file). "
+            "Call when you no longer need the credential."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service": {"type": "string", "description": "The service name to release."},
+            },
+            "required": ["service"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+# The tool NAMES intercepted worker-side BEFORE the LOCAL/AUTHORITY split. These
+# are neither LOCAL shell executors nor daemon-RPC AUTHORITY tools: they talk to
+# the vault-broker directly from the worker PID.
+_SECRET_TOOLS = frozenset({
+    "secret_list_services", "secret_request_secret", "secret_release",
+})
 
 
 # Spawn-family tools (delegate spawn). Under isolation these DO NOT run in the
@@ -360,6 +433,15 @@ async def _route_tool(client: Any, name: str, tool_input: dict, agent_label: str
             return {"error": f"{name} (rpc spawn_child) failed: {exc}"}
         return result if isinstance(result, dict) else {"result": result}
 
+    # Secret family (P5): intercept BEFORE the LOCAL/AUTHORITY split. These talk
+    # to the vault-broker directly from THIS worker's kernel PID (no daemon RPC,
+    # no owner secret). The broker authenticates the PID and only ever exposes
+    # the services this PID was granted at register-time. secret_request_secret
+    # returns {var_name, path} — NEVER the value; the value reaches the daemon
+    # monitor via the broker's owner-authenticated push (P2), never through here.
+    if name in _SECRET_TOOLS:
+        return await _handle_secret_tool(name, tool_input)
+
     if not _is_authority_tool(name):
         try:
             return await _SHELL_TOOL_EXECUTORS[name](tool_input)
@@ -372,6 +454,80 @@ async def _route_tool(client: Any, name: str, tool_input: dict, agent_label: str
     except Exception as exc:
         return {"error": f"{name} (rpc {rpc_kind}) failed: {exc}"}
     return result if isinstance(result, dict) else {"result": result}
+
+
+# Worker-context marker: set by ``agent_worker._amain`` in the worker process
+# ONLY. A secret tool that fires outside a worker (e.g. accidentally routed in
+# the daemon) is fail-closed refused — the broker authenticates by PID and the
+# daemon's PID is NOT a granted worker, but we refuse before we ever touch the
+# broker so a value can never be staged for the wrong process.
+_WORKER_CONTEXT_ENV = "ATN_IS_WORKER"
+
+
+def _in_worker_context() -> bool:
+    return os.environ.get(_WORKER_CONTEXT_ENV) == "1"
+
+
+async def _handle_secret_tool(name: str, tool_input: dict) -> dict:
+    """Service one secret_* tool from the worker PID via the vault-broker.
+
+    FAIL-CLOSED throughout:
+      - not in a worker context           -> {"ok": False, "error": ...} (no broker call)
+      - broker down / bad reply / POSIX   -> WorkerBrokerClient returns an error dict
+      - a value would leak                 -> impossible: request returns {var_name, path}
+
+    The WorkerBrokerClient is built lazily, does exactly one round-trip, and is
+    thrown away — it holds no secret and its only authority is this process's
+    kernel PID, which the broker reads directly.
+    """
+    if not _in_worker_context():
+        # Never touch the broker off a worker PID: a secret must only ever be
+        # staged for a granted worker process, never the daemon.
+        return {"ok": False, "error": "secret tools are worker-only"}
+
+    # Lazy import: keeps the daemon-side manifest builder free of broker plumbing
+    # and matches the "one round-trip, then close" discipline.
+    from .broker_client import WorkerBrokerClient
+
+    broker = WorkerBrokerClient()
+
+    if name == "secret_list_services":
+        res = broker.list_services()
+        if not isinstance(res, dict) or res.get("ok") is False:
+            return {"ok": False, "services": [],
+                    "error": (res or {}).get("error", "broker unavailable")}
+        services = res.get("services")
+        return {"ok": True, "services": list(services) if isinstance(services, list) else []}
+
+    if name == "secret_request_secret":
+        service = str((tool_input or {}).get("service", "") or "")
+        if not service:
+            return {"ok": False, "error": "service is required"}
+        res = broker.request(service)
+        if not isinstance(res, dict) or res.get("ok") is False:
+            # Denied / unmapped / broker down: NO staging happened.
+            return {"ok": False,
+                    "error": (res or {}).get("error", "request denied")}
+        # SAFETY-CRITICAL: return ONLY the indirection, never the value. Even if
+        # the broker ever returned a value, we strip everything except the two
+        # safe fields so a value can never ride this tool result into the model.
+        return {
+            "ok": True,
+            "var_name": str(res.get("var_name", "") or ""),
+            "path": str(res.get("path", "") or ""),
+        }
+
+    if name == "secret_release":
+        service = str((tool_input or {}).get("service", "") or "")
+        if not service:
+            return {"ok": False, "error": "service is required"}
+        res = broker.release(service)
+        if not isinstance(res, dict) or res.get("ok") is False:
+            return {"ok": False,
+                    "error": (res or {}).get("error", "release failed")}
+        return {"ok": True}
+
+    return {"ok": False, "error": f"unknown secret tool: {name}"}
 
 
 # ---------------------------------------------------------------------------

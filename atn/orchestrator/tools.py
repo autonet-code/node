@@ -1070,6 +1070,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             parent_id=parent_id,
             created_by=caller_id or "",
             notify_parent=input.get("notify_parent", True),
+            secrets_allowance=input.get("secrets_allowance"),
         )
         try:
             aid = await runtime.register_agent(defn)
@@ -1165,6 +1166,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             expose_as_tool=bool(input.get("expose_as_tool", False)),
             tool_input_schema=input.get("tool_input_schema"),
             notify_parent=input.get("notify_parent", True),
+            secrets_allowance=input.get("secrets_allowance"),
         )
 
         try:

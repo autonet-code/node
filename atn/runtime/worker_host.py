@@ -48,7 +48,7 @@ STATUS (worker -> daemon):
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, FrozenSet, Optional, Union
 
 from ..events import Event, EventType
 from ..models import (
@@ -64,16 +64,35 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# BINDING SEAM (design D5) — allowance intersection. NO-OP in P6.
+# ALLOWANCE ALGEBRA (secret-allowance/tripwire track, Phase 1)
 #
-# ``resolve_spec`` turns a parent's requested child spec into the allowance it
-# is ASKING for; ``resolve_parent_allowance`` returns the parent's OWN allowance
-# (held daemon-side, keyed by the authoritative pipe-bound parent id); the child
-# grant is their INTERSECTION. In P6 both are stubs (sentinel ALL / passthrough),
-# so no allowance is enforced — but the CALL SITE and the data flow are real and
-# run DAEMON-SIDE at spawn_child. Task 16 (secret-allowance/vault track) replaces
-# the two stubs + the intersection with the real grant algebra; nothing else in
-# this seam moves.
+# ``resolve_spec`` (kevin/keystore.py) is the single, shared expander from a
+# comma-separated launch spec (none/all/<service>/<bundle>) to the concrete set
+# of vault service NAMES that actually exist. We import it verbatim — no fork,
+# no drift. If that import fails (kevin not on path, module missing), we bind a
+# FAIL-CLOSED shim that grants nothing, so a broken keystore can never widen an
+# allowance.
+try:  # pragma: no cover - import guard exercised only when kevin is absent
+    from kevin.keystore import resolve_spec as _resolve_spec  # type: ignore
+except Exception:  # ANY import failure => deny-all
+    def _resolve_spec(spec: Any) -> list:  # type: ignore
+        """FAIL-CLOSED shim: keystore unavailable => grant nothing."""
+        return []
+
+
+# ---------------------------------------------------------------------------
+# BINDING SEAM (design D5) — allowance intersection. LIVE (secret track P1).
+#
+# ``_resolve_spec_allowance`` turns a parent's requested child spec into the
+# allowance it is ASKING for (via the shared ``resolve_spec``);
+# ``_resolve_parent_allowance`` returns the parent's OWN allowance (L_parent),
+# read from daemon-held registry state keyed by the authoritative pipe-bound
+# parent id; the child grant is their INTERSECTION (monotone clamp). As of P1
+# the algebra is REAL and the computed grant is materialized to concrete service
+# NAMES and stashed in ``runtime._pending_grants[child_id]`` — but NOTHING
+# CONSUMES it yet (no nonce mint, no secret tools, no monitor). Seam B
+# (_on_pid_bound, P4) pops it; the secret_* tools (P5) expose it. This phase
+# only computes + stashes. Flag OFF forces the grant to deny-all.
 #
 # FRACTAL GUARANTEE (why this MUST run daemon-side): the parent worker's
 # requested spec is only an UPPER-BOUND WISH. The daemon clamps it (intersection)
@@ -82,25 +101,107 @@ log = logging.getLogger(__name__)
 # or buggy parent worker can only ever REQUEST a narrower-or-equal grant, never
 # widen one. That clamp is the entire reason process isolation makes the fractal
 # allowance safe.
-_ALLOWANCE_ALL = object()  # sentinel: "unrestricted" — P6 placeholder for L_parent
+class _AllowanceAll:
+    """Sentinel type: an UNBOUNDED allowance ("all vault services, incl. any
+    added later"). A distinct class (not a bare ``object()``) so ``isinstance``
+    checks in the intersection are unambiguous and the value never leaks onto
+    the RPC/worker path (it is materialized to concrete names before it is ever
+    stashed in ``runtime._pending_grants``)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return "_ALLOWANCE_ALL"
 
 
-def _resolve_parent_allowance(agent_id: str) -> Any:  # TASK 16 fills this
-    """STUB: return the parent's own allowance (L_parent). P6 => sentinel ALL."""
-    return _ALLOWANCE_ALL
+_ALLOWANCE_ALL = _AllowanceAll()  # sentinel: "unrestricted" (root / default-all)
+
+# AllowanceGrant = the sentinel (unbounded, picks up new services) OR a concrete
+# frozenset of resolved vault service NAMES. It is NEVER a str spec and NEVER a
+# secret value.
+AllowanceGrant = Union[_AllowanceAll, FrozenSet[str]]
 
 
-def _resolve_spec_allowance(payload: dict) -> Any:  # TASK 16 fills this
-    """STUB: turn the requested child spec into the allowance it asks for.
-    P6 => sentinel ALL (the request is not narrowed)."""
-    return _ALLOWANCE_ALL
+def _resolve_parent_allowance(agent_id: str, runtime: Any) -> AllowanceGrant:
+    """Return the parent's OWN allowance (L_parent), held DAEMON-SIDE.
+
+    The parent's authored wish lives on its ``AgentDefinition.secrets_allowance``
+    (a spec string, or ``None``). This is read from daemon-held registry state,
+    keyed by the AUTHORITATIVE pipe-bound parent id — never from the worker body.
+
+    Fail-closed mapping:
+      - unknown agent / no runtime / no keystore    -> frozenset()  (deny-all)
+      - wish is ``None`` or ``"none"`` (or blank)   -> frozenset()  (deny-all)
+      - wish is ``"all"``                           -> _ALLOWANCE_ALL (unbounded)
+      - otherwise                                   -> frozenset(resolve_spec(wish))
+    """
+    if runtime is None:
+        return frozenset()
+    try:
+        defn = runtime.get_agent(agent_id)
+    except Exception:
+        return frozenset()
+    if defn is None:
+        return frozenset()
+    wish = getattr(defn, "secrets_allowance", None)
+    if wish is None:
+        return frozenset()
+    tokens = [t.strip().lower() for t in str(wish).split(",") if t.strip()]
+    if not tokens:
+        return frozenset()
+    # A wish that is exactly/among "none" resolves to deny-all (resolve_spec's
+    # own rule); we short-circuit to be explicit and independent of vault state.
+    if any(t == "none" for t in tokens):
+        return frozenset()
+    if any(t == "all" for t in tokens):
+        return _ALLOWANCE_ALL
+    return frozenset(_resolve_spec(wish))
 
 
-def _intersect_allowance(requested: Any, parent: Any) -> Any:  # TASK 16 fills this
-    """STUB: L_child = requested INTERSECT L_parent. P6 => passthrough (no clamp).
-    Task 16 replaces this with the real grant-intersection; the RESULT is what
-    the pid-bound seam (_on_pid_bound) will register against the child's pid."""
-    return _ALLOWANCE_ALL
+def _resolve_spec_allowance(payload: dict, runtime: Any) -> AllowanceGrant:
+    """Turn the parent worker's REQUESTED child spec into the allowance it asks
+    for. This is the ONLY place a worker-supplied spec is honored — and it is
+    only ever a REQUEST: ``_intersect_allowance`` clamps it against L_parent, so
+    a forged/over-broad spec can never widen the child beyond the parent.
+
+    The requested spec is ``payload["secrets_allowance"]`` (the authored wish on
+    the child definition). Mapping mirrors ``_resolve_parent_allowance``:
+      - missing / None / "none" / blank -> frozenset()  (asks for nothing)
+      - "all"                           -> _ALLOWANCE_ALL (asks for everything)
+      - otherwise                       -> frozenset(resolve_spec(spec))
+    """
+    if not isinstance(payload, dict):
+        return frozenset()
+    spec = payload.get("secrets_allowance")
+    if spec is None:
+        return frozenset()
+    tokens = [t.strip().lower() for t in str(spec).split(",") if t.strip()]
+    if not tokens:
+        return frozenset()
+    if any(t == "none" for t in tokens):
+        return frozenset()
+    if any(t == "all" for t in tokens):
+        return _ALLOWANCE_ALL
+    return frozenset(_resolve_spec(spec))
+
+
+def _intersect_allowance(requested: AllowanceGrant,
+                         parent: AllowanceGrant) -> AllowanceGrant:
+    """L_child = requested INTERSECT L_parent — a MONOTONE CLAMP.
+
+    The worker only influences ``requested``; ``∩ parent`` guarantees the
+    invariant  child ⊆ parent  (a child can never hold more than its parent).
+
+      - parent is ALL  -> child = requested  (parent imposes no ceiling)
+      - requested ALL  -> child = parent     (asked for everything; clamp to L_parent)
+      - both concrete  -> child = requested & parent
+    """
+    if isinstance(parent, _AllowanceAll):
+        return requested
+    if isinstance(requested, _AllowanceAll):
+        return parent
+    # both are frozensets
+    return requested & parent
 
 
 # Callback the host invokes exactly once when the worker reports execution_done.
@@ -328,21 +429,41 @@ class WorkerHost:
         parent worker as the tool-result. The parent never receives L_parent, a
         nonce, or the child's grant — see the module-level FRACTAL GUARANTEE.
         """
-        # --- BINDING SEAM (D5) — NO-OP in P6; task 16 fills the three stubs. ---
-        # Runs DAEMON-SIDE with daemon-held parent state; a parent worker can
-        # never widen a child's grant because it never participates in this clamp.
-        l_parent = _resolve_parent_allowance(agent_id)
-        l_requested = _resolve_spec_allowance(payload)
-        l_child = _intersect_allowance(l_requested, l_parent)  # noqa: F841 (task 16 registers this at _on_pid_bound)
-
         if not isinstance(payload, dict):
             return {"error": "spawn_child payload must be an object"}
 
         from ..orchestrator.tools import execute_tool
 
+        # Hoisted above the binding seam: the seam reads daemon-held parent state
+        # (registry) through the runtime, and the stash target
+        # (runtime._pending_grants) also lives here. No runtime => nothing to
+        # spawn against AND nothing to clamp against => fail closed.
         runtime = getattr(self._engine, "_runtime_ref", None)
         if runtime is None:
             return {"error": "spawn_child unavailable: no runtime bound to engine"}
+
+        # --- BINDING SEAM (D5) — LIVE (Phase 1): compute + clamp + stash. ---
+        # Runs DAEMON-SIDE with daemon-held parent state; a parent worker can
+        # never widen a child's grant because it never participates in this
+        # clamp (see the module-level FRACTAL GUARANTEE). The parent's requested
+        # spec (payload["secrets_allowance"]) is an UPPER-BOUND WISH only.
+        try:
+            l_parent = _resolve_parent_allowance(agent_id, runtime)
+            l_requested = _resolve_spec_allowance(payload, runtime)
+            l_child = _intersect_allowance(l_requested, l_parent)
+        except Exception:
+            # A runtime fault in resolve_spec (e.g. transient keystore error,
+            # after a successful import) must NEVER fail open. Deny-all; worst
+            # case is a child with no secret grant, never an over-broad one.
+            log.exception("allowance resolution failed; denying all secrets")
+            l_child = frozenset()
+
+        # Isolation OFF => no tripwire => FORCE deny-all. Secrets only ever
+        # activate under ATN_WORKER_ISOLATION; with the flag off the grant is
+        # empty and nothing downstream (P4/P5) will mint or expose a secret.
+        _wi = getattr(getattr(runtime, "_config", None), "worker_isolation", None)
+        if not getattr(_wi, "enabled", False):
+            l_child = frozenset()
 
         try:
             # caller_id = the AUTHORITATIVE pipe-bound parent id. execute_tool
@@ -355,6 +476,27 @@ class WorkerHost:
             log.debug("spawn_child create_agent for parent %s failed",
                       agent_id, exc_info=True)
             return {"error": f"spawn_child failed: {exc}"}
+
+        # Stash the daemon-computed grant for the child, keyed by its new id, so
+        # Seam B (_on_pid_bound) can pop it once when the child's pid binds. The
+        # value stashed is ALWAYS concrete JSON-safe service NAMES — the ALL
+        # sentinel is materialized here via resolve_spec("all"), never carried on
+        # the RPC/worker path. (Written only on a clean create; a failed create
+        # leaves _pending_grants untouched.)
+        child_id = (result or {}).get("agent_id") if isinstance(result, dict) else None
+        if child_id:
+            if isinstance(l_child, _AllowanceAll):
+                materialized = sorted(_resolve_spec("all"))
+            else:
+                materialized = sorted(l_child)
+            try:
+                runtime._pending_grants[child_id] = materialized
+            except Exception:
+                log.debug("spawn_child: could not stash grant for child %s",
+                          child_id, exc_info=True)
+            log.info("spawn_child: parent=%s -> child=%s grant=%d service(s)%s",
+                     agent_id, child_id, len(materialized),
+                     " [ALL]" if isinstance(l_child, _AllowanceAll) else "")
 
         log.info("spawn_child: parent=%s -> child=%s status=%s", agent_id,
                  (result or {}).get("agent_id"), (result or {}).get("status"))

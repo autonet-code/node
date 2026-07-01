@@ -1,0 +1,428 @@
+r"""broker_client — daemon/worker clients for the kevin vault-broker.
+
+Phase 2 of the secret-allowance / tripwire track. Two clients, both talking
+newline-JSON over the broker's Windows named pipe (``\\.\pipe\vault-broker``,
+NOT the atn daemon pipe):
+
+  * ``DaemonBrokerClient`` — runs IN THE DAEMON. Holds the owner secret
+    (``BROKER_OWNER_SECRET``). Can ``mint_nonce`` (owner-gated), ``register`` a
+    worker PID against a minted nonce, and ``release_session`` (owner-gated) to
+    tear a session down at PID revoke. It ALSO owns the daemon side of the
+    one-way VALUE-PUSH: it opens an owner-authenticated listener pipe that the
+    broker connects back to when it stages a secret, delivering
+    ``{value, staged_path, secret_name, pid, agent_id}`` to a daemon-side sink
+    (the SecurityMonitor in P3). The raw value never leaves the daemon monitor.
+
+  * ``WorkerBrokerClient`` — runs in a WORKER process (per-PID). Holds NO
+    secret; its only authority is its kernel-supplied PID, which the broker
+    reads directly. It can ``list`` / ``request`` / ``release`` / ``whoami``.
+    It NEVER receives the raw value — ``request`` returns ``{var_name, path}``.
+
+FAIL-CLOSED throughout: a broker that is down, an unauthenticated op, an
+unmapped service — all return an error dict, never a value, never fail-open.
+
+Windows-first (named pipes via ctypes, no pywin32 dep — mirrors the broker).
+On POSIX the pipe ops raise / return an error dict; the broker itself is
+Windows-only today, so the whole feature is gated to nt by the callers.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+log = logging.getLogger(__name__)
+
+# The broker's pipe (its own, separate from the atn daemon pipe).
+BROKER_PIPE = r"\\.\pipe\vault-broker"
+
+# Shared service->policy map, authored by the broker's migration
+# (kevin/vault/migrate_and_policies.py). We READ it (no drift, no re-derivation);
+# an unmapped service is DROPPED (fail-closed). Absent file => empty map => the
+# daemon can mint nothing, which is the correct fail-closed posture.
+_SERVICE_POLICY_MAP = Path(r"C:\code\kevin\vault\service_policy_map.json")
+
+# ── Win32 named-pipe constants (mirror the broker's plumbing) ─────────────────
+_GENERIC_READ = 0x80000000
+_GENERIC_WRITE = 0x40000000
+_OPEN_EXISTING = 3
+_PIPE_ACCESS_DUPLEX = 0x00000003
+_PIPE_TYPE_BYTE = 0x0
+_PIPE_READMODE_BYTE = 0x0
+_PIPE_WAIT = 0x0
+_PIPE_REJECT_REMOTE_CLIENTS = 0x8
+_PIPE_UNLIMITED_INSTANCES = 255
+_INVALID_HANDLE_VALUE = (1 << 64) - 1  # ctypes c_void_p(-1) as unsigned
+_ERROR_PIPE_CONNECTED = 535
+
+if os.name == "nt":  # pragma: no branch - platform gate
+    import ctypes
+    from ctypes import wintypes
+    _k32 = ctypes.windll.kernel32
+else:  # pragma: no cover - POSIX has no vault-broker today
+    ctypes = None  # type: ignore
+    wintypes = None  # type: ignore
+    _k32 = None  # type: ignore
+
+
+def _bad_handle(h) -> bool:
+    """True if a CreateFile*/CreateNamedPipe* handle is invalid. ctypes returns
+    the failure as signed -1 when no restype is set; the constant is the unsigned
+    form — accept BOTH plus falsy/None."""
+    return (not h) or h == _INVALID_HANDLE_VALUE or h == -1
+
+
+# ── Low-level pipe I/O (client side: connect out to the broker) ───────────────
+def _pipe_call(request: dict[str, Any], pipe_name: str = BROKER_PIPE,
+               timeout_ms: int = 5000) -> dict[str, Any]:
+    """Send one newline-JSON request to a named pipe, read one JSON reply.
+
+    Fail-closed: any error (pipe down, bad reply, non-Windows) -> {"ok": False,
+    "error": "..."} — NEVER a value, NEVER a raise into the caller.
+    """
+    if os.name != "nt" or _k32 is None:
+        return {"ok": False, "error": "vault-broker requires Windows named pipes"}
+    # Wait briefly for a pipe instance if the server is busy.
+    h = None
+    try:
+        h = _k32.CreateFileW(pipe_name, _GENERIC_READ | _GENERIC_WRITE, 0, None,
+                             _OPEN_EXISTING, 0, None)
+        # CreateFileW (no restype on _k32) returns signed -1 on failure, not the
+        # unsigned INVALID_HANDLE_VALUE constant — guard BOTH forms.
+        if _bad_handle(h):
+            # ERROR_PIPE_BUSY (231) -> wait then one retry.
+            if _k32.GetLastError() == 231 and _k32.WaitNamedPipeW(pipe_name, timeout_ms):
+                h = _k32.CreateFileW(pipe_name, _GENERIC_READ | _GENERIC_WRITE, 0,
+                                     None, _OPEN_EXISTING, 0, None)
+            if _bad_handle(h):
+                return {"ok": False, "error": "broker unavailable"}
+        data = (json.dumps(request) + "\n").encode("utf-8")
+        w = wintypes.DWORD(0)
+        if not _k32.WriteFile(h, data, len(data), ctypes.byref(w), None):
+            return {"ok": False, "error": "broker write failed"}
+        _k32.FlushFileBuffers(h)
+        # Read one line reply.
+        buf = bytearray()
+        chunk = ctypes.create_string_buffer(4096)
+        read = wintypes.DWORD(0)
+        while True:
+            if not _k32.ReadFile(h, chunk, 4096, ctypes.byref(read), None) or read.value == 0:
+                break
+            buf += chunk.raw[:read.value]
+            if b"\n" in buf:
+                break
+        if not buf:
+            return {"ok": False, "error": "broker gave no reply"}
+        try:
+            return json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return {"ok": False, "error": "broker reply malformed"}
+    except Exception as e:  # noqa: BLE001 — never raise into the caller
+        log.debug("broker pipe call failed: %s", type(e).__name__)
+        return {"ok": False, "error": "broker call error"}
+    finally:
+        if not _bad_handle(h):
+            try:
+                _k32.CloseHandle(h)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _SECRET_MARKERS_OK(env_name: str) -> bool:
+    """True iff ``env_name`` contains a worker env-scrub secret marker, i.e. the
+    worker's ``_scrub_env`` will strip it before a worker inherits the env.
+
+    Reuses ``worker_manager._SECRET_MARKERS`` VERBATIM (no drift): the daemon's
+    startup invariant that BROKER_OWNER_SECRET is scrubbed must track the exact
+    marker set the scrubber uses. Fail-closed: if the markers can't be imported,
+    return False (treat as NOT covered -> the caller logs a security error).
+    """
+    try:
+        from .worker_manager import _SECRET_MARKERS
+    except Exception:  # noqa: BLE001
+        return False
+    upper = env_name.upper()
+    return any(marker in upper for marker in _SECRET_MARKERS)
+
+
+def _load_service_policy_map() -> dict[str, str]:
+    """Load the shared service->policy map (fail-closed to {} if absent/bad)."""
+    try:
+        with open(_SERVICE_POLICY_MAP, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+
+
+def _services_to_policies(services: list[str]) -> list[str]:
+    """Map resolved service NAMES -> broker policy names via the shared map.
+
+    Unmapped services are DROPPED (fail-closed): the daemon can only authorize a
+    policy that actually exists in the broker's map, never invent one.
+    """
+    mapping = _load_service_policy_map()
+    out: list[str] = []
+    for svc in services or []:
+        pol = mapping.get(svc)
+        if pol:
+            out.append(pol)
+    return out
+
+
+# ── Daemon-side value-push listener ───────────────────────────────────────────
+class _ValuePushListener:
+    r"""Owner-authenticated named-pipe server the broker connects back to.
+
+    The daemon opens this pipe (a fresh unguessable name under
+    ``\\.\pipe\atn-vpush-<token>``) and hands the pipe name + an auth token to
+    the broker at mint_nonce time. When the broker stages a secret it connects
+    here and pushes ``{push_token, value, staged_path, secret_name, pid,
+    agent_id?}``. We authenticate the ``push_token`` (constant-time-ish) and
+    forward the exposure to ``sink`` — a daemon-side callback (the
+    SecurityMonitor.add_exposure in P3). The raw value is handed to the sink and
+    then dropped from this frame; it is NEVER logged.
+
+    Best-effort + isolated: a malformed/unauthenticated push is discarded; the
+    listener never raises into the daemon.
+    """
+
+    def __init__(self, sink: Callable[[dict[str, Any]], None], token: str,
+                 pipe_name: str) -> None:
+        self._sink = sink
+        self._token = token
+        self.pipe_name = pipe_name
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if os.name != "nt" or _k32 is None:
+            log.warning("value-push listener needs Windows named pipes; not started")
+            return
+        self._thread = threading.Thread(target=self._serve, name="atn-vpush",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        # Poke the pipe so a blocked ConnectNamedPipe returns.
+        if os.name == "nt" and _k32 is not None:
+            try:
+                h = _k32.CreateFileW(self.pipe_name, _GENERIC_READ | _GENERIC_WRITE,
+                                     0, None, _OPEN_EXISTING, 0, None)
+                if not _bad_handle(h):
+                    _k32.CloseHandle(h)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _serve(self) -> None:  # pragma: no cover - exercised in a live run
+        while not self._stop.is_set():
+            h = self._create_pipe()
+            if h is None:
+                continue
+            ok = _k32.ConnectNamedPipe(h, None)
+            if not ok and _k32.GetLastError() not in (_ERROR_PIPE_CONNECTED, 0):
+                _k32.CloseHandle(h)
+                continue
+            if self._stop.is_set():
+                _k32.CloseHandle(h)
+                break
+            try:
+                self._handle_push(h)
+            finally:
+                try:
+                    _k32.DisconnectNamedPipe(h)
+                    _k32.CloseHandle(h)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _create_pipe(self):
+        h = _k32.CreateNamedPipeW(
+            self.pipe_name, _PIPE_ACCESS_DUPLEX,
+            _PIPE_TYPE_BYTE | _PIPE_READMODE_BYTE | _PIPE_WAIT | _PIPE_REJECT_REMOTE_CLIENTS,
+            _PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, None)
+        if _bad_handle(h):
+            return None
+        return h
+
+    def _read_msg(self, handle) -> Optional[dict]:
+        buf = bytearray()
+        chunk = ctypes.create_string_buffer(4096)
+        read = wintypes.DWORD(0)
+        while True:
+            if not _k32.ReadFile(handle, chunk, 4096, ctypes.byref(read), None) or read.value == 0:
+                break
+            buf += chunk.raw[:read.value]
+            if b"\n" in buf:
+                break
+        if not buf:
+            return None
+        try:
+            return json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def _handle_push(self, handle) -> None:
+        msg = self._read_msg(handle)
+        if not isinstance(msg, dict):
+            return
+        # Authenticate the push token. A mismatch is silently dropped (an
+        # attacker probing the pipe learns nothing and injects nothing).
+        tok = msg.get("push_token", "")
+        if not self._token or not _consteq(str(tok), self._token):
+            return
+        value = msg.get("value")
+        if not isinstance(value, str) or not value:
+            return
+        exposure = {
+            "value": value,
+            "staged_path": msg.get("staged_path"),
+            "secret_name": msg.get("secret_name"),
+            "pid": msg.get("pid"),
+            "agent_id": msg.get("agent_id"),
+        }
+        try:
+            self._sink(exposure)
+        except Exception:  # noqa: BLE001 — a bad sink must not kill the listener
+            log.debug("value-push sink raised; exposure dropped")
+        finally:
+            del value, exposure  # drop the raw value from this frame
+
+
+def _consteq(a: str, b: str) -> bool:
+    """Length-independent constant-ish string compare (hmac.compare_digest)."""
+    import hmac
+    try:
+        return hmac.compare_digest(a, b)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# ── Daemon client (owner secret; runs in the daemon only) ─────────────────────
+class DaemonBrokerClient:
+    r"""The daemon's privileged client to the vault-broker.
+
+    Holds the owner secret (from ``BROKER_OWNER_SECRET`` in the daemon env). Used
+    daemon-side ONLY — never handed to a worker. Owns the value-push listener.
+
+    Ops:
+      * ``mint_nonce(services)``  -> owner-gated: resolve service names to broker
+        policies, mint a one-time nonce, and (if a value-push listener is armed)
+        register the daemon's push sink with the nonce. Returns the nonce.
+      * ``register(pid, nonce)``  -> bind a worker PID to a minted nonce.
+      * ``release_session(pid)``  -> owner-gated teardown (drop policies + push
+        sink + unlink staged files for the PID).
+    """
+
+    def __init__(self, owner_secret: Optional[str] = None,
+                 pipe_name: str = BROKER_PIPE) -> None:
+        self._owner_secret = owner_secret if owner_secret is not None \
+            else os.environ.get("BROKER_OWNER_SECRET", "")
+        self._pipe = pipe_name
+        self._listener: Optional[_ValuePushListener] = None
+        self._push_endpoint: Optional[str] = None
+        self._push_token: Optional[str] = None
+
+    # -- value-push listener lifecycle --------------------------------------
+    def arm_value_push(self, sink: Callable[[dict[str, Any]], None]) -> bool:
+        """Open the daemon-side value-push listener and remember its endpoint +
+        token so ``mint_nonce`` can register it. ``sink`` receives each exposure
+        dict (fed to SecurityMonitor.add_exposure in P3). Returns True if armed.
+
+        Idempotent-ish: a second call replaces the listener.
+        """
+        if os.name != "nt":
+            return False
+        import secrets as _secrets
+        token = _secrets.token_hex(24)
+        pipe_name = r"\\.\pipe\atn-vpush-" + _secrets.token_hex(16)
+        listener = _ValuePushListener(sink=sink, token=token, pipe_name=pipe_name)
+        listener.start()
+        # Replace any prior listener.
+        if self._listener is not None:
+            self._listener.stop()
+        self._listener = listener
+        self._push_endpoint = pipe_name
+        self._push_token = token
+        return True
+
+    def disarm_value_push(self) -> None:
+        if self._listener is not None:
+            self._listener.stop()
+        self._listener = None
+        self._push_endpoint = None
+        self._push_token = None
+
+    @property
+    def value_push_armed(self) -> bool:
+        return self._listener is not None and bool(self._push_token)
+
+    # -- broker ops ----------------------------------------------------------
+    def mint_nonce(self, services: list[str],
+                   agent_id: Optional[str] = None) -> dict[str, Any]:
+        """Owner-gated: mint a one-time registration nonce for a resolved set of
+        service names. Returns {"ok", "nonce", "policies"} or a fail-closed
+        error dict. If a value-push listener is armed, its endpoint + token are
+        registered with the nonce so the broker pushes staged values to us.
+        """
+        if not self._owner_secret:
+            return {"ok": False, "error": "no owner secret; cannot mint"}
+        policies = _services_to_policies(services)
+        req: dict[str, Any] = {
+            "op": "mint_nonce",
+            "owner_secret": self._owner_secret,
+            "policies": policies,
+        }
+        if self._push_endpoint and self._push_token:
+            req["push_endpoint"] = self._push_endpoint
+            req["push_token"] = self._push_token
+            if agent_id:
+                req["agent_id"] = agent_id
+        return _pipe_call(req, self._pipe)
+
+    def register(self, pid: int, nonce: str) -> dict[str, Any]:
+        """Bind a worker PID to a minted nonce (consumes the nonce)."""
+        return _pipe_call(
+            {"op": "register", "pid": int(pid), "nonce": nonce}, self._pipe)
+
+    def release_session(self, pid: int) -> dict[str, Any]:
+        """Owner-gated teardown of a worker session at PID revoke."""
+        if not self._owner_secret:
+            return {"ok": False, "error": "no owner secret; cannot release"}
+        return _pipe_call(
+            {"op": "release_session", "owner_secret": self._owner_secret,
+             "pid": int(pid)}, self._pipe)
+
+
+# ── Worker client (no secret; runs in a worker PID) ───────────────────────────
+class WorkerBrokerClient:
+    r"""A worker's unprivileged client to the vault-broker.
+
+    Holds NO secret. Its authority is purely its kernel-supplied PID (read by the
+    broker via GetNamedPipeClientProcessId). A worker can only ever reach the
+    services its OWN PID was granted at register-time; it can never widen that,
+    never mint, never register, never release another session.
+
+    ``request`` returns ``{var_name, path}`` — the daemon monitor gets the value
+    via the broker's push, the worker never does.
+    """
+
+    def __init__(self, pipe_name: str = BROKER_PIPE) -> None:
+        self._pipe = pipe_name
+
+    def list_services(self) -> dict[str, Any]:
+        return _pipe_call({"op": "list"}, self._pipe)
+
+    def request(self, service: str) -> dict[str, Any]:
+        return _pipe_call({"op": "request", "service": service}, self._pipe)
+
+    def release(self, service: str) -> dict[str, Any]:
+        return _pipe_call({"op": "release", "service": service}, self._pipe)
+
+    def whoami(self) -> dict[str, Any]:
+        return _pipe_call({"op": "whoami"}, self._pipe)

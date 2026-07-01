@@ -189,6 +189,16 @@ class AgentDefinition:
     #                   "period": "monthly"}}          # daily | weekly | monthly | hourly | none
     # 0 or absent = unlimited.  Counter rolls up to ancestors.
 
+    # --- Secret allowance (authored wish; secret-allowance/tripwire track) ---
+    secrets_allowance: str | None = None
+    # The AUTHORED wish for which vault secrets this agent may request. A spec
+    # string in kevin/keystore.py resolve_spec form (comma-separated tokens:
+    # none/all/bundle:<name>/<service-literal>). None => no wish (fail-closed:
+    # the daemon grants nothing unless secrets.default_root_allowance opts in).
+    # This is ONLY the wish; the ENFORCED grant is the daemon-computed
+    # intersection with the parent's allowance, carried out-of-band via
+    # runtime._pending_grants (never on the RPC/worker path). Inert in P0.
+
     # --- Long-horizon safeguards (None = use registry defaults) ---
     max_children: int | None = None
     # Max direct children this agent may spawn. Default: 20.

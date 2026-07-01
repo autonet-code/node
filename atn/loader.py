@@ -214,6 +214,12 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         errors.append(LoadError(file, "'tool_input_schema' must be a mapping (JSON Schema object)"))
         return None, errors
 
+    # --- Secret allowance (authored wish; fail-closed None when absent) ---
+    secrets_allowance = raw.get("secrets_allowance")
+    if secrets_allowance is not None and not isinstance(secrets_allowance, str):
+        errors.append(LoadError(file, "'secrets_allowance' must be a string spec (e.g. 'none', 'all', 'bundle:x,svc')"))
+        return None, errors
+
     return AgentDefinition(
         id=agent_id,
         name=name,
@@ -238,6 +244,7 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         heartbeat=heartbeat,
         expose_as_tool=expose_as_tool,
         tool_input_schema=tool_input_schema,
+        secrets_allowance=secrets_allowance,
     ), errors
 
 
@@ -331,6 +338,8 @@ def save_agent(defn: AgentDefinition, directory: Path) -> Path:
         data["concurrency"] = defn.concurrency
     if defn.budgets:
         data["budgets"] = defn.budgets
+    if defn.secrets_allowance is not None:
+        data["secrets_allowance"] = defn.secrets_allowance
     if defn.output_schema:
         data["output_schema"] = defn.output_schema
     if defn.connector_ids:

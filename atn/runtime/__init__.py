@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Callable
@@ -170,6 +171,90 @@ class Runtime:
         # process when ATN_WORKER_ISOLATION is ON *and* a worker is registered.
         # With the flag OFF nothing here touches an OS process. The two security
         # hooks are injected as NO-OPs here (P3) — the vault track fills them.
+        # Daemon-held Seam A -> Seam B bridge for the secret-allowance track.
+        # Maps child_agent_id -> daemon-computed enforced grant (JSON-safe list
+        # of resolved vault service names; NEVER the _ALLOWANCE_ALL sentinel,
+        # NEVER on the RPC/worker path). Written at allowance intersection
+        # (Seam A, before child spawn) and popped once at PID->identity bind
+        # (Seam B). Nothing consumes it yet in P0 — inert until P4.
+        self._pending_grants: dict[str, list[str]] = {}
+
+        # --- Live broker sessions (secret-allowance track, Phase 4) ----------
+        # pid -> {"agent_id": str, "services": list[str]} for every worker that
+        # actually received a broker session at Seam B. The revoke hook pops this
+        # to release the session + drop the monitor exposure. Daemon-only; never
+        # carries a value and never crosses the worker/RPC boundary.
+        self._grants: dict[int, dict[str, Any]] = {}
+
+        # --- Vault broker client (secret-allowance track, Phase 2) -----------
+        # The daemon's privileged client to the kevin vault-broker (owner secret
+        # from BROKER_OWNER_SECRET). Constructed unconditionally (cheap, no I/O
+        # until an op is called); nothing consumes it yet in P2 (Seam B / P4 is
+        # the first caller of mint_nonce/register; _reap / P4 calls
+        # release_session; the value-push listener is armed once the monitor
+        # exists in P3). It is daemon-only and NEVER handed to a worker.
+        from .broker_client import DaemonBrokerClient, _SECRET_MARKERS_OK
+        self._broker_client = DaemonBrokerClient()
+        # STARTUP INVARIANTS (fail-loud, dev-time): (1) the owner-secret env var
+        # name must contain a _SECRET_MARKERS substring so the worker env-scrub
+        # (worker_manager._scrub_env) strips it — otherwise a spawned worker
+        # could inherit the owner secret and mint its own grants. (2) VAULT_TOKEN
+        # must be ABSENT from the daemon env — the broker's Vault token lives ONLY
+        # in the vault-svc process; if it leaked into the daemon a worker could
+        # inherit it (SECRET/TOKEN markers do scrub it, but its presence here is a
+        # deployment error worth surfacing).
+        _secret_env_ok = _SECRET_MARKERS_OK("BROKER_OWNER_SECRET")
+        if not _secret_env_ok:
+            log.error(
+                "SECURITY: BROKER_OWNER_SECRET env name is not covered by the "
+                "worker env-scrub markers; a worker could inherit it. Refusing "
+                "to treat the broker client as usable.")
+        if os.environ.get("VAULT_TOKEN"):
+            log.error(
+                "SECURITY: VAULT_TOKEN is present in the daemon environment; the "
+                "broker's Vault token must live ONLY in the vault-svc process. "
+                "This is a deployment error.")
+
+        # --- Security tripwire (secret-allowance track, Phase 3) -------------
+        # The daemon-side live-exposure monitor. Subscribes to STEP_OUTPUT and
+        # scans every agent transcript chunk for a leaked secret VALUE or its
+        # staged PATH, firing SECURITY_ALARM on a hit. Constructed + STARTED
+        # unconditionally here (cheap; with an empty live-set every scan is a
+        # no-op, so flag-off behaviour is externally byte-identical). It MUST
+        # exist before the supervisor wires Seam B / revoke below so that P4 can
+        # refuse to grant when the monitor is down (monitor-down => no tripwire
+        # => no secrets), and so drop_exposure is reachable from the revoke hook.
+        #
+        # The broker value-push (P2) is armed here: each staged exposure the
+        # broker pushes back over the owner-authenticated pipe is delivered
+        # straight into the monitor's live-set (value scanned daemon-side ONLY,
+        # never into model context, never logged). Arming is Windows-only and
+        # best-effort; a failure to arm leaves value_push_armed False, which P4
+        # will treat as monitor-down (fail-closed: refuse to grant).
+        from .security_monitor import SecurityMonitor
+        self.security_monitor = SecurityMonitor(
+            self.events, data_dir=self._config.data_dir)
+        self.security_monitor.start()
+
+        def _value_push_sink(exposure: dict) -> None:
+            # Owner-authenticated push frame -> live-set. The raw value lives
+            # ONLY here (and the worker's staged file); it is dropped at revoke.
+            try:
+                self.security_monitor.add_exposure(
+                    value=exposure.get("value"),
+                    staged_path=exposure.get("staged_path"),
+                    secret_name=exposure.get("secret_name") or "",
+                    agent_id=exposure.get("agent_id") or "",
+                    pid=exposure.get("pid"),
+                )
+            except Exception:  # noqa: BLE001 — a bad push must not kill anything
+                log.debug("value-push -> add_exposure failed", exc_info=True)
+
+        try:
+            self._broker_client.arm_value_push(_value_push_sink)
+        except Exception:  # noqa: BLE001
+            log.debug("value-push listener failed to arm", exc_info=True)
+
         from .worker_manager import WorkerManager
         from .agent_supervisor import AgentSupervisor
         _wi_cfg = getattr(self._config, "worker_isolation", None)
@@ -325,13 +410,117 @@ class Runtime:
     # ------------------------------------------------------------------
 
     def _on_pid_bound(self, agent_id: str, pid: int, parent_agent_id: str | None) -> None:
-        """Fired when a worker PID is bound to an agent identity (before "go").
-        No-op in P3; the secrets track hangs PID-bound grant issuance here."""
+        """Fired when a worker PID is bound to an agent identity, AFTER the worker
+        is ready but BEFORE it is told "go" (so the grant is in place before the
+        worker can run any tool). Mints a broker session for the daemon-computed
+        allowance stashed at Seam A and binds it to this PID.
+
+        FAIL-CLOSED at every gate — the default outcome is *no session* (deny):
+          1. monitor-down (not subscribed/sweeper dead) OR value-push not armed
+             => no tripwire => refuse to grant.
+          2. no stashed grant / empty grant => nothing to authorize.
+          3. no service maps to a broker policy => nothing to authorize.
+          4. mint_nonce / register returns not-ok (broker down, bad reply) => no
+             session.
+        Only on a fully successful mint+register do we record the live session so
+        the revoke hook can tear it down. The stash is always popped (consumed
+        once) whether or not a session is minted, so it can't leak into a later
+        PID rebind."""
+        # (1) Monitor-down => no secrets. Both the scan (monitor subscribed +
+        # sweeper alive) and the delivery channel (value-push armed) must be up,
+        # else a staged value would never reach the scanner: a silent blind spot.
+        try:
+            monitor_up = self.security_monitor.is_healthy()
+        except Exception:  # noqa: BLE001
+            monitor_up = False
+        push_up = False
+        try:
+            push_up = bool(self._broker_client.value_push_armed)
+        except Exception:  # noqa: BLE001
+            push_up = False
+        if not (monitor_up and push_up):
+            # Consume the stash so it can't be picked up by a future rebind.
+            self._pending_grants.pop(agent_id, None)
+            if not monitor_up or not push_up:
+                log.warning(
+                    "secret-grant refused for agent=%s pid=%s: monitor_up=%s "
+                    "push_armed=%s (fail-closed)", agent_id, pid, monitor_up, push_up)
+            return None
+
+        # (2) The daemon-computed enforced grant (Seam A). Popped exactly once.
+        l_child = self._pending_grants.pop(agent_id, [])
+        if not l_child:
+            return None
+
+        # (3) Resolve service NAMES -> broker policy names (unmapped dropped).
+        from .broker_client import _services_to_policies
+        policies = _services_to_policies(l_child)
+        if not policies:
+            log.warning(
+                "secret-grant: agent=%s pid=%s had grant %s but no service maps "
+                "to a broker policy; no session", agent_id, pid, l_child)
+            return None
+
+        # (4) Mint a one-time nonce (owner-gated) then bind it to the PID. Any
+        # not-ok reply (broker down, empty owner secret, bad frame) => no session.
+        try:
+            r = self._broker_client.mint_nonce(policies, agent_id=agent_id)
+        except Exception:  # noqa: BLE001
+            log.warning("secret-grant: mint_nonce raised for agent=%s pid=%s",
+                        agent_id, pid, exc_info=True)
+            return None
+        if not (isinstance(r, dict) and r.get("ok") and r.get("nonce")):
+            log.warning("secret-grant: mint_nonce not-ok for agent=%s pid=%s: %s",
+                        agent_id, pid, (r or {}).get("error"))
+            return None
+
+        try:
+            r2 = self._broker_client.register(pid, r["nonce"])
+        except Exception:  # noqa: BLE001
+            log.warning("secret-grant: register raised for agent=%s pid=%s",
+                        agent_id, pid, exc_info=True)
+            return None
+        if not (isinstance(r2, dict) and r2.get("ok")):
+            log.warning("secret-grant: register not-ok for agent=%s pid=%s: %s",
+                        agent_id, pid, (r2 or {}).get("error"))
+            return None
+
+        # Session is live. Record it (services = the resolved vault NAMES, never a
+        # value) so revoke can release it. The broker value-push (P2/P3) now feeds
+        # the monitor as the worker stages each value.
+        self._grants[int(pid)] = {"agent_id": agent_id, "services": list(l_child)}
+        log.info("secret-grant: session minted for agent=%s pid=%s services=%s",
+                 agent_id, pid, l_child)
         return None
 
-    def _on_pid_revoked(self, pid: int) -> None:
-        """Fired when a worker PID is reaped. No-op in P3; the secrets track
-        hangs grant revocation here."""
+    def _on_pid_revoked(self, pid: int, agent_id: str | None) -> None:
+        """Fired when a worker PID is reaped. Tears down any broker session and
+        drops the monitor exposure for the PID, and drains the stale grant stash.
+        Each teardown is independent (best-effort): a failure in one must not
+        block the others, and the broker's TTL is the backstop if release fails."""
+        grant = self._grants.pop(int(pid), None) if pid is not None else None
+        if grant is not None:
+            # (a) Release the broker session (owner-gated). Independent try; the
+            # broker also TTLs the session, so a failure here is not fatal.
+            try:
+                self._broker_client.release_session(int(pid))
+            except Exception:  # noqa: BLE001
+                log.debug("secret-revoke: release_session failed for pid=%s",
+                          pid, exc_info=True)
+            # (b) Drop the live exposure(s) for this PID — drops the raw value(s)
+            # from the monitor live-set and clears the agent's tail buffer.
+            try:
+                self.security_monitor.drop_exposure(
+                    pid=int(pid), agent_id=agent_id or grant.get("agent_id"))
+            except Exception:  # noqa: BLE001
+                log.debug("secret-revoke: drop_exposure failed for pid=%s",
+                          pid, exc_info=True)
+
+        # (c) Drain any stale stash keyed by this agent (e.g. a grant was stashed
+        # at Seam A but the worker died before Seam B popped it). Uses the
+        # pipe-bound agent_id the supervisor passed.
+        if agent_id:
+            self._pending_grants.pop(agent_id, None)
         return None
 
     async def start(self) -> None:
@@ -461,6 +650,18 @@ class Runtime:
             await self.supervisor.stop_monitor()
         except Exception:
             log.debug("supervisor stop_monitor failed", exc_info=True)
+
+        # Tear down the security tripwire: disarm the value-push listener (drops
+        # any live raw values held for scanning) and stop the monitor (unsubscribe
+        # + halt the TTL sweeper). Idempotent; safe when never armed.
+        try:
+            self._broker_client.disarm_value_push()
+        except Exception:
+            log.debug("value-push disarm failed", exc_info=True)
+        try:
+            self.security_monitor.stop()
+        except Exception:
+            log.debug("security_monitor stop failed", exc_info=True)
 
         if self.agent_directory is not None:
             await self.agent_directory.stop()

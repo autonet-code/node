@@ -500,6 +500,15 @@ class ExecutionEngine:
         # (surface vs connector vs framework tool).
         if name in _SHELL_TOOL_EXECUTORS:
             return await _SHELL_TOOL_EXECUTORS[name](tool_input)
+        # Secret tools are WORKER-ONLY (they need the worker's kernel PID to reach
+        # the vault-broker; the daemon holds no broker session and must never
+        # stage a secret for itself). They can only appear here if a granted
+        # execution FELL BACK to the in-process path after a worker spawn failure
+        # — refuse fail-closed. The value can never stage: the broker would reject
+        # the daemon PID anyway, but we never even reach it.
+        from .worker_loop import _SECRET_TOOLS
+        if name in _SECRET_TOOLS:
+            return {"ok": False, "error": "secret tools require an isolated worker"}
         # Surface-contributed tools (read channel history, etc.) route back to
         # whichever active surface offers them.
         if name.startswith("surface_"):
@@ -835,6 +844,25 @@ class ExecutionEngine:
                         agent_tools.extend(fn(defn.id) or [])
                     except Exception:
                         log.debug("surface.agent_tools failed", exc_info=True)
+
+            # --- Secret tool surface (P5, DOUBLE-GATED) ---
+            # Append the secret_* tools IFF the isolation flag is ON *and* this
+            # agent has a non-empty daemon-computed grant staged in
+            # runtime._pending_grants. An empty/absent grant => the schemas are
+            # never added => the worker MODEL cannot even name the tools (the
+            # broker would refuse anyway, but we never surface the ability). The
+            # grant list itself (resolved service names) is NEVER put in the
+            # manifest — only the enabling flag is derived from it here; the
+            # worker enumerates its real services over the broker at run time.
+            try:
+                rt_secret = getattr(self, "_runtime_ref", None)
+                if (rt_secret is not None
+                        and self._worker_isolation_enabled()
+                        and rt_secret._pending_grants.get(defn.id)):
+                    from .worker_loop import SECRET_TOOL_SCHEMAS
+                    agent_tools.extend(SECRET_TOOL_SCHEMAS)
+            except Exception:
+                log.debug("secret tool surface gate failed", exc_info=True)
 
             # --- Drain inbox ---
             all_messages = self.inbox.drain(defn.id)

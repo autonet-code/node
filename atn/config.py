@@ -317,6 +317,24 @@ class WorkerIsolationConfig:
 
 
 @dataclass
+class SecretsConfig:
+    """Owner config for the secret-allowance / tripwire track (default OFF).
+
+    Governs how the daemon resolves the ROOT (parent-less / user-created)
+    agent's secret allowance. Everything here is FAIL-CLOSED by default: a
+    root agent gets NOTHING unless the owner explicitly opts in.
+
+    ``default_root_allowance`` is a resolve_spec string (kevin/keystore.py
+    form): "none" (default; deny-all) or "all" (grant every vault service,
+    unbounded / picks up new services) or a comma-separated bundle/literal
+    spec. This is the L_parent seed for agents with no parent allowance to
+    intersect against. Inert until the enforcement phases (P4+); read only
+    when worker_isolation is also enabled and a real grant is requested.
+    """
+    default_root_allowance: str = "none"
+
+
+@dataclass
 class ATNConfig:
     """Top-level ATN configuration."""
     data_dir: Path = field(default_factory=lambda: _DEFAULT_DIR)
@@ -328,6 +346,7 @@ class ATNConfig:
     trace_logging: TraceLoggingConfig = field(default_factory=TraceLoggingConfig)
     auto_update: AutoUpdateConfig = field(default_factory=AutoUpdateConfig)
     worker_isolation: WorkerIsolationConfig = field(default_factory=WorkerIsolationConfig)
+    secrets: SecretsConfig = field(default_factory=SecretsConfig)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     connectors: dict[str, ConnectorConfig] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -472,6 +491,18 @@ def _load_worker_isolation(wi_raw: dict[str, Any]) -> WorkerIsolationConfig:
     except (TypeError, ValueError):
         memory_cap_mb = 0
     return WorkerIsolationConfig(enabled=wi_enabled, memory_cap_mb=memory_cap_mb)
+
+
+def _load_secrets(secrets_raw: dict[str, Any]) -> SecretsConfig:
+    """Build the secrets config (secret-allowance / tripwire track).
+
+    Fail-closed: an unset or non-string ``default_root_allowance`` falls back
+    to "none" (deny-all root).
+    """
+    root = secrets_raw.get("default_root_allowance", "none")
+    if not isinstance(root, str) or not root.strip():
+        root = "none"
+    return SecretsConfig(default_root_allowance=root.strip())
 
 
 def load_config(path: Path | None = None) -> ATNConfig:
@@ -647,6 +678,11 @@ def load_config(path: Path | None = None) -> ATNConfig:
     wi_raw = raw.get("worker_isolation", {})
     config.worker_isolation = _load_worker_isolation(
         wi_raw if isinstance(wi_raw, dict) else {})
+
+    # Secrets / tripwire track (root allowance, fail-closed default "none").
+    secrets_raw = raw.get("secrets", {})
+    config.secrets = _load_secrets(
+        secrets_raw if isinstance(secrets_raw, dict) else {})
 
     # Connectors
     for name, craw in raw.get("connectors", {}).items():
