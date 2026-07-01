@@ -90,6 +90,14 @@ class VoiceConfig:
     input_device: str | None = None
     kokoro_model_dir: str | None = None   # directory containing kokoro-v1.0.onnx
     piper_module_dir: str | None = None   # directory containing piper voice module
+    # Security-alarm consumer: when True the alarm is spoken via Piper (offline,
+    # always available), bypassing mute/backend selection so a tamper alert is
+    # never swallowed by a cloud-TTS outage. Full monitor lands in the security
+    # track; this flag governs the consumer stub already wired here.
+    piper_mandatory_for_alarm: bool = True
+    # Reserved for the optional local audio overlay (owner decision pending); the
+    # overlay module is NOT built yet. Kept here so config stays forward-stable.
+    local_overlay: bool = False
 
 
 @dataclass
@@ -202,6 +210,12 @@ class RPBConfig:
     # Empty = use same provider resolution as local agents.
     sponsor_provider: str = ""
     sponsor_model: str = ""  # Model to serve (empty = accept any model request)
+    # Input-seam gating policy for the WebSocket surface: "allow" (AllowAll,
+    # today's default — every connected client may drive its scoped agents) or
+    # "single_writer" (only the arbiter-elected active input surface may send).
+    # Mirrors chat.policy; the single-writer decision is enforced by the
+    # runtime-owned InputArbiter, not by this policy object.
+    ws_input_policy: str = "allow"
 
     def __post_init__(self) -> None:
         """Apply jurisdiction defaults for empty fields."""
@@ -240,6 +254,41 @@ class TraceLoggingConfig:
 
 
 @dataclass
+class AutoUpdateConfig:
+    """Silent daemon auto-update (opt-in).
+
+    When ``enabled``, a background task polls the release source (default
+    PyPI) on ``check_interval_secs``. A newer release is downloaded, its
+    wheel hash verified, and (advisory) checked against the on-chain core
+    hash, then *staged* to ``{data_dir}/staged_update/``. The running
+    daemon is never restarted — the staged wheel is installed on the next
+    daemon boot, before any heavy modules load, then the process re-execs
+    once into the new code.
+
+    This is legitimate rather than sneaky only because control of the
+    official codebase is meant to be decentralized via reputation /
+    governance. V1 trusts PyPI as the version pointer and the published
+    wheel hash (plus the on-chain core hash when present); the source of
+    the version pointer can later move to a governance-approved on-chain
+    pointer without changing the stage/apply machinery.
+
+    Example config.yaml snippet::
+
+        auto_update:
+          enabled: true
+          check_interval_secs: 86400   # daily
+          source: pypi                 # pypi | git | http | blob_store
+          pypi_index_url: ""           # "" → pypi.org default
+          package_name: autonet-computer
+    """
+    enabled: bool = False
+    check_interval_secs: int = 86400     # daily
+    source: str = "pypi"                 # pypi | git | http | blob_store
+    pypi_index_url: str = ""             # "" → pypi.org JSON API default
+    package_name: str = "autonet-computer"
+
+
+@dataclass
 class ATNConfig:
     """Top-level ATN configuration."""
     data_dir: Path = field(default_factory=lambda: _DEFAULT_DIR)
@@ -249,6 +298,7 @@ class ATNConfig:
     chat: ChatConfig = field(default_factory=ChatConfig)
     autonet: AutonetConfig = field(default_factory=AutonetConfig)
     trace_logging: TraceLoggingConfig = field(default_factory=TraceLoggingConfig)
+    auto_update: AutoUpdateConfig = field(default_factory=AutoUpdateConfig)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     connectors: dict[str, ConnectorConfig] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -518,6 +568,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
         remote_ws_port=int(resolved.get("remote_ws_port", 7701)),
         public_ws_endpoint=resolved.get("public_ws_endpoint", ""),
         firestore_project=resolved.get("firestore_project", ""),
+        ws_input_policy=resolved.get("ws_input_policy", "allow"),
     )
 
     # Trace logging
@@ -528,6 +579,17 @@ def load_config(path: Path | None = None) -> ATNConfig:
             trace_dir=trace_raw.get("trace_dir", ""),
             include_user_data=trace_raw.get("include_user_data", False),
             min_turns=trace_raw.get("min_turns", 1),
+        )
+
+    # Auto-update
+    auto_update_raw = raw.get("auto_update", {})
+    if isinstance(auto_update_raw, dict):
+        config.auto_update = AutoUpdateConfig(
+            enabled=auto_update_raw.get("enabled", False),
+            check_interval_secs=auto_update_raw.get("check_interval_secs", 86400),
+            source=auto_update_raw.get("source", "pypi"),
+            pypi_index_url=auto_update_raw.get("pypi_index_url", ""),
+            package_name=auto_update_raw.get("package_name", "autonet-computer"),
         )
 
     # Connectors

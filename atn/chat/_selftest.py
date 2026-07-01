@@ -44,9 +44,13 @@ class _FakeRuntime:
         self.relayed: list[tuple[str, str]] = []
         self.registry = None  # no seed
 
-    async def send_agent_message(self, agent_id: str, content: str) -> bool:
+    async def send_agent_message(self, agent_id: str, content: str,
+                                 *, surface: object = None) -> dict:
+        # Mirrors the real send_agent_message: accepts the surface= kwarg the
+        # arbiter threads through, and ALWAYS returns a dict (callers branch on
+        # result.get("error")/"code", never truthiness).
         self.relayed.append((agent_id, content))
-        return True
+        return {"status": "triggered", "agent_id": agent_id}
 
 
 def _evt(t: EventType, source: str, **data) -> Event:

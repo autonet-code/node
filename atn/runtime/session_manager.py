@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from .agent_registry import AgentRegistry
     from .execution_engine import ExecutionEngine
     from .provider_manager import ProviderManager
+    from ..input_arbiter import InputArbiter, SurfaceId
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class SessionManager:
         events: EventBus,
         inbox: InboxManager,
         config: Any,
+        arbiter: "InputArbiter | None" = None,
     ) -> None:
         self.conversation = conversation
         self.registry = registry
@@ -44,6 +46,9 @@ class SessionManager:
         self.events = events
         self.inbox = inbox
         self._config = config
+        # Single-writer input gate (P3). May be None in bare/test construction;
+        # a None arbiter means "no gating" (every message trusted).
+        self._arbiter = arbiter
 
         self._agent_conversations: dict[str, ConversationStore] = {}
         self._delegate_output_dir = self._config.data_dir / "delegates"
@@ -98,7 +103,18 @@ class SessionManager:
             self._agent_conversations[agent_id] = ConversationStore(store_dir)
         return self._agent_conversations[agent_id]
 
-    async def send_agent_message(self, agent_id: str, text: str) -> dict:
+    async def send_agent_message(
+        self, agent_id: str, text: str, *, surface: "SurfaceId | None" = None,
+    ) -> dict:
+        # Single-writer gate (P3): a message that came through an input surface
+        # is only delivered if that surface currently holds the mic. surface=None
+        # => trusted internal caller (orchestrator tool, scheduler), never gated.
+        # ALWAYS returns a dict; callers must inspect result.get("error").
+        if surface is not None and self._arbiter is not None \
+                and not self._arbiter.is_active(surface):
+            return {"error": "not the active input surface",
+                    "code": "input_not_active",
+                    "holder": self._arbiter.holder_token()}
         defn = self.registry.get_agent(agent_id)
         if defn is None:
             return {"error": f"Agent '{agent_id}' not found"}

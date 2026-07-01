@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import platform
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from ..models import AgentStatus, StepType, TaskStatus
@@ -80,6 +81,7 @@ class SnapshotBuilder:
         config: Any,
         voice_ref: Any,
         autonet_ref: Any,
+        arbiter_ref: Any = None,
     ) -> None:
         self.registry = registry
         self.engine = engine
@@ -96,6 +98,7 @@ class SnapshotBuilder:
         self._config = config
         self._voice_ref = voice_ref
         self._autonet_ref = autonet_ref
+        self._arbiter_ref = arbiter_ref
 
     def snapshot(self, scope_ids: set[str] | None = None) -> dict:
         """Build the dashboard snapshot.
@@ -274,6 +277,7 @@ class SnapshotBuilder:
                 "python": platform.python_version(),
                 "shell": "powershell" if platform.system() == "Windows" else "bash",
             },
+            "update": self._update_snapshot(),
             "orchestrator": orch_info,
             "providers": providers_summary,
             "agents": agents,
@@ -294,6 +298,10 @@ class SnapshotBuilder:
             "delegates": self._delegates_snapshot(),
             "voice": voice_status,
             "autonet": self._autonet_ref.get_status() if self._autonet_ref else {},
+            # Single-writer input arbitration (P3). NOT a secret section — every
+            # session may see who currently holds the mic and which surfaces are
+            # connected. Deliberately outside _SECRET_SECTIONS in ws_server.
+            "input": self._arbiter_ref.state() if self._arbiter_ref else {},
         }
 
     def _aggregate_claude_max_rate_limits(self) -> dict:
@@ -330,3 +338,32 @@ class SnapshotBuilder:
         if voice:
             return voice.get_status()
         return {"running": False, "available": _voice_available()}
+
+    def _update_snapshot(self) -> dict:
+        """Auto-update status for the dashboard.
+
+        Reads the staged-update marker straight from disk (ground truth)
+        rather than holding a reference to the poll task, so it's accurate
+        regardless of whether the poll task is wired into this builder.
+        """
+        au = getattr(self._config, "auto_update", None)
+        enabled = bool(getattr(au, "enabled", False))
+        current = _daemon_version()
+        out: dict = {
+            "enabled": enabled,
+            "current_version": current,
+            "staged_version": "",
+            "pending": False,
+        }
+        try:
+            import json
+            data_dir = getattr(self._config, "data_dir", None)
+            if data_dir is not None:
+                marker = Path(data_dir) / "staged_update" / "pending.json"
+                if marker.exists():
+                    payload = json.loads(marker.read_text(encoding="utf-8"))
+                    out["staged_version"] = payload.get("version", "")
+                    out["pending"] = True
+        except Exception:
+            pass
+        return out

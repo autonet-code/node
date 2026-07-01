@@ -71,6 +71,13 @@ class Runtime:
         self.data_dir = data_dir
         self._config = config or ATNConfig()
 
+        # Single-writer input arbitration (P3). Runtime-owned; a gate ABOVE
+        # every per-surface InputPolicy. Surfaces register/release against it;
+        # SessionManager.send_agent_message consults is_active() at the
+        # chokepoint. See atn/input_arbiter.py.
+        from ..input_arbiter import InputArbiter
+        self.input_arbiter = InputArbiter(self.events)
+
         # --- Core stores (owned by Runtime, injected into modules) ---
         self.inbox = InboxManager()
         self.output_store = OutputStore()
@@ -169,6 +176,7 @@ class Runtime:
             events=self.events,
             inbox=self.inbox,
             config=self._config,
+            arbiter=self.input_arbiter,
         )
         # Wire session_manager into engine (circular dep resolved here)
         self.engine.session_manager = self.sessions
@@ -202,6 +210,13 @@ class Runtime:
         # of platform SDKs and deployment-specific policy.
         self.chat = None  # type: Any
         self._chat_task = None  # background task running the chat adapter's client
+
+        # WebSocket bridge (set by register_surface() from cli.py once the
+        # bridge's listeners are up). A first-class Surface like chat/voice:
+        # long-lived, bidirectional, with an input seam (its .policy). The CLI
+        # owns the bridge's construction + port-retry; the runtime owns its
+        # Surface identity and input-seam policy.
+        self.ws_bridge = None  # type: Any
 
         # Agent directory publisher (lazy) — writes this daemon's
         # browser-reachable wss:// endpoint into the Firestore agent directory
@@ -269,6 +284,7 @@ class Runtime:
                 config=self._config,
                 voice_ref=self.voice,
                 autonet_ref=self.autonet,
+                arbiter_ref=self.input_arbiter,
             )
         # Update mutable refs
         self._snapshot_builder._voice_ref = self.voice
@@ -555,11 +571,36 @@ class Runtime:
             return CreditPolicy(store, ops)
         return AllowAll()
 
+    def register_surface(self, ws_bridge: Any) -> None:
+        """Register the WebSocket bridge as a first-class Surface.
+
+        Called by the CLI once the bridge's listeners are up. Records it as
+        self.ws_bridge and wires its input-seam policy (default AllowAll). The
+        single-writer *decision* isn't a policy — it belongs to the
+        runtime-owned InputArbiter (P3), a gate above every surface's policy;
+        this only supplies the per-surface seam object the Surface contract
+        expects. No general registry: active_surfaces() keeps an explicit
+        (chat, voice, ws_bridge) tuple."""
+        self.ws_bridge = ws_bridge
+        ws_bridge.policy = self._make_ws_input_policy()
+
+    def _make_ws_input_policy(self) -> Any:
+        """Build the WS surface's input-seam policy from config, mirroring the
+        chat-policy switch. "allow" => AllowAll (today's default). "single_writer"
+        is accepted but resolves to AllowAll here: single-writer is enforced by
+        the InputArbiter gate (P3), not by a per-surface policy object."""
+        from ..surface import AllowAll
+        kind = getattr(self._config.autonet, "ws_input_policy", "allow")
+        if kind == "single_writer":
+            # Seam reserved for the arbiter gate (P3); no per-surface gating today.
+            return AllowAll()
+        return AllowAll()
+
     def active_surfaces(self) -> list:
-        """Currently-running Surfaces (chat, voice, …). Used by the execution
-        engine to collect surface-contributed tools for an agent and to route
-        surface tool calls back."""
-        return [s for s in (self.chat, self.voice) if s is not None]
+        """Currently-running Surfaces (chat, voice, ws_bridge). Used by the
+        execution engine to collect surface-contributed tools for an agent and
+        to route surface tool calls back. Explicit tuple, not a registry."""
+        return [s for s in (self.chat, self.voice, self.ws_bridge) if s is not None]
 
     async def stop_chat(self) -> dict:
         if self.chat is None:
@@ -694,8 +735,15 @@ class Runtime:
     def get_agent_conversation_store(self, agent_id: str) -> ConversationStore:
         return self.sessions.get_agent_conversation_store(agent_id)
 
-    async def send_agent_message(self, agent_id: str, text: str) -> dict:
-        return await self.sessions.send_agent_message(agent_id, text)
+    async def send_agent_message(
+        self, agent_id: str, text: str, *, surface: "Any | None" = None,
+    ) -> dict:
+        """Deliver a user message to an agent. ``surface`` is the SurfaceId of
+        the input surface, if this came through one; the SessionManager gates it
+        against the InputArbiter (single-writer). surface=None => trusted
+        internal caller (orchestrator tool, scheduler) — never mic-gated.
+        ALWAYS returns a dict; callers must branch on result.get('error')."""
+        return await self.sessions.send_agent_message(agent_id, text, surface=surface)
 
     def append_delegate_output(self, agent_id: str, text: str) -> None:
         self.sessions.append_delegate_output(agent_id, text)

@@ -33,6 +33,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ..events import Event, EventBus, EventType
+from ..input_arbiter import SurfaceId
 from .policy import AllowAll, InputPolicy
 from .rendering import AgentExecutionRender, SubAgentTile
 from .routing import (
@@ -140,6 +141,12 @@ class ChatService:
         self._started_at: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._running = False
+        # This surface's identity for the InputArbiter (single-writer gate). The
+        # chat platform is an in-process singleton: kind 'chat', instance
+        # 'discord' (idle Discord never holds the mic — it registers but only
+        # auto-acquires on a genuine inbound when the mic is free).
+        self._surface_id = SurfaceId(
+            kind="chat", instance="discord", label="Discord", in_process=True)
 
     def _parent_of(self, agent_id: str) -> str | None:
         """Resolver for the routing helpers: agent_id -> parent_id, or None if
@@ -190,6 +197,11 @@ class ChatService:
         await self._reconcile_all_history()
         for et in _SUBSCRIBED:
             self.events.subscribe(et, self._on_bus_event)
+        # Register with the single-writer arbiter (does NOT grab the mic; an
+        # idle Discord bot holds nothing until someone actually addresses it).
+        arbiter = getattr(self.runtime, "input_arbiter", None)
+        if arbiter is not None:
+            arbiter.register(self._surface_id)
         self._running = True
         log.info("ChatService started; channel=%s bound to orchestrator", self.channel_id)
 
@@ -201,6 +213,9 @@ class ChatService:
                 self.events.unsubscribe(et, self._on_bus_event)
             except Exception:
                 pass
+        arbiter = getattr(self.runtime, "input_arbiter", None)
+        if arbiter is not None:
+            arbiter.release_for(self._surface_id)
         self._running = False
 
     # -- channel history as a FILE (read/grep, not a one-shot fetch) ----------
@@ -725,7 +740,23 @@ class ChatService:
         # (a notification), never talking about someone behind their back.
         sender_id = str(getattr(message.author, "id", "") or "")
         stamped = f"[from <@{sender_id}>]: {message.content}" if sender_id else message.content
-        ok = await self.runtime.send_agent_message(target, stamped)
-        if ok:
-            log.info("relayed inbound -> %s (%d chars)", target, len(message.content))
-        return ok
+        # send_agent_message ALWAYS returns a dict; inspect it (the old `if ok:`
+        # on a truthy dict never distinguished success from an error dict).
+        result = await self.runtime.send_agent_message(
+            target, stamped, surface=self._surface_id)
+        if result.get("code") == "input_not_active":
+            # A different surface holds input right now. Let the sender know
+            # rather than silently swallowing their message.
+            try:
+                await self.client.reply(
+                    message.id, message.channel.id,
+                    content="⏳ Another input surface is active right now.",
+                    mention_author=True)
+            except Exception:
+                log.debug("input-not-active reply failed", exc_info=True)
+            return False
+        if result.get("error"):
+            log.info("relay to %s not delivered: %s", target, result.get("error"))
+            return False
+        log.info("relayed inbound -> %s (%d chars)", target, len(message.content))
+        return True

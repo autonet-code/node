@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from .runtime import Runtime
 from .ws_server import WebSocketBridge, DEFAULT_PORT
 
 console = Console()
+log = logging.getLogger(__name__)
 
 # Maps event types to (colour, symbol) for the log stream.
 _EVENT_STYLE: dict[EventType, tuple[str, str]] = {
@@ -521,6 +523,11 @@ async def run_cli() -> None:
         )
         try:
             await ws_bridge.start()
+            # Register the bridge as a first-class Surface (Track 1): the
+            # runtime now knows it as self.ws_bridge, wires its input-seam
+            # policy, and includes it in active_surfaces(). Listeners + the
+            # port-retry loop stay CLI-owned.
+            runtime.register_surface(ws_bridge)
             console.print(f"  [green]WebSocket server listening on ws://localhost:{DEFAULT_PORT}[/]")
             if _remote_host:
                 _modes = ("owner+agent-self" if _owner_wallet else "agent-self")
@@ -544,6 +551,30 @@ async def run_cli() -> None:
             )
             break
 
+    # Auto-update: start the poll task (opt-in via config). It only *stages*
+    # verified updates; the running daemon never restarts itself. Skipped
+    # entirely on a developer's working tree / editable install — the running
+    # code isn't the pip-installed package there.
+    update_poll_task: asyncio.Task | None = None
+    if getattr(config.auto_update, "enabled", False):
+        try:
+            from .update_boot import dev_environment_reason
+            _dev_reason = dev_environment_reason()
+        except Exception:
+            _dev_reason = ""
+        if _dev_reason:
+            console.print(
+                f"  [yellow]Auto-update: skipped[/] [dim]({_dev_reason} — "
+                f"only pip-installed daemons auto-update)[/]"
+            )
+        else:
+            update_poll_task = asyncio.create_task(_update_poll_loop(runtime, config))
+            console.print(
+                f"  [green]Auto-update enabled[/] [dim](source: "
+                f"{config.auto_update.source}, every "
+                f"{config.auto_update.check_interval_secs}s — staged, applied on restart)[/]"
+            )
+
     _print_help()
     console.print("[dim]Events stream below.  Type commands at any time.\n[/]")
 
@@ -553,6 +584,12 @@ async def run_cli() -> None:
         pass
     finally:
         console.print("\n[bold red]Shutting down...[/]")
+        if update_poll_task is not None and not update_poll_task.done():
+            update_poll_task.cancel()
+            try:
+                await update_poll_task
+            except asyncio.CancelledError:
+                pass
         if ws_bridge:
             await ws_bridge.stop()
         if not runtime._shutdown_event.is_set():
@@ -561,7 +598,149 @@ async def run_cli() -> None:
         console.print("[dim]Bye.[/]")
 
 
+def _build_updater(runtime: Runtime, config: ATNConfig):
+    """Construct an AutonetUpdater from the daemon's auto_update config.
+
+    rpc_url / registry_address (for the advisory on-chain core-hash check)
+    are sourced from the autonet/blockchain config when available; absent
+    them, staging proceeds with wheel-hash verification only (logged).
+    """
+    from nodes.common.updater import AutonetUpdater
+    from .runtime.snapshot import _daemon_version
+
+    au = config.auto_update
+    _an = getattr(config, "autonet", None)
+    rpc_url = getattr(_an, "rpc_url", "") if _an else ""
+    registry_addr = (
+        getattr(_an, "registry_address", "")
+        or getattr(_an, "rpb_contract_address", "")
+        if _an else ""
+    )
+    return AutonetUpdater(
+        current_version=_daemon_version(),
+        source=au.source,
+        package_name=au.package_name,
+        pypi_index_url=au.pypi_index_url,
+        data_dir=str(config.data_dir),
+        check_interval=au.check_interval_secs,
+        rpc_url=rpc_url or "",
+        registry_address=registry_addr or "",
+    )
+
+
+async def _update_poll_loop(runtime: Runtime, config: ATNConfig) -> None:
+    """Background poll: check the release source on a fixed interval, stage
+    if a newer release is found.
+
+    The interval is the *maximum* check frequency. The last-check time is
+    persisted across restarts, so a daemon that's been down longer than the
+    interval checks shortly after startup; one restarted within the interval
+    waits out the remainder before its first check.
+
+    Stage-only — never restarts the running daemon. Emits UPDATE_STATUS
+    events on state transitions so the frontend can surface availability.
+    Stored on ``runtime._updater`` for the ws ``update_status`` handler and
+    the snapshot to read.
+    """
+    import asyncio as _asyncio
+
+    # Never auto-update a developer's working tree / editable install — the
+    # running code isn't the pip-installed package, so an upgrade would either
+    # do nothing useful or clobber the dev's source. Same guard the boot-apply
+    # path uses, applied here so a dev machine doesn't even download/stage.
+    try:
+        from .update_boot import dev_environment_reason
+        reason = dev_environment_reason()
+    except Exception:
+        reason = ""
+    if reason:
+        log.info("Auto-update: disabled for this environment (%s)", reason)
+        console.print(
+            f"  [yellow]Auto-update: skipped[/] [dim]({reason} — "
+            f"only pip-installed daemons auto-update)[/]"
+        )
+        return
+
+    try:
+        updater = _build_updater(runtime, config)
+    except Exception as exc:
+        log.warning("Auto-update: could not construct updater: %s", exc)
+        return
+    runtime._updater = updater  # type: ignore[attr-defined]
+
+    interval = max(60, int(config.auto_update.check_interval_secs))
+    last_state = ""
+
+    # First check: if the persisted last-check is older than the interval
+    # (or never happened), check soon after boot; otherwise wait out the
+    # remaining time so we honor the interval as a max frequency. A small
+    # floor keeps the check from competing with boot work.
+    since = updater.seconds_since_last_check()
+    if since >= interval:
+        initial_wait = 15
+    else:
+        initial_wait = max(15, int(interval - since))
+    log.info(
+        "Auto-update: first check in %ds (%.0fs since last check, interval %ds)",
+        initial_wait,
+        since if since != float("inf") else -1,
+        interval,
+    )
+    slept = 0
+    while slept < initial_wait:
+        try:
+            await _asyncio.sleep(min(30, initial_wait - slept))
+        except _asyncio.CancelledError:
+            return
+        slept += 30
+    while True:
+        try:
+            info = await _asyncio.to_thread(updater.check_update)
+            if info is not None and info.has_update:
+                staged = await _asyncio.to_thread(updater.stage_update, info)
+                if staged:
+                    log.info(
+                        "Auto-update: staged %s (applies on next restart)",
+                        info.available_version,
+                    )
+            # Emit a status event only when the state changed.
+            status = updater.get_status()
+            if status.get("state") != last_state:
+                last_state = status.get("state", "")
+                try:
+                    await runtime.events.emit(Event(
+                        type=EventType.UPDATE_STATUS,
+                        source="updater",
+                        data=status,
+                    ))
+                except Exception:
+                    pass
+        except _asyncio.CancelledError:
+            break
+        except Exception as exc:
+            log.warning("Auto-update poll error: %s", exc)
+        # Sleep in short slices so cancellation is responsive.
+        slept = 0
+        while slept < interval:
+            try:
+                await _asyncio.sleep(min(60, interval - slept))
+            except _asyncio.CancelledError:
+                return
+            slept += 60
+
+
 def main() -> None:
+    # Auto-update: apply any staged release BEFORE importing heavy runtime
+    # modules, so a pip-install can cleanly replace them, then re-exec once.
+    # Import-light and self-contained (stdlib only); no-ops when nothing is
+    # staged or auto-update is off. See atn/update_boot.py.
+    try:
+        from .update_boot import apply_staged_update_if_any
+        apply_staged_update_if_any()
+    except Exception:
+        # Never let the updater block the daemon from starting.
+        pass
+
     try:
         asyncio.run(run_cli())
     except KeyboardInterrupt:

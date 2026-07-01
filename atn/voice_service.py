@@ -47,6 +47,7 @@ from dataclasses import dataclass
 
 from .config import VoiceConfig
 from .events import Event, EventBus, EventType
+from .input_arbiter import SurfaceId
 from .surface import AllowAll, InputPolicy
 
 if TYPE_CHECKING:
@@ -70,13 +71,17 @@ except ImportError:
     _sd = None  # type: ignore[assignment]
     VOICE_AVAILABLE = False
 
-# PTT feature gate — keyboard + faster-whisper
-try:
-    import keyboard as _keyboard  # noqa: F401
-    from faster_whisper import WhisperModel as _WhisperModel  # noqa: F401
-    PTT_AVAILABLE = True
-except ImportError:
-    PTT_AVAILABLE = False
+# PTT feature gate — keyboard + faster-whisper.
+# NOTE: faster_whisper transitively imports torch (~590MB, ~5s). We must NOT
+# pay that in every process that imports voice_service (e.g. an agent worker,
+# the daemon boot). So the gate is a lightweight spec-check only; the heavy
+# imports happen lazily at first use (_get_whisper / the PTT loop).
+import importlib.util as _ilu
+PTT_AVAILABLE = (
+    _ilu.find_spec("keyboard") is not None
+    and _ilu.find_spec("faster_whisper") is not None
+)
+_keyboard = None  # lazily bound in the PTT loop
 
 
 # ── Constants ─────────────────────────────────────────────────
@@ -210,6 +215,9 @@ class AudioChannel:
         self._lock = threading.Lock()
         self._fade_vol = 1.0
         self._fade_rate = 0.0
+        # When paused, read() returns silence WITHOUT consuming the buffer, so
+        # playback resumes exactly where it left off. Set by AudioMixer.pause().
+        self.paused = False
 
     def write(self, audio_f32: Any) -> None:
         with self._lock:
@@ -217,6 +225,11 @@ class AudioChannel:
             self._total += len(audio_f32)
 
     def read(self, n: int) -> Any:
+        # Paused channels emit silence and keep their buffer intact. Do this
+        # BEFORE touching the buffer or the fade envelope so a pause holds the
+        # fade state frozen too (resume picks up mid-fade unchanged).
+        if self.paused:
+            return _np.zeros(n, dtype=_np.float32)
         with self._lock:
             if self._total == 0:
                 return None
@@ -350,6 +363,19 @@ class AudioMixer:
 
     def unmute(self) -> None:
         self._muting = False
+
+    def pause(self, name: str) -> None:
+        """Freeze one channel: it emits silence but keeps its buffer + fade
+        state, so unpause() resumes exactly where playback stopped. Distinct
+        from mute (master-level) and stop_all (drains buffers)."""
+        ch = self.channels.get(name)
+        if ch is not None:
+            ch.paused = True
+
+    def unpause(self, name: str) -> None:
+        ch = self.channels.get(name)
+        if ch is not None:
+            ch.paused = False
 
     def stop_all(self) -> None:
         for ch in self.channels.values():
@@ -663,6 +689,8 @@ def _get_whisper():
     if _whisper_model is None:
         with _whisper_lock:
             if _whisper_model is None:
+                # Lazy import — this is where torch actually loads.
+                from faster_whisper import WhisperModel as _WhisperModel
                 try:
                     _whisper_model = _WhisperModel(
                         "base.en", device="cuda", compute_type="float16"
@@ -706,6 +734,11 @@ class PushToTalkRecorder:
                  mixer: AudioMixer | None = None,
                  device: int | None = None,
                  on_record_start: Callable | None = None) -> None:
+        # Lazy-bind the keyboard module here (only when PTT is actually
+        # constructed) so importing voice_service never pulls it in.
+        global _keyboard
+        if _keyboard is None:
+            import keyboard as _keyboard  # type: ignore[no-redef]
         self.keys = keys or ["page down"]
         self.sr = sr
         self.mixer = mixer
@@ -855,6 +888,10 @@ class VoiceService:
         # gate (e.g. the chat surface's CreditPolicy) to govern both channels.
         self.policy: InputPolicy = policy or AllowAll()
         self._author = VoiceAuthor()
+        # This surface's identity for the InputArbiter (single-writer gate). The
+        # local mic is an in-process singleton: kind 'voice', instance 'local'.
+        self._surface_id = SurfaceId(
+            kind="voice", instance="local", label="Local mic", in_process=True)
 
         # Focus — which agent_id the user is listening to (per channel)
         self.voice_focus: str = "orchestrator"   # agent whose TTS plays on "voice"
@@ -887,6 +924,15 @@ class VoiceService:
         self._running = False
         self._voice_enabled = True
         self._last_spoken_text: dict[str, str] = {}
+
+        # TTS transport flags (ported from kevin). Three orthogonal controls the
+        # _tts_loop honors while a response plays:
+        #   _tts_cancelled — abandon the WHOLE current item and drain (mute/kill)
+        #   _tts_skip      — skip ONE sentence, keep playing the rest
+        #   _tts_paused    — set = paused (channel emits silence), clear = running
+        self._tts_cancelled = threading.Event()
+        self._tts_skip = threading.Event()
+        self._tts_paused = threading.Event()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -989,9 +1035,19 @@ class VoiceService:
         self.events.subscribe(EventType.EXECUTION_COMPLETED, self._on_execution_completed)
         self.events.subscribe(EventType.EXECUTION_STARTED, self._on_execution_started)
         self.events.subscribe(EventType.AGENT_REGISTERED, self._on_agent_registered)
+        # Security-alarm consumer STUB. The full tamper monitor is the security
+        # track; this consumer must be ready + correct now so voice speaks an
+        # alert the instant that track emits SECURITY_ALARM.
+        self.events.subscribe(EventType.SECURITY_ALARM, self._on_security_alarm)
 
         # Capture the main event loop for cross-thread scheduling
         self._main_loop = asyncio.get_running_loop()
+
+        # Register with the single-writer arbiter (does NOT grab the mic; the
+        # first push-to-talk utterance auto-acquires when the mic is free).
+        arbiter = getattr(self.runtime, "input_arbiter", None)
+        if arbiter is not None:
+            arbiter.register(self._surface_id)
 
         # Startup chime
         self.mixer.play("effects", make_startup_chime())
@@ -1023,6 +1079,11 @@ class VoiceService:
             return
         self._running = False
 
+        # Deregister from the single-writer arbiter (hands the mic off if held).
+        arbiter = getattr(self.runtime, "input_arbiter", None)
+        if arbiter is not None:
+            arbiter.release_for(self._surface_id)
+
         # Unsubscribe
         self.events.unsubscribe(EventType.STEP_OUTPUT, self._on_step_output)
         self.events.unsubscribe(EventType.DELEGATE_SPAWNED, self._on_delegate_spawned)
@@ -1031,6 +1092,7 @@ class VoiceService:
         self.events.unsubscribe(EventType.EXECUTION_COMPLETED, self._on_execution_completed)
         self.events.unsubscribe(EventType.EXECUTION_STARTED, self._on_execution_started)
         self.events.unsubscribe(EventType.AGENT_REGISTERED, self._on_agent_registered)
+        self.events.unsubscribe(EventType.SECURITY_ALARM, self._on_security_alarm)
 
         # Stop TTS worker
         self._tts_q.put(None)
@@ -1184,8 +1246,66 @@ class VoiceService:
 
         raise RuntimeError("No TTS backend available")
 
+    def _fade_and_clear_voice(self, fade_secs: float = 0.5) -> None:
+        """Crossfade the voice channel out and reset it — the single transition
+        primitive used before each new sentence and by skip_current()."""
+        if not self.mixer:
+            return
+        if self.mixer.is_playing("voice"):
+            self.mixer.channels["voice"].fade_out(fade_secs, sr=self.mixer.sr)
+            time.sleep(fade_secs)
+        self.mixer.channels["voice"].clear()
+        self.mixer.channels["voice"].fade_reset()
+
+    def _wait_if_paused(self) -> None:
+        """Block between sentences while paused (until unpaused or cancelled)."""
+        while self._tts_paused.is_set() and not self._tts_cancelled.is_set():
+            time.sleep(0.05)
+
+    def _wait_channel_pausable(self, name: str) -> None:
+        """Like mixer.wait_channel but returns early on cancel or skip so the
+        transport controls take effect mid-sentence."""
+        if not self.mixer:
+            return
+        while self.mixer.channels[name].has_data():
+            if self._tts_cancelled.is_set() or self._tts_skip.is_set():
+                return
+            time.sleep(0.03)
+
+    def pause(self) -> None:
+        """Pause TTS playback. The voice channel freezes (emits silence, keeps
+        its buffer); the loop halts between sentences. Idempotent."""
+        self._tts_paused.set()
+        if self.mixer:
+            self.mixer.pause("voice")
+
+    def resume(self) -> None:
+        """Resume paused TTS playback. Idempotent."""
+        self._tts_paused.clear()
+        if self.mixer:
+            self.mixer.unpause("voice")
+
+    def skip_current(self) -> bool:
+        """Skip the currently-playing sentence and advance to the next one in
+        the response (or the next queued item) WITHOUT draining the queue — that
+        is mute/_kill_all_audio. Uses the dedicated _tts_skip flag so the rest of
+        the response keeps playing. Returns False if nothing is playing/queued."""
+        if not self.mixer:
+            return False
+        if not (self.mixer.is_playing("voice") or not self._tts_q.empty()):
+            return False
+        self._tts_skip.set()
+        # If paused, unpause so the skip actually lands.
+        if self._tts_paused.is_set():
+            self._tts_paused.clear()
+            self.mixer.unpause("voice")
+        # Crossfade out the current sentence (same feel as a normal transition).
+        self._fade_and_clear_voice(fade_secs=0.3)
+        return True
+
     def _tts_loop(self) -> None:
-        """Worker thread that processes the TTS queue."""
+        """Worker thread that processes the TTS queue, honoring the transport
+        flags (_tts_cancelled / _tts_skip / _tts_paused)."""
         while True:
             item = self._tts_q.get()
             if item is None:
@@ -1195,22 +1315,32 @@ class VoiceService:
                 self._tts_q.task_done()
                 continue
             try:
+                # A fresh item starts un-cancelled and un-skipped. (Pause is
+                # sticky across items — the user stays paused until they resume.)
+                self._tts_cancelled.clear()
+                self._tts_skip.clear()
                 if is_final:
                     sentences = text_or_list if isinstance(text_or_list, list) else [text_or_list]
                     for sentence in sentences:
+                        if self._tts_cancelled.is_set():
+                            break
+                        self._wait_if_paused()
+                        if self._tts_cancelled.is_set():
+                            break
                         s = sentence.strip()
                         if not s:
                             continue
                         audio, sr = self._generate_tts(s)
-                        if self.mixer.is_playing("voice"):
-                            self.mixer.channels["voice"].fade_out(
-                                0.5, sr=self.mixer.sr
-                            )
-                            time.sleep(0.5)
-                        self.mixer.channels["voice"].clear()
-                        self.mixer.channels["voice"].fade_reset()
+                        if self._tts_cancelled.is_set():
+                            break
+                        self._fade_and_clear_voice(fade_secs=0.5)
                         self.mixer.play("voice", audio, sr=sr)
-                        self.mixer.wait_channel("voice")
+                        # Returns early on skip OR cancel. On skip, clear the flag
+                        # and fall through to the next sentence (skip_current()
+                        # already faded the current one out).
+                        self._wait_channel_pausable("voice")
+                        if self._tts_skip.is_set():
+                            self._tts_skip.clear()
                 else:
                     text = text_or_list if isinstance(text_or_list, str) else " ".join(text_or_list)
                     text = text.strip()
@@ -1218,14 +1348,9 @@ class VoiceService:
                         self._tts_q.task_done()
                         continue
                     audio, sr = self._generate_tts(text)
-                    if self.mixer.is_playing("voice"):
-                        self.mixer.channels["voice"].fade_out(
-                            0.5, sr=self.mixer.sr
-                        )
-                        time.sleep(0.5)
-                    self.mixer.channels["voice"].clear()
-                    self.mixer.channels["voice"].fade_reset()
-                    self.mixer.play("voice", audio, sr=sr)
+                    if not self._tts_cancelled.is_set():
+                        self._fade_and_clear_voice(fade_secs=0.5)
+                        self.mixer.play("voice", audio, sr=sr)
             except Exception as exc:
                 log.warning("TTS error: %s", exc)
             self._tts_q.task_done()
@@ -1368,11 +1493,66 @@ class VoiceService:
             self._play_cached_announcement(agent_id, "created")
 
     # ------------------------------------------------------------------
+    # Security-alarm consumer (STUB — full monitor is the security track)
+    # ------------------------------------------------------------------
+
+    async def _on_security_alarm(self, event: Event) -> None:
+        """Speak a security alarm — names only — the instant one fires.
+
+        A tamper alert must NOT be swallowed by mute, a disabled voice, or a
+        cloud-TTS outage: it deliberately ignores ``_voice_enabled`` and (when
+        ``piper_mandatory_for_alarm``) renders through Piper, the offline
+        backend, unmuting the mixer so the alert is audible. SECURITY_ALARM
+        carries NO agent_id (no subtree scoping) — data is names only.
+        """
+        names = event.data.get("names") or []
+        if isinstance(names, str):
+            names = [names]
+        names = [str(n).strip() for n in names if str(n).strip()]
+        if not names:
+            return
+        spoken = ", ".join(names)
+        # Render + play off the event loop so the handler doesn't block the bus.
+        threading.Thread(
+            target=self._speak_alarm, args=(spoken,), daemon=True,
+            name="voice-alarm",
+        ).start()
+
+    def _speak_alarm(self, text: str) -> None:
+        """Render an alarm clip through Piper (offline, always available) and
+        force it out on the effects channel, bypassing mute and TTS enable."""
+        if not self.mixer:
+            return
+        try:
+            if self.config.piper_mandatory_for_alarm:
+                audio, sr = generate_piper(text)
+            else:
+                audio, sr = self._generate_tts(text)
+        except Exception as exc:
+            log.warning("[voice] security alarm TTS failed: %s", exc)
+            return
+        # A security alert overrides mute — unmute, play, and let the caller's
+        # normal state stand afterward (the alarm is a one-shot on effects).
+        self.mixer.unmute()
+        self.mixer.unpause("voice")
+        self.mixer.play("effects", audio, sr=sr)
+
+    # ------------------------------------------------------------------
     # Push-to-talk loop
     # ------------------------------------------------------------------
 
     def _on_record_start(self) -> None:
         self._kill_all_audio()
+        # A physical PTT press is the human at the local mic asking to speak, so
+        # proactively acquire the input token now (not lazily at send time). The
+        # switch-authorizer is stubbed AllowSwitch today, so this always wins;
+        # the seam is where a future preemption policy would gate it.
+        arbiter = getattr(self.runtime, "input_arbiter", None)
+        if arbiter is not None:
+            try:
+                self._run_on_main_loop(arbiter.request_input(self._surface_id))
+            except Exception as exc:
+                log.debug("[PTT] Failed to acquire input token: %s", exc)
         # Signal to UI that recording has started
         try:
             self._run_on_main_loop(self.events.emit(Event(
@@ -1384,7 +1564,14 @@ class VoiceService:
             log.debug("[PTT] Failed to emit recording start event: %s", exc)
 
     def _kill_all_audio(self) -> None:
+        # Cancel the in-flight TTS item so the loop abandons the current
+        # response mid-sentence; clear pause/skip so the next item starts clean
+        # and unpause the channel (a paused channel would otherwise swallow it).
+        self._tts_cancelled.set()
+        self._tts_skip.clear()
+        self._tts_paused.clear()
         if self.mixer:
+            self.mixer.unpause("voice")
             self.mixer.stop_all()
             for ch in self.mixer.channels.values():
                 ch.fade_reset()
@@ -1467,16 +1654,28 @@ class VoiceService:
 
         tagged = f"🎤 [Voice Input] {text}"
 
-        # Try to deliver to the focused agent first
-        delivered = await self.runtime.send_agent_message(agent_id, tagged)
+        # Try to deliver to the focused agent first. send_agent_message ALWAYS
+        # returns a dict; treat a non-empty "error"/"code" as failure (the old
+        # `if not delivered` was dead code — a dict is always truthy).
+        result = await self.runtime.send_agent_message(
+            agent_id, tagged, surface=self._surface_id)
+
+        # If the arbiter denied this surface the mic, the utterance is dropped
+        # here (a different surface holds input) — do NOT reroute to the
+        # orchestrator, which would just be denied too.
+        if result.get("code") == "input_not_active":
+            log.info("[voice] input not active (mic held by %s); dropping",
+                     result.get("holder"))
+            return
 
         # If delivery failed and this isn't the orchestrator, fall back to orchestrator
-        if not delivered and agent_id != ORCHESTRATOR_ID:
+        if result.get("error") and agent_id != ORCHESTRATOR_ID:
             log.warning(
                 "[PTT] Agent '%s' is not available, routing to orchestrator",
                 agent_id,
             )
-            await self.runtime.send_agent_message(ORCHESTRATOR_ID, tagged)
+            await self.runtime.send_agent_message(
+                ORCHESTRATOR_ID, tagged, surface=self._surface_id)
 
     # ------------------------------------------------------------------
     # Status for WS/UI
@@ -1496,4 +1695,14 @@ class VoiceService:
             "announcements": self.config.announcements,
             "available_backends": _available_backends() if self._running else [],
             "playing": self.mixer.is_playing() if self.mixer else False,
+            # Whether THIS (local mic) surface currently holds the input token.
+            "owns_local_audio": self._owns_local_audio(),
+            "tts_paused": self._tts_paused.is_set(),
         }
+
+    def _owns_local_audio(self) -> bool:
+        """True if the local mic surface holds the single-writer input token."""
+        arbiter = getattr(self.runtime, "input_arbiter", None)
+        if arbiter is None:
+            return False
+        return arbiter.holder_token() == self._surface_id.token

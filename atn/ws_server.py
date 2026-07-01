@@ -87,6 +87,37 @@ OWNER_ONLY_TOOLS = frozenset({
 _TARGET_ARG_KEYS = ("agent_id", "target", "parent_id", "id")
 
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class WSAuthor:
+    """Platform-neutral author for a WS-originated inbound message.
+
+    Adapts a ClientSession into the `author` an InputPolicy.evaluate() expects
+    (exposes at least ``id`` and ``is_bot``). The extra fields (local / owner /
+    conn_id / root_agent_id) are what a future InputArbiter needs to build a
+    SurfaceId and reason about ownership — threaded now so P3 can gate without
+    re-plumbing. A WS client is always a human driver, never a bot."""
+
+    id: str                          # the session's root agent id (its identity)
+    conn_id: str                     # server-random per-connection id (SurfaceId.instance)
+    local: bool = False              # arrived on the privileged loopback listener
+    owner: bool = False              # authed as the daemon owner
+    root_agent_id: str = ORCHESTRATOR_ID
+    is_bot: bool = False             # a WS client is a human driver, never a bot
+
+    @classmethod
+    def from_session(cls, session: ClientSession) -> "WSAuthor":
+        return cls(
+            id=session.root_agent_id,
+            conn_id=session.conn_id,
+            local=session.local,
+            owner=session.owner,
+            root_agent_id=session.root_agent_id,
+        )
+
+
 class WebSocketBridge:
     """Bridges the ATN Runtime to WebSocket clients.
 
@@ -115,6 +146,12 @@ class WebSocketBridge:
         # Per-connection auth/scope state (replaces the old flat client set).
         self._sessions: dict[ServerConnection, ClientSession] = {}
         self._event_handler_registered = False
+        # Input-seam policy (Surface contract). AllowAll by default; the runtime
+        # overrides it via register_surface() -> _make_ws_input_policy(). The
+        # single-writer decision itself lives in the runtime-owned InputArbiter
+        # (a gate ABOVE this policy), not here — this stays the per-surface seam.
+        from .surface import AllowAll, InputPolicy  # local import avoids cycle
+        self.policy: InputPolicy = AllowAll()
 
     @property
     def _clients(self):
@@ -175,6 +212,62 @@ class WebSocketBridge:
         log.info("WebSocket server stopped")
 
     # ------------------------------------------------------------------
+    # Surface contract (see atn/surface.py)
+    #
+    # The WS bridge is a first-class registered Surface: a long-lived,
+    # bidirectional bridge with an input seam (self.policy) and a lifecycle
+    # (start/stop). Output already flows via the shared EventBus, so the bridge
+    # contributes no agent-facing tools of its own — the browser IS the tool
+    # surface. agent_tools/call_surface_tool exist to structurally satisfy the
+    # Surface protocol; both are inert.
+    # ------------------------------------------------------------------
+
+    def _surface_id_for(self, session: "ClientSession") -> "SurfaceId":
+        """Build the InputArbiter SurfaceId for a WS connection. Each connection
+        is its own surface: kind 'ws', instance = the per-connection conn_id
+        (its token). in_process mirrors session.local (a loopback client shares
+        the daemon's box; a remote peer does not)."""
+        from .input_arbiter import SurfaceId
+        label = "Local app" if session.local else (
+            f"Remote {session.root_agent_id}" if session.root_agent_id else "Remote app")
+        return SurfaceId(kind="ws", instance=session.conn_id,
+                         label=label, in_process=session.local)
+
+    def _register_input_surface(self, session: "ClientSession") -> None:
+        """Register (or re-register, to refresh the label) this connection with
+        the InputArbiter. Idempotent on the conn_id token."""
+        arbiter = getattr(self.runtime, "input_arbiter", None)
+        if arbiter is not None:
+            arbiter.register(self._surface_id_for(session))
+
+    def _arbiter_gate(self, session: "ClientSession") -> dict | None:
+        """Single-writer gate for the WS sibling input paths (delegate_message,
+        orchestrator_message) that bypass send_agent_message. Returns None if
+        this surface may write (holds the mic, or auto-acquired a free mic),
+        else a deny payload to merge into the error response. Same is_active
+        semantics as the send_agent_message chokepoint, so the three paths
+        acquire/deny identically."""
+        arbiter = getattr(self.runtime, "input_arbiter", None)
+        if arbiter is None:
+            return None
+        sid = self._surface_id_for(session)
+        if arbiter.is_active(sid):
+            return None
+        return {"error": "not the active input surface",
+                "code": "input_not_active",
+                "holder": arbiter.holder_token()}
+
+    def agent_tools(self, agent_id: str) -> list[dict]:
+        """The WS bridge contributes no agent-callable tools; the browser is
+        the interface, not something an agent acts back on. Return []."""
+        return []
+
+    async def call_surface_tool(self, name: str, tool_input: dict, agent_id: str) -> dict:
+        """No surface tools are offered (see agent_tools); reachable only via a
+        misrouted `surface_`-prefixed call."""
+        return {"error": f"surface tool {name} not handled"}
+
+    # ------------------------------------------------------------------
     # Client handling
     # ------------------------------------------------------------------
 
@@ -198,6 +291,12 @@ class WebSocketBridge:
             session.root_agent_id = ORCHESTRATOR_ID
             session.scope_ids = None          # full fleet
         self._sessions[ws] = session
+        # Register this connection as an input surface with the single-writer
+        # arbiter. Registration does NOT grab the mic — the first genuine
+        # inbound (send_agent_message) auto-acquires when the mic is free. A
+        # remote session registers now too; its SurfaceId label sharpens after
+        # auth resolves its root agent, but the conn_id (its token) is stable.
+        self._register_input_surface(session)
         log.info("Client connected: %s (local=%s)", remote, local)
 
         # Per-connection outbound event queue + writer task. _on_event enqueues
@@ -234,6 +333,11 @@ class WebSocketBridge:
         finally:
             writer_task.cancel()
             self._sessions.pop(ws, None)
+            # Release this connection's input surface. If it held the mic, the
+            # arbiter auto-hands it to the most-recently-registered surface.
+            arbiter = getattr(self.runtime, "input_arbiter", None)
+            if arbiter is not None:
+                arbiter.release_for(f"ws:{session.conn_id}")
             if session.dropped_events:
                 log.warning("Client %s: %d event(s) dropped (slow consumer)",
                             remote, session.dropped_events)
@@ -376,6 +480,9 @@ class WebSocketBridge:
                              else self.runtime.registry.get_subtree_ids(resolved))
         log.info("Remote auth: signer=%s owner=%s root=%s scoped=%s",
                  signer, session.owner, resolved, session.scope_ids is not None)
+        # Refresh the input-surface label now that the root agent is known
+        # (re-register is idempotent on the conn_id token).
+        self._register_input_surface(session)
         return {"msg_id": msg_id, "type": "auth_ok", "ok": True,
                 "owner": session.owner, "root": resolved, "wallet": signer}
 
@@ -492,6 +599,27 @@ class WebSocketBridge:
                 "ok": True,
                 "result": self._redact_snapshot(snap, session),
             }
+
+        # Single-writer input arbitration (P3). Additive messages:
+        #   input_request — explicitly ask for the mic for THIS connection.
+        #   input_status  — read the arbiter state (holder + connected surfaces).
+        if msg_type == "input_request":
+            arbiter = getattr(self.runtime, "input_arbiter", None)
+            if arbiter is None:
+                return {"msg_id": msg_id, "ok": False, "error": "input arbiter unavailable"}
+            # credential is threaded to the switch-authorizer seam but UNUSED
+            # today (mic-preemption policy is deferred).
+            result = await arbiter.request_input(
+                self._surface_id_for(session),
+                requester_is_owner=bool(session.owner),
+                credential=msg.get("credential"))
+            return {"msg_id": msg_id, "ok": bool(result.get("granted")), "result": result}
+
+        if msg_type == "input_status":
+            arbiter = getattr(self.runtime, "input_arbiter", None)
+            if arbiter is None:
+                return {"msg_id": msg_id, "ok": False, "error": "input arbiter unavailable"}
+            return {"msg_id": msg_id, "ok": True, "result": arbiter.state()}
 
         # Daemon restart: signal the CLI driver to re-exec the process after
         # shutdown completes. Reply first so the client sees an ack before
@@ -673,6 +801,12 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
             if not content:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'content' field"}
+            # G1: delegate_message bypasses send_agent_message, so gate the
+            # single-writer arbiter here at the handler (interrupts stay ungated
+            # — stopping a turn is not input).
+            gate = self._arbiter_gate(session)
+            if gate is not None:
+                return {"msg_id": msg_id, "ok": False, **gate}
             delivered = await self.runtime.send_delegate_message(agent_id, content)
             if not delivered:
                 return {"msg_id": msg_id, "ok": False, "error": f"Delegate '{agent_id}' is not running"}
@@ -686,9 +820,12 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
             if not content:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'content' field"}
-            result = await self.runtime.send_agent_message(agent_id, content)
+            # Gate through the single-writer arbiter as this WS surface.
+            result = await self.runtime.send_agent_message(
+                agent_id, content, surface=self._surface_id_for(session))
             if result.get("error"):
-                return {"msg_id": msg_id, "ok": False, "error": result["error"]}
+                return {"msg_id": msg_id, "ok": False, "error": result["error"],
+                        "code": result.get("code"), "holder": result.get("holder")}
             return {"msg_id": msg_id, "ok": True, "result": result}
 
         # Interrupt — gracefully stop a running LLM session mid-turn
@@ -742,6 +879,26 @@ class WebSocketBridge:
             if self.runtime.voice:
                 return {"msg_id": msg_id, "ok": True, "result": self.runtime.voice.get_status()}
             return {"msg_id": msg_id, "ok": True, "result": {"running": False}}
+
+        # TTS transport controls (P4). Additive; guarded by a running voice
+        # service so the WS contract is stable whether or not voice is up.
+        if msg_type == "voice_pause":
+            if self.runtime.voice:
+                self.runtime.voice.pause()
+                return {"msg_id": msg_id, "ok": True, "result": {"paused": True}}
+            return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
+
+        if msg_type == "voice_resume":
+            if self.runtime.voice:
+                self.runtime.voice.resume()
+                return {"msg_id": msg_id, "ok": True, "result": {"paused": False}}
+            return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
+
+        if msg_type == "voice_skip":
+            if self.runtime.voice:
+                skipped = self.runtime.voice.skip_current()
+                return {"msg_id": msg_id, "ok": True, "result": {"skipped": bool(skipped)}}
+            return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
 
         if msg_type == "voice_focus":
             agent_id = msg.get("agent_id", "orchestrator")
@@ -1202,6 +1359,25 @@ class WebSocketBridge:
             except Exception as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
+        # Daemon auto-update status: current/available/staged version + state.
+        # The updater stages verified releases; they apply on the next restart.
+        if msg_type == "update_status":
+            updater = getattr(self.runtime, "_updater", None)
+            if updater is None:
+                # Auto-update disabled or poll task not running.
+                from .runtime.snapshot import _daemon_version
+                return {"msg_id": msg_id, "ok": True, "status": {
+                    "state": "disabled",
+                    "current_version": _daemon_version(),
+                    "available_version": "",
+                    "staged_version": "",
+                    "pending": False,
+                }}
+            try:
+                return {"msg_id": msg_id, "ok": True, "status": updater.get_status()}
+            except Exception as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
         # Targeted dispute: attach a CON child under a specific
         # substrate node. The claim text is the dispute's referent and
         # the embedder input; the author must be an on-chain-registered
@@ -1543,6 +1719,12 @@ class WebSocketBridge:
             content = msg.get("content", "")
             if not content:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'content' field"}
+            # G1: orchestrator_message also bypasses send_agent_message (it
+            # injects into the running bridge, or falls through to post_message
+            # which triggers a run). Both are input — gate the arbiter here.
+            gate = self._arbiter_gate(session)
+            if gate is not None:
+                return {"msg_id": msg_id, "ok": False, **gate}
             from .orchestrator import ORCHESTRATOR_ID
             from .providers.bridge import BridgeProvider
             provider = self.runtime._active_providers.get(ORCHESTRATOR_ID)

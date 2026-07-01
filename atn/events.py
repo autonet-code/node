@@ -83,6 +83,18 @@ class EventType(Enum):
     # Budget
     BUDGET_EXCEEDED = "budget.exceeded"
 
+    # Auto-update (daemon self-update — staged, applied on restart)
+    UPDATE_STATUS = "update.status"
+
+    # Input arbiter (single-writer surface arbitration)
+    INPUT_ACTIVE_CHANGED = "input.active_changed"
+    INPUT_GRANT_REQUESTED = "input.grant_requested"
+    INPUT_GRANTED = "input.granted"
+    INPUT_GRANT_DENIED = "input.denied"
+
+    # Security (stub — full monitor is the security track)
+    SECURITY_ALARM = "security.alarm"
+
     # Generic / custom events
     CUSTOM = "custom"
 
