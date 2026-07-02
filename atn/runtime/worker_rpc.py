@@ -55,6 +55,20 @@ MAX_FRAME_BYTES = 64 * 1024 * 1024
 # Bounded event queue depth (worker->daemon events are droppable; see below).
 EVENT_QUEUE_MAXSIZE = 1024
 
+# Per-channel cap on concurrently in-flight rpc_req handlers (H3). The reader
+# blocks on this semaphore once the cap is reached, which stops it draining the
+# pipe and backpressures the worker's send_bytes — so a malicious worker cannot
+# flood the daemon with unbounded tasks (each spawn_child = a real child process)
+# and starve the shared event loop serving every other agent. Generous vs any
+# honest worker (tool calls are near-serial); it only bites a flood.
+MAX_INFLIGHT_RPC = 64
+
+# Consecutive undecodable inbound frames before a channel is torn down (M1). A
+# single bad frame is skipped (see _recv_loop), but a worker spewing garbage in a
+# tight loop would otherwise spin a core; past this many in a row with no valid
+# frame between, treat the worker as hostile/broken and end the channel.
+MAX_CONSECUTIVE_BAD_FRAMES = 64
+
 
 # ---------------------------------------------------------------------------
 # Envelope kinds
@@ -250,7 +264,11 @@ class PipeTransport:
     async def recv(self) -> Envelope:
         async with self._recv_lock:
             # recv_bytes, never recv. recv() would unpickle -> RCE in the daemon.
-            body = await asyncio.to_thread(self._conn.recv_bytes)
+            # Pass maxlength so an oversize frame is rejected by multiprocessing
+            # BEFORE it is allocated (on POSIX it also restores the size-prefix
+            # guard); an over-cap message raises OSError, which _recv_loop treats
+            # as terminal for that (hostile) worker.
+            body = await asyncio.to_thread(self._conn.recv_bytes, MAX_FRAME_BYTES)
         if len(body) > MAX_FRAME_BYTES:
             raise ValueError(f"inbound frame too large: {len(body)}")
         d = json.loads(body.decode("utf-8"))
@@ -433,6 +451,9 @@ class WorkerChannel:
         self._reader: Optional[asyncio.Task] = None
         self._event_worker: Optional[asyncio.Task] = None
         self._closed = False
+        # Bounds concurrent rpc handlers (H3); acquired by the reader before each
+        # rpc task is spawned, released in _handle_rpc's finally.
+        self._rpc_sem = asyncio.Semaphore(MAX_INFLIGHT_RPC)
 
     def start(self) -> None:
         if self._reader is None:
@@ -448,12 +469,37 @@ class WorkerChannel:
 
     # -- inbound demux -----------------------------------------------------
     async def _recv_loop(self) -> None:
+        bad_frames = 0
         try:
             while not self._closed:
-                env = await self._t.recv()
+                # Decode is isolated so a SINGLE malformed frame (non-object JSON,
+                # bad kind, non-utf8) is skipped rather than killing the channel.
+                # Previously any decode error escaped to the outer `except
+                # Exception` and exited the loop, silently wedging the worker's
+                # whole channel while its process kept running — the supervisor
+                # never learned it died and any parent awaiting its status hung.
+                try:
+                    env = await self._t.recv()
+                except (EOFError, OSError):
+                    raise                      # pipe closed / oversize -> terminal
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    bad_frames += 1
+                    if bad_frames >= MAX_CONSECUTIVE_BAD_FRAMES:
+                        log.warning("worker %s: %d consecutive undecodable frames"
+                                    " — tearing down channel", self.agent_id,
+                                    bad_frames)
+                        break
+                    log.warning("worker %s sent an undecodable frame; skipping",
+                                self.agent_id)
+                    continue
+                bad_frames = 0
                 if env.kind == KIND_RPC_REQ:
-                    # NEVER dropped. Handle each in its own task so a slow
-                    # handler doesn't head-of-line-block the reader.
+                    # NEVER dropped, but bounded: block here (=> pipe backpressure)
+                    # once MAX_INFLIGHT_RPC handlers are outstanding. Each runs in
+                    # its own task so a slow handler doesn't head-of-line-block.
+                    await self._rpc_sem.acquire()
                     asyncio.create_task(self._handle_rpc(env))
                 elif env.kind == KIND_EVENT:
                     self._offer_event(env)
@@ -473,20 +519,24 @@ class WorkerChannel:
         name = env.name
         handler = self._rpc_handlers.get(name)
         try:
-            if name not in RPC_NAMES:
-                raise ValueError(f"unknown rpc name: {name!r}")
-            if handler is None:
-                # P4 wires these; until then answer honestly.
-                raise NotImplementedError(f"rpc handler not wired: {name}")
-            # AUTHORITATIVE agent_id — the worker's body cannot override it.
-            result = await handler(self.agent_id, dict(env.payload or {}))
-            await self._t.send(Envelope.rpc_res(env.id, result if isinstance(result, dict) else {"result": result}))
-        except Exception as e:
-            log.debug("rpc %r for %s failed: %s", name, self.agent_id, e)
             try:
-                await self._t.send(Envelope.rpc_res(env.id, error=f"{type(e).__name__}: {e}"))
-            except Exception:
-                log.warning("failed to send rpc error for %s", self.agent_id)
+                if name not in RPC_NAMES:
+                    raise ValueError(f"unknown rpc name: {name!r}")
+                if handler is None:
+                    # P4 wires these; until then answer honestly.
+                    raise NotImplementedError(f"rpc handler not wired: {name}")
+                # AUTHORITATIVE agent_id — the worker's body cannot override it.
+                result = await handler(self.agent_id, dict(env.payload or {}))
+                await self._t.send(Envelope.rpc_res(env.id, result if isinstance(result, dict) else {"result": result}))
+            except Exception as e:
+                log.debug("rpc %r for %s failed: %s", name, self.agent_id, e)
+                try:
+                    await self._t.send(Envelope.rpc_res(env.id, error=f"{type(e).__name__}: {e}"))
+                except Exception:
+                    log.warning("failed to send rpc error for %s", self.agent_id)
+        finally:
+            # Release the H3 in-flight slot the reader acquired for this rpc.
+            self._rpc_sem.release()
 
     def _offer_event(self, env: Envelope) -> None:
         """Enqueue an event, dropping the OLDEST on overflow (events droppable)."""

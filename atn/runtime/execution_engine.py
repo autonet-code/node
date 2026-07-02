@@ -370,6 +370,14 @@ class ExecutionEngine:
             on_execution_done=_on_done,
         )
 
+        # Snapshot the parent's supervised state so a mid-spawn parent kill can be
+        # detected at pre-go (M2). Only a WORKER parent is supervised; an
+        # in-process parent (the orchestrator) is never supervised, so this stays
+        # False and its children are never falsely orphan-killed.
+        _parent_id0 = getattr(defn, "parent_id", None)
+        _parent_was_supervised = bool(_parent_id0) and \
+            self.supervisor.is_supervised(_parent_id0)
+
         mgr = self._worker_manager()
         handle = None
         try:
@@ -416,6 +424,45 @@ class ExecutionEngine:
             await self.supervisor.kill(agent_id, reason="kill_before_go")
             await self._await_finalize(eid, done_evt)
             return True
+
+        # Mid-spawn orphan guard (M2): if our parent was a live worker when we
+        # began spawning and is gone now, it was killed during our spawn — its
+        # subtree-kill walked a _children set that didn't yet contain us. Refuse
+        # to run so a delegate never outlives its parent (nor runs with a live
+        # secret grant after the parent is dead).
+        if _parent_was_supervised and not self.supervisor.is_supervised(_parent_id0):
+            log.info("worker cutover: parent %s killed during spawn of %s — "
+                     "killing orphan", _parent_id0, agent_id)
+            await self.supervisor.kill(agent_id, reason="parent_killed_mid_spawn")
+            await self._await_finalize(eid, done_evt)
+            return True
+
+        # Bind the PID->grant OFF the event-loop thread (M3), now that the spawn
+        # is committed (not cancelled, not orphaned). The broker mint+register are
+        # blocking named-pipe round-trips; run inline in the sync
+        # supervisor.register they stalled every agent/WS/heartbeat ~up to 10s per
+        # spawn. Completes before "go" below, so the grant is in place before the
+        # worker can run any tool. Fail-closed: on error the worker runs with no
+        # grant (no secrets), never an over-broad one.
+        try:
+            await asyncio.to_thread(
+                self.supervisor.bind_pid_grant, agent_id, handle.pid, parent_id)
+        except Exception:
+            log.warning("worker cutover: bind_pid_grant failed for %s — "
+                        "continuing with no secret grant", agent_id, exc_info=True)
+
+        # M3 race-close: bind_pid_grant ran on a worker thread. If a reap raced it
+        # (worker died during the broker round-trip), the loop-thread revoke ran
+        # BEFORE the grant was recorded and skipped release — leaving a live broker
+        # session + monitor exposure for a dead pid that nothing tears down. Back
+        # on the loop now (reap-state authoritative): if the worker was reaped
+        # during bind, revoke again (ownership-guarded + idempotent) to clean up
+        # whatever bind just minted.
+        _w = self.supervisor.get(agent_id)
+        if _w is None or getattr(_w, "reaped", False):
+            log.info("worker cutover: %s reaped during grant bind — reconciling "
+                     "teardown", agent_id)
+            self.supervisor.revoke_grant(handle.pid, agent_id)
 
         # PID is bound + granted → tell the worker to run. From here the worker
         # owns the loop; we park until finalize completes (clean or on-behalf).

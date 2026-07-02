@@ -2584,6 +2584,19 @@ _EXECUTORS: dict[str, ToolExecutor] = {
 }
 
 
+# Agent-callable confinement (H2). The tools a sub-agent may invoke via
+# route_tool_call/execute_tool are EXACTLY the schema-backed tools in ``_TOOLS``.
+# The extra ``_EXECUTORS`` entries marked "UI-facing" above (send_agent_message,
+# approve_task, reject_task, the *_conversation ops) are internal sinks reachable
+# only by the trusted orchestrator or the WS/surface layer — NEVER by an agent.
+# Left agent-reachable they are confused-deputy escalations: send_agent_message
+# runs with surface=None and bypasses the single-writer input arbiter (spoofing
+# human input); approve_task/reject_task let an agent self-approve its own
+# proposed tasks. The gate in ``execute_tool`` enforces this for every agent
+# caller (both the worker framework_tool RPC path and the in-process loop).
+_AGENT_CALLABLE_TOOLS: frozenset[str] = frozenset(t.name for t in _TOOLS)
+
+
 def get_tool_definitions() -> list[ToolDefinition]:
     """Return all orchestrator tool definitions (for the LLM)."""
     return list(_TOOLS)
@@ -2642,6 +2655,20 @@ async def execute_tool(
     executor = _EXECUTORS.get(name)
     if executor is None:
         return {"error": f"Unknown tool: {name}"}
+    # Agent-callable confinement (H2). A real sub-agent may only invoke
+    # schema-backed tools; the orchestrator (caller_id None, or explicitly the
+    # orchestrator id) is trusted and unrestricted. This refuses UI-facing /
+    # internal executors (send_agent_message -> arbiter bypass, approve_task ->
+    # self-approval, conversation ops) BEFORE the executor runs, whether the name
+    # arrived via a compromised worker's framework_tool RPC or a prompt-injected
+    # tool_use in the in-process loop.
+    if caller_id is not None:
+        from . import ORCHESTRATOR_ID
+        if caller_id != ORCHESTRATOR_ID and name not in _AGENT_CALLABLE_TOOLS:
+            log.warning("blocked non-agent-callable tool %r by caller %s",
+                        name, caller_id)
+            return {"error": f"Tool '{name}' is not available to agent "
+                             f"'{caller_id}'"}
     # Inject caller context so tools that need it can derive parent_id
     if caller_id is not None:
         input = {**input, "_caller_id": caller_id}

@@ -204,6 +204,28 @@ def _intersect_allowance(requested: AllowanceGrant,
     return requested & parent
 
 
+def _allowance_to_spec(grant: AllowanceGrant) -> str:
+    """Serialize a computed grant back to a canonical launch-spec string so it can
+    be PERSISTED as the child's authored ``secrets_allowance``.
+
+    This is what makes the fractal clamp COMPOSE across depth. Without it, the
+    child's stored wish is the parent's (possibly wider) REQUEST, and
+    ``_resolve_parent_allowance`` reads that wish as the ceiling for the NEXT
+    spawn level — so a compromised child could grant its grandchild a service it
+    was itself denied. Persisting the clamped grant instead means the stored wish
+    is always the ENFORCED grant, so ``child ⊆ parent`` holds at every hop.
+
+      - ``_ALLOWANCE_ALL`` -> ``"all"``  (child holds all iff its parent did)
+      - empty frozenset    -> ``"none"`` (deny-all)
+      - concrete names     -> comma-joined (round-trips through ``resolve_spec``,
+                              since these names came from it in the first place)
+    """
+    if isinstance(grant, _AllowanceAll):
+        return "all"
+    names = sorted(grant)
+    return ",".join(names) if names else "none"
+
+
 # Callback the host invokes exactly once when the worker reports execution_done.
 # The caller (trigger_run cutover / supervisor) uses it to run the clean
 # finalize path. Signature: (status, error, accumulated_tool_calls) -> awaitable.
@@ -365,6 +387,31 @@ class WorkerHost:
         target = str(payload.get("target") or "")
         if not target:
             return {"error": "inbox_post missing 'target'"}
+        # Hierarchy scoping (M4): mirror the _post_message tool — an agent may
+        # only post to its parent, a direct child, a sibling, or itself. The RPC
+        # path previously skipped this, so a malicious worker could plant a
+        # message (any type, incl. TRIGGER) into ANY agent's inbox daemon-wide.
+        # source is already forced to the pipe-bound agent_id below, so only the
+        # target needs bounding here.
+        runtime = getattr(self._engine, "_runtime_ref", None)
+        if runtime is not None:
+            from ..orchestrator import ORCHESTRATOR_ID
+            tgt_defn = runtime.get_agent(target)
+            if tgt_defn is None:
+                return {"error": f"inbox_post target '{target}' not found"}
+            if agent_id != ORCHESTRATOR_ID:
+                src_defn = runtime.get_agent(agent_id)
+                if src_defn is not None:
+                    is_parent = (src_defn.parent_id == target)
+                    is_child = (tgt_defn.parent_id == agent_id)
+                    is_sibling = bool(src_defn.parent_id and tgt_defn.parent_id
+                                      and src_defn.parent_id == tgt_defn.parent_id)
+                    is_self = (agent_id == target)
+                    if not (is_parent or is_child or is_sibling or is_self):
+                        log.warning("inbox_post: agent %s blocked posting to %s "
+                                    "(outside hierarchy)", agent_id, target)
+                        return {"error": f"agent '{agent_id}' cannot post to "
+                                         f"'{target}': outside its hierarchy"}
         try:
             mtype = MessageType(str(payload.get("type") or "info"))
         except ValueError:
@@ -469,8 +516,18 @@ class WorkerHost:
             # caller_id = the AUTHORITATIVE pipe-bound parent id. execute_tool
             # injects it as input["_caller_id"]; _create_agent pops it and sets
             # parent_id = caller_id. Any parent/_caller_id in the body is ignored.
+            #
+            # FRACTAL CLAMP (H1): persist the CLAMPED grant, not the parent's raw
+            # requested wish, as the child's authored secrets_allowance. The
+            # parent worker only ever influences ``requested`` (already clamped
+            # into l_child above); storing l_child's canonical spec guarantees
+            # that when THIS child later spawns, _resolve_parent_allowance reads a
+            # ceiling that already obeys child ⊆ parent. Overwrites any wish the
+            # worker put in the body — that value is an upper-bound request only.
+            child_payload = {**payload,
+                             "secrets_allowance": _allowance_to_spec(l_child)}
             result = await execute_tool(
-                "create_agent", dict(payload), runtime, caller_id=agent_id,
+                "create_agent", child_payload, runtime, caller_id=agent_id,
             )
         except Exception as exc:
             log.debug("spawn_child create_agent for parent %s failed",

@@ -498,7 +498,17 @@ class Runtime:
         drops the monitor exposure for the PID, and drains the stale grant stash.
         Each teardown is independent (best-effort): a failure in one must not
         block the others, and the broker's TTL is the backstop if release fails."""
-        grant = self._grants.pop(int(pid), None) if pid is not None else None
+        # Ownership guard (pid-reuse + M3-reconcile safe): peek first, and only
+        # release a grant that belongs to the agent we're revoking for. A recycled
+        # pid may now hold a DIFFERENT worker's live grant (M5 eviction, or the M3
+        # off-loop bind reconcile) — tearing that down would DoS the live worker.
+        grant = self._grants.get(int(pid)) if pid is not None else None
+        if grant is not None:
+            owner = grant.get("agent_id")
+            if agent_id and owner not in (None, agent_id):
+                grant = None  # not ours — leave it live
+            else:
+                self._grants.pop(int(pid), None)
         if grant is not None:
             # (a) Release the broker session (owner-gated). Independent try; the
             # broker also TTLs the session, so a failure here is not fatal.

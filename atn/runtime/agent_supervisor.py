@@ -186,6 +186,27 @@ class AgentSupervisor:
             max_memory_mb=max_memory_mb,
             max_idle_s=max_idle_s,
         )
+        # PID-reuse guard (M5): if this kernel PID is still mapped to a DIFFERENT
+        # agent, the OS recycled a dead worker's PID before its _reap ran. Evict
+        # the stale entry now — drop it from the maps and release its grant — so
+        # the old worker's later _reap can't resolve this PID to (and tear down
+        # the broker session / exposure of) the NEW worker we're registering.
+        prior_aid = self._pid_index.get(pid)
+        if prior_aid is not None and prior_aid != agent_id:
+            log.warning("supervisor: PID %s reused (was agent=%s, now=%s); "
+                        "evicting stale entry", pid, prior_aid, agent_id)
+            old = self._workers.pop(prior_aid, None)
+            if old is not None:
+                old.reaped = True
+            self._children.pop(prior_aid, None)
+            for _kids in self._children.values():
+                _kids.discard(prior_aid)
+            try:
+                self._on_pid_revoked(pid, prior_aid)
+            except Exception:
+                log.debug("stale-evict on_pid_revoked error pid=%s", pid,
+                          exc_info=True)
+
         self._workers[agent_id] = w
         self._pid_index[pid] = agent_id
         if parent_agent_id:
@@ -193,15 +214,39 @@ class AgentSupervisor:
 
         self._write_pidfile(w)
 
-        # Security seam: PID bound → grant, fired BEFORE "go". No-op in P3.
+        # PID->grant is bound by the caller via ``bind_pid_grant`` (M3), run OFF
+        # the event loop so the blocking broker round-trips don't stall it. Still
+        # fired after register + before "go" — grant-before-run is preserved.
+
+        log.info("supervisor: registered worker agent=%s pid=%s parent=%s",
+                 agent_id, pid, parent_agent_id)
+        return w
+
+    def bind_pid_grant(self, agent_id: str, pid: int,
+                       parent_agent_id: Optional[str]) -> None:
+        """Fire the PID->grant seam (mints the broker session, binds it to the
+        PID). SPLIT OUT of ``register`` (M3) so the caller can run it via
+        ``asyncio.to_thread`` — the broker mint+register are blocking named-pipe
+        round-trips that, run inline in the sync register on the loop thread,
+        stalled every agent/WS/heartbeat ~up to 10s per spawn. Invoked AFTER
+        register and BEFORE "go", preserving the grant-before-run ordering.
+        Fail-closed: any error leaves the worker with no grant (no secrets)."""
         try:
             self._on_pid_bound(agent_id, pid, parent_agent_id)
         except Exception:
             log.debug("on_pid_bound hook error for %s", agent_id, exc_info=True)
 
-        log.info("supervisor: registered worker agent=%s pid=%s parent=%s",
-                 agent_id, pid, parent_agent_id)
-        return w
+    def revoke_grant(self, pid: int, agent_id: Optional[str]) -> None:
+        """Best-effort grant teardown OUTSIDE the reap path (M3 reconcile). If a
+        worker died while ``bind_pid_grant`` was running off-thread, the loop's
+        _reap already ran _on_pid_revoked and found no grant to release; the
+        off-thread bind may then have minted one for a now-dead pid. The cutover
+        calls this back on the loop to tear that down. Ownership-guarded inside
+        _on_pid_revoked and idempotent with _reap's own revoke."""
+        try:
+            self._on_pid_revoked(pid, agent_id)
+        except Exception:
+            log.debug("revoke_grant error pid=%s", pid, exc_info=True)
 
     def get(self, agent_id: str) -> Optional[SupervisedWorker]:
         return self._workers.get(agent_id)

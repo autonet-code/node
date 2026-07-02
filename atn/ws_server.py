@@ -292,11 +292,16 @@ class WebSocketBridge:
             session.scope_ids = None          # full fleet
         self._sessions[ws] = session
         # Register this connection as an input surface with the single-writer
-        # arbiter. Registration does NOT grab the mic — the first genuine
-        # inbound (send_agent_message) auto-acquires when the mic is free. A
-        # remote session registers now too; its SurfaceId label sharpens after
-        # auth resolves its root agent, but the conn_id (its token) is stable.
-        self._register_input_surface(session)
+        # arbiter — but ONLY once authorized (M6). A remote session is unauthed at
+        # connect; registering it here would let an unauthenticated peer sit in
+        # the arbiter's connected set and passively capture a freed mic
+        # (release_for auto-hands to the most-recently-registered surface),
+        # silently dropping the real user's input. Local sessions are pre-authed
+        # as owner and register now; remote sessions register at auth success
+        # (see _handle_auth_response). Registration does NOT grab the mic — the
+        # first genuine inbound auto-acquires when the mic is free.
+        if session.authed:
+            self._register_input_surface(session)
         log.info("Client connected: %s (local=%s)", remote, local)
 
         # Per-connection outbound event queue + writer task. _on_event enqueues
