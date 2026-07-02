@@ -72,8 +72,14 @@ log = logging.getLogger(__name__)
 # no drift. If that import fails (kevin not on path, module missing), we bind a
 # FAIL-CLOSED shim that grants nothing, so a broken keystore can never widen an
 # allowance.
-try:  # pragma: no cover - import guard exercised only when kevin is absent
-    from kevin.keystore import resolve_spec as _resolve_spec  # type: ignore
+try:  # pragma: no cover - import guard exercised only when the keystore is absent
+    # The vendored in-wheel copy is authoritative (ships with the product so
+    # `pip install autonet-computer` brings the vault); fall back to a dev
+    # checkout of kevin on the path, then to a fail-closed deny-all shim.
+    try:
+        from atn._vendor.kevin.keystore import resolve_spec as _resolve_spec  # type: ignore
+    except Exception:
+        from kevin.keystore import resolve_spec as _resolve_spec  # type: ignore
 except Exception:  # ANY import failure => deny-all
     def _resolve_spec(spec: Any) -> list:  # type: ignore
         """FAIL-CLOSED shim: keystore unavailable => grant nothing."""
