@@ -79,7 +79,9 @@ strength split for our own tree. The one residual — a descendant that detaches
 before we record it — is identical across platforms and accepted. This removes
 the only architecture decision that was blocking Phase 1.
 
-## Verification caveat
-This work was scoped on a Windows box. The POSIX paths (`AF_UNIX` + `SO_PEERCRED`,
-`PDEATHSIG`, cgroups) **cannot be verified on Windows** — the sprint needs a Linux
-(and ideally macOS) test environment, not just fresh context.
+## Verification
+Scoped on a Windows box; the POSIX paths (`AF_UNIX` + `SO_PEERCRED`, tracked-PID
+kill) can't run on Windows. **Linux verification target: the Ubuntu EC2** (ssh via
+ZeroTier — see the `ec2_smoke_setup` memory). P1/P2/P4 get real end-to-end runs
+there. **macOS** (`LOCAL_PEERCRED`/`getpeereid`) stays code-review-only unless a
+Mac is available — verify Linux, port-by-symmetry for macOS, flag it as untested.
