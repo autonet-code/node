@@ -284,6 +284,40 @@ class ExecutionEngine:
         cfg["base_url"] = str(getattr(provider, "_config_base_url", "") or "")
         return cfg
 
+    def _has_pending_grant(self, agent_id: str) -> bool:
+        """True iff this agent has a non-empty daemon-computed secret grant staged
+        for this run. A GRANTED execution must never silently downgrade to the
+        un-isolated in-process path on a spawn failure (P4 fail-closed): without
+        the worker PID there is no broker session, so secret tools would run
+        outside the PID-auth boundary. Ungranted agents fall back freely."""
+        rt = getattr(self, "_runtime_ref", None)
+        if rt is None:
+            return False
+        try:
+            return bool(rt._pending_grants.get(agent_id))
+        except Exception:
+            return False
+
+    async def _fail_closed_no_isolation(
+        self, defn: "AgentDefinition", record: "ExecutionRecord", eid: str,
+        done_evt: "asyncio.Event", reason: str,
+    ) -> None:
+        """Finalize a GRANTED execution as FAILED when its worker could not be
+        spawned — rather than fall through to the un-isolated in-process path.
+        The worker-cutover caller treats a True return as 'worker owns finalize',
+        so this terminal outcome replaces the silent downgrade."""
+        log.error("worker cutover: spawn failed for GRANTED agent %s (%s) — "
+                  "failing CLOSED (no un-isolated fallback for a secret grant)",
+                  defn.id, reason)
+        await self._finalize_execution(
+            defn, record, ExecutionStatus.FAILED,
+            error=("isolation unavailable for a secret-granted execution: "
+                   f"{reason}"),
+            recorded_inflight=None,
+            accumulated_tool_calls=[],
+        )
+        await self._await_finalize(eid, done_evt)
+
     async def _run_cognitive_in_worker(
         self,
         defn: AgentDefinition,
@@ -327,6 +361,12 @@ class ExecutionEngine:
         try:
             provider_config = self._build_provider_config(provider)
         except Exception:
+            if self._has_pending_grant(agent_id):
+                _evt = asyncio.Event()
+                self._finalize_events[eid] = _evt
+                await self._fail_closed_no_isolation(
+                    defn, record, eid, _evt, "provider_config build failed")
+                return True
             log.warning("worker cutover: provider_config build failed for %s "
                         "— falling back to in-process", agent_id, exc_info=True)
             return False
@@ -388,6 +428,10 @@ class ExecutionEngine:
                 status_sink=host.status_sink(),
             )
         except Exception:
+            if self._has_pending_grant(agent_id):
+                await self._fail_closed_no_isolation(
+                    defn, record, eid, done_evt, "ensure_worker failed")
+                return True
             log.warning("worker cutover: ensure_worker failed for %s — falling "
                         "back to in-process", agent_id, exc_info=True)
             self._finalize_events.pop(eid, None)
@@ -410,11 +454,15 @@ class ExecutionEngine:
             )
         except Exception:
             log.warning("worker cutover: supervisor.register failed for %s — "
-                        "killing worker and falling back", agent_id, exc_info=True)
+                        "killing worker", agent_id, exc_info=True)
             try:
                 await mgr.hard_kill(handle)
             except Exception:
                 pass
+            if self._has_pending_grant(agent_id):
+                await self._fail_closed_no_isolation(
+                    defn, record, eid, done_evt, "supervisor.register failed")
+                return True
             self._finalize_events.pop(eid, None)
             return False
 

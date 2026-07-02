@@ -380,9 +380,15 @@ class WorkerManager:
     async def hard_kill(self, handle: WorkerHandle) -> None:
         """Out-of-band PID kill (a wedged worker won't read a shutdown cmd).
 
-        Windows: closing the kill-on-close Job Object reaps the whole tree; we
-        also TerminateProcess the top process. POSIX: SIGTERM the process group,
-        grace, then SIGKILL the group.
+        The PRIMARY, portable containment is a direct kill of the TRACKED worker
+        PID (the security identity the supervisor holds). Descendants are then
+        swept by the OS-native tree backstop:
+          * Windows: closing the kill-on-close Job Object reaps the tree.
+          * POSIX:   SIGTERM/SIGKILL the worker's process group (start_new_session
+            gave it its own pgid) to catch child processes it spawned (e.g. the
+            bridge ``bun``/node), belt-and-suspenders behind the per-PID kill.
+        The only descendant neither reaches is one that detached (``setsid``)
+        before we could observe it — an accepted, cross-platform residual.
         """
         await self._hard_kill_proc(handle.proc, handle.job)
         await self._cleanup_handle(handle)
@@ -413,24 +419,44 @@ class WorkerManager:
                 # Closing the last job handle kills anything still assigned.
                 _close_handle(job)
         else:
+            # PRIMARY: kill the tracked worker PID directly. This is the portable
+            # containment guarantee — no process group or cgroup required.
             pgid = None
             try:
                 pgid = os.getpgid(proc.pid)
             except Exception:
                 pgid = None
+            # SIGTERM the PID, then (backstop) the whole group for descendants.
+            self._posix_signal_pid(proc, signal.SIGTERM)
             self._posix_signal_group(proc, pgid, signal.SIGTERM)
             exited = await self._wait_exit(proc, DEFAULT_TERM_GRACE)
             if not exited:
+                self._posix_signal_pid(proc, signal.SIGKILL)
                 self._posix_signal_group(proc, pgid, signal.SIGKILL)
                 await self._wait_exit(proc, DEFAULT_TERM_GRACE)
 
     @staticmethod
-    def _posix_signal_group(proc: subprocess.Popen, pgid: Optional[int], sig: int) -> None:
+    def _posix_signal_pid(proc: subprocess.Popen, sig: int) -> None:
+        """Signal the tracked worker PID directly (the primary, portable kill)."""
         try:
-            if pgid is not None:
-                os.killpg(pgid, sig)
-            else:
-                proc.send_signal(sig)
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            log.debug("posix pid signal %s failed", sig, exc_info=True)
+
+    @staticmethod
+    def _posix_signal_group(proc: subprocess.Popen, pgid: Optional[int], sig: int) -> None:
+        """Backstop: sweep the worker's process group for descendants it spawned.
+
+        Only signals a pgid that is genuinely the worker's OWN group (created by
+        start_new_session). If we couldn't read one, we do NOTHING here — the
+        per-PID kill already covered the worker, and blindly signalling via the
+        proc handle would be redundant with _posix_signal_pid."""
+        if pgid is None:
+            return
+        try:
+            os.killpg(pgid, sig)
         except ProcessLookupError:
             pass
         except Exception:

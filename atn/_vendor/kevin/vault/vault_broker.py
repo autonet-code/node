@@ -58,9 +58,15 @@ SECURITY notes (honest):
 import os
 import sys
 import json
-import ctypes
 import threading
-from ctypes import wintypes
+
+_IS_WIN = os.name == "nt"
+if _IS_WIN:
+    import ctypes
+    from ctypes import wintypes
+else:
+    import socket
+    import struct
 
 # Self-contained backend: secrets come from the local age-encrypted keystore
 # (keystore.py at kevin root), NOT HashiCorp Vault. Ensure kevin root is
@@ -69,6 +75,9 @@ _KEVIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _KEVIN_ROOT not in sys.path:
     sys.path.insert(0, _KEVIN_ROOT)
 
+# Broker endpoint: named pipe on Windows, AF_UNIX socket path on POSIX. The
+# POSIX path mirrors the client's default (keystore dir / vault-broker.sock),
+# env-overridable via ATN_VAULT_BROKER_SOCK.
 PIPE_NAME = r"\\.\pipe\vault-broker"
 
 # service<->policy map. Resolved from the keystore DATA dir (env-overridable),
@@ -80,16 +89,22 @@ _MAP_PATH = os.environ.get(
     "ATN_VAULT_POLICY_MAP",
     os.path.join(_ks.KEYSTORE_DIR, "service_policy_map.json"))
 
-# ── Win32 named-pipe plumbing (server) ────────────────────────────────────────
-PIPE_ACCESS_DUPLEX = 0x00000003
-PIPE_TYPE_BYTE = 0x0
-PIPE_READMODE_BYTE = 0x0
-PIPE_WAIT = 0x0
-PIPE_REJECT_REMOTE_CLIENTS = 0x8
-PIPE_UNLIMITED_INSTANCES = 255
-INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-ERROR_PIPE_CONNECTED = 535
-k32 = ctypes.windll.kernel32
+# POSIX AF_UNIX socket path (mirrors broker_client._default_unix_sock()).
+UNIX_SOCK = os.environ.get(
+    "ATN_VAULT_BROKER_SOCK",
+    os.path.join(_ks.KEYSTORE_DIR, "vault-broker.sock"))
+
+# ── Win32 named-pipe plumbing (server; Windows only) ──────────────────────────
+if _IS_WIN:
+    PIPE_ACCESS_DUPLEX = 0x00000003
+    PIPE_TYPE_BYTE = 0x0
+    PIPE_READMODE_BYTE = 0x0
+    PIPE_WAIT = 0x0
+    PIPE_REJECT_REMOTE_CLIENTS = 0x8
+    PIPE_UNLIMITED_INSTANCES = 255
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    ERROR_PIPE_CONNECTED = 535
+    k32 = ctypes.windll.kernel32
 
 
 def _load_map():
@@ -121,21 +136,47 @@ _OWNER_SECRET = os.environ.get("BROKER_OWNER_SECRET", "")
 
 
 def _identity(pid):
-    """OS-read pid:starttime, used to detect PID reuse. None if dead."""
-    import subprocess  # GetProcessTimes via ctypes
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
-    if not h:
-        return None
-    try:
-        creation = wintypes.FILETIME()
-        a = wintypes.FILETIME(); b = wintypes.FILETIME(); c = wintypes.FILETIME()
-        if not k32.GetProcessTimes(h, ctypes.byref(creation), ctypes.byref(a),
-                                   ctypes.byref(b), ctypes.byref(c)):
+    """OS-read pid:starttime, used to detect PID reuse. None if dead.
+
+    Portable create-time guard: the value need only be STABLE for the life of a
+    process and DIFFERENT after PID reuse — it is never compared across hosts.
+      * Windows: GetProcessTimes creation FILETIME (100ns ticks since 1601).
+      * Linux:   /proc/<pid>/stat field 22 (starttime, clock ticks since boot).
+      * other POSIX (macOS/BSD): psutil.create_time() (float seconds).
+    """
+    if os.name == "nt":
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
             return None
-        return f"{pid}:{(creation.dwHighDateTime << 32) | creation.dwLowDateTime}"
-    finally:
-        k32.CloseHandle(h)
+        try:
+            creation = wintypes.FILETIME()
+            a = wintypes.FILETIME(); b = wintypes.FILETIME(); c = wintypes.FILETIME()
+            if not k32.GetProcessTimes(h, ctypes.byref(creation), ctypes.byref(a),
+                                       ctypes.byref(b), ctypes.byref(c)):
+                return None
+            return f"{pid}:{(creation.dwHighDateTime << 32) | creation.dwLowDateTime}"
+        finally:
+            k32.CloseHandle(h)
+    # Linux fast path: read starttime straight from /proc, no psutil needed.
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{int(pid)}/stat", "rb") as f:
+                data = f.read()
+            # comm (field 2) is parenthesized and may contain spaces/`)`; split
+            # on the LAST `)` so field indexing past it is correct. starttime is
+            # field 22 (1-based); after the ')' the first token is state (field 3).
+            rest = data[data.rfind(b")") + 2:].split()
+            starttime = rest[19]  # field 22 == index 19 counting state as 0
+            return f"{pid}:{starttime.decode('ascii', 'replace')}"
+        except (OSError, IndexError, ValueError):
+            return None
+    # Other POSIX: fall back to psutil create_time (seconds float).
+    try:
+        import psutil  # type: ignore
+        return f"{pid}:{psutil.Process(int(pid)).create_time()}"
+    except Exception:
+        return None
 
 
 def _create_pipe():
@@ -239,26 +280,26 @@ def _var_name():
 
 
 # ── Value-push (owner-gated, one-way vault-svc -> daemon monitor) ─────────────
-GENERIC_READ = 0x80000000
-GENERIC_WRITE = 0x40000000
-OPEN_EXISTING = 3
+if _IS_WIN:
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    OPEN_EXISTING = 3
 
 
 def _push_value(pid, secret_name, staged_path, value):
     """Push the raw value to the daemon monitor sink registered for this pid.
 
-    Connects OUT to the daemon's push pipe (daemon = OWNER-run, same-user or
-    trusted; auth is the owner-minted push_token). Returns True ONLY if the value
-    was actually delivered to the sink pipe; the ``request`` caller fails CLOSED
-    (unlinks the staged file, denies) on a False/failed push so a readable secret
-    is never left un-scanned (M7). The value is written to the pipe and then this
-    frame forgets it — nothing here logs or retains it.
+    Connects OUT to the daemon's push endpoint (named pipe on Windows, AF_UNIX
+    socket on POSIX; daemon = OWNER-run, auth is the owner-minted push_token).
+    Returns True ONLY if the value was actually delivered; the ``request`` caller
+    fails CLOSED (unlinks the staged file, denies) on a False/failed push so a
+    readable secret is never left un-scanned (M7). The value is written and then
+    this frame forgets it — nothing here logs or retains it.
     """
     with _LOCK:
         sink = _PUSH_SINKS.get(pid)
     if not sink or not sink.get("endpoint") or not sink.get("token"):
         return False
-    endpoint = sink["endpoint"]
     payload = {
         "push_token": sink["token"],
         "value": value,
@@ -269,6 +310,35 @@ def _push_value(pid, secret_name, staged_path, value):
     aid = sink.get("agent_id")
     if aid:
         payload["agent_id"] = aid
+    if _IS_WIN:
+        return _push_value_win(sink["endpoint"], payload)
+    return _push_value_unix(sink["endpoint"], payload)
+
+
+def _push_value_unix(endpoint, payload):
+    """AF_UNIX connect-out push. True only on full delivery (M7)."""
+    s = None
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5.0)
+        try:
+            s.connect(endpoint)
+        except (FileNotFoundError, ConnectionRefusedError, OSError):
+            return False
+        data = (json.dumps(payload) + "\n").encode("utf-8")
+        s.sendall(data)  # sendall raises if not all bytes are sent
+        return True
+    except Exception:  # noqa: BLE001 — a failed push returns False, never raises
+        return False
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _push_value_win(endpoint, payload):
     h = None
     try:
         h = k32.CreateFileW(endpoint, GENERIC_READ | GENERIC_WRITE, 0, None,
@@ -429,7 +499,114 @@ def _serve_one(handle):
         k32.CloseHandle(handle)
 
 
-def serve_forever():
+# ── POSIX AF_UNIX serving (peer PID from SO_PEERCRED) ─────────────────────────
+def _peer_pid(conn):
+    """Kernel-authenticated peer PID (+uid,gid) via SO_PEERCRED — the POSIX
+    analog of GetNamedPipeClientProcessId. The client cannot forge these; they
+    come from the kernel, not the wire. Returns pid or None."""
+    try:
+        creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                struct.calcsize("3i"))
+        pid, _uid, _gid = struct.unpack("3i", creds)
+        return int(pid) if pid > 0 else None
+    except (OSError, AttributeError):
+        return None
+
+
+def _read_msg_sock(conn):
+    conn.settimeout(5.0)
+    buf = bytearray()
+    while b"\n" not in buf:
+        try:
+            chunk = conn.recv(4096)
+        except Exception:  # noqa: BLE001
+            break
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > 1 << 20:  # 1 MiB cap — a request is tiny
+            break
+    if not buf:
+        return None
+    try:
+        return json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {"op": "__bad__"}
+
+
+def _write_msg_sock(conn, obj):
+    data = (json.dumps(obj) + "\n").encode("utf-8")
+    try:
+        conn.sendall(data)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _serve_one_unix(conn):
+    try:
+        pid = _peer_pid(conn)
+        req = _read_msg_sock(conn)
+        if req is None:
+            return
+        resp = _handle(req, pid) if pid else {"ok": False, "error": "no caller pid"}
+        _write_msg_sock(conn, resp)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _harden_process():
+    """Best-effort self-hardening against a same-uid attacker reading the age key
+    out of this process's memory. PR_SET_DUMPABLE(0) makes the process
+    non-dumpable: it disables ptrace-attach and core dumps by a non-root peer
+    (the analog of denying SeDebugPrivilege on Windows). If the broker runs as a
+    SEPARATE uid (the recommended P3 posture), Yama ptrace_scope already blocks
+    cross-uid ptrace; this closes the same-uid case too. Never fatal."""
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes as _ct
+        libc = _ct.CDLL("libc.so.6", use_errno=True)
+        PR_SET_DUMPABLE = 4
+        libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
+    except Exception:  # noqa: BLE001
+        print("[vault-broker] warning: PR_SET_DUMPABLE hardening unavailable",
+              flush=True)
+
+
+def _serve_forever_unix():
+    _harden_process()
+    try:
+        os.unlink(UNIX_SOCK)
+    except OSError:
+        pass
+    d = os.path.dirname(UNIX_SOCK)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(UNIX_SOCK)
+    # 0600: only the broker uid may connect(). P3 sets the broker to a separate
+    # uid and the containing dir 0700 so agents (a different uid) can't reach it.
+    try:
+        os.chmod(UNIX_SOCK, 0o600)
+    except OSError:
+        pass
+    srv.listen(64)
+    print(f"[vault-broker] listening on {UNIX_SOCK} (age keystore, local)",
+          flush=True)
+    print(f"[vault-broker] {len(SERVICE_POLICY)} services mapped", flush=True)
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            continue
+        threading.Thread(target=_serve_one_unix, args=(conn,), daemon=True).start()
+
+
+def _serve_forever_win():
     print(f"[vault-broker] listening on {PIPE_NAME} (age keystore, local)",
           flush=True)
     print(f"[vault-broker] {len(SERVICE_POLICY)} services mapped", flush=True)
@@ -441,7 +618,12 @@ def serve_forever():
         threading.Thread(target=_serve_one, args=(h,), daemon=True).start()
 
 
+def serve_forever():
+    if _IS_WIN:
+        _serve_forever_win()
+    else:
+        _serve_forever_unix()
+
+
 if __name__ == "__main__":
-    if os.name != "nt":
-        print("Windows named pipes only.", file=sys.stderr); sys.exit(2)
     serve_forever()

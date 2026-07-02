@@ -1,11 +1,33 @@
 # Cross-Platform Isolation + Vault — Port Plan
 
-**Status:** scoped, not started. The agent process-isolation path and the secret
-vault are **Windows-only** today. In-process (single-process, all-agents) is the
-only fully-working execution path off Windows, and it's the default everywhere
-(gated by `ATN_WORKER_ISOLATION`, off by default).
+**Status:** IMPLEMENTED + Linux-verified (2026-07-02). All 4 phases landed and
+run green end-to-end on the Ubuntu EC2 (`tests/test_posix_isolation.py`, 6/6).
+macOS remains port-by-symmetry (`LOCAL_PEERCRED`/`getpeereid`), code-review-only.
+In-process (single-process, all-agents) is still the default everywhere (gated by
+`ATN_WORKER_ISOLATION`, off by default); isolation now works on POSIX when on.
 
-This is the sprint to make isolation + vault OS-agnostic.
+This was the sprint to make isolation + vault OS-agnostic.
+
+## What landed (per phase)
+- **P0** — portable `_identity(pid)`: Linux `/proc/<pid>/stat` starttime (field
+  22), Windows `GetProcessTimes`, psutil fallback for other POSIX; `psutil`
+  moved to core deps. `pyrage` already core.
+- **P1** — POSIX containment: primary is a direct kill of the *tracked* worker
+  PID (`_posix_signal_pid`), with a process-group sweep (`_posix_signal_group`,
+  only when we own the pgid) as the descendant backstop. No cgroups/Job Object
+  on POSIX. `setsid`-detach residual confirmed + accepted.
+- **P2** — POSIX broker IPC: `AF_UNIX` transport in `broker_client.py` (client +
+  value-push listener) and `vault_broker.py` (server), peer PID via
+  `SO_PEERCRED` (== `GetNamedPipeClientProcessId`). Value-push socket uses a
+  short runtime dir (`_short_unix_sock_path`) to stay under the sun_path limit.
+- **P3** — hardening + setup: broker calls `PR_SET_DUMPABLE(0)`;
+  `atn-vault-setup` POSIX branch tightens keystore 0700 / age-key 0600, emits a
+  systemd unit template + `RUNBOOK_POSIX.md` (separate `vault-svc` uid, Yama
+  `ptrace_scope`).
+- **P4** — fail-closed fallback: a *granted* execution whose worker can't spawn
+  now finalizes FAILED instead of silently downgrading to un-isolated in-process
+  (`_has_pending_grant` / `_fail_closed_no_isolation`). Committed POSIX
+  integration tests formalize the EC2 verification.
 
 ## Coupling inventory (what's anchored to Windows)
 

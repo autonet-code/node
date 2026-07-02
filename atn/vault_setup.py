@@ -67,14 +67,99 @@ def main(argv=None) -> int:
               "keystore.put_secret(service, value), then re-run to refresh "
               "the map.")
 
-    # 3. the elevated OS step pip cannot do (hardening against same-user agents).
+    # 3. tighten perms on what pip CAN do (data-plane hardening).
+    _tighten_perms(ks)
+
+    # 4. the elevated OS step pip cannot do (hardening against same-user agents).
+    if os.name == "nt":
+        _print_windows_next()
+    else:
+        _print_posix_next(ks)
+    return 0
+
+
+def _tighten_perms(ks) -> None:
+    """0700 the keystore dir and 0600 the age key — pip-doable hardening so the
+    key is at least not world/group readable before the elevated uid split."""
+    if os.name == "nt":
+        return  # POSIX-mode bits are meaningless on Windows; ACLs are the model
+    try:
+        os.chmod(ks.KEYSTORE_DIR, 0o700)
+    except OSError:
+        pass
+    # keystore.py stores the age identity as identity.age-key in KEYSTORE_DIR.
+    for name in ("identity.age-key", "identity.key", "key.age"):
+        p = os.path.join(ks.KEYSTORE_DIR, name)
+        if os.path.exists(p):
+            try:
+                os.chmod(p, 0o600)
+            except OSError:
+                pass
+
+
+def _print_windows_next() -> None:
     print()
     print("[vault] NEXT (elevated, one-time): run the PID-auth broker as a "
           "separate, locked-down OS identity so agents cannot read the age key")
     print("        (identity.age-key). Until that is done the vault WORKS but is "
           "NOT hardened against a same-user agent reading the key directly.")
     print("        Broker service setup: atn/_vendor/kevin/vault/RUNBOOK.md")
-    return 0
+
+
+def _print_posix_next(ks) -> None:
+    """POSIX elevated guidance: create a separate broker uid, chown the key to it,
+    and run the broker under a systemd unit. Emit a ready-to-install unit file."""
+    unit_path = os.path.join(ks.KEYSTORE_DIR, "atn-vault-broker.service")
+    try:
+        with open(unit_path, "w", encoding="utf-8") as f:
+            f.write(_SYSTEMD_UNIT.format(
+                keystore_dir=ks.KEYSTORE_DIR,
+                python=sys.executable,
+            ))
+        print(f"[vault] systemd unit : {unit_path} (template)")
+    except OSError:
+        unit_path = "(could not write unit template)"
+    print()
+    print("[vault] NEXT (root, one-time): run the PID-auth broker as a SEPARATE")
+    print("        uid so a same-daemon-uid agent cannot read the age key. Until")
+    print("        then the vault WORKS but is NOT hardened against a same-uid")
+    print("        agent reading identity.age-key directly. Steps:")
+    print("          1. sudo useradd --system --no-create-home vault-svc")
+    print(f"          2. sudo chown -R vault-svc {ks.KEYSTORE_DIR}")
+    print(f"          3. sudo chmod 700 {ks.KEYSTORE_DIR}")
+    print("          4. ensure Yama ptrace_scope>=1 "
+          "(sysctl kernel.yama.ptrace_scope=1) so agents can't ptrace the broker")
+    print(f"          5. sudo cp {unit_path} /etc/systemd/system/ && \\")
+    print("             sudo systemctl enable --now atn-vault-broker")
+    print("        Full runbook: atn/_vendor/kevin/vault/RUNBOOK_POSIX.md")
+
+
+# systemd unit template. Runs the broker as vault-svc with the owner secret from
+# an EnvironmentFile (root-only, 0600) — never in the unit or the process argv.
+_SYSTEMD_UNIT = """\
+[Unit]
+Description=ATN vault-broker (PID-auth secret broker)
+After=network.target
+
+[Service]
+Type=simple
+User=vault-svc
+Group=vault-svc
+# BROKER_OWNER_SECRET lives here, root-owned 0600 — NOT in this unit file.
+EnvironmentFile=-/etc/atn/vault-broker.env
+Environment=KEYSTORE_DIR={keystore_dir}
+ExecStart={python} -m atn._vendor.kevin.vault.vault_broker
+# Hardening: no new privileges, private tmp, read-only system, non-dumpable.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths={keystore_dir}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+"""
 
 
 if __name__ == "__main__":  # pragma: no cover

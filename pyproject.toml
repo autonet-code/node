@@ -35,6 +35,11 @@ dependencies = [
     # pyrage = age encryption for the local secret store (vendored under
     # atn/_vendor/kevin). The broker itself uses only stdlib + ctypes.
     "pyrage>=1.1",
+    # psutil = PID-reuse defense (create_time/cmdline) for the agent supervisor's
+    # orphan recovery under ATN_WORKER_ISOLATION. Cross-platform; the Linux broker
+    # _identity has a /proc fast path that does not need it, but the supervisor
+    # does. Small, pure-ish, ships in core.
+    "psutil>=5.9.0",
 ]
 # Note: the substrate runtime needs the world-model engine. It's
 # vendored under nodes/common/world_model_substrate/_engine/ so
@@ -64,8 +69,7 @@ network = [
     # LLM backbone (open-weights encoder for JEPA)
     "transformers>=4.40.0",
     "accelerate>=0.28.0",
-    # System monitoring
-    "psutil>=5.9.0",
+    # System monitoring (psutil moved to core for the isolation supervisor)
     "mss>=9.0.0",
 ]
 # Core voice: TTS output + audio mixing
