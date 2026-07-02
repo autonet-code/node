@@ -37,11 +37,16 @@ This is the sprint to make isolation + vault OS-agnostic.
   without pulling it).
 
 ### Phase 1 — POSIX process containment (`worker_manager.py`)
-- Replace "Job-Object-or-nothing" with a `ProcessTree` abstraction. Windows keeps
-  the Job Object; POSIX gets new-session/pgid (have it) + `PR_SET_PDEATHSIG`
-  (Linux — orphaned grandchildren self-kill) + SIGTERM→SIGKILL to the pgid.
-- Reap the bridge node-grandchild on POSIX (the `setsid`-escape case flagged in
-  the P5 review).
+- **Approach: track every spawned PID in the supervisor and kill each directly**
+  (`os.kill`), not by process group. We already record our own tree (`_children`);
+  the bridge node-grandchild just needs adding to that tracking. Portable —
+  needs neither Job Objects nor cgroups. On Windows we keep the Job Object as a
+  belt-and-suspenders backstop, but the per-PID kill is the primary, portable path.
+- The only thing per-PID kill can't reach is a descendant we **never saw** (an
+  agent that shells out and the grandchild double-forks/`setsid` to detach before
+  we record its PID). That residual is **equal on every OS** (Job Objects catch it
+  on Windows; nothing does on plain POSIX) and is accepted — it's inherent to
+  tracking-based containment, not a Linux-specific gap.
 
 ### Phase 2 — POSIX broker IPC + PID auth (the core, ~half the sprint)
 - Add an `AF_UNIX` transport alongside the named-pipe one, in both
@@ -66,17 +71,13 @@ This is the sprint to make isolation + vault OS-agnostic.
 - POSIX integration tests for tree-kill and PID-auth (both deferred in the Windows
   build).
 
-## The decision to settle before Phase 1
-Tree-kill on POSIX is **weaker than a Job Object**. Process-group kill +
-`PDEATHSIG` covers the common case, but a determined grandchild can
-double-fork/`setsid` and escape. The only bulletproof Linux analog is **cgroup v2
-`cgroup.kill`**, which needs cgroup delegation (running the daemon under a systemd
-scope) — a real deployment dependency. **macOS has no equivalent** — best-effort
-pgid kill only.
-
-Resulting strength story: **full on Windows and Linux (with the cgroup/systemd
-path), best-effort on macOS.** The cgroup-vs-plain-pgid choice changes whether the
-Linux daemon has a systemd dependency — decide it first.
+## Tree-kill: resolved (no open decision)
+Kill by **tracked PID**, not process group: the supervisor already knows every
+process it spawned, and killing a known PID is trivial and portable on every OS.
+So there is **no** cgroup/systemd dependency and **no** Windows/Linux/macOS
+strength split for our own tree. The one residual — a descendant that detaches
+before we record it — is identical across platforms and accepted. This removes
+the only architecture decision that was blocking Phase 1.
 
 ## Verification caveat
 This work was scoped on a Windows box. The POSIX paths (`AF_UNIX` + `SO_PEERCRED`,
