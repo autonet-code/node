@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonet-computer"
-version = "0.3.1"
+version = "0.4.0"
 description = "Decentralized AI alignment network with agent orchestration framework"
 requires-python = ">=3.11"
 license = "MIT"
