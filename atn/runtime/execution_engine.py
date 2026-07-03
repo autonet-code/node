@@ -1537,8 +1537,12 @@ class ExecutionEngine:
             self.registry._last_idle[defn.id] = datetime.now(timezone.utc)
             if record.status == ExecutionStatus.FAILED:
                 self.registry._status[defn.id] = AgentStatus.ERROR
+                self.registry._consec_failures[defn.id] = (
+                    self.registry._consec_failures.get(defn.id, 0) + 1
+                )
             elif self.registry._status.get(defn.id) == AgentStatus.RUNNING:
                 self.registry._status[defn.id] = AgentStatus.ACTIVE
+                self.registry._consec_failures.pop(defn.id, None)
 
         # Signal delegate_done
         done_event = self._delegate_done.get(defn.id)

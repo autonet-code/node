@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Crash-loop backoff (inbox watcher): an ERROR agent with pending messages
+# waits base * 2^(fails-1) seconds before re-activation; after MAX
+# consecutive failures it is parked until manual reactivation.
+_CRASH_LOOP_BASE_COOLDOWN = 10.0
+_CRASH_LOOP_MAX_FAILURES = 3
+
 
 class Scheduler:
     """Manages schedule-based triggers, heartbeats, inbox watching, and planning reviews."""
@@ -62,6 +68,10 @@ class Scheduler:
         # Module freshness tracking
         self._next_freshness_check: float = 0.0
         self._freshness_ok: bool = True
+
+        # Crash-loop backoff: agents parked after repeated instant failures
+        # (see _inbox_watcher_loop). Cleared on any successful trigger.
+        self._crash_loop_parked: set[str] = set()
 
     def start(self) -> None:
         self._running = True
@@ -268,12 +278,36 @@ class Scheduler:
                     )
                     if not should_trigger:
                         continue
+                    if status == AgentStatus.ERROR:
+                        # Crash-loop backoff: an agent that keeps failing
+                        # instantly (e.g. unresolvable provider) would
+                        # otherwise be re-triggered every poll — observed
+                        # live at ~2 failures/sec. Exponential cool-down,
+                        # then a hard stop pending manual reactivation.
+                        fails = self.registry._consec_failures.get(agent_id, 0)
+                        if fails >= _CRASH_LOOP_MAX_FAILURES:
+                            if agent_id not in self._crash_loop_parked:
+                                self._crash_loop_parked.add(agent_id)
+                                log.warning(
+                                    "Agent %s failed %d times in a row — "
+                                    "parking (reactivate manually or "
+                                    "post a new message after fixing it)",
+                                    agent_id, fails,
+                                )
+                            continue
+                        last_idle = self.registry._last_idle.get(agent_id)
+                        if last_idle is not None:
+                            cooldown = _CRASH_LOOP_BASE_COOLDOWN * (2 ** max(0, fails - 1))
+                            elapsed = (datetime.now(timezone.utc) - last_idle).total_seconds()
+                            if elapsed < cooldown:
+                                continue
                     if status in (AgentStatus.COMPLETED, AgentStatus.ERROR):
                         # Keep the provider alive — it holds prompt cache and
                         # session state.  The execution engine will reuse it.
                         self.registry._status[agent_id] = AgentStatus.ACTIVE
                         log.info("Inbox watcher re-activated %s agent %s",
                                  status.value, agent_id)
+                    self._crash_loop_parked.discard(agent_id)
                     await self.engine.trigger_run(agent_id, source="inbox")
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:

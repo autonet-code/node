@@ -131,6 +131,9 @@ class AgentRegistry:
         self._heartbeat_table: dict[str, float] = {}
         self._last_idle: dict[str, datetime] = {}
         self._child_counters: dict[str, int] = {}
+        # Consecutive FAILED executions per agent (reset on success) — the
+        # scheduler's crash-loop backoff keys off this.
+        self._consec_failures: dict[str, int] = {}
         # Budget tracking: agent_id -> provider -> tokens_used (cumulative
         # across all executions, persisted to data_dir/budget_state.json).
         self._budget_used: dict[str, dict[str, int]] = {}
@@ -638,6 +641,8 @@ class AgentRegistry:
     async def activate_agent(self, agent_id: str) -> None:
         self._require_agent(agent_id)
         self._status[agent_id] = AgentStatus.ACTIVE
+        # Manual (re)activation is a fresh start for the crash-loop guard.
+        self._consec_failures.pop(agent_id, None)
         await self.events.emit(Event(
             type=EventType.AGENT_ACTIVATED,
             source="runtime",
