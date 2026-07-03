@@ -15,9 +15,11 @@ Tool calls returned by the LLM:
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -89,11 +91,22 @@ CONTEXT_WINDOWS: dict[str, int] = {
 
 
 def get_context_window(model: str) -> int:
-    """Resolve context window size for a model identifier."""
+    """Resolve context window size for a model identifier.
+
+    ``model_specs`` is the single source of truth (§7). We delegate there
+    first; the legacy ``CONTEXT_WINDOWS`` dict remains only as a fallback for
+    model strings the store doesn't recognise (``resolve`` returns the
+    default spec).
+    """
+    from ..model_specs import resolve
+    spec = resolve(model)
+    if spec.id != "default":
+        return spec.context_window
+    # Unknown to the store — try the legacy prefix table before the default.
     for prefix, size in CONTEXT_WINDOWS.items():
         if prefix != "default" and model.startswith(prefix):
             return size
-    return CONTEXT_WINDOWS.get("default", 128_000)
+    return spec.context_window
 
 
 def classify_model(model: str) -> str:
@@ -187,6 +200,10 @@ class ProviderResponse:
     usage: Usage = field(default_factory=Usage)
     model: str = ""
     raw: Any = None                # provider-specific raw response
+    # Mid-turn steering messages (§5) that arrived but weren't drained before
+    # the run ended. The caller MUST re-post these to the agent's inbox so they
+    # aren't lost — never silently dropped.
+    undelivered_steering: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -293,13 +310,40 @@ class Provider(ABC):
     # context window, summarize the conversation to free space.
     _COMPACTION_THRESHOLD = 0.80
     _compaction_count: int = 0
+    # Compactions within the current send_orchestrate run (spiral guard, §2).
+    # Reset at the start of each run.
+    _compactions_this_run: int = 0
 
     # Interrupt flag — set via interrupt() to stop the orchestration loop.
     _interrupted: bool = False
 
+    # Mid-turn steering queue (§5). Lazily created; only non-None while an
+    # orchestration is active. send_user_message() enqueues onto it; the loop
+    # drains it at each iteration boundary and appends each item as a user turn.
+    _steering_queue: asyncio.Queue | None = None
+
     async def interrupt(self) -> None:
         """Signal the orchestration loop to stop after the current turn."""
         self._interrupted = True
+
+    async def send_user_message(self, content: str) -> bool:
+        """Inject a user message mid-orchestration (§5).
+
+        Backed by ``_steering_queue`` (created for the duration of a
+        ``send_orchestrate`` run). Returns True if an orchestration is active
+        to consume the message (queued), False otherwise so the caller can
+        fall back to the inbox.
+
+        Providers with native mid-turn injection (BridgeProvider) override this.
+        """
+        if self._steering_queue is None:
+            return False
+        await self._steering_queue.put(content)
+        return True
+
+    def _drain_steering(self) -> list[str]:
+        """Pop all queued steering messages (§5). Never blocks."""
+        return _drain_queue(getattr(self, "_steering_queue", None))
 
     async def send_orchestrate(
         self,
@@ -344,6 +388,10 @@ class Provider(ABC):
             session_id:     Session ID to resume (ignored by generic impl).
         """
         self._interrupted = False
+        # Open the steering queue for the duration of this run (§5). Any
+        # send_user_message() call now enqueues instead of returning False.
+        self._steering_queue = asyncio.Queue()
+        self._compactions_this_run = 0
 
         # Track active model for session stats
         if model:
@@ -375,54 +423,127 @@ class Provider(ABC):
         # — rough but sufficient for runaway prevention. Refuse when the
         # estimate exceeds per_turn_input_max.
         effective_per_turn_max = per_turn_input_max if per_turn_input_max is not None else 200_000
-        effective_repeat_limit = repeat_call_limit if repeat_call_limit is not None else 5
+        # §4: exact-repeat threshold drops 5 → 3 (opencode DOOM_LOOP_THRESHOLD).
+        effective_repeat_limit = repeat_call_limit if repeat_call_limit is not None else 3
         recent_call_signatures: list[str] = []  # last N tool-call fingerprints
+        # §4 oscillation guard: fingerprints of the last few tool calls, plus a
+        # one-shot "already warned" flag so the model gets one chance to self-
+        # correct before we abort.
+        osc_fingerprints: list[str] = []
+        loop_warning_issued = False
+
+        # Per-request output cap comes from the model spec (§7), bounded at 16k
+        # so a huge output ceiling doesn't shrink the usable input budget.
+        from ..model_specs import max_output_tokens as _spec_max_output
+        max_tokens = min(16_384, _spec_max_output(model or self._active_model))
+        if max_tokens <= 0:
+            max_tokens = 16_384
 
         for turn in range(max_turns):
             if self._interrupted:
-                return ProviderResponse(
-                    text="",
-                    stop_reason="interrupted",
-                    usage=cumulative_usage,
-                    model=model or self._active_model,
+                return Provider._finalize_orchestrate(self, 
+                    ProviderResponse(
+                        text="",
+                        stop_reason="interrupted",
+                        model=model or self._active_model,
+                    ),
+                    messages, cumulative_usage, abort_reason="interrupted",
                 )
+
+            # §5: drain any mid-turn steering into the message stack at the
+            # iteration boundary (after prior tool results were appended, before
+            # the next send). Each item becomes a user turn.
+            for steer in Provider._drain_steering(self):
+                log.info("Injecting steering message (%d chars) for agent %s",
+                         len(steer), self.source_agent_id or "?")
+                messages.append({"role": "user", "content": steer})
 
             # Pre-flight per-turn input ceiling — refuse a turn whose estimated
             # input would exceed the configured cap. Estimate via chars/4 across
             # the message stack plus the system prompt.
-            estimated_input = (len(system) + sum(
-                len(m["content"]) if isinstance(m.get("content"), str)
-                else len(json.dumps(m.get("content"), default=str))
-                for m in messages
-            )) // 4
+            estimated_input = _estimate_chars(system, messages) // 4
             if effective_per_turn_max > 0 and estimated_input > effective_per_turn_max:
                 log.warning(
                     "Per-turn input ceiling hit (estimated %d > %d) — aborting cognitive loop "
                     "for agent %s. Raise AgentDefinition.per_turn_input_max if intended.",
                     estimated_input, effective_per_turn_max, self.source_agent_id or "?",
                 )
-                cumulative_usage = cumulative_usage  # no-op for clarity
-                return ProviderResponse(
-                    text=(
-                        f"Aborted: estimated input {estimated_input} tokens exceeds "
-                        f"per_turn_input_max ({effective_per_turn_max}). Increase the "
-                        f"limit on this agent if it legitimately needs to process "
-                        f"larger contexts."
+                return Provider._finalize_orchestrate(self, 
+                    ProviderResponse(
+                        text=(
+                            f"Aborted: estimated input {estimated_input} tokens exceeds "
+                            f"per_turn_input_max ({effective_per_turn_max}). Increase the "
+                            f"limit on this agent if it legitimately needs to process "
+                            f"larger contexts."
+                        ),
+                        stop_reason="per_turn_input_exceeded",
+                        model=model or self._active_model,
                     ),
-                    stop_reason="per_turn_input_exceeded",
-                    usage=cumulative_usage,
-                    model=model or self._active_model,
+                    messages, cumulative_usage, abort_reason="per_turn_input_exceeded",
                 )
 
-            response = await self.send_stream(
-                messages=messages,
-                system=system,
-                model=model,
-                max_tokens=16384,
-                tools=tool_defs,
-                temperature=0.0,
-                on_chunk=on_chunk,
-            )
+            # §2 pre-send context reduction: if the estimated next-request size
+            # exceeds ctx_window − max_tokens − 8k buffer, prune then compact
+            # BEFORE sending (cheaper than an overflow round-trip).
+            ctx_window_pre = get_context_window(self._active_model or model)
+            if ctx_window_pre > 0 and estimated_input > (ctx_window_pre - max_tokens - 8_000):
+                try:
+                    await Provider._reduce_context(
+                        self, messages, system, model, message, max_tokens,
+                    )
+                except ContextOverflowError as exc:
+                    log.warning("Pre-send context reduction gave up: %s", exc)
+                    return Provider._finalize_orchestrate(self, 
+                        ProviderResponse(
+                            text=f"Aborted: {exc}",
+                            stop_reason="context_overflow",
+                            model=model or self._active_model,
+                        ),
+                        messages, cumulative_usage, abort_reason="context_overflow",
+                    )
+
+            async def _reduce() -> None:
+                # Reactive path (overflow 400) — force compaction even if our
+                # estimate looks under budget; the provider disagrees.
+                await self._reduce_context(
+                    messages, system, model, message, max_tokens, force=True,
+                )
+
+            try:
+                response = await Provider._send_stream_with_retry(self, 
+                    messages=messages,
+                    system=system,
+                    model=model,
+                    max_tokens=max_tokens,
+                    tool_defs=tool_defs,
+                    on_chunk=on_chunk,
+                    reduce_context=_reduce,
+                )
+            except ContextOverflowError as exc:
+                # §1/§2: overflow that survived reduction → abort, don't retry.
+                log.warning("Context overflow abort for agent %s: %s",
+                            self.source_agent_id or "?", exc)
+                return Provider._finalize_orchestrate(self, 
+                    ProviderResponse(
+                        text=f"Aborted: context overflow could not be reduced ({exc}).",
+                        stop_reason="context_overflow",
+                        model=model or self._active_model,
+                    ),
+                    messages, cumulative_usage, abort_reason="context_overflow",
+                )
+            except Exception as exc:
+                # §1: fatal (or transient that exhausted retries) → structured
+                # provider_error abort with orphan repair.
+                log.warning("Provider error abort for agent %s: %s",
+                            self.source_agent_id or "?", exc)
+                return Provider._finalize_orchestrate(self, 
+                    ProviderResponse(
+                        text=f"Aborted: provider error ({exc}).",
+                        stop_reason="provider_error",
+                        model=model or self._active_model,
+                    ),
+                    messages, cumulative_usage, abort_reason="provider_error",
+                )
 
             # Accumulate usage across turns
             cumulative_usage.input_tokens += response.usage.input_tokens
@@ -467,15 +588,17 @@ class Provider(ABC):
                                 "(blocker=%s) — aborting cognitive loop for agent %s",
                                 blocker, self.source_agent_id or "?",
                             )
-                            return ProviderResponse(
-                                text=(
-                                    f"Aborted: budget exceeded "
-                                    f"(blocked by '{blocker}'). Adjust the budget on "
-                                    f"that agent or wait for the next period."
+                            return Provider._finalize_orchestrate(self, 
+                                ProviderResponse(
+                                    text=(
+                                        f"Aborted: budget exceeded "
+                                        f"(blocked by '{blocker}'). Adjust the budget on "
+                                        f"that agent or wait for the next period."
+                                    ),
+                                    stop_reason="budget_exceeded",
+                                    model=model or self._active_model,
                                 ),
-                                stop_reason="budget_exceeded",
-                                usage=cumulative_usage,
-                                model=model or self._active_model,
+                                messages, cumulative_usage, abort_reason="budget_exceeded",
                             )
                 except Exception:
                     log.exception("usage_recorder failed; continuing")
@@ -507,13 +630,15 @@ class Provider(ABC):
 
             # No tool calls or not a tool_use stop — we're done
             if not response.tool_calls or response.stop_reason != "tool_use":
-                response.usage = cumulative_usage
-                return response
+                return Provider._finalize_orchestrate(self, 
+                    response, messages, cumulative_usage,
+                )
 
             # No executor — return as-is (tool calls visible but not executed)
             if tool_executor is None:
-                response.usage = cumulative_usage
-                return response
+                return Provider._finalize_orchestrate(self, 
+                    response, messages, cumulative_usage,
+                )
 
             # Execute tool calls and build continuation messages
             assistant_content: list[dict[str, Any]] = []
@@ -528,39 +653,106 @@ class Provider(ABC):
                 })
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # Loop-detection: track tool-call fingerprints across turns. If
-            # the last K tool calls (across this and prior turns) are byte-for-byte
-            # identical, the agent is stuck — abort with a structured error.
+            # Loop-detection (§4): two signals, both over tool-call fingerprints.
+            #   1. exact-repeat: last K identical calls in a row (K default 3).
+            #   2. oscillation: over the last 6 calls, ≤2 distinct fingerprints
+            #      each seen ≥2 times (A/B/A/B/... shapes the exact check misses).
+            # Before aborting for EITHER, inject one warning turn and give the
+            # model a chance to self-correct; abort only if it repeats again.
             if effective_repeat_limit > 0 and response.tool_calls:
                 for tc in response.tool_calls:
                     sig = tc.name + ":" + json.dumps(tc.input, sort_keys=True, default=str)
                     recent_call_signatures.append(sig)
-                # Trim to the window we care about
+                    osc_fingerprints.append(sig)
+                # Trim each window to what it needs.
                 if len(recent_call_signatures) > effective_repeat_limit:
                     recent_call_signatures = recent_call_signatures[-effective_repeat_limit:]
-                if (
+                if len(osc_fingerprints) > _OSCILLATION_WINDOW:
+                    osc_fingerprints = osc_fingerprints[-_OSCILLATION_WINDOW:]
+
+                exact_repeat = (
                     len(recent_call_signatures) >= effective_repeat_limit
                     and len(set(recent_call_signatures)) == 1
-                ):
+                )
+                oscillating = _is_oscillating(osc_fingerprints)
+
+                if exact_repeat or oscillating:
+                    kind = "repeat" if exact_repeat else "oscillation"
+                    if not loop_warning_issued:
+                        # One warning turn — the model gets a chance to change
+                        # approach or conclude before we abort.
+                        loop_warning_issued = True
+                        log.info(
+                            "Loop suspected (%s) for agent %s — injecting one "
+                            "warning turn before abort", kind, self.source_agent_id or "?",
+                        )
+                        # We already appended the assistant turn above; the loop
+                        # normally appends tool_results next. Append them, then
+                        # the warning, so history stays valid (no orphan).
+                        _tr = [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tc.id,
+                                "content": json.dumps(
+                                    {"note": "not executed — loop guard warning"}
+                                ),
+                            }
+                            for tc in response.tool_calls
+                        ]
+                        messages.append({"role": "user", "content": _tr})
+                        messages.append({"role": "user", "content": (
+                            "You appear to be looping — repeating the same tool "
+                            "call(s) without progress. Change your approach or "
+                            "conclude with a final answer. Do not repeat the last "
+                            "call as-is."
+                        )})
+                        # Reset the windows so a genuinely-corrected next turn
+                        # isn't instantly re-flagged by stale fingerprints.
+                        recent_call_signatures.clear()
+                        osc_fingerprints.clear()
+                        continue
+
                     log.warning(
-                        "Repeat-call limit hit (%d consecutive identical tool calls) — "
-                        "aborting cognitive loop for agent %s. Last call: %s",
-                        effective_repeat_limit, self.source_agent_id or "?",
-                        recent_call_signatures[-1][:200],
+                        "Loop guard abort (%s) for agent %s after warning. Last call: %s",
+                        kind, self.source_agent_id or "?",
+                        (recent_call_signatures or osc_fingerprints)[-1][:200],
                     )
-                    return ProviderResponse(
-                        text=(
-                            f"Aborted: {effective_repeat_limit} consecutive identical tool "
-                            f"calls detected (likely stuck in a loop). Last call: "
-                            f"{recent_call_signatures[-1][:200]}"
+                    return Provider._finalize_orchestrate(self, 
+                        ProviderResponse(
+                            text=(
+                                f"Aborted: {kind} loop detected (agent kept repeating "
+                                f"tool calls after a warning to change approach)."
+                            ),
+                            stop_reason="loop_detected" if oscillating and not exact_repeat
+                            else "repeat_call_limit",
+                            model=model or self._active_model,
                         ),
-                        stop_reason="repeat_call_limit",
-                        usage=cumulative_usage,
-                        model=model or self._active_model,
+                        messages, cumulative_usage,
+                        abort_reason="loop_detected",
                     )
 
             tool_result_content: list[dict[str, Any]] = []
             for tc in response.tool_calls:
+                # §8: malformed tool arguments. When an adapter can't parse the
+                # tool-call args as JSON it degrades them to {"raw": <text>}.
+                # Do NOT execute — synthesize an error tool_result telling the
+                # model to re-emit, and continue the loop.
+                if _is_malformed_args(tc.input):
+                    log.warning(
+                        "Malformed tool args for %s (agent %s) — not executing",
+                        tc.name, self.source_agent_id or "?",
+                    )
+                    tool_result_content.append({
+                        "type": "tool_result",
+                        "tool_use_id": tc.id,
+                        "content": json.dumps({
+                            "error": "arguments were not valid JSON — re-emit the "
+                                     "tool call with well-formed JSON arguments",
+                        }),
+                        "is_error": True,
+                    })
+                    continue
+
                 log.info("Orchestrate tool %s (turn %d/%d)", tc.name, turn + 1, max_turns)
 
                 # Emit tool use start event
@@ -612,17 +804,9 @@ class Provider(ABC):
                     ))
 
                 result_json = json.dumps(result, default=str)
-                # Cap oversized tool results. An untruncated multi-MB result
-                # would not only blow this turn's input — it gets re-sent on
-                # EVERY subsequent turn of the loop. The cap bounds that to
-                # ~10k tokens per result while telling the model how to get
-                # the rest if it genuinely needs it.
-                if len(result_json) > _TOOL_RESULT_CHAR_MAX:
-                    result_json = (
-                        result_json[:_TOOL_RESULT_CHAR_MAX]
-                        + f'... [truncated: result was {len(result_json)} chars; '
-                        f're-invoke the tool with a narrower query if more is needed]'
-                    )
+                # Cap oversized tool results (§6): head+tail, keeping the
+                # command echo and the error tail while eliding the middle.
+                result_json = _truncate_tool_result(result_json)
                 tool_result_content.append({
                     "type": "tool_result",
                     "tool_use_id": tc.id,
@@ -630,17 +814,197 @@ class Provider(ABC):
                 })
             messages.append({"role": "user", "content": tool_result_content})
 
-            # Context compaction: if input tokens approach the context window,
-            # summarize the conversation to free space.
-            ctx_window = get_context_window(self._active_model) if self._active_model else 0
-            if ctx_window > 0 and self._last_input_tokens > ctx_window * self._COMPACTION_THRESHOLD:
-                messages = await self._compact_messages(
-                    messages, system, model, original_request=message,
-                )
+            # §2 note: context reduction runs PRE-SEND at the top of the next
+            # iteration (estimate-based) and reactively on an overflow 400, so
+            # the old post-tool compaction is no longer needed here.
 
         # Exhausted max_turns — return last response with accumulated usage
+        return Provider._finalize_orchestrate(self, response, messages, cumulative_usage)
+
+    def _finalize_orchestrate(
+        self,
+        response: ProviderResponse,
+        messages: list[dict[str, Any]],
+        cumulative_usage: Usage,
+        abort_reason: str = "",
+    ) -> ProviderResponse:
+        """Shared exit path for send_orchestrate (§3, §5).
+
+        - Repairs orphaned ``tool_use`` blocks in ``messages`` in place so the
+          history replays cleanly against Anthropic-shape APIs.
+        - Drains any undrained steering messages into
+          ``response.undelivered_steering`` so the caller can re-post them to
+          the inbox (never silently dropped).
+        - Closes the steering queue.
+
+        Every ``return`` from send_orchestrate goes through here.
+        """
+        _repair_orphan_tool_uses(messages, abort_reason)
+        undelivered = _drain_queue(getattr(self, "_steering_queue", None))
+        self._steering_queue = None
+        if undelivered:
+            log.info(
+                "Surfacing %d undelivered steering message(s) for agent %s "
+                "(re-post to inbox)", len(undelivered),
+                getattr(self, "source_agent_id", "") or "?",
+            )
+            response.undelivered_steering = undelivered
         response.usage = cumulative_usage
         return response
+
+    async def _send_stream_with_retry(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        system: str,
+        model: str,
+        max_tokens: int,
+        tool_defs: list[ToolDefinition] | None,
+        on_chunk: Any,
+        reduce_context: Any,
+    ) -> ProviderResponse:
+        """Per-turn send_stream wrapped in the §1 retry gate.
+
+        Routes raised errors by class (see ``classify_provider_error``):
+          - transient → up to 3 loop-level retries, exp backoff + jitter,
+            honoring Retry-After; the request is re-sent unchanged.
+          - overflow → run §2 context reduction (``reduce_context``), then
+            re-send once; a second overflow raises ContextOverflowError.
+          - fatal → re-raise for the loop to abort as provider_error.
+        """
+        backoff_schedule = (2.0, 8.0, 30.0)
+        overflow_reduced = False
+        transient_attempts = 0
+        while True:
+            try:
+                return await self.send_stream(
+                    messages=messages,
+                    system=system,
+                    model=model,
+                    max_tokens=max_tokens,
+                    tools=tool_defs,
+                    temperature=0.0,
+                    on_chunk=on_chunk,
+                )
+            except Exception as exc:
+                route = classify_provider_error(exc)
+                if route == "overflow":
+                    if overflow_reduced:
+                        # Already reduced once and still overflowing — give up.
+                        log.warning(
+                            "Context overflow persists after reduction for agent %s",
+                            self.source_agent_id or "?",
+                        )
+                        raise ContextOverflowError(
+                            f"context overflow after reduction: {exc}",
+                            status_code=getattr(exc, "status_code", 400),
+                            provider=self.name,
+                        )
+                    log.info(
+                        "Context overflow — running reduction for agent %s: %s",
+                        self.source_agent_id or "?", exc,
+                    )
+                    await reduce_context()
+                    overflow_reduced = True
+                    continue
+                if route == "transient":
+                    if transient_attempts >= len(backoff_schedule):
+                        log.warning(
+                            "Transient error exhausted %d loop-level retries for "
+                            "agent %s: %s", len(backoff_schedule),
+                            self.source_agent_id or "?", exc,
+                        )
+                        raise
+                    wait = backoff_schedule[transient_attempts]
+                    retry_after = getattr(exc, "retry_after", None)
+                    if retry_after:
+                        try:
+                            wait = max(wait, float(retry_after))
+                        except (TypeError, ValueError):
+                            pass
+                    wait += random.uniform(0, wait * 0.25)  # jitter
+                    transient_attempts += 1
+                    log.warning(
+                        "Transient error (loop retry %d/%d, sleeping %.1fs) for "
+                        "agent %s: %s", transient_attempts, len(backoff_schedule),
+                        wait, self.source_agent_id or "?", exc,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                # fatal — let the loop abort as provider_error
+                raise
+
+    async def _reduce_context(
+        self,
+        messages: list[dict[str, Any]],
+        system: str,
+        model: str,
+        original_request: str,
+        max_tokens: int,
+        force: bool = False,
+    ) -> None:
+        """Two-tier context reduction: prune, then compact (§2).
+
+        Operates on ``messages`` IN PLACE. Tier 1 prunes old tool_result
+        bodies (free). Tier 2 compacts via the LLM summarizer with a spiral
+        guard. Called both pre-send (estimate over threshold) and on an
+        overflow 400 from the provider.
+
+        ``force`` is set on the reactive (overflow-400) path: the provider has
+        just told us we're over budget, so our chars/4 estimate is wrong low —
+        run compaction even if the estimate looks under budget.
+        """
+        ctx_window = get_context_window(self._active_model or model)
+        budget_chars = max(0, (ctx_window - max_tokens - 8_000)) * 4
+
+        # Tier 1 — prune old tool_result bodies (no LLM call).
+        est_before = _estimate_chars(system, messages)
+        if force or est_before > budget_chars:
+            saved = _prune_tool_results(messages)
+            if saved >= _PRUNE_MIN_SAVINGS:
+                log.info(
+                    "Context prune freed ~%d chars for agent %s",
+                    saved, self.source_agent_id or "?",
+                )
+
+        # Tier 2 — compact (only if still over budget, or forced by an overflow).
+        est_after_prune = _estimate_chars(system, messages)
+        if not force and est_after_prune <= budget_chars:
+            return
+
+        if self._compactions_this_run >= _MAX_COMPACTIONS_PER_RUN:
+            log.warning(
+                "Compaction spiral guard: %d compactions already this run for "
+                "agent %s — refusing further compaction",
+                self._compactions_this_run, self.source_agent_id or "?",
+            )
+            raise ContextOverflowError(
+                "context reduction exhausted (max compactions reached)",
+                status_code=400, provider=self.name,
+            )
+
+        self._compactions_this_run += 1
+        compacted = await self._compact_messages(
+            messages, system, model, original_request=original_request,
+        )
+        est_after_compact = _estimate_chars(system, compacted)
+
+        # Spiral guard: a compaction that barely moves the needle means the
+        # summarizer isn't helping — abort rather than loop.
+        reduction = 1.0 - (est_after_compact / est_before) if est_before > 0 else 0.0
+        if reduction < _COMPACTION_MIN_REDUCTION:
+            log.warning(
+                "Compaction reduced estimate by only %.1f%% (<%.0f%%) for agent "
+                "%s — aborting to avoid a spiral", reduction * 100,
+                _COMPACTION_MIN_REDUCTION * 100, self.source_agent_id or "?",
+            )
+            raise ContextOverflowError(
+                "context reduction ineffective (compaction spiral)",
+                status_code=400, provider=self.name,
+            )
+
+        # Apply the compacted list in place.
+        messages[:] = compacted
 
     async def _compact_messages(
         self,
@@ -673,15 +1037,30 @@ class Provider(ABC):
                 },
             ))
 
-        # Build a summary request using just the conversation (no tools)
+        # Retention set (§2): the tail we NEVER summarize away —
+        #   (a) the original task message (messages[0] under history-as-messages)
+        #   (b) the last 2 turns
+        #   (c) the last ~20k chars of user messages
+        # Everything before that boundary is folded into one structured summary.
+        if not original_request:
+            original_request = messages[0]["content"] if messages else ""
+
+        retained_tail = _compaction_retained_tail(messages)
+        to_summarize = messages[: len(messages) - len(retained_tail)]
+
+        # Nothing to fold — the retained tail already IS the whole thing.
+        if not to_summarize:
+            return messages
+
+        # Structured summary template (Goal / Progress / Key decisions /
+        # Critical context / Next steps) — matches the harness compaction shape.
         summary_prompt = (
-            "Summarize the conversation so far in a concise format that preserves "
-            "all critical context: what was requested, what actions were taken, "
-            "what results were observed, what decisions were made, and what remains "
-            "to be done. Be specific about file paths, code changes, error messages, "
-            "and tool results. This summary will replace the conversation history."
+            "Summarize the conversation so far under EXACTLY these headings, "
+            "preserving all critical context (file paths, code changes, error "
+            "messages, tool results). This summary replaces the older history.\n\n"
+            "## Goal\n## Progress\n## Key decisions\n## Critical context\n## Next steps"
         )
-        summary_messages = messages + [{"role": "user", "content": summary_prompt}]
+        summary_messages = to_summarize + [{"role": "user", "content": summary_prompt}]
 
         try:
             summary_resp = await self.send(
@@ -691,16 +1070,32 @@ class Provider(ABC):
                 max_tokens=4096,
             )
             summary_text = summary_resp.text
+            if not summary_text.strip():
+                raise ValueError("summarizer returned empty text")
         except Exception as exc:
-            log.warning("Compaction summary failed: %s — continuing without compaction", exc)
-            return messages
+            # Fallback hard truncation (§2): NEVER no-op into a guaranteed
+            # overflow. Drop the oldest turns, keeping the retained tail.
+            log.warning(
+                "Compaction summary failed (%s) — falling back to hard "
+                "truncation for agent %s", exc, self.source_agent_id or "?",
+            )
+            compacted = _hard_truncate(messages, original_request, retained_tail)
+            if self.event_bus and self.source_agent_id:
+                from ..events import Event, EventType
+                await self.event_bus.emit(Event(
+                    type=EventType.CONTEXT_COMPACTION,
+                    source=self.source_agent_id,
+                    data={
+                        "agent_id": self.source_agent_id,
+                        "compaction_count": self._compaction_count,
+                        "pre_tokens": self._last_input_tokens,
+                        "status": "hard_truncated",
+                    },
+                ))
+            return compacted
 
-        # The live task prompt (passed by the caller; messages[0] may be an
-        # old history turn now that history rides as messages).
-        if not original_request:
-            original_request = messages[0]["content"] if messages else ""
-
-        # Rebuild messages: summary + original request
+        # Rebuild: summary message + retained tail (original task rides in the
+        # summary header so it survives even if it fell outside the tail).
         compacted: list[dict[str, Any]] = [
             {"role": "user", "content": (
                 f"[Context compaction — conversation summary follows]\n\n"
@@ -710,9 +1105,10 @@ class Provider(ABC):
                 f"Continue from where you left off. Do not repeat completed work."
             )},
         ]
+        compacted.extend(retained_tail)
 
-        log.info("Compaction #%d complete: %d messages → 1 summary message",
-                 self._compaction_count, len(messages))
+        log.info("Compaction #%d complete: %d messages → 1 summary + %d retained",
+                 self._compaction_count, len(messages), len(retained_tail))
 
         if self.event_bus and self.source_agent_id:
             from ..events import Event, EventType
@@ -775,6 +1171,228 @@ class Provider(ABC):
 # Hard cap on a single tool result fed back into the loop (~10k tokens).
 _TOOL_RESULT_CHAR_MAX = 40_000
 
+# Head+tail split for an oversized tool result (§6). Keeps the command echo
+# (head) and the error tail — the two parts that carry signal — and elides the
+# middle. head + tail must stay under _TOOL_RESULT_CHAR_MAX.
+_TOOL_RESULT_HEAD_CHARS = 24_000
+_TOOL_RESULT_TAIL_CHARS = 12_000
+
+
+def _drain_queue(queue: "asyncio.Queue | None") -> list[str]:
+    """Pop everything currently in a steering queue (§5). Never blocks."""
+    if queue is None:
+        return []
+    drained: list[str] = []
+    while True:
+        try:
+            drained.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    return drained
+
+
+def _truncate_tool_result(result_json: str) -> str:
+    """Head+tail truncation of an oversized tool result (§6).
+
+    Replaces the old tail-chop: keep the first _TOOL_RESULT_HEAD_CHARS and the
+    last _TOOL_RESULT_TAIL_CHARS, eliding the middle with a marker. An
+    untruncated multi-MB result would not only blow this turn's input — it gets
+    re-sent on EVERY subsequent turn of the loop.
+    """
+    total = len(result_json)
+    if total <= _TOOL_RESULT_CHAR_MAX:
+        return result_json
+    elided = total - _TOOL_RESULT_HEAD_CHARS - _TOOL_RESULT_TAIL_CHARS
+    return (
+        result_json[:_TOOL_RESULT_HEAD_CHARS]
+        + f"\n…[elided {elided} chars of {total}]…\n"
+        + result_json[-_TOOL_RESULT_TAIL_CHARS:]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Context reduction helpers (§2)
+# ---------------------------------------------------------------------------
+
+# Prune (tier 1): protect the most recent N chars of tool output and only bother
+# pruning if it saves at least M chars.
+_PRUNE_PROTECT_RECENT_CHARS = 40_000
+_PRUNE_MIN_SAVINGS = 20_000
+
+# Compact (tier 2): retain the last ~20k chars of user messages, keep the last
+# 2 turns verbatim, and cap compactions per run (spiral guard).
+_COMPACT_RETAIN_USER_CHARS = 20_000
+_COMPACT_RETAIN_TURNS = 2
+_MAX_COMPACTIONS_PER_RUN = 2
+_COMPACTION_MIN_REDUCTION = 0.20
+
+
+def _estimate_chars(system: str, messages: list[dict[str, Any]]) -> int:
+    """Chars across the system prompt + message stack (the chars/4 basis)."""
+    return len(system) + sum(
+        len(m["content"]) if isinstance(m.get("content"), str)
+        else len(json.dumps(m.get("content"), default=str))
+        for m in messages
+    )
+
+
+def _prune_tool_results(messages: list[dict[str, Any]]) -> int:
+    """Replace old tool_result bodies with a stub, in place (§2 tier 1).
+
+    Protects the most recent ``_PRUNE_PROTECT_RECENT_CHARS`` of tool output
+    (walking newest→oldest) and everything in the last 2 assistant turns.
+    Returns the estimated chars freed.
+    """
+    # Index of the second-to-last assistant turn: results after it are recent
+    # and must not be pruned.
+    assistant_idxs = [i for i, m in enumerate(messages) if m.get("role") == "assistant"]
+    protect_from = assistant_idxs[-_COMPACT_RETAIN_TURNS] if len(assistant_idxs) >= _COMPACT_RETAIN_TURNS else 0
+
+    saved = 0
+    recent_budget = _PRUNE_PROTECT_RECENT_CHARS
+    # Walk newest→oldest so the char budget protects the freshest output.
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for j, block in enumerate(content):
+            if not (isinstance(block, dict) and block.get("type") == "tool_result"):
+                continue
+            body = block.get("content", "")
+            body_len = len(body) if isinstance(body, str) else len(json.dumps(body, default=str))
+            # Protect recent turns and the recent-char budget.
+            if i >= protect_from or recent_budget > 0:
+                recent_budget -= body_len
+                continue
+            if not isinstance(body, str) or body.startswith("[pruned:"):
+                continue
+            name = ""
+            # tool_result carries no name; leave name empty (looked up by id
+            # upstream if needed).
+            content[j] = {
+                **block,
+                "content": f"[pruned: {body_len} chars, tool={name or block.get('tool_use_id', '')}]",
+            }
+            saved += body_len - len(content[j]["content"])
+    return saved
+
+
+def _compaction_retained_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The suffix of ``messages`` that compaction must keep verbatim (§2).
+
+    Keeps the last ``_COMPACT_RETAIN_TURNS`` messages, extended backward to
+    also cover the last ~``_COMPACT_RETAIN_USER_CHARS`` chars of user messages.
+    Never includes messages[0] (the original task — it rides in the summary
+    header instead).
+    """
+    if len(messages) <= 1:
+        return []
+    n = len(messages)
+    keep_from = max(1, n - _COMPACT_RETAIN_TURNS)
+    # Walk further back while we're still within the user-char budget.
+    user_chars = 0
+    i = keep_from
+    while i > 1:
+        m = messages[i - 1]
+        if m.get("role") == "user":
+            c = m.get("content")
+            clen = len(c) if isinstance(c, str) else len(json.dumps(c, default=str))
+            if user_chars + clen > _COMPACT_RETAIN_USER_CHARS:
+                break
+            user_chars += clen
+        i -= 1
+    return messages[i:]
+
+
+def _hard_truncate(
+    messages: list[dict[str, Any]],
+    original_request: str,
+    retained_tail: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fallback when the summarizer fails (§2): drop oldest, keep the tail.
+
+    Never a no-op — always returns a strictly smaller list than the input when
+    there is anything to drop, so an overflow can't recur unchanged.
+    """
+    head = {"role": "user", "content": (
+        f"[Context truncated — older history dropped after a summarizer failure]\n\n"
+        f"[Original request]\n{original_request}\n\n"
+        f"Continue from where you left off. Do not repeat completed work."
+    )}
+    return [head, *retained_tail]
+
+
+# ---------------------------------------------------------------------------
+# Orphan repair (§3)
+# ---------------------------------------------------------------------------
+
+def _repair_orphan_tool_uses(messages: list[dict[str, Any]], reason: str) -> None:
+    """Append synthetic tool_result blocks for any dangling tool_use (§3).
+
+    If the trailing assistant message carries ``tool_use`` blocks with no
+    matching ``tool_result`` (an abort/interrupt mid-turn), append a user
+    message with cancelled tool_result blocks so the persisted history replays
+    cleanly against Anthropic-shape APIs. In place.
+    """
+    if not messages or messages[-1].get("role") != "assistant":
+        return
+    content = messages[-1].get("content")
+    if not isinstance(content, list):
+        return
+    open_ids = [
+        b["id"] for b in content
+        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id")
+    ]
+    if not open_ids:
+        return
+    reason = reason or "aborted"
+    results = [
+        {
+            "type": "tool_result",
+            "tool_use_id": tid,
+            "content": json.dumps({"cancelled": True, "reason": reason}),
+            "is_error": True,
+        }
+        for tid in open_ids
+    ]
+    messages.append({"role": "user", "content": results})
+
+
+# ---------------------------------------------------------------------------
+# Loop detection (§4) + malformed args (§8)
+# ---------------------------------------------------------------------------
+
+# Oscillation guard window: over the last N tool calls, if there are ≤2 distinct
+# fingerprints and each appeared ≥2 times, the agent is oscillating.
+_OSCILLATION_WINDOW = 6
+
+
+def _is_oscillating(fingerprints: list[str]) -> bool:
+    """True if the recent fingerprints show a low-diversity oscillation (§4)."""
+    if len(fingerprints) < _OSCILLATION_WINDOW:
+        return False
+    window = fingerprints[-_OSCILLATION_WINDOW:]
+    counts: dict[str, int] = {}
+    for fp in window:
+        counts[fp] = counts.get(fp, 0) + 1
+    return len(counts) <= 2 and all(c >= 2 for c in counts.values())
+
+
+def _is_malformed_args(args: Any) -> bool:
+    """True if tool args are the adapter's {"raw": ...} degradation shape (§8).
+
+    An adapter that couldn't parse the tool-call arguments as JSON emits
+    ``{"raw": <original text>}``. That single-key shape is unambiguous — a
+    real tool taking exactly one string field named ``raw`` doesn't exist in
+    the surface, and the loss of structure means we must not execute.
+    """
+    return (
+        isinstance(args, dict)
+        and set(args.keys()) == {"raw"}
+        and isinstance(args.get("raw"), str)
+    )
+
 
 def _normalize_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Shape prior-conversation dicts into valid Messages-API history.
@@ -814,3 +1432,69 @@ class ProviderError(Exception):
         self.status_code = status_code
         self.provider = provider
         super().__init__(message)
+
+
+class ContextOverflowError(ProviderError):
+    """The request exceeded the model's context / token limit.
+
+    Adapters map their provider's overflow shape (a 400 whose message matches
+    a context/token-limit pattern) onto this shared class so the loop can route
+    it to context reduction (§2) rather than a blind retry. It is NOT a
+    transient failure — retrying the same request will fail identically.
+    """
+
+
+# Substrings that mark a 400 as a context-window overflow rather than a
+# generic bad request. Case-insensitive match against the error message.
+_OVERFLOW_PATTERNS: tuple[str, ...] = (
+    "context length",
+    "context window",
+    "maximum context",
+    "context_length_exceeded",
+    "too many tokens",
+    "prompt is too long",
+    "input is too long",
+    "reduce the length",
+    "maximum number of tokens",
+    "exceeds the maximum",
+    "token limit",
+)
+
+
+def is_overflow_message(message: str) -> bool:
+    """True if a provider error message looks like a context-limit overflow."""
+    low = (message or "").lower()
+    return any(p in low for p in _OVERFLOW_PATTERNS)
+
+
+# HTTP statuses that are transient at the loop level (escaped the adapter's
+# own bounded retry): rate limits, overload, gateway/service errors.
+_TRANSIENT_STATUSES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 529})
+
+
+def classify_provider_error(exc: Exception) -> str:
+    """Bucket a raised provider exception into a loop route (§1).
+
+    Returns one of ``"overflow"``, ``"transient"``, ``"fatal"``. The
+    adapters already translate their provider-specific overflow shape into
+    ``ContextOverflowError``; this also sniffs a plain ``ProviderError`` whose
+    400 message matches an overflow pattern, so an adapter that hasn't been
+    upgraded still routes correctly.
+    """
+    if isinstance(exc, ContextOverflowError):
+        return "overflow"
+    # Timeouts / dropped streams surface as their own transport exceptions;
+    # match by name to avoid importing httpx here.
+    exc_name = type(exc).__name__
+    if exc_name in ("TimeoutException", "ReadTimeout", "ConnectTimeout",
+                    "ConnectError", "ReadError", "RemoteProtocolError",
+                    "StreamError", "PoolTimeout"):
+        return "transient"
+    if isinstance(exc, ProviderError):
+        status = exc.status_code
+        if status == 400 and is_overflow_message(str(exc)):
+            return "overflow"
+        if status in _TRANSIENT_STATUSES:
+            return "transient"
+        return "fatal"
+    return "fatal"

@@ -367,12 +367,112 @@ class TestOrchestrateHistory:
             tool_executor=executor,
             max_turns=3,
         )
-        # Second send's last message carries the tool_result block
+        # Second send's last message carries the tool_result block. §6 replaced
+        # the tail-chop with head+tail elision.
         second = p.seen_messages[1]
         block = second[-1]["content"][0]
         assert block["type"] == "tool_result"
         assert len(block["content"]) <= _TOOL_RESULT_CHAR_MAX + 200
-        assert "[truncated" in block["content"]
+        assert "[elided" in block["content"]
+
+
+class TestHeadTailTruncation:
+    """§6: oversized tool results keep head + tail, elide the middle."""
+
+    def test_under_cap_unchanged(self):
+        from atn.providers.base import _truncate_tool_result, _TOOL_RESULT_CHAR_MAX
+        s = "x" * (_TOOL_RESULT_CHAR_MAX - 10)
+        assert _truncate_tool_result(s) == s
+
+    def test_head_and_tail_preserved(self):
+        from atn.providers.base import (
+            _truncate_tool_result,
+            _TOOL_RESULT_HEAD_CHARS,
+            _TOOL_RESULT_TAIL_CHARS,
+        )
+        head = "H" * _TOOL_RESULT_HEAD_CHARS
+        mid = "M" * 100_000
+        tail = "T" * _TOOL_RESULT_TAIL_CHARS
+        out = _truncate_tool_result(head + mid + tail)
+        # Head kept verbatim, tail kept verbatim, middle elided with a marker.
+        assert out.startswith("H" * 1000)
+        assert out.endswith("T" * 1000)
+        assert "[elided" in out
+        assert "M" * 1000 not in out
+        # Total is bounded well under the raw input.
+        assert len(out) < _TOOL_RESULT_HEAD_CHARS + _TOOL_RESULT_TAIL_CHARS + 200
+
+    @pytest.mark.asyncio
+    async def test_loop_uses_head_tail(self):
+        """The orchestrate loop truncates via head+tail (not tail-chop)."""
+        from atn.providers.base import _TOOL_RESULT_HEAD_CHARS
+        tc = ToolCall(id="tc1", name="big", input={})
+        p = RecordingProvider([
+            ProviderResponse(tool_calls=[tc], stop_reason="tool_use",
+                             usage=Usage(input_tokens=5, output_tokens=2)),
+            ProviderResponse(text="done", stop_reason="end_turn",
+                             usage=Usage(input_tokens=5, output_tokens=2)),
+        ])
+
+        async def executor(name, inp):
+            # A result whose head and tail carry distinct markers.
+            return "HEAD_MARKER" + ("z" * 200_000) + "TAIL_MARKER"
+
+        await p.send_orchestrate(
+            message="go",
+            tools=[{"name": "big", "description": "", "input_schema": {"type": "object"}}],
+            tool_executor=executor,
+            max_turns=3,
+        )
+        block = p.seen_messages[1][-1]["content"][0]
+        assert block["type"] == "tool_result"
+        # Both ends survive; the old tail-chop dropped the tail.
+        assert "HEAD_MARKER" in block["content"]
+        assert "TAIL_MARKER" in block["content"]
+        assert "[elided" in block["content"]
+
+
+class TestMaxTokensFromSpec:
+    """§7: per-request max_tokens = min(16384, spec.max_output_tokens)."""
+
+    @pytest.mark.asyncio
+    async def test_capped_at_16k_for_large_output_model(self):
+        """A model with a huge output cap is bounded to 16k per request."""
+        p = RecordingMaxTokensProvider([
+            ProviderResponse(text="ok", stop_reason="end_turn",
+                             usage=Usage(input_tokens=5, output_tokens=2)),
+        ])
+        # opus 4.8 has 128k output cap → should be clamped to 16384.
+        await p.send_orchestrate(message="hi", tools=[], model="claude-opus-4-8")
+        assert p.seen_max_tokens[0] == 16384
+
+    @pytest.mark.asyncio
+    async def test_small_output_cap_used_directly(self):
+        """A model whose output cap < 16k uses that smaller cap."""
+        p = RecordingMaxTokensProvider([
+            ProviderResponse(text="ok", stop_reason="end_turn",
+                             usage=Usage(input_tokens=5, output_tokens=2)),
+        ])
+        # haiku-4-5 has an 8192 output cap.
+        await p.send_orchestrate(message="hi", tools=[], model="claude-haiku-4-5")
+        assert p.seen_max_tokens[0] == 8192
+
+
+class RecordingMaxTokensProvider(Provider):
+    """Captures the max_tokens passed to send_stream each turn."""
+
+    def __init__(self, responses: list[ProviderResponse]):
+        self._responses = list(responses)
+        self.seen_max_tokens: list[int] = []
+
+    @property
+    def name(self) -> str:
+        return "recording_maxtok"
+
+    async def send(self, *, messages, system="", model="", max_tokens=1024,
+                   tools=None, temperature=0.0) -> ProviderResponse:
+        self.seen_max_tokens.append(max_tokens)
+        return self._responses.pop(0)
 
 
 class TestAnthropicMovingBreakpoint:

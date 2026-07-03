@@ -170,7 +170,13 @@ class _RepeatingProvider:
 
 @pytest.mark.asyncio
 async def test_repeat_call_limit_aborts_after_default(tmp_path):
-    """Five identical tool calls in a row trip the default repeat-call limit."""
+    """Identical tool calls trip the default repeat-call limit.
+
+    Per agentic_loop.md §4: the default exact-repeat threshold is now 3 (down
+    from 5), and the loop injects ONE warning turn before aborting. So the
+    sequence is: 3 identical calls -> warning (windows reset) -> 3 more
+    identical calls -> abort. That's 6 send_stream() calls.
+    """
     from atn.providers.base import Provider
 
     provider = _RepeatingProvider()
@@ -188,13 +194,17 @@ async def test_repeat_call_limit_aborts_after_default(tmp_path):
     )
 
     assert response.stop_reason == "repeat_call_limit"
-    # The default is 5 — so we expect 5 send_stream() calls before the abort.
-    assert provider.calls == 5
+    # 3 (first trip) + warning + 3 (re-trip after the warning) = 6.
+    assert provider.calls == 6
 
 
 @pytest.mark.asyncio
 async def test_repeat_call_limit_respects_override(tmp_path):
-    """Setting repeat_call_limit=3 trips after 3 identical calls."""
+    """Setting repeat_call_limit=2 trips after 2 identical calls (+ warning).
+
+    With the §4 warning turn, an override of 2 yields: 2 identical -> warning
+    -> 2 more identical -> abort = 4 calls.
+    """
     from atn.providers.base import Provider
 
     provider = _RepeatingProvider()
@@ -209,11 +219,11 @@ async def test_repeat_call_limit_respects_override(tmp_path):
         tools=[{"name": "loop_tool", "description": "", "input_schema": {"type": "object"}}],
         max_turns=20,
         tool_executor=tool_executor,
-        repeat_call_limit=3,
+        repeat_call_limit=2,
     )
 
     assert response.stop_reason == "repeat_call_limit"
-    assert provider.calls == 3
+    assert provider.calls == 4
 
 
 # ---------------------------------------------------------------------------

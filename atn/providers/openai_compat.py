@@ -19,12 +19,14 @@ from typing import Any
 import httpx
 
 from .base import (
+    ContextOverflowError,
     Provider,
     ProviderError,
     ProviderResponse,
     ToolCall,
     ToolDefinition,
     Usage,
+    is_overflow_message,
 )
 
 log = logging.getLogger(__name__)
@@ -160,6 +162,12 @@ class OpenAICompatibleProvider(Provider):
                             err_msg = err_msg.get("message", resp.text)
                     except Exception:
                         err_msg = resp.text
+                    # §1: context-overflow 400 → shared class (route to reduction).
+                    if resp.status_code == 400 and is_overflow_message(str(err_msg)):
+                        raise ContextOverflowError(
+                            f"{self._name} context overflow: {err_msg}",
+                            status_code=400, provider=self._name,
+                        )
                     raise ProviderError(
                         f"{self._name} API error {resp.status_code}: {err_msg}",
                         status_code=resp.status_code,
@@ -276,6 +284,12 @@ class OpenAICompatibleProvider(Provider):
                             err_msg = err_msg.get("message", resp.text)
                     except Exception:
                         err_msg = resp.text
+                    # §1: context-overflow 400 → shared class (route to reduction).
+                    if resp.status_code == 400 and is_overflow_message(str(err_msg)):
+                        raise ContextOverflowError(
+                            f"{self._name} context overflow: {err_msg}",
+                            status_code=400, provider=self._name,
+                        )
                     raise ProviderError(
                         f"{self._name} API error {resp.status_code}: {err_msg}",
                         status_code=resp.status_code,

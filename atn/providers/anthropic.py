@@ -55,12 +55,14 @@ from typing import Any
 import httpx
 
 from .base import (
+    ContextOverflowError,
     Provider,
     ProviderError,
     ProviderResponse,
     ToolCall,
     ToolDefinition,
     Usage,
+    is_overflow_message,
 )
 
 log = logging.getLogger(__name__)
@@ -213,6 +215,13 @@ class AnthropicProvider(Provider):
                         err_msg = err_body.get("error", {}).get("message", resp.text)
                     except Exception:
                         err_msg = resp.text
+                    # §1: map a context-overflow 400 to the shared class so the
+                    # loop routes it to reduction, not a blind retry.
+                    if resp.status_code == 400 and is_overflow_message(err_msg):
+                        raise ContextOverflowError(
+                            f"Anthropic context overflow: {err_msg}",
+                            status_code=400, provider="anthropic",
+                        )
                     raise ProviderError(
                         f"Anthropic API error {resp.status_code}: {err_msg}",
                         status_code=resp.status_code,
@@ -331,6 +340,12 @@ class AnthropicProvider(Provider):
                         err_msg = err_body.get("error", {}).get("message", resp.text)
                     except Exception:
                         err_msg = resp.text
+                    # §1: context-overflow 400 → shared class (route to reduction).
+                    if resp.status_code == 400 and is_overflow_message(err_msg):
+                        raise ContextOverflowError(
+                            f"Anthropic context overflow: {err_msg}",
+                            status_code=400, provider="anthropic",
+                        )
                     raise ProviderError(
                         f"Anthropic API error {resp.status_code}: {err_msg}",
                         status_code=resp.status_code,
