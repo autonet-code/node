@@ -20,12 +20,14 @@ from typing import Any
 import httpx
 
 from .base import (
+    ContextOverflowError,
     Provider,
     ProviderError,
     ProviderResponse,
     ToolCall,
     ToolDefinition,
     Usage,
+    is_overflow_message,
 )
 
 log = logging.getLogger(__name__)
@@ -35,6 +37,20 @@ _MAX_RETRIES = 3
 _RETRY_STATUSES = {429, 503, 502}
 _INITIAL_BACKOFF = 1.0
 _BACKOFF_MULTIPLIER = 2.0
+# Fallback context window when model_specs can't be imported or a model can't
+# be sized — matches the local-model default (§7).
+_DEFAULT_NUM_CTX = 16_384
+
+
+def _num_ctx_for(model: str) -> int:
+    """Context window for ``options.num_ctx`` from model_specs (§9). Unknown
+    local models resolve to 16384; falls back to that if the lookup fails."""
+    try:
+        from ..model_specs import get_context_window
+        ctx = get_context_window(model)
+        return ctx if ctx > 0 else _DEFAULT_NUM_CTX
+    except Exception:
+        return _DEFAULT_NUM_CTX
 
 
 def _normalize_content(content: Any) -> str:
@@ -42,6 +58,10 @@ def _normalize_content(content: Any) -> str:
 
     The base.py send_orchestrate() loop builds messages with list-of-dict
     content blocks (Anthropic format).  Ollama expects plain strings.
+
+    Used only for plain-text blocks. Structured ``tool_use`` / ``tool_result``
+    linkage is preserved natively by :func:`_translate_history` instead of being
+    flattened here (agentic_loop.md §9 / live finding 5).
     """
     if isinstance(content, str):
         return content
@@ -57,6 +77,88 @@ def _normalize_content(content: Any) -> str:
                 parts.append(block)
         return "\n".join(parts) if parts else ""
     return str(content)
+
+
+def _translate_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Translate canonical (Anthropic-shape) history into ollama /api/chat native.
+
+    The base.py send_orchestrate() loop builds:
+      - assistant turns as ``{"role":"assistant","content":[{type:text}, {type:tool_use, id, name, input}]}``
+      - tool results as ``{"role":"user","content":[{type:tool_result, tool_use_id, content}]}``
+
+    Ollama's native format wants:
+      - assistant tool calls as ``{"role":"assistant","content":<text>,"tool_calls":[{"function":{"name","arguments"}}]}``
+      - each tool result as its own ``{"role":"tool","content":<result>,"tool_name":<name>}`` message
+
+    Preserving this linkage (rather than flattening to text via
+    ``_normalize_content``) is what lets a local model follow multi-turn tool
+    use past turn 1. ``tool_name`` is recovered from the tool_use that produced
+    each result (ollama accepts ``tool_name`` on tool messages).
+    """
+    # Map tool_use_id -> tool name so tool_result messages can carry tool_name.
+    id_to_name: dict[str, str] = {}
+    out: list[dict[str, Any]] = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        # Plain-text content (string, or list without structured blocks) —
+        # keep the existing normalization.
+        if not isinstance(content, list):
+            out.append({"role": role, "content": _normalize_content(content)})
+            continue
+
+        has_tool_use = any(
+            isinstance(b, dict) and b.get("type") == "tool_use" for b in content
+        )
+        has_tool_result = any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+        )
+
+        if role == "assistant" and has_tool_use:
+            text_parts: list[str] = []
+            tool_calls: list[dict[str, Any]] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text_parts.append(block.get("text", ""))
+                elif btype == "tool_use":
+                    name = block.get("name", "")
+                    tuid = block.get("id", "")
+                    if tuid:
+                        id_to_name[tuid] = name
+                    tool_calls.append({
+                        "function": {
+                            "name": name,
+                            "arguments": block.get("input", {}) or {},
+                        },
+                    })
+            out.append({
+                "role": "assistant",
+                "content": "\n".join(p for p in text_parts if p),
+                "tool_calls": tool_calls,
+            })
+        elif has_tool_result:
+            # One ollama "tool" message per tool_result block, preserving the
+            # per-result linkage (name recovered from the originating tool_use).
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tuid = block.get("tool_use_id", "")
+                    tool_msg: dict[str, Any] = {
+                        "role": "tool",
+                        "content": block.get("content", ""),
+                    }
+                    name = id_to_name.get(tuid, "")
+                    if name:
+                        tool_msg["tool_name"] = name
+                    out.append(tool_msg)
+        else:
+            out.append({"role": role, "content": _normalize_content(content)})
+
+    return out
 
 
 class OllamaProvider(Provider):
@@ -87,12 +189,12 @@ class OllamaProvider(Provider):
     ) -> ProviderResponse:
         model = model or self._default_model
 
-        # Build message list with system prompt
+        # Build message list with system prompt. Structured tool history is
+        # translated natively (§9) so multi-turn tool use round-trips.
         ollama_messages: list[dict[str, Any]] = []
         if system:
             ollama_messages.append({"role": "system", "content": system})
-        for msg in messages:
-            ollama_messages.append({"role": msg["role"], "content": _normalize_content(msg["content"])})
+        ollama_messages.extend(_translate_history(messages))
 
         body: dict[str, Any] = {
             "model": model,
@@ -102,6 +204,9 @@ class OllamaProvider(Provider):
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
+                # §9: never rely on ollama's 4096 default — it silently
+                # truncates larger prompts. Size from model_specs.
+                "num_ctx": _num_ctx_for(model),
             },
         }
 
@@ -128,8 +233,7 @@ class OllamaProvider(Provider):
         ollama_messages: list[dict[str, Any]] = []
         if system:
             ollama_messages.append({"role": "system", "content": system})
-        for msg in messages:
-            ollama_messages.append({"role": msg["role"], "content": _normalize_content(msg["content"])})
+        ollama_messages.extend(_translate_history(messages))
 
         body: dict[str, Any] = {
             "model": model,
@@ -139,6 +243,9 @@ class OllamaProvider(Provider):
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
+                # §9: size the context window from model_specs, never ollama's
+                # 4096 default.
+                "num_ctx": _num_ctx_for(model),
             },
         }
         if tools:
@@ -163,6 +270,13 @@ class OllamaProvider(Provider):
             ) as resp:
                 if resp.status_code != 200:
                     await resp.aread()
+                    # §1: map a context-overflow error to the shared class so
+                    # the loop routes it to reduction, not a blind retry.
+                    if resp.status_code == 400 and is_overflow_message(resp.text):
+                        raise ContextOverflowError(
+                            f"Ollama context overflow: {resp.text[:200]}",
+                            status_code=400, provider="ollama",
+                        )
                     raise ProviderError(
                         f"Ollama API error {resp.status_code}: {resp.text[:200]}",
                         status_code=resp.status_code,
@@ -243,6 +357,12 @@ class OllamaProvider(Provider):
                         backoff *= _BACKOFF_MULTIPLIER
                         continue
 
+                    # §1: context-overflow → shared class (route to reduction).
+                    if resp.status_code == 400 and is_overflow_message(resp.text):
+                        raise ContextOverflowError(
+                            f"Ollama context overflow: {resp.text[:200]}",
+                            status_code=400, provider="ollama",
+                        )
                     raise ProviderError(
                         f"Ollama API error {resp.status_code}: {resp.text[:200]}",
                         status_code=resp.status_code,

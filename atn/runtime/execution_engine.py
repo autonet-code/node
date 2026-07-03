@@ -18,6 +18,8 @@ from ..models import (
     AgentStatus,
     ExecutionRecord,
     ExecutionStatus,
+    InboxMessage,
+    MessagePriority,
     MessageType,
     StepType,
     TokenUsage,
@@ -878,6 +880,7 @@ class ExecutionEngine:
             else:
                 system_prompt = build_delegate_prompt(
                     defn.agent_type, defn.id, defn.parent_id,
+                    tool_categories=defn.tools,
                 )
                 _inject_identity = True
 
@@ -904,8 +907,20 @@ class ExecutionEngine:
             # sdk_builtin) runs with just the ATN MCP tools, much smaller prefix.
             native_tools = "sdk_builtin" in (defn.tools or [])
 
+            # §9 lean tool surface: non-bridge providers no longer get the full
+            # _SHELL_TOOLS schema block unconditionally (it bloated every lean
+            # agent's first-turn context). Shell tools ride the "shell" tool
+            # category — an agent opts in via tools=["shell", ...]. Back-compat:
+            # the bridge-native flags "atn_full"/"sdk_builtin" still imply shell
+            # access so pre-existing agents are unaffected.
+            _tool_spec = defn.tools or []
+            _wants_shell = (
+                "shell" in _tool_spec
+                or "atn_full" in _tool_spec
+                or "sdk_builtin" in _tool_spec
+            )
             from ..providers.bridge import BridgeProvider as _BP
-            if not isinstance(sub_provider, _BP):
+            if not isinstance(sub_provider, _BP) and _wants_shell:
                 agent_tools.extend(_SHELL_TOOLS)
 
             # Start this agent's declared connectors and add their tools. The
@@ -1183,6 +1198,19 @@ class ExecutionEngine:
                 send_kwargs["repeat_call_limit"] = defn.repeat_call_limit
 
             response = await sub_provider.send_orchestrate(**send_kwargs)
+
+            # Steering that was accepted mid-run but not consumed before the
+            # loop ended must not be lost (finding 8 contract): re-post each
+            # item to the agent's inbox so the next run picks it up.
+            for _undelivered in getattr(response, "undelivered_steering", None) or []:
+                self.inbox.post(InboxMessage(
+                    id=InboxMessage.generate_id(),
+                    source="steering-fallback",
+                    target=defn.id,
+                    type=MessageType.WORK,
+                    priority=MessagePriority.HIGH,
+                    data={"instruction": _undelivered},
+                ))
 
             # --- Process result ---
             result_text = response.text or ""

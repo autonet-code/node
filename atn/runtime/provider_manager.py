@@ -275,6 +275,14 @@ class ProviderManager:
         # can still fetch stats after execution completes.
         self._cached_session_stats: dict[str, dict[str, Any]] = {}
 
+        # §10: cache the ollama /api/tags probe so unknown-model routing can
+        # check "is this installed locally?" without a network call per resolve.
+        # ``_ollama_tags_cache`` is the set of installed model ids (names, with
+        # and without their :tag), refreshed at most every ~60s.
+        self._ollama_tags_cache: set[str] | None = None
+        self._ollama_tags_cache_ts: float = 0.0
+        self._ollama_tags_ttl: float = 60.0
+
     # ------------------------------------------------------------------
     # API key resolution
     # ------------------------------------------------------------------
@@ -449,14 +457,67 @@ class ProviderManager:
                 log.warning("world_service_resolver failed: %s", e)
         return self._world_service
 
+    def _ollama_tags_cached(self) -> set[str]:
+        """Return the set of locally-installed ollama model ids, cached ~60s.
+
+        Sync (called from the sync resolve path). Tolerates ollama being down —
+        returns an empty set on any error and caches that so we don't hammer a
+        dead endpoint. Ids are stored both with and without their ``:tag`` so a
+        bare name like ``qwen3.5`` also matches an installed ``qwen3.5:4b``.
+        """
+        import time
+        now = time.monotonic()
+        if (
+            self._ollama_tags_cache is not None
+            and (now - self._ollama_tags_cache_ts) < self._ollama_tags_ttl
+        ):
+            return self._ollama_tags_cache
+
+        tags: set[str] = set()
+        try:
+            import httpx
+            pconfig = self._config.providers.get("ollama")
+            defaults = self._PROVIDER_DEFAULTS.get("ollama", {})
+            base_url = (
+                (pconfig.base_url if pconfig else "")
+                or defaults.get("base_url", "http://localhost:11434")
+            ).rstrip("/")
+            resp = httpx.get(f"{base_url}/api/tags", timeout=3.0)
+            if resp.status_code == 200:
+                for m in resp.json().get("models", []):
+                    name = (m.get("name") or "").lower()
+                    if name:
+                        tags.add(name)
+                        if ":" in name:
+                            tags.add(name.split(":", 1)[0])
+        except Exception as exc:
+            log.debug("ollama tags probe failed (treating as not installed): %s", exc)
+
+        self._ollama_tags_cache = tags
+        self._ollama_tags_cache_ts = now
+        return tags
+
+    def _model_installed_in_ollama(self, model_name: str) -> bool:
+        lower = model_name.lower()
+        tags = self._ollama_tags_cached()
+        if lower in tags:
+            return True
+        # Also match on the bare base name (``qwen3.5`` matches ``qwen3.5:4b``).
+        base = lower.split(":", 1)[0]
+        return base in tags
+
     def _resolve_provider_for_model(self, model_name: str, agent_id: str) -> Any:
         model_lower = model_name.lower()
         if model_lower.startswith("gemini"):
             defaults = self._PROVIDER_DEFAULTS.get("gemini", {})
             api_key = self._resolve_api_key("gemini")
             if not api_key:
-                log.warning("No Gemini API key found, falling back to BridgeProvider")
-                return BridgeProvider(model=model_name)
+                # §10: no silent BridgeProvider fallback onto the user's
+                # subscription. A keyless gemini model is a routing error.
+                raise ProviderError(
+                    f"No Gemini API key configured for model '{model_name}': "
+                    f"set a key or specify provider explicitly"
+                )
             return OpenAICompatibleProvider(
                 name=f"gemini-{agent_id}",
                 base_url=defaults.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai"),
@@ -467,20 +528,43 @@ class ProviderManager:
             defaults = self._PROVIDER_DEFAULTS.get("openai", {})
             api_key = self._resolve_api_key("openai")
             if not api_key:
-                log.warning("No OpenAI API key found, falling back to BridgeProvider")
-                return BridgeProvider(model=model_name)
+                # §10: fail loud rather than silently billing the bridge.
+                raise ProviderError(
+                    f"No OpenAI API key configured for model '{model_name}': "
+                    f"set a key or specify provider explicitly"
+                )
             return OpenAICompatibleProvider(
                 name=f"openai-{agent_id}",
                 base_url=defaults.get("base_url", "https://api.openai.com/v1"),
                 api_key=api_key,
                 default_model=model_name,
             )
-        # Default for claude-* models: prefer Anthropic API if key available
-        if model_lower.startswith("claude"):
+        # Default for claude models: prefer Anthropic API if key available, else
+        # the Claude Max bridge (an explicit, expected route for claude ids).
+        # Match the "claude" prefix AND the canonical short aliases the bridge
+        # accepts (sonnet/opus/haiku/fable/mythos) — these are Claude models, not
+        # unknown ids, so they must NOT hit the fail-loud path below.
+        _CLAUDE_ALIASES = ("sonnet", "opus", "haiku", "fable", "mythos")
+        if model_lower.startswith("claude") or model_lower.startswith(_CLAUDE_ALIASES):
             api_key = self._resolve_api_key("anthropic")
             if api_key:
                 return AnthropicProvider(api_key=api_key, default_model=model_name)
-        return BridgeProvider(model=model_name)
+            return BridgeProvider(model=model_name)
+        # §10: unknown prefix. Probe the ollama tags cache — if the model is
+        # installed locally, route to ollama. Otherwise FAIL LOUD instead of
+        # falling onto the bridge (the qwen3.5:4b-burned-45k-subscription bug,
+        # live finding 1).
+        if self._model_installed_in_ollama(model_name):
+            defaults = self._PROVIDER_DEFAULTS.get("ollama", {})
+            pconfig = self._config.providers.get("ollama")
+            return OllamaProvider(
+                base_url=(pconfig.base_url if pconfig else "") or defaults.get("base_url", "http://localhost:11434"),
+                default_model=model_name,
+            )
+        raise ProviderError(
+            f"unknown model '{model_name}': not a known cloud model and not "
+            f"installed in ollama — set provider explicitly"
+        )
 
     def get_bridge_provider(self, agent_id: str | None = None) -> Any:
         from ..orchestrator import ORCHESTRATOR_ID

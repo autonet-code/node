@@ -37,6 +37,7 @@ class ModelSpec:
     relative_cost: float = 1.0          # multiplier vs. Sonnet for subscription burn
     default_channel: str = ""           # provider name typically used (hint only)
     aliases: tuple[str, ...] = ()       # alternate IDs that resolve here
+    orchestrator_capable: bool = False  # may serve as the root/orchestrator agent (§14)
 
 
 _DEFAULT_SPEC = ModelSpec(
@@ -47,6 +48,22 @@ _DEFAULT_SPEC = ModelSpec(
     context_window=128_000,
     max_output_tokens=8_192,
     relative_cost=1.0,
+)
+
+# Local (ollama) models default conservatively: 16384 context, not 128k. An
+# unknown local model that claims a 128k window would let ollama silently
+# truncate a large prompt to its 4096 default and answer from hallucination
+# (agentic_loop.md §7 / live finding 4). Unknown local ids fall through here.
+_LOCAL_DEFAULT_SPEC = ModelSpec(
+    id="local-default",
+    family="local",
+    klass="other",
+    display_name="Unknown local model",
+    context_window=16_384,
+    max_output_tokens=8_192,
+    relative_cost=0.0,
+    default_channel="ollama",
+    orchestrator_capable=False,
 )
 
 
@@ -62,26 +79,28 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="Claude Fable 5",
         context_window=1_000_000, max_output_tokens=128_000,
         relative_cost=10.0, default_channel="claude_max",
-        aliases=("fable", "fable-5"),
+        aliases=("fable", "fable-5"), orchestrator_capable=True,
     ),
     ModelSpec(
         id="claude-mythos-5", family="claude", klass="opus",
         display_name="Claude Mythos 5",
         context_window=1_000_000, max_output_tokens=128_000,
         relative_cost=10.0, default_channel="claude_max",
-        aliases=("mythos", "mythos-5"),
+        aliases=("mythos", "mythos-5"), orchestrator_capable=True,
     ),
     ModelSpec(
         id="claude-opus-4-8", family="claude", klass="opus",
         display_name="Claude Opus 4.8",
         context_window=1_000_000, max_output_tokens=128_000,
         relative_cost=5.0, default_channel="claude_max",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="claude-opus-4-7", family="claude", klass="opus",
         display_name="Claude Opus 4.7",
         context_window=1_000_000, max_output_tokens=128_000,
         relative_cost=5.0, default_channel="claude_max",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="claude-sonnet-4-6", family="claude", klass="sonnet",
@@ -94,6 +113,7 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="Claude Opus 4.6",
         context_window=1_000_000, max_output_tokens=128_000,
         relative_cost=5.0, default_channel="claude_max",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="claude-haiku-4-5", family="claude", klass="haiku",
@@ -120,18 +140,21 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="GPT-5.5",
         context_window=400_000, max_output_tokens=128_000,
         relative_cost=1.0, default_channel="openai",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="gpt-5", family="gpt", klass="other",
         display_name="GPT-5",
         context_window=400_000, max_output_tokens=128_000,
         relative_cost=1.0, default_channel="openai",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="gpt-4.1", family="gpt", klass="other",
         display_name="GPT-4.1",
         context_window=1_000_000, max_output_tokens=32_000,
         relative_cost=0.5, default_channel="openai",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="gpt-4o", family="gpt", klass="other",
@@ -144,6 +167,7 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="o3",
         context_window=200_000, max_output_tokens=100_000,
         relative_cost=2.0, default_channel="openai",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="o4-mini", family="gpt", klass="other",
@@ -164,6 +188,7 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="DeepSeek Reasoner",
         context_window=1_000_000, max_output_tokens=64_000,
         relative_cost=0.1, default_channel="deepseek",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="deepseek-chat", family="deepseek", klass="other",
@@ -176,6 +201,7 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="DeepSeek V4 Pro",
         context_window=1_000_000, max_output_tokens=8_192,
         relative_cost=0.1, default_channel="deepseek",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="deepseek-v4-flash", family="deepseek", klass="other",
@@ -190,6 +216,7 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="Gemini 3 Pro",
         context_window=1_000_000, max_output_tokens=64_000,
         relative_cost=1.0, default_channel="gemini",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="gemini-3-flash", family="gemini", klass="other",
@@ -202,12 +229,33 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="Gemini 2.5 Pro",
         context_window=2_000_000, max_output_tokens=65_536,
         relative_cost=1.0, default_channel="gemini",
+        orchestrator_capable=True,
     ),
     ModelSpec(
         id="gemini-2.5-flash", family="gemini", klass="other",
         display_name="Gemini 2.5 Flash",
         context_window=1_000_000, max_output_tokens=65_536,
         relative_cost=0.2, default_channel="gemini",
+    ),
+
+    # ---- Local (Ollama) ----
+    # relative_cost=0 — local inference doesn't burn the shared subscription.
+    # context 16384 keeps ollama from silently truncating to its 4096 default.
+    # orchestrator_capable stays False until §14's prerequisites are proven per
+    # model (structured tool round-trip + num_ctx + smoke test). Do NOT flip on.
+    ModelSpec(
+        id="qwen3.5:4b", family="qwen", klass="other",
+        display_name="Qwen3.5 4B",
+        context_window=16_384, max_output_tokens=8_192,
+        relative_cost=0.0, default_channel="ollama",
+        orchestrator_capable=False,
+    ),
+    ModelSpec(
+        id="vibethinker-3b", family="vibethinker", klass="other",
+        display_name="VibeThinker 3B",
+        context_window=16_384, max_output_tokens=8_192,
+        relative_cost=0.0, default_channel="ollama",
+        orchestrator_capable=False,
     ),
 )
 
@@ -219,8 +267,20 @@ _MODELS_BY_PREFIX_LEN: tuple[ModelSpec, ...] = tuple(
 _MODELS_BY_ID: dict[str, ModelSpec] = {s.id: s for s in _MODELS}
 
 
+def _looks_local(model_id: str) -> bool:
+    """Heuristic: an ollama/local model id, e.g. ``qwen3:4b``, ``llama3.1:8b``,
+    ``vibethinker-3b``. Ollama tags carry a ``:size`` suffix; cloud model ids
+    never do. This lets unknown local models default to the conservative
+    16384-token window instead of the cloud 128k default (agentic_loop.md §7)."""
+    return ":" in model_id
+
+
 def resolve(model_id: str) -> ModelSpec:
-    """Return the ModelSpec matching ``model_id`` (longest-prefix), or default."""
+    """Return the ModelSpec matching ``model_id`` (longest-prefix), or default.
+
+    Unknown models that look local (ollama ``name:tag`` form) fall through to
+    ``_LOCAL_DEFAULT_SPEC`` (16384 context), not the 128k cloud default.
+    """
     if not model_id:
         return _DEFAULT_SPEC
     lower = model_id.lower()
@@ -235,6 +295,8 @@ def resolve(model_id: str) -> ModelSpec:
     for spec in _MODELS_BY_PREFIX_LEN:
         if lower.startswith(spec.id.lower()):
             return spec
+    if _looks_local(model_id):
+        return _LOCAL_DEFAULT_SPEC
     return _DEFAULT_SPEC
 
 
@@ -257,9 +319,23 @@ def list_by_class(klass: str) -> tuple[ModelSpec, ...]:
 # Backward-compat shims — replaced gradually as call sites migrate.
 # ---------------------------------------------------------------------------
 
-def context_window(model_id: str) -> int:
-    """Legacy: prefer ``resolve(model_id).context_window``."""
+def get_context_window(model_id: str) -> int:
+    """Context window for a model. Unknown local models default to 16384,
+    unknown cloud models to 128k (see ``resolve``)."""
     return resolve(model_id).context_window
+
+
+def context_window(model_id: str) -> int:
+    """Legacy alias for ``get_context_window``."""
+    return resolve(model_id).context_window
+
+
+def orchestrator_capable(model_id: str) -> bool:
+    """Whether a model may serve as the root/orchestrator agent (§14).
+
+    Derived per-model from the spec flag. Local models stay False until their
+    §14 prerequisites are proven; unknown models are not orchestrator-capable."""
+    return resolve(model_id).orchestrator_capable
 
 
 def max_output_tokens(model_id: str) -> int:

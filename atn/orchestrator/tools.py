@@ -167,6 +167,20 @@ _TOOLS: list[ToolDefinition] = [
                     "type": "string",
                     "description": "Model override (e.g. 'sonnet', 'opus').",
                 },
+                "provider": {
+                    "type": "string",
+                    "enum": [
+                        "claude_max", "codex_max", "anthropic", "openai",
+                        "gemini", "deepseek", "ollama", "rpb", "substrate",
+                    ],
+                    "description": (
+                        "Explicit provider for this agent. Omit to route by the "
+                        "model id (the daemon fails loud if a model can't be "
+                        "placed rather than defaulting onto the subscription). "
+                        "Set 'ollama' for local models, 'rpb' for sponsor-routed "
+                        "dependents."
+                    ),
+                },
                 "max_turns": {
                     "type": "integer",
                     "description": "Max LLM turns. Default: 50.",
@@ -579,6 +593,21 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
+        name="get_usage",
+        description=(
+            "Get YOUR provider usage so you can self-pace long-horizon work "
+            "against the shared subscription. For Claude Max / bridge agents: "
+            "5h + 7d subscription-window utilization and reset times, plus your "
+            "own budget consumption. For API/local providers: cumulative session "
+            "tokens vs your configured budget. Cached ~60s — safe to poll between "
+            "phases without burning a probe call every turn."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
+    ToolDefinition(
         name="set_credit_budget",
         description="Configure the credit budget for a provider.",
         input_schema={
@@ -894,16 +923,19 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     if "max_turns" in input:
         defn.max_turns = input["max_turns"]
         changed.append("max_turns")
+    provider_or_model_changed = False
     if "model" in input:
         defn.cognitive_model = input["model"]
         defn.provider = input["model"]
         changed.append("model")
+        provider_or_model_changed = True
     if "provider" in input:
         # Explicit provider override (e.g. "rpb" for a dependent agent that
         # routes inference to a sponsor). Set after "model" so it wins when
         # both are present.
         defn.provider = input["provider"]
         changed.append("provider")
+        provider_or_model_changed = True
     if "sponsor_address" in input:
         # The on-chain address of the sponsor agent this dependent routes to.
         # Empty string clears it (falls back to any is_sponsor peer).
@@ -993,6 +1025,25 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     if not changed:
         return {"agent_id": agent_id, "status": "no_changes"}
 
+    # §10: a provider/model change must be LIVE. The resolved provider instance
+    # is cached in ``providers._active_providers[agent_id]``; without eviction
+    # the cached instance keeps serving the OLD model (execution_engine.py:847
+    # class of bug — inert update_agent). Evict + close so the next run rebuilds
+    # against the new config. Mirrors unregister_agent's provider cleanup
+    # (runtime/__init__.py:912-918) minus the file deletion.
+    if provider_or_model_changed:
+        pmgr = getattr(runtime, "providers", None)
+        active = getattr(pmgr, "_active_providers", None) if pmgr else None
+        if isinstance(active, dict):
+            old_provider = active.pop(agent_id, None)
+            if old_provider is not None and hasattr(old_provider, "close"):
+                try:
+                    await old_provider.close()
+                except Exception as exc:
+                    log.warning("Failed to close evicted provider for %s: %s", agent_id, exc)
+            if hasattr(pmgr, "_cached_session_stats"):
+                pmgr._cached_session_stats.pop(agent_id, None)
+
     # Persist to YAML
     try:
         save_agent(defn, runtime._config.agents_dir)
@@ -1041,6 +1092,10 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 
         effective_model = model or runtime._config.orchestrator.model or "sonnet"
         model_tier = get_model_tier(effective_model)
+        # §10: an explicit provider (enum of known providers) pins routing.
+        # Omitted → provider is the model id, and _resolve_provider_for_model
+        # fails loud if it can't place it (no silent bridge fallback).
+        explicit_provider = input.get("provider", "")
 
         # Warn if model tier seems low for agent_type
         tier_warning = None
@@ -1055,7 +1110,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             id=agent_id,
             name=input.get("name", "") or input.get("id", agent_id),
             mode=AgentMode.COGNITIVE,
-            provider=effective_model,
+            provider=explicit_provider or effective_model,
             cognitive_model=effective_model,
             system_prompt=system_prompt,
             task_prompt=prompt,
@@ -1976,6 +2031,87 @@ async def _get_my_budget_status(runtime: Runtime, input: dict[str, Any]) -> dict
     }
 
 
+# §13 get_usage: cache the (possibly network-backed) usage payload per caller
+# so an agent polling get_usage every turn doesn't fire a probe call each time.
+_USAGE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_USAGE_CACHE_TTL = 60.0
+
+
+async def _get_usage(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Return the caller's provider usage (§13).
+
+    Bridge (Claude Max) callers get the cached subscription-window utilization
+    (5h/7d + reset times from ``BridgeProvider.refresh_usage``) plus their own
+    per-provider budget counters. API/local callers get cumulative session
+    tokens vs their configured budget. Cached ~60s per caller.
+    """
+    import time
+    from . import ORCHESTRATOR_ID
+    from ..providers.bridge import BridgeProvider
+
+    caller_id = input.get("_caller_id") or ORCHESTRATOR_ID
+
+    cached = _USAGE_CACHE.get(caller_id)
+    if cached is not None and (time.monotonic() - cached[0]) < _USAGE_CACHE_TTL:
+        return {**cached[1], "cached": True}
+
+    result: dict[str, Any] = {"caller_id": caller_id}
+
+    # The caller's own per-provider budget counters (works for every provider).
+    try:
+        result["budgets"] = runtime.registry.get_budget_info(caller_id)
+    except Exception:
+        result["budgets"] = {}
+
+    pmgr = getattr(runtime, "providers", None)
+    active = getattr(pmgr, "_active_providers", None) if pmgr else None
+    provider = active.get(caller_id) if isinstance(active, dict) else None
+
+    if isinstance(provider, BridgeProvider):
+        # Subscription-window utilization. Prefer the already-cached
+        # rate_limits; only hit the network if we've never populated them.
+        result["provider"] = "claude_max"
+        rate_limits = dict(getattr(provider, "_rate_limits", {}) or {})
+        if not rate_limits:
+            try:
+                rate_limits = await provider.refresh_usage()
+            except Exception as exc:
+                log.warning("get_usage: refresh_usage failed for %s: %s", caller_id, exc)
+                rate_limits = {}
+        result["subscription"] = {"rate_limits": rate_limits}
+        # Session token counters, if the bridge exposes them.
+        try:
+            stats = provider.session_stats
+            result["session"] = {
+                "cumulative_input_tokens": stats.get("cumulative_input_tokens"),
+                "cumulative_output_tokens": stats.get("cumulative_output_tokens"),
+                "context_used_pct": stats.get("context_used_pct"),
+            }
+        except Exception:
+            pass
+    else:
+        # API / local provider: cumulative session tokens vs configured budget.
+        if provider is not None and hasattr(provider, "session_stats"):
+            try:
+                stats = provider.session_stats
+                result["provider"] = getattr(provider, "name", "unknown")
+                result["session"] = stats
+            except Exception:
+                result["provider"] = getattr(provider, "name", "unknown")
+        else:
+            # No live provider (e.g. isolated worker) — fall back to the cached
+            # session-stats snapshot the worker reported on execution_done.
+            cache = getattr(pmgr, "_cached_session_stats", None)
+            snap = cache.get(caller_id) if isinstance(cache, dict) else None
+            if snap:
+                result["session"] = snap
+                if snap.get("rate_limits"):
+                    result["subscription"] = {"rate_limits": snap["rate_limits"]}
+
+    _USAGE_CACHE[caller_id] = (time.monotonic(), result)
+    return {**result, "cached": False}
+
+
 async def _set_credit_budget(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     b = runtime.credit_budget.set_budget(
         provider=input["provider"],
@@ -2141,9 +2277,15 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     "unified_tools": {"list_tools", "use_tool"},
     "planning": {"get_goals", "add_goal", "update_goal", "get_projects", "add_project", "update_project",
                  "propose_task", "list_tasks"},
-    "budget": {"get_credit_budget", "set_credit_budget"},
+    "budget": {"get_credit_budget", "set_credit_budget", "get_usage"},
     "identity": {"register_on_chain"},
     "profile": {"get_user_profile"},
+    # "shell" (bash/read_file/write_file/list_directory/search_files) is NOT a
+    # normal category: its tools live in shell_tools.py, not _TOOLS, and are
+    # appended by execution_engine for non-bridge providers. resolve_tool_surface
+    # skips it (like "sdk_builtin"). §9: non-bridge agents opt in via
+    # tools=["shell", ...] instead of getting the whole schema block by default.
+    "shell": set(),
 }
 
 
@@ -2182,8 +2324,8 @@ def resolve_tool_surface(tool_spec: list[str]) -> list[dict[str, Any]]:
     resolved_names: set[str] = set()
 
     for spec in tool_spec:
-        if spec in ("sdk_builtin", "connectors"):
-            continue  # handled by execution_engine
+        if spec in ("sdk_builtin", "connectors", "shell"):
+            continue  # handled by execution_engine (shell → _SHELL_TOOLS, §9)
         if spec == "atn_core":
             resolved_names.update(_DELEGATE_TOOL_NAMES)
         elif spec in _TOOL_CATEGORIES:
@@ -2560,6 +2702,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "get_credit_budget": _get_credit_budget,
     "set_credit_budget": _set_credit_budget,
     "get_my_budget_status": _get_my_budget_status,
+    "get_usage": _get_usage,
     "propose_task": _propose_task,
     "list_tasks": _list_tasks,
     "get_user_profile": _get_user_profile,
