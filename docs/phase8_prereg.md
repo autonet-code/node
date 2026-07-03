@@ -49,6 +49,18 @@ B−C remains a secondary contrast and its content asymmetry is by design.
   2026-07-03, merged with the legacy 17 and deduplicated by uid. All
   other sampling rules unchanged. Questions and judge claims are
   regenerated against the amended sample; nothing downstream had run.
+- **Amendment 3 (2026-07-03, before any calibration/contest call):**
+  the amended extraction yielded only 44 units (the world-model project
+  transcripts were deleted from disk after May; main-session-only
+  autonet extraction is small). Corpus source amended to additionally
+  include (a) subagent-session work units (pipeline default excludes
+  them as "operational helpers", but they carry real implementation
+  knowledge and the legacy world-model extraction included them —
+  yields ~194 autonet units), and (b) the surviving May 2026
+  world-model extraction (13 units; source transcripts no longer
+  exist). Merge, dedupe by uid, same deterministic 200-cap sampling.
+  Known limitation: one near-duplicate pair whose outcome drifted
+  between extractions survives uid-dedupe.
 - Sample: 200 units, deterministic (sort by sha256 of the unit's JSON,
   take first 200). Cap chosen for substrate build tractability
   (~15 s/unit); reported as a limitation.
