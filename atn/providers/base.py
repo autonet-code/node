@@ -438,6 +438,14 @@ class Provider(ABC):
         max_tokens = min(16_384, _spec_max_output(model or self._active_model))
         if max_tokens <= 0:
             max_tokens = 16_384
+        # Small-window models (locals at 16k): the output cap must scale with
+        # the window, or the pre-send input budget (window − max_tokens −
+        # buffer) goes negative and context reduction can never succeed
+        # (observed live: 16k window − 16k max_tokens − 8k buffer → instant
+        # "compaction spiral" abort on turn 1).
+        _ctx_for_cap = get_context_window(model or self._active_model)
+        if _ctx_for_cap > 0:
+            max_tokens = min(max_tokens, max(1_024, _ctx_for_cap // 4))
 
         for turn in range(max_turns):
             if self._interrupted:
@@ -486,7 +494,9 @@ class Provider(ABC):
             # exceeds ctx_window − max_tokens − 8k buffer, prune then compact
             # BEFORE sending (cheaper than an overflow round-trip).
             ctx_window_pre = get_context_window(self._active_model or model)
-            if ctx_window_pre > 0 and estimated_input > (ctx_window_pre - max_tokens - 8_000):
+            if ctx_window_pre > 0 and estimated_input > (
+                ctx_window_pre - max_tokens - _reduction_buffer(ctx_window_pre)
+            ):
                 try:
                     await Provider._reduce_context(
                         self, messages, system, model, message, max_tokens,
@@ -806,7 +816,17 @@ class Provider(ABC):
                 result_json = json.dumps(result, default=str)
                 # Cap oversized tool results (§6): head+tail, keeping the
                 # command echo and the error tail while eliding the middle.
-                result_json = _truncate_tool_result(result_json)
+                # On small windows the cap scales down so one result can never
+                # exceed a third of the input budget (chars).
+                _ctx_tokens = get_context_window(self._active_model or model)
+                _result_cap = 0
+                if 0 < _ctx_tokens <= 64_000:
+                    _budget_chars = max(
+                        0,
+                        _ctx_tokens - max_tokens - _reduction_buffer(_ctx_tokens),
+                    ) * 4
+                    _result_cap = max(4_000, _budget_chars // 3)
+                result_json = _truncate_tool_result(result_json, cap=_result_cap)
                 tool_result_content.append({
                     "type": "tool_result",
                     "tool_use_id": tc.id,
@@ -955,7 +975,9 @@ class Provider(ABC):
         run compaction even if the estimate looks under budget.
         """
         ctx_window = get_context_window(self._active_model or model)
-        budget_chars = max(0, (ctx_window - max_tokens - 8_000)) * 4
+        budget_chars = max(
+            0, (ctx_window - max_tokens - _reduction_buffer(ctx_window))
+        ) * 4
 
         # Tier 1 — prune old tool_result bodies (no LLM call).
         est_before = _estimate_chars(system, messages)
@@ -978,6 +1000,9 @@ class Provider(ABC):
                 "agent %s — refusing further compaction",
                 self._compactions_this_run, self.source_agent_id or "?",
             )
+            if _trim_tail_tool_results(messages, budget_chars) and \
+                    _estimate_chars(system, messages) <= budget_chars:
+                return
             raise ContextOverflowError(
                 "context reduction exhausted (max compactions reached)",
                 status_code=400, provider=self.name,
@@ -993,6 +1018,14 @@ class Provider(ABC):
         # summarizer isn't helping — abort rather than loop.
         reduction = 1.0 - (est_after_compact / est_before) if est_before > 0 else 0.0
         if reduction < _COMPACTION_MIN_REDUCTION:
+            # Last resort before giving up: the usual reason compaction can't
+            # help on a small window is an oversized tool_result inside the
+            # retained tail (which prune protects and compact keeps verbatim).
+            # Trim those in place; if that lands us under budget, carry on.
+            if _trim_tail_tool_results(compacted, budget_chars) and \
+                    _estimate_chars(system, compacted) <= budget_chars:
+                messages[:] = compacted
+                return
             log.warning(
                 "Compaction reduced estimate by only %.1f%% (<%.0f%%) for agent "
                 "%s — aborting to avoid a spiral", reduction * 100,
@@ -1191,22 +1224,31 @@ def _drain_queue(queue: "asyncio.Queue | None") -> list[str]:
     return drained
 
 
-def _truncate_tool_result(result_json: str) -> str:
+def _truncate_tool_result(result_json: str, cap: int = 0) -> str:
     """Head+tail truncation of an oversized tool result (§6).
 
     Replaces the old tail-chop: keep the first _TOOL_RESULT_HEAD_CHARS and the
     last _TOOL_RESULT_TAIL_CHARS, eliding the middle with a marker. An
     untruncated multi-MB result would not only blow this turn's input — it gets
     re-sent on EVERY subsequent turn of the loop.
+
+    ``cap``: optional per-request override below _TOOL_RESULT_CHAR_MAX.
+    Small-window (local) models must cap results well under the window or a
+    single tool result lands in the protected last-2-turns tail at a size no
+    reduction tier is allowed to touch (observed live: one get_snapshot on a
+    16k window → unrecoverable "compaction spiral" on the next turn).
     """
+    limit = min(_TOOL_RESULT_CHAR_MAX, cap) if cap > 0 else _TOOL_RESULT_CHAR_MAX
     total = len(result_json)
-    if total <= _TOOL_RESULT_CHAR_MAX:
+    if total <= limit:
         return result_json
-    elided = total - _TOOL_RESULT_HEAD_CHARS - _TOOL_RESULT_TAIL_CHARS
+    head = min(_TOOL_RESULT_HEAD_CHARS, int(limit * 0.65))
+    tail = min(_TOOL_RESULT_TAIL_CHARS, limit - head)
+    elided = total - head - tail
     return (
-        result_json[:_TOOL_RESULT_HEAD_CHARS]
+        result_json[:head]
         + f"\n…[elided {elided} chars of {total}]…\n"
-        + result_json[-_TOOL_RESULT_TAIL_CHARS:]
+        + result_json[-tail:]
     )
 
 
@@ -1234,6 +1276,40 @@ def _estimate_chars(system: str, messages: list[dict[str, Any]]) -> int:
         else len(json.dumps(m.get("content"), default=str))
         for m in messages
     )
+
+
+def _trim_tail_tool_results(messages: list[dict[str, Any]], budget_chars: int) -> bool:
+    """Last-resort reduction: truncate oversized tool_result bodies ANYWHERE
+    in the message stack, including the tail that prune/compact protect.
+
+    Prune skips the last 2 turns and compact retains them verbatim — correct
+    for big windows, but on a small one a single oversized tool_result in
+    that tail makes reduction structurally impossible. Trimming a result is
+    strictly better than aborting the run. Returns True if anything shrank.
+    """
+    per_result_cap = max(2_000, budget_chars // 4)
+    trimmed = False
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            body = block.get("content")
+            if isinstance(body, str) and len(body) > per_result_cap:
+                block["content"] = _truncate_tool_result(body, cap=per_result_cap)
+                trimmed = True
+    return trimmed
+
+
+def _reduction_buffer(ctx_window: int) -> int:
+    """Headroom (tokens) reserved on top of max_tokens when budgeting the
+    input side of a request. 8k on large windows; scales down on small
+    (local-model) windows so window − max_tokens − buffer stays positive."""
+    if ctx_window <= 0:
+        return 8_000
+    return min(8_000, max(1_024, ctx_window // 4))
 
 
 def _prune_tool_results(messages: list[dict[str, Any]]) -> int:
