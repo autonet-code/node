@@ -201,11 +201,28 @@ class TestDelegatePrompts:
         prompt = build_delegate_prompt("implement", "orch.1", "orch")
         assert "delegate" in prompt
         assert "post_message" in prompt
-        assert "get_snapshot" in prompt
+        # Tool-surface honesty: category tools are only advertised when the
+        # category is granted — the bare prompt must NOT claim get_snapshot.
+        assert "get_snapshot" not in prompt
+        with_obs = build_delegate_prompt(
+            "implement", "orch.1", "orch", tool_categories=["observation"])
+        assert "get_snapshot" in with_obs
 
-    def test_unknown_type_defaults_to_implement(self):
+    def test_tool_categories_are_deterministic(self):
+        a = build_delegate_prompt(
+            "general", "x", "y", tool_categories=["budget", "observation"])
+        b = build_delegate_prompt(
+            "general", "x", "y", tool_categories=["observation", "budget"])
+        assert a == b  # sorted rendering — cache prefix is order-invariant
+
+    def test_unknown_type_defaults_to_general(self):
         prompt = build_delegate_prompt("unknown_type", "orch.1", "orch")
-        assert "Implementation" in prompt
+        assert "Generalist" in prompt
+
+    def test_general_type_has_own_layer(self):
+        prompt = build_delegate_prompt("general", "orch.1", "orch")
+        assert "Generalist" in prompt
+        assert "Implementation Focus" not in prompt
 
 
 # ---------------------------------------------------------------------------
