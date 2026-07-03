@@ -218,6 +218,13 @@ def apply_events(world: World, events: List[Dict[str, Any]]) -> World:
                 obs_id = ev.get("observation_id", "")
                 if obs_id:
                     new_node.observation_id = obs_id
+                # Carry artifact_digest through replay so replica worlds
+                # can price artifacts by this node's standing (two-plane
+                # inference). Runtime-only attribute: not serialized, not
+                # hashed, no effect on ids/coords/equilibration.
+                digest = ev.get("artifact_digest", "")
+                if digest:
+                    new_node.artifact_digest = digest
                 # Authored post (targeted disputes): one unit-weight
                 # post by the event's author. Idempotent across replay
                 # waves because each event is applied exactly once.

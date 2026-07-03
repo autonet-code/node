@@ -61,6 +61,8 @@ from .world_persistence import (
     PersistenceConfig,
     WorldPersistence,
 )
+from .blob_store import BlobStore
+from .world_model_substrate.artifact_index import ArtifactIndex
 
 
 logger = logging.getLogger(__name__)
@@ -142,6 +144,28 @@ def _hash_claim(claim: str) -> str:
     return hashlib.sha256(claim.encode("utf-8")).hexdigest()[:16]
 
 
+def _outcome_to_dict(outcome: Any) -> Dict[str, Any]:
+    """Serialize a work-unit outcome to a JSON-able dict for the blob.
+
+    Handles the ``Outcome`` dataclass (accepted/kept/built_on/paid via
+    ``to_coords``), a raw mapping, or a bare 4-tuple. Kept permissive so
+    the ingestion path never raises on an unexpected outcome shape.
+    """
+    to_coords = getattr(outcome, "to_coords", None)
+    if callable(to_coords):
+        return dict(zip(
+            ("accepted", "kept", "built_on", "paid"), to_coords(),
+        ))
+    if isinstance(outcome, dict):
+        return outcome
+    try:
+        return dict(zip(
+            ("accepted", "kept", "built_on", "paid"), tuple(outcome),
+        ))
+    except TypeError:
+        return {"value": outcome}
+
+
 class WorldService:
     """Long-lived holder of one persistent World, one per RPB."""
 
@@ -156,6 +180,7 @@ class WorldService:
         snapshot_every_n_events: int = 100,
         snapshot_every_seconds: float = 60.0,
         epoch_emission_rate: Optional[float] = None,
+        blob_store: Optional[BlobStore] = None,
     ):
         self.rpb_address = rpb_address
         self.bandwidth = bandwidth
@@ -235,6 +260,22 @@ class WorldService:
             )
             persistence = WorldPersistence(cfg)
         self._persistence = persistence
+
+        # Two-plane substrate (docs/two_plane_inference.md): the data
+        # plane. Full work-unit payloads live in a blob store; a
+        # daemon-local ArtifactIndex embeds them for similarity retrieval.
+        # Both live next to the WAL in the persistence state dir. The
+        # index is derived, daemon-local state (never gossiped, never
+        # anchored) — it does NOT affect epoch-close determinism.
+        state_dir = self._persistence._dir
+        if blob_store is None:
+            blob_store = BlobStore(data_dir=str(state_dir / "blobs"))
+        self._blob_store = blob_store
+        self._artifact_index = ArtifactIndex(
+            self._blob_store,
+            index_path=state_dir / "artifact_index.jsonl",
+            dim=embedding_dim,
+        )
 
         # Try to recover from disk; if nothing exists, the fresh charter world
         # we just built is what we use.
@@ -517,6 +558,7 @@ class WorldService:
         sprout_rootless: bool = False,
         equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
         equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
+        artifact_digest: str = "",
     ) -> Dict[str, Any]:
         """Apply a single observation to the world.
 
@@ -569,6 +611,12 @@ class WorldService:
                         content=observation.label or "",
                         world=self._world,
                     )
+                    # Two-plane substrate: tag the work-unit node with its
+                    # blob-store digest so downstream retrieval can price
+                    # the artifact by this node's standing. Empty by
+                    # default -> to_dict omits it, old-format parity holds.
+                    if artifact_digest and new_node is not None:
+                        new_node.artifact_digest = artifact_digest
                     recorder._seq += 1
                     recorder.events.append(SubClaimSprouted(
                         seq=recorder._seq,
@@ -586,6 +634,7 @@ class WorldService:
                         # worlds drift from the live one (seen as 5-vs-30
                         # stakes on the same node).
                         observation_id=observation.id,
+                        artifact_digest=artifact_digest,
                     ))
 
             # 3. Equilibrate. The events derived here are NOT persisted
@@ -707,6 +756,15 @@ class WorldService:
                 obs_id = "wu_" + _hash_claim(claim)
                 obs = Observation(id=obs_id, coords=coords, label=claim)
 
+                # Two-plane substrate: store the full work-unit payload in
+                # the artifact index (data plane) and thread the digest
+                # into the sprouted node + event (verdict plane).
+                artifact_digest = self._artifact_index.add_artifact({
+                    "problem": problem,
+                    "resolution": resolution,
+                    "outcome": _outcome_to_dict(outcome),
+                })
+
                 receipt = self.submit_observation(
                     obs,
                     agent_id=agent_id,
@@ -714,6 +772,7 @@ class WorldService:
                     sprout_rootless=True,
                     equilibrate_rounds=equilibrate_rounds,
                     equilibrate_tolerance=equilibrate_tolerance,
+                    artifact_digest=artifact_digest,
                 )
                 total_events += receipt["events_applied"]
                 total_rounds += receipt["rounds"]
@@ -726,6 +785,23 @@ class WorldService:
                 "root_scores_before": scores_before,
                 "root_scores_after": scores_after,
             }
+
+    def infer_artifacts(self, query_text: str, k: int = 5) -> Dict[str, Any]:
+        """Two-plane inference: retrieve artifacts by embedding similarity
+        and re-rank by claim-graph standing (docs/two_plane_inference.md,
+        section 4).
+
+        Returns the ``_infer_artifacts`` result dict (mode="artifacts").
+        """
+        with self._lock:
+            from .world_model_substrate.infer import _infer_artifacts
+            return _infer_artifacts(
+                {"text": query_text},
+                world=self._world,
+                artifact_index=self._artifact_index,
+                blob_store=self._blob_store,
+                k=k,
+            )
 
     def submit_con(
         self,

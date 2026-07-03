@@ -30,6 +30,7 @@ from world_model.generalized import (
     equilibrate,
     render,
 )
+from world_model.models.tree import Position
 
 from .adapter import (
     CHARTER,
@@ -86,6 +87,7 @@ def _looks_like_turn(input_data: Dict[str, Any]) -> bool:
 def _infer_alignment(
     input_data: Dict[str, Any],
     global_model_payload: Optional[Dict[str, Any]] = None,
+    world: Optional[Any] = None,
 ) -> Dict[str, Any]:
     if "turns" in input_data:
         turns = input_data["turns"]
@@ -94,10 +96,11 @@ def _infer_alignment(
     else:
         turns = [input_data]
 
-    if global_model_payload is not None:
-        world = deserialize_world(global_model_payload)
-    else:
-        world = build_charter_world()
+    if world is None:
+        if global_model_payload is not None:
+            world = deserialize_world(global_model_payload)
+        else:
+            world = build_charter_world()
 
     for i, turn in enumerate(turns):
         world.add_observation(turn_to_observation(turn, turn_index=i))
@@ -126,11 +129,13 @@ def _infer_alignment(
 def _infer_general(
     input_data: Dict[str, Any],
     global_model_payload: Optional[Dict[str, Any]] = None,
+    world: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    if global_model_payload is not None:
-        world = deserialize_world(global_model_payload)
-    else:
-        world = build_charter_world()
+    if world is None:
+        if global_model_payload is not None:
+            world = deserialize_world(global_model_payload)
+        else:
+            world = build_charter_world()
 
     # Equilibrate once so existing structure has settled scores
     equilibrate(world, max_rounds=4, tolerance=1e-3)
@@ -152,6 +157,115 @@ def _infer_general(
 
 
 # ---------------------------------------------------------------------------
+# Artifact retrieval inference (data plane)
+# ---------------------------------------------------------------------------
+
+
+def _query_text(input_data: Dict[str, Any]) -> str:
+    """Extract the query text from an artifact request.
+
+    Accepts ``text``, ``query``, or ``question`` (first present).
+    Raises ValueError if none is provided.
+    """
+    for key in ("text", "query", "question"):
+        if key in input_data and input_data[key] is not None:
+            return str(input_data[key])
+    raise ValueError(
+        "artifacts inference requires 'text', 'query', or 'question' in input_data"
+    )
+
+
+def _artifact_standing(world: Any) -> Dict[str, List[Any]]:
+    """Walk every node across all tendencies once, grouping claim nodes
+    by their ``artifact_digest`` attribute.
+
+    Returns a map ``digest -> [claim nodes]``. Nodes without an
+    ``artifact_digest`` (or with an empty one) are skipped. The
+    attribute is read via ``getattr(node, "artifact_digest", "")`` —
+    it is set by the ingestion agent and may be absent.
+    """
+    by_digest: Dict[str, List[Any]] = {}
+    for tendency in world.tendencies.values():
+        for node in tendency.tree.all_nodes():
+            digest = getattr(node, "artifact_digest", "")
+            if not digest:
+                continue
+            by_digest.setdefault(digest, []).append(node)
+    return by_digest
+
+
+def _standing_of(nodes: List[Any]) -> float:
+    """Standing = Σ net_score(PRO-positioned) − Σ net_score(CON-positioned)."""
+    standing = 0.0
+    for node in nodes:
+        if node.position == Position.CON:
+            standing -= node.net_score
+        elif node.position == Position.PRO:
+            standing += node.net_score
+    return standing
+
+
+def _infer_artifacts(
+    input_data: Dict[str, Any],
+    world: Any,
+    artifact_index: Any,
+    blob_store: Any,
+    k: int = 5,
+) -> Dict[str, Any]:
+    """Retrieve artifacts by embedding similarity, re-ranked by graph standing.
+
+    See ``docs/two_plane_inference.md`` section 4. The claim graph is a
+    verdict layer: artifacts are retrieved from the embedding index and
+    re-priced by the net_score of the PRO/CON claim nodes that reference
+    each artifact digest.
+    """
+    query = _query_text(input_data)
+
+    candidates = artifact_index.search(query, k=k * 3)
+    by_digest = _artifact_standing(world)
+
+    scored: List[Dict[str, Any]] = []
+    for digest, cosine in candidates:
+        claim_nodes = by_digest.get(digest, [])
+        standing = _standing_of(claim_nodes)
+        final = cosine * (1.0 + math.tanh(standing))
+        claims = sorted(
+            (
+                {
+                    "content": node.content,
+                    "position": node.position.value,
+                    "net_score": node.net_score,
+                }
+                for node in claim_nodes
+            ),
+            key=lambda c: c["content"],
+        )
+        scored.append(
+            {
+                "digest": digest,
+                "cosine": cosine,
+                "standing": standing,
+                "final": final,
+                "payload": blob_store.get_json(digest),
+                "claims": claims,
+            }
+        )
+
+    # Deterministic: highest final first, tie-break on digest ascending.
+    scored.sort(key=lambda a: (-a["final"], a["digest"]))
+    artifacts = scored[:k]
+
+    return {
+        "mode": "artifacts",
+        "artifacts": artifacts,
+        # Compatibility fields so downstream callers expecting the
+        # alignment shape don't crash.
+        "predictions": [],
+        "probabilities": [],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Top-level
 # ---------------------------------------------------------------------------
 
@@ -160,23 +274,49 @@ def infer_with_world_model(
     input_data: Dict[str, Any],
     global_model_payload: Optional[Dict[str, Any]] = None,
     mode: Optional[str] = None,
+    *,
+    world: Optional[Any] = None,
+    artifact_index: Optional[Any] = None,
+    blob_store: Optional[Any] = None,
+    k: int = 5,
 ) -> Dict[str, Any]:
-    """Run inference. Two modes auto-selected unless overridden:
+    """Run inference. Three modes auto-selected unless overridden:
 
       mode='alignment' or input looks turn-shaped:
-        Score against the four charter tendencies. Return the
-        dominant principle and softmax probabilities. Original path.
+        Score against the charter tendencies. Return the dominant
+        principle and softmax probabilities. Original path.
+
+      mode='artifacts' or (artifact_index + blob_store provided and
+      input is not turn-shaped):
+        Retrieve artifacts from the embedding index and re-rank by
+        graph standing. Data-plane retrieval. See
+        ``docs/two_plane_inference.md``.
 
       mode='general' or input is anything else:
         locate(input) -> render(region). Return the rendered region's
         structure for downstream rendering.
+
+    When ``world`` is passed it is used directly by every mode instead
+    of deserializing ``global_model_payload`` or building a fresh
+    charter world. When ``world`` is None behavior is unchanged.
     """
     if mode is None:
-        mode = "alignment" if _looks_like_turn(input_data) else "general"
+        if _looks_like_turn(input_data):
+            mode = "alignment"
+        elif artifact_index is not None and blob_store is not None:
+            mode = "artifacts"
+        else:
+            mode = "general"
 
     if mode == "alignment":
-        return _infer_alignment(input_data, global_model_payload)
+        return _infer_alignment(input_data, global_model_payload, world=world)
     elif mode == "general":
-        return _infer_general(input_data, global_model_payload)
+        return _infer_general(input_data, global_model_payload, world=world)
+    elif mode == "artifacts":
+        if artifact_index is None or blob_store is None or world is None:
+            raise ValueError(
+                "artifacts mode requires world, artifact_index, and blob_store"
+            )
+        return _infer_artifacts(input_data, world, artifact_index, blob_store, k=k)
     else:
         raise ValueError(f"unknown inference mode: {mode!r}")

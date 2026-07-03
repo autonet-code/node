@@ -188,6 +188,12 @@ class _EventRecorder:
                     polarity_axis=list(claim.polarity_axis) if claim else [],
                     content=node.content,
                     observation_id=getattr(node, "observation_id", "") or "",
+                    # Two-plane substrate: the work-unit node carries the
+                    # blob-store digest of its full payload (set by the
+                    # ingestion path when an artifact_index is provided).
+                    # Empty for every node that isn't a work-unit sprout,
+                    # so to_dict() omits it and old-format parity holds.
+                    artifact_digest=getattr(node, "artifact_digest", "") or "",
                 ))
 
 
@@ -212,6 +218,7 @@ def train_world_model_on_usefulness(
     agent_id: str = "default-trainer",
     embedder: Optional[Callable[[str], Tuple[float, ...]]] = None,
     seed_world: Optional[World] = None,
+    artifact_index: Optional[Any] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Train the substrate on a list of (problem, resolution, outcome).
 
@@ -224,6 +231,11 @@ def train_world_model_on_usefulness(
       agent_id: solver identifier, attached to each emitted event.
       embedder: optional override; default = default_usefulness_embedder().
       seed_world: continue from an existing world instead of fresh.
+      artifact_index: optional ArtifactIndex (two-plane substrate). When
+        provided, each work unit's full (problem, resolution, outcome)
+        payload is stored via ``add_artifact`` and the returned digest is
+        attached to the work-unit's sprouted node + emitted event. When
+        None, behavior is byte-identical to before (no digest field).
 
     Returns: (contribution, metrics) compatible with the protocol slot
     used by the alignment-path adapter.
@@ -287,6 +299,20 @@ def train_world_model_on_usefulness(
                     observation=obs,
                     content=problem[:80],
                 )
+                # Two-plane substrate: store the full work-unit payload
+                # in the artifact index and tag the sprouted node with
+                # its digest. The recorder reads node.artifact_digest via
+                # getattr when it scans new nodes after equilibrate.
+                if artifact_index is not None and new_node is not None:
+                    digest = artifact_index.add_artifact({
+                        "problem": problem,
+                        "resolution": resolution,
+                        "outcome": dict(zip(
+                            ("accepted", "kept", "built_on", "paid"),
+                            outcome.to_coords(),
+                        )),
+                    })
+                    new_node.artifact_digest = digest
             equilibrate(world, max_rounds=4, tolerance=1e-3)
             recorder.sub_claims_after_equilibrate(world, before_ids)
             n_observations += 1

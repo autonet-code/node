@@ -103,9 +103,23 @@ class SubClaimSprouted:
     # waiting for tendencies to organically stake it. Deterministic:
     # same event -> same post on every daemon.
     author_post: bool = False
+    # Two-plane substrate (docs/two_plane_inference.md): sha256 hex
+    # digest of the full work-unit payload stored in the blob store /
+    # artifact index. The digest rides the event so peers can fetch the
+    # artifact lazily; it does NOT participate in node ids, coords, or
+    # equilibration, so epoch close stays bit-identical. Serialized ONLY
+    # when non-empty (below) so replay of old logs — which never carried
+    # this field — produces byte-identical event dicts and batch hashes.
+    artifact_digest: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        # Back-compat: omit the optional artifact_digest when empty so
+        # events recorded before this field existed serialize identically
+        # (and their canonical-ordering batch hashes stay unchanged).
+        if not self.artifact_digest:
+            d.pop("artifact_digest", None)
+        return d
 
 
 @dataclass
