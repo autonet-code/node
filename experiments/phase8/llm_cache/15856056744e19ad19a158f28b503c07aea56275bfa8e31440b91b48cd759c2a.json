@@ -1,0 +1,7 @@
+{
+  "text": "All five candidates decline to answer from the actual docstring; scoring based on how they handle that plus quality of any inference offered.",
+  "kind": "grading",
+  "qid": "q009",
+  "grader": "sonnet",
+  "nudge": false
+}

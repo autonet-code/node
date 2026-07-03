@@ -1,0 +1,6 @@
+{
+  "text": "N_DIMS = 6 (len(CHARTER), which has 6 entries).\n\nDefault `veto_floor` for every CHARTER entry: `None` — all six entries (life_precious, self_preservation, promotion_of_intelligence, evolution, correctness, simplicity) have `\"veto_floor\": None`. Per the comment block above CHARTER, `None` means no veto pruning (the engine's `veto_shaped` flag stays off for that tendency); this is the current default so substrate behavior is unchanged from prior phases. A finite value would be a negative number (historically -1.0 for correctness in the engine default; 0 would be stricter).\n\nEffect of a finite `veto_floor` in `build_charter_world`: for each CHARTER entry, the function reads `veto_floor = entry.get(\"veto_floor\")`. If it is not None, two extra kwargs are added to the `GeneralizedTendency` constructor call:\n- `kwargs[\"veto_shaped\"] = True`\n- `kwargs[\"veto_score_floor\"] = float(veto_floor)`\n\n(When `veto_floor` is None, neither kwarg is set, so `GeneralizedTendency` uses its own defaults, i.e. veto pruning off.) Per the CHARTER comment, `veto_score_floor` sets the structural prune threshold for that tendency: a child whose tendency-tree `intrinsic_score` falls below this value gets pruned outright via `prune_veto_negatives`.",
+  "kind": "reference_key",
+  "qid": "q021",
+  "grader": "sonnet"
+}

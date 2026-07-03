@@ -1,0 +1,7 @@
+{
+  "text": "All five candidate answers decline to answer and instead explain what they'd need to check. None cite the actual figures (95%/84%/73%) or the dim_sweep.py/Phase 2.2 source. Scoring accordingly — they're near-identical in substance, with minor differences (D and E at least offer generic domain knowledge, which is low-value but slightly more substantive; B and C are essentially identical refusals; A is also a pure refusal but frames it well).",
+  "kind": "grading",
+  "qid": "q031",
+  "grader": "sonnet",
+  "nudge": false
+}

@@ -1,0 +1,37 @@
+{
+  "n": 10,
+  "mock": false,
+  "n_problems": 23,
+  "means": {
+    "none": 0.7286663216011042,
+    "rag": 0.4629658385093168,
+    "substrate": 0.470212215320911
+  },
+  "deltas": {
+    "substrate_minus_none": -0.2584541062801932,
+    "substrate_minus_rag": 0.007246376811594235,
+    "rag_minus_none": -0.26570048309178745
+  },
+  "significance_ttest_rel": {
+    "substrate_vs_none": {
+      "t": -2.8596024457348523,
+      "p": 0.009110545813184972
+    },
+    "substrate_vs_rag": {
+      "t": 0.2717084896643915,
+      "p": 0.7883796414230064
+    },
+    "rag_vs_none": {
+      "t": -2.921623090900306,
+      "p": 0.007902842033351301
+    }
+  },
+  "scipy_available": true,
+  "bridge_errors": [],
+  "empty_artifact_problems": [],
+  "probe": {
+    "min_artifacts_per_query": 5,
+    "mean_context_chars": 6000.0,
+    "invariant_failed": false
+  }
+}

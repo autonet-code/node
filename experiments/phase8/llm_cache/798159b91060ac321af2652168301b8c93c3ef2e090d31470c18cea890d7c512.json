@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate each candidate against the reference key.\n\nAll five answers (A-E) essentially decline to answer, stating they lack access to adapter.py, then offer generic first-principles speculation about veto pruning. None hit the actual key facts: veto_floor wiring to veto_shaped/veto_score_floor, prune_veto_negatives, structural pruning of below-floor children, or the stated rationale (\"substrate behavior unchanged from prior phases\").\n\n{\"scores\": {\"A\": {\"correctness\": 2, \"completeness\": 2, \"reference_accuracy\": 1}, \"B\": {\"correctness\": 2, \"completeness\": 2, \"reference_accuracy\": 1}, \"C\": {\"correctness\": 2, \"completeness\": 2, \"reference_accuracy\": 1}, \"D\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"E\": {\"correctness\": 2, \"completeness\": 2, \"reference_accuracy\": 2}}}",
+  "kind": "grading",
+  "qid": "q030",
+  "grader": "opus",
+  "nudge": false
+}

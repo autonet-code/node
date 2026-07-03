@@ -1,0 +1,7 @@
+{
+  "text": "All five candidates declined to answer substantively, correctly recognizing they lacked the file. I'll score based on how much correct content each provided relative to the key.\n\n- **A, B, C, D**: Pure refusals, no substantive answer. B and D correctly frame the three-option structure but attribute no failure modes. All get correctness ~2 (nothing wrong but nothing right), completeness 1, reference varies (E and D/C cite paths).\n- **E**: Cites the exact correct file path, and attempts general-knowledge failure modes — but they don't match the key (compositional/binary vs. compensation; rigidity vs. refuse-to-learn-dual-use). Partial correctness at best.\n\n{\"scores\": {\"A\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 2}, \"B\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 1}, \"C\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 2}, \"D\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 2}, \"E\": {\"correctness\": 2, \"completeness\": 2, \"reference_accuracy\": 4}}}",
+  "kind": "grading",
+  "qid": "q028",
+  "grader": "opus",
+  "nudge": false
+}

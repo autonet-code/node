@@ -1,0 +1,1 @@
+{"problem": "passthrough\n\nIdentity function. Return x\n\n>>> passthrough(3)\n3", "resolution": "def passthrough(x):\n    \"\"\" Identity function. Return x\n\n    >>> passthrough(3)\n    3\n    \"\"\"\n    return x\n", "text": "passthrough"}

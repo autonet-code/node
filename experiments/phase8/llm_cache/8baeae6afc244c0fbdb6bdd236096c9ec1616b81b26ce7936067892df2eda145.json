@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate the candidate answers against the reference key.\n\nAnswer [A] is a refusal — it declines to answer, providing no information about `max_delta` computation, the tolerance test, or the `round_idx` condition. It cannot be scored as correct or complete on the actual content, though it does correctly not fabricate anything.\n\n- **correctness**: 1 — provides no correct factual content relative to the key (it contradicts nothing but answers nothing).\n- **completeness**: 1 — misses everything.\n- **reference_accuracy**: The one file path it guesses (`world_model/generalized/equilibrate.py`) is unverified and speculative, and it names no actual mechanisms/functions from the key. Score 1 for lack of accurate references (it points at a plausible location but fabricates the path without basis).\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q007",
+  "grader": "opus",
+  "nudge": false
+}

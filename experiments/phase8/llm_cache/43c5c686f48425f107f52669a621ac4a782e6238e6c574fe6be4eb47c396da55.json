@@ -1,0 +1,7 @@
+{
+  "text": "I evaluated each answer against the reference key. All five candidates decline to answer, stating they lack file access. None provide the actual values (N_DIMS=6, veto_floor default None, or the veto_shaped/veto_score_floor kwargs behavior). They differ only in how much accurate contextual/path detail they cite.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}, \"B\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"C\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}, \"D\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}, \"E\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}}}",
+  "kind": "grading",
+  "qid": "q021",
+  "grader": "opus",
+  "nudge": false
+}

@@ -1,0 +1,7 @@
+{
+  "text": "All five candidate answers decline to answer, citing lack of access to the file. None provide the substantive answer (fallback/unattributed bucket, conservation of mint / divide-by-zero rationale).\n\nScoring: A, B, E give no substantive content at all (pure \"can't answer\"). C and D offer a small fragment of correct reasoning — C mentions an \"unclaimed/protocol\" bucket and \"shouldn't be discarded because it represents real work,\" which touches the correct answer partially. D acknowledges architecture but gives no substance.",
+  "kind": "grading",
+  "qid": "q039",
+  "grader": "opus",
+  "nudge": false
+}

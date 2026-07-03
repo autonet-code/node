@@ -1,0 +1,7 @@
+{
+  "text": "All five candidate answers decline to answer and provide no verifiable content matching the reference key.",
+  "kind": "grading",
+  "qid": "q031",
+  "grader": "sonnet",
+  "nudge": true
+}

@@ -1,0 +1,6 @@
+{
+  "text": "DEFAULT_DIM = 64 (current value in usefulness_coords.py).\n\nJustification: Inline comment directly above the constant states this was measured in \"Phase 2.2 (dim_sweep.py),\" which measured categorical separation across dims on the work_units corpus. Based on that measurement, DEFAULT_DIM was raised from 16 → 64.\n\nSeparation retained relative to native-384 (per the Phase 2.2 dim_sweep.py measurement):\n- 64 dims: 95%\n- 32 dims: 84%\n- 16 dims: 73%\n\nAdditional context for grading: the module docstring's \"Reduction\" section is stale/inconsistent — it still says \"The substrate uses 16D by default,\" which contradicts the actual current DEFAULT_DIM = 64 set by the Phase 2.2 finding. A fully correct answer may note this discrepancy, but the authoritative current value is 64, per the DEFAULT_DIM assignment and its adjacent comment. Answers that say 16 (from the docstring) without noting the actual constant value should be marked incorrect; answers citing 64 with the dim_sweep.py/Phase 2.2 justification and the 95/84/73% figures are fully correct.",
+  "kind": "reference_key",
+  "qid": "q022",
+  "grader": "sonnet"
+}

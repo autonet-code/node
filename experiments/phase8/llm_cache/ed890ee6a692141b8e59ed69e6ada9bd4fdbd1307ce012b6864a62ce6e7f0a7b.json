@@ -1,0 +1,7 @@
+{
+  "text": "I was given only one candidate answer (A), which declines to answer and asks to read the file instead. It provides no factual content, no coverage of the key points, and no accurate references.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q005",
+  "grader": "opus",
+  "nudge": false
+}

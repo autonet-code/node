@@ -1,0 +1,131 @@
+{
+  "n_questions": 25,
+  "per_arm": {
+    "A": {
+      "n": 25,
+      "mean": 1.22,
+      "ci95": [
+        1.1133333333333333,
+        1.3400000000000003
+      ]
+    },
+    "B": {
+      "n": 25,
+      "mean": 1.5866666666666667,
+      "ci95": [
+        1.373333333333333,
+        1.8266666666666669
+      ]
+    },
+    "C": {
+      "n": 25,
+      "mean": 1.3066666666666666,
+      "ci95": [
+        1.1533333333333333,
+        1.5066666666666666
+      ]
+    },
+    "D256": {
+      "n": 25,
+      "mean": 1.4333333333333333,
+      "ci95": [
+        1.2533333333333332,
+        1.6533333333333333
+      ]
+    },
+    "D64": {
+      "n": 25,
+      "mean": 1.3866666666666665,
+      "ci95": [
+        1.2333333333333332,
+        1.5666666666666667
+      ]
+    }
+  },
+  "contrasts": {
+    "primary": {
+      "arm_a": "D256",
+      "arm_b": "C",
+      "n": 25,
+      "mean_diff": 0.12666666666666668,
+      "t": 2.3536443961937024,
+      "p_raw": 0.02711675529927703,
+      "ci95": [
+        0.026666666666666696,
+        0.23999999999999994
+      ],
+      "insufficient_data": false,
+      "p_holm": 0.05423351059855406
+    },
+    "secondary_B_minus_A": {
+      "arm_a": "B",
+      "arm_b": "A",
+      "n": 25,
+      "mean_diff": 0.3666666666666666,
+      "t": 3.3166247903553994,
+      "p_raw": 0.002892078249584974,
+      "ci95": [
+        0.17333333333333328,
+        0.5933333333333333
+      ],
+      "insufficient_data": false,
+      "p_holm": 0.011568312998339896
+    },
+    "secondary_C_minus_B": {
+      "arm_a": "C",
+      "arm_b": "B",
+      "n": 25,
+      "mean_diff": -0.27999999999999997,
+      "t": -3.3006806952477956,
+      "p_raw": 0.003006901604859479,
+      "ci95": [
+        -0.44666666666666666,
+        -0.12
+      ],
+      "insufficient_data": false,
+      "p_holm": 0.011568312998339896
+    },
+    "secondary_D64_minus_D256": {
+      "arm_a": "D64",
+      "arm_b": "D256",
+      "n": 25,
+      "mean_diff": -0.046666666666666676,
+      "t": -1.1932010784269864,
+      "p_raw": 0.24445315018051722,
+      "ci95": [
+        -0.12666666666666662,
+        0.026666666666666644
+      ],
+      "insufficient_data": false,
+      "p_holm": 0.24445315018051722
+    }
+  },
+  "agreement": {
+    "n_paired": 115,
+    "pearson_r": 0.5731940776939993,
+    "pearson_p": 2.162473331042846e-11,
+    "mean_abs_disagreement": 0.39420289855072466,
+    "ungradeable": false,
+    "gate_threshold": 0.4
+  },
+  "decision": {
+    "verdict": "DEMOTE equilibration (gate stands): D256-C mean diff=0.1267 Holm p=0.05423 \u2014 does not clear D256>C AND p<0.05 AND diff>=0.25. Mint pricing moves toward explicit debate standing (economics change ratified by the user); equilibration demoted to experimental kernel.",
+    "retain_equilibration": false,
+    "mean_diff": 0.12666666666666668,
+    "p_holm": 0.05423351059855406,
+    "p_threshold": 0.05,
+    "diff_threshold": 0.25
+  },
+  "expansion": {
+    "recommend_expansion": false,
+    "ci_spans_zero": false,
+    "abs_mean_diff": 0.12666666666666668,
+    "diff_threshold": 0.3,
+    "reason": "CI [0.026666666666666696, 0.23999999999999994] spans 0 (False) AND |mean diff|=0.1267 < 0.3 (True)"
+  },
+  "per_category_EXPLORATORY": {},
+  "bootstrap": {
+    "n_resamples": 10000,
+    "seed": 8
+  }
+}

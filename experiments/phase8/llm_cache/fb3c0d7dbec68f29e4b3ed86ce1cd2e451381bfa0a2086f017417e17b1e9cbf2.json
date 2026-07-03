@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate Answer [A] against the reference key.\n\nAnswer [A] declines to answer, citing lack of file access. It provides no values for `N_DIMS`, no `veto_floor` defaults, and no explanation of the kwargs behavior. It contradicts nothing in the key (no false claims), but covers none of the material points and cites no correct mechanisms.\n\n{\"scores\": {\"A\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q021",
+  "grader": "opus",
+  "nudge": false
+}

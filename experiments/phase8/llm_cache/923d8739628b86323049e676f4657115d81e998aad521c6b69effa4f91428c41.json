@@ -1,0 +1,7 @@
+{
+  "text": "All five candidate answers refuse to answer, providing none of the required content (neither convergence condition, no scope behavior). They are equally empty on correctness/completeness. Some fabricate context (wrong file paths, unrelated project references).\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"B\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"C\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"D\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"E\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q023",
+  "grader": "opus",
+  "nudge": false
+}

@@ -1,0 +1,7 @@
+{
+  "text": "{\"scores\": {\"A\": {\"correctness\": 3, \"completeness\": 1, \"reference_accuracy\": 2}}}",
+  "kind": "grading",
+  "qid": "q006",
+  "grader": "opus",
+  "nudge": false
+}

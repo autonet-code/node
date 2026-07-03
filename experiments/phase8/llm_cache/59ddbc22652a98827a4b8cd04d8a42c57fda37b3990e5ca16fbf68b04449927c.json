@@ -1,0 +1,7 @@
+{
+  "text": "All five candidate answers decline to answer, providing none of the required technical content (the two conditions, the `0.0` return, or the `/0.5` rescaling).",
+  "kind": "grading",
+  "qid": "q020",
+  "grader": "opus",
+  "nudge": false
+}

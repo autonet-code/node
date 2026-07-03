@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate Answer [A] against the reference key.\n\nAnswer [A] declines to answer, stating it lacks file access. It provides no charter IDs, no scale factor, and no per-agent derivation logic — only a description of what it *would* need to do.\n\n- **correctness**: Nothing stated contradicts the key, but nothing correct is asserted either. A non-answer earns the floor.\n- **completeness**: Covers none of the three material aspects.\n- **reference_accuracy**: No references used at all — no charter IDs, no functions, no mechanisms cited. It names the function/file from the prompt but provides no actual reference content.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q019",
+  "grader": "opus",
+  "nudge": false
+}

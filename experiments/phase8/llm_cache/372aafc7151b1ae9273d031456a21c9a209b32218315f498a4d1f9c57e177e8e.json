@@ -1,0 +1,7 @@
+{
+  "text": "I only have one candidate answer to score (Answer [A]).\n\nAnswer [A] is an honest \"I don't know\" — it doesn't name the three consumers, their uses, or the architectural benefit. Its guesses (node positioning, state lookup, epoch management) don't match the key. It does point at roughly the right files/directories to search, which is minor reference credit, but nothing substantive is correct or complete.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}}}",
+  "kind": "grading",
+  "qid": "q012",
+  "grader": "opus",
+  "nudge": false
+}

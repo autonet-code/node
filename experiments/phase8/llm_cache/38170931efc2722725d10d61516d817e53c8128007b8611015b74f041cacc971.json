@@ -1,0 +1,7 @@
+{
+  "text": "All five candidates decline to answer, citing lack of file access. None provide the formula or conditions.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"B\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}, \"C\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}, \"D\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}, \"E\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q001",
+  "grader": "opus",
+  "nudge": false
+}

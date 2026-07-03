@@ -1,0 +1,1 @@
+{"outcome": {"accepted": 0.0, "built_on": 0.0, "kept": 1.0, "paid": 0.0}, "problem": "C:/Program Files/Git/usage", "resolution": "That path looks like an accidental paste \u2014 `C:/Program Files/Git/usage` isn't a meaningful command or file reference on its own. Did you mean to ask something specific (e.g., check Git installation, look at disk usage, run a Git command)?"}

@@ -1,0 +1,6 @@
+{
+  "text": "Given the truncated source, I need to check the untruncated `_attribute_node_mint` function to ground the answer precisely.",
+  "kind": "reference_key",
+  "qid": "q039",
+  "grader": "sonnet"
+}

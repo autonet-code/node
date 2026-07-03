@@ -1,0 +1,6 @@
+{
+  "text": "The provided source material (reconcile.py, novelty/mint/attribution logic) does not contain a function named `apply_emission_pool`, nor any pool-share, scale-factor, sorted-key iteration, or `raw_total` logic. I cannot write a grounded reference key from this file — that function is not defined or referenced anywhere in the given text (it's truncated at 15615 chars and cuts off mid-`_events_under_node`, well before any pool/emission code, if such code exists elsewhere in the codebase at all).\n\nTo produce an accurate reference key, I need the actual source of `apply_emission_pool` (likely in a different module — possibly something like an emissions/rewards/distribution file that calls into or follows this reconciliation step). Could you provide that file's contents? Given the docstring here talks about \"Per-agent mint amounts are what the network reports back through RPB.recordTraining,\" `apply_emission_pool` is probably downstream of this, normalizing per-agent mint totals into shares of a fixed emission budget — but I don't want to guess at the scale-factor computation, sort-order rationale, or the `raw_total <= 0` edge case without seeing the real code.",
+  "kind": "reference_key",
+  "qid": "q003",
+  "grader": "sonnet"
+}

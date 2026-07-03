@@ -1,0 +1,7 @@
+{
+  "text": "{\"scores\": {\"A\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 1}, \"B\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"C\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 1}, \"D\": {\"correctness\": 2, \"completeness\": 2, \"reference_accuracy\": 1}, \"E\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q025",
+  "grader": "sonnet",
+  "nudge": false
+}

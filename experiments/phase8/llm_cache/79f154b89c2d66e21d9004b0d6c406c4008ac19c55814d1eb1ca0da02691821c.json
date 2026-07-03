@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate Answer [A]. It's a refusal — no attempt to answer any of the substantive questions.",
+  "kind": "grading",
+  "qid": "q020",
+  "grader": "opus",
+  "nudge": false
+}

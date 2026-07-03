@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate Answer [A] against the reference key.\n\nThe reference key describes a specific codebase: a debate/equilibration substrate where \"charter violation\" = an agreed-upon CON sub-claim with positive `net_score`, implemented in `charter_violation_score`/`apply_mint_gate` in `mint_gate.py`, with `charter_ids` parameterized against `DEFAULT_CHARTER_IDS` and synced to `adapter.py:CHARTER`.\n\nAnswer [A] gets the *high-level shape* of both decisions directionally right (push governance out of code into consensus; parameterize charter for configurability), but it fabricates the technical substrate. It invents a blockchain/smart-contract context: \"Substrate.sol\", \"claim bonds/slashing\", \"cross-chain bridge validator\", \"epoch close → settlement\", \"tokens_to_verify\". None of these exist in the reference. It never identifies violation = CON sub-claim with positive net_score, never mentions net_score, position.value==\"con\", equilibration-winning, the anti-gaming consensus requirement, dual-use / gate-not-coordinate framing, proportional (non-binary) suppression, `DEFAULT_CHARTER_IDS`, or the adapter.py single-source-of-truth point. It even asserts CON outcomes \"reflect genuine disagreement\" — a misreading of the mechanism.",
+  "kind": "grading",
+  "qid": "q016",
+  "grader": "opus",
+  "nudge": false
+}

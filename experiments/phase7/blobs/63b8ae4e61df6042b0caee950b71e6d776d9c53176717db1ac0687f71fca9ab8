@@ -1,0 +1,1 @@
+{"problem": "head\n\nThe head element in a sequence\n\n>>> head('ABC')\n'A'", "resolution": "def head(seq):\n    \"\"\" The head element in a sequence\n\n    >>> head('ABC')\n    'A'\n    \"\"\"\n    return next(iter(seq))\n", "text": "head"}

@@ -1,0 +1,7 @@
+{
+  "text": "{\"scores\": {\"A\": {\"correctness\": 5, \"completeness\": 4, \"reference_accuracy\": 3}, \"B\": {\"correctness\": 5, \"completeness\": 4, \"reference_accuracy\": 3}, \"C\": {\"correctness\": 5, \"completeness\": 5, \"reference_accuracy\": 4}, \"D\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 2}, \"E\": {\"correctness\": 4, \"completeness\": 3, \"reference_accuracy\": 3}}}",
+  "kind": "grading",
+  "qid": "q034",
+  "grader": "opus",
+  "nudge": false
+}

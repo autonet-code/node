@@ -1,0 +1,7 @@
+{
+  "text": "I'm being asked to grade candidate answers. Let me evaluate each against the reference key.\n\nAll five answers (A, B, C, D, E) refuse to answer and claim they lack file access. None of them actually walk through the computation. Since none provide the actual mechanism, they all score low on correctness, completeness, and reference_accuracy — except D, which fabricates plausible-but-wrong details (making it worse on reference_accuracy since it invents mechanisms).\n\nLet me assess:\n- **A, B, C, E**: Honest \"I can't answer\" refusals. No correct content, no key points covered, no fabrication. Correctness ~1-2, completeness 1, reference_accuracy ~1 (no specific correct references, but no fabrication either).\n- **D**: Guesses/fabricates the mechanism (ratio normalization, weighted sums, etc.) — all wrong vs. the key. It does correctly name the file path and function name. But its substantive content contradicts the key (e.g., proposes `con_sum/(pro_sum+con_sum)`, none of the real filters). Fabricated references → low.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"B\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"C\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"D\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}, \"E\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q005",
+  "grader": "opus",
+  "nudge": false
+}

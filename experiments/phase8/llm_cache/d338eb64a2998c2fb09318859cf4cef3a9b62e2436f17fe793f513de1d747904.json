@@ -1,0 +1,7 @@
+{
+  "text": "All five candidates decline to answer, correctly stating they lack access to the file. None provide the actual mapping, so completeness and reference_accuracy are minimal across the board. B and C give plausible file-path guesses but still no real content.\n\n{\"scores\": {\"A\": {\"correctness\": 3, \"completeness\": 1, \"reference_accuracy\": 2}, \"B\": {\"correctness\": 3, \"completeness\": 1, \"reference_accuracy\": 2}, \"C\": {\"correctness\": 3, \"completeness\": 1, \"reference_accuracy\": 2}, \"D\": {\"correctness\": 3, \"completeness\": 1, \"reference_accuracy\": 2}, \"E\": {\"correctness\": 3, \"completeness\": 1, \"reference_accuracy\": 2}}}",
+  "kind": "grading",
+  "qid": "q008",
+  "grader": "opus",
+  "nudge": false
+}

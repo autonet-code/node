@@ -1,0 +1,6 @@
+{
+  "text": "DEFAULT_DIM = 64 (raised from a previous value of 16).\n\nJustification for the raise: a categorical-separation measurement from **Phase 2.2**, run by **dim_sweep.py**, on the **work_units corpus**. It measured how much categorical separation each reduced dimensionality retained relative to native-384.\n\nSeparation retained relative to native-384:\n- **64 dims → 95%**\n- **32 dims → 84%**\n- **16 dims → 73%**\n\nBecause 64 retained 95% of native-384 separation (vs. the old 16-dim default at only 73%), the default was raised 16 → 64. The rationale noted in the comment: the original 16-dim setting was conservative for early bootstrapping, and with PCA/JL reduction at 64 the contest has substantially more room to differentiate work units.\n\nSupporting context: DEFAULT_DIM is the module-level constant consumed as the default `dim` by HashingEmbedder, SentenceTransformersEmbedder, and SubprocessEmbedder. Note the module docstring still says \"The substrate uses 16D by default,\" which is stale relative to the current DEFAULT_DIM = 64 — a candidate correctly citing 64 should not be penalized for that docstring inconsistency.",
+  "kind": "reference_key",
+  "qid": "q022",
+  "grader": "opus"
+}

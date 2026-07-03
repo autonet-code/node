@@ -1,0 +1,1 @@
+{"problem": "prepend_item\n\nAdd el to beginning of (possibly infinite) sequence seq.\n\n>>> list(prepend_item(1, [2, 3]))\n[1, 2, 3]", "resolution": "def prepend_item(el, seq):\n    \"\"\" Add el to beginning of (possibly infinite) sequence seq.\n\n    >>> list(prepend_item(1, [2, 3]))\n    [1, 2, 3]\n    \"\"\"\n    return itertools.chain([el], seq)\n", "text": "prepend_item"}

@@ -1,0 +1,7 @@
+{
+  "text": "All five candidates decline to answer and admit lack of file access, only offering generic inference. None cite the specific mechanisms in the reference key (mint formula, `RPB.recordTraining`, `EpochSnapshots.start`/`close`, `snapshot_node_scores`). They differ mainly in how well their generic reasoning aligns with the key's core points (cross-node consistency, determinism, auditability) and how explicitly they refuse vs. hedge.",
+  "kind": "grading",
+  "qid": "q034",
+  "grader": "sonnet",
+  "nudge": false
+}

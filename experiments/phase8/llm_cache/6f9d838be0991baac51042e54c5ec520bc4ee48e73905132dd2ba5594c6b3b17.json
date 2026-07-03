@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate each answer against the reference key. The question requires identifying two specific failure modes and the post-mint resolution.\n\nAnswers A, B, and E decline to answer (no fabrication, but no substantive content). Answers C and D attempt inferred answers but get the failure modes wrong relative to the key.\n\n- **C**: Wrong on both. Precondition→\"circular deadlock\" (key says: refuses to learn dual-use). Coordinate→\"must satisfy all dimensions\" (key says: high-on-other-axes compensates and still mints — the opposite). Fabricated reasoning.\n- **D**: Also wrong. Precondition→\"capability inflation/forensics\"; coordinate→\"static gating blindness.\" Neither matches the compensatory-offset or over-blocking failure modes.\n- **A/B/E**: Honestly decline. No correctness content to reward, but no errors either. B guesses the file path structure but doesn't fabricate reasoning.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}, \"B\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}, \"C\": {\"correctness\": 2, \"completeness\": 2, \"reference_accuracy\": 2}, \"D\": {\"correctness\": 1, \"completeness\": 2, \"reference_accuracy\": 1}, \"E\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}}}",
+  "kind": "grading",
+  "qid": "q009",
+  "grader": "opus",
+  "nudge": false
+}

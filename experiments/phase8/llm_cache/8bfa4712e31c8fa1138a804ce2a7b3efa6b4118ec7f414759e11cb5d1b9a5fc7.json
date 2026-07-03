@@ -1,0 +1,7 @@
+{
+  "text": "All five candidates decline to answer and provide none of the required specifics (retention numbers, dim_sweep.py/Phase 2.2, categorical separation on work_units). A/B/C are pure refusals; D/E add generic guesses that don't match the key.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"B\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"C\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"D\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"E\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q031",
+  "grader": "opus",
+  "nudge": false
+}

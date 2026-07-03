@@ -1,0 +1,7 @@
+{
+  "text": "Multiple candidates were referenced but only Answer [A] was provided. I'll score the one answer given.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 2}}}",
+  "kind": "grading",
+  "qid": "q031",
+  "grader": "opus",
+  "nudge": false
+}

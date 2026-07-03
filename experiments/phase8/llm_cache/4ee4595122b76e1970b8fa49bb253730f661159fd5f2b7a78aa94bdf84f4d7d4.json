@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate each candidate against the reference key. All five answers decline to answer, citing lack of file access — none provides the actual content.",
+  "kind": "grading",
+  "qid": "q019",
+  "grader": "opus",
+  "nudge": false
+}

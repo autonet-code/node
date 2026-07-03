@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate each answer against the reference key.\n\nAll five answers (A-E) decline to answer, claiming no file access. None provide the actual mechanism: `mean(score over epoch) / score_close`, clipping to [0, 1], or the correct asymmetry explanation. Answers C, D, and E make speculative guesses that partially gesture at the right intuition (late = low, early = high) but miss the exact quantity entirely and don't identify it as a mean-over-snapshots ratio.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"B\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"C\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 1}, \"D\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 1}, \"E\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q002",
+  "grader": "opus",
+  "nudge": false
+}

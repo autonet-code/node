@@ -1,0 +1,6 @@
+{
+  "text": "mint(node) = max(0, score_close - score_start) * survival * novelty\n\ni.e. rise = score_close - score_start; if rise > 0 and score_close > 0: return rise * survival * novelty, where survival = _node_survival_factor(node_id, snapshots) and novelty = _node_persistent_n(node_id, world) (node.n from the live world, defaulting to 1.0 if world is None or node not found).\n\n- If score_close <= 0: returns 0.0 (checked first, before computing rise).\n- If rise <= 0 (i.e., score_close <= score_start): returns 0.0.\n\nNote the module docstring's formula additionally multiplies by an indicator I(score_close > 0), but in the actual `_node_mint` code that's implemented as the early `score_close <= 0: return 0.0` guard rather than a literal multiplicative term; the docstring also omits the novelty factor that the real implementation includes (`rise * survival * novelty`).",
+  "kind": "reference_key",
+  "qid": "q017",
+  "grader": "sonnet"
+}

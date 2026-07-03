@@ -1,0 +1,7 @@
+{
+  "text": "Looking at this, only one candidate answer was provided (Answer [A]), and it declines to answer, stating it lacks file access.\n\n{\"scores\": {\"A\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q028",
+  "grader": "opus",
+  "nudge": false
+}

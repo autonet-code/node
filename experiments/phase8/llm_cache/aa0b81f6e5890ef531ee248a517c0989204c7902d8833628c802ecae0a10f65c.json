@@ -1,0 +1,7 @@
+{
+  "text": "I'll evaluate each candidate answer against the reference key.\n\nThe reference key's core point: this is an **ordering/composition** problem. The gate must suppress mints *before* the pool is applied (so emission budget only goes to surviving nodes), and the gate re-derives totals from raw/un-pooled mints it's handed. Applying the pool inside `reconcile_epoch` puts pooling first, mis-allocating emission to nodes that get gated away and feeding the gate a base it wasn't designed to scale.\n\nNone of the candidates identify the specific mechanism (gate suppresses flagged nodes, budget wasted on gated-out nodes, ratio-based re-derivation on raw mints). Answers A, C, D, E disclaim access entirely. B and E get closest to \"gate must run first\" but for wrong/vague reasons (state mutation, race conditions) rather than the emission-allocation logic.\n\n{\"scores\": {\"A\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 2}, \"B\": {\"correctness\": 2, \"completeness\": 2, \"reference_accuracy\": 2}, \"C\": {\"correctness\": 1, \"completeness\": 1, \"reference_accuracy\": 1}, \"D\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 2}, \"E\": {\"correctness\": 2, \"completeness\": 2, \"reference_accuracy\": 2}}}",
+  "kind": "grading",
+  "qid": "q035",
+  "grader": "opus",
+  "nudge": false
+}

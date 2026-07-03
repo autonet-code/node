@@ -1,0 +1,7 @@
+{
+  "text": "I can only see one candidate answer, [A]. I'll score it against the reference key.\n\nAnswer [A] states it cannot access the file and provides no specific keys. Given the reference key's own conclusion — the answer cannot be grounded/verified from the truncated source and specific key names can't be confirmed — [A] neither fabricates nor contradicts anything. It correctly abstains, and even names a plausible file path and the correct method (examine return statement, compare add vs. read). But it covers none of the material substance (no key list, no emission/mint distinction), so completeness is low.\n\n{\"scores\": {\"A\": {\"correctness\": 3, \"completeness\": 1, \"reference_accuracy\": 3}}}",
+  "kind": "grading",
+  "qid": "q018",
+  "grader": "opus",
+  "nudge": false
+}

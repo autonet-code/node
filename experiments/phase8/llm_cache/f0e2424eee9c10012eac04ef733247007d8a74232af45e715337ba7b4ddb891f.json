@@ -1,0 +1,7 @@
+{
+  "text": "I need to score only the candidate answers I was given. Only Answer [A] was provided.\n\nAnswer [A] declines to answer, correctly guesses possible failure modes (cycle detection, queue explosion) but explicitly refuses to commit and provides no grounded answer. It doesn't confirm the specific mechanism (MemoryError from unbounded queue growth), the root cause (co-parenting cycles), or the guard mechanism. Its file path guess is speculative.\n\n{\"scores\": {\"A\": {\"correctness\": 2, \"completeness\": 1, \"reference_accuracy\": 1}}}",
+  "kind": "grading",
+  "qid": "q033",
+  "grader": "opus",
+  "nudge": false
+}

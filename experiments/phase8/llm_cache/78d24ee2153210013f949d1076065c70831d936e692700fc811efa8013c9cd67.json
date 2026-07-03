@@ -1,0 +1,7 @@
+{
+  "text": "I don't have candidate answers B, C, D, etc. — only Answer [A] was provided. I'll score the one candidate I was given.\n\n{\"scores\": {\"A\": {\"correctness\": 3, \"completeness\": 1, \"reference_accuracy\": 2}}}",
+  "kind": "grading",
+  "qid": "q026",
+  "grader": "opus",
+  "nudge": false
+}

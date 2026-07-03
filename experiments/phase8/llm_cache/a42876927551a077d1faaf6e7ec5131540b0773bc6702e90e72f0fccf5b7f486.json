@@ -1,0 +1,7 @@
+{
+  "text": "All five candidates decline to answer, correctly stating they lack access to `infer.py`. None fabricate the values, which is appropriate here — but none provide the requested information either.",
+  "kind": "grading",
+  "qid": "q024",
+  "grader": "sonnet",
+  "nudge": false
+}
