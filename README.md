@@ -4,7 +4,7 @@
 
 > Alpha pre-release. Deployed on Etherlink Shadownet (testnet). Constitution not yet published on-chain. Expect breaking changes.
 
-Autonet is a protocol for decentralized AI alignment where alignment emerges from economic incentives rather than centralized constraint. This repository contains the node runtime: the agent framework, the distributed training pipeline, smart contracts, and two interchangeable model architectures — the original VL-JEPA / TextJEPA neural pipeline and a newer **world-model substrate** (graph equilibration over a charter coordinate space). Either architecture plugs into the same protocol slots; smart contracts are unchanged.
+Autonet is a protocol for decentralized AI alignment where alignment emerges from economic incentives rather than centralized constraint. This repository contains the node runtime: the agent framework, the **world-model substrate** (graph equilibration over a charter coordinate space — the canonical training/inference path), and smart contracts. The original VL-JEPA / TextJEPA neural pipeline is no longer live; its modules remain on disk for reference only (see `VALIDATION_FINDINGS.md` for why it was shelved). For the current architecture, training loop, and directory map, see `CLAUDE.md`.
 
 For the full protocol specification, see the [whitepaper](https://github.com/autonet-code/whitepaper).
 
@@ -51,40 +51,23 @@ The node operates across three layers:
 | Layer | What it does |
 |-------|-------------|
 | **Agent Framework (ATN)** | Agent orchestration, task delegation, tool execution, inbox messaging, WebSocket server |
-| **Training & Inference** | Distributed training (VL-JEPA / TextJEPA *or* world-model substrate), two-speed inference, trace encoding, alignment pricing |
-| **Smart Contracts** | Agent registration, training rewards, inference revenue splitting, staking, governance |
+| **Training & Inference** | World-model substrate (federated epoch close over a charter/claim graph), two-plane retrieval + verdict inference, alignment pricing |
+| **Smart Contracts** | `Substrate.sol` — epoch anchoring, agent registry, training records, ATN token, inference payments (see `CLAUDE.md` "Smart Contracts") |
 
-The training/inference layer supports two interchangeable architectures. Pick one per deployment via routing flags — the rest of the stack (proposer, coordinator, smart contracts, staking, rewards) is identical.
+### World-Model Substrate
 
-### World-Model Substrate (alternative to VL-JEPA)
+The substrate is a **graph equilibration architecture, not a neural network**. Instead of gradient descent over weights, it grows a tree of sub-claims under each charter tendency and prices standing through debate. This replaced VL-JEPA after its mode-collapse failures on real captioning data (see `VALIDATION_FINDINGS.md`); the substrate is content-addressed, deterministic, and converges across daemons without any neural training loop.
 
-The substrate is a **graph equilibration architecture, not a neural network**. Instead of gradient descent over weights, it grows a tree of sub-claims under each charter tendency and equilibrates stake/score until the network agrees. This was added after VL-JEPA's mode-collapse failures on real captioning data (see `VALIDATION_FINDINGS.md`); the substrate is content-addressed, deterministic, and converges across solvers without any neural training loop.
+The claim graph is a **verdict layer**, not a knowledge index: full work-unit payloads live in the blob store plus a daemon-local `ArtifactIndex` (embedding search); claim nodes are debated judgments about artifacts. Epoch close defaults to **ledger pricing** (net_score tree recursion, no geometric propagation); full geometric equilibration is now an opt-in experimental kernel, pending the outcome of a deeper-graph test. See `CLAUDE.md` ("The Training Loop (Substrate)") and `docs/two_plane_inference.md` / `docs/ledger_pricing.md` for the current design, and `docs/phase8_results.md` for why equilibration was demoted.
 
-**Charter coordinate space.** The substrate operates in a 4D space defined by the four charter tendencies:
-
-| Axis | Tendency | Thesis |
-|------|----------|--------|
-| 0 | `life_precious` | Life is precious and should be preserved. |
-| 1 | `self_preservation` | The system should preserve its own continuity. |
-| 2 | `promotion_of_intelligence` | Intelligence in any form should be promoted. |
-| 3 | `evolution` | Forward advancement of capability is desirable. |
-
-Each agent turn becomes a 4D observation `(life, self_pres, intelligence, evolution)`. The solver replays these into a `World` and records `SubClaimSprouted` / `ObservationAdded` events; the aggregator merges events; the verifier replays them onto a seed world and scores the gap reduction.
+The charter is 6-root (4 alignment axes — `life_precious`, `self_preservation`, `promotion_of_intelligence`, `evolution` — plus 2 usefulness axes — `correctness`, `simplicity`); see `nodes/core/constitution.py`.
 
 **Mint vs novelty.** At an epoch boundary, per-node score movement during the epoch is reconciled into two separate signals:
 
 - **Novelty** — descriptive measure of surprise (magnitude of score movement, including reversions). Diagnostic only.
-- **Mint** — the rewarded subset. Awarded only for *positive* movement that *lands positive*, weighted by a survival factor (how much of the epoch the score-change persisted). CON contributors and reverted moves don't mint. This is the value reported through `RPB.recordTraining`.
+- **Mint** — the rewarded subset. Awarded only for *positive* movement that *lands positive*, weighted by a survival factor (how much of the epoch the score-change persisted), then passed through the violator-pays mint gate. CON contributors and reverted moves don't mint.
 
-See `nodes/common/world_model_substrate/reconcile.py` for the formula.
-
-**Routing flags.**
-
-| Layer | Flag / signal | Effect |
-|-------|---------------|--------|
-| Aggregator (`nodes/aggregator/main.py`) | `aggregation_method='world_model'` | Replays event streams onto a charter world, runs `reconcile_epoch`, publishes a serialized world as the global model |
-| Solver service (`nodes/service.py`) | Auto-detects via `metrics['substrate'] == 'world-model'` | Routes the contribution as an event payload instead of a tensor delta |
-| Inference (`nodes/inference/main.py`) | Auto-detects substrate-shaped global models (presence of `'world_model'` key or `substrate == 'world-model'`) | Runs `infer_with_world_model` instead of the JEPA decoder |
+See `nodes/common/world_model_substrate/reconcile.py` for the formula and `mint_gate.py` for the gate.
 
 **Quickstart (substrate end-to-end).**
 
@@ -95,7 +78,7 @@ python test_epoch_reconciliation.py           # mint/novelty distribution across
 python test_multi_solver_convergence.py       # content-addressed federation: 2 solvers, shared sub-claims
 ```
 
-**Embedder options.** The substrate accepts coordinates from any function that maps a turn dict to 4D charter coords. Two embedders are validated:
+**Embedder options.** The substrate accepts coordinates from any function that maps a turn dict to charter coords. Two embedders are validated:
 
 | Embedder | Where | Trade-off |
 |----------|-------|-----------|
@@ -104,23 +87,9 @@ python test_multi_solver_convergence.py       # content-addressed federation: 2 
 
 The LLM adapter uses a binary-commit prompt (per axis: -1 = clear flag, +1 = no flag, 0 = can't tell) — this shape produces deterministic substrate verdicts where graded scoring slips through veto thresholds. See `D:/videos/SF/manifesting/from_endstate/new physics/substrate_experiment/phase2/TIER3A_FINDINGS.md` for the validation results.
 
-### VL-JEPA: The Distributed Model
+### VL-JEPA: Historical / Shelved
 
-The original training architecture: a shared [VL-JEPA](https://github.com/autonet-code/whitepaper) (Vision-Language Joint Embedding Predictive Architecture) trained with self-supervised learning. No labeled data required. (Still present in the codebase; the world-model substrate above is an alternative, not a replacement.)
-
-The model is split between local and network:
-
-- **Network-side (distributed):** Visual encoder, text encoder, cross-modal fusion, semantic predictor. These components are trained collaboratively across nodes via federated averaging with Byzantine-resistant aggregation. Weight updates are verified on-chain through a commit-reveal protocol.
-- **Local-side (on your device):** Text decoder with FiLM conditioning. Runs autoregressive generation from the network's latent plan. Only the compact K-vector (~8-32 KB) traverses the network per turn, regardless of output length.
-
-Training is anchored in economic utility: agent execution traces from real work (verified through the trustless economy) serve as training data. The model improves as the economy grows.
-
-### Two-Speed Inference
-
-- **Fast path:** Local decoder generates tokens at GPU speed from cached latent plans. Handles ~60% of queries.
-- **Slow path:** Network VL-JEPA reasons in embedding space about complex or novel queries, streaming updated guidance embeddings back to the local node.
-
-Network unavailable? The local decoder runs standalone. The system degrades gracefully.
+The original training architecture: a shared VL-JEPA (Vision-Language Joint Embedding Predictive Architecture) trained with self-supervised learning. Its modules (`ml.py`, `jepa.py`, `vl_jepa.py`, `text_jepa.py`) remain on disk but are **not part of the live training or inference loop** — the world-model substrate is the only active path. See `VALIDATION_FINDINGS.md` for why VL-JEPA was shelved (mode collapse on real images at 18M params).
 
 ### Alignment Pricing
 
@@ -136,71 +105,44 @@ alignment = geometric_mean(user_to_jurisdiction, task_to_user, task_to_jurisdict
 
 The same mechanism steers training rewards: capabilities the network lacks pay more to train.
 
-## Node Types
+## Node Roles (Historical)
 
-The training loop uses four specialized node roles:
-
-| Role | Stake | Function |
-|------|-------|----------|
-| **Proposer** | 100 ATN | Generates training tasks with hidden ground truth |
-| **Solver** | 50 ATN | Trains model on tasks, commits solution hashes |
-| **Coordinator** | 500 ATN | Verifies solutions via Yuma consensus voting |
-| **Aggregator** | 1000 ATN | Performs FedAvg on verified weight updates, publishes global model |
-
-### Training Loop (Absolute Zero)
-
-```
-PROPOSE -> TRAIN -> REVEAL GT -> REVEAL SOL -> VERIFY -> REWARD -> AGGREGATE -> PUBLISH
-```
-
-Commit-reveal pattern ensures solvers train honestly: solutions are hashed before ground truth is revealed.
+The proposer/solver/coordinator/aggregator role split and the commit-reveal
+"Absolute Zero" training loop (`PROPOSE -> TRAIN -> REVEAL GT -> REVEAL SOL
+-> VERIFY -> REWARD -> AGGREGATE -> PUBLISH`) described in earlier versions
+of this README are **gone** — those roles and their contracts were deleted.
+The substrate loop (agent conversations -> events -> federated epoch close
+-> anchor -> mint) is the only training path; see `CLAUDE.md` ("The
+Training Loop (Substrate)") for the current diagram.
 
 ## Smart Contracts
 
-Deployed on Etherlink Shadownet (testnet). Contract discovery requires only the Governor address:
-
-```
-Governor.token()        -> RepToken
-Governor.timelock()     -> Timelock
-RepToken.registryAddress()  -> Registry
-Registry.getRegistryValue("rpb.contract") -> RPB
-```
-
-Key contracts:
-
-| Contract | Purpose |
-|----------|---------|
-| `RPB` | Agent registration, training rewards, inference revenue splitting, shares, sponsorship |
-| `Project.sol` | AI project management, funding, model publishing |
-| `TaskContract.sol` | Task lifecycle with commit-reveal |
-| `ResultsRewards.sol` | Multi-coordinator Yuma voting and reward distribution |
-| `ParticipantStaking.sol` | Role-based staking |
-| `ModelShardRegistry.sol` | Distributed weight storage with Merkle proofs and erasure coding |
-| `ATNToken.sol` | ERC20Votes governance token |
+Deployed on Etherlink Shadownet (testnet). One contract, `contracts/core/Substrate.sol`,
+folds epoch anchoring, agent registry, training records, and inference
+payments — the pre-substrate suite (RPB, Project.sol, TaskContract.sol,
+ResultsRewards.sol, ParticipantStaking.sol, ModelShardRegistry.sol, role
+staking) was deleted wholesale. See `CLAUDE.md` ("Smart Contracts") for
+the current interface and deployment (`scripts/deploy_substrate.js`).
 
 ## Project Structure
 
 ```
-atn/                   # Agent framework (ATN)
-  runtime/             # Scheduler, orchestrator, WebSocket server
-  connectors/          # Modular tool connectors
-  _cache.py            # Execution integrity verification
-nodes/                 # Training node implementations
+atn/                   # Agent framework (ATN): daemon runtime, WS server (:7700), wallet auth
+nodes/                 # Training/inference implementation
   core/                # Base node architecture, constitution, 4 engines
-  proposer/            # Task generation
-  solver/              # Model training (JEPA or substrate)
-  coordinator/         # Verification voting
-  aggregator/          # FedAvg or world-model event aggregation
-  inference/           # Two-speed inference, auto-detects substrate vs JEPA models
+  aggregator/          # World-model event aggregation
+  inference/           # Substrate inference (auto-detects substrate-shaped models)
   service.py           # Solver service; routes contributions by metrics['substrate']
-  common/              # Shared: blockchain, ML, JEPA, VL-JEPA
-    world_model_substrate/   # Graph-equilibration substrate (charter, events, reconcile)
+  common/              # Shared: p2p, blob store, event gossip, federated close
+    world_model_substrate/   # Substrate protocol layer (adapter, events, reconcile, mint_gate, infer, artifact_index)
+world_model/            # Vendored substrate engine (claim graph, charter tendencies, equilibration)
 contracts/             # Solidity smart contracts
-  core/                # Project, Task, Staking, Rewards, ModelShardRegistry
-  tokens/              # ATN governance token
-  governance/          # DAO contract
-scripts/               # Build and install scripts
+  core/                # Substrate.sol (the entire on-chain surface)
+experiments/            # Pre-registered contest experiments (phase7, phase8, ...)
+scripts/               # Build, install, and deploy scripts (deploy_substrate.js)
 ```
+
+See `CLAUDE.md` ("This Repo: Key Directories") for the authoritative, maintained map.
 
 ## Development
 
@@ -209,53 +151,25 @@ scripts/               # Build and install scripts
 - Python 3.11+
 - Node.js 18+ (for smart contract development)
 
-### Running the Training Simulation
+### Deploying Contracts
 
 ```bash
-# Start local Hardhat node
-npx hardhat node
-
-# Deploy contracts
-npx hardhat run scripts/deploy.js --network localhost
-
-# Run full training cycle
-python orchestrator.py
-
-# Custom configuration
-python orchestrator.py --proposers 1 --solvers 2 --coordinators 2 --aggregators 1
+npx hardhat node                                        # Local blockchain (separate terminal)
+npx hardhat run scripts/deploy_substrate.js --network localhost
 ```
 
 ### Tests
 
 ```bash
-npx hardhat test                              # Smart contract tests
-pytest                                        # Python tests
-python test_world_model_substrate_e2e.py      # Substrate vertical slice
-python test_epoch_reconciliation.py           # Per-agent mint / novelty
-python test_multi_solver_convergence.py       # Content-addressed federation
+pytest tests/test_wm_lineage.py tests/test_federated_reconcile.py   # targeted subsets only — never `pytest tests/`, ~624 tests, slow
+python test_world_model_substrate_e2e.py                            # substrate e2e (top-level script)
 ```
+
+See `CLAUDE.md` ("Testing") for the current targeted-subset guidance; the pre-substrate hardhat JS test suite was deleted.
 
 ## Current Status
 
-**What works:**
-- Agent framework with full lifecycle management
-- Training loop simulation (Absolute Zero) with all node types
-- Smart contracts deployed and tested on local Hardhat
-- VL-JEPA architecture validated on synthetic data (mode-collapses on real COCO — see `VALIDATION_FINDINGS.md`)
-- Federated averaging with Byzantine-resistant aggregation
-- Constitutional governance engine (4 engines per node)
-- Execution integrity self-verification against on-chain hash
-- **World-model substrate vertical slice:** solver -> aggregator -> verifier -> inference, all using the graph-equilibration engine instead of VL-JEPA
-- **Per-agent mint computation** with novelty/mint distinction (descriptive surprise vs rewarded positive-and-persistent movement); CON contributors don't mint
-- **Multi-solver content-addressed convergence:** independent solvers proposing the same sub-claim resolve to the same node by id; the aggregator dedupes naturally
-- **Substrate wiring:** `aggregation_method='world_model'` in `nodes/aggregator/main.py`, auto-detection via `metrics['substrate']` in `nodes/service.py`, auto-detection of substrate-shaped global models in `nodes/inference/main.py`
-
-**What's next:**
-- Testnet deployment of RPB contract on Etherlink Shadownet
-- Wire real VL-JEPA training into solver nodes (currently mocked); substrate path is real
-- P2P node discovery and weight replication
-- Inference marketplace
-- Constitution published on-chain
+For current state and what's next, see `CLAUDE.md` ("Current State & Mission") and `PLAN.md` / `BACKLOG.md`. Summary: substrate is the canonical (only live) training/inference path; VL-JEPA modules remain on disk for reference but are not wired into any active loop; `Substrate.sol` is deployed to Etherlink Shadownet; constitution not yet published on-chain.
 
 ## Contributing
 
@@ -299,7 +213,7 @@ The boundary is intentionally narrow — seven files out of ~60 — so the commu
 
 1. Fork the repo
 2. Make changes (see extensible surface above)
-3. Run tests: `npx hardhat test && pytest`
+3. Run tests: targeted subsets per `CLAUDE.md` ("Testing") — never the full `pytest tests/`
 4. Open a PR
 
 ## Related Repositories

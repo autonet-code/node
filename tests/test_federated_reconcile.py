@@ -133,7 +133,7 @@ def test_three_daemons_produce_byte_identical_maps():
     ]
     assert seq_hashes[0] == seq_hashes[1] == seq_hashes[2]
 
-    results = [federated_epoch_close(c) for c in canonicals]
+    results = [federated_epoch_close(c, pricing="equilibrated") for c in canonicals]
 
     # Strict equality on the authoritative payload — the part that
     # gets anchored on chain. Deterministic at byte level across
@@ -181,7 +181,7 @@ def test_serialized_json_is_byte_identical_across_daemons():
     serialized = []
     for d in deliveries:
         canonical = canonical_order(d)
-        result = federated_epoch_close(canonical)
+        result = federated_epoch_close(canonical, pricing="equilibrated")
         # Serialize WITHOUT sort_keys — relies on the wrapper's
         # canonical insertion order.
         payload = json.dumps({
@@ -225,7 +225,10 @@ def test_malformed_sender_contributes_zero_others_unaffected():
     for d in deliveries:
         rng.shuffle(d)
 
-    results = [federated_epoch_close(canonical_order(d)) for d in deliveries]
+    results = [
+        federated_epoch_close(canonical_order(d), pricing="equilibrated")
+        for d in deliveries
+    ]
 
     # All three identical.
     assert results[0]["agent_mint"] == results[1]["agent_mint"] == results[2]["agent_mint"]
@@ -288,7 +291,10 @@ def test_many_agents_many_nodes_deterministic():
     for d in deliveries:
         rng.shuffle(d)
 
-    results = [federated_epoch_close(canonical_order(d)) for d in deliveries]
+    results = [
+        federated_epoch_close(canonical_order(d), pricing="equilibrated")
+        for d in deliveries
+    ]
     assert results[0]["agent_mint"] == results[1]["agent_mint"] == results[2]["agent_mint"]
     # And the totals match too (cheap secondary check).
     assert results[0]["total_mint"] == results[1]["total_mint"] == results[2]["total_mint"]

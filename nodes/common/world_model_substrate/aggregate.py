@@ -77,7 +77,13 @@ def aggregate_contributions(
     }
 
 
-def apply_events(world: World, events: List[Dict[str, Any]]) -> World:
+def apply_events(
+    world: World,
+    events: List[Dict[str, Any]],
+    *,
+    equilibrate_after: bool = True,
+    remap_out: Optional[Dict[str, str]] = None,
+) -> World:
     """Replay an event stream onto a world. Mutates the world in place.
 
     Two event kinds:
@@ -87,13 +93,24 @@ def apply_events(world: World, events: List[Dict[str, Any]]) -> World:
     Sprouts target nodes by their solver-side ids. Because the engine
     uses content-addressed ids, two solvers proposing the same sub-claim
     end up with the same id; their replays consolidate naturally.
+
+    ``equilibrate_after``: run geometric equilibration after the replay
+    (default, matches legacy behavior). Ledger pricing sets this False:
+    scores are the raw ``net_score`` tree recursion over the causal
+    events only — no geometric propagation, no derived-sprout capture.
+
+    ``remap_out``: when provided, is populated with the solver-side ->
+    live node-id mapping learned during replay. Ledger-mode attribution
+    needs it to rewrite each causal sprout event's ``node_id`` to the
+    live id so ``_events_under_node`` matches (the wire carries solver
+    labels, not live content-addressed ids).
     """
     from world_model.generalized import Observation
 
     # parent-id remap: solver-side root id -> live root id, by tendency.
     # We learn solver root ids from sprout events whose parent is the
     # tendency's root.
-    remap: Dict[str, str] = {}
+    remap: Dict[str, str] = remap_out if remap_out is not None else {}
 
     # Index sprouts by their solver-side node_id so we can resolve
     # "parent is itself a sprout" cases via remap as we go.
@@ -240,8 +257,10 @@ def apply_events(world: World, events: List[Dict[str, Any]]) -> World:
             break
         pending_sprouts = next_round
 
-    # Equilibrate so post-replay scores reflect the merged state
-    equilibrate(world, max_rounds=8, tolerance=1e-3)
+    # Equilibrate so post-replay scores reflect the merged state.
+    # Ledger pricing skips this: net_score over causal events only.
+    if equilibrate_after:
+        equilibrate(world, max_rounds=8, tolerance=1e-3)
     return world
 
 

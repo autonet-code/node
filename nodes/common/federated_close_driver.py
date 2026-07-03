@@ -94,8 +94,10 @@ class FederatedCloseDriver:
         bandwidth: float = 1.5,
         embedding_dim: int = 1024,
         canonical_tracker: Optional[Any] = None,
+        pricing: str = "ledger",
     ):
         self.gossip = gossip
+        self.pricing = pricing
         self.bandwidth = bandwidth
         self.embedding_dim = embedding_dim
         # Optional state_sync.CanonicalWorldTracker. When present, each
@@ -132,6 +134,7 @@ class FederatedCloseDriver:
                 canonical,
                 bandwidth=self.bandwidth,
                 embedding_dim=self.embedding_dim,
+                pricing=self.pricing,
             )
         except Exception as e:
             logger.error(

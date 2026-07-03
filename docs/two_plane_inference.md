@@ -113,3 +113,30 @@ def _infer_artifacts(input_data, world, artifact_index, blob_store,
 - Scoped/per-tendency equilibration (the O(N²) wall) — separate work.
 - Any change to mint, reconcile, or the gate.
 - P2P blob replication improvements.
+
+## Addendum: phase8 outcome (2026-07-03)
+
+Phase 8 (`docs/phase8_prereg.md`, `docs/phase8_results.md`) contested this
+design end-to-end. Two findings feed back into this document:
+
+- **Retrieval validated.** Plain artifact retrieval (payloads only, no
+  verdict text) beat no-context by +0.367 (Holm p=0.012) — the two-plane
+  data path (artifacts in blob store + `ArtifactIndex`) is the product
+  surface, confirmed on a real, unsaturated domain.
+- **Verdicts-in-context hurt.** Injecting claim/verdict text into the
+  prompt alongside payloads cost −0.280 (Holm p=0.012) relative to
+  payloads-only. `render_context()` in `infer.py` therefore ships the
+  arm-B format: standing-ranked payload text only (problem + resolution,
+  proportional truncation), no claims/verdict text in the rendered
+  prompt. Claims remain available in the structured result for
+  programmatic consumers. Standing ranks and prices; it does not fill
+  context. See `docs/ledger_pricing.md` (Change 3) for the exact
+  `render_context` / `infer_artifacts(render=...)` contract.
+- **Equilibration demoted.** The re-rank geometry contrast (equilibrated
+  vs vote-count standing) cleared significance but not the pre-registered
+  magnitude bar, so epoch-close pricing now defaults to the ledger mode
+  (`net_score` tree recursion) described in `docs/ledger_pricing.md`;
+  equilibration is an opt-in experimental kernel pending
+  `docs/phase9_depth_experiment.md`. This does not change the artifact
+  plane / verdict plane split above — it changes how standing on the
+  verdict plane is computed by default.

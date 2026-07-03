@@ -58,6 +58,61 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Deterministic net_score snapshot (ledger mode)
+# ---------------------------------------------------------------------------
+
+
+def _all_nodes_sorted(world: World) -> List[Any]:
+    """All nodes across every tendency's tree, de-duplicated by id and
+    returned in sorted-id order.
+
+    Co-parented nodes appear in more than one tendency tree; we keep a
+    single object per id (the first one encountered under sorted
+    tendency iteration) so evaluation order is a pure function of the
+    node-id set.
+    """
+    by_id: Dict[str, Any] = {}
+    for tid in sorted(world.tendencies.keys()):
+        tendency = world.tendencies[tid]
+        for node in tendency.tree.all_nodes():
+            if node.id not in by_id:
+                by_id[node.id] = node
+    return [by_id[nid] for nid in sorted(by_id.keys())]
+
+
+def snapshot_node_scores_ordered(world: World) -> Dict[str, float]:
+    """Snapshot per-node ``net_score`` with a FIXED evaluation order.
+
+    ``net_score`` memoizes and, under a co-parented cycle, the
+    ``_in_progress`` sentinel short-circuits the reentrant edge to 0.0.
+    Which edge gets short-circuited — and therefore the final cached
+    values — depends on which node in the cycle is evaluated first.
+    ``Tree.all_nodes()`` iterates the node index in insertion order,
+    which is NOT stable across daemons that applied the same causal
+    events in different physical arrival orders.
+
+    Ledger mode fixes this by (1) invalidating every net_score cache so
+    no stale seeding survives, then (2) forcing evaluation in sorted
+    node-id order across the whole world. Every honest daemon then
+    seeds the cycle break at the same node and computes byte-identical
+    scores. Returns {node_id: net_score}.
+    """
+    nodes = _all_nodes_sorted(world)
+    # Clear any cached net_score so the sorted-order pass is the one
+    # that seeds cycle breaks. (direct_weight is order-independent, but
+    # invalidate_cache() resets it too — harmless, it recomputes.)
+    for node in nodes:
+        node._net_score = None
+        node._in_progress = False
+    # Force evaluation in sorted-id order. The first node in a cycle to
+    # be evaluated is deterministic, so the memoized result is too.
+    out: Dict[str, float] = {}
+    for node in nodes:
+        out[node.id] = node.net_score
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Snapshots over an epoch
 # ---------------------------------------------------------------------------
 
@@ -267,6 +322,39 @@ def _attribute_node_mint(
         agent: node_mint_amount * (count / total)
         for agent, count in pro_events_by_agent.items()
     }
+
+
+def scale_node_agent_mint_by_violation(
+    node_agent_mint: Dict[str, Dict[str, float]],
+    node_violation: Dict[str, float],
+    gate_strength: float = 1.0,
+) -> Dict[str, float]:
+    """Violator-pays gate over a per-(node, agent) mint breakdown.
+
+    ``node_agent_mint`` maps node_id -> {agent_id: mint_at_this_node}.
+    Each node's mint is scaled by ``(1 - gate_strength * violation)``,
+    THEN summed per agent. Because the scaling is per node before
+    aggregation, only the agents who authored the flagged node lose
+    mint — an honest agent who happened to also author a clean node
+    keeps that node's full mint.
+
+    Combined with a fixed emission pool (applied afterward), the mint
+    suppressed on a flagged node redistributes to every other agent's
+    share of the pool: the violator's absolute mint drops and honest
+    agents' absolute mint rises. This is the property the uniform-ratio
+    fallback in ``apply_mint_gate`` could not deliver.
+
+    Deterministic: iterates nodes and agents in sorted order so the
+    per-agent float sum is associative-stable across daemons.
+    """
+    agent_mint: Dict[str, float] = {}
+    for node_id in sorted(node_agent_mint.keys()):
+        v = node_violation.get(node_id, 0.0)
+        scale = max(0.0, 1.0 - gate_strength * v)
+        per_agent = node_agent_mint[node_id]
+        for agent in sorted(per_agent.keys()):
+            agent_mint[agent] = agent_mint.get(agent, 0.0) + per_agent[agent] * scale
+    return agent_mint
 
 
 # ---------------------------------------------------------------------------

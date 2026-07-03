@@ -266,6 +266,62 @@ def _infer_artifacts(
 
 
 # ---------------------------------------------------------------------------
+# Context rendering (phase8 arm B format — docs/ledger_pricing.md Change 3)
+# ---------------------------------------------------------------------------
+
+
+def _render_block(idx: int, problem: str, resolution: str, budget: int) -> str:
+    """Render one artifact block within ``budget`` chars.
+
+    Mirrors ``experiments/phase8/run_contest.py:_artifact_block`` (arm B
+    shape): a file-style header plus PROBLEM/RESOLUTION text, no claims,
+    no digests, no standing numbers. Proportionally truncated to fit the
+    per-artifact budget; the header itself is never truncated.
+    """
+    header = f"--- artifact [{idx}] ---\n"
+    body = f"PROBLEM:\n{problem}\n\nRESOLUTION:\n{resolution}"
+    avail = max(0, budget - len(header))
+    if len(body) > avail:
+        body = body[:avail]
+    return header + body
+
+
+def render_context(result: Dict[str, Any], char_budget: int = 6000) -> str:
+    """Render an ``_infer_artifacts`` result into a phase8 arm-B-style
+    context string: standing-ranked payloads only.
+
+    Per docs/ledger_pricing.md Change 3 (phase8: C−B = −0.28 — verdicts
+    in the prompt hurt): renders each artifact's payload problem +
+    resolution text behind a small index header. NO claims, NO digest
+    hashes, NO standing numbers — nothing that reads as verdict text.
+    Claims/standing stay available in the structured result for
+    programmatic consumers; this function is prompt-facing only.
+
+    Artifacts already arrive in standing-ranked order from
+    ``_infer_artifacts`` (sorted by ``final`` descending); this function
+    preserves that order. Artifacts whose ``payload`` is ``None`` (blob
+    not yet replicated) are skipped. Proportional truncation across
+    artifacts mirrors ``run_contest.py``'s ``format_context``/
+    ``_artifact_block``: the budget is divided evenly by artifact count,
+    and each block is truncated independently to fit its share.
+    Deterministic: pure function of ``result`` and ``char_budget``.
+    """
+    artifacts = [a for a in result.get("artifacts", []) if a.get("payload") is not None]
+    if not artifacts:
+        return ""
+
+    per_art = char_budget // len(artifacts)
+    blocks = []
+    for i, art in enumerate(artifacts):
+        payload = art["payload"] or {}
+        problem = payload.get("problem", "") or ""
+        resolution = payload.get("resolution", "") or ""
+        blocks.append(_render_block(i, problem, resolution, per_art))
+    ctx = "\n\n".join(blocks)
+    return ctx[:char_budget]
+
+
+# ---------------------------------------------------------------------------
 # Top-level
 # ---------------------------------------------------------------------------
 

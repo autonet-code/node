@@ -45,13 +45,15 @@ from .world_model_substrate.adapter import (
 from .world_model_substrate.aggregate import apply_events
 from .world_model_substrate.mint_gate import (
     DEFAULT_CHARTER_IDS,
-    apply_mint_gate,
+    charter_violation_score,
 )
 from .world_model_substrate.reconcile import (
     EpochSnapshots,
     _attribute_node_mint,
     _node_mint,
     _node_novelty,
+    scale_node_agent_mint_by_violation,
+    snapshot_node_scores_ordered,
 )
 
 
@@ -108,6 +110,11 @@ def federated_reconcile_epoch(
     node_novelty: Dict[str, float] = {}
     agent_mint: Dict[str, float] = {}
     agent_novelty: Dict[str, float] = {}
+    # Per-(node, agent) mint breakdown, retained so the violator-pays
+    # gate can scale a flagged node's mint before it aggregates into
+    # per-agent totals. reconcile.py's uniform-ratio fallback discarded
+    # this; keeping it is what lets a CON win redistribute correctly.
+    node_agent_mint: Dict[str, Dict[str, float]] = {}
 
     for node_id in sorted_node_ids:
         nov = _node_novelty(node_id, snapshots)
@@ -127,12 +134,14 @@ def federated_reconcile_epoch(
 
         if mint > 0:
             mint_attribution = _attribute_node_mint(node_id, mint, events, world)
+            per_agent: Dict[str, float] = {}
             for agent in sorted(mint_attribution.keys()):
                 amount = mint_attribution[agent]
                 weight = agent_weights.get(agent, 1.0)
-                agent_mint[agent] = (
-                    agent_mint.get(agent, 0.0) + amount * weight
-                )
+                weighted = amount * weight
+                agent_mint[agent] = agent_mint.get(agent, 0.0) + weighted
+                per_agent[agent] = per_agent.get(agent, 0.0) + weighted
+            node_agent_mint[node_id] = per_agent
 
     # Output normalization: round all per-agent and per-node values
     # to `output_decimals` places. This swamps any IEEE 754 jitter
@@ -166,19 +175,37 @@ def federated_reconcile_epoch(
     }
 
     if apply_gate:
-        result = apply_mint_gate(
-            result, world,
-            charter_ids=DEFAULT_CHARTER_IDS,
-            gate_strength=gate_strength,
+        # Violator-pays gate: scale each flagged node's per-agent mint
+        # BEFORE aggregating, so suppression falls only on the flagged
+        # node's authors (not uniformly across all agents like
+        # apply_mint_gate's fallback). Combined with the emission pool
+        # below, a winning CON redistributes the violator's mint to
+        # everyone else.
+        node_violation: Dict[str, float] = {}
+        for node_id in sorted(node_agent_mint.keys()):
+            node_violation[node_id] = charter_violation_score(
+                world, node_id, DEFAULT_CHARTER_IDS,
+            )
+        gated_agent_mint = scale_node_agent_mint_by_violation(
+            node_agent_mint, node_violation, gate_strength=gate_strength,
         )
-        # apply_mint_gate may not normalize; re-normalize the mints
-        # it touched.
+        # Recompute the gated per-node mint (for diagnostics + pool
+        # scaling of node_mint), scaling each node by its violation.
+        gated_node_mint: Dict[str, float] = {}
+        for node_id in sorted(node_mint.keys()):
+            v = node_violation.get(node_id, 0.0)
+            scale = max(0.0, 1.0 - gate_strength * v)
+            gm = node_mint[node_id] * scale
+            if gm > 0:
+                gated_node_mint[node_id] = gm
+
         result["agent_mint"] = dict(sorted(
-            _round_dict(result.get("agent_mint", {}), output_decimals).items()
+            _round_dict(gated_agent_mint, output_decimals).items()
         ))
         result["node_mint"] = dict(sorted(
-            _round_dict(result.get("node_mint", {}), output_decimals).items()
+            _round_dict(gated_node_mint, output_decimals).items()
         ))
+        result["node_violation"] = dict(sorted(node_violation.items()))
         result["total_mint"] = round(
             sum(result["agent_mint"].values()), output_decimals,
         )
@@ -223,13 +250,30 @@ def federated_epoch_close(
     equilibrate_rounds: int = 8,
     equilibrate_tolerance: float = 1e-3,
     emission_pool: Optional[float] = None,
+    pricing: str = "ledger",
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
     Builds a throwaway replay world from a fresh charter (or from the
     supplied ``seed_world`` if continuing from a prior epoch's
-    authoritative state), replays the canonical batch sequence with
-    per-batch equilibration, and runs federated_reconcile_epoch.
+    authoritative state), replays the canonical batch sequence, and
+    runs federated_reconcile_epoch.
+
+    ``pricing`` selects how per-node scores are derived:
+
+      - ``"ledger"`` (default, post-phase8): replay applies causal
+        events only — NO equilibrate rounds, NO derived-sprout capture.
+        A node's score is the ``net_score`` tree recursion (posts +
+        signed pro/con children). Score moves only when causal events
+        land on/under the node during the epoch. The O(N^2) equilibrate
+        leaves the hot path. Cycle memoization is made deterministic by
+        evaluating net_score in sorted node-id order (see
+        ``snapshot_node_scores_ordered``).
+
+      - ``"equilibrated"``: the pre-phase8 experimental kernel. Replays
+        each batch with per-batch equilibration and captures the
+        derived sprouts it produces, attributing them to the batch's
+        author. Preserved BIT-FOR-BIT for the experimental kernel.
 
     The returned ``result`` is bit-identical across daemons that
     received the same canonical sequence — which by 5.3's contract
@@ -244,6 +288,9 @@ def federated_epoch_close(
     epoch's snapshot (so cross-epoch lineage works); that's why
     ``seed_world`` is exposed.
     """
+    if pricing not in ("ledger", "equilibrated"):
+        raise ValueError(f"unknown pricing mode: {pricing!r}")
+
     if seed_world is None:
         world = build_charter_world(
             bandwidth=bandwidth, embedding_dim=embedding_dim,
@@ -252,50 +299,84 @@ def federated_epoch_close(
         world = seed_world
 
     snapshots = EpochSnapshots()
-    snapshots.record_start(world)
 
-    # Replay each batch as its own apply_events + equilibrate, so
-    # equilibration history matches what would have happened with
-    # in-order live submission.
-    #
-    # Attribution gotcha (Phase 5.4): the gossip wire format carries
-    # only causal events. Reconcile, however, attributes mint by
-    # finding sub_claim_sprouted events under each minting node —
-    # which means it needs the *derived* sprouts that equilibration
-    # produced too. We capture them here and attribute them to the
-    # batch's author, so attribution reproduces deterministically.
-    #
-    # Determinism: cross-tendency discovery and equilibration are
-    # deterministic given world state, so two daemons replaying the
-    # same canonical sequence produce the same derived events.
-    all_events: List[Dict[str, Any]] = []
-    for batch in canonical.ordered_batches:
-        # Author of this batch's derived events = whoever signed the
-        # batch. We use sender_pubkey hex as a stable agent identity.
-        # If batch.events carry an explicit author_agent, prefer that
-        # (the daemon may run on behalf of multiple agents).
-        author = _author_for_batch(batch)
-        before_ids = _all_node_ids(world)
-        if batch.events:
-            apply_events(world, batch.events)
-        equilibrate(
-            world,
-            max_rounds=equilibrate_rounds,
-            tolerance=equilibrate_tolerance,
-        )
-        # Capture derived sprouts post-equilibrate, attributed to
-        # this batch's author. The event recorder uses its own
-        # sequence numbering; we offset to keep events globally
-        # unique-ish in the all_events list (reconcile only matches
-        # by node_id and position, not seq).
-        recorder = _EventRecorder(agent_id=author)
-        recorder.sub_claims_after_equilibrate(world, before_ids)
-        derived = [e.to_dict() for e in recorder.events]
+    if pricing == "ledger":
+        # Ledger replay: causal events only, no equilibration, no
+        # derived-sprout capture. Snapshots use sorted-order net_score
+        # so co-parented-cycle memoization is deterministic.
+        #
+        # Attribution needs each causal sprout event's node_id to be the
+        # LIVE (content-addressed) id, but the wire carries solver-side
+        # labels. We capture the replay remap and rewrite the events so
+        # ``_events_under_node`` (which matches raw event node_ids
+        # against live descendant ids) attributes to the real author.
+        snapshots.start = snapshot_node_scores_ordered(world)
+        all_events: List[Dict[str, Any]] = []
+        for batch in canonical.ordered_batches:
+            if not batch.events:
+                continue
+            remap: Dict[str, str] = {}
+            apply_events(
+                world, batch.events,
+                equilibrate_after=False, remap_out=remap,
+            )
+            # Build attribution copies with node_id rewritten to the
+            # live id. We do NOT mutate batch.events (the canonical log
+            # is fed downstream to the state-sync tracker verbatim).
+            for ev in batch.events:
+                if ev.get("kind") == "sub_claim_sprouted":
+                    live = remap.get(ev.get("node_id", ""))
+                    if live and live != ev.get("node_id"):
+                        ev = dict(ev)
+                        ev["solver_node_id"] = ev.get("node_id")
+                        ev["node_id"] = live
+                all_events.append(ev)
+        snapshots.close = snapshot_node_scores_ordered(world)
+    else:
+        # Equilibrated (experimental) kernel — unchanged behavior.
+        snapshots.record_start(world)
+        # Replay each batch as its own apply_events + equilibrate, so
+        # equilibration history matches what would have happened with
+        # in-order live submission.
+        #
+        # Attribution gotcha (Phase 5.4): the gossip wire format carries
+        # only causal events. Reconcile, however, attributes mint by
+        # finding sub_claim_sprouted events under each minting node —
+        # which means it needs the *derived* sprouts that equilibration
+        # produced too. We capture them here and attribute them to the
+        # batch's author, so attribution reproduces deterministically.
+        #
+        # Determinism: cross-tendency discovery and equilibration are
+        # deterministic given world state, so two daemons replaying the
+        # same canonical sequence produce the same derived events.
+        all_events = []
+        for batch in canonical.ordered_batches:
+            # Author of this batch's derived events = whoever signed the
+            # batch. We use sender_pubkey hex as a stable agent identity.
+            # If batch.events carry an explicit author_agent, prefer that
+            # (the daemon may run on behalf of multiple agents).
+            author = _author_for_batch(batch)
+            before_ids = _all_node_ids(world)
+            if batch.events:
+                apply_events(world, batch.events)
+            equilibrate(
+                world,
+                max_rounds=equilibrate_rounds,
+                tolerance=equilibrate_tolerance,
+            )
+            # Capture derived sprouts post-equilibrate, attributed to
+            # this batch's author. The event recorder uses its own
+            # sequence numbering; we offset to keep events globally
+            # unique-ish in the all_events list (reconcile only matches
+            # by node_id and position, not seq).
+            recorder = _EventRecorder(agent_id=author)
+            recorder.sub_claims_after_equilibrate(world, before_ids)
+            derived = [e.to_dict() for e in recorder.events]
 
-        all_events.extend(batch.events)
-        all_events.extend(derived)
+            all_events.extend(batch.events)
+            all_events.extend(derived)
 
-    snapshots.record_close(world)
+        snapshots.record_close(world)
 
     result = federated_reconcile_epoch(
         world, snapshots, all_events,
@@ -309,6 +390,7 @@ def federated_epoch_close(
     result["n_events"] = len(all_events)
     result["scope"] = "federated"
     result["authoritative"] = True
+    result["pricing"] = pricing
 
     # The on-chain anchor (Phase 5.5) commits the merkle of an
     # ``authoritative_payload`` dict. Only fields whose keys are
@@ -328,6 +410,7 @@ def federated_epoch_close(
         "total_novelty": result["total_novelty"],
         "output_decimals": result.get("output_decimals", output_decimals),
         "gate_applied": result.get("gate_applied", False),
+        "pricing": pricing,
         "n_batches": result["n_batches"],
         "n_events": result["n_events"],
     }

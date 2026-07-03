@@ -852,10 +852,12 @@ class AutonetService:
             )
         except Exception as e:
             logger.warning("canonical world tracker unavailable: %s", e)
+        pricing = getattr(self._world_service, "pricing", "ledger")
         self._federated_close_driver = FederatedCloseDriver(
             gossip=self._event_gossip,
             embedding_dim=embedding_dim,
             canonical_tracker=canonical_tracker,
+            pricing=pricing,
         )
 
         def _on_local_close(local_result):

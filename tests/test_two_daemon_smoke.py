@@ -46,11 +46,19 @@ def _make_daemon(
     embedding_dim: int = 32,
 ) -> Tuple[WorldService, EventGossip, FederatedCloseDriver]:
     """Build a WorldService + EventGossip + FederatedCloseDriver
-    triple sharing the given hub."""
+    triple sharing the given hub.
+
+    Pinned to the "equilibrated" kernel: this smoke submits
+    observation-only events, which mint via geometric propagation +
+    derived-sprout capture. Ledger mode (the post-phase8 default) scores
+    net_score over causal events only, so observations alone don't move
+    score — that path is exercised by tests/test_ledger_pricing.py.
+    """
     svc = WorldService(
         rpb_address=rpb,
         data_root=tmp_path / name,
         embedding_dim=embedding_dim,
+        pricing="equilibrated",
     )
     transport = InMemoryTransport(hub=hub, node_id=name)
     gossip = EventGossip(
@@ -59,7 +67,9 @@ def _make_daemon(
         transport=transport,
         world_service=svc,
     )
-    driver = FederatedCloseDriver(gossip=gossip, embedding_dim=embedding_dim)
+    driver = FederatedCloseDriver(
+        gossip=gossip, embedding_dim=embedding_dim, pricing="equilibrated",
+    )
     return svc, gossip, driver
 
 

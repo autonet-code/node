@@ -4,7 +4,9 @@ Covers ``_infer_artifacts`` and ``infer_with_world_model`` dispatch:
 retrieval by embedding cosine, graph-standing re-rank (a well-supported
 CON claim demotes an artifact), payload passthrough, missing-blob
 tolerance, determinism, mode dispatch, and back-compat of the
-alignment/general modes.
+alignment/general modes. Also covers ``render_context`` (arm-B-style
+prompt rendering, docs/ledger_pricing.md Change 3) and the
+``WorldService.infer_artifacts(render=True)`` wiring.
 
 Uses HashingEmbedder (deterministic, dependency-free) so no torch and
 stable rankings.
@@ -22,6 +24,7 @@ from nodes.common.world_model_substrate.usefulness_coords import HashingEmbedder
 from nodes.common.world_model_substrate.infer import (
     _infer_artifacts,
     infer_with_world_model,
+    render_context,
 )
 from nodes.common.world_model_substrate.adapter import build_charter_world
 
@@ -334,3 +337,204 @@ def test_general_mode_uses_passed_world():
     assert result["root_scores"]["promotion_of_intelligence"] == pytest.approx(
         base_score + 3.0
     )
+
+
+# --------------------------------------------------------------------------- #
+# (h) standing works WITHOUT equilibration — ledger-mode contract
+#     (docs/ledger_pricing.md Change 3)
+# --------------------------------------------------------------------------- #
+
+
+def test_standing_works_without_equilibration(blob_store, embedder):
+    """net_score is a pure tree recursion over posts + signed children —
+    it requires no equilibrate() rounds. This test builds a world, sprouts
+    claim nodes with artifact_digest and posts, and NEVER calls
+    equilibrate(). It pins that _infer_artifacts standings are nonzero and
+    that ranking still responds to a CON node with posts, as a contract for
+    ledger-mode worlds (Change 1: replay without equilibrate rounds).
+    """
+    idx = ArtifactIndex(blob_store, embedder=embedder, dim=DIM)
+    query = "parse a date string into a datetime object"
+
+    d_high = idx.add_artifact(
+        _work_unit(query, "call datetime.strptime with the matching format code")
+    )
+    d_low = idx.add_artifact(
+        _work_unit(
+            "parse a date string into a struct",
+            "call an alternative date parser routine",
+        )
+    )
+
+    # A fresh world — no equilibrate() call anywhere in this test.
+    world = _single_tendency_world()
+
+    # PRO support for d_high: nonzero standing without equilibration.
+    _add_claim(world, "T", "n_pro_high", Position.PRO, posts=3,
+               digest=d_high, content="this artifact is correct")
+
+    result = _infer_artifacts({"text": query}, world, idx, blob_store, k=5)
+    by_digest = {a["digest"]: a for a in result["artifacts"]}
+    assert by_digest[d_high]["standing"] == 3.0
+    assert by_digest[d_high]["standing"] != 0.0
+
+    # Now add a strongly-supported CON claim on top — ranking must still
+    # respond (standing swings negative, final drops) purely from net_score
+    # tree recursion, no equilibrate() involved.
+    _add_claim(world, "T", "n_con_high", Position.CON, posts=10,
+               digest=d_high, content="actually this artifact is wrong")
+
+    reranked = _infer_artifacts({"text": query}, world, idx, blob_store, k=5)
+    r_by_digest = {a["digest"]: a for a in reranked["artifacts"]}
+    r_order = [a["digest"] for a in reranked["artifacts"]]
+
+    # 3 (PRO) - 10 (CON) = -7.
+    assert r_by_digest[d_high]["standing"] == -7.0
+    assert r_order.index(d_low) < r_order.index(d_high), (
+        f"expected CON-flipped ranking without equilibration, got {r_order}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# render_context: arm-B-style prompt rendering (docs/ledger_pricing.md
+# Change 3, docs/phase8_results.md C-B = -0.28)
+# --------------------------------------------------------------------------- #
+
+
+def _result_with_artifacts(payloads):
+    """Build a minimal _infer_artifacts-shaped result dict from a list of
+    (digest, payload_or_None) pairs, already in standing-ranked order.
+    """
+    artifacts = []
+    for i, (digest, payload) in enumerate(payloads):
+        artifacts.append({
+            "digest": digest,
+            "cosine": 1.0 - i * 0.01,
+            "standing": 0.0,
+            "final": 1.0 - i * 0.01,
+            "payload": payload,
+            "claims": [
+                {"content": "some claim text", "position": "pro", "net_score": 5.0}
+            ] if payload is not None else [],
+        })
+    return {"mode": "artifacts", "artifacts": artifacts, "predictions": [], "probabilities": []}
+
+
+def test_render_context_respects_char_budget():
+    payloads = [
+        (f"digest{i}", {"problem": "P" * 500, "resolution": "R" * 500})
+        for i in range(5)
+    ]
+    result = _result_with_artifacts(payloads)
+    ctx = render_context(result, char_budget=1000)
+    assert len(ctx) <= 1000
+
+
+def test_render_context_excludes_claims_digests_and_standing():
+    result = _result_with_artifacts([
+        ("deadbeef" * 8, {"problem": "parse a date", "resolution": "use strptime"}),
+    ])
+    ctx = render_context(result)
+    assert "deadbeef" not in ctx
+    assert "some claim text" not in ctx
+    assert "standing" not in ctx.lower()
+    assert "net_score" not in ctx
+    assert "cosine" not in ctx
+    assert "[PRO" not in ctx and "[CON" not in ctx
+    # The payload content IS present.
+    assert "parse a date" in ctx
+    assert "use strptime" in ctx
+
+
+def test_render_context_skips_none_payloads():
+    result = _result_with_artifacts([
+        ("d1", {"problem": "problem one", "resolution": "resolution one"}),
+        ("d2", None),
+        ("d3", {"problem": "problem three", "resolution": "resolution three"}),
+    ])
+    ctx = render_context(result)
+    assert "problem one" in ctx
+    assert "problem three" in ctx
+    # None payload contributed no block at all.
+    assert ctx.count("--- artifact [") == 2
+
+
+def test_render_context_all_none_payloads_returns_empty():
+    result = _result_with_artifacts([("d1", None), ("d2", None)])
+    assert render_context(result) == ""
+
+
+def test_render_context_deterministic():
+    payloads = [
+        (f"digest{i}", {"problem": f"problem {i}", "resolution": f"resolution {i}"})
+        for i in range(4)
+    ]
+    result = _result_with_artifacts(payloads)
+    ctx1 = render_context(result)
+    ctx2 = render_context(result)
+    assert ctx1 == ctx2
+
+
+def test_render_context_preserves_standing_ranked_order():
+    # Artifacts arrive pre-ranked by standing (as _infer_artifacts sorts
+    # them); render_context must not re-sort.
+    payloads = [
+        ("d_first", {"problem": "first problem alpha", "resolution": "first resolution"}),
+        ("d_second", {"problem": "second problem beta", "resolution": "second resolution"}),
+    ]
+    result = _result_with_artifacts(payloads)
+    ctx = render_context(result)
+    assert ctx.index("first problem alpha") < ctx.index("second problem beta")
+
+
+def test_render_context_proportional_truncation_across_artifacts():
+    # Two artifacts sharing a fixed budget: each should get roughly half,
+    # so a very long payload gets truncated while a short one is untouched.
+    long_payload = {"problem": "P" * 5000, "resolution": "R" * 5000}
+    short_payload = {"problem": "short problem", "resolution": "short resolution"}
+    result = _result_with_artifacts([("d_long", long_payload), ("d_short", short_payload)])
+    ctx = render_context(result, char_budget=1000)
+    assert len(ctx) <= 1000
+    # The short payload's full text survives; the long one is cut down.
+    assert "short problem" in ctx
+    assert "short resolution" in ctx
+    assert "P" * 5000 not in ctx
+
+
+# --------------------------------------------------------------------------- #
+# WorldService.infer_artifacts(render=True) — integration
+# --------------------------------------------------------------------------- #
+
+
+def test_world_service_infer_artifacts_render_true(tmp_path: Path):
+    from nodes.common.world_service import WorldService
+
+    service = WorldService("test-rpb", data_root=tmp_path)
+    service.submit_work_units([
+        (
+            "parse a date string into a datetime object",
+            "call datetime.strptime with the matching format code",
+            {"ok": True},
+        ),
+        (
+            "resize an image to a thumbnail",
+            "scale the pixel dimensions down",
+            {"ok": True},
+        ),
+    ])
+
+    out = service.infer_artifacts(
+        "parse a date string into a datetime object", k=5, render=True
+    )
+    assert set(out.keys()) == {"result", "context"}
+    assert out["result"]["mode"] == "artifacts"
+    assert isinstance(out["context"], str)
+    assert "strptime" in out["context"]
+    # Verdict/digest text must not leak into the rendered context.
+    for art in out["result"]["artifacts"]:
+        assert art["digest"] not in out["context"]
+
+    # render=False (default) stays back-compat: bare result dict.
+    out_default = service.infer_artifacts("parse a date string into a datetime object", k=5)
+    assert out_default["mode"] == "artifacts"
+    assert "context" not in out_default

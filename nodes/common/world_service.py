@@ -181,10 +181,21 @@ class WorldService:
         snapshot_every_seconds: float = 60.0,
         epoch_emission_rate: Optional[float] = None,
         blob_store: Optional[BlobStore] = None,
+        pricing: str = "ledger",
     ):
         self.rpb_address = rpb_address
         self.bandwidth = bandwidth
         self.embedding_dim = embedding_dim
+        # Pricing mode for the FEDERATED epoch close (Change 1,
+        # post-phase8): "ledger" (default) scores per-node net_score
+        # over causal events only — no equilibration on the hot path;
+        # "equilibrated" is the experimental kernel preserving the
+        # pre-phase8 geometric-propagation behavior bit-for-bit. Plumbed
+        # to the FederatedCloseDriver the same way epoch_emission_rate
+        # is plumbed to the local close.
+        if pricing not in ("ledger", "equilibrated"):
+            raise ValueError(f"unknown pricing mode: {pricing!r}")
+        self.pricing = pricing
         # Fixed-emission economics: tokens minted per SECOND of epoch
         # duration, split pro-rata by post-gate contribution. None =
         # legacy uncapped mint (every claim prints). The pool for an
@@ -786,22 +797,29 @@ class WorldService:
                 "root_scores_after": scores_after,
             }
 
-    def infer_artifacts(self, query_text: str, k: int = 5) -> Dict[str, Any]:
+    def infer_artifacts(
+        self, query_text: str, k: int = 5, render: bool = False
+    ) -> Dict[str, Any]:
         """Two-plane inference: retrieve artifacts by embedding similarity
         and re-rank by claim-graph standing (docs/two_plane_inference.md,
         section 4).
 
         Returns the ``_infer_artifacts`` result dict (mode="artifacts").
+        When ``render=True``, returns ``{"result": <that dict>, "context":
+        render_context(result)}`` instead (docs/ledger_pricing.md Change 3).
         """
         with self._lock:
-            from .world_model_substrate.infer import _infer_artifacts
-            return _infer_artifacts(
+            from .world_model_substrate.infer import _infer_artifacts, render_context
+            result = _infer_artifacts(
                 {"text": query_text},
                 world=self._world,
                 artifact_index=self._artifact_index,
                 blob_store=self._blob_store,
                 k=k,
             )
+            if render:
+                return {"result": result, "context": render_context(result)}
+            return result
 
     def submit_con(
         self,
