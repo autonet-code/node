@@ -32,6 +32,14 @@ net_score vs raw vote counting). This isolates the geometry.
 - Source: extracted Claude Code work units for the autonet repo
   (`work_units_autonet.jsonl` in the substrate_experiment dir), the
   real session-trace corpus.
+- **Amendment 1 (2026-07-03, before any calibration/contest call):**
+  `work_units_autonet.jsonl` turned out to hold only 17 units — too few
+  for meaningful retrieval (k=5 of 17). Corpus source amended to: fresh
+  extraction (same `extract_sessions.py` pipeline) from the
+  `C--code-autonet` and `C--code-world-model` session transcripts as of
+  2026-07-03, merged with the legacy 17 and deduplicated by uid. All
+  other sampling rules unchanged. Questions and judge claims are
+  regenerated against the amended sample; nothing downstream had run.
 - Sample: 200 units, deterministic (sort by sha256 of the unit's JSON,
   take first 200). Cap chosen for substrate build tractability
   (~15 s/unit); reported as a limitation.
