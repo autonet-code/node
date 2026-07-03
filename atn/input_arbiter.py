@@ -27,11 +27,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .events import Event, EventBus, EventType
 
 log = logging.getLogger(__name__)
+
+
+# A liveness predicate answers "is this token backed by a live session?".
+# It ONLY judges ``ws:`` tokens — every other surface kind (voice/chat) is
+# always treated as live (the predicate is never consulted for them). A None
+# predicate (the default) means "everything is live" — exact legacy behavior.
+LivenessPredicate = Callable[[str], bool]
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +121,8 @@ class InputArbiter:
     """
 
     def __init__(self, events: EventBus,
-                 authorizer: SwitchAuthorizer | None = None) -> None:
+                 authorizer: SwitchAuthorizer | None = None,
+                 liveness: "LivenessPredicate | None" = None) -> None:
         self._events = events
         self._authorizer: SwitchAuthorizer = authorizer or AllowSwitch()
         self._holder: SurfaceId | None = None
@@ -125,6 +133,31 @@ class InputArbiter:
         # Serializes grant decisions so two concurrent request_input calls
         # can't both win.
         self._grant_lock = asyncio.Lock()
+        # §12 ghost-holder recovery: an optional predicate over ``ws:`` tokens.
+        # Set by ws_server so hand-off / gate can skip ws surfaces whose session
+        # is gone. None = legacy "everything is live".
+        self._liveness: "LivenessPredicate | None" = liveness
+
+    def set_liveness_predicate(self, liveness: "LivenessPredicate | None") -> None:
+        """Install (or clear) the ws-token liveness predicate. Backward-compat
+        seam so a runtime that constructed the arbiter without one can wire it
+        after the fact (ws_server does this at start)."""
+        self._liveness = liveness
+
+    def _token_alive(self, token: str) -> bool:
+        """True unless the token is a dead ``ws:`` surface. Only ws tokens are
+        judged by the predicate; voice/chat and any non-ws surface are always
+        live. A missing predicate treats everything as live (legacy)."""
+        if self._liveness is None:
+            return True
+        if not token.startswith("ws:"):
+            return True
+        try:
+            return bool(self._liveness(token))
+        except Exception:
+            # A predicate error must never wedge input — fail open (live).
+            log.debug("[arbiter] liveness predicate raised for %s", token, exc_info=True)
+            return True
 
     # -- registration -------------------------------------------------------
 
@@ -143,9 +176,11 @@ class InputArbiter:
         self._connected.pop(token, None)
         if self._holder is not None and self._holder.token == token:
             prior = self._holder
-            # Most-recently-registered remaining surface = last dict entry.
-            successor = next(reversed(self._connected.values()), None) \
-                if self._connected else None
+            # Most-recently-registered remaining LIVE surface. §12: a dead
+            # ws: surface (session gone but still in _connected) must not
+            # recapture the mic on hand-off — skip it and, while we're here,
+            # drop it from the connected set so it can't win a later hand-off.
+            successor = self._pick_live_successor()
             self._holder = successor
             self._emit(EventType.INPUT_ACTIVE_CHANGED, {
                 "active_writer": successor.token if successor else None,
@@ -155,6 +190,24 @@ class InputArbiter:
             })
             log.info("[arbiter] %s released the mic; auto-handed to %s",
                      prior.token, successor.token if successor else "(none)")
+
+    def _pick_live_successor(self) -> SurfaceId | None:
+        """Most-recently-registered remaining surface that is still live.
+
+        Walks the connected set newest-first, skipping (and pruning) dead
+        ``ws:`` surfaces so a ghost can never be handed the mic. Returns None
+        if no live surface remains."""
+        dead: list[str] = []
+        successor: SurfaceId | None = None
+        for sid in reversed(list(self._connected.values())):
+            if self._token_alive(sid.token):
+                successor = sid
+                break
+            dead.append(sid.token)
+        for tok in dead:
+            self._connected.pop(tok, None)
+            log.info("[arbiter] pruned dead ws surface %s during hand-off", tok)
+        return successor
 
     # -- queries ------------------------------------------------------------
 

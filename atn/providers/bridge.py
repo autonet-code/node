@@ -66,6 +66,64 @@ _STDIN_DRAIN_TIMEOUT = 60.0
 # results inflate every subsequent SDK turn and can wedge the stdin pipe.
 _TOOL_RESULT_CHAR_MAX = 40_000
 
+# §11 first-event watchdog: the bridge must produce its FIRST stream event
+# within this many seconds of an orchestrate request being sent. A model the
+# SDK loop rejects (haiku on the orchestrate path) can otherwise hot-spin at
+# 100% CPU with zero output until the 1800s idle ceiling. On timeout we kill
+# the subprocess and raise so the execution fails loudly. Overridable.
+_FIRST_EVENT_TIMEOUT = float(os.environ.get("ATN_BRIDGE_FIRST_EVENT_TIMEOUT", "120"))
+# §11 kill ladder: grace window between a cooperative interrupt and a verified
+# hard kill of the tracked bun PID. Polled, then taskkill /F (win) / SIGKILL.
+_KILL_GRACE_SECONDS = float(os.environ.get("ATN_BRIDGE_KILL_GRACE", "5"))
+
+
+def _model_is_orchestrator_capable(model: str) -> tuple[bool, str]:
+    """§11 model-tier guard (READ-ONLY over model_specs).
+
+    The SDK orchestrate loop is known to misbehave on non-orchestrator-capable
+    models — a haiku-class model made the bun bridge hot-spin at 100% CPU with
+    zero output for 20+ min. Reject orchestrate on those models with a clear
+    error BEFORE spawning the SDK loop.
+
+    Uses ``model_specs.get_model_tier`` when present (the §14 flag another
+    agent may add), else falls back to the class bucket: haiku is not
+    orchestrator-capable. Returns (ok, reason).
+    """
+    try:
+        from .. import model_specs as _ms
+    except Exception:
+        return True, ""  # can't resolve — don't block
+    # Prefer an explicit tier/capability helper if model_specs exposes one.
+    getter = getattr(_ms, "get_model_tier", None)
+    if callable(getter):
+        try:
+            tier = getter(model)
+        except Exception:
+            tier = None
+        if isinstance(tier, str) and tier.lower() in ("haiku", "fast", "small"):
+            return False, (
+                f"model '{model}' (tier '{tier}') is not orchestrator-capable; "
+                "the SDK orchestrate loop hot-spins on it — pick a "
+                "sonnet/opus-class model or set the model explicitly"
+            )
+        if isinstance(tier, str):
+            return True, ""
+    # Fallback: class bucket. Haiku is the known-bad orchestrate tier.
+    try:
+        klass = _ms.model_class(model)
+    except Exception:
+        klass = "other"
+    # Also catch the bare "haiku" family alias the bridge accepts
+    # (mapModelToClaudeModel maps any string containing "haiku" → haiku),
+    # which resolves to the default spec (klass "other") in the store.
+    if klass == "haiku" or "haiku" in (model or "").lower():
+        return False, (
+            f"model '{model}' (haiku-class) is not orchestrator-capable; "
+            "the SDK orchestrate loop hot-spins on it — pick a "
+            "sonnet/opus-class model or set the model explicitly"
+        )
+    return True, ""
+
 
 class BridgeProvider(Provider):
     """Claude Max provider via the TypeScript bridge subprocess.
@@ -99,6 +157,19 @@ class BridgeProvider(Provider):
         # Set by the caller (e.g. runtime) after construction.
         self.event_bus: EventBus | None = None
         self.source_agent_id: str = ""
+
+        # §5 delivery-ack (finding 8): injected user_messages, keyed by id.
+        # value = content. An entry is present from the moment send_user_message
+        # writes it until the bridge acks it (user_message_consumed → removed)
+        # or the orchestration ends (unconsumed → re-posted to the inbox by
+        # execution_control). ``_injection_seq`` mints monotonic ids.
+        self._injection_seq: int = 0
+        self._pending_injections: dict[str, str] = {}
+        self._first_event_timeout: float = _FIRST_EVENT_TIMEOUT
+        # Armed per-orchestration; set on the first bridge event (stdout line
+        # or stderr @@EVENT@@) so the watchdog can tell "wedged from the start"
+        # from "busy". None between orchestrations.
+        self._first_event: asyncio.Event | None = None
 
         # Cumulative session stats — updated after each orchestrate response.
         # These track the SDK's view of the session, not our own bookkeeping.
@@ -413,6 +484,14 @@ class BridgeProvider(Provider):
         # It CANNOT use _send_request/_send_raw (which assume one-shot).
         # We acquire the lock to prevent concurrent bridge use, but hold it
         # for the entire orchestration session.
+        # §11 model-tier guard: reject non-orchestrator-capable models (haiku)
+        # BEFORE acquiring the lock or spawning the SDK loop, since the loop
+        # hot-spins on them. Cheap, pure model check.
+        effective_model = model or self._model
+        _ok, _reason = _model_is_orchestrator_capable(effective_model)
+        if not _ok:
+            raise ProviderError(_reason, provider="claude_max")
+
         async with self._lock:
             await self._ensure_process()
             assert self._process and self._process.stdin and self._process.stdout
@@ -420,7 +499,6 @@ class BridgeProvider(Provider):
             self._request_id += 1
             request_id = f"req-{self._request_id}"
 
-            effective_model = model or self._model
             if model:
                 self._model = model  # Keep session_stats in sync
             request: dict[str, Any] = {
@@ -466,6 +544,14 @@ class BridgeProvider(Provider):
             # previous orchestration, and a stale timestamp would get a
             # healthy-but-thinking bridge killed on the first probe.
             self._last_subprocess_activity = time.monotonic()
+
+            # §11 first-event watchdog: arm a signal that the stderr drain and
+            # the stdout loop set on the FIRST piece of bridge traffic. If it
+            # stays unset past _first_event_timeout the SDK loop is wedged
+            # (haiku hot-spin) — kill the subprocess and fail loudly instead of
+            # waiting out the 1800s idle ceiling.
+            self._first_event = asyncio.Event()
+            watchdog_task = asyncio.create_task(self._first_event_watchdog())
 
             log.info("Orchestrate request sent (tools=%d, max_turns=%d)", len(tools), max_turns)
 
@@ -639,6 +725,8 @@ class BridgeProvider(Provider):
                             provider="claude_max",
                         )
                     self._last_subprocess_activity = time.monotonic()
+                    if self._first_event is not None:
+                        self._first_event.set()
 
                     try:
                         msg = json.loads(raw)
@@ -730,6 +818,23 @@ class BridgeProvider(Provider):
                         await stream_task
                     except asyncio.CancelledError:
                         pass
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
+                self._first_event = None
+                # Re-post any injection the bridge never consumed to the inbox
+                # so a delegate_message that raced turn completion is not lost.
+                # execution_control reads/clears _pending_injections on the
+                # delegate_message path; here we just log a warning for any
+                # that remain (the caller-side fallback owns the re-post).
+                if self._pending_injections:
+                    log.warning(
+                        "orchestration ended with %d unconsumed injection(s): %s",
+                        len(self._pending_injections),
+                        list(self._pending_injections.keys()),
+                    )
 
             if final_resp is None:
                 raise ProviderError(
@@ -1168,25 +1273,53 @@ class BridgeProvider(Provider):
         """
         return self._tokens_per_pct_by_class.get("sonnet")
 
-    async def send_user_message(self, content: str) -> None:
+    async def send_user_message(self, content: str) -> str | None:
         """Inject a user message into the active orchestration session.
 
-        The message is queued and picked up by the SDK on the next turn.
-        Safe to call while send_orchestrate() is running.
+        Assigns a monotonic injection id, records it in ``_pending_injections``,
+        and writes it to the bridge tagged with that id. The bridge acks with
+        ``user_message_consumed`` the moment the SDK loop dequeues it (which
+        clears the pending entry), or ``user_message_dropped`` if it raced turn
+        completion (leaving it pending for the inbox fallback).
+
+        Returns the injection id on a successful write (so the caller can check
+        whether it was consumed via ``injection_consumed``), or None if there
+        was no active process / the write failed.
 
         Does NOT acquire the lock — same rationale as interrupt().
         """
         if not self._process or self._process.returncode is not None:
             log.warning("send_user_message: no active bridge process")
-            return
+            return None
         assert self._process.stdin
+        self._injection_seq += 1
+        inj_id = f"inj-{self._injection_seq}"
+        # Track BEFORE writing so a consumed-ack that races back can't find the
+        # entry missing.
+        self._pending_injections[inj_id] = content
         try:
-            line = json.dumps({"type": "user_message", "content": content}) + "\n"
+            line = json.dumps({
+                "type": "user_message", "content": content, "id": inj_id,
+            }) + "\n"
             self._process.stdin.write(line.encode())
             await self._process.stdin.drain()
-            log.info("User message injected (%d chars)", len(content))
+            log.info("User message injected (%d chars, id=%s)", len(content), inj_id)
+            return inj_id
         except (BrokenPipeError, ConnectionResetError, OSError):
             log.warning("Failed to send user_message (bridge stdin broken)")
+            self._pending_injections.pop(inj_id, None)
+            return None
+
+    def injection_consumed(self, inj_id: str) -> bool:
+        """True once the bridge has acked ``inj_id`` as consumed by the SDK loop
+        (i.e. it is no longer pending). An unknown id reads as consumed."""
+        return inj_id not in self._pending_injections
+
+    def take_unconsumed_injection(self, inj_id: str) -> str | None:
+        """Pop and return the content of an injection that was never consumed,
+        so the caller can re-post it to the inbox (§5 fallback). Returns None if
+        the injection was already consumed (or unknown)."""
+        return self._pending_injections.pop(inj_id, None)
 
     # ------------------------------------------------------------------
     # Session context inspection
@@ -1381,6 +1514,112 @@ class BridgeProvider(Provider):
                     provider="claude_max",
                 )
 
+    async def _first_event_watchdog(self) -> None:
+        """§11: kill the subprocess if the FIRST bridge event never arrives.
+
+        Armed on each orchestrate request. If ``_first_event`` is not set
+        within ``_first_event_timeout`` the SDK loop is wedged from the start
+        (the haiku hot-spin) — hard-kill the tracked PID so the blocked
+        ``_read_stdout_guarded`` sees the process exit and raises, failing the
+        execution loudly instead of waiting out the 1800s idle ceiling.
+        """
+        ev = self._first_event
+        if ev is None:
+            return
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=self._first_event_timeout)
+            return  # first event arrived — healthy start
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            return
+        proc = self._process
+        pid = proc.pid if proc else None
+        log.error(
+            "Bridge first-event watchdog fired: no event within %.0fs "
+            "(pid=%s) — killing subprocess (wedged SDK loop)",
+            self._first_event_timeout, pid,
+        )
+        await self.terminate_subprocess(reason="first_event_timeout")
+
+    async def terminate_subprocess(self, reason: str = "") -> bool:
+        """§11 kill ladder — verified hard kill of the tracked bun PID.
+
+        A cooperative interrupt cannot stop a spinning/wedged SDK loop, so a
+        "killed" agent must not leave the subprocess running. Try graceful
+        ``kill()`` (SIGTERM/terminate), poll for exit within
+        ``_KILL_GRACE_SECONDS``, then escalate to a hard kill of the OS PID
+        (``taskkill /F`` on Windows, SIGKILL elsewhere). Returns True once the
+        process is confirmed gone (or was already gone).
+        """
+        proc = self._process
+        if proc is None:
+            return True
+        pid = proc.pid
+        if proc.returncode is not None:
+            return True
+
+        # Step 1: graceful terminate + short poll.
+        try:
+            proc.terminate()
+        except (ProcessLookupError, Exception):
+            pass
+        deadline = time.monotonic() + _KILL_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if proc.returncode is not None:
+                log.info("Bridge subprocess pid=%s exited gracefully (reason=%s)", pid, reason)
+                return True
+            try:
+                await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=0.25)
+                return True
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
+
+        # Step 2: escalate to a hard kill of the tracked PID, verified.
+        log.warning(
+            "Bridge subprocess pid=%s did not exit within %.0fs — hard-killing (reason=%s)",
+            pid, _KILL_GRACE_SECONDS, reason,
+        )
+        try:
+            proc.kill()
+        except (ProcessLookupError, Exception):
+            pass
+        # OS-level fallback: proc.kill() can be a no-op if the transport is
+        # confused; taskkill/SIGKILL by PID is the backstop.
+        try:
+            if sys.platform == "win32":
+                await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/T", "/PID", str(pid),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            else:
+                import signal as _signal
+                try:
+                    os.kill(pid, _signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        except Exception:
+            log.debug("OS-level kill fallback failed for pid=%s", pid, exc_info=True)
+
+        # Verify exit by polling one more grace window.
+        deadline = time.monotonic() + _KILL_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if proc.returncode is not None:
+                log.info("Bridge subprocess pid=%s confirmed killed (reason=%s)", pid, reason)
+                return True
+            try:
+                await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=0.25)
+                return True
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
+        log.error("Bridge subprocess pid=%s could NOT be confirmed dead", pid)
+        return False
+
     async def _drain_stderr(self) -> None:
         """Read bridge stderr, routing @@EVENT@@ lines to the event queue.
 
@@ -1397,6 +1636,10 @@ class BridgeProvider(Provider):
             if not text:
                 continue
             if text.startswith(_EVENT_PREFIX):
+                # Any bridge event proves the SDK loop is alive — satisfy the
+                # first-event watchdog (§11).
+                if self._first_event is not None:
+                    self._first_event.set()
                 payload = text[len(_EVENT_PREFIX):]
                 try:
                     event = json.loads(payload)
@@ -1411,6 +1654,18 @@ class BridgeProvider(Provider):
                             "rate_limit %s: utilization=%s status=%s",
                             key, event.get("utilization"), event.get("status"),
                         )
+                        continue
+                    if etype in ("user_message_consumed", "user_message_dropped"):
+                        # §5 delivery-ack. Consumed → the SDK loop read the
+                        # injection; drop it from pending. Dropped → the bridge
+                        # couldn't queue it (raced turn end); leave it pending so
+                        # the caller's inbox fallback re-posts it.
+                        inj_id = event.get("id", "")
+                        if etype == "user_message_consumed":
+                            self._pending_injections.pop(inj_id, None)
+                            log.info("injection %s consumed by SDK loop", inj_id)
+                        else:
+                            log.warning("injection %s dropped by bridge (raced turn end)", inj_id)
                         continue
                     if etype not in ("text_delta",):
                         log.info("bridge stderr event: type=%s", etype)

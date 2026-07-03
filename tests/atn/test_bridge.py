@@ -289,6 +289,220 @@ async def test_bridge_script_path():
 
 
 # ---------------------------------------------------------------------------
+# §11 model-tier guard — reject orchestrate on non-orchestrator-capable models
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_orchestrate_rejects_haiku_before_spawning():
+    """A haiku-class model on the orchestrate path must be rejected BEFORE the
+    subprocess is spawned (it hot-spins the SDK loop)."""
+    provider = BridgeProvider(model="claude-haiku-4-5")
+
+    # _ensure_process must never be reached — assert it isn't by making it blow
+    # up if called.
+    async def _boom():
+        raise AssertionError("_ensure_process should not run for a rejected model")
+    provider._ensure_process = _boom  # type: ignore
+
+    with pytest.raises(ProviderError, match="not orchestrator-capable"):
+        await provider.send_orchestrate(
+            message="hi", tools=[], tool_executor=AsyncMock(),
+            model="claude-haiku-4-5",
+        )
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_allows_sonnet():
+    """A sonnet-class model passes the tier guard (we stop right after by
+    making _ensure_process raise a sentinel so no real subprocess spawns)."""
+    provider = BridgeProvider(model="claude-sonnet-4-6")
+
+    class _Sentinel(Exception):
+        pass
+
+    async def _sentinel():
+        raise _Sentinel()
+    provider._ensure_process = _sentinel  # type: ignore
+
+    # Passing the guard means we reach _ensure_process (our sentinel), not a
+    # ProviderError about the tier.
+    with pytest.raises(_Sentinel):
+        await provider.send_orchestrate(
+            message="hi", tools=[], tool_executor=AsyncMock(),
+            model="claude-sonnet-4-6",
+        )
+
+
+def test_model_tier_helper():
+    from atn.providers.bridge import _model_is_orchestrator_capable
+    ok, _ = _model_is_orchestrator_capable("claude-haiku-4-5")
+    assert ok is False
+    ok, _ = _model_is_orchestrator_capable("claude-sonnet-4-6")
+    assert ok is True
+    ok, _ = _model_is_orchestrator_capable("claude-opus-4-8")
+    assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# §5 delivery-ack — injection tracking (finding 8)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_send_user_message_tracks_injection():
+    """send_user_message assigns an id, tracks it pending, and tags the wire
+    message with that id."""
+    provider = BridgeProvider(model="sonnet")
+    mock_proc = MockBridgeProcess([])
+    mock_proc.returncode = None
+    provider._process = mock_proc
+
+    inj_id = await provider.send_user_message("steer left")
+    assert inj_id is not None
+    assert inj_id in provider._pending_injections
+    assert provider._pending_injections[inj_id] == "steer left"
+    # Wire message carries the id.
+    wire = json.loads(mock_proc.stdin.written[-1])
+    assert wire["type"] == "user_message"
+    assert wire["id"] == inj_id
+    assert wire["content"] == "steer left"
+    # Not yet consumed.
+    assert provider.injection_consumed(inj_id) is False
+
+
+@pytest.mark.asyncio
+async def test_injection_consumed_and_take():
+    provider = BridgeProvider(model="sonnet")
+    mock_proc = MockBridgeProcess([])
+    provider._process = mock_proc
+
+    inj_id = await provider.send_user_message("hello")
+    # Simulate the bridge acking consumption (what _drain_stderr does).
+    provider._pending_injections.pop(inj_id, None)
+    assert provider.injection_consumed(inj_id) is True
+    # take on a consumed id returns None (nothing to reclaim).
+    assert provider.take_unconsumed_injection(inj_id) is None
+
+
+@pytest.mark.asyncio
+async def test_take_unconsumed_injection_returns_content():
+    provider = BridgeProvider(model="sonnet")
+    mock_proc = MockBridgeProcess([])
+    provider._process = mock_proc
+
+    inj_id = await provider.send_user_message("unconsumed content")
+    # Not acked → still pending → take reclaims the content for the fallback.
+    assert provider.take_unconsumed_injection(inj_id) == "unconsumed content"
+    assert inj_id not in provider._pending_injections
+
+
+@pytest.mark.asyncio
+async def test_send_user_message_no_process_returns_none():
+    provider = BridgeProvider(model="sonnet")
+    provider._process = None
+    assert await provider.send_user_message("x") is None
+
+
+# ---------------------------------------------------------------------------
+# §11 kill ladder — verified subprocess termination
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_terminate_subprocess_graceful():
+    """A subprocess that exits on terminate() is confirmed dead without a hard
+    kill."""
+    provider = BridgeProvider(model="sonnet")
+
+    class _GracefulProc:
+        def __init__(self):
+            self.pid = 4242
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0  # exits promptly
+        def kill(self):
+            self.killed = True
+        async def wait(self):
+            return self.returncode
+
+    proc = _GracefulProc()
+    provider._process = proc
+    ok = await provider.terminate_subprocess(reason="test")
+    assert ok is True
+    assert proc.terminated is True
+    assert proc.killed is False
+
+
+@pytest.mark.asyncio
+async def test_terminate_subprocess_already_dead():
+    provider = BridgeProvider(model="sonnet")
+
+    class _DeadProc:
+        pid = 1
+        returncode = -9
+        def terminate(self): pass
+        def kill(self): pass
+        async def wait(self): return -9
+
+    provider._process = _DeadProc()
+    assert await provider.terminate_subprocess() is True
+
+
+@pytest.mark.asyncio
+async def test_terminate_subprocess_no_process():
+    provider = BridgeProvider(model="sonnet")
+    provider._process = None
+    assert await provider.terminate_subprocess() is True
+
+
+@pytest.mark.asyncio
+async def test_terminate_subprocess_escalates_to_hard_kill(monkeypatch):
+    """A subprocess that ignores terminate() must be escalated to a hard kill
+    of the tracked PID, verified. We stub the OS-level kill so no real process
+    is touched, and flip returncode when kill() lands."""
+    import atn.providers.bridge as bridgemod
+    # Shrink the grace window so the test is fast.
+    monkeypatch.setattr(bridgemod, "_KILL_GRACE_SECONDS", 0.2)
+
+    provider = BridgeProvider(model="sonnet")
+
+    class _StubbornProc:
+        def __init__(self):
+            self.pid = 999999  # non-existent; OS calls are stubbed anyway
+            self.returncode = None
+            self.hard_killed = False
+        def terminate(self):
+            pass  # ignores the polite request
+        def kill(self):
+            self.hard_killed = True
+            self.returncode = -9  # dies on hard kill
+        async def wait(self):
+            # Mirror real asyncio: block until the process actually exits.
+            while self.returncode is None:
+                await asyncio.sleep(0.01)
+            return self.returncode
+
+    proc = _StubbornProc()
+    provider._process = proc
+
+    # Stub the OS-level fallback so nothing real is signalled.
+    called = {"taskkill": False, "oskill": False}
+
+    async def _fake_subproc_exec(*args, **kwargs):
+        called["taskkill"] = True
+        class _P:
+            async def wait(self): return 0
+        return _P()
+    monkeypatch.setattr(bridgemod.asyncio, "create_subprocess_exec", _fake_subproc_exec)
+    monkeypatch.setattr(bridgemod.os, "kill", lambda *a, **k: called.__setitem__("oskill", True))
+
+    ok = await provider.terminate_subprocess(reason="wedged")
+    assert ok is True
+    assert proc.hard_killed is True
+
+
+# ---------------------------------------------------------------------------
 # Live test — requires Claude Code / Claude Max
 # ---------------------------------------------------------------------------
 

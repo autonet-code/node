@@ -167,6 +167,14 @@ class WebSocketBridge:
             self.runtime.events.subscribe(None, self._on_event)
             self._event_handler_registered = True
 
+        # §12: give the InputArbiter a liveness view over ws: tokens so hand-off
+        # skips dead ws surfaces. Backward-compat: only if the arbiter supports
+        # the setter (older runtimes constructed it without one).
+        arbiter = getattr(self.runtime, "input_arbiter", None)
+        setter = getattr(arbiter, "set_liveness_predicate", None)
+        if callable(setter):
+            setter(self._ws_token_live)
+
         # Privileged local listener — full control, key export, no handshake.
         self._server = await websockets.serve(
             lambda ws: self._handle_client(ws, local=True),
@@ -253,9 +261,34 @@ class WebSocketBridge:
         sid = self._surface_id_for(session)
         if arbiter.is_active(sid):
             return None
+        # §12 ghost-holder recovery: the denial may be because a dead ws:
+        # surface is still holding the mic (its session closed but release_for
+        # never fired, or it was captured before disconnect). Validate the
+        # holder; if it's a ws: token with no live session, release it (auto-
+        # hands to a live surface / frees the mic) and re-run the gate ONCE.
+        holder = arbiter.holder_token()
+        if holder and holder.startswith("ws:") and not self._ws_token_live(holder):
+            log.info("[arbiter] gate denied to %s; holder %s is a dead ws surface — releasing",
+                     sid.token, holder)
+            arbiter.release_for(holder)
+            if arbiter.is_active(sid):
+                return None
         return {"error": "not the active input surface",
                 "code": "input_not_active",
                 "holder": arbiter.holder_token()}
+
+    def _ws_token_live(self, token: str) -> bool:
+        """Liveness predicate for the InputArbiter: is a ``ws:<conn_id>`` token
+        backed by a still-connected authed session? Only ws tokens are judged;
+        the arbiter treats every other kind as live. Passed to the arbiter at
+        start() and reused by _arbiter_gate."""
+        if not token.startswith("ws:"):
+            return True
+        conn_id = token[len("ws:"):]
+        for sess in self._sessions.values():
+            if sess.conn_id == conn_id:
+                return True
+        return False
 
     def agent_tools(self, agent_id: str) -> list[dict]:
         """The WS bridge contributes no agent-callable tools; the browser is
@@ -815,7 +848,11 @@ class WebSocketBridge:
             delivered = await self.runtime.send_delegate_message(agent_id, content)
             if not delivered:
                 return {"msg_id": msg_id, "ok": False, "error": f"Delegate '{agent_id}' is not running"}
-            return {"msg_id": msg_id, "ok": True, "result": {"status": "injected", "agent_id": agent_id}}
+            # Reflect reality (finding 8): "injected" only when the running loop
+            # actually consumed it; "inbox_fallback" when it raced turn end and
+            # was re-posted to the inbox instead. Legacy truthy (True) → injected.
+            status = delivered if isinstance(delivered, str) else "injected"
+            return {"msg_id": msg_id, "ok": True, "result": {"status": status, "agent_id": agent_id}}
 
         # Send message to a cognitive agent (universal chat)
         if msg_type == "send_agent_message":

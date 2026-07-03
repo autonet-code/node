@@ -985,7 +985,7 @@ class Runtime:
     def unregister_interrupt_hook(self, execution_id: str) -> None:
         self.control.unregister_interrupt_hook(execution_id)
 
-    async def send_delegate_message(self, agent_id: str, content: str) -> bool:
+    async def send_delegate_message(self, agent_id: str, content: str) -> "str | bool":
         return await self.control.send_delegate_message(agent_id, content)
 
     async def interrupt_delegate(self, agent_id: str) -> bool:

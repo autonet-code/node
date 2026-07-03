@@ -89,17 +89,41 @@ function handleRateLimitEvent(msg: any): void {
 }
 
 // -- Global error handlers --
+//
+// A swallowed error is the root of the haiku hot-spin: the SDK's query()
+// loop can reject in a background promise (e.g. an invalid/rejected model
+// like claude-haiku-4-5 on the orchestrate path). The old handlers just
+// logged and kept the process alive, so the running orchestration never got
+// a `result` message, never called respond(), and the SDK kept retrying
+// internally at 100% CPU with zero @@EVENT@@ output. If an orchestration is
+// active when an unhandled error fires, we now FAIL that orchestration
+// loudly (error event + ok:false response + query.close) instead of leaving
+// it to spin. When nothing is active, we keep the old keep-alive behaviour.
+
+function failActiveOrchestration(reason: string): boolean {
+  if (!activeOrchestration) return false
+  const ao = activeOrchestration
+  activeOrchestration = null
+  log("failing active orchestration due to unhandled error", { reason })
+  emitEvent({ type: "error", error: reason })
+  try { ao.inputQueue.done() } catch {}
+  try { ao.query.close() } catch {}
+  const cb = ao.onFatal
+  if (cb) {
+    try { cb(new Error(reason)) } catch {}
+  }
+  return true
+}
 
 process.on("unhandledRejection", (reason: unknown) => {
-  log("unhandled rejection (kept alive)", {
-    error: reason instanceof Error ? reason.message : String(reason),
-  })
+  const msg = reason instanceof Error ? reason.message : String(reason)
+  if (failActiveOrchestration(`unhandled rejection: ${msg}`)) return
+  log("unhandled rejection (kept alive)", { error: msg })
 })
 
 process.on("uncaughtException", (err: Error) => {
-  log("uncaught exception (kept alive)", {
-    error: err.message,
-  })
+  if (failActiveOrchestration(`uncaught exception: ${err.message}`)) return
+  log("uncaught exception (kept alive)", { error: err.message })
 })
 
 // -- Claude executable resolution --
@@ -694,11 +718,47 @@ function respond(resp: BridgeResponse): void {
 
 const sessionManager = new SessionManager()
 
-// Active orchestration state — allows stdin to reach the running query
+// Active orchestration state — allows stdin to reach the running query.
+//   onFatal:  invoked by the global error handlers to reject the in-flight
+//             collection when the SDK loop dies in a background promise.
 let activeOrchestration: {
   query: Query
   inputQueue: AsyncQueue<SDKUserMessage>
+  onFatal?: (err: Error) => void
 } | null = null
+
+// -- Injection consumption tracking (§5 delivery ack, finding 8) --
+// A delegate_message written to stdin is only "delivered" when the SDK loop
+// actually pulls it out of the input queue. We tag each injected message with
+// an id and emit @@EVENT@@ user_message_consumed the instant it is dequeued
+// into the SDK, so the Python side can distinguish a consumed injection from
+// one that raced turn completion and was dropped.
+let injectionSeq = 0
+
+// Wrap an AsyncQueue so that each injected SDKUserMessage carrying an
+// __atn_injection_id is acked (user_message_consumed) the moment the SDK's
+// async iterator reads it. The first (task) message and any message without
+// an id pass through untouched.
+function attachConsumptionAcks(q: AsyncQueue<SDKUserMessage>): AsyncQueue<SDKUserMessage> {
+  const origIterator = q[Symbol.asyncIterator].bind(q)
+  ;(q as any)[Symbol.asyncIterator] = (): AsyncIterator<SDKUserMessage> => {
+    const inner = origIterator()
+    return {
+      next: async (): Promise<IteratorResult<SDKUserMessage>> => {
+        const r = await inner.next()
+        if (!r.done && r.value) {
+          const injId = (r.value as any).__atn_injection_id
+          if (injId) {
+            emitEvent({ type: "user_message_consumed", id: injId })
+            log("user_message consumed by SDK loop", { id: injId })
+          }
+        }
+        return r
+      },
+    }
+  }
+  return q
+}
 
 async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> {
   try {
@@ -792,13 +852,26 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
       resumeSession: req.session_id || null,
     })
 
+    // Ack injected messages the moment the SDK dequeues them (finding 8).
+    attachConsumptionAcks(inputQueue)
+
     const q = query({
       prompt: inputQueue,
       options: sdkOptions,
     })
 
+    // onFatal lets the global unhandledRejection/uncaughtException handlers
+    // abort THIS collection loop (via a rejected race) instead of leaving the
+    // for-await hanging forever on an SDK loop that died in the background.
+    let fatalReject: ((err: Error) => void) | null = null
+    const fatalPromise = new Promise<never>((_, reject) => { fatalReject = reject })
+
     // Expose to stdin handler for interrupt / user_message
-    activeOrchestration = { query: q, inputQueue }
+    activeOrchestration = {
+      query: q,
+      inputQueue,
+      onFatal: (err: Error) => { if (fatalReject) fatalReject(err) },
+    }
 
     // Collect the full response
     let text = ""
@@ -818,9 +891,50 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
     let contextWindow = 0
     let maxOutputTokens = 0
     let sessionId = ""
+    let fatalError: string | null = null
+
+    // First-event watchdog (§11): the SDK must produce its FIRST stream
+    // message within ATN_BRIDGE_FIRST_EVENT_TIMEOUT. A model the SDK loop
+    // rejects (haiku on orchestrate) can otherwise sit at 100% CPU emitting
+    // nothing. We only guard the FIRST .next(); once the stream is producing,
+    // long quiet stretches are normal (tools run in-process) and the Python
+    // idle ceiling covers mid-run silence.
+    const firstEventTimeoutMs =
+      Number(process.env.ATN_BRIDGE_FIRST_EVENT_TIMEOUT || "120") * 1000
+    let firstMessageSeen = false
+
+    const orchIterator = q[Symbol.asyncIterator]()
 
     try {
-      for await (const message of q) {
+      while (true) {
+        let iterResult: IteratorResult<SDKMessage, void>
+        if (!firstMessageSeen) {
+          // Race the first .next() against the watchdog and the fatal signal.
+          let watchdog: ReturnType<typeof setTimeout> | null = null
+          const watchdogPromise = new Promise<never>((_, reject) => {
+            watchdog = setTimeout(() => {
+              reject(new Error(
+                `no bridge event within ${firstEventTimeoutMs / 1000}s ` +
+                `(model=${model}) — SDK loop appears wedged`))
+            }, firstEventTimeoutMs)
+          })
+          try {
+            iterResult = await Promise.race([
+              orchIterator.next(),
+              watchdogPromise,
+              fatalPromise,
+            ])
+          } finally {
+            if (watchdog) clearTimeout(watchdog)
+          }
+          firstMessageSeen = true
+        } else {
+          // After the first message, still race the fatal signal so a
+          // background SDK rejection unblocks a hung .next().
+          iterResult = await Promise.race([orchIterator.next(), fatalPromise])
+        }
+        if (iterResult.done) break
+        const message = iterResult.value
         log("orchestrate.message", {
           type: message.type,
           subtype: (message as any).subtype,
@@ -982,11 +1096,18 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
         }
       }
     } catch (err) {
-      log("orchestrate.error", {
-        error: err instanceof Error ? err.message : String(err),
-      })
+      const errMsg = err instanceof Error ? err.message : String(err)
+      log("orchestrate.error", { error: errMsg })
+      // Surface the failure as a stream event (§11): an SDK error, a
+      // first-event-watchdog timeout, or a background fatal reject must never
+      // be a silent loop exit. The Python side keys @@EVENT@@ error / done.
+      emitEvent({ type: "error", error: errMsg })
+      // Kill the query so the SDK's internal loop can't keep spinning after we
+      // give up on it (the wedge / haiku-spin case).
+      try { q.close() } catch {}
       if (!text) {
-        text = `[Bridge: orchestration error: ${err instanceof Error ? err.message : String(err)}]`
+        fatalError = errMsg
+        text = `[Bridge: orchestration error: ${errMsg}]`
       }
     } finally {
       // Clean up — close the input queue and clear active orchestration
@@ -996,13 +1117,26 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
 
     emitEvent({ type: "done" })
 
+    // A fatal error with no assistant output is a hard request failure, not a
+    // successful empty turn — report ok:false so the provider raises instead
+    // of returning a phantom empty response.
+    if (fatalError && !resolvedModel && numTurns === 0) {
+      respond({
+        id: req.id,
+        ok: false,
+        error: fatalError,
+        session_id: sessionId || undefined,
+      })
+      return
+    }
+
     respond({
       id: req.id,
       ok: true,
       session_id: sessionId || undefined,
       text,
       thinking: thinking.length > 0 ? thinking : undefined,
-      stop_reason: wasInterrupted ? "interrupted" : "end_turn",
+      stop_reason: wasInterrupted ? "interrupted" : (fatalError ? "provider_error" : "end_turn"),
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
@@ -1188,18 +1322,34 @@ rl.on("line", async (line: string) => {
       return
     }
 
-    // Push a user message into the active orchestration
+    // Push a user message into the active orchestration.
+    // The Python side assigns an id (parsed.id); we tag the queued message with
+    // __atn_injection_id so attachConsumptionAcks emits user_message_consumed
+    // the instant the SDK dequeues it. If no orchestration is active, the write
+    // raced turn completion — reply with a not-consumed ack so the Python side
+    // routes the content to the inbox fallback (nothing is silently dropped).
     if (parsed.type === "user_message" && parsed.content) {
+      const injId = parsed.id || `inj-${++injectionSeq}`
       if (activeOrchestration) {
-        log("user_message injected", { contentLen: parsed.content.length })
-        activeOrchestration.inputQueue.push({
+        log("user_message injected", { contentLen: parsed.content.length, id: injId })
+        const injMsg: any = {
           type: "user",
           message: { role: "user", content: parsed.content },
           parent_tool_use_id: null,
           session_id: "",
-        })
+        }
+        injMsg.__atn_injection_id = injId
+        try {
+          activeOrchestration.inputQueue.push(injMsg)
+        } catch (err) {
+          // Queue already closed (turn ended between the active-check and the
+          // push) — treat as not consumed so Python falls back to the inbox.
+          log("user_message push failed (queue closed)", { id: injId })
+          emitEvent({ type: "user_message_dropped", id: injId })
+        }
       } else {
-        log("user_message received but no active orchestration")
+        log("user_message received but no active orchestration", { id: injId })
+        emitEvent({ type: "user_message_dropped", id: injId })
       }
       return
     }
