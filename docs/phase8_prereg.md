@@ -25,6 +25,15 @@ net_score vs raw vote counting). This isolates the geometry.
 | 4 | v3: oracle = same model as a contestant (self-preference bias) | Two graders (Opus 4.8, Sonnet 5), both ≠ contestant (Haiku). Blind, randomized answer labels, grade against a code-grounded key the grader writes first. Report inter-grader agreement. |
 | 5 | Selection/regression bias risk when picking "hard" questions | Questions selected on a CALIBRATION run of bare Haiku; the contest re-runs the bare arm FRESH on the selected set. |
 | 6 | Context-length confound between arms | Same char budget (6000), same k=5, same prompt template for B/C/D; assert per-row context lengths within 10% band across arms. |
+
+**Amendment 2 (2026-07-03, before any calibration/contest call):** guard #6's
+10% band applies strictly within {C, D256, D64} — the arms of the primary
+contrast, which share an identical format. Arm B intentionally omits the
+claims section (that omission IS the B-vs-C treatment), so a cross-arm char
+band including B either aborts spuriously or forces truncating C/D payloads
+to B's length, distorting the primary contrast. B instead gets its own
+floor: per-row context ≥ 2500 chars and the same [3000, 6000] mean window.
+B−C remains a secondary contrast and its content asymmetry is by design.
 | 7 | Non-reproducibility / mid-run peeking | Every LLM call cached to jsonl keyed by prompt hash; analysis script is pure over persisted artifacts and runs only after all rows exist. |
 
 ## Corpus
