@@ -155,6 +155,32 @@ mismatch vs chain is a slashable/CON-able inconsistency. The federated
 close keeps reading gossip (stays chain-free and deterministic); chain
 is the dispute arbiter.
 
+### Owner-rooted registration (ratified 2026-07-04, late)
+
+The AGENT is the only web3 entity, and fleets root in a human WALLET —
+never in an installation. With the root agent deprecated, the fleet
+tree lives on chain as pure registration data:
+
+- `registerAgent` v2 records (agent, **owner**, **parent**) — owner is
+  the sponsoring human wallet, **cryptographically verified** (a
+  sponsorship signature by the owner wallet over the agent address,
+  recovered on-chain; an unverified owner claim would let sybils mint
+  fake distinct owners and evade the damper). `parent` is optional and
+  must itself be a registered agent with the SAME owner. Registration
+  stays a deliberate, any-time act.
+- Chain registrations = *who and whose* (topology + ownership,
+  recomputable by anyone, indexer materializes fleet trees). The local
+  lineage hash = *what* (birth constitution: prompt/key/parent at
+  creation) — kept, computed at birth as always; when the daemon
+  happens to know the owner address, parentless agents seed their
+  lineage from it (free bonus, never a requirement).
+- Damper exclusion, final form: attestations from agents under the
+  SAME REGISTERED OWNER as the tool's author don't count. The close
+  stays chain-free: the owner map enters as an explicit carry-over
+  input (like `tool_registrations`), sourced from chain by the driver;
+  until v2 registrations exist on-chain, the wire-level batch-key
+  dedup remains as the interim floor.
+
 ## ATN surface (implemented)
 
 - `register_tool` (agent-callable, `toolsmith` bundle): author derived

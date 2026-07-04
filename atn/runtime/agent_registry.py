@@ -576,10 +576,20 @@ class AgentRegistry:
                     parent_defn = self._agents[defn.parent_id]
                     parent_identity = getattr(parent_defn, 'identity', None)
 
+                # Parentless agents root their lineage in the OWNER's
+                # wallet when known (rootless fleet ≠ rootless lineage;
+                # fleets hang from a human 0x, never an installation).
+                owner_root = ""
+                if parent_identity is None:
+                    owner_root = getattr(
+                        getattr(self._config, "autonet", None),
+                        "owner_wallet", "") or ""
+
                 identity, private_key = generate_agent_identity(
                     agent_id=defn.id,
                     system_prompt=defn.system_prompt,
                     parent_identity=parent_identity,
+                    owner_root=owner_root,
                 )
                 defn.identity = identity
                 self._agent_keys[defn.id] = private_key

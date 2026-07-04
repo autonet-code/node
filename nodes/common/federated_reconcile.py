@@ -72,6 +72,7 @@ def compute_tool_mint(
     events: List[Dict[str, Any]],
     *,
     registrations: Optional[Dict[str, Dict[str, str]]] = None,
+    agent_owner_map: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Tool-author mint from canonical events (docs/tool_substrate.md v2).
 
@@ -86,11 +87,20 @@ def compute_tool_mint(
     ``usage_term`` is the sim-ratified combo damper (spec: Mint
     section): Σ over unique attesting AGENTS a ≠ author of
     log1p(a's attested-ok receipts) — only COGNITIVE attestations
-    count; mechanical receipts are exhaust. One wire-level dedup runs
-    first: a caller whose attestation batches were signed by the same
-    key as the registration batch is excluded (co-hosted sybil agents
-    collapse to nothing). The sender key is transport plumbing — the
-    agent is the only economic entity; the key appears in no output.
+    count; mechanical receipts are exhaust. Two exclusions run first:
+
+      1. Owner-rooted (final form, spec "Owner-rooted registration"):
+         a caller whose registered owner wallet equals the author's is
+         excluded. ``agent_owner_map`` (agent id → owner 0x) is an
+         explicit carry-over input like ``registrations`` — sourced
+         from chain sponsorship data by the driver, identical at every
+         daemon, absent entries = unknown owner = no exclusion.
+      2. Wire-level (interim floor until sponsored registrations are
+         ubiquitous): a caller whose attestation batches were signed
+         with the same key as the registration batch is excluded
+         (co-hosted sybil agents collapse to nothing). The sender key
+         is transport plumbing — the agent is the only economic
+         entity; the key appears in no output.
 
     Cross-epoch state comes in as one explicit param, derived purely
     from prior epochs' canonical events (so bit-identical everywhere):
@@ -156,12 +166,17 @@ def compute_tool_mint(
         # co-hosted callers (attestation batch signed with the same key
         # as the registration batch) excluded.
         reg_sender = str(meta.get("sender") or "")
+        owner_map = agent_owner_map or {}
+        author_owner = owner_map.get(author, "")
         attested_by = usage[digest]["attested_ok_by_caller"]
         attester_senders = usage[digest]["attester_senders"]
         usage_term = 0.0
         attesters = 0
         for caller in sorted(attested_by.keys()):
             if caller == author:
+                continue
+            # Owner-rooted exclusion: same registered owner = same fleet.
+            if author_owner and owner_map.get(caller, "") == author_owner:
                 continue
             if reg_sender and reg_sender in attester_senders.get(caller, []):
                 continue
@@ -402,6 +417,7 @@ def federated_epoch_close(
     emission_pool: Optional[float] = None,
     pricing: str = "ledger",
     tool_registrations: Optional[Dict[str, Dict[str, str]]] = None,
+    agent_owner_map: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -541,6 +557,7 @@ def federated_epoch_close(
     tool_result = compute_tool_mint(
         world, all_events,
         registrations=tool_registrations,
+        agent_owner_map=agent_owner_map,
     )
 
     result = federated_reconcile_epoch(

@@ -122,6 +122,14 @@ class FederatedCloseDriver:
         self._tool_registrations: Dict[str, Dict[str, str]] = (
             self._load_tool_registrations()
         )
+        # Owner-rooted damper exclusion (spec: Owner-rooted registration):
+        # agent id -> owner wallet, sourced from chain sponsorship data
+        # (AgentSponsored events / getAgentOwner). Every daemon reading
+        # the same anchored chain state derives the same map, so the
+        # bit-identical close guarantee holds. Empty until the chain
+        # sourcing is wired (registerAgent v2 deploy) — the wire-level
+        # batch-key dedup remains the interim floor.
+        self.agent_owner_map: Dict[str, str] = {}
 
     def run(self, local_close_result: Dict[str, Any]) -> Optional[FederatedCloseResult]:
         """Drive one federated close given the local close's result.
@@ -152,6 +160,7 @@ class FederatedCloseDriver:
                 embedding_dim=self.embedding_dim,
                 pricing=self.pricing,
                 tool_registrations=dict(self._tool_registrations),
+                agent_owner_map=dict(self.agent_owner_map),
             )
         except Exception as e:
             logger.error(

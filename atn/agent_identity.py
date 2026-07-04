@@ -50,16 +50,24 @@ def generate_agent_identity(
     agent_id: str,
     system_prompt: str = "",
     parent_identity: AgentIdentity | None = None,
+    owner_root: str = "",
 ) -> Tuple[AgentIdentity, str]:
     """Generate a full agent identity.
 
     Returns (identity, private_key_hex).
     The private key should be stored securely by the caller.
+
+    ``owner_root``: the owner wallet's 0x address, used as the lineage
+    root for PARENTLESS agents so a rootless fleet still hangs from the
+    human's identity, never from an installation (docs/tool_substrate.md,
+    Owner-rooted registration). Free bonus, not a requirement: unknown
+    owner → empty root, exactly as before. Authoritative fleet ownership
+    lives on chain via sponsored registration, not in this hash.
     """
     private_key, address = generate_keypair()
     public_key = address  # In the fallback case, address serves as public key
 
-    parent_hash = parent_identity.lineage_hash if parent_identity else None
+    parent_hash = parent_identity.lineage_hash if parent_identity else (owner_root or None)
     lineage = compute_lineage_hash(agent_id, parent_hash, system_prompt, public_key)
 
     identity = AgentIdentity(

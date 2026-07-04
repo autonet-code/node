@@ -188,6 +188,33 @@ class TestToolMintClose:
         result = federated_epoch_close(canonical_order(batches))
         assert result["tool_mint"] == {}
 
+    def test_same_owner_attestations_do_not_mint(self):
+        """Owner-rooted exclusion (final form): callers registered under
+        the same owner wallet as the author are the author's own fleet —
+        their attestations don't count, even from a different daemon."""
+        batches = _standard_batches()  # caller-1/caller-2 on separate key
+        owner_map = {
+            AUTHOR: "0xOwnerA",
+            "caller-1": "0xOwnerA",     # same fleet as the author
+            "caller-2": "0xOwnerB",     # genuine third party
+        }
+        result = federated_epoch_close(
+            canonical_order(batches), agent_owner_map=owner_map)
+        entry = result["tool_mint"][DIGEST]
+        assert entry["attesters"] == 1          # only caller-2 counts
+        assert entry["mint"] == pytest.approx(
+            entry["standing"] * math.log1p(1))
+
+    def test_unknown_owner_is_not_excluded(self):
+        """Absent map entries = unknown owner = no exclusion (the map is
+        chain-derived; unregistered agents simply aren't in it)."""
+        batches = _standard_batches()
+        result = federated_epoch_close(
+            canonical_order(batches),
+            agent_owner_map={AUTHOR: "0xOwnerA"},  # callers unknown
+        )
+        assert result["tool_mint"][DIGEST]["attesters"] == 2
+
     def test_no_tool_events_null_case(self):
         kp = Keypair.generate()
         batches = _batches([{
