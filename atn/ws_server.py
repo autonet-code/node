@@ -977,6 +977,64 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": result["error"]}
             return {"msg_id": msg_id, "ok": True, "result": result}
 
+        # Registered-tool grants — HUMAN-ONLY by construction (same pattern
+        # as clone_agent): granting a tool outside its author lineage is the
+        # owner's call, so grant/revoke exist only as WS handlers and are
+        # never part of any agent tool surface. docs/tool_substrate.md.
+        if msg_type == "list_registered_tools":
+            store = self.runtime.tool_store
+            tools = []
+            for record in store.visible_to(None):  # owner sees everything
+                m = record.manifest
+                tools.append({
+                    "digest": record.digest,
+                    "name": record.name,
+                    "description": m.get("description", ""),
+                    "trust_class": m.get("trust_class", ""),
+                    "author": m.get("author", ""),
+                    "fee_atn": m.get("fee_atn", 0),
+                    "grants": sorted(record.grants),
+                    "enabled": record.enabled,
+                    "version_of": m.get("version_of"),
+                    "input_schema": m.get("input_schema", {}),
+                })
+            return {"msg_id": msg_id, "ok": True, "result": {"tools": tools}}
+
+        if msg_type == "grant_tool":
+            digest = msg.get("digest", "")
+            agent_id = msg.get("agent_id", "")
+            if not digest or not agent_id:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Missing 'digest' or 'agent_id' field"}
+            if not self.runtime.tool_store.grant(digest, agent_id):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Unknown tool digest: {digest[:16]}"}
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"digest": digest, "granted_to": agent_id}}
+
+        if msg_type == "revoke_tool":
+            digest = msg.get("digest", "")
+            agent_id = msg.get("agent_id", "")
+            if not digest or not agent_id:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Missing 'digest' or 'agent_id' field"}
+            if not self.runtime.tool_store.revoke(digest, agent_id):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Unknown tool digest: {digest[:16]}"}
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"digest": digest, "revoked_from": agent_id}}
+
+        if msg_type == "set_tool_enabled":
+            digest = msg.get("digest", "")
+            if not digest:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'digest' field"}
+            enabled = bool(msg.get("enabled", True))
+            if not self.runtime.tool_store.set_enabled(digest, enabled):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Unknown tool digest: {digest[:16]}"}
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"digest": digest, "enabled": enabled}}
+
         # Voice service control
         if msg_type == "voice_start":
             result = await self.runtime.start_voice()

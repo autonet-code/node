@@ -366,6 +366,10 @@ class Runtime:
         # Wire trace_logger into the execution engine
         self.engine.trace_logger = self.trace_logger
 
+        # Registered tools (tool substrate — docs/tool_substrate.md)
+        from ..tool_store import ToolStore
+        self.tool_store = ToolStore(self, self._config.data_dir / "tools")
+
         # Tool registry
         from ..tool_registry import ToolRegistry
         self.tool_registry = ToolRegistry(self)

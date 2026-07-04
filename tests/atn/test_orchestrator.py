@@ -354,16 +354,20 @@ async def test():
         "use_connector",
         # Unified tools
         "list_tools", "use_tool",
+        # Tool substrate (docs/tool_substrate.md)
+        "register_tool",
         # Planning & goal tools
         "get_goals", "add_goal", "update_goal",
         "get_projects", "add_project", "update_project",
-        "get_credit_budget", "set_credit_budget",
+        "get_credit_budget", "set_credit_budget", "get_usage",
         "propose_task", "list_tasks", "get_user_profile",
         # Delegation
         "delegate_status", "delegate_message", "delegate_collect",
         "get_latest_thought", "get_children_status",
         # Budgets & chain
         "get_my_budget_status", "register_on_chain",
+        # Manual compaction (spec §15)
+        "compact_agent",
     }
     assert tool_names == expected, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
     # Each tool has a name, description, and input_schema

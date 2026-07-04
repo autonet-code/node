@@ -62,6 +62,8 @@ def build_tool_manifest(
     endpoint: str = "",
     provider: str = "",
     connector_id: str = "",
+    # economics
+    fee_atn: float = 0.0,
     # lineage
     version_of: Optional[str] = None,
     created_ts: int = 0,
@@ -98,6 +100,8 @@ def build_tool_manifest(
         manifest["provider"] = provider
     if connector_id:
         manifest["connector_id"] = connector_id
+    if fee_atn:
+        manifest["fee_atn"] = float(fee_atn)
 
     errors = validate_manifest(manifest)
     if errors:

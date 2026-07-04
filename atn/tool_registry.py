@@ -30,6 +30,7 @@ class ToolCategory(Enum):
     CONNECTOR = "connector"
     PIPELINE = "pipeline"
     CORE = "core"
+    REGISTERED = "registered"
 
 
 @dataclass
@@ -44,6 +45,8 @@ class UnifiedTool:
     connector_tool_name: str | None = None
     # For pipeline-agent tools
     agent_id: str | None = None
+    # For registered tools (tool substrate): manifest digest
+    digest: str | None = None
 
 
 class ToolRegistry:
@@ -69,14 +72,19 @@ class ToolRegistry:
         *,
         category: ToolCategory | None = None,
         include_operations: bool = False,
+        caller_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return all available tools as dicts.
 
         Args:
-            category: Filter by category (connector/pipeline/core). None = all.
+            category: Filter by category (connector/pipeline/core/registered).
+                None = all.
             include_operations: If True, include per-tool operations (connector
                 tools list their MCP operations, pipeline tools list their steps).
                 For core tools, includes the full input_schema.
+            caller_id: Identity used for registered-tool scoping (author-
+                lineage visibility, docs/tool_substrate.md). None/owner sees
+                everything.
 
         Returns:
             List of tool descriptors, each with: name, description, category,
@@ -92,6 +100,9 @@ class ToolRegistry:
 
         if category is None or category == ToolCategory.CORE:
             tools.extend(self._list_core_tools(include_operations))
+
+        if category is None or category == ToolCategory.REGISTERED:
+            tools.extend(self._list_registered_tools(include_operations, caller_id))
 
         return tools
 
@@ -141,6 +152,20 @@ class ToolRegistry:
                 input_schema=tdef["input_schema"],
             )
 
+        # Check registered tools (tool substrate) LAST — a registered
+        # tool can never shadow a core/connector/pipeline name.
+        store = getattr(self._runtime, "tool_store", None)
+        if store is not None:
+            record = store.resolve(name)
+            if record is not None:
+                return UnifiedTool(
+                    name=f"reg_{record.digest[:12]}",
+                    description=record.manifest.get("description", ""),
+                    category=ToolCategory.REGISTERED,
+                    input_schema=record.manifest.get("input_schema", {}),
+                    digest=record.digest,
+                )
+
         return None
 
     # ------------------------------------------------------------------
@@ -173,6 +198,8 @@ class ToolRegistry:
             return await self._call_pipeline_tool(tool, arguments, caller_id=caller_id)
         elif tool.category == ToolCategory.CORE:
             return await self._call_core_tool(tool, arguments, caller_id=caller_id)
+        elif tool.category == ToolCategory.REGISTERED:
+            return await self._call_registered_tool(tool, arguments, caller_id=caller_id)
         else:
             return {"error": f"Unsupported tool category: {tool.category}"}
 
@@ -375,6 +402,62 @@ class ToolRegistry:
         """Execute a core ATN tool via the standard executor."""
         from .orchestrator.tools import execute_tool
         return await execute_tool(tool.name, arguments, self._runtime, caller_id=caller_id)
+
+    # ------------------------------------------------------------------
+    # Registered tools (tool substrate — docs/tool_substrate.md)
+    # ------------------------------------------------------------------
+
+    def _list_registered_tools(
+        self, include_operations: bool, caller_id: str | None,
+    ) -> list[dict[str, Any]]:
+        """List registered tool manifests visible to ``caller_id``."""
+        store = getattr(self._runtime, "tool_store", None)
+        if store is None:
+            return []
+        tools: list[dict[str, Any]] = []
+        for record in store.visible_to(caller_id):
+            m = record.manifest
+            entry: dict[str, Any] = {
+                "name": f"reg_{record.digest[:12]}",
+                "tool_name": record.name,
+                "description": m.get("description", ""),
+                "category": ToolCategory.REGISTERED.value,
+                "trust_class": m.get("trust_class", ""),
+                "author": m.get("author", ""),
+                "digest": record.digest,
+                "enabled": record.enabled,
+            }
+            if m.get("fee_atn"):
+                entry["fee_atn"] = m["fee_atn"]
+            if include_operations:
+                entry["input_schema"] = m.get("input_schema", {})
+            tools.append(entry)
+        return tools
+
+    async def _call_registered_tool(
+        self, tool: UnifiedTool, arguments: dict[str, Any],
+        *, caller_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Call-time author-lineage enforcement, then dispatch.
+
+        This is the second half of the scoping contract (the first is
+        visibility in listing): even a caller who learned a digest out
+        of band cannot invoke a tool outside its author lineage.
+        """
+        store = getattr(self._runtime, "tool_store", None)
+        if store is None or tool.digest is None:
+            return {"error": "registered-tool store unavailable"}
+        record = store.get(tool.digest)
+        if record is None:
+            return {"error": f"Unknown registered tool: {tool.digest[:16]}"}
+        if not store.allowed(caller_id, record):
+            log.warning("blocked out-of-lineage tool call %s by %s",
+                        record.name, caller_id)
+            return {"error": f"Tool '{record.name}' is not available to "
+                             f"'{caller_id}' (author-lineage scoped)"}
+        if not record.enabled and not store._is_owner(caller_id):
+            return {"error": f"Tool '{record.name}' is disabled"}
+        return await store.call(record, arguments, caller_id=caller_id)
 
     # ------------------------------------------------------------------
     # Schema derivation

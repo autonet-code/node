@@ -452,8 +452,8 @@ _TOOLS: list[ToolDefinition] = [
             "properties": {
                 "category": {
                     "type": "string",
-                    "enum": ["connector", "pipeline", "core"],
-                    "description": "Filter by category. 'core' = ATN framework tools. Omit to list all.",
+                    "enum": ["connector", "pipeline", "core", "registered"],
+                    "description": "Filter by category. 'core' = ATN framework tools, 'registered' = substrate-registered tools visible to you. Omit to list all.",
                 },
                 "include_operations": {
                     "type": "boolean",
@@ -480,6 +480,37 @@ _TOOLS: list[ToolDefinition] = [
                 },
             },
             "required": ["name"],
+        },
+    ),
+    ToolDefinition(
+        name="register_tool",
+        description=(
+            "Author a new tool and register it on the tool substrate. Provide either "
+            "`code` (a Python script reading JSON arguments on stdin and printing a JSON "
+            "result — becomes a PINNED tool, behavior locked by content hash) or an "
+            "`endpoint`/`connector_id` (becomes an ATTESTED tool whose standing decays "
+            "without fresh usage). The tool is scoped to you and your superiors; only "
+            "the user can grant it outside that lineage. You are the author: substrate "
+            "consensus judges the tool and you earn from its standing and usage."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Tool name (snake_case, verb-first)."},
+                "description": {"type": "string", "description": "What the tool does — this is also how it's discovered, so be precise."},
+                "input_schema": {
+                    "type": "object",
+                    "description": "JSON schema of the tool's arguments.",
+                    "additionalProperties": True,
+                },
+                "code": {"type": "string", "description": "Python source (pinned tools). Reads JSON args on stdin, prints JSON result on stdout."},
+                "endpoint": {"type": "string", "description": "HTTPS endpoint (attested tools). Arguments are POSTed as JSON."},
+                "connector_id": {"type": "string", "description": "MCP connector backing this tool (attested); the tool name must match a connector operation."},
+                "provider": {"type": "string", "description": "External provider identity for attested tools (e.g. 'google')."},
+                "fee_atn": {"type": "number", "description": "Per-invocation fee in ATN charged to callers (default 0)."},
+                "version_of": {"type": "string", "description": "Digest of the manifest this revises (artifact lineage)."},
+            },
+            "required": ["name", "description", "input_schema"],
         },
     ),
     ToolDefinition(
@@ -1663,12 +1694,13 @@ async def _list_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
         try:
             category = ToolCategory(category_str)
         except ValueError:
-            return {"error": f"Invalid category: '{category_str}'. Use 'connector', 'pipeline', or 'core'."}
+            return {"error": f"Invalid category: '{category_str}'. Use 'connector', 'pipeline', 'core', or 'registered'."}
 
     include_ops = bool(input.get("include_operations", False))
     tools = runtime.tool_registry.list_all(
         category=category,
         include_operations=include_ops,
+        caller_id=input.get("_caller_id"),
     )
     return {"tools": tools, "count": len(tools)}
 
@@ -1682,6 +1714,56 @@ async def _use_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     return await runtime.tool_registry.call_tool(
         name, arguments, caller_id=caller_id,
     )
+
+
+async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Author a tool manifest on the tool substrate (docs/tool_substrate.md).
+
+    The author is the CALLER — authorship is the scoping primitive, so it
+    is derived, never accepted as input. Owner callers author as "user".
+    """
+    from ..tool_store import OWNER_AUTHOR
+    from . import is_owner_caller
+
+    name = str(input.get("name") or "").strip()
+    if not name:
+        return {"error": "Missing required field: 'name'"}
+    schema = input.get("input_schema")
+    if not isinstance(schema, dict):
+        return {"error": "input_schema must be a JSON-schema object"}
+
+    # Registered tools may never shadow framework names.
+    if get_core_tool_def(name) is not None:
+        return {"error": f"'{name}' is a core ATN tool name; pick another"}
+    for reserved in ("reg_", "pipeline_", "tool_", "connector_"):
+        if name.startswith(reserved):
+            return {"error": f"tool names may not start with '{reserved}'"}
+
+    caller_id = input.get("_caller_id")
+    author = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
+
+    try:
+        result = runtime.tool_store.register(
+            name=name,
+            description=str(input.get("description") or ""),
+            input_schema=schema,
+            author=author,
+            code=str(input.get("code") or ""),
+            endpoint=str(input.get("endpoint") or ""),
+            provider=str(input.get("provider") or ""),
+            connector_id=str(input.get("connector_id") or ""),
+            fee_atn=float(input.get("fee_atn") or 0.0),
+            version_of=input.get("version_of") or None,
+        )
+    except (ValueError, RuntimeError) as exc:
+        return {"error": str(exc)}
+    return {
+        "digest": result["digest"],
+        "name": name,
+        "trust_class": result["manifest"]["trust_class"],
+        "author": author,
+        "unified_name": f"reg_{result['digest'][:12]}",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2300,6 +2382,8 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
                   "remove_agent", "compact_agent"},
     "connectors": {"list_connectors", "add_connector", "get_connector_tools", "use_connector", "remove_connector"},
     "unified_tools": {"list_tools", "use_tool"},
+    # Tool substrate (docs/tool_substrate.md): authoring is opt-in per agent.
+    "toolsmith": {"register_tool"},
     "planning": {"get_goals", "add_goal", "update_goal", "get_projects", "add_project", "update_project",
                  "propose_task", "list_tasks"},
     "budget": {"get_credit_budget", "set_credit_budget", "get_usage"},
@@ -2984,6 +3068,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     # Unified tools
     "list_tools": _list_tools,
     "use_tool": _use_tool,
+    "register_tool": _register_tool,
     "get_history": _get_history,
     # Planning & goal tools
     "get_goals": _get_goals,
