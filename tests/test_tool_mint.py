@@ -194,3 +194,44 @@ class TestComputeToolMint:
         out = compute_tool_mint(world, [_receipt_event(1, "caller-1")])
         assert out["per_digest"] == {}
         assert out["registrations_next"] == {}
+
+
+class TestDriverCarryOver:
+    """FederatedCloseDriver accumulates + persists tool registrations
+    across epochs (and across a driver restart)."""
+
+    def _driver(self, tmp_path, events_per_epoch):
+        from unittest.mock import MagicMock
+
+        from nodes.common.event_gossip import EventGossip
+        from nodes.common.federated_close_driver import FederatedCloseDriver
+
+        kp = Keypair.generate()
+        gossip = MagicMock(spec=EventGossip)
+        gossip.known_senders.return_value = [kp.public_key]
+        gossip.sender_pubkey = kp.public_key
+        gossip.drain_epoch_batches.side_effect = [
+            _batches(evs, kp) for evs in events_per_epoch
+        ]
+        return FederatedCloseDriver(
+            gossip=gossip, embedding_dim=EMBED_DIM,
+            tool_registrations_path=tmp_path / "tool_registrations.json",
+        )
+
+    def test_registration_carries_across_epochs_and_restart(self, tmp_path):
+        driver = self._driver(tmp_path, [
+            [_registration_event(1), _receipt_event(2, "c1")],   # epoch 1
+            [_receipt_event(1, "c2")],                            # epoch 2
+        ])
+        r1 = driver.run({"epoch_id": "e1"})
+        assert r1.close_result["tool_registrations"][DIGEST]["author"] == AUTHOR
+
+        # Epoch 2 has receipts only — the carried registration still
+        # attributes (per_digest empty here only because the fresh
+        # charter world lacks the claim node; the REGISTRATION survives).
+        r2 = driver.run({"epoch_id": "e2"})
+        assert r2.close_result["tool_registrations"][DIGEST]["author"] == AUTHOR
+
+        # Restart: a new driver instance reloads the cache from disk.
+        driver2 = self._driver(tmp_path, [[_receipt_event(1, "c3")]])
+        assert driver2._tool_registrations[DIGEST]["author"] == AUTHOR

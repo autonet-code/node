@@ -853,11 +853,24 @@ class AutonetService:
         except Exception as e:
             logger.warning("canonical world tracker unavailable: %s", e)
         pricing = getattr(self._world_service, "pricing", "ledger")
+        # Tool-substrate registration carry-over cache lives next to the
+        # world state (rebuildable from canonical events; see
+        # FederatedCloseDriver). Missing state dir → in-memory only.
+        tool_regs_path = None
+        try:
+            state_dir = getattr(
+                getattr(self._world_service, "_persistence", None), "_dir", None,
+            )
+            if state_dir is not None:
+                tool_regs_path = state_dir / "tool_registrations.json"
+        except Exception:
+            tool_regs_path = None
         self._federated_close_driver = FederatedCloseDriver(
             gossip=self._event_gossip,
             embedding_dim=embedding_dim,
             canonical_tracker=canonical_tracker,
             pricing=pricing,
+            tool_registrations_path=tool_regs_path,
         )
 
         def _on_local_close(local_result):

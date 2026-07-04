@@ -27,8 +27,11 @@ going offline between the canonical close and the anchor submission.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .canonical_ordering import canonical_order
@@ -95,6 +98,7 @@ class FederatedCloseDriver:
         embedding_dim: int = 1024,
         canonical_tracker: Optional[Any] = None,
         pricing: str = "ledger",
+        tool_registrations_path: Optional[Any] = None,
     ):
         self.gossip = gossip
         self.pricing = pricing
@@ -106,6 +110,18 @@ class FederatedCloseDriver:
         # Must be constructed with the SAME bandwidth/embedding_dim so
         # the tracker's replay matches the federated kernel.
         self.canonical_tracker = canonical_tracker
+        # Tool-substrate carry-over (docs/tool_substrate.md v2): the
+        # accumulated digest -> manifest_meta registration map, so a
+        # tool registered in epoch 1 still attributes mint in epoch 5.
+        # Derived purely from canonical events (each close returns the
+        # advanced map), so the on-disk copy is a CACHE — rebuildable
+        # by replaying epochs, identical on every honest daemon.
+        self._tool_registrations_path: Optional[Path] = (
+            Path(tool_registrations_path) if tool_registrations_path else None
+        )
+        self._tool_registrations: Dict[str, Dict[str, str]] = (
+            self._load_tool_registrations()
+        )
 
     def run(self, local_close_result: Dict[str, Any]) -> Optional[FederatedCloseResult]:
         """Drive one federated close given the local close's result.
@@ -135,12 +151,21 @@ class FederatedCloseDriver:
                 bandwidth=self.bandwidth,
                 embedding_dim=self.embedding_dim,
                 pricing=self.pricing,
+                tool_registrations=dict(self._tool_registrations),
             )
         except Exception as e:
             logger.error(
                 "federated_epoch_close failed: %s", e, exc_info=True,
             )
             return None
+
+        # Advance + persist the tool-registration carry-over for the
+        # next epoch (returned map = carried ∪ this epoch's canonical
+        # registration events, first-registration-wins).
+        self._tool_registrations = dict(
+            close_result.get("tool_registrations") or {}
+        )
+        self._save_tool_registrations()
 
         # Inherit epoch_id from the local close so on-chain dedup
         # (isAnchored(epoch_id)) can reject duplicate submissions.
@@ -194,3 +219,35 @@ class FederatedCloseDriver:
             world_cid=world_cid,
             world_checkpoint_blob=world_blob,
         )
+
+    # ---- tool-registration carry-over persistence -------------------
+
+    def _load_tool_registrations(self) -> Dict[str, Dict[str, str]]:
+        path = self._tool_registrations_path
+        if path is None or not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): dict(v) for k, v in data.items()
+                        if isinstance(v, dict)}
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("tool registrations cache unreadable (%s); "
+                           "starting empty — it rebuilds from canonical "
+                           "events", e)
+        return {}
+
+    def _save_tool_registrations(self) -> None:
+        path = self._tool_registrations_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(dict(sorted(self._tool_registrations.items()))),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist tool registrations: %s", e)
