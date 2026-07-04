@@ -63,7 +63,8 @@ def _registration_event(seq: int = 1, *, trust_class: str = "pinned",
 
 def _receipt_event(seq: int, caller: str, *, ok: bool = True,
                    digest: str = DIGEST,
-                   attested: bool = True) -> Dict[str, Any]:
+                   attested: bool = True,
+                   loadout: str = "") -> Dict[str, Any]:
     ev = {
         "kind": "tool_used",
         "seq": seq,
@@ -79,6 +80,8 @@ def _receipt_event(seq: int, caller: str, *, ok: bool = True,
     if attested:
         ev["attested"] = True
         ev["score"] = 0.8
+    if loadout:
+        ev["loadout"] = loadout
     return ev
 
 
@@ -353,6 +356,72 @@ class TestCompositionFanOut:
         padded_total = sum(e["mint"] for e in r_padded["tool_mint"].values())
         plain_total = sum(e["mint"] for e in r_plain["tool_mint"].values())
         assert padded_total <= plain_total + 1e-9
+
+
+class TestLoadoutAdoption:
+    """Resident grammar: distros earn by distinct-fleet adoption,
+    volume-blind, fanned over their module deps."""
+
+    MODULE = "11" * 32
+    DISTRO = "22" * 32
+
+    def _batches_with_adoption(self):
+        kp_auth = Keypair.generate()
+        kp_f1, kp_f2 = Keypair.generate(), Keypair.generate()
+        reg = _batches([
+            _registration_event(1, digest=self.MODULE, author="mod-author",
+                                axis=2),
+            _registration_event(2, digest=self.DISTRO, author="distro-author",
+                                deps=self.MODULE, axis=3),
+            _registration_event(3, digest=DIGEST, author=AUTHOR, axis=4),
+        ], kp_auth)
+        # Fleet 1: FIVE attestations under the distro (volume must not
+        # matter for adoption). Fleet 2: one.
+        f1 = _batches([
+            _receipt_event(i, "caller-1", loadout=self.DISTRO)
+            for i in range(1, 6)
+        ], kp_f1)
+        f2 = _batches([
+            _receipt_event(1, "caller-2", loadout=self.DISTRO),
+        ], kp_f2)
+        return reg + f1 + f2
+
+    def test_adoption_volume_blind_and_fanned(self):
+        owner_map = {
+            AUTHOR: "0xA", "mod-author": "0xM", "distro-author": "0xD",
+            "caller-1": "0xF1", "caller-2": "0xF2",
+        }
+        result = federated_epoch_close(
+            canonical_order(self._batches_with_adoption()),
+            agent_owner_map=owner_map)
+        tm = result["tool_mint"]
+        ln2 = math.log1p(1)
+        # Two distinct fleets, log1p(1) each, split 0.7 distro / 0.3 module.
+        assert tm[self.DISTRO]["usage_term"] == pytest.approx(2 * ln2 * 0.7)
+        assert tm[self.MODULE]["usage_term"] == pytest.approx(2 * ln2 * 0.3)
+        # Invoked credit for the tool itself stays volume-SENSITIVE:
+        # caller-1 attested 5 times, caller-2 once.
+        assert tm[DIGEST]["usage_term"] == pytest.approx(
+            math.log1p(5) + math.log1p(1))
+
+    def test_same_fleet_as_distro_author_excluded_but_module_credited(self):
+        """A fleet can't pump its own distro — but its adoption still
+        credits upstream modules it doesn't own (exclusions are
+        per-target)."""
+        owner_map = {
+            AUTHOR: "0xA", "mod-author": "0xM", "distro-author": "0xD",
+            "caller-1": "0xD",   # same fleet as the distro author
+            "caller-2": "0xF2",
+        }
+        result = federated_epoch_close(
+            canonical_order(self._batches_with_adoption()),
+            agent_owner_map=owner_map)
+        tm = result["tool_mint"]
+        ln2 = math.log1p(1)
+        # Distro: only fleet 2 counts.
+        assert tm[self.DISTRO]["usage_term"] == pytest.approx(1 * ln2 * 0.7)
+        # Module: both fleets count (module author's owner differs).
+        assert tm[self.MODULE]["usage_term"] == pytest.approx(2 * ln2 * 0.3)
 
 
 class TestDriverCarryOver:

@@ -123,6 +123,11 @@ class ToolStore:
         # safe (manifest claims are content-addressed by digest).
         self.event_sink: Any = None
         self.manifest_sink: Any = None
+        # Active harness distro digest (docs/tool_substrate.md — "Resident
+        # tools, loadouts, distros"). Set by bootstrap_reference_distro at
+        # runtime init; stamped onto cognitive attestations so adoption
+        # accrues to the distro. Empty until a distro is bootstrapped.
+        self.active_loadout: str = ""
         self._load()
         # Seq counter spans BOTH tiers so seqs stay unique within the store
         # across a reload (mechanical receipts + cognitive attestations both
@@ -870,6 +875,10 @@ class ToolStore:
                 "score": score,
                 "review_digest": review_digest,
             }
+            # Stamp the active harness distro (docs/tool_substrate.md —
+            # loadout digest is atomic with the attestation). Only when set.
+            if self.active_loadout:
+                row["loadout"] = self.active_loadout
             receipt_digest = ""
             if blobs is not None:
                 try:
@@ -898,6 +907,8 @@ class ToolStore:
                     "problem_coords": list(problem_coords),
                     "review_digest": review_digest,
                 }
+                if self.active_loadout:
+                    event["loadout"] = self.active_loadout
                 try:
                     self.event_sink(event)
                 except Exception as exc:

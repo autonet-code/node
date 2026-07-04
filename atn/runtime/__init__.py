@@ -380,6 +380,16 @@ class Runtime:
         from ..tool_registry import ToolRegistry
         self.tool_registry = ToolRegistry(self)
 
+        # Bootstrap the reference harness as the first distro manifest and
+        # stamp the active loadout (docs/tool_substrate.md — Resident tools,
+        # loadouts, distros). Best-effort: guarded so a failure (or a
+        # standalone install with no substrate package) never breaks boot.
+        try:
+            from ..harness_distro import bootstrap_reference_distro
+            bootstrap_reference_distro(self)
+        except Exception as exc:
+            log.warning("reference harness distro bootstrap failed: %s", exc)
+
         # Snapshot builder (created lazily to capture voice/autonet refs)
         self._snapshot_builder: SnapshotBuilder | None = None
 

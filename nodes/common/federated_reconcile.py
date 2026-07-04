@@ -222,6 +222,38 @@ def compute_tool_mint(
                 bucket = eff.setdefault(target, {})
                 bucket[caller] = bucket.get(caller, 0.0) + damped * shares[target]
 
+    # Resident grammar — ADOPTION (spec: Resident tools, loadouts,
+    # distros): loadout stamps on attestations credit the distro by
+    # DISTINCT FLEETS, volume-blind: callers collapse by the chain
+    # owner map (fallback: each caller its own fleet — documented
+    # degradation when registrations are sparse), each fleet
+    # contributes log1p(1) once per epoch regardless of how many
+    # attestations it emitted. The damped value injects at the distro
+    # root and fans over its dep DAG like any composite. Exclusions
+    # (author, same-owner, wire dedup) run in the mint loop below via
+    # the fleet's sorted representative caller, whose sender pool is
+    # the union of the fleet's senders.
+    from .world_model_substrate.tool_usage import loadout_adoption_from_events
+    adoption = loadout_adoption_from_events(events)
+    owner_map_early = agent_owner_map or {}
+    for loadout in sorted(set(adoption) & set(known_regs)):
+        shares = _composition_shares(loadout, deps_of)
+        entry = adoption[loadout]
+        fleets: Dict[str, List[str]] = {}
+        for caller in sorted(entry["by_caller"].keys()):
+            fleet_key = owner_map_early.get(caller, "") or caller
+            fleets.setdefault(fleet_key, []).append(caller)
+        for fleet_key in sorted(fleets.keys()):
+            members = fleets[fleet_key]
+            rep = members[0]  # sorted representative
+            pooled = caller_senders.setdefault(rep, set())
+            for member in members:
+                pooled.update(entry["senders"].get(member, []))
+            damped = math.log1p(1)
+            for target in sorted(shares.keys()):
+                bucket = eff.setdefault(target, {})
+                bucket[rep] = bucket.get(rep, 0.0) + damped * shares[target]
+
     per_digest: Dict[str, Dict[str, Any]] = {}
     node_agent: Dict[str, Dict[str, float]] = {}
     for digest in sorted(eff.keys()):

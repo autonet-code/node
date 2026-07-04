@@ -231,7 +231,12 @@ class TestScoping:
 
         assert names("parent") == ["echo_tool"]
         assert names("sibling") == []
-        assert names(None) == ["echo_tool"]  # owner
+        # Owner sees echo_tool PLUS the platform-authored reference harness
+        # distro manifests (author "user"), which bootstrap at runtime init.
+        owner_names = names(None)
+        assert "echo_tool" in owner_names
+        assert all(n == "echo_tool" or n.startswith("atn_")
+                   for n in owner_names)
 
     @pytest.mark.asyncio
     async def test_call_time_enforcement_even_with_digest(self, tmp_path):

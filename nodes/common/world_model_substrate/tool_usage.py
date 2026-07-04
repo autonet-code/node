@@ -88,3 +88,40 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
             k: sorted(v) for k, v in sorted(entry["attester_senders"].items())
         }
     return dict(sorted(usage.items()))
+
+
+def loadout_adoption_from_events(
+    events: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Aggregate the ``loadout`` stamps on attested receipts.
+
+    Returns (canonically ordered):
+      {loadout_digest: {"by_caller": {caller: count},
+                        "senders": {caller: [sender_hex, ...]}}}
+
+    Adoption is derived at close as DISTINCT FLEETS (callers collapsed
+    by the chain owner map — that happens in compute_tool_mint where
+    the map lives); counts here are kept only so the evidence trail is
+    inspectable. Same determinism rules as tool_usage_from_events.
+    """
+    receipts = [e for e in events if e.get("kind") == "tool_used"
+                and e.get("attested") and e.get("ok", True)
+                and e.get("loadout")]
+    receipts.sort(key=lambda e: (e.get("author_agent", ""),
+                                 e.get("seq", 0),
+                                 e.get("receipt_digest", "")))
+    out: Dict[str, Dict[str, Any]] = {}
+    for ev in receipts:
+        loadout = str(ev["loadout"])
+        entry = out.setdefault(loadout, {"by_caller": {}, "senders": {}})
+        caller = str(ev.get("author_agent") or "")
+        entry["by_caller"][caller] = entry["by_caller"].get(caller, 0) + 1
+        sender = str(ev.get("sender") or "")
+        senders = entry["senders"].setdefault(caller, [])
+        if sender and sender not in senders:
+            senders.append(sender)
+    for entry in out.values():
+        entry["by_caller"] = dict(sorted(entry["by_caller"].items()))
+        entry["senders"] = {k: sorted(v)
+                            for k, v in sorted(entry["senders"].items())}
+    return dict(sorted(out.items()))

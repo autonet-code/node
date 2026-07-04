@@ -177,6 +177,51 @@ invoke a dep (result comes back as one JSON line on stdin), and
 ``{"return": <result>}`` to finish. Tools without deps keep the sealed
 stdin-close/stdout-blob contract byte-for-byte.
 
+## Resident tools, loadouts, distros (ratified 2026-07-05)
+
+Two grammars of tools:
+
+- **Invoked** — chosen per problem, attested per work item. Everything
+  above.
+- **Resident** — bound at boot, ambient in the loop (fs, shell,
+  delegation, messaging). Per-call attestation of ambient
+  infrastructure is rubber-stamp death; residents earn by **ADOPTION**.
+
+Terms: an agent's active resident set = its **loadout**. A curated
+loadout + system prompt + loop policies = a **harness DISTRO** — a
+composite manifest (Composition section) whose deps are the module
+digests and whose blob carries the prompt/config. Distros compete;
+modules earn through distro deps; customization = forking a distro
+(``version_of``, swap a dep). Swap granularity is the distro; the
+daemon's reference harness bootstraps as the first distro manifest.
+
+Mechanics:
+- Attestations carry a ``loadout`` digest — atomic with the
+  attestation (no last-swap temporal reasoning); swap events are UI
+  telemetry only.
+- Adoption at close: distinct attesting FLEETS per loadout (callers
+  collapsed by the chain owner map, author's fleet + wire dedup
+  excluded), log1p(1) each — volume-blind: a chatty fleet doesn't
+  out-vote a productive one. The damped adoption value injects at the
+  distro root and fans over its dep DAG (damp-then-split, conserved).
+- Rent limiter: capability-gap pricing (saturated capability →
+  multiplier → 0) is what keeps default-distro incumbency from
+  becoming a tax; genuinely better distros earn until they saturate.
+  Primitives (grep) mint ~nothing — correctly; the headroom is policy
+  (retrieval, compaction, delegation strategy), and that's where
+  distros compete.
+
+**Constitution floor (NOT tool-swappable, wording user-blessed —
+placeholder list):** wallet custody with the human; human-only WS
+surfaces (clone, grants, publish); budget cascade; input arbiter;
+charter/RPB injection. Upgradeability of the floor is DEFERRED by
+explicit decision (2026-07-05) — possibly never, possibly
+consensus-hot-swappable, a future session's question. Enforcement
+reality check lives in the five-plane constitution model (prompt /
+semantic / economic / structural / chain): the floor is plane 4, binds
+honest deployments only, and planes 2/3/5 are the ones built to not
+care about tampered hosts.
+
 ## Consensus mechanics (v1 implementation, still current)
 
 - `ToolUsed` consensus event: caller-attested, gossiped, epoch-

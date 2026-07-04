@@ -184,6 +184,12 @@ class ToolUsed:
     attested: bool = False
     score: float = 0.0
     review_digest: str = ""
+    # Resident-tool grammar (spec: Resident tools, loadouts, distros):
+    # digest of the harness distro the attesting agent ran under —
+    # atomic with the attestation, no swap-time reasoning. Feeds the
+    # ADOPTION term at close (distinct fleets per loadout), never
+    # per-call credit.
+    loadout: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -196,6 +202,8 @@ class ToolUsed:
             d.pop("score", None)
         if not self.review_digest:
             d.pop("review_digest", None)
+        if not self.loadout:
+            d.pop("loadout", None)
         return d
 
 
