@@ -401,6 +401,14 @@ async def run_cognitive_loop(
         if tpp is not None:
             session_stats["tokens_per_percent"] = tpp
 
+    # §5 undelivered steering: any mid-run steering the loop accepted but never
+    # consumed before it ended lives on the ProviderResponse. The in-process
+    # path (execution_engine.py ~:1205) re-posts each to the agent's inbox as a
+    # HIGH WORK message so nothing is silently dropped. The provider is in THIS
+    # worker, so we ship the list back and the DAEMON does the inbox re-post
+    # (it owns the InboxManager) — see WorkerHost._handle_execution_done.
+    undelivered_steering = list(getattr(response, "undelivered_steering", None) or [])
+
     return {
         "status": status,
         "error": error,
@@ -409,6 +417,7 @@ async def run_cognitive_loop(
         "tool_calls": accumulated_tool_calls,
         "streamed_text": streamed["text"],
         "session_stats": session_stats,
+        "undelivered_steering": undelivered_steering,
     }
 
 

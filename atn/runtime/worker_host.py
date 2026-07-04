@@ -676,6 +676,31 @@ class WorkerHost:
                 log.debug("caching worker session_stats for %s failed",
                           agent_id, exc_info=True)
 
+        # §5 undelivered steering re-post: the worker accepted these mid-run but
+        # its loop ended before consuming them. The in-process finalize path
+        # (execution_engine.py ~:1205) re-posts each to the agent's inbox as a
+        # HIGH WORK message so nothing is silently dropped; the provider lives in
+        # the worker, so it ships the list here and the DAEMON (which owns the
+        # InboxManager) does the identical re-post. Same shape as the in-process
+        # path: source="steering-fallback", WORK/HIGH, data={"instruction": ...}.
+        undelivered = payload.get("undelivered_steering") or []
+        if isinstance(undelivered, list) and undelivered:
+            inbox = getattr(self._engine, "inbox", None)
+            if inbox is not None:
+                for instruction in undelivered:
+                    try:
+                        inbox.post(InboxMessage(
+                            id=InboxMessage.generate_id(),
+                            source="steering-fallback",
+                            target=agent_id,
+                            type=MessageType.WORK,
+                            priority=MessagePriority.HIGH,
+                            data={"instruction": str(instruction)},
+                        ))
+                    except Exception:
+                        log.debug("undelivered-steering re-post failed for %s",
+                                  agent_id, exc_info=True)
+
         status = _STATUS_BY_NAME.get(
             str(payload.get("status") or "").lower(), ExecutionStatus.FAILED)
         error = payload.get("error")

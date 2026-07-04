@@ -89,7 +89,13 @@ class AgentWorker:
         self._injected_messages: list[str] = []
 
     # -- inbound cmd handling ---------------------------------------------
-    async def on_cmd(self, env: Envelope) -> None:
+    async def on_cmd(self, env: Envelope) -> Optional[dict]:
+        """Handle one inbound daemon cmd.
+
+        Returns a dict for cmds that carried an id (expect_reply): the
+        DaemonClient reader sends it back as the cmd_res body. Fire-and-forget
+        cmds (id=None) return None and no reply is sent — unchanged behavior.
+        """
         name = env.name
         if name == "manifest":
             await self._on_manifest(env.payload)
@@ -110,22 +116,64 @@ class AgentWorker:
                 self._run_task = asyncio.create_task(
                     self._on_run(payload), name=f"worker-run-{self._agent_label}")
         elif name == "send_user_message":
-            # Live-inject a user message into the running loop. The generic
-            # base-class loop doesn't expose a mid-flight injection point, so we
-            # stage it: a provider that supports send_user_message gets it now;
-            # otherwise it's queued for the daemon to re-post to the inbox on the
-            # next run (the daemon's send_delegate_message handles that fallback).
-            content = str((env.payload or {}).get("content", ""))
-            if content:
-                self._injected_messages.append(content)
-                prov = self._provider
-                inject = getattr(prov, "send_user_message", None) if prov else None
-                if inject is not None:
-                    try:
-                        await inject(content)
-                    except Exception:
-                        log.debug("[%s] live send_user_message failed", self._agent_label,
-                                  exc_info=True)
+            # Live-inject a user message into the running loop and poll for the
+            # consumption ack, mirroring ExecutionControl.send_delegate_message's
+            # in-process path (the provider lives HERE under isolation, so the
+            # poll runs worker-side). Returns the ack to the daemon over cmd_res:
+            #   {"status": "injected"}                   — consumed by the loop
+            #   {"status": "inbox_fallback",
+            #    "content": <reclaimed>}                 — raced turn end / dropped;
+            #                                              the DAEMON owns the inbox
+            #                                              re-post (it holds the
+            #                                              InboxManager, not us).
+            return await self._handle_send_user_message(env.payload or {})
+        elif name == "request_compaction":
+            # §15 manual compaction of a RUNNING worker: set the provider's
+            # compact-requested flag (honored at the next generic-loop iteration
+            # boundary). The provider lives in THIS process, so the daemon-side
+            # compact_agent tool forwards the request here. Returns:
+            #   {"accepted": True}      — a generic loop is active and took the flag
+            #   {"accepted": False}     — no active loop (race: just ended) → daemon
+            #                             falls through to the idle-store path
+            #   {"unsupported": True}   — a bridge/SDK worker: its loop lives in the
+            #                             node subprocess with no compact control,
+            #                             so the daemon answers unsupported_while_running
+            #                             (matches the in-process bridge branch).
+            prov = self._provider
+            payload = env.payload or {}
+            requested_by = str(payload.get("requested_by", "") or "")
+            if prov is not None and self._provider_is_bridge(prov):
+                return {"unsupported": True}
+            accepted = False
+            fn = getattr(prov, "request_compaction", None) if prov else None
+            if callable(fn):
+                try:
+                    accepted = bool(fn(requested_by=requested_by))
+                except Exception:
+                    log.debug("[%s] request_compaction failed", self._agent_label,
+                              exc_info=True)
+            return {"accepted": accepted}
+        elif name == "get_context":
+            # Context-breakdown probe of a RUNNING worker: measure the live
+            # provider's context snapshot (system / tools / message stack) in
+            # THIS process, where the provider actually lives. Returns:
+            #   {"breakdown": {...}}   — live measurement succeeded
+            #   {"unsupported": True}  — bridge/SDK worker or no live snapshot;
+            #                            the daemon falls back to the
+            #                            reconstructed (store-based) path
+            prov = self._provider
+            if prov is None or self._provider_is_bridge(prov):
+                return {"unsupported": True}
+            try:
+                from .context_inspect import breakdown_from_provider
+                bd = breakdown_from_provider(prov, "live_worker")
+            except Exception:
+                log.debug("[%s] get_context breakdown failed", self._agent_label,
+                          exc_info=True)
+                bd = None
+            if bd is None:
+                return {"unsupported": True}
+            return {"breakdown": bd}
         elif name == "interrupt":
             # Cooperative interrupt: signal the provider loop to stop after the
             # current turn (matches ExecutionControl.interrupt semantics).
@@ -140,6 +188,97 @@ class AgentWorker:
             self._shutdown.set()
         else:
             log.warning("[%s] unknown cmd %r", self._agent_label, name)
+        return None
+
+    async def _handle_send_user_message(self, payload: dict) -> dict:
+        """Live-inject a steering message and poll for its consumption ack.
+
+        Mirrors ExecutionControl.send_delegate_message's in-process branch, run
+        WORKER-SIDE because the provider is local here:
+          - no provider yet / no send_user_message contract -> stage for the
+            daemon inbox fallback (the next run picks it up);
+          - provider reports an injection id -> poll injection_consumed briefly;
+            on timeout reclaim via take_unconsumed_injection and ask the daemon
+            to re-post it to the inbox;
+          - provider with no id contract (returns None/True) -> treat as injected
+            (prior behavior).
+        """
+        content = str(payload.get("content", ""))
+        if not content:
+            return {"status": "injected"}
+        # Always stage in the fallback list too, so a shutdown-cancelled run
+        # doesn't silently drop it (belt-and-suspenders with the inbox re-post).
+        self._injected_messages.append(content)
+        prov = self._provider
+        inject = getattr(prov, "send_user_message", None) if prov else None
+        if inject is None:
+            # No live loop to consume it — the daemon must inbox it.
+            return {"status": "inbox_fallback", "content": content}
+        try:
+            inj_id = await inject(content)
+        except Exception:
+            log.debug("[%s] live send_user_message failed", self._agent_label,
+                      exc_info=True)
+            return {"status": "inbox_fallback", "content": content}
+
+        # Providers whose send_user_message doesn't report an id (older / the
+        # base generic queue returning True) can't be verified — injected.
+        if not isinstance(inj_id, str) or not inj_id:
+            return {"status": "injected"}
+
+        consumed = await self._await_injection_consumed(prov, inj_id)
+        if consumed:
+            return {"status": "injected"}
+
+        take = getattr(prov, "take_unconsumed_injection", None)
+        pending = take(inj_id) if callable(take) else content
+        if pending is None:
+            # Consumed in the race between the poll and the take — good.
+            return {"status": "injected"}
+        log.info("[%s] injection %s not consumed — daemon inbox fallback",
+                 self._agent_label, inj_id)
+        return {"status": "inbox_fallback", "content": pending}
+
+    async def _await_injection_consumed(
+        self, provider: Any, inj_id: str, timeout: float = 2.0, interval: float = 0.05,
+    ) -> bool:
+        """Poll ``provider.injection_consumed(inj_id)`` up to ``timeout`` s.
+
+        Worker-side copy of ExecutionControl._await_injection_consumed (same
+        window/interval) so the injected/inbox_fallback boundary matches the
+        in-process path byte-for-byte."""
+        checker = getattr(provider, "injection_consumed", None)
+        if not callable(checker):
+            return True  # can't verify — assume delivered
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            if checker(inj_id):
+                return True
+            await asyncio.sleep(interval)
+        return checker(inj_id)
+
+    @staticmethod
+    def _provider_is_bridge(prov: Any) -> bool:
+        """True if the live provider drives its loop in a node/SDK subprocess
+        (BridgeProvider / CodexBridgeProvider) rather than the generic base
+        loop. Bridge has no compact-control input, so manual compaction of a
+        running bridge is unsupported — mirrors the in-process tool branch.
+        Import lazily + guard so a missing optional module never crashes the
+        cmd handler."""
+        try:
+            from .providers.bridge import BridgeProvider
+            if isinstance(prov, BridgeProvider):
+                return True
+        except Exception:
+            pass
+        try:
+            from .providers.codex_bridge import CodexBridgeProvider
+            if isinstance(prov, CodexBridgeProvider):
+                return True
+        except Exception:
+            pass
+        return False
 
     async def _on_manifest(self, payload: dict) -> None:
         # Manifest is informational only; identity is pipe-bound on the daemon.

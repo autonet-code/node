@@ -491,12 +491,16 @@ async def run_cli() -> None:
     # Load agents from YAML files
     await _load_agents(runtime, config)
 
-    # Register the orchestrator meta-agent
-    try:
-        await runtime.setup_orchestrator()
-        console.print("  [green]Orchestrator registered[/]")
-    except Exception as exc:
-        console.print(f"  [yellow]Orchestrator not available: {exc}[/]")
+    # Legacy root agent — DEPRECATED. Only auto-provisioned when explicitly
+    # re-enabled (orchestrator.enabled: true). The default is a rootless
+    # fleet: the human owner is the root of trust, and supervision composes
+    # from heartbeat + notify_parent + get_children_status on any agent.
+    if getattr(config.orchestrator, "enabled", False):
+        try:
+            await runtime.setup_orchestrator()
+            console.print("  [green]Orchestrator registered (legacy mode)[/]")
+        except Exception as exc:
+            console.print(f"  [yellow]Orchestrator not available: {exc}[/]")
 
     # Phase 12: if any loaded agent already has on-chain registration,
     # auto-start autonet — the user opted in earlier and the daemon

@@ -14,6 +14,25 @@ from ..models import AgentDefinition, AgentMode
 
 ORCHESTRATOR_ID = "orchestrator"
 
+# The OWNER is the human behind a trusted surface (WS frontend, voice, CLI).
+# Tool calls arriving without an agent caller are attributed to the owner,
+# who holds full permissions. This is the root of trust — NOT a privileged
+# agent. ORCHESTRATOR_ID above is DEPRECATED as a privilege anchor: the
+# auto-provisioned root agent is being phased out (config
+# orchestrator.enabled, default off); the id remains only so legacy
+# installs and their on-disk agents keep working.
+OWNER_ID = "user"
+
+
+def is_owner_caller(caller_id: str | None) -> bool:
+    """True when a tool call originates from the human owner's surface.
+
+    None/empty = trusted internal caller (WS bridge, voice, CLI) — the
+    owner. OWNER_ID is the explicit spelling. ORCHESTRATOR_ID retains
+    owner-level trust as a legacy alias while the root agent is phased out.
+    """
+    return caller_id in (None, "", OWNER_ID, ORCHESTRATOR_ID)
+
 
 def build_system_prompt_with_context(
     *,

@@ -171,6 +171,13 @@ class Scheduler:
         from ..orchestrator import ORCHESTRATOR_ID
         from ..planning_prompt import build_planning_context
 
+        # DEPRECATED path: the review digest goes to the legacy root agent's
+        # inbox, so it is meaningless without one. Rootless fleets get the
+        # same behavior compositionally — a heartbeating supervisor agent
+        # pulls its children + user goals itself.
+        if ORCHESTRATOR_ID not in self.registry._agents:
+            return
+
         profile = self.user_profile.get_profile()
 
         goals: list[dict[str, Any]] = []

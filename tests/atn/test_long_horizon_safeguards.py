@@ -155,6 +155,8 @@ class _RepeatingProvider:
         self._cumulative_turns = 0
         self._last_input_tokens = 0
         self._COMPACTION_THRESHOLD = 0.9
+        self._compact_requested = False
+        self._compact_requested_by = ""
 
     async def send_stream(self, **kwargs: Any):
         from atn.providers.base import ProviderResponse, ToolCall, Usage

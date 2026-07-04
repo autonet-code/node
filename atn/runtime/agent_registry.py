@@ -617,7 +617,12 @@ class AgentRegistry:
         conversations, and files before calling this.
         """
         from ..orchestrator import ORCHESTRATOR_ID
-        if agent_id == ORCHESTRATOR_ID and not _force:
+        # The root agent is only protected in legacy mode (orchestrator
+        # auto-provisioning enabled). In a rootless fleet it is a normal
+        # agent and the owner may remove it like any other.
+        _orch_cfg = getattr(self._config, "orchestrator", None)
+        if agent_id == ORCHESTRATOR_ID and not _force \
+                and getattr(_orch_cfg, "enabled", False):
             raise ValueError("The orchestrator cannot be unregistered")
         self._agents.pop(agent_id, None)
         self._status.pop(agent_id, None)

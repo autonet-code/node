@@ -1066,6 +1066,63 @@ class Runtime:
     async def get_session_context(self, agent_id: str | None = None) -> dict[str, Any]:
         return await self.providers.get_session_context(agent_id)
 
+    async def get_context_breakdown(self, agent_id: str | None = None) -> dict[str, Any]:
+        """Per-category context-window composition for an agent (the /context surface).
+
+        Source fidelity ladder:
+          1. live_worker      — agent running in an isolated worker: probe the
+                                worker's live provider over the cmd channel.
+          2. live_inprocess   — daemon-side provider with a live snapshot
+                                (in-process run, or cached after the run).
+          3. reconstructed    — rebuilt from the definition + persisted
+                                conversation store (idle agents, bridge/SDK).
+        """
+        from ..orchestrator import ORCHESTRATOR_ID
+        from ..context_inspect import breakdown_from_provider, breakdown_reconstructed
+        target = agent_id or ORCHESTRATOR_ID
+
+        # 1. Isolated running worker — same channel discovery as compact_agent.
+        wi = getattr(self._config, "worker_isolation", None)
+        supervisor = getattr(self, "supervisor", None)
+        if getattr(wi, "enabled", False) and supervisor is not None \
+                and supervisor.is_supervised(target):
+            worker = supervisor.get(target)
+            channel = getattr(getattr(worker, "handle", None), "channel", None)
+            if channel is not None:
+                try:
+                    ack = await channel.send_cmd_await("get_context", {})
+                    if isinstance(ack, dict) and isinstance(ack.get("breakdown"), dict):
+                        bd = ack["breakdown"]
+                        bd["agent_id"] = target
+                        return bd
+                except Exception:
+                    log.debug("get_context cmd failed for %s", target, exc_info=True)
+                # unsupported / no live loop — fall through.
+
+        # 2. Daemon-side provider with a live snapshot.
+        active = getattr(self.providers, "_active_providers", None)
+        provider = active.get(target) if isinstance(active, dict) else None
+        if provider is not None:
+            bd = breakdown_from_provider(provider, "live_inprocess")
+            if bd is not None:
+                bd["agent_id"] = target
+                return bd
+
+        # 3. Reconstructed from definition + persisted store.
+        return breakdown_reconstructed(self, target)
+
+    # ------------------------------------------------------------------
+    # Agent cloning (human-only WS surface — never an agent tool)
+    # ------------------------------------------------------------------
+
+    async def clone_agent(self, agent_id: str) -> dict[str, Any]:
+        from ..agent_clone import clone_agent
+        return await clone_agent(self, agent_id)
+
+    async def merge_clone(self, agent_id: str) -> dict[str, Any]:
+        from ..agent_clone import merge_clone
+        return await merge_clone(self, agent_id)
+
     def _get_available_models(self, provider_name: str, **kwargs) -> list[dict[str, str]]:
         return self.providers.get_available_models(provider_name, **kwargs)
 

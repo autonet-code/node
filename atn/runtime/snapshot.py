@@ -144,6 +144,12 @@ class SnapshotBuilder:
                 agent_info["agent_type"] = agent_type
             if defn.parent_id:
                 agent_info["parent_id"] = self.registry._resolve_parent_agent_id(defn.parent_id)
+            if getattr(defn, "cloned_from", None):
+                agent_info["cloned_from"] = defn.cloned_from
+            # Tool grant spec (bundle ids / flags) — lets the Tools screen
+            # build the reverse index (which agents hold which bundle).
+            if defn.tools:
+                agent_info["tools"] = list(defn.tools)
             children_count = sum(
                 1 for cid, d in self.registry._agents.items()
                 if d.parent_id

@@ -126,7 +126,16 @@ class ChatConfig:
 
 @dataclass
 class OrchestratorConfig:
-    """Configuration for the orchestrator's LLM usage."""
+    """Configuration for the DEPRECATED root agent.
+
+    The auto-provisioned privileged orchestrator is being phased out: the
+    human owner (via WS/voice/CLI surfaces) is the root of trust, and fleet
+    supervision composes from the fractal primitives (heartbeat +
+    notify_parent + get_children_status) on any agent the user creates.
+    ``enabled=True`` restores the legacy behavior: auto-provision the
+    orchestrator at boot and protect it from removal.
+    """
+    enabled: bool = False       # auto-provision the root agent at boot (legacy)
     provider: str = ""          # provider name (e.g. "anthropic", "gemini")
     model: str = ""             # model override (e.g. "claude-sonnet-4-20250514")
 
@@ -548,6 +557,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
     orch_raw = raw.get("orchestrator", {})
     if isinstance(orch_raw, dict):
         config.orchestrator = OrchestratorConfig(
+            enabled=bool(orch_raw.get("enabled", False)),
             provider=orch_raw.get("provider", ""),
             model=orch_raw.get("model", ""),
         )

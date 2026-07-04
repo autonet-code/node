@@ -212,20 +212,32 @@ class ExecutionControl:
         """
         # Dual-mode (C1): a supervised worker's provider object lives IN THE
         # WORKER, not in the daemon's _active_providers map. Route the injection
-        # over the IPC "send_user_message" cmd (the worker's on_cmd handles it:
-        # live-inject if the provider supports it, else stage for the inbox
-        # fallback). Mirrors interrupt_delegate's worker branch.
+        # over the IPC "send_user_message" cmd and AWAIT the worker's consumption
+        # ack (the worker runs the same injection_consumed poll the in-process
+        # path runs, because the provider is local to it). The worker returns
+        # {"status": "injected"} when the loop consumed it, or
+        # {"status": "inbox_fallback", "content": <reclaimed>} when it raced turn
+        # end / was dropped — in which case the DAEMON does the inbox re-post
+        # here (it owns the InboxManager; the worker cannot). This gives the
+        # caller the SAME "injected"/"inbox_fallback" semantics as in-process.
         if self._supervised(agent_id):
             worker = self.supervisor.get(agent_id)
             channel = getattr(getattr(worker, "handle", None), "channel", None)
             if channel is not None:
                 try:
-                    await channel.send_cmd("send_user_message", {"content": content})
-                    return "injected"
+                    ack = await channel.send_cmd_await(
+                        "send_user_message", {"content": content})
                 except Exception:
                     log.debug("send_user_message cmd failed for %s", agent_id, exc_info=True)
-                    return self._inbox_fallback(agent_id, content)
-            return self._inbox_fallback(agent_id, content)
+                    return self._inbox_fallback(agent_id, content) or "inbox_fallback"
+                status = (ack or {}).get("status") if isinstance(ack, dict) else None
+                if status == "injected":
+                    return "injected"
+                # inbox_fallback (or an unexpected ack): re-post the reclaimed
+                # content (worker returns the exact text it couldn't deliver).
+                pending = (ack or {}).get("content") if isinstance(ack, dict) else None
+                return self._inbox_fallback(agent_id, pending or content) or "inbox_fallback"
+            return self._inbox_fallback(agent_id, content) or "inbox_fallback"
 
         provider = self.provider_manager._active_providers.get(agent_id)
         if provider is None:

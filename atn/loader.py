@@ -241,6 +241,7 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         parent_id=parent_id,
         created_by=created_by,
         notify_parent=notify_parent,
+        cloned_from=raw.get("cloned_from") or None,
         heartbeat=heartbeat,
         expose_as_tool=expose_as_tool,
         tool_input_schema=tool_input_schema,
@@ -358,6 +359,8 @@ def save_agent(defn: AgentDefinition, directory: Path) -> Path:
         data["created_by"] = defn.created_by
     if not defn.notify_parent:
         data["notify_parent"] = False
+    if defn.cloned_from:
+        data["cloned_from"] = defn.cloned_from
 
     # Heartbeat
     if defn.heartbeat:

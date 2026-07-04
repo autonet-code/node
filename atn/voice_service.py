@@ -1668,8 +1668,10 @@ class VoiceService:
                      result.get("holder"))
             return
 
-        # If delivery failed and this isn't the orchestrator, fall back to orchestrator
-        if result.get("error") and agent_id != ORCHESTRATOR_ID:
+        # If delivery failed, fall back to the legacy root agent — but only
+        # when one actually exists (rootless fleets have no fallback target).
+        if result.get("error") and agent_id != ORCHESTRATOR_ID \
+                and self.runtime.get_agent(ORCHESTRATOR_ID) is not None:
             log.warning(
                 "[PTT] Agent '%s' is not available, routing to orchestrator",
                 agent_id,

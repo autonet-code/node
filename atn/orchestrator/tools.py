@@ -876,6 +876,8 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
             result["parent_id"] = defn.parent_id
         if defn.created_by:
             result["created_by"] = defn.created_by
+        if getattr(defn, "cloned_from", None):
+            result["cloned_from"] = defn.cloned_from
         # Include output preview for running/completed cognitive agents
         output_text = runtime.get_delegate_output(agent_id)
         if output_text:
@@ -1404,9 +1406,10 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         return {"error": f"Agent '{target}' not found."}
 
     # Hierarchy scoping: agents can only message parent, direct children,
-    # or siblings (same parent_id).  The orchestrator is unrestricted.
+    # or siblings (same parent_id).  The owner surface is unrestricted.
+    from . import is_owner_caller
     caller_id = input.get("_caller_id")
-    if caller_id and caller_id != ORCHESTRATOR_ID:
+    if caller_id and not is_owner_caller(caller_id):
         caller_defn = runtime.get_agent(caller_id)
         if caller_defn:
             is_parent = (caller_defn.parent_id == target)
@@ -2719,7 +2722,8 @@ async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     # --- Permission check (§15) ---------------------------------------------
     if caller_id == agent_id:
         return {"error": "An agent cannot compact itself."}
-    if caller_id != ORCHESTRATOR_ID and target.parent_id != caller_id:
+    from . import is_owner_caller
+    if not is_owner_caller(caller_id) and target.parent_id != caller_id:
         return {
             "error": (
                 f"Agent '{caller_id}' can only compact its direct children; "
@@ -2732,6 +2736,19 @@ async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     provider = active.get(agent_id) if isinstance(active, dict) else None
 
     is_running = runtime._running_count.get(agent_id, 0) > 0
+
+    # --- Isolated-worker running path (§15 worker parity) -------------------
+    # Under ATN_WORKER_ISOLATION the running agent's provider lives IN THE
+    # WORKER process, so it is NOT in _active_providers (provider is None above).
+    # Forward the request_compaction over the worker's IPC command channel; the
+    # worker sets the flag on its live provider and reports whether an
+    # orchestration was active to consume it. Only bridge/composite providers
+    # stay in-process, so a supervised worker is always a generic loop (which
+    # honors the flag). If the worker reports the loop wasn't active (race:
+    # just ended), fall through to the idle-store path below.
+    worker = await _compact_running_worker(runtime, agent_id, caller_id)
+    if worker is not None:
+        return worker
 
     # --- Running path -------------------------------------------------------
     if is_running and provider is not None:
@@ -2752,6 +2769,50 @@ async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
 
     # --- Idle path ----------------------------------------------------------
     return await _compact_idle_store(runtime, agent_id, caller_id, provider)
+
+
+async def _compact_running_worker(
+    runtime: Runtime, agent_id: str, caller_id: str,
+) -> dict[str, Any] | None:
+    """Forward a manual compaction to an isolated worker over IPC (§15).
+
+    Returns:
+      - ``{"status": "queued", ...}`` if the agent is running in a supervised
+        worker and its live loop accepted the request_compaction flag;
+      - ``None`` if there is no supervised worker for this agent, OR the worker
+        reported no active loop to consume it (race: the run just ended) — the
+        caller then falls through to the idle-store path.
+
+    A NO-OP (returns None immediately) when worker isolation is off or no
+    supervisor exists, so the flag-off path is byte-for-byte unchanged.
+    """
+    cfg = getattr(runtime, "_config", None)
+    wi = getattr(cfg, "worker_isolation", None)
+    if not getattr(wi, "enabled", False):
+        return None
+    supervisor = getattr(runtime, "supervisor", None)
+    if supervisor is None or not supervisor.is_supervised(agent_id):
+        return None
+    worker = supervisor.get(agent_id)
+    channel = getattr(getattr(worker, "handle", None), "channel", None)
+    if channel is None:
+        return None
+    try:
+        ack = await channel.send_cmd_await(
+            "request_compaction", {"requested_by": caller_id})
+    except Exception:
+        log.debug("request_compaction cmd failed for %s", agent_id, exc_info=True)
+        # Couldn't reach the worker's loop — fall through to the idle path.
+        return None
+    if isinstance(ack, dict) and ack.get("unsupported"):
+        # A running bridge/SDK worker: no compact control (matches the
+        # in-process bridge branch's answer exactly).
+        return {"status": "unsupported_while_running", "agent_id": agent_id}
+    accepted = bool((ack or {}).get("accepted")) if isinstance(ack, dict) else False
+    if accepted:
+        return {"status": "queued", "agent_id": agent_id}
+    # Loop wasn't active (just ended) — let the caller try the idle store.
+    return None
 
 
 async def _compact_idle_store(
@@ -3040,8 +3101,8 @@ async def execute_tool(
     # arrived via a compromised worker's framework_tool RPC or a prompt-injected
     # tool_use in the in-process loop.
     if caller_id is not None:
-        from . import ORCHESTRATOR_ID
-        if caller_id != ORCHESTRATOR_ID and name not in _AGENT_CALLABLE_TOOLS:
+        from . import is_owner_caller
+        if not is_owner_caller(caller_id) and name not in _AGENT_CALLABLE_TOOLS:
             log.warning("blocked non-agent-callable tool %r by caller %s",
                         name, caller_id)
             return {"error": f"Tool '{name}' is not available to agent "

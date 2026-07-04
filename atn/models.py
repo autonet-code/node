@@ -225,6 +225,12 @@ class AgentDefinition:
     created_by: str = ""                    # agent_id of creator
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    # --- Clone lineage (human-only branching; see agent_clone.py) ---
+    cloned_from: str | None = None
+    # Set when this agent was forked from another WITH its conversation
+    # history. Clones share the original's budget ceiling via parent_id
+    # rollup and carry no inherited identity/wallet.
+
     # --- Parent notification ---
     notify_parent: bool = True              # if False, skip inbox post on completion
     # When True (default), framework posts a lean completion notification

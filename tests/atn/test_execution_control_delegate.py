@@ -110,6 +110,93 @@ def make_control(agent_ids=("delegate-1",)):
 
 
 # ---------------------------------------------------------------------------
+# Worker-isolation fakes (supervised path)
+# ---------------------------------------------------------------------------
+
+class _FakeWIConfig:
+    class _WI:
+        enabled = True
+    worker_isolation = _WI()
+
+
+class _FakeChannel:
+    """Records send_cmd_await calls and returns a scripted ack (or raises)."""
+    def __init__(self, ack=None, raises=False):
+        self.awaited = []
+        self._ack = ack
+        self._raises = raises
+
+    async def send_cmd_await(self, name, payload=None, *, timeout=5.0):
+        self.awaited.append((name, dict(payload or {})))
+        if self._raises:
+            raise RuntimeError("pipe gone")
+        return self._ack
+
+
+class _FakeWorker:
+    def __init__(self, channel):
+        self.handle = type("H", (), {"channel": channel})()
+
+
+class _FakeSupervisor:
+    def __init__(self, workers):
+        self._workers = workers   # {agent_id: _FakeWorker}
+
+    def is_supervised(self, agent_id):
+        return agent_id in self._workers
+
+    def get(self, agent_id):
+        return self._workers.get(agent_id)
+
+
+def make_supervised_control(agent_id="delegate-1", ack=None, raises=False):
+    engine = FakeEngine((agent_id,))
+    engine._config = _FakeWIConfig()      # flag ON
+    pm = FakeProviderManager()
+    channel = _FakeChannel(ack=ack, raises=raises)
+    sup = _FakeSupervisor({agent_id: _FakeWorker(channel)})
+    control = ExecutionControl(engine, pm, supervisor=sup)
+    return control, engine, channel
+
+
+# ---------------------------------------------------------------------------
+# send_delegate_message — worker-path consumption ack (IPC parity, gap 1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_worker_injection_consumed_reports_injected():
+    control, engine, channel = make_supervised_control(ack={"status": "injected"})
+    status = await control.send_delegate_message("delegate-1", "steer")
+    assert status == "injected"
+    assert channel.awaited == [("send_user_message", {"content": "steer"})]
+    assert engine.inbox.posted == []       # no fallback
+
+
+@pytest.mark.asyncio
+async def test_worker_injection_unconsumed_falls_back_to_inbox():
+    control, engine, channel = make_supervised_control(
+        ack={"status": "inbox_fallback", "content": "reclaimed text"})
+    status = await control.send_delegate_message("delegate-1", "reclaimed text")
+    assert status == "inbox_fallback"
+    # Daemon re-posted the worker-reclaimed content as HIGH WORK.
+    assert len(engine.inbox.posted) == 1
+    msg = engine.inbox.posted[0]
+    assert msg.target == "delegate-1"
+    assert msg.type == MessageType.WORK
+    assert msg.priority == MessagePriority.HIGH
+    assert msg.data["instruction"] == "reclaimed text"
+
+
+@pytest.mark.asyncio
+async def test_worker_injection_cmd_error_falls_back_to_inbox():
+    control, engine, channel = make_supervised_control(raises=True)
+    status = await control.send_delegate_message("delegate-1", "unreachable")
+    assert status == "inbox_fallback"
+    assert len(engine.inbox.posted) == 1
+    assert engine.inbox.posted[0].data["instruction"] == "unreachable"
+
+
+# ---------------------------------------------------------------------------
 # send_delegate_message — §5 ack + fallback
 # ---------------------------------------------------------------------------
 

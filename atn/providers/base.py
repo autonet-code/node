@@ -243,6 +243,18 @@ class Provider(ABC):
     _last_input_tokens: int = 0
     _active_model: str = ""
 
+    # Live context snapshot (set by send_orchestrate for the duration of a
+    # run). The message list is otherwise LOCAL to the loop; these references
+    # let an out-of-band inspector (context_inspect / the get_context worker
+    # cmd) measure the exact context the loop is working with. _live_messages
+    # is the same list object the loop mutates, so compactions and appends are
+    # visible to readers. None = no run has populated a snapshot (bridge
+    # providers, which override send_orchestrate, never set one).
+    _live_system: str = ""
+    _live_tools: Any = None
+    _live_messages: Any = None
+    _live_max_tokens: int = 0
+
     @property
     def session_stats(self) -> dict[str, Any]:
         """Session statistics — base implementation for non-bridge providers.
@@ -491,6 +503,15 @@ class Provider(ABC):
         _ctx_for_cap = get_context_window(model or self._active_model)
         if _ctx_for_cap > 0:
             max_tokens = min(max_tokens, max(1_024, _ctx_for_cap // 4))
+
+        # Publish the live context snapshot for out-of-band inspection
+        # (context_inspect.breakdown_from_provider). Same list object as the
+        # loop below mutates — kept after the run ends so the last-known
+        # context stays inspectable until the next run replaces it.
+        self._live_system = system
+        self._live_tools = list(tools) if tools else []
+        self._live_messages = messages
+        self._live_max_tokens = max_tokens
 
         for turn in range(max_turns):
             if self._interrupted:

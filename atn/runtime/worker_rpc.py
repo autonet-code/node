@@ -84,12 +84,20 @@ MAX_CONSECUTIVE_BAD_FRAMES = 64
 # so kill is out-of-band PID termination by the supervisor, never a message.
 
 KIND_CMD = "cmd"
+KIND_CMD_RES = "cmd_res"
 KIND_RPC_REQ = "rpc_req"
 KIND_RPC_RES = "rpc_res"
 KIND_EVENT = "event"
 KIND_STATUS = "status"
 
-_VALID_KINDS = frozenset({KIND_CMD, KIND_RPC_REQ, KIND_RPC_RES, KIND_EVENT, KIND_STATUS})
+# cmd_res  worker -> daemon : reply to a daemon cmd that carried an id
+#                            (expect_reply=True). This is the SYMMETRIC twin of
+#                            rpc_res: it lets a host->worker cmd carry a result
+#                            back (e.g. send_user_message consumption ack,
+#                            request_compaction accepted flag) WITHOUT a second
+#                            channel. Fire-and-forget cmds (id=None) never get one.
+_VALID_KINDS = frozenset({KIND_CMD, KIND_CMD_RES, KIND_RPC_REQ, KIND_RPC_RES,
+                          KIND_EVENT, KIND_STATUS})
 
 # rpc names the worker may ask the daemon to perform (in the daemon's shared
 # context). Wiring of the actual callables is P4; here they are just the
@@ -167,6 +175,13 @@ class Envelope:
         if error is not None:
             body = {"error": error}
         return cls(kind=KIND_RPC_RES, name="", id=req_id, payload=body)
+
+    @classmethod
+    def cmd_res(cls, cmd_id: str, payload: dict | None = None, *, error: str | None = None) -> "Envelope":
+        body = dict(payload or {})
+        if error is not None:
+            body = {"error": error}
+        return cls(kind=KIND_CMD_RES, name="", id=cmd_id, payload=body)
 
     @classmethod
     def event(cls, name: str, payload: dict | None = None) -> "Envelope":
@@ -339,7 +354,25 @@ class DaemonClient:
                         log.warning("rpc_res for unknown id %s", env.id)
                 elif env.kind == KIND_CMD:
                     if self._on_cmd is not None:
-                        await self._on_cmd(env)
+                        # A cmd carrying an id expects a cmd_res reply (the
+                        # symmetric twin of rpc_req/rpc_res). The handler's
+                        # return value (a dict, or None) becomes the reply body;
+                        # a raised exception becomes a cmd_res error. Handlers
+                        # for fire-and-forget cmds (id=None) return None and no
+                        # reply is sent — unchanged behavior.
+                        if env.id is not None:
+                            try:
+                                result = await self._on_cmd(env)
+                                body = result if isinstance(result, dict) else {}
+                                await self._t.send(Envelope.cmd_res(env.id, body))
+                            except Exception as e:
+                                try:
+                                    await self._t.send(Envelope.cmd_res(
+                                        env.id, error=f"{type(e).__name__}: {e}"))
+                                except Exception:
+                                    log.warning("failed to send cmd_res error")
+                        else:
+                            await self._on_cmd(env)
                     else:
                         log.warning("no cmd handler for cmd %r", env.name)
                 else:
@@ -451,6 +484,10 @@ class WorkerChannel:
         self._reader: Optional[asyncio.Task] = None
         self._event_worker: Optional[asyncio.Task] = None
         self._closed = False
+        # Futures for daemon->worker cmds that carried an id (expect_reply). The
+        # worker replies with a cmd_res correlated by id — symmetric to the
+        # DaemonClient rpc_req/rpc_res mechanism, on the SAME channel.
+        self._pending_cmds: dict[str, asyncio.Future] = {}
         # Bounds concurrent rpc handlers (H3); acquired by the reader before each
         # rpc task is spawned, released in _handle_rpc's finally.
         self._rpc_sem = asyncio.Semaphore(MAX_INFLIGHT_RPC)
@@ -466,6 +503,31 @@ class WorkerChannel:
     # -- daemon -> worker --------------------------------------------------
     async def send_cmd(self, name: str, payload: dict | None = None) -> None:
         await self._t.send(Envelope.cmd(name, payload))
+
+    async def send_cmd_await(
+        self, name: str, payload: dict | None = None, *, timeout: float = 5.0,
+    ) -> dict:
+        """Send a daemon->worker cmd and await the worker's cmd_res reply.
+
+        Symmetric to ``DaemonClient.rpc`` but in the daemon->worker direction:
+        used for cmds whose result the daemon needs (send_user_message's
+        consumption ack, request_compaction's accepted flag). The reply body is
+        returned as a dict; a worker-side error is raised as RuntimeError; a
+        missing reply within ``timeout`` raises asyncio.TimeoutError. Reuses the
+        one existing pipe — NOT a second channel."""
+        env = Envelope.cmd(name, payload, expect_reply=True)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending_cmds[env.id] = fut
+        try:
+            await self._t.send(env)
+        except Exception:
+            self._pending_cmds.pop(env.id, None)
+            raise
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        finally:
+            self._pending_cmds.pop(env.id, None)
 
     # -- inbound demux -----------------------------------------------------
     async def _recv_loop(self) -> None:
@@ -501,6 +563,17 @@ class WorkerChannel:
                     # its own task so a slow handler doesn't head-of-line-block.
                     await self._rpc_sem.acquire()
                     asyncio.create_task(self._handle_rpc(env))
+                elif env.kind == KIND_CMD_RES:
+                    fut = self._pending_cmds.pop(env.id, None)
+                    if fut is not None and not fut.done():
+                        err = env.payload.get("error") if isinstance(env.payload, dict) else None
+                        if err is not None:
+                            fut.set_exception(RuntimeError(str(err)))
+                        else:
+                            fut.set_result(dict(env.payload or {}))
+                    else:
+                        log.warning("worker %s: cmd_res for unknown id %s",
+                                    self.agent_id, env.id)
                 elif env.kind == KIND_EVENT:
                     self._offer_event(env)
                 elif env.kind == KIND_STATUS:
@@ -573,6 +646,12 @@ class WorkerChannel:
 
     async def close(self) -> None:
         self._closed = True
+        # Fail any outstanding cmd replies so a caller in send_cmd_await doesn't
+        # hang past channel teardown (mirrors DaemonClient's pending-rpc drain).
+        for fut in self._pending_cmds.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("worker channel closed"))
+        self._pending_cmds.clear()
         for task in (self._reader, self._event_worker):
             if task is not None:
                 task.cancel()

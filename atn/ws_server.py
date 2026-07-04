@@ -908,6 +908,75 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": result["error"]}
             return {"msg_id": msg_id, "ok": True, "result": result}
 
+        if msg_type == "context_breakdown":
+            agent_id = msg.get("agent_id")  # None = orchestrator
+            result = await self.runtime.get_context_breakdown(agent_id)
+            if "error" in result:
+                return {"msg_id": msg_id, "ok": False, "error": result["error"]}
+            return {"msg_id": msg_id, "ok": True, "result": result}
+
+        # The canonical agent tool surface — everything an agent can be
+        # granted, grouped by the same bundle ids the create-agent flow
+        # uses, with each tool's endpoints (name / description / params).
+        if msg_type == "tool_surface":
+            from .orchestrator.tools import _TOOL_CATEGORIES, _TOOLS
+            from .shell_tools import SHELL_TOOLS
+
+            def _entry(name, description, schema):
+                props = list(((schema or {}).get("properties")) or {})
+                return {"name": name,
+                        "description": (description or "").strip().split("\n")[0][:220],
+                        "params": props}
+
+            tool_index = {t.name: t for t in _TOOLS}
+            bundles = []
+            for cat in sorted(_TOOL_CATEGORIES):
+                if cat == "shell":
+                    tools = [_entry(t["name"], t.get("description", ""),
+                                    t.get("input_schema")) for t in SHELL_TOOLS]
+                else:
+                    tools = [
+                        _entry(n, tool_index[n].description, tool_index[n].input_schema)
+                        for n in sorted(_TOOL_CATEGORIES[cat]) if n in tool_index
+                    ]
+                bundles.append({"id": cat, "tools": tools})
+            # Bridge-native (Claude SDK) built-ins — granted via "sdk_builtin".
+            # Schemas live in the SDK; names are the stable contract.
+            bundles.append({"id": "sdk_builtin", "tools": [
+                {"name": n, "description": d, "params": []} for n, d in [
+                    ("Bash", "Run shell commands"),
+                    ("Read", "Read files"), ("Write", "Write files"),
+                    ("Edit", "Edit files"),
+                    ("Glob", "Find files by pattern"),
+                    ("Grep", "Search file contents"),
+                    ("WebSearch", "Search the web"),
+                    ("WebFetch", "Fetch a URL"),
+                    ("Task", "Spawn a sub-task"),
+                ]]})
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"bundles": bundles}}
+
+        # Agent cloning — HUMAN-ONLY by construction: these exist solely as
+        # WS handlers and are never registered in any agent tool surface, so
+        # no agent can invoke (or even name) the capability.
+        if msg_type == "clone_agent":
+            agent_id = msg.get("agent_id", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
+            result = await self.runtime.clone_agent(agent_id)
+            if "error" in result:
+                return {"msg_id": msg_id, "ok": False, "error": result["error"]}
+            return {"msg_id": msg_id, "ok": True, "result": result}
+
+        if msg_type == "merge_clone":
+            agent_id = msg.get("agent_id", "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
+            result = await self.runtime.merge_clone(agent_id)
+            if "error" in result:
+                return {"msg_id": msg_id, "ok": False, "error": result["error"]}
+            return {"msg_id": msg_id, "ok": True, "result": result}
+
         # Voice service control
         if msg_type == "voice_start":
             result = await self.runtime.start_voice()
@@ -1723,7 +1792,12 @@ class WebSocketBridge:
             if not agent_id:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
             from .orchestrator import ORCHESTRATOR_ID
-            if agent_id == ORCHESTRATOR_ID:
+            # Legacy mode only: the provisioned root agent stays protected.
+            # Rootless fleets treat it as a normal, removable agent (the
+            # registry enforces the same rule — this is just a friendlier
+            # message).
+            _orch_cfg = getattr(self.runtime._config, "orchestrator", None)
+            if agent_id == ORCHESTRATOR_ID and getattr(_orch_cfg, "enabled", False):
                 return {"msg_id": msg_id, "ok": False, "error": "The root agent cannot be removed"}
             try:
                 await self.runtime.unregister_agent(agent_id)
@@ -1820,9 +1894,19 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": False, "error": authz_err}
 
         # caller_id: a full-fleet session may act as any agent (today's UI
-        # behavior). A scoped session is clamped to its own root.
+        # behavior). A scoped session is clamped to its own root. When no
+        # caller is named, a legacy install with a provisioned root agent
+        # keeps acting as the orchestrator; a rootless fleet acts as the
+        # OWNER ("" → owner-trusted, parentless creates).
         if session.scope_ids is None:
-            caller_id = msg.get("caller_id", "orchestrator")
+            caller_id = msg.get("caller_id")
+            if caller_id is None:
+                from .orchestrator import ORCHESTRATOR_ID
+                caller_id = (
+                    "orchestrator"
+                    if self.runtime.get_agent(ORCHESTRATOR_ID) is not None
+                    else ""
+                )
         else:
             caller_id = session.root_agent_id
         result = await execute_tool(msg_type, args, self.runtime, caller_id=caller_id)

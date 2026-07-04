@@ -280,6 +280,105 @@ class TestIdlePath:
 # Running bridge path (§15) — unsupported_while_running
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Isolated-worker running path (§15 worker parity) — request_compaction over IPC
+# ---------------------------------------------------------------------------
+
+class _FakeChannel:
+    def __init__(self, ack):
+        self.awaited = []
+        self._ack = ack
+
+    async def send_cmd_await(self, name, payload=None, *, timeout=5.0):
+        self.awaited.append((name, dict(payload or {})))
+        return self._ack
+
+
+class _FakeWorker:
+    def __init__(self, channel):
+        self.handle = type("H", (), {"channel": channel})()
+
+
+class _FakeSupervisor:
+    def __init__(self, workers):
+        self._workers = workers
+
+    def is_supervised(self, agent_id):
+        return agent_id in self._workers
+
+    def get(self, agent_id):
+        return self._workers.get(agent_id)
+
+
+class TestRunningWorker:
+    @pytest.mark.asyncio
+    async def test_running_worker_forwards_request_compaction(self, tmp_path):
+        rt = _make_runtime(EventBus(), tmp_path)
+        rt._config.worker_isolation.enabled = True
+        await _register(rt, "wkr-1")
+        rt.registry._running_count["wkr-1"] = 1
+        channel = _FakeChannel({"accepted": True})
+        rt.supervisor = _FakeSupervisor({"wkr-1": _FakeWorker(channel)})
+
+        res = await _compact_agent(rt, {"agent_id": "wkr-1",
+                                        "_caller_id": ORCHESTRATOR_ID})
+        assert res == {"status": "queued", "agent_id": "wkr-1"}
+        assert channel.awaited == [
+            ("request_compaction", {"requested_by": ORCHESTRATOR_ID})]
+
+    @pytest.mark.asyncio
+    async def test_running_worker_bridge_unsupported(self, tmp_path):
+        rt = _make_runtime(EventBus(), tmp_path)
+        rt._config.worker_isolation.enabled = True
+        await _register(rt, "wkr-2")
+        rt.registry._running_count["wkr-2"] = 1
+        channel = _FakeChannel({"unsupported": True})
+        rt.supervisor = _FakeSupervisor({"wkr-2": _FakeWorker(channel)})
+
+        res = await _compact_agent(rt, {"agent_id": "wkr-2",
+                                        "_caller_id": ORCHESTRATOR_ID})
+        assert res == {"status": "unsupported_while_running", "agent_id": "wkr-2"}
+
+    @pytest.mark.asyncio
+    async def test_running_worker_loop_ended_falls_through_to_idle(self, tmp_path):
+        # Worker reports the loop wasn't active (race) -> idle-store path runs.
+        rt = _make_runtime(EventBus(), tmp_path)
+        rt._config.worker_isolation.enabled = True
+        await _register(rt, "wkr-3")
+        _seed_conversation(rt, "wkr-3", 6)
+        rt.registry._running_count["wkr-3"] = 1
+        channel = _FakeChannel({"accepted": False})
+        rt.supervisor = _FakeSupervisor({"wkr-3": _FakeWorker(channel)})
+
+        mock = AsyncMock()
+        mock.send = AsyncMock(return_value=ProviderResponse(text="SUMMARY"))
+        mock.close = AsyncMock()
+        with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
+            res = await _compact_agent(rt, {"agent_id": "wkr-3",
+                                            "_caller_id": ORCHESTRATOR_ID})
+        assert res["status"] == "compacted"
+
+    @pytest.mark.asyncio
+    async def test_flag_off_never_touches_supervisor(self, tmp_path):
+        # Isolation OFF: the worker branch is a no-op even if a supervisor with
+        # this agent exists — behavior byte-for-byte unchanged (idle path).
+        rt = _make_runtime(EventBus(), tmp_path)
+        # worker_isolation defaults off
+        await _register(rt, "wkr-4")
+        _seed_conversation(rt, "wkr-4", 6)
+        channel = _FakeChannel({"accepted": True})
+        rt.supervisor = _FakeSupervisor({"wkr-4": _FakeWorker(channel)})
+
+        mock = AsyncMock()
+        mock.send = AsyncMock(return_value=ProviderResponse(text="SUMMARY"))
+        mock.close = AsyncMock()
+        with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
+            res = await _compact_agent(rt, {"agent_id": "wkr-4",
+                                            "_caller_id": ORCHESTRATOR_ID})
+        assert res["status"] == "compacted"
+        assert channel.awaited == []   # supervisor path never entered
+
+
 class TestRunningBridge:
     @pytest.mark.asyncio
     async def test_running_bridge_unsupported(self, tmp_path):
