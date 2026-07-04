@@ -509,6 +509,7 @@ _TOOLS: list[ToolDefinition] = [
                 "connector_id": {"type": "string", "description": "MCP connector backing this tool (attested); the tool name must match a connector operation."},
                 "provider": {"type": "string", "description": "External provider identity for attested tools (e.g. 'google')."},
                 "publish": {"type": "boolean", "description": "Publish to the substrate (default false = private local tool)."},
+                "dependencies": {"type": "array", "items": {"type": "string"}, "description": "Digests of published tools this tool calls at runtime (pinned only). Declaration = the runtime allowlist; nested calls run under the ORIGINAL caller's authority. Composite tools use the line-framed sandbox protocol (see docs/tool_substrate.md)."},
                 "version_of": {"type": "string", "description": "Digest of the manifest this revises (artifact lineage)."},
             },
             "required": ["name", "description", "input_schema"],
@@ -1784,6 +1785,15 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     caller_id = input.get("_caller_id")
     author = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
 
+    raw_deps = input.get("dependencies")
+    dependencies = None
+    if raw_deps is not None:
+        if not isinstance(raw_deps, list) or not all(
+            isinstance(d, str) for d in raw_deps
+        ):
+            return {"error": "dependencies must be a list of manifest digests"}
+        dependencies = raw_deps or None
+
     try:
         result = runtime.tool_store.register(
             name=name,
@@ -1795,6 +1805,7 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
             connector_id=str(input.get("connector_id") or ""),
             version_of=input.get("version_of") or None,
             publish=bool(input.get("publish", False)),
+            dependencies=dependencies,
         )
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}

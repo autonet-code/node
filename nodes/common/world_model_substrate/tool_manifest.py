@@ -69,6 +69,10 @@ def build_tool_manifest(
     connector_id: str = "",
     # economics
     fee_atn: float = 0.0,
+    # composition (docs/tool_substrate.md, Composition section):
+    # digests of published tools this tool calls at runtime. Doubles as
+    # the sandbox call-rail ALLOWLIST and the mint fan-out DAG.
+    dependencies: Optional[List[str]] = None,
     # lineage
     version_of: Optional[str] = None,
     created_ts: int = 0,
@@ -107,6 +111,8 @@ def build_tool_manifest(
         manifest["connector_id"] = connector_id
     if fee_atn:
         manifest["fee_atn"] = float(fee_atn)
+    if dependencies:
+        manifest["dependencies"] = list(dependencies)
 
     errors = validate_manifest(manifest)
     if errors:
@@ -151,6 +157,17 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
     version_of = payload.get("version_of")
     if version_of is not None and not isinstance(version_of, str):
         errors.append("version_of must be a digest string or null")
+
+    deps = payload.get("dependencies")
+    if deps is not None:
+        if not isinstance(deps, list) or not all(
+            isinstance(d, str) and len(d) == 64 for d in deps
+        ):
+            errors.append("dependencies must be a list of sha256 hex digests")
+        elif trust != TRUST_PINNED:
+            errors.append("only pinned tools may declare dependencies")
+        elif len(deps) != len(set(deps)):
+            errors.append("dependencies must be unique")
 
     return errors
 

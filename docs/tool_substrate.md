@@ -126,6 +126,57 @@ dominates as receipts accumulate. Atlas GAPS are the future input for
 capability-gap mint multipliers (network pays more for uncovered
 regions) — designed, not yet built.
 
+## Composition: tools calling tools (ratified 2026-07-05)
+
+Pinned tools may declare **dependencies** — other published tools they
+invoke at runtime. Three rules make composition attributable without
+opening an amplification hole:
+
+1. **Declared = callable, and nothing else.** The manifest's
+   ``dependencies`` list (digests) is a runtime ALLOWLIST: the sandbox
+   call rail only services calls to declared digests. Declaration
+   honesty is enforced by construction — an undeclared call is
+   impossible, and a declared-but-unused dep only routes the
+   declarer's own credit away (padding is self-harm or charity, never
+   profit).
+2. **Nested calls run under the ORIGINAL caller's authority** (the
+   agent that invoked the composite) — never the composite author's.
+   A composite must not be a confused deputy that launders access to
+   tools its caller couldn't touch; its deps must be published or
+   granted to the caller. Every nested call records its own mechanical
+   receipt, tagged ``via`` the composite digest (telemetry; mechanical
+   receipts still mint nothing).
+3. **Conservation of attestation.** Mint fan-out uses the DECLARED
+   dependency DAG (consensus-carried: ``deps`` rides ``manifest_meta``
+   on the registration sprout, like author/trust_class), not the
+   per-invocation dynamic tree — deterministic at every daemon. One
+   attestation of a composite carries total weight 1, split
+   recursively: the root keeps ``COMPOSITE_ROOT_SHARE`` (0.7), the
+   remainder divides equally among its declared deps, recursing with
+   the same rule to ``COMPOSITE_MAX_DEPTH`` (4); cycles and missing
+   registrations forfeit their share (never redistribute upward — the
+   total may be < 1, never > 1). ORDER OF OPERATIONS MATTERS: the
+   per-caller count is DAMPED FIRST (log1p once, at the composite the
+   caller attested), then the damped value splits linearly over the
+   DAG. Damping per-node after splitting would let log1p's concavity
+   mint free credit (log1p(0.7)+log1p(0.3) > log1p(1)) — discovered by
+   the padding test; damp-then-split makes self-padding exactly
+   neutral at equal standing. No arrangement of self-calls can
+   manufacture more credit than callers genuinely attested; imported
+   tools earn a royalty slice of every composite built on them.
+
+This is what gives the ``simplicity`` axis a bank account: small,
+sharp, composable tools become economically optimal, and ``built_on``
+(the old outcome axis) is reborn tool-natively.
+
+Sandbox protocol (opt-in — legacy sealed tools unchanged): a manifest
+WITH dependencies runs interactively — arguments arrive as one JSON
+line on stdin (stdin stays open), the tool emits line-framed JSON on
+stdout: ``{"call": <declared digest or name>, "args": {...}}`` to
+invoke a dep (result comes back as one JSON line on stdin), and
+``{"return": <result>}`` to finish. Tools without deps keep the sealed
+stdin-close/stdout-blob contract byte-for-byte.
+
 ## Consensus mechanics (v1 implementation, still current)
 
 - `ToolUsed` consensus event: caller-attested, gossiped, epoch-

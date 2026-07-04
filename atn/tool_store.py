@@ -41,6 +41,10 @@ OWNER_AUTHOR = "user"
 
 _PINNED_EXEC_TIMEOUT_S = 120
 _MAX_CODE_BYTES = 512 * 1024
+# Composition (docs/tool_substrate.md — Composition, COMPOSITE_MAX_DEPTH):
+# a composite may nest dep calls this many levels deep. Exceeding it is a
+# runtime error frame, not a crash — guards runaway recursion / cycles.
+_COMPOSITE_MAX_DEPTH = 4
 
 
 @dataclass
@@ -142,6 +146,7 @@ class ToolStore:
         connector_id: str = "",
         version_of: str | None = None,
         publish: bool = False,
+        dependencies: list[str] | None = None,
     ) -> dict[str, Any]:
         """Build, sign, store, and index a tool manifest. Returns
         ``{"digest", "manifest"}`` or raises ValueError on bad input.
@@ -154,6 +159,12 @@ class ToolStore:
         ``publish=False`` (default) keeps the tool PRIVATE: local
         capability only, no substrate push, no consensus footprint.
         Publishing is a deliberate act.
+
+        ``dependencies`` (docs/tool_substrate.md — Composition): digests
+        of published tools this tool may call at runtime. Each declared
+        dep MUST already exist in this store and be enabled — you cannot
+        declare what you cannot call. The manifest layer additionally
+        enforces pinned-only + 64-hex + uniqueness.
         """
         from nodes.common.world_model_substrate.tool_manifest import (
             build_tool_manifest,
@@ -171,6 +182,23 @@ class ToolStore:
             code_digest = blobs.add_bytes(raw)
 
         trust_class = "pinned" if code_digest else "attested"
+
+        # Composition guard (docs/tool_substrate.md — Composition rule 1):
+        # you cannot declare a dependency you cannot call. Each declared
+        # digest must resolve to an existing, enabled record in THIS store.
+        # (build_tool_manifest enforces the structural rules: pinned-only,
+        # 64-hex, uniqueness.)
+        deps = list(dependencies) if dependencies else []
+        for dep_digest in deps:
+            dep_record = self._records.get(dep_digest)
+            if dep_record is None:
+                raise ValueError(
+                    f"declared dependency {dep_digest[:16]}... is not "
+                    "registered in this store")
+            if not dep_record.enabled:
+                raise ValueError(
+                    f"declared dependency {dep_digest[:16]}... is disabled")
+
         author_pubkey = self._author_address(author)
         # Consensus author = the 0x address (chain-claimable, globally
         # unique — mint keyed by a local id has no on-chain claim path).
@@ -190,6 +218,7 @@ class ToolStore:
             provider=provider,
             connector_id=connector_id,
             version_of=version_of,
+            dependencies=deps or None,
             created_ts=int(time.time()),
         )
         self._sign(author, manifest)
@@ -332,19 +361,34 @@ class ToolStore:
         arguments: dict[str, Any],
         *,
         caller_id: str | None = None,
+        via: str = "",
+        _depth: int = 0,
     ) -> dict[str, Any]:
         """Execute a registered tool. Scoping is the CALLER's job
-        (``ToolRegistry.call_tool``) — this only dispatches."""
+        (``ToolRegistry.call_tool``) — this only dispatches.
+
+        ``via`` tags the receipt with a composite's digest when this call
+        was dispatched from a composite's sandbox call-rail (telemetry;
+        mechanical receipts mint nothing). ``_depth`` is the composition
+        nesting counter (``_COMPOSITE_MAX_DEPTH`` guard).
+        """
         manifest = record.manifest
         if manifest.get("code_digest"):
-            result = await self._call_pinned(record, arguments)
+            deps = manifest.get("dependencies") or []
+            if deps:
+                # Interactive (composition) path — opt-in on declared deps.
+                result = await self._call_pinned_interactive(
+                    record, arguments, caller_id=caller_id, depth=_depth)
+            else:
+                # Sealed path — byte-for-byte legacy contract.
+                result = await self._call_pinned(record, arguments)
         elif manifest.get("connector_id"):
             result = await self._call_connector(record, arguments)
         else:
             return {"error": f"Tool {record.name!r} has no executable backing"}
 
         self._record_receipt(record, arguments, caller_id,
-                             ok="error" not in result)
+                             ok="error" not in result, via=via)
         return result
 
     async def _call_pinned(self, record: ToolRecord,
@@ -394,6 +438,184 @@ class ToolStore:
         except json.JSONDecodeError:
             return {"result": out_text[:8000]}
 
+    async def _call_pinned_interactive(
+        self,
+        record: ToolRecord,
+        arguments: dict[str, Any],
+        *,
+        caller_id: str | None,
+        depth: int,
+    ) -> dict[str, Any]:
+        """Composition sandbox (docs/tool_substrate.md — Composition).
+
+        Line-framed JSON protocol over a KEPT-OPEN stdin:
+
+          - we write ``json.dumps(arguments) + "\\n"`` and keep stdin open;
+          - the tool emits line-framed JSON on stdout:
+              * ``{"call": <digest|name>, "args": {...}}`` — invoke a dep;
+                the target MUST be in this manifest's declared dependency
+                allowlist AND callable by the ORIGINAL caller (nested calls
+                run under the original caller's authority, never the
+                composite author's). We write the result back as one JSON
+                line on stdin.
+              * ``{"return": <result>}`` — final result.
+          - undecodable / non-frame lines are tolerated (logged) and, at
+            process exit without a return frame, parsed like the sealed
+            path's stdout blob.
+
+        Nested ``self.call`` carries ``via=<composite digest>`` so the
+        nested mechanical receipt self-records tagged to this composite,
+        and ``_depth=depth+1`` so ``_COMPOSITE_MAX_DEPTH`` bounds recursion.
+        """
+        import sys
+        code_digest = record.manifest["code_digest"]
+        declared: set[str] = set(record.manifest.get("dependencies") or [])
+        blobs = self._blob_store()
+        raw = blobs.get_bytes(code_digest)
+        if raw is None:
+            return {"error": f"code blob {code_digest[:16]}... not in local store"}
+
+        if depth >= _COMPOSITE_MAX_DEPTH:
+            return {"error": f"composition depth exceeded {_COMPOSITE_MAX_DEPTH}"}
+
+        cache_dir = self._dir / "code_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        script = cache_dir / f"{code_digest}.py"
+        if not script.exists():
+            script.write_bytes(raw)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(script),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            return {"error": f"tool subprocess failed to start: {exc}"}
+
+        async def _pump() -> dict[str, Any]:
+            # Feed arguments as the first line; keep stdin open for the
+            # dep-result round-trips (the tool blocks on readline()).
+            proc.stdin.write((json.dumps(arguments) + "\n").encode("utf-8"))
+            await proc.stdin.drain()
+
+            leftover: list[str] = []  # non-frame stdout for the exit fallback
+            while True:
+                line_bytes = await proc.stdout.readline()
+                if not line_bytes:
+                    break  # EOF: process exited without a return frame
+                line = line_bytes.decode("utf-8", errors="replace").rstrip("\n")
+                if not line.strip():
+                    continue
+                try:
+                    frame = json.loads(line)
+                except json.JSONDecodeError:
+                    leftover.append(line)  # junk / plain output — tolerate
+                    continue
+                if not isinstance(frame, dict):
+                    leftover.append(line)
+                    continue
+
+                if "return" in frame:
+                    # Close stdin and reap the process so its pipes/
+                    # transports are released (Windows Proactor loop leaks
+                    # ResourceWarnings otherwise).
+                    try:
+                        proc.stdin.close()
+                    except Exception:
+                        pass
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except (asyncio.TimeoutError, Exception):
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                    return {"result": frame["return"]}
+
+                if "call" in frame:
+                    reply = await self._dispatch_dep_call(
+                        frame, declared, record,
+                        caller_id=caller_id, depth=depth)
+                    proc.stdin.write((json.dumps(reply) + "\n").encode("utf-8"))
+                    await proc.stdin.drain()
+                    continue
+
+                # A dict that is neither a call nor a return: treat as
+                # trailing output (legacy-compatible best effort).
+                leftover.append(line)
+
+            # No return frame: fall back to the sealed path's parsing of
+            # accumulated non-frame stdout, respecting exit code.
+            await proc.wait()
+            if proc.returncode != 0:
+                err = (await proc.stderr.read()).decode(
+                    "utf-8", errors="replace").strip()
+                return {"error": f"tool exited {proc.returncode}: {err[:2000]}"}
+            out_text = "\n".join(leftover).strip()
+            if not out_text:
+                return {"error": "composite exited without a return frame"}
+            try:
+                return {"result": json.loads(out_text)}
+            except json.JSONDecodeError:
+                return {"result": out_text[:8000]}
+
+        try:
+            return await asyncio.wait_for(_pump(), timeout=_PINNED_EXEC_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            return {"error": f"tool timed out after {_PINNED_EXEC_TIMEOUT_S}s"}
+        except Exception as exc:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            return {"error": f"composite sandbox failed: {exc}"}
+
+    async def _dispatch_dep_call(
+        self,
+        frame: dict[str, Any],
+        declared: set[str],
+        composite: ToolRecord,
+        *,
+        caller_id: str | None,
+        depth: int,
+    ) -> dict[str, Any]:
+        """Service one ``{"call": ..., "args": ...}`` frame from a composite.
+
+        Two gates, in order:
+          1. DECLARED allowlist — the resolved target's digest must be in
+             the composite manifest's ``dependencies`` (an undeclared call
+             is impossible by construction). Reject → error frame.
+          2. ORIGINAL-caller scoping — the nested call runs under the agent
+             that invoked the composite, never the composite author. A
+             composite must not launder access its caller lacks. Reject →
+             error frame.
+        """
+        target = frame.get("call")
+        if not isinstance(target, str) or not target:
+            return {"error": "malformed call frame"}
+        dep_record = self.resolve(target)
+        if dep_record is None:
+            return {"error": "undeclared dependency"}
+        if dep_record.digest not in declared:
+            return {"error": "undeclared dependency"}
+        if not self.allowed(caller_id, dep_record):
+            return {"error": "caller not authorized for dependency"}
+        args = frame.get("args")
+        if not isinstance(args, dict):
+            args = {}
+        return await self.call(
+            dep_record, args,
+            caller_id=caller_id,
+            via=composite.digest,
+            _depth=depth + 1,
+        )
+
     async def _call_connector(self, record: ToolRecord,
                               arguments: dict[str, Any]) -> dict[str, Any]:
         """Attested connector-backed tool: the manifest name is the
@@ -417,10 +639,18 @@ class ToolStore:
         caller_id: str | None,
         *,
         ok: bool,
+        via: str = "",
     ) -> None:
         """Append a usage receipt and (best-effort) emit the consensus
         ``tool_used`` event. Local ledger first — never lost to a
-        substrate outage; the sink failure is logged, not raised."""
+        substrate outage; the sink failure is logged, not raised.
+
+        ``via`` (composition telemetry): when non-empty, this call was
+        dispatched from a composite's sandbox call-rail; the digest is
+        recorded on the receipt row and the emitted event so nested
+        mechanical receipts stay attributable to the composite (mechanical
+        receipts still mint nothing — docs/tool_substrate.md, Composition
+        rule 2)."""
         import hashlib
 
         caller = caller_id if caller_id else OWNER_AUTHOR
@@ -439,6 +669,8 @@ class ToolStore:
             "ok": ok,
             "fee_atn": fee,
         }
+        if via:
+            receipt["via"] = via
         receipt_digest = ""
         try:
             receipt_digest = self._blob_store().add_json(receipt)
@@ -464,6 +696,8 @@ class ToolStore:
                 "ok": ok,
                 "fee_atn": fee,
             }
+            if via:
+                event["via"] = via
             try:
                 self.event_sink(event)
             except Exception as exc:

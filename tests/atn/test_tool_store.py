@@ -530,3 +530,150 @@ class TestAttestation:
             "child", [{"tool": "echo_tool", "ok": True}], "work item")
         assert out["attested"] == 1
         assert sunk[0]["problem_coords"] == []
+
+
+# ---------------------------------------------------------------------------
+# Composition — tools calling tools (docs/tool_substrate.md — Composition)
+# ---------------------------------------------------------------------------
+
+
+# A composite that reads its args from the FIRST stdin line, calls a
+# declared dependency by name via a {"call": ...} frame, reads the result
+# line back, and emits {"return": ...} combining both. Keeps stdin open by
+# using readline() (the sandbox contract) rather than json.load(sys.stdin).
+COMPOSITE_CODE = (
+    "import sys, json\n"
+    "args = json.loads(sys.stdin.readline())\n"
+    "sys.stdout.write(json.dumps("
+    "{'call': args['dep'], 'args': {'x': args['x']}}) + '\\n')\n"
+    "sys.stdout.flush()\n"
+    "reply = json.loads(sys.stdin.readline())\n"
+    "sys.stdout.write(json.dumps("
+    "{'return': {'wrapped': reply, 'seen': args['x']}}) + '\\n')\n"
+    "sys.stdout.flush()\n"
+)
+
+# A composite that tries to call a tool it did NOT declare, gets an error
+# frame back, then returns anyway (proving reject-and-continue).
+UNDECLARED_COMPOSITE_CODE = (
+    "import sys, json\n"
+    "args = json.loads(sys.stdin.readline())\n"
+    "sys.stdout.write(json.dumps("
+    "{'call': args['dep'], 'args': {'x': 'nope'}}) + '\\n')\n"
+    "sys.stdout.flush()\n"
+    "reply = json.loads(sys.stdin.readline())\n"
+    "sys.stdout.write(json.dumps({'return': {'dep_reply': reply}}) + '\\n')\n"
+    "sys.stdout.flush()\n"
+)
+
+
+async def _register_composite(rt, dep_digest, caller_id="child",
+                              name="composite_tool", code=COMPOSITE_CODE,
+                              declare=True):
+    return await execute_tool(
+        "register_tool",
+        {"name": name, "description": "Calls a dep then combines.",
+         "input_schema": {
+             "type": "object",
+             "properties": {"x": {"type": "string"},
+                            "dep": {"type": "string"}}},
+         "code": code,
+         "dependencies": [dep_digest] if declare else []},
+        rt, caller_id=caller_id,
+    )
+
+
+class TestComposition:
+    @pytest.mark.asyncio
+    async def test_composite_calls_dep_and_returns(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        dep = await _register_echo(rt)  # author = child
+        comp = await _register_composite(rt, dep["digest"])
+        assert "error" not in comp
+
+        sunk: list[dict] = []
+        rt.tool_store.event_sink = sunk.append
+
+        out = await rt.tool_registry.call_tool(
+            "composite_tool", {"x": "hi", "dep": "echo_tool"},
+            caller_id="child")
+
+        # End-to-end: the dep echoed, the composite combined.
+        assert out == {"result": {"wrapped": {"result": {"echo": "hi"}},
+                                  "seen": "hi"}}
+
+        # TWO mechanical receipts: the nested dep call tagged via the
+        # composite digest, the top-level composite call not tagged.
+        assert len(sunk) == 2
+        by_digest = {ev["manifest_digest"]: ev for ev in sunk}
+        dep_ev = by_digest[dep["digest"]]
+        comp_ev = by_digest[comp["digest"]]
+        assert dep_ev["via"] == comp["digest"]
+        assert "via" not in comp_ev
+
+        # Same in the persisted ledger.
+        rows = list(rt.tool_store._iter_receipts())
+        via_rows = [r for r in rows if r.get("via")]
+        assert len(via_rows) == 1
+        assert via_rows[0]["manifest_digest"] == dep["digest"]
+        assert via_rows[0]["via"] == comp["digest"]
+
+    @pytest.mark.asyncio
+    async def test_undeclared_call_gets_error_frame_but_composite_returns(
+            self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        dep = await _register_echo(rt)  # author = child
+        # Register a SECOND (undeclared) tool the composite will try to hit.
+        other = await _register_echo(rt, name="other_tool")
+        # Composite declares only `dep`, but its code calls `other_tool`.
+        comp = await _register_composite(
+            rt, dep["digest"], code=UNDECLARED_COMPOSITE_CODE)
+        assert "error" not in comp
+
+        out = await rt.tool_registry.call_tool(
+            "composite_tool", {"x": "hi", "dep": "other_tool"},
+            caller_id="child")
+        # The dep call was rejected with an error frame; the composite
+        # received it and still returned.
+        assert out["result"]["dep_reply"] == {"error": "undeclared dependency"}
+
+    @pytest.mark.asyncio
+    async def test_register_rejects_nonexistent_dependency(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        fake_digest = "a" * 64
+        comp = await _register_composite(rt, fake_digest)
+        assert "error" in comp
+        assert "not registered" in comp["error"]
+
+    @pytest.mark.asyncio
+    async def test_nested_call_scoped_under_original_caller(self, tmp_path):
+        """The dep runs under the ORIGINAL caller's authority. A sibling
+        cannot reach child's dep even through a composite it may call."""
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        dep = await _register_echo(rt)  # author = child, sibling out of lineage
+        comp = await _register_composite(rt, dep["digest"])
+        # Owner grants the composite (only) to the sibling.
+        rt.tool_store.grant(comp["digest"], "sibling")
+
+        out = await rt.tool_registry.call_tool(
+            "composite_tool", {"x": "hi", "dep": "echo_tool"},
+            caller_id="sibling")
+        # Sibling may run the composite, but the nested dep call is scoped
+        # to the sibling (original caller) — who lacks access to the dep.
+        assert out["result"]["wrapped"] == {
+            "error": "caller not authorized for dependency"}
+
+    @pytest.mark.asyncio
+    async def test_legacy_no_deps_tool_still_sealed(self, tmp_path):
+        """A tool WITHOUT dependencies keeps the sealed json.load(stdin)
+        contract — must still round-trip."""
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        await _register_echo(rt)
+        out = await rt.tool_registry.call_tool(
+            "echo_tool", {"x": "sealed"}, caller_id="child")
+        assert out == {"result": {"echo": "sealed"}}

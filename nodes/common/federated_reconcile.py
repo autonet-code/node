@@ -66,6 +66,48 @@ logger = logging.getLogger(__name__)
 # at 6 decimals), but well above IEEE 754 jitter (~15 sig figs).
 OUTPUT_DECIMALS = 10
 
+# Composition fan-out (docs/tool_substrate.md, Composition section):
+# one attestation of a composite carries total weight 1 — the root
+# keeps ROOT_SHARE, the remainder splits equally among declared deps,
+# recursively to MAX_DEPTH. Cycles and unregistered deps FORFEIT their
+# share (total may be < 1, never > 1): conservation of attestation.
+COMPOSITE_ROOT_SHARE = 0.7
+COMPOSITE_MAX_DEPTH = 4
+
+
+def _composition_shares(
+    root: str,
+    deps_of: Dict[str, List[str]],
+    *,
+    root_share: float = COMPOSITE_ROOT_SHARE,
+    max_depth: int = COMPOSITE_MAX_DEPTH,
+) -> Dict[str, float]:
+    """Split one unit of attestation weight over a declared-dep DAG.
+
+    Pure + deterministic (sorted recursion over consensus-carried
+    declarations). Returns {digest: weight} with sum <= 1.0.
+    """
+    shares: Dict[str, float] = {}
+
+    def _spread(digest: str, weight: float, depth: int, path: frozenset) -> None:
+        declared = [d for d in deps_of.get(digest, []) if d]
+        if not declared or depth >= max_depth:
+            shares[digest] = shares.get(digest, 0.0) + weight
+            return
+        shares[digest] = shares.get(digest, 0.0) + weight * root_share
+        # Split by the FULL declared count; shares of cyclic or
+        # unregistered deps are forfeited, never redistributed to
+        # siblings (conservation: total <= 1, gaming by padding with
+        # dead deps only burns the padder's own credit).
+        child_w = weight * (1.0 - root_share) / len(declared)
+        for dep in sorted(declared):
+            if dep in path or dep not in deps_of:
+                continue
+            _spread(dep, child_w, depth + 1, path | {digest})
+
+    _spread(root, 1.0, 0, frozenset({root}))
+    return shares
+
 
 def compute_tool_mint(
     world: World,
@@ -149,9 +191,40 @@ def compute_tool_mint(
     usage = tool_usage_from_events(events)
     by_digest = _artifact_standing(world)
 
+    # Composition fan-out (docs/tool_substrate.md — Composition rule 3):
+    # each receipt digest's attested counts distribute over its declared
+    # dependency DAG with conserved total weight 1 (root keeps
+    # COMPOSITE_ROOT_SHARE, deps split the rest, recursively).
+    #
+    # ORDER OF OPERATIONS IS THE ANTI-AMPLIFICATION GUARANTEE: the
+    # per-caller count is DAMPED FIRST (log1p once, at the composite the
+    # caller actually attested), then the damped value splits linearly
+    # over the DAG. Damping per-node after splitting would let concavity
+    # mint free credit (log1p(0.7)+log1p(0.3) > log1p(1)) — self-padding
+    # a composite with your own deps would amplify. Linear distribution
+    # of the damped quantity makes padding exactly neutral at equal
+    # standing. Attester wire identities are pooled per caller so the
+    # co-hosting dedup applies wherever the credit lands.
+    deps_of: Dict[str, List[str]] = {
+        d: [x for x in str(m.get("deps") or "").split(",") if x]
+        for d, m in known_regs.items()
+    }
+    eff: Dict[str, Dict[str, float]] = {}
+    caller_senders: Dict[str, set] = {}
+    for digest in sorted(set(usage) & set(known_regs)):
+        shares = _composition_shares(digest, deps_of)
+        entry = usage[digest]
+        for caller in sorted(entry["attested_ok_by_caller"].keys()):
+            damped = math.log1p(entry["attested_ok_by_caller"][caller])
+            caller_senders.setdefault(caller, set()).update(
+                entry["attester_senders"].get(caller, []))
+            for target in sorted(shares.keys()):
+                bucket = eff.setdefault(target, {})
+                bucket[caller] = bucket.get(caller, 0.0) + damped * shares[target]
+
     per_digest: Dict[str, Dict[str, Any]] = {}
     node_agent: Dict[str, Dict[str, float]] = {}
-    for digest in sorted(set(usage) & set(known_regs)):
+    for digest in sorted(eff.keys()):
         meta = known_regs[digest]
         author = str(meta.get("author") or "")
         if not author:
@@ -168,8 +241,7 @@ def compute_tool_mint(
         reg_sender = str(meta.get("sender") or "")
         owner_map = agent_owner_map or {}
         author_owner = owner_map.get(author, "")
-        attested_by = usage[digest]["attested_ok_by_caller"]
-        attester_senders = usage[digest]["attester_senders"]
+        attested_by = eff[digest]
         usage_term = 0.0
         attesters = 0
         for caller in sorted(attested_by.keys()):
@@ -178,9 +250,11 @@ def compute_tool_mint(
             # Owner-rooted exclusion: same registered owner = same fleet.
             if author_owner and owner_map.get(caller, "") == author_owner:
                 continue
-            if reg_sender and reg_sender in attester_senders.get(caller, []):
+            if reg_sender and reg_sender in caller_senders.get(caller, set()):
                 continue
-            usage_term += math.log1p(attested_by[caller])
+            # Already damped at fan-out time (log1p once per caller per
+            # attested composite) — sum linearly here.
+            usage_term += attested_by[caller]
             attesters += 1
         mint = max(0.0, standing) * usage_term
         if mint <= 0.0:
@@ -196,7 +270,7 @@ def compute_tool_mint(
             "author": author,
             "trust_class": TRUST_PINNED,
             "standing": standing,
-            "ok_count": int(usage[digest]["ok_count"]),
+            "ok_count": int(usage.get(digest, {}).get("ok_count", 0)),
             "attesters": attesters,
             "usage_term": round(usage_term, 10),
             "mint": mint,

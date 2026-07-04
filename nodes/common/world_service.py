@@ -890,6 +890,11 @@ class WorldService:
                 manifest_meta={
                     "trust_class": str(manifest.get("trust_class", "")),
                     "author": str(manifest.get("author", "")),
+                    # Composition fan-out DAG (consensus-carried like
+                    # author — the close must never depend on blob
+                    # replication). Comma-joined: manifest_meta values
+                    # are strings on the wire.
+                    "deps": ",".join(manifest.get("dependencies") or []),
                 },
                 # Registering a claim IS a claim: one unit-weight,
                 # CON-able self-post so a published tool has standing 1

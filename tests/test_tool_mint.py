@@ -39,21 +39,25 @@ def _coords(axis: int = 4, mag: float = 0.8) -> List[float]:
 
 
 def _registration_event(seq: int = 1, *, trust_class: str = "pinned",
-                        digest: str = DIGEST) -> Dict[str, Any]:
+                        digest: str = DIGEST, author: str = AUTHOR,
+                        deps: str = "", axis: int = 4) -> Dict[str, Any]:
+    meta = {"trust_class": trust_class, "author": author}
+    if deps:
+        meta["deps"] = deps
     return {
         "kind": "sub_claim_sprouted",
         "seq": seq,
-        "author_agent": AUTHOR,
+        "author_agent": author,
         "tendency_id": "correctness",
         "parent_id": "solver_root",       # remaps to the live root
         "node_id": f"tm_{digest[:12]}",
         "position": "pro",
-        "coords": _coords(),
-        "polarity_axis": _coords(),
-        "content": "tool echo_tool: echoes its input back",
+        "coords": _coords(axis=axis),
+        "polarity_axis": _coords(axis=axis),
+        "content": f"tool {digest[:8]}: does a thing",
         "author_post": True,              # immediate unit standing
         "artifact_digest": digest,
-        "manifest_meta": {"trust_class": trust_class, "author": AUTHOR},
+        "manifest_meta": meta,
     }
 
 
@@ -262,6 +266,93 @@ class TestComputeToolMint:
         out = compute_tool_mint(world, [_receipt_event(1, "caller-1")])
         assert out["per_digest"] == {}
         assert out["registrations_next"] == {}
+
+
+class TestCompositionFanOut:
+    """Conservation of attestation over the declared-dep DAG
+    (docs/tool_substrate.md — Composition rule 3)."""
+
+    def test_shares_split_and_recursion(self):
+        from nodes.common.federated_reconcile import _composition_shares
+        deps_of = {"root": ["d1", "d2"], "d1": ["d3"], "d2": [], "d3": []}
+        shares = _composition_shares("root", deps_of)
+        assert shares["root"] == pytest.approx(0.7)
+        assert shares["d2"] == pytest.approx(0.15)
+        assert shares["d1"] == pytest.approx(0.15 * 0.7)
+        assert shares["d3"] == pytest.approx(0.15 * 0.3)
+        assert sum(shares.values()) == pytest.approx(1.0)
+
+    def test_cycle_and_missing_dep_forfeit(self):
+        from nodes.common.federated_reconcile import _composition_shares
+        # Cycle: d1 declares root back — that share is forfeited.
+        shares = _composition_shares("root", {"root": ["d1"], "d1": ["root"]})
+        assert shares["root"] == pytest.approx(0.7)
+        assert shares["d1"] == pytest.approx(0.3 * 0.7)
+        assert sum(shares.values()) < 1.0
+        # Missing dep (declared, never registered): forfeits, never
+        # redistributes to siblings.
+        shares = _composition_shares("root", {"root": ["dx", "d2"], "d2": []})
+        assert shares["root"] == pytest.approx(0.7)
+        assert shares["d2"] == pytest.approx(0.15)
+        assert "dx" not in shares
+
+    def test_close_fans_attestation_over_deps(self):
+        """One attestation of a composite credits the composite AND its
+        declared dep — royalty flow, conserved."""
+        dep_digest = "cc" * 32
+        kp_authors, kp_caller = Keypair.generate(), Keypair.generate()
+        batches = _batches([
+            _registration_event(1, digest=dep_digest, author="dep-author",
+                                axis=2),
+            _registration_event(2, digest=DIGEST, author=AUTHOR,
+                                deps=dep_digest, axis=4),
+        ], kp_authors) + _batches([
+            _receipt_event(1, "caller-1"),        # attests the COMPOSITE
+        ], kp_caller)
+        result = federated_epoch_close(canonical_order(batches))
+        tm = result["tool_mint"]
+        assert DIGEST in tm and dep_digest in tm
+        # Damp-then-split: log1p applies ONCE (at the attested
+        # composite), the damped value distributes linearly — the
+        # anti-amplification order of operations.
+        damped = math.log1p(1)
+        assert tm[DIGEST]["usage_term"] == pytest.approx(damped * 0.7)
+        assert tm[dep_digest]["usage_term"] == pytest.approx(damped * 0.3)
+        assert tm[dep_digest]["author"] == "dep-author"
+        # Conservation of the damped quantity across the DAG.
+        assert (tm[DIGEST]["usage_term"] + tm[dep_digest]["usage_term"]
+                == pytest.approx(damped))
+        # Both mints positive, each priced by its OWN standing.
+        assert tm[DIGEST]["mint"] == pytest.approx(
+            tm[DIGEST]["standing"] * damped * 0.7)
+        assert tm[dep_digest]["mint"] == pytest.approx(
+            tm[dep_digest]["standing"] * damped * 0.3)
+
+    def test_self_dep_padding_cannot_amplify(self):
+        """An author padding a composite with their own junk deps moves
+        credit between their tools but total author mint never exceeds
+        the un-padded case (same standing assumed)."""
+        junk = "ee" * 32
+        kp_authors, kp_caller = Keypair.generate(), Keypair.generate()
+        padded = _batches([
+            _registration_event(1, digest=junk, author=AUTHOR, axis=2),
+            _registration_event(2, digest=DIGEST, author=AUTHOR,
+                                deps=junk, axis=4),
+        ], kp_authors) + _batches([_receipt_event(1, "caller-1")], kp_caller)
+        plain = _batches([
+            _registration_event(1, digest=DIGEST, author=AUTHOR, axis=4),
+        ], Keypair.generate()) + _batches(
+            [_receipt_event(1, "caller-1")], Keypair.generate())
+
+        r_padded = federated_epoch_close(canonical_order(padded))
+        r_plain = federated_epoch_close(canonical_order(plain))
+        # log1p is concave: log1p(0.7)+log1p(0.3) < 2*log1p(0.5) but
+        # more importantly <= ... the padded author total must not
+        # exceed the plain total given equal standings (both nodes
+        # standing ~1 from the author post).
+        padded_total = sum(e["mint"] for e in r_padded["tool_mint"].values())
+        plain_total = sum(e["mint"] for e in r_plain["tool_mint"].values())
+        assert padded_total <= plain_total + 1e-9
 
 
 class TestDriverCarryOver:
