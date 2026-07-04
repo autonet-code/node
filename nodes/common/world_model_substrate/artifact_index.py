@@ -136,9 +136,11 @@ class ArtifactIndex:
 
         Iterates ``blob_store.list_hashes()``, loads each JSON payload,
         and re-indexes those that look like artifacts (a ``problem`` or
-        ``text`` key). The jsonl is rewritten atomically (temp file then
-        replace). Returns the number of artifacts indexed.
+        ``text`` key, or a tool manifest). The jsonl is rewritten
+        atomically (temp file then replace). Returns the number of
+        artifacts indexed.
         """
+        from .tool_manifest import is_tool_manifest
         vectors: Dict[str, np.ndarray] = {}
         labels: Dict[str, str] = {}
 
@@ -146,7 +148,8 @@ class ArtifactIndex:
             payload = self.blob_store.get_json(digest)
             if not isinstance(payload, dict):
                 continue
-            if "problem" not in payload and "text" not in payload:
+            if ("problem" not in payload and "text" not in payload
+                    and not is_tool_manifest(payload)):
                 continue
             label = self._embedding_text(payload)
             vectors[digest] = self._embed(label)
@@ -169,10 +172,14 @@ class ArtifactIndex:
     def _embedding_text(payload: Dict[str, Any]) -> str:
         """Derive the text to embed from an artifact payload.
 
-        Work-unit payloads (``problem`` present) embed
-        ``f"{problem}\\n\\n{resolution}"``; generic payloads embed the
-        ``text`` field.
+        Tool manifests (``docs/tool_substrate.md``) embed
+        name + description + schema property names; work-unit payloads
+        (``problem`` present) embed ``f"{problem}\\n\\n{resolution}"``;
+        generic payloads embed the ``text`` field.
         """
+        from .tool_manifest import is_tool_manifest, manifest_embedding_text
+        if is_tool_manifest(payload):
+            return manifest_embedding_text(payload)
         if "problem" in payload:
             problem = payload.get("problem") or ""
             resolution = payload.get("resolution") or ""
