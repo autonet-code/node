@@ -19,9 +19,10 @@ Actions and proposals are evaluated through a tiered pipeline:
     Handles nuanced cases where Tier 1 is uncertain. Each bottleneck
     neuron corresponds to one RPB principle (interpretable).
 
-  Tier 3 — Full LLM evaluation with multi-node Yuma consensus
-    The existing RPBEvaluator/AIProvider chain. Used for high-stakes
-    and adversarial-seeming inputs (Verdict.UNCERTAIN from Tiers 1+2).
+  Tier 3 — Full LLM evaluation via AIProvider
+    A direct AIProvider call, used for high-stakes and adversarial-seeming
+    inputs (Verdict.UNCERTAIN from Tiers 1+2). Invoked by
+    ThreeTierConstitutionalEvaluator.
 
 Evolution proposals require 95% quorum (CONSTITUTIONAL_QUORUM_BPS)
 for constitutional amendments (parameter changes).
@@ -518,16 +519,17 @@ class GovernanceBridge:
 
 
 # =============================================================================
-# AI Provider Abstraction (for RPB evaluation)
+# AI Provider Abstraction (Tier 3 constitutional evaluation)
 # =============================================================================
 
 
 class AIProvider(ABC):
     """
-    Abstract interface for AI providers used in RPB evaluation.
+    Abstract interface for AI providers used in Tier 3 constitutional
+    evaluation (ThreeTierConstitutionalEvaluator).
 
-    Nodes call evaluate() with the constitutional prompt and proposal data.
-    The provider returns a structured recommendation. Different providers
+    Callers invoke evaluate() with the constitutional prompt and the action
+    text. The provider returns a structured recommendation. Different providers
     (Claude, GPT, local LLM) implement this interface.
     """
 
@@ -592,275 +594,6 @@ class PlaceholderAIProvider(AIProvider):
 
 
 # =============================================================================
-# RPB Evaluator (node-side)
-# =============================================================================
-
-
-class RPBEvaluator:
-    """
-    Node-side RPB evaluator.
-
-    Listens for new proposals, loads the constitutional prompt from Registry,
-    evaluates proposals through the 3-tier pipeline, and submits structured
-    recommendations on-chain.
-
-    Tier routing:
-      - Tier 1+2 (geometric/bottleneck): used when an embedding of the proposal
-        content is available (e.g., encoded via the node's TextEncoder)
-      - Tier 3 (LLM): always used when Tier 1+2 returns UNCERTAIN, and always
-        used when no geometry evaluator is configured
-
-    Usage:
-        evaluator = RPBEvaluator(governance_bridge, provider)
-        evaluator.evaluate_pending_proposals()  # Call periodically
-    """
-
-    def __init__(
-        self,
-        governance: GovernanceBridge,
-        provider: Optional[AIProvider] = None,
-        blob_store: Optional[object] = None,
-        geometry: Optional["ConstitutionalGeometry"] = None,  # type: ignore[name-defined]
-        encode_fn: Optional[object] = None,
-    ):
-        self.governance = governance
-        self.provider = provider or PlaceholderAIProvider()
-        self.blob_store = blob_store
-        self._geometry = geometry    # ConstitutionalGeometry instance (optional)
-        self._encode_fn = encode_fn  # Callable[[str], Tensor]: text → embedding
-        self._evaluated_proposals: set = set()
-        self.logger = logging.getLogger(
-            f"RPBEvaluator[{governance.node_id}]"
-        )
-
-    def evaluate_pending_proposals(self) -> int:
-        """
-        Evaluate all pending proposals that this node hasn't evaluated yet.
-
-        Routes each proposal through the 3-tier constitutional pipeline:
-          - Tier 1+2: fast geometric/bottleneck evaluation (if geometry configured)
-          - Tier 3:   full LLM evaluation via AIProvider (always available fallback)
-
-        Returns:
-            Number of proposals evaluated.
-        """
-        pending = self.governance.get_pending_proposals()
-        if not pending:
-            return 0
-
-        prompt_cid = self.governance.get_rpb_prompt()
-        prompt_text: Optional[str] = None
-        if prompt_cid:
-            prompt_text = self._resolve_prompt(prompt_cid)
-
-        evaluated = 0
-        for proposal in pending:
-            pid = proposal["id"]
-            if pid in self._evaluated_proposals:
-                continue
-
-            try:
-                recommendation = self._evaluate_proposal_tiered(
-                    proposal, prompt_text
-                )
-                if recommendation is None:
-                    continue
-
-                reason_cid = f"rpb-eval-{pid}-{self.governance.node_id}"
-                success = self.governance.submit_rpb_evaluation(
-                    pid,
-                    recommendation.approve,
-                    recommendation.confidence,
-                    reason_cid,
-                )
-
-                if success:
-                    self._evaluated_proposals.add(pid)
-                    evaluated += 1
-                    self.logger.info(
-                        f"Evaluated proposal {pid}: "
-                        f"{'approve' if recommendation.approve else 'reject'} "
-                        f"(confidence={recommendation.confidence})"
-                    )
-            except Exception as e:
-                self.logger.warning(f"Failed to evaluate proposal {pid}: {e}")
-
-        return evaluated
-
-    def _evaluate_proposal_tiered(
-        self,
-        proposal: Dict[str, Any],
-        prompt_text: Optional[str],
-    ) -> Optional[RPBRecommendation]:
-        """
-        Route a proposal through the 3-tier constitutional pipeline.
-
-        Tries Tier 1+2 (geometric) first when available. Falls through to
-        Tier 3 (LLM) when:
-          - Geometry evaluator is not configured
-          - Proposal embedding is unavailable
-          - Tier 1+2 returns Verdict.UNCERTAIN
-          - drift_warning is set (geometry may be unreliable)
-        """
-        content_cid = proposal.get("contentCid", "")
-
-        # Attempt Tier 1+2 if geometry + encoder are available
-        if self._geometry is not None and self._encode_fn is not None and content_cid:
-            tier_result = self._run_geometric_tiers(content_cid)
-            if tier_result is not None:
-                return tier_result
-
-        # Tier 3: full LLM evaluation
-        if not prompt_text:
-            self.logger.debug(
-                f"Proposal {proposal.get('id')}: no RPB prompt resolved — "
-                f"using PlaceholderAIProvider"
-            )
-        llm_prompt = prompt_text or "Evaluate the following proposal."
-        return self.provider.evaluate(llm_prompt, content_cid)
-
-    def _run_geometric_tiers(
-        self, content_cid: str
-    ) -> Optional[RPBRecommendation]:
-        """
-        Try Tier 1+2 for a proposal. Returns None if LLM fallback is needed.
-        """
-        from .constitutional_geometry import Verdict
-
-        try:
-            embedding = self._encode_fn(content_cid)
-        except Exception as e:
-            self.logger.debug(f"Could not encode proposal content: {e}")
-            return None
-
-        result = self._geometry.evaluate(embedding)
-
-        # Always use LLM if drift detected (geometric results may be wrong)
-        if result.drift_warning:
-            self.logger.info(
-                "Embedding drift detected — skipping Tier 1+2, using LLM (Tier 3)"
-            )
-            return None
-
-        if result.verdict == Verdict.UNCERTAIN:
-            return None  # Tier 1+2 inconclusive → LLM
-
-        # Convert geometric result to RPBRecommendation
-        approve = result.verdict == Verdict.COMPLIANT
-        # Scale 0-1 confidence to 0-10000 bps
-        confidence_bps = int(result.overall_confidence * 10_000)
-
-        weakest_note = ""
-        if result.weakest_principle and not approve:
-            weakest_note = (
-                f" Weakest principle: {result.weakest_principle.value}."
-            )
-
-        self.logger.info(
-            f"Geometric Tier {result.tier_used} decision: "
-            f"{'approve' if approve else 'reject'} "
-            f"(conf={confidence_bps} bps){weakest_note}"
-        )
-
-        return RPBRecommendation(
-            approve=approve,
-            confidence=confidence_bps,
-            reasoning=result.explanation + weakest_note,
-            constitutional_alignment=result.overall_confidence,
-            risks=(
-                []
-                if approve
-                else [
-                    f"Potential violation of {result.weakest_principle.value}"
-                    if result.weakest_principle
-                    else "Constitutional concern detected"
-                ]
-            ),
-            benefits=(
-                ["Geometric constitutional evaluation: compliant"] if approve else []
-            ),
-        )
-
-    def _resolve_prompt(self, prompt_cid: str) -> Optional[str]:
-        """
-        Resolve a prompt CID to the full evaluation prompt text.
-
-        Uses rpb_prompt.load_prompt_text which tries blob store first,
-        then falls back to the local constitution/v1_udhr.txt file.
-        """
-        try:
-            from .rpb_prompt import load_prompt_text
-            return load_prompt_text(self.blob_store, prompt_cid)
-        except Exception as e:
-            self.logger.warning(f"Failed to resolve prompt {prompt_cid}: {e}")
-            return None
-
-
-# =============================================================================
-# RPB Consensus
-# =============================================================================
-
-
-class RPBConsensus:
-    """
-    Consensus mechanism for RPB evaluations.
-
-    Multiple nodes evaluate proposals independently using (potentially
-    different) AI providers. Non-deterministic LLM outputs are resolved
-    through weighted confidence voting:
-
-    1. Each evaluator submits (approve/reject, confidence, reasoning)
-    2. Approval is computed as: sum(approve_confidence) / sum(all_confidence)
-    3. If approval >= threshold, proposal is approved for trial
-    4. Resolution is permissionless (anyone calls resolveEvaluation)
-
-    This extends the Yuma consensus pattern used for training verification
-    to handle the non-deterministic nature of LLM evaluations.
-    """
-
-    def __init__(self, governance: GovernanceBridge):
-        self.governance = governance
-        self.logger = logging.getLogger(
-            f"RPBConsensus[{governance.node_id}]"
-        )
-
-    def try_resolve_proposals(self) -> int:
-        """
-        Attempt to resolve any proposals that have reached quorum.
-
-        Calls the permissionless resolveEvaluation on-chain function.
-        The contract enforces quorum and time requirements.
-
-        Returns:
-            Number of proposals resolved.
-        """
-        if not self.governance._evolution_available:
-            return 0
-
-        pending = self.governance.get_pending_proposals()
-        resolved = 0
-
-        for proposal in pending:
-            pid = proposal["id"]
-            try:
-                result = self.governance.registry.resolve_proposal_evaluation(pid)
-                if result.success:
-                    self.logger.info(f"Resolved proposal {pid}")
-                    resolved += 1
-                else:
-                    # QuorumNotReached or EvaluationPeriodActive are expected
-                    if "QuorumNotReached" not in str(result.error) and \
-                       "EvaluationPeriodActive" not in str(result.error):
-                        self.logger.debug(
-                            f"Could not resolve proposal {pid}: {result.error}"
-                        )
-            except Exception as e:
-                self.logger.debug(f"Resolution attempt for {pid} failed: {e}")
-
-        return resolved
-
-
-# =============================================================================
 # Three-Tier Constitutional Evaluator
 # =============================================================================
 
@@ -868,10 +601,10 @@ class RPBConsensus:
 class ThreeTierConstitutionalEvaluator:
     """
     Convenience wrapper that combines ConstitutionalGeometry (Tiers 1+2) with
-    the existing LLM-based RPBEvaluator (Tier 3).
+    a direct LLM AIProvider call (Tier 3).
 
     Used by GovernanceEngine to evaluate individual node instructions before
-    they are queued for execution, and by RPBEvaluator for on-chain proposals.
+    they are queued for execution.
 
     Quick usage (per-instruction compliance check):
         evaluator = ThreeTierConstitutionalEvaluator(geometry=geometry)

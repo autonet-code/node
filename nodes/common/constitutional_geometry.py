@@ -13,9 +13,10 @@ geometry survey:
     Handles nuanced cases where Tier 1 is uncertain.
 
   Tier 3 — Full LLM evaluation (expensive, high-stakes)
-    Falls through to the existing RPBEvaluator / AIProvider chain.
-    Reserved for adversarial-seeming or genuinely ambiguous inputs.
-    Signalled by returning Verdict.UNCERTAIN — caller must escalate.
+    Falls through to a direct AIProvider call (see
+    ThreeTierConstitutionalEvaluator). Reserved for adversarial-seeming or
+    genuinely ambiguous inputs. Signalled by returning Verdict.UNCERTAIN —
+    caller must escalate.
 
 Critical design constraint: embedding drift causes ROC-AUC to collapse from
 0.85 to 0.50 at σ=0.028 drift (arXiv:2603.01297). DriftMonitor detects this
@@ -609,8 +610,8 @@ class ConstitutionalGeometry:
       3. LLM (external)      — signalled by returning Verdict.UNCERTAIN
 
     Caller is responsible for Tier 3: when evaluate() returns UNCERTAIN, the
-    action must be passed to RPBEvaluator (which uses an AIProvider + Yuma
-    multi-node consensus).
+    action must be passed to an AIProvider (see
+    ThreeTierConstitutionalEvaluator).
 
     Drift monitoring is active continuously. When drift is detected, all Tier 1
     and Tier 2 results include drift_warning=True and confidence is reduced.
@@ -704,7 +705,7 @@ class ConstitutionalGeometry:
 
         Tiers 1 and 2 are tried in order. If neither produces a confident
         decision, returns Verdict.UNCERTAIN to signal that Tier 3 (LLM) is
-        needed. The caller must then invoke RPBEvaluator.
+        needed. The caller must then invoke an AIProvider (Tier 3).
 
         Args:
             embedding:  (embed_dim,) or (1, embed_dim) embedding of the action
