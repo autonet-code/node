@@ -251,6 +251,35 @@ Upgradeability of reference defaults: ordinary distro evolution. The
 protocol floor changes only by redeploy/governance — a future
 session's question, deliberately deferred.
 
+## Vetting: the candidate pool (ratified 2026-07-05, design — not built)
+
+Publishing enters a tool into the CANDIDATE pool: visible, debatable,
+NOT yet mint-eligible and not yet adoption-recommended. Admission to
+the substrate proper is a consensus greenlight:
+
+- A **vet** is the third attestation flavor (after mechanical receipts
+  and usage attestations): a validator reads the pinned code and
+  attests two claims — code ADHERES TO MANIFEST (does what it says,
+  capabilities honestly declared) and NO MALICE FOUND. Real cognitive
+  work, priced accordingly.
+- **Greenlight** = N vets from DISTINCT FLEETS (owner-map collapse —
+  authors can't self-vet through sock puppets). Greenlit status is the
+  main provenance input the adoption policy reads.
+- **Incentive = stake.** Validators earn a conserved royalty share of
+  the tool's future mint (composition-style split, first K epochs) —
+  paid from the value they unlocked, aligned with long-run quality,
+  and forfeitable: a reproducible exploit CON winning against the
+  digest AFTER greenlight claws back the validators' accrued+future
+  royalties from that tool and CONs their vetting record. Vetting
+  weight = f(standing of one's past vets): green-lighting malware
+  costs the money AND kills the future vote. Slashing without a
+  staking contract.
+- **Containment is NOT replaced.** Vetting is cognitive audit;
+  auditors miss underhanded code. Sandbox + capability manifest +
+  owner consent remain defense-in-depth beneath it. Greenlight lowers
+  friction, never removes walls.
+- Knobs for sims: N, K, royalty share, vet-weight decay.
+
 ## Consensus mechanics (v1 implementation, still current)
 
 - `ToolUsed` consensus event: caller-attested, gossiped, epoch-
