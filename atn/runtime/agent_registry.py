@@ -482,6 +482,28 @@ class AgentRegistry:
             f"to inherit the subtree's cap."
         )
 
+    def validate_budget_update(
+        self, defn: AgentDefinition, new_budgets: dict,
+    ) -> str | None:
+        """Cascade re-check for a budget UPDATE (blessed semantics,
+        docs/tool_substrate.md floor item 3: parent-updateable within
+        the parent's own headroom).
+
+        Registration-time enforcement skips re-registrations, so
+        updates need their own pass. Returns an error string or None.
+        """
+        if defn.parent_id is None or not new_budgets:
+            return None
+        old = defn.budgets
+        defn.budgets = new_budgets
+        try:
+            self._check_budget_cascade(defn)
+        except ValueError as exc:
+            return str(exc)
+        finally:
+            defn.budgets = old
+        return None
+
     def _enforce_budget_cascade(self, defn: AgentDefinition) -> None:
         """A child's per-provider limit must fit in the parent's remaining headroom.
 
@@ -498,6 +520,10 @@ class AgentRegistry:
             return
         if not defn.budgets:
             return  # already handled by _enforce_budget_required for cognitive
+        self._check_budget_cascade(defn)
+
+    def _check_budget_cascade(self, defn: AgentDefinition) -> None:
+        """The cascade walk itself (raises ValueError on violation)."""
         for provider in list(defn.budgets):
             child_limit, _, child_unit = _resolve_budget(defn, provider)
             if child_limit <= 0:

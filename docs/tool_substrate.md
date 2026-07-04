@@ -211,16 +211,45 @@ Mechanics:
   (retrieval, compaction, delegation strategy), and that's where
   distros compete.
 
-**Constitution floor (NOT tool-swappable, wording user-blessed —
-placeholder list):** wallet custody with the human; human-only WS
-surfaces (clone, grants, publish); budget cascade; input arbiter;
-charter/RPB injection. Upgradeability of the floor is DEFERRED by
-explicit decision (2026-07-05) — possibly never, possibly
-consensus-hot-swappable, a future session's question. Enforcement
-reality check lives in the five-plane constitution model (prompt /
-semantic / economic / structural / chain): the floor is plane 4, binds
-honest deployments only, and planes 2/3/5 are the ones built to not
-care about tampered hosts.
+**The floor, corrected (user-blessed 2026-07-05):** there is NO
+disqualification concept anywhere in this architecture — everything is
+priced, nothing is policed, and a compliance blacklist would only
+invite compliance spoofing (the execution-integrity hole wearing a
+rules badge). The real floor was never in the daemon:
+
+- **Protocol floor (enforced by math, unspoofable):** the contracts
+  (custody economics, agent = msg.sender, mint only via anchored
+  consensus, not-served-not-paid) and the deterministic epoch close.
+  A non-conforming harness doesn't get punished — its close forks out
+  of consensus and its transactions revert.
+- **Reference-distro DEFAULTS (our best bet, shipped not imposed):**
+  1. Custody: admin authority = PHYSICAL HOST ACCESS, not wallet
+     identity. The owner wallet is the fleet's label; a different
+     wallet signing in does not orphan agent wallets — the host can
+     always LOCALLY drain fleet earnings. No remote path to custody.
+  2. Owner actions (clone, cross-lineage grants, publish, owner
+     binding) stay off the agent tool library. Terminology: these are
+     ACTIONS, not "surfaces" — surface is reserved for human
+     interfaces (voice, app, discord). (Noted future thread: surfaces
+     are themselves formalizable, incentivizable items — orthogonal
+     rail to tools: WS vs MCP, human-facing vs agent-facing.)
+  3. Budget cascade (BLESSED as consensus-relevant semantics): no
+     execution without headroom; ancestor rollup binds; budgets are
+     parent-updateable WITHIN the parent's own headroom — human or
+     agent may top up a child it judges worth it.
+  4. Input arbiter (single-writer human channel).
+  5. Charter/RPB prompt injection — plane-1 coordination for the
+     honest majority; the SEMANTIC plane (charter space as alignment
+     attractor) is the real mechanism and needs no enforcement.
+- **Accountability for competing distros:** registered distros are
+  pinned code — claimed properties are auditable by reading, and a
+  claim/code mismatch is a reproducible CON. Debated and priced,
+  never disqualified. Unregistered/tampered harnesses are invisible
+  and their fleets' OUTPUTS are priced like everyone's (planes 2/3/5).
+
+Upgradeability of reference defaults: ordinary distro evolution. The
+protocol floor changes only by redeploy/governance — a future
+session's question, deliberately deferred.
 
 ## Consensus mechanics (v1 implementation, still current)
 

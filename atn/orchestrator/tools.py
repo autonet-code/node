@@ -1040,6 +1040,25 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         defn.concurrency = input["concurrency"]
         changed.append("concurrency")
     if "budgets" in input:
+        # Blessed semantics (docs/tool_substrate.md, reference default 3):
+        # budgets are PARENT-updateable within the parent's own headroom.
+        # Owner callers are unconstrained. An agent may change budgets
+        # only for its direct children — never its own (no self-raise),
+        # never a stranger's — and the cascade re-checks the new limits.
+        caller_id = input.get("_caller_id")
+        from . import is_owner_caller
+        if caller_id is not None and not is_owner_caller(caller_id):
+            if caller_id == agent_id:
+                return {"error": "An agent cannot change its own budget — "
+                                 "budgets are parent-granted."}
+            if defn.parent_id != caller_id:
+                return {"error": "Budgets are parent-updateable only: "
+                                 f"'{caller_id}' is not the parent of "
+                                 f"'{agent_id}'."}
+        cascade_err = runtime.registry.validate_budget_update(
+            defn, input["budgets"])
+        if cascade_err:
+            return {"error": cascade_err}
         defn.budgets = input["budgets"]
         changed.append("budgets")
     if "connector_ids" in input:
