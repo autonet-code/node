@@ -6,14 +6,19 @@ digest. The manifest is the substrate item; claims in the verdict layer
 reference it by digest, usage receipts attest invocations of it, and
 epoch close mints to its author proportional to standing x usage.
 
-Two trust classes:
+Two trust classes (v2 — docs/tool_substrate.md):
 
   - ``pinned``   — codebase tools. Behavior is locked by ``code_digest``
                    (sha256 of the code blob). Verdicts are permanent;
-                   standing compounds.
-  - ``attested`` — API/endpoint tools. Behavior lives outside the
-                   network, so standing decays without fresh usage
-                   receipts (rug-pull pricing).
+                   the only mintable class.
+  - ``attested`` — connector-backed tools: they run LOCALLY with the
+                   user's own credentials but lean on an external API,
+                   so their CON evidence is a timestamp, not a
+                   permanent proof. Publishable, debatable, unminted.
+
+Endpoint-backed manifests are NOT tools — remote counterparties with an
+ask price are Services (``docs/services_market.md``) and are rejected
+here.
 
 Identity is the digest. A revision is a NEW manifest whose
 ``version_of`` points at its predecessor — artifact lineage, no
@@ -136,8 +141,12 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
         if not payload.get("code_digest"):
             errors.append("pinned manifest requires code_digest")
     elif trust == TRUST_ATTESTED:
-        if not (payload.get("endpoint") or payload.get("connector_id")):
-            errors.append("attested manifest requires endpoint or connector_id")
+        if not payload.get("connector_id"):
+            errors.append("attested manifest requires connector_id")
+
+    if payload.get("endpoint"):
+        errors.append("endpoint-backed offerings are Services, not tools "
+                      "(docs/services_market.md) — register a service instead")
 
     version_of = payload.get("version_of")
     if version_of is not None and not isinstance(version_of, str):

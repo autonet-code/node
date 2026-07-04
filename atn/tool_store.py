@@ -40,7 +40,6 @@ log = logging.getLogger(__name__)
 OWNER_AUTHOR = "user"
 
 _PINNED_EXEC_TIMEOUT_S = 120
-_ENDPOINT_TIMEOUT_S = 60
 _MAX_CODE_BYTES = 512 * 1024
 
 
@@ -51,6 +50,10 @@ class ToolRecord:
     manifest: dict[str, Any]
     grants: set[str] = field(default_factory=set)   # owner-granted agent ids
     enabled: bool = True
+    # Three tiers (tool_substrate.md v2): private (default) vs published.
+    # Private tools are pure local capability — never pushed to the
+    # substrate, no consensus footprint. Publishing is a deliberate act.
+    published: bool = False
     registered_ts: int = 0
 
     @property
@@ -70,6 +73,7 @@ class ToolRecord:
             "digest": self.digest,
             "grants": sorted(self.grants),
             "enabled": self.enabled,
+            "published": self.published,
             "registered_ts": self.registered_ts,
         }
 
@@ -110,18 +114,22 @@ class ToolStore:
         author: str,
         code: str = "",
         entrypoint: str = "",
-        endpoint: str = "",
         provider: str = "",
         connector_id: str = "",
-        fee_atn: float = 0.0,
         version_of: str | None = None,
+        publish: bool = False,
     ) -> dict[str, Any]:
         """Build, sign, store, and index a tool manifest. Returns
         ``{"digest", "manifest"}`` or raises ValueError on bad input.
 
         Trust class is derived, not chosen: ``code`` present → pinned
         (behavior hash-locked by the code blob digest); otherwise
-        attested (endpoint or connector-backed).
+        attested (connector-backed). Endpoint-backed offerings are
+        Services and are rejected upstream (docs/services_market.md).
+
+        ``publish=False`` (default) keeps the tool PRIVATE: local
+        capability only, no substrate push, no consensus footprint.
+        Publishing is a deliberate act.
         """
         from nodes.common.world_model_substrate.tool_manifest import (
             build_tool_manifest,
@@ -151,10 +159,8 @@ class ToolStore:
             code_digest=code_digest,
             entrypoint=entrypoint,
             runtime="python3" if code_digest else "",
-            endpoint=endpoint,
             provider=provider,
             connector_id=connector_id,
-            fee_atn=fee_atn,
             version_of=version_of,
             created_ts=int(time.time()),
         )
@@ -164,30 +170,52 @@ class ToolStore:
         record = ToolRecord(
             digest=digest,
             manifest=manifest,
+            published=bool(publish),
             registered_ts=int(time.time()),
         )
         self._records[digest] = record
         self._persist()
-        log.info("registered tool %r (%s, %s) by %s -> %s",
-                 name, trust_class, "code" if code_digest else
-                 (connector_id or endpoint), author, digest[:16])
-        if self.manifest_sink is not None:
+        log.info("registered tool %r (%s, %s, %s) by %s -> %s",
+                 name, trust_class, "code" if code_digest else connector_id,
+                 "published" if publish else "private", author, digest[:16])
+        if record.published and self.manifest_sink is not None:
             try:
                 self.manifest_sink(manifest, author)
             except Exception as exc:
                 log.warning("manifest sink failed for %s: %s", name, exc)
-        return {"digest": digest, "manifest": manifest}
+        return {"digest": digest, "manifest": manifest,
+                "published": record.published}
+
+    def set_published(self, digest: str, published: bool) -> bool:
+        """Owner-gated publish/unpublish. Publishing pushes the manifest
+        to the substrate; unpublishing only stops future pushes (the
+        substrate is forward-only — existing claims stand)."""
+        record = self._records.get(digest)
+        if record is None:
+            return False
+        record.published = bool(published)
+        self._persist()
+        if record.published and self.manifest_sink is not None:
+            try:
+                self.manifest_sink(record.manifest, record.author)
+            except Exception as exc:
+                log.warning("manifest sink failed for %s: %s",
+                            record.name, exc)
+        return True
 
     def push_all_manifests(self) -> int:
-        """Re-submit every registered manifest through manifest_sink.
+        """Re-submit every PUBLISHED manifest through manifest_sink.
 
         Called when the substrate comes up after tools were registered
         offline. Idempotent on the world side (content-addressed claim
-        node per digest). Returns the number pushed."""
+        node per digest). Private tools never leave the daemon. Returns
+        the number pushed."""
         if self.manifest_sink is None:
             return 0
         pushed = 0
         for record in self._records.values():
+            if not record.published:
+                continue
             try:
                 self.manifest_sink(record.manifest, record.author)
                 pushed += 1
@@ -281,8 +309,6 @@ class ToolStore:
             result = await self._call_pinned(record, arguments)
         elif manifest.get("connector_id"):
             result = await self._call_connector(record, arguments)
-        elif manifest.get("endpoint"):
-            result = await self._call_endpoint(record, arguments)
         else:
             return {"error": f"Tool {record.name!r} has no executable backing"}
 
@@ -348,24 +374,6 @@ class ToolStore:
             return {"error": f"failed to start connector {connector_id!r}: {exc}"}
         return await self._runtime.connectors.call_tool(
             connector_id, record.name, arguments)
-
-    async def _call_endpoint(self, record: ToolRecord,
-                             arguments: dict[str, Any]) -> dict[str, Any]:
-        """Attested HTTP tool: POST JSON arguments, JSON back."""
-        import httpx
-        endpoint = record.manifest["endpoint"]
-        try:
-            async with httpx.AsyncClient(timeout=_ENDPOINT_TIMEOUT_S) as client:
-                resp = await client.post(endpoint, json=arguments)
-        except httpx.HTTPError as exc:
-            return {"error": f"endpoint call failed: {exc}"}
-        if resp.status_code >= 400:
-            return {"error": f"endpoint returned {resp.status_code}: "
-                             f"{resp.text[:2000]}"}
-        try:
-            return {"result": resp.json()}
-        except ValueError:
-            return {"result": resp.text[:8000]}
 
     # ------------------------------------------------------------------
     # Receipts + fee ledger (docs/tool_substrate.md — usage receipts)
@@ -581,6 +589,7 @@ class ToolStore:
                 manifest=manifest,
                 grants=set(row.get("grants") or []),
                 enabled=bool(row.get("enabled", True)),
+                published=bool(row.get("published", False)),
                 registered_ts=int(row.get("registered_ts") or 0),
             )
 

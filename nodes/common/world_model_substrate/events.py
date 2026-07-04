@@ -168,9 +168,19 @@ class ToolUsed:
     receipt_digest: str = ""      # blob: {arguments_digest, ok, ts, ...}
     ok: bool = True
     fee_atn: float = 0.0
+    # Demonstrated-utility coordinates (tool_substrate.md v2): embedding
+    # of the problem context the CALLER was solving, in the usefulness
+    # space. Retrieval blends a tool's claimed position toward the
+    # centroid of problems it actually solved (anti-SEO: description
+    # proposes, usage disposes). Serialized only when present — same
+    # back-compat rule as every optional event field.
+    problem_coords: List[float] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        if not self.problem_coords:
+            d.pop("problem_coords", None)
+        return d
 
 
 Event = Any   # SubClaimSprouted | ObservationAdded | ToolUsed

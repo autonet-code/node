@@ -485,13 +485,15 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="register_tool",
         description=(
-            "Author a new tool and register it on the tool substrate. Provide either "
-            "`code` (a Python script reading JSON arguments on stdin and printing a JSON "
-            "result — becomes a PINNED tool, behavior locked by content hash) or an "
-            "`endpoint`/`connector_id` (becomes an ATTESTED tool whose standing decays "
-            "without fresh usage). The tool is scoped to you and your superiors; only "
-            "the user can grant it outside that lineage. You are the author: substrate "
-            "consensus judges the tool and you earn from its standing and usage."
+            "Author a new tool. Provide either `code` (a Python script reading JSON "
+            "arguments on stdin and printing a JSON result — becomes a PINNED tool, "
+            "behavior locked by content hash) or a `connector_id` (ATTESTED, "
+            "connector-backed). The tool is PRIVATE by default: local capability "
+            "scoped to you and your superiors; only the user can grant it outside "
+            "that lineage. Pass publish=true to also publish it to the substrate, "
+            "where consensus judges it and you (the author) earn mint from its "
+            "standing and usage — pinned tools only. Remote paid APIs are Services, "
+            "not tools: use the services rail instead of an endpoint."
         ),
         input_schema={
             "type": "object",
@@ -504,10 +506,9 @@ _TOOLS: list[ToolDefinition] = [
                     "additionalProperties": True,
                 },
                 "code": {"type": "string", "description": "Python source (pinned tools). Reads JSON args on stdin, prints JSON result on stdout."},
-                "endpoint": {"type": "string", "description": "HTTPS endpoint (attested tools). Arguments are POSTed as JSON."},
                 "connector_id": {"type": "string", "description": "MCP connector backing this tool (attested); the tool name must match a connector operation."},
                 "provider": {"type": "string", "description": "External provider identity for attested tools (e.g. 'google')."},
-                "fee_atn": {"type": "number", "description": "Per-invocation fee in ATN charged to callers (default 0)."},
+                "publish": {"type": "boolean", "description": "Publish to the substrate (default false = private local tool)."},
                 "version_of": {"type": "string", "description": "Digest of the manifest this revises (artifact lineage)."},
             },
             "required": ["name", "description", "input_schema"],
@@ -1739,6 +1740,10 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         if name.startswith(reserved):
             return {"error": f"tool names may not start with '{reserved}'"}
 
+    if input.get("endpoint"):
+        return {"error": "endpoint-backed offerings are Services, not tools "
+                         "— use the services rail (docs/services_market.md)"}
+
     caller_id = input.get("_caller_id")
     author = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
 
@@ -1749,11 +1754,10 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
             input_schema=schema,
             author=author,
             code=str(input.get("code") or ""),
-            endpoint=str(input.get("endpoint") or ""),
             provider=str(input.get("provider") or ""),
             connector_id=str(input.get("connector_id") or ""),
-            fee_atn=float(input.get("fee_atn") or 0.0),
             version_of=input.get("version_of") or None,
+            publish=bool(input.get("publish", False)),
         )
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}
@@ -1762,6 +1766,7 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         "name": name,
         "trust_class": result["manifest"]["trust_class"],
         "author": author,
+        "published": result["published"],
         "unified_name": f"reg_{result['digest'][:12]}",
     }
 

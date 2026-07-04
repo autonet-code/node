@@ -62,7 +62,7 @@ def _attested(**overrides):
         input_schema={"type": "object", "properties": {"attendees": {"type": "array"}}},
         author="google",
         trust_class="attested",
-        endpoint="https://calendar.example/api",
+        connector_id="google_calendar",
         provider="google",
         created_ts=1780531200,
     )
@@ -89,12 +89,15 @@ def test_pinned_requires_code_digest():
         _pinned(code_digest="")
 
 
-def test_attested_requires_endpoint_or_connector():
-    with pytest.raises(ValueError, match="endpoint or connector_id"):
-        _attested(endpoint="", connector_id="")
-    # connector_id alone satisfies it
-    m = _attested(endpoint="", connector_id="google_calendar")
-    assert validate_manifest(m) == []
+def test_attested_requires_connector():
+    with pytest.raises(ValueError, match="connector_id"):
+        _attested(connector_id="")
+
+
+def test_endpoint_backed_rejected_as_service():
+    """Remote paid APIs are Services, not tools (spec v2)."""
+    with pytest.raises(ValueError, match="Services"):
+        _attested(endpoint="https://calendar.example/api")
 
 
 def test_bad_trust_class_rejected():

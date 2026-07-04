@@ -96,11 +96,51 @@ class TestRegistration:
         res = await execute_tool(
             "register_tool",
             {"name": "owner_tool", "description": "d", "input_schema": SCHEMA,
-             "endpoint": "https://example.test/api"},
+             "connector_id": "google_calendar"},
             rt, caller_id="",  # owner caller
         )
         assert res["author"] == "user"
         assert res["trust_class"] == "attested"
+
+    @pytest.mark.asyncio
+    async def test_endpoint_rejected_as_service(self, tmp_path):
+        """Remote paid APIs are Services, not tools (spec v2)."""
+        rt = _make_runtime(tmp_path)
+        res = await execute_tool(
+            "register_tool",
+            {"name": "remote_api", "description": "d", "input_schema": SCHEMA,
+             "endpoint": "https://example.test/api"},
+            rt, caller_id="")
+        assert "Services" in res["error"]
+
+    @pytest.mark.asyncio
+    async def test_private_by_default_publish_deliberate(self, tmp_path):
+        """Three tiers (spec v2): private is the default — no substrate
+        push; publish=true (or set_published) fires the manifest sink."""
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        pushed: list[tuple] = []
+        rt.tool_store.manifest_sink = lambda m, a: pushed.append((m["name"], a))
+
+        res = await _register_echo(rt)                     # default: private
+        assert res["published"] is False
+        assert pushed == []
+        assert rt.tool_store.push_all_manifests() == 0     # backfill skips private
+
+        res2 = await execute_tool(
+            "register_tool",
+            {"name": "public_echo", "description": "Echo.", "input_schema": SCHEMA,
+             "code": ECHO_CODE, "publish": True},
+            rt, caller_id="child")
+        assert res2["published"] is True
+        assert pushed == [("public_echo", "child")]
+
+        # Owner flips the private one to published later.
+        assert rt.tool_store.set_published(res["digest"], True)
+        assert pushed[-1] == ("echo_tool", "child")
+        # Publish state survives reload.
+        reloaded = ToolStore(rt, rt._config.data_dir / "tools")
+        assert reloaded.get(res["digest"]).published is True
 
     @pytest.mark.asyncio
     async def test_core_name_and_reserved_prefix_rejected(self, tmp_path):
@@ -248,56 +288,50 @@ class TestResolutionAndExecution:
         assert out == {"result": {"echo": "round-trip"}}
 
     @pytest.mark.asyncio
-    async def test_receipts_and_fee_ledger(self, tmp_path):
+    async def test_receipts_and_usage_ledger(self, tmp_path):
+        """Fees left tools with spec v2 (they belong to Services); the
+        receipt rail remains: local ledger + consensus events."""
         rt = _make_runtime(tmp_path)
         await _family(rt)
-        res = await execute_tool(
-            "register_tool",
-            {"name": "paid_echo", "description": "Echo, for a fee.",
-             "input_schema": SCHEMA, "code": ECHO_CODE, "fee_atn": 0.5},
-            rt, caller_id="child")
+        res = await _register_echo(rt)
 
         sunk: list[dict] = []
         rt.tool_store.event_sink = sunk.append
 
-        await rt.tool_registry.call_tool("paid_echo", {"x": "1"}, caller_id="parent")
-        await rt.tool_registry.call_tool("paid_echo", {"x": "2"}, caller_id="child")
+        await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="parent")
+        await rt.tool_registry.call_tool("echo_tool", {"x": "2"}, caller_id="child")
 
-        # Consensus events emitted, caller attested, fee carried.
+        # Consensus events emitted, caller attested.
         assert len(sunk) == 2
         assert sunk[0]["kind"] == "tool_used"
         assert sunk[0]["author_agent"] == "parent"
         assert sunk[0]["tool_author"] == "child"
         assert sunk[0]["manifest_digest"] == res["digest"]
         assert sunk[0]["ok"] is True
-        assert sunk[0]["fee_atn"] == 0.5
 
-        # Off-chain ledger: author earned, callers spent.
         balances = rt.tool_store.balances()
-        assert balances["earned"] == {"child": 1.0}
-        assert balances["spent"] == {"parent": 0.5, "child": 0.5}
         assert balances["usage"][res["digest"]]["ok_count"] == 2
+        assert balances["earned"] == {}   # no fees on tools in v2
 
         # Receipt seq survives a reload (no duplicate seq after restart).
         reloaded = ToolStore(rt, rt._config.data_dir / "tools")
         assert reloaded._receipt_seq == 2
 
     @pytest.mark.asyncio
-    async def test_failed_call_recorded_without_fee(self, tmp_path):
+    async def test_failed_call_recorded(self, tmp_path):
         rt = _make_runtime(tmp_path)
         await _family(rt)
         bad_code = "import sys\nsys.exit(3)\n"
         await execute_tool(
             "register_tool",
             {"name": "broken", "description": "Always fails.",
-             "input_schema": SCHEMA, "code": bad_code, "fee_atn": 0.5},
+             "input_schema": SCHEMA, "code": bad_code},
             rt, caller_id="child")
 
         out = await rt.tool_registry.call_tool("broken", {"x": "1"}, caller_id="child")
         assert "error" in out
 
         balances = rt.tool_store.balances()
-        assert balances["earned"] == {}          # not served = not paid
         entry = next(iter(balances["usage"].values()))
         assert entry["count"] == 1 and entry["ok_count"] == 0
 

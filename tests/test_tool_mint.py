@@ -23,7 +23,6 @@ from nodes.common.federated_reconcile import (
 )
 from nodes.common.world_model_substrate.adapter import N_DIMS, build_charter_world
 from nodes.common.world_model_substrate.aggregate import apply_events
-from nodes.common.world_model_substrate.tool_standing import DEFAULT_ATTESTED_DECAY
 
 EMBED_DIM = 1024
 DIGEST = "ab" * 32
@@ -107,18 +106,16 @@ class TestToolMintClose:
         assert entry["ok_count"] == 2                       # failure excluded
         assert entry["standing"] > 0                        # author_post landed
         assert entry["mint"] > 0
-        assert entry["mint"] == entry["effective_standing"] * math.log1p(2)
+        assert entry["mint"] == entry["standing"] * math.log1p(2)
         # Merged into the consensus attribution map.
         assert result["agent_mint"].get(AUTHOR, 0) >= round(entry["mint"], 6) * 0.5
-        # Receipt history reset for the used digest.
-        assert result["tool_receipt_history"][DIGEST] == 0
         assert result["tool_registrations"][DIGEST]["author"] == AUTHOR
 
     def test_double_close_bit_identical(self):
         batches = _standard_batches()
         r1 = federated_epoch_close(canonical_order(list(batches)))
         r2 = federated_epoch_close(canonical_order(list(batches)))
-        for key in ("agent_mint", "tool_mint", "tool_receipt_history",
+        for key in ("agent_mint", "tool_mint",
                     "tool_registrations", "authoritative_payload"):
             assert json.dumps(r1[key]) == json.dumps(r2[key]), key
 
@@ -136,31 +133,19 @@ class TestToolMintClose:
         assert results[0]["tool_mint"] == results[1]["tool_mint"] == results[2]["tool_mint"]
         assert results[0]["agent_mint"] == results[1]["agent_mint"] == results[2]["agent_mint"]
 
-    def test_attested_decay_reduces_mint(self):
+    def test_attested_mints_nothing(self):
+        """Pinned-only emission (spec v2): connector-backed tools are
+        publishable and debatable but draw nothing from the pool."""
         kp = Keypair.generate()
         batches = _batches([
             _registration_event(1, trust_class="attested"),
             _receipt_event(2, "caller-1"),
         ], kp)
-        fresh = federated_epoch_close(canonical_order(list(batches)))
-        stale = federated_epoch_close(
-            canonical_order(list(batches)),
-            tool_receipt_history={DIGEST: 5},
-        )
-        m_fresh = fresh["tool_mint"][DIGEST]["mint"]
-        m_stale = stale["tool_mint"][DIGEST]["mint"]
-        assert 0 < m_stale < m_fresh
-        ratio = m_stale / m_fresh
-        assert abs(ratio - DEFAULT_ATTESTED_DECAY ** 5) < 1e-9
-
-    def test_pinned_ignores_history(self):
-        batches = _standard_batches()  # pinned
-        fresh = federated_epoch_close(canonical_order(list(batches)))
-        stale = federated_epoch_close(
-            canonical_order(list(batches)),
-            tool_receipt_history={DIGEST: 50},
-        )
-        assert fresh["tool_mint"][DIGEST]["mint"] == stale["tool_mint"][DIGEST]["mint"]
+        result = federated_epoch_close(canonical_order(batches))
+        assert result["tool_mint"] == {}
+        # ...but the registration still carries over (attribution is
+        # permanent even for unminted classes).
+        assert result["tool_registrations"][DIGEST]["trust_class"] == "attested"
 
     def test_no_tool_events_null_case(self):
         kp = Keypair.generate()
@@ -170,7 +155,6 @@ class TestToolMintClose:
         }], kp)
         result = federated_epoch_close(canonical_order(batches))
         assert result["tool_mint"] == {}
-        assert result["tool_receipt_history"] == {}
         assert result["tool_registrations"] == {}
 
 
@@ -209,15 +193,4 @@ class TestComputeToolMint:
         world = build_charter_world(embedding_dim=EMBED_DIM)
         out = compute_tool_mint(world, [_receipt_event(1, "caller-1")])
         assert out["per_digest"] == {}
-        # ...but the receipt still enters the history at 0.
-        assert out["receipt_history_next"][DIGEST] == 0
-
-    def test_quiet_epoch_increments_history(self):
-        world = self._world_with_registration()
-        out = compute_tool_mint(
-            world, [],  # no receipts this epoch
-            receipt_history={DIGEST: 2},
-            registrations={DIGEST: {"trust_class": "attested", "author": AUTHOR}},
-        )
-        assert out["per_digest"] == {}  # no usage → no mint
-        assert out["receipt_history_next"][DIGEST] == 3
+        assert out["registrations_next"] == {}

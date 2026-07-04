@@ -1,9 +1,9 @@
-"""Tool standing — verdict-layer claims for manifests + attested decay.
+"""Tool standing — verdict-layer claims for manifests.
 
 Covers WorldService.submit_tool_manifest (two-plane split, dedup on
-resubmission, retrieval via infer_artifacts), manifest_standing on the
-live world, effective_standing trust-class semantics, and the
-receipt-history advance. Design: docs/tool_substrate.md.
+resubmission, retrieval via infer_artifacts) and manifest_standing on
+the live world. Decay tests removed with spec v2 (decay retired —
+endpoint offerings are Services now). Design: docs/tool_substrate.md.
 """
 
 from __future__ import annotations
@@ -13,11 +13,8 @@ import pytest
 from nodes.common.world_service import WorldService
 from nodes.common.world_model_substrate.tool_manifest import build_tool_manifest
 from nodes.common.world_model_substrate.tool_standing import (
-    DEFAULT_ATTESTED_DECAY,
     all_manifest_standings,
-    effective_standing,
     manifest_standing,
-    update_receipt_history,
 )
 from nodes.common.world_model_substrate.usefulness_coords import HashingEmbedder
 
@@ -124,53 +121,10 @@ class TestManifestStanding:
             _manifest(name="fetch_weather",
                       description="Fetch the weather for a city.",
                       trust_class="attested", code_digest="",
-                      endpoint="https://w.example/api"),
+                      connector_id="weather"),
             agent_id="a", embedder=embedder)["manifest_digest"]
         standings = all_manifest_standings(svc._world, [d2, d1, "f" * 64])
         assert list(standings.keys()) == sorted({d1, d2, "f" * 64})
         assert standings["f" * 64] == 0.0  # unknown digest → no claims
 
 
-class TestEffectiveStanding:
-    def test_pinned_never_decays(self):
-        assert effective_standing(10.0, "pinned", 50) == 10.0
-
-    def test_attested_decays_geometrically(self):
-        s = effective_standing(10.0, "attested", 5)
-        assert s == pytest.approx(10.0 * DEFAULT_ATTESTED_DECAY ** 5)
-
-    def test_fresh_receipt_no_decay(self):
-        assert effective_standing(10.0, "attested", 0) == 10.0
-
-    def test_unknown_class_treated_as_attested(self):
-        assert effective_standing(10.0, "verified", 5) == pytest.approx(
-            10.0 * DEFAULT_ATTESTED_DECAY ** 5)
-
-    def test_custom_rate(self):
-        assert effective_standing(8.0, "attested", 2, decay_rate=0.5) == 2.0
-
-
-class TestReceiptHistory:
-    def test_used_resets_quiet_increments(self):
-        history = {"a" * 64: 3, "b" * 64: 0}
-        out = update_receipt_history(
-            history, used_digests={"a" * 64}, known_digests={"a" * 64, "b" * 64})
-        assert out["a" * 64] == 0
-        assert out["b" * 64] == 1
-
-    def test_new_manifest_appears(self):
-        out = update_receipt_history({}, used_digests=set(),
-                                     known_digests={"c" * 64})
-        assert out == {"c" * 64: 1}
-
-    def test_receipt_for_untracked_digest_included(self):
-        # A receipt gossiped for a manifest we haven't fetched yet still
-        # enters the history at 0 (we'll price it when the blob arrives).
-        out = update_receipt_history({}, used_digests={"d" * 64},
-                                     known_digests=set())
-        assert out == {"d" * 64: 0}
-
-    def test_keys_sorted(self):
-        out = update_receipt_history(
-            {}, used_digests={"b" * 64}, known_digests={"c" * 64, "a" * 64})
-        assert list(out.keys()) == sorted(out.keys())
