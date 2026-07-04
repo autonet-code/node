@@ -764,6 +764,26 @@ _TOOLS: list[ToolDefinition] = [
             "required": ["agent_id"],
         },
     ),
+    ToolDefinition(
+        name="compact_agent",
+        description=(
+            "Compact a target agent's conversation to free context (§15). "
+            "You may compact your own DIRECT CHILDREN; the owner may compact any "
+            "agent. You can NEVER compact yourself. If the agent is running its "
+            "generic loop, compaction is queued for the next iteration boundary; "
+            "if it is idle, its persisted history is summarized in place and the "
+            "cached provider evicted so the next run rebuilds from the compacted "
+            "store. A running bridge (Claude SDK) agent cannot be compacted "
+            "mid-run and returns 'unsupported_while_running'."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "The agent to compact."},
+            },
+            "required": ["agent_id"],
+        },
+    ),
 ]
 
 
@@ -2244,6 +2264,7 @@ _DELEGATE_TOOL_NAMES = {
     "get_output",     # read child agent output
     "post_message",   # communicate with other agents
     "get_snapshot",   # see system state
+    "compact_agent",  # §15 compact a direct child's context
 }
 
 
@@ -2268,11 +2289,12 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     "delegation": {
         "create_agent", "update_agent", "delegate_status", "delegate_collect",
         "delegate_message", "get_latest_thought", "get_children_status",
-        "trigger_run", "get_output",
+        "trigger_run", "get_output", "compact_agent",
     },
     "messaging": {"post_message"},
     "observation": {"get_snapshot", "list_agents", "get_agent", "get_execution", "get_history"},
-    "lifecycle": {"activate_agent", "deactivate_agent", "kill_agent", "kill_execution", "remove_agent"},
+    "lifecycle": {"activate_agent", "deactivate_agent", "kill_agent", "kill_execution",
+                  "remove_agent", "compact_agent"},
     "connectors": {"list_connectors", "add_connector", "get_connector_tools", "use_connector", "remove_connector"},
     "unified_tools": {"list_tools", "use_tool"},
     "planning": {"get_goals", "add_goal", "update_goal", "get_projects", "add_project", "update_project",
@@ -2664,6 +2686,216 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
 
 
 # ---------------------------------------------------------------------------
+# Manual compaction (§15)
+# ---------------------------------------------------------------------------
+
+async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Compact a target agent's conversation to free context (§15).
+
+    Permissions: the owner (ORCHESTRATOR_ID caller — this includes the WS/owner
+    surface, whose caller_id defaults to the orchestrator) may compact any
+    agent; a non-owner agent may compact only its DIRECT CHILDREN
+    (target.parent_id == caller_id); no agent may compact itself. Violations
+    return an error with no side effects.
+
+    Dispatch by target state:
+      - running generic loop  -> set the provider's compact-requested flag,
+        honored at the next iteration boundary (status "queued").
+      - running bridge (SDK)  -> no input compact control -> "unsupported_while_running".
+      - idle (any provider)   -> summarize the persisted store in place, archive
+        the original, evict the cached provider (status "compacted").
+    """
+    from . import ORCHESTRATOR_ID
+
+    agent_id = input.get("agent_id", "")
+    if not agent_id:
+        return {"error": "Missing 'agent_id'."}
+    caller_id = input.get("_caller_id") or ORCHESTRATOR_ID
+
+    target = runtime.get_agent(agent_id)
+    if target is None:
+        return {"error": f"Agent '{agent_id}' not found."}
+
+    # --- Permission check (§15) ---------------------------------------------
+    if caller_id == agent_id:
+        return {"error": "An agent cannot compact itself."}
+    if caller_id != ORCHESTRATOR_ID and target.parent_id != caller_id:
+        return {
+            "error": (
+                f"Agent '{caller_id}' can only compact its direct children; "
+                f"'{agent_id}' is not one."
+            )
+        }
+
+    pmgr = getattr(runtime, "providers", None)
+    active = getattr(pmgr, "_active_providers", None) if pmgr else None
+    provider = active.get(agent_id) if isinstance(active, dict) else None
+
+    is_running = runtime._running_count.get(agent_id, 0) > 0
+
+    # --- Running path -------------------------------------------------------
+    if is_running and provider is not None:
+        # A running BridgeProvider drives its loop inside the SDK subprocess;
+        # the Claude Agent SDK input protocol exposes no compact control
+        # message (only interrupt / setModel / setPermissionMode). Honestly
+        # report unsupported rather than pretend (§15).
+        from ..providers.bridge import BridgeProvider
+        from ..providers.codex_bridge import CodexBridgeProvider
+        if isinstance(provider, (BridgeProvider, CodexBridgeProvider)):
+            return {"status": "unsupported_while_running", "agent_id": agent_id}
+        # Generic loop: request_compaction() returns True iff an orchestration
+        # is actively consuming (steering queue open). If the loop just ended
+        # (race), fall through to the idle path.
+        if hasattr(provider, "request_compaction") and \
+                provider.request_compaction(requested_by=caller_id):
+            return {"status": "queued", "agent_id": agent_id}
+
+    # --- Idle path ----------------------------------------------------------
+    return await _compact_idle_store(runtime, agent_id, caller_id, provider)
+
+
+async def _compact_idle_store(
+    runtime: Runtime, agent_id: str, caller_id: str, provider: Any,
+) -> dict[str, Any]:
+    """Summarize an idle agent's persisted conversation store in place (§15).
+
+    Summarizes all turns but the last 2 into one summary turn (same
+    Goal/Progress/Decisions/Critical-context/Next-steps template used by the
+    running-loop compactor), archives the original history via the store's
+    reset() archive mechanics, writes back the compacted history, then evicts
+    and closes the cached provider so the next run rebuilds from the store.
+    Emits CONTEXT_COMPACTION events with manual: true + requested_by.
+    """
+    from ..events import Event, EventType
+    from ..providers.base import (
+        COMPACTION_SUMMARIZER_SYSTEM,
+        COMPACTION_SUMMARY_PROMPT,
+    )
+
+    store = runtime.get_agent_conversation_store(agent_id)
+    turns = store.get_turns()
+    turns_before = len(turns)
+
+    _RETAIN = 2  # last N turns kept verbatim (matches _COMPACT_RETAIN_TURNS)
+    _manual = {"manual": True, "requested_by": caller_id}
+
+    async def _emit(status: str) -> None:
+        await runtime.events.emit(Event(
+            type=EventType.CONTEXT_COMPACTION,
+            source=agent_id,
+            data={
+                "agent_id": agent_id,
+                "pre_tokens": sum(len(t.content) for t in turns) // 4,
+                "status": status,
+                **_manual,
+            },
+        ))
+
+    # Nothing to fold — the retained tail already IS the whole thing.
+    if turns_before <= _RETAIN:
+        return {
+            "status": "compacted", "agent_id": agent_id,
+            "turns_before": turns_before, "turns_after": turns_before,
+            "note": "nothing to summarize (at or under the retained tail)",
+        }
+
+    await _emit("in_progress")
+
+    to_summarize = turns[: turns_before - _RETAIN]
+    retained = turns[turns_before - _RETAIN:]
+    original_request = turns[0].content if turns else ""
+
+    # Resolve a provider to run the summarizer: reuse the cached instance if
+    # present, else build one for the agent (do NOT cache it — we evict below).
+    summarizer = provider
+    if summarizer is None:
+        try:
+            defn = runtime.get_agent(agent_id)
+            summarizer = runtime.providers.resolve_provider_with_fallback(defn)
+        except Exception as exc:
+            await _emit("hard_truncated")
+            log.warning("compact_agent: no provider for %s (%s)", agent_id, exc)
+            return {"error": f"Cannot resolve a provider to summarize '{agent_id}': {exc}"}
+
+    # Build the summarizer input in canonical message shape from the turns.
+    summary_input = [
+        {"role": ("assistant" if t.role == "assistant" else "user"),
+         "content": (t.content if t.role in ("user", "assistant")
+                     else f"[system] {t.content}")}
+        for t in to_summarize
+    ]
+    summary_input.append({"role": "user", "content": COMPACTION_SUMMARY_PROMPT})
+
+    summary_text = ""
+    try:
+        resp = await summarizer.send(
+            messages=summary_input,
+            system=COMPACTION_SUMMARIZER_SYSTEM,
+            model="",
+            max_tokens=4096,
+        )
+        summary_text = (resp.text or "").strip()
+    except Exception as exc:
+        log.warning("compact_agent: summarizer send failed for %s: %s", agent_id, exc)
+
+    if not summary_text:
+        # Never destroy history: leave the store untouched and report honestly.
+        await _emit("hard_truncated")
+        return {"error": f"Summarizer produced no output for '{agent_id}'; "
+                         "store left unchanged."}
+
+    summary_turn = (
+        f"[Context compaction — conversation summary follows]\n\n"
+        f"{summary_text}\n\n"
+        f"---\n\n"
+        f"[Original request]\n{original_request}\n\n"
+        f"Continue from where you left off. Do not repeat completed work."
+    )
+
+    # Archive the ORIGINAL history (store.reset() moves active.jsonl -> an
+    # archived <session>.jsonl and clears the in-memory buffer), then write the
+    # compacted history back. reset() never destroys — it archives.
+    archived_session_id = store.reset()
+    store.add_user_turn(summary_turn)
+    for t in retained:
+        if t.role == "assistant":
+            store.add_assistant_turn(t.content, execution_id=t.execution_id)
+        elif t.role == "system":
+            store.add_system_turn(t.content)
+        else:
+            store.add_user_turn(t.content)
+
+    turns_after = store.turn_count()
+
+    # Evict + close the cached provider so the next run rebuilds from the
+    # compacted store (bridge session_id dropped). Mirrors update_agent's
+    # eviction (runtime/__init__.py:912-918) minus file deletion.
+    pmgr = getattr(runtime, "providers", None)
+    active = getattr(pmgr, "_active_providers", None) if pmgr else None
+    if isinstance(active, dict):
+        old = active.pop(agent_id, None)
+        if old is not None and hasattr(old, "close"):
+            try:
+                await old.close()
+            except Exception as exc:
+                log.warning("compact_agent: failed to close provider for %s: %s",
+                            agent_id, exc)
+        cache = getattr(pmgr, "_cached_session_stats", None)
+        if isinstance(cache, dict):
+            cache.pop(agent_id, None)
+
+    await _emit("completed")
+
+    result: dict[str, Any] = {
+        "status": "compacted", "agent_id": agent_id,
+        "turns_before": turns_before, "turns_after": turns_after,
+    }
+    if archived_session_id:
+        result["archived_session_id"] = archived_session_id
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Registry: name -> (ToolDefinition, executor)
 # ---------------------------------------------------------------------------
 
@@ -2714,6 +2946,8 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "get_children_status": _get_children_status,
     # On-chain
     "register_on_chain": _register_on_chain,
+    # Manual compaction (§15)
+    "compact_agent": _compact_agent,
     # Conversation management (UI-facing, not in orchestrator's tool list)
     "reset_conversation": _reset_conversation,
     "get_conversation": _get_conversation,

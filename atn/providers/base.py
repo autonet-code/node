@@ -119,6 +119,23 @@ def classify_model(model: str) -> str:
     return model_class(model)
 
 
+# Structured compaction summary template (§2/§15). Goal / Progress / Key
+# decisions / Critical context / Next steps — matches the harness compaction
+# shape. Factored out so both the running-loop compactor (_compact_messages)
+# and the idle-path manual compactor (compact_agent) use ONE template.
+COMPACTION_SUMMARY_PROMPT = (
+    "Summarize the conversation so far under EXACTLY these headings, "
+    "preserving all critical context (file paths, code changes, error "
+    "messages, tool results). This summary replaces the older history.\n\n"
+    "## Goal\n## Progress\n## Key decisions\n## Critical context\n## Next steps"
+)
+
+# System prompt for the summarizer send() call.
+COMPACTION_SUMMARIZER_SYSTEM = (
+    "You are a conversation summarizer. Produce a dense, accurate summary."
+)
+
+
 # ---------------------------------------------------------------------------
 # Canonical data types
 # ---------------------------------------------------------------------------
@@ -317,6 +334,14 @@ class Provider(ABC):
     # Interrupt flag — set via interrupt() to stop the orchestration loop.
     _interrupted: bool = False
 
+    # Manual-compaction flag (§15). Set via request_compaction() by the
+    # compact_agent tool while an orchestration is running; the loop honors it
+    # at the next iteration boundary (next to the steering drain) by forcing a
+    # context reduction, then clears it. requested_by is threaded onto the
+    # emitted CONTEXT_COMPACTION event so the owner sees who asked.
+    _compact_requested: bool = False
+    _compact_requested_by: str = ""
+
     # Mid-turn steering queue (§5). Lazily created; only non-None while an
     # orchestration is active. send_user_message() enqueues onto it; the loop
     # drains it at each iteration boundary and appends each item as a user turn.
@@ -325,6 +350,26 @@ class Provider(ABC):
     async def interrupt(self) -> None:
         """Signal the orchestration loop to stop after the current turn."""
         self._interrupted = True
+
+    def request_compaction(self, requested_by: str = "") -> bool:
+        """Request a manual compaction at the next loop iteration (§15).
+
+        Sets a flag honored by ``send_orchestrate`` at its iteration boundary
+        (right where steering is drained): it forces a ``_reduce_context`` pass
+        even if the size estimate is under budget. Returns True if an
+        orchestration is active (``_steering_queue`` is open) to consume the
+        request, False otherwise so the caller can fall back to the idle path.
+
+        BridgeProvider has no honoring loop of its own (its orchestration lives
+        in the SDK subprocess); it does not override this, so a running bridge
+        agent reports no active generic loop here and the tool answers
+        ``unsupported_while_running`` — see the tool handler.
+        """
+        if self._steering_queue is None:
+            return False
+        self._compact_requested = True
+        self._compact_requested_by = requested_by
+        return True
 
     async def send_user_message(self, content: str) -> bool:
         """Inject a user message mid-orchestration (§5).
@@ -465,6 +510,33 @@ class Provider(ABC):
                 log.info("Injecting steering message (%d chars) for agent %s",
                          len(steer), self.source_agent_id or "?")
                 messages.append({"role": "user", "content": steer})
+
+            # §15: honor a manual compaction request at the same iteration
+            # boundary. Force a reduction pass regardless of the size estimate
+            # (the owner asked for it explicitly). Consume the flag once so it
+            # runs a single time per request. An overflow that reduction can't
+            # resolve aborts the run like any other context_overflow.
+            if self._compact_requested:
+                self._compact_requested = False
+                requested_by = self._compact_requested_by
+                self._compact_requested_by = ""
+                log.info("Manual compaction requested by %s for agent %s",
+                         requested_by or "?", self.source_agent_id or "?")
+                try:
+                    await Provider._reduce_context(
+                        self, messages, system, model, message, max_tokens,
+                        force=True, manual=True, requested_by=requested_by,
+                    )
+                except ContextOverflowError as exc:
+                    log.warning("Manual compaction reduction gave up: %s", exc)
+                    return Provider._finalize_orchestrate(self,
+                        ProviderResponse(
+                            text=f"Aborted: {exc}",
+                            stop_reason="context_overflow",
+                            model=model or self._active_model,
+                        ),
+                        messages, cumulative_usage, abort_reason="context_overflow",
+                    )
 
             # Pre-flight per-turn input ceiling — refuse a turn whose estimated
             # input would exceed the configured cap. Estimate via chars/4 across
@@ -962,6 +1034,8 @@ class Provider(ABC):
         original_request: str,
         max_tokens: int,
         force: bool = False,
+        manual: bool = False,
+        requested_by: str = "",
     ) -> None:
         """Two-tier context reduction: prune, then compact (§2).
 
@@ -973,6 +1047,10 @@ class Provider(ABC):
         ``force`` is set on the reactive (overflow-400) path: the provider has
         just told us we're over budget, so our chars/4 estimate is wrong low —
         run compaction even if the estimate looks under budget.
+
+        ``manual`` / ``requested_by`` (§15): set on the manual compaction path
+        so the emitted CONTEXT_COMPACTION events carry ``manual: true`` and the
+        requester id. They ride through to ``_compact_messages``.
         """
         ctx_window = get_context_window(self._active_model or model)
         budget_chars = max(
@@ -1011,6 +1089,7 @@ class Provider(ABC):
         self._compactions_this_run += 1
         compacted = await self._compact_messages(
             messages, system, model, original_request=original_request,
+            manual=manual, requested_by=requested_by,
         )
         est_after_compact = _estimate_chars(system, compacted)
 
@@ -1045,13 +1124,21 @@ class Provider(ABC):
         system: str,
         model: str,
         original_request: str = "",
+        manual: bool = False,
+        requested_by: str = "",
     ) -> list[dict[str, Any]]:
         """Summarize conversation history to free context space.
 
         Asks the LLM to produce a concise summary of the conversation so far,
         then replaces the message history with the summary as a single user
         message.  The original user request is preserved at the end.
+
+        ``manual`` / ``requested_by`` (§15): when set, the emitted
+        CONTEXT_COMPACTION events carry ``manual: true`` and the requester id.
         """
+        # §15: extra event fields shared by all three status emissions below.
+        _manual_fields = {"manual": True, "requested_by": requested_by} if manual else {}
+
         self._compaction_count += 1
         log.info("Context compaction #%d triggered (last_input=%d tokens)",
                  self._compaction_count, self._last_input_tokens)
@@ -1067,6 +1154,7 @@ class Provider(ABC):
                     "compaction_count": self._compaction_count,
                     "pre_tokens": self._last_input_tokens,
                     "status": "in_progress",
+                    **_manual_fields,
                 },
             ))
 
@@ -1086,19 +1174,16 @@ class Provider(ABC):
             return messages
 
         # Structured summary template (Goal / Progress / Key decisions /
-        # Critical context / Next steps) — matches the harness compaction shape.
-        summary_prompt = (
-            "Summarize the conversation so far under EXACTLY these headings, "
-            "preserving all critical context (file paths, code changes, error "
-            "messages, tool results). This summary replaces the older history.\n\n"
-            "## Goal\n## Progress\n## Key decisions\n## Critical context\n## Next steps"
-        )
-        summary_messages = to_summarize + [{"role": "user", "content": summary_prompt}]
+        # Critical context / Next steps) — factored out (§15) so the idle-path
+        # manual compactor reuses the exact same prompt.
+        summary_messages = to_summarize + [
+            {"role": "user", "content": COMPACTION_SUMMARY_PROMPT}
+        ]
 
         try:
             summary_resp = await self.send(
                 messages=summary_messages,
-                system="You are a conversation summarizer. Produce a dense, accurate summary.",
+                system=COMPACTION_SUMMARIZER_SYSTEM,
                 model=model,
                 max_tokens=4096,
             )
@@ -1123,6 +1208,7 @@ class Provider(ABC):
                         "compaction_count": self._compaction_count,
                         "pre_tokens": self._last_input_tokens,
                         "status": "hard_truncated",
+                        **_manual_fields,
                     },
                 ))
             return compacted
@@ -1153,6 +1239,7 @@ class Provider(ABC):
                     "compaction_count": self._compaction_count,
                     "pre_tokens": self._last_input_tokens,
                     "status": "completed",
+                    **_manual_fields,
                 },
             ))
 

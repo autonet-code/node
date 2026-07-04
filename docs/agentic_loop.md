@@ -241,6 +241,40 @@ and continue the loop. Applies to all three adapters' parse paths.
   fleet degrades to local instead of halting when cloud auth/quota is
   gone.
 
+## §15 Manual compaction (owner request 2026-07-04)
+
+New tool + WS message `compact_agent(agent_id)`.
+
+Permissions: the owner (WS / ORCHESTRATOR_ID caller) may compact any
+agent; an agent may compact only its **direct children**
+(`target.parent_id == caller_id`); never itself. Violations return an
+error, no side effects.
+
+Semantics by target state:
+- **Running, generic loop:** set a compact-requested flag on the
+  provider; the loop honors it at the next iteration boundary by
+  running `_reduce_context(force=True)`. Result `{"status": "queued"}`.
+- **Running, bridge:** if the Claude Agent SDK input protocol supports
+  a compact control message, inject it; otherwise return
+  `{"status": "unsupported_while_running"}` — do NOT pretend.
+- **Idle (any provider):** compact the persisted conversation store:
+  summarize all but the last 2 turns via the agent's own provider into
+  one summary turn (same Goal/Progress/Decisions/Critical
+  context/Next steps template), archive the original history
+  (existing store archive mechanics), and evict the cached provider
+  instance (bridge session_id dropped) so the next run rebuilds from
+  the compacted store. Result `{"status": "compacted", "turns_before",
+  "turns_after"}`.
+
+Events: every manual compaction emits the existing CONTEXT_COMPACTION
+event with `"manual": true` and `"requested_by": <caller_id>` in data,
+statuses in_progress / completed / hard_truncated as today.
+
+Frontend contract (atn_web): subscribe to `context.compaction` events —
+live "Compacting…" indicator while in_progress, updated compaction chip
+on completed, visually distinct warning on hard_truncated; a "Compact"
+action (owner UI) sends `{"type": "compact_agent", "agent_id": ...}`.
+
 ## Testing (targeted only — never the full suite)
 
 New/updated files: `tests/atn/test_loop_hardening.py` (§1–§6, §8:
