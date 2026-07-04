@@ -570,6 +570,7 @@ class WorldService:
         equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
         equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
         artifact_digest: str = "",
+        manifest_meta: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Apply a single observation to the world.
 
@@ -646,6 +647,11 @@ class WorldService:
                         # stakes on the same node).
                         observation_id=observation.id,
                         artifact_digest=artifact_digest,
+                        # Tool substrate: registration sprouts carry the
+                        # manifest's trust_class/author on the canonical
+                        # event so epoch-close tool mint never depends on
+                        # blob replication (docs/tool_substrate.md).
+                        manifest_meta=dict(manifest_meta or {}),
                     ))
 
             # 3. Equilibrate. The events derived here are NOT persisted
@@ -847,6 +853,10 @@ class WorldService:
                 equilibrate_rounds=equilibrate_rounds,
                 equilibrate_tolerance=equilibrate_tolerance,
                 artifact_digest=digest,
+                manifest_meta={
+                    "trust_class": str(manifest.get("trust_class", "")),
+                    "author": str(manifest.get("author", "")),
+                },
             )
             receipt["manifest_digest"] = digest
             return receipt

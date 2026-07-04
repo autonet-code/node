@@ -67,6 +67,120 @@ logger = logging.getLogger(__name__)
 OUTPUT_DECIMALS = 10
 
 
+def compute_tool_mint(
+    world: World,
+    events: List[Dict[str, Any]],
+    *,
+    receipt_history: Optional[Dict[str, int]] = None,
+    registrations: Optional[Dict[str, Dict[str, str]]] = None,
+    decay_rate: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Tool-author mint from canonical events (docs/tool_substrate.md).
+
+    ``tool_mint(m) = max(0, effective_standing(m)) × log1p(ok_count(m))``
+    per manifest with usage this epoch, attributed to the author carried
+    on the registration sprout's ``manifest_meta`` — consensus data, so
+    a blob-store miss can never fork the close.
+
+    Cross-epoch state comes in as explicit params, both derived purely
+    from prior epochs' canonical events (so bit-identical everywhere):
+    ``receipt_history`` (digest → epochs since last receipt) and
+    ``registrations`` (digest → manifest_meta, accumulated across
+    epochs — a registration in epoch 1 still attributes mint in epoch
+    5). A carried registration wins over a same-digest re-registration
+    event: mint can never be re-attributed. Manifests known to neither
+    mint nothing. Cross-epoch STANDING additionally requires seeding the
+    close from the prior epoch's world (``seed_world``) so the manifest
+    claim node persists; on a fresh-charter close only manifests
+    (re-)sprouted this epoch have standing.
+
+    Returns (all maps key-sorted, pure function of canonical inputs):
+      {
+        "per_digest": {digest: {node_id, author, trust_class, standing,
+                                effective_standing, ok_count, mint}},
+        "node_agent": {node_id: {author: mint}},   # gate-mergeable
+        "receipt_history_next": {digest: epochs_since_last_receipt},
+        "registrations_next": {digest: manifest_meta},
+      }
+    """
+    import math
+
+    from .world_model_substrate.infer import _artifact_standing, _standing_of
+    from .world_model_substrate.tool_standing import (
+        DEFAULT_ATTESTED_DECAY,
+        effective_standing,
+        update_receipt_history,
+    )
+    from .world_model_substrate.tool_usage import tool_usage_from_events
+
+    history = dict(receipt_history or {})
+    rate = DEFAULT_ATTESTED_DECAY if decay_rate is None else float(decay_rate)
+
+    # Registrations: carried-over map first (immutable attribution),
+    # then this epoch's sprouts in canonical author/seq order — a later
+    # re-registration cannot re-attribute an existing digest.
+    known_regs: Dict[str, Dict[str, str]] = dict(registrations or {})
+    reg_events = [
+        e for e in events
+        if e.get("kind") == "sub_claim_sprouted"
+        and e.get("artifact_digest") and e.get("manifest_meta")
+    ]
+    reg_events.sort(key=lambda e: (e.get("author_agent", ""), e.get("seq", 0)))
+    for ev in reg_events:
+        known_regs.setdefault(ev["artifact_digest"], dict(ev["manifest_meta"]))
+
+    usage = tool_usage_from_events(events)
+    by_digest = _artifact_standing(world)
+
+    per_digest: Dict[str, Dict[str, Any]] = {}
+    node_agent: Dict[str, Dict[str, float]] = {}
+    for digest in sorted(set(usage) & set(known_regs)):
+        meta = known_regs[digest]
+        author = str(meta.get("author") or "")
+        if not author:
+            continue
+        nodes = by_digest.get(digest, [])
+        standing = _standing_of(nodes)
+        eff = effective_standing(
+            standing, str(meta.get("trust_class") or ""),
+            history.get(digest, 0), decay_rate=rate,
+        )
+        ok_count = int(usage[digest]["ok_count"])
+        mint = max(0.0, eff) * math.log1p(ok_count)
+        if mint <= 0.0:
+            continue
+        # Anchor the mint on the manifest's claim node so the
+        # violator-pays gate prices it: a won charter CON against the
+        # tool suppresses exactly this share. Deterministic node pick:
+        # lexicographically-first id among the digest's claim nodes.
+        node_id = (sorted({n.id for n in nodes})[0] if nodes
+                   else f"tool:{digest}")
+        per_digest[digest] = {
+            "node_id": node_id,
+            "author": author,
+            "trust_class": str(meta.get("trust_class") or ""),
+            "standing": standing,
+            "effective_standing": eff,
+            "ok_count": ok_count,
+            "mint": mint,
+        }
+        bucket = node_agent.setdefault(node_id, {})
+        bucket[author] = bucket.get(author, 0.0) + mint
+
+    history_next = update_receipt_history(
+        history,
+        used_digests=set(usage),
+        known_digests=set(history) | set(known_regs),
+    )
+    return {
+        "per_digest": dict(sorted(per_digest.items())),
+        "node_agent": {k: dict(sorted(v.items()))
+                       for k, v in sorted(node_agent.items())},
+        "receipt_history_next": history_next,
+        "registrations_next": dict(sorted(known_regs.items())),
+    }
+
+
 def federated_reconcile_epoch(
     world: World,
     snapshots: EpochSnapshots,
@@ -77,6 +191,7 @@ def federated_reconcile_epoch(
     gate_strength: float = 1.0,
     output_decimals: int = OUTPUT_DECIMALS,
     emission_pool: Optional[float] = None,
+    extra_node_agent_mint: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Dict[str, Any]:
     """Run reconcile_epoch deterministically.
 
@@ -142,6 +257,25 @@ def federated_reconcile_epoch(
                 agent_mint[agent] = agent_mint.get(agent, 0.0) + weighted
                 per_agent[agent] = per_agent.get(agent, 0.0) + weighted
             node_agent_mint[node_id] = per_agent
+
+    # Extra per-(node, agent) mint from non-score sources — currently
+    # tool-author mint (compute_tool_mint). Merged BEFORE the gate so a
+    # won charter CON against the anchoring node suppresses it like any
+    # other mint, and before the pool so it competes for the same
+    # emission. Sorted iteration keeps the float-add order canonical.
+    for node_id in sorted((extra_node_agent_mint or {}).keys()):
+        extra = extra_node_agent_mint[node_id]
+        per_agent = node_agent_mint.setdefault(node_id, {})
+        node_total = 0.0
+        for agent in sorted(extra.keys()):
+            amount = float(extra[agent])
+            if amount <= 0.0:
+                continue
+            agent_mint[agent] = agent_mint.get(agent, 0.0) + amount
+            per_agent[agent] = per_agent.get(agent, 0.0) + amount
+            node_total += amount
+        if node_total > 0.0:
+            node_mint[node_id] = node_mint.get(node_id, 0.0) + node_total
 
     # Output normalization: round all per-agent and per-node values
     # to `output_decimals` places. This swamps any IEEE 754 jitter
@@ -251,6 +385,9 @@ def federated_epoch_close(
     equilibrate_tolerance: float = 1e-3,
     emission_pool: Optional[float] = None,
     pricing: str = "ledger",
+    tool_receipt_history: Optional[Dict[str, int]] = None,
+    tool_registrations: Optional[Dict[str, Dict[str, str]]] = None,
+    tool_decay_rate: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -378,13 +515,29 @@ def federated_epoch_close(
 
         snapshots.record_close(world)
 
+    # Tool substrate: author mint ∝ standing × usage, anchored on the
+    # manifest's claim node so the violator-pays gate prices it
+    # (docs/tool_substrate.md). Pure function of the replayed world +
+    # canonical events + explicitly-passed receipt history, so the
+    # bit-identical guarantee holds.
+    tool_result = compute_tool_mint(
+        world, all_events,
+        receipt_history=tool_receipt_history,
+        registrations=tool_registrations,
+        decay_rate=tool_decay_rate,
+    )
+
     result = federated_reconcile_epoch(
         world, snapshots, all_events,
         apply_gate=apply_gate,
         gate_strength=gate_strength,
         output_decimals=output_decimals,
         emission_pool=emission_pool,
+        extra_node_agent_mint=tool_result["node_agent"],
     )
+    result["tool_mint"] = tool_result["per_digest"]
+    result["tool_receipt_history"] = tool_result["receipt_history_next"]
+    result["tool_registrations"] = tool_result["registrations_next"]
     result["epoch_root"] = canonical.epoch_root().hex()
     result["n_batches"] = len(canonical.ordered_batches)
     result["n_events"] = len(all_events)

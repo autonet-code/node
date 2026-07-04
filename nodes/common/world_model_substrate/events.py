@@ -111,6 +111,13 @@ class SubClaimSprouted:
     # when non-empty (below) so replay of old logs — which never carried
     # this field — produces byte-identical event dicts and batch hashes.
     artifact_digest: str = ""
+    # Tool substrate (docs/tool_substrate.md): consensus-carried manifest
+    # metadata on the REGISTRATION sprout ({"trust_class", "author"}).
+    # Epoch-close tool mint must not depend on whether a daemon has the
+    # manifest blob replicated — a blob-store miss must never fork the
+    # close — so the two fields mint needs ride the canonical event.
+    # Same back-compat rule as artifact_digest: omitted when empty.
+    manifest_meta: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -119,6 +126,8 @@ class SubClaimSprouted:
         # (and their canonical-ordering batch hashes stay unchanged).
         if not self.artifact_digest:
             d.pop("artifact_digest", None)
+        if not self.manifest_meta:
+            d.pop("manifest_meta", None)
         return d
 
 
