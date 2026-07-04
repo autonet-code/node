@@ -162,12 +162,25 @@ never in an installation. With the root agent deprecated, the fleet
 tree lives on chain as pure registration data:
 
 - `registerAgent` v2 records (agent, **owner**, **parent**) — owner is
-  the sponsoring human wallet, **cryptographically verified** (a
-  sponsorship signature by the owner wallet over the agent address,
-  recovered on-chain; an unverified owner claim would let sybils mint
-  fake distinct owners and evade the damper). `parent` is optional and
-  must itself be a registered agent with the SAME owner. Registration
-  stays a deliberate, any-time act.
+  the human wallet, **cryptographically verified** via an OWNER BINDING:
+  an EIP-712 signature by the owner wallet over (agent, parent, nonce),
+  recovered on-chain. (Terminology: "binding", never "sponsorship" —
+  that word belongs to the sponsor/dependent inference system.) An
+  unverified owner claim would let sybils mint fake distinct owners and
+  evade the damper. `parent` is optional and must itself be a
+  registered agent with the SAME owner. Registration stays a
+  deliberate, any-time act.
+- **Key-loss recovery = rotation, authorized by the host.** Owner
+  binding is NOT write-once: the agent key (physical daemon custody)
+  can rotate the binding to a NEW owner's signature at any time, with
+  the old owner deliberately not consulted (they may have lost the key;
+  requiring them hands a veto to the thief). The per-agent nonce closes
+  the replay this reopens (a captured old binding can't rotate you
+  back). Mint never needs reassignment: emission accrues to AGENT
+  addresses, whose keys live on the host — a leaked owner wallet
+  exposes its own assets and the identity label, never earned ATN.
+  Fleets migrate agent-by-agent; rotations are public events the
+  indexer (and debate) can see.
 - Chain registrations = *who and whose* (topology + ownership,
   recomputable by anyone, indexer materializes fleet trees). The local
   lineage hash = *what* (birth constitution: prompt/key/parent at
