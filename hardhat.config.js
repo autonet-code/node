@@ -34,7 +34,10 @@ module.exports = {
   },
   paths: {
     sources: "./contracts",
-    tests: "./tests",
+    // JS/Solidity hardhat tests live in ./test. The ./tests directory is the
+    // Python (pytest) suite — pointing hardhat there would make it try to
+    // parse .py files as Mocha specs.
+    tests: "./test",
     cache: "./cache",
     artifacts: "./artifacts",
   },

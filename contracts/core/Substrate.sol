@@ -328,6 +328,68 @@ contract Substrate {
     }
 
     // =========================================================================
+    // Tool registry (tool-substrate v2, docs/tool_substrate.md §On-chain)
+    //
+    // A published tool's manifest is a sha256-addressed blob in the blob
+    // store (NOT an IPFS CID). registerTool anchors AUTHORSHIP on chain:
+    // msg.sender is the agent key, so "who authored this manifest digest"
+    // becomes chain-verified truth. The federated epoch close keeps reading
+    // the gossiped manifest_meta (stays chain-free + deterministic); the
+    // chain is the dispute arbiter — a gossip/chain mismatch is CON-able.
+    //
+    // Chain = truth, blob = storage, indexer mirrors ToolRegistered into
+    // the Firestore `tools` collection for the web2 surface. Exact same
+    // doctrine as agents (AgentRegistered) and services (ServiceRegistered).
+    //
+    // Duplicate policy: REVERT on duplicate manifestDigest. A manifest
+    // digest is content-addressed, so the same digest is byte-identical
+    // content; letting a second agent "register" it would falsely claim
+    // authorship of the first agent's blob. First registrant wins; the
+    // digest → author binding is permanent. (A genuinely new tool has a
+    // different digest, even a one-byte edit, so this never blocks real
+    // authorship — only theft of an existing blob.)
+    // =========================================================================
+
+    /// @dev manifestDigest → author agent address. address(0) = unregistered.
+    mapping(bytes32 => address) public toolAuthor;
+    /// @dev Registration timestamp per digest (0 = unregistered).
+    mapping(bytes32 => uint256) public toolRegisteredAt;
+    /// @dev Per-agent count of tools authored (for cheap directory paging).
+    mapping(address => uint256) public toolCountByAgent;
+
+    event ToolRegistered(
+        address indexed agent,
+        bytes32 indexed manifestDigest,
+        uint256 timestamp
+    );
+
+    error ManifestDigestRequired();
+    error ToolAlreadyRegistered(bytes32 manifestDigest, address author);
+
+    /// @notice Register authorship of a published tool manifest.
+    /// @dev    Callable only by an active registered agent (reuses the
+    ///         agent registry). Reverts on a digest already registered by
+    ///         anyone (content-addressed ⇒ same digest is the same blob).
+    /// @param manifestDigest sha256 of the canonical manifest blob bytes.
+    function registerTool(bytes32 manifestDigest) external {
+        if (!agents[msg.sender].active) revert AgentNotActive();
+        if (manifestDigest == bytes32(0)) revert ManifestDigestRequired();
+        address existing = toolAuthor[manifestDigest];
+        if (existing != address(0)) {
+            revert ToolAlreadyRegistered(manifestDigest, existing);
+        }
+        toolAuthor[manifestDigest] = msg.sender;
+        toolRegisteredAt[manifestDigest] = block.timestamp;
+        toolCountByAgent[msg.sender] += 1;
+        emit ToolRegistered(msg.sender, manifestDigest, block.timestamp);
+    }
+
+    /// @notice True iff a manifest digest has a chain-verified author.
+    function isToolRegistered(bytes32 manifestDigest) external view returns (bool) {
+        return toolAuthor[manifestDigest] != address(0);
+    }
+
+    // =========================================================================
     // Per-epoch training records
     // =========================================================================
 
