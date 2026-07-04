@@ -123,8 +123,8 @@ class FederatedCloseDriver:
             self._load_tool_registrations()
         )
         # Owner-rooted damper exclusion (spec: Owner-rooted registration):
-        # agent id -> owner wallet, sourced from chain sponsorship data
-        # (AgentSponsored events / getAgentOwner). Every daemon reading
+        # agent id -> owner wallet, sourced from chain owner-binding data
+        # (OwnerBound events / getAgentOwner). Every daemon reading
         # the same anchored chain state derives the same map, so the
         # bit-identical close guarantee holds. Empty until the chain
         # sourcing is wired (registerAgent v2 deploy) — the wire-level

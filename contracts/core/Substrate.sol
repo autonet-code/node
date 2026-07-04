@@ -63,7 +63,7 @@ contract Substrate is EIP712 {
     using ECDSA for bytes32;
 
     /// @dev EIP712 domain: name + version. The domain separator folds in
-    ///      chainId + this contract's address, so a sponsorship signature is
+    ///      chainId + this contract's address, so an owner-binding signature is
     ///      bound to THIS Substrate deployment on THIS chain — it cannot be
     ///      replayed against another Substrate instance or a fork.
     constructor() EIP712("AutonetSubstrate", "1") {}
@@ -344,7 +344,7 @@ contract Substrate is EIP712 {
     //
     // The AGENT is the only web3 entity; fleets root in a human WALLET (the
     // "owner"), never in an installation. The chain records *who and whose*:
-    // (agent → owner) attributes an agent to a sponsoring wallet, and
+    // (agent → owner) attributes an agent to an owner wallet, and
     // (agent → parent) records fleet topology. This is pure registration
     // data — recomputable by anyone, materialized off-chain into fleet trees.
     //
@@ -353,91 +353,131 @@ contract Substrate is EIP712 {
     // owner were a self-declared field, a sybil operator could register many
     // agents each claiming a DIFFERENT fabricated owner wallet and thereby
     // evade the same-owner exclusion. So `owner` is proven: the owner wallet
-    // must have signed an EIP-712 Sponsorship over (agent, parent). The agent
+    // must have signed an EIP-712 OwnerBinding over (agent, parent). The agent
     // key (msg.sender) countersigns implicitly by being the transaction sender.
     // Two independent keys must agree, exactly as intended: the human vouches
     // for the agent, the agent submits.
     //
-    // REPLAY SAFETY. The Sponsorship struct binds {agent, parent}; the EIP712
-    // domain separator binds {chainId, this contract}. Together these make a
-    // signature usable ONLY to attach THIS agent to THIS owner (the recovered
-    // signer) with THIS parent, on THIS deployment. No nonce is included, and
-    // deliberately so:
-    //   - owner is write-once (immutable after first set — see below), so a
-    //     captured signature can never RE-attribute an already-owned agent;
-    //     the second attach reverts regardless of signature validity.
-    //   - the signature does not authorize value movement or any repeatable
-    //     effect — its only effect is the one-time (agent→owner) binding.
-    //   - `agent` is msg.sender, so a stolen signature can't be redirected to
-    //     a different agent (the tx sender must equal the signed agent).
-    // A nonce would guard against re-attaching a DIFFERENT owner later, but
-    // owner-immutability already forecloses that. Documented as an explicit
-    // design resolution.
+    // OWNER BINDING IS AGENT-AUTHORIZED ROTATION, NOT WRITE-ONCE. The physical
+    // host that holds the agent keys (msg.sender) is the root of trust. It can
+    // (re)bind the fleet to any wallet that signs a fresh OwnerBinding. This
+    // exists for KEY-LOSS RECOVERY: a human who leaks their owner-wallet key
+    // recovers by re-binding every agent, from the daemon host, to a new
+    // wallet. Crucially the OLD owner's signature is NOT required to rotate —
+    // requiring it would hand a veto to the thief who stole the key. Custody of
+    // the agent keys, not possession of the old owner key, authorizes rotation.
+    //
+    // REPLAY SAFETY. The OwnerBinding struct binds {agent, parent, nonce}; the
+    // EIP712 domain separator binds {chainId, this contract}. Together these
+    // make a signature usable ONLY to bind THIS agent to THIS owner (the
+    // recovered signer) with THIS parent, at THIS binding nonce, on THIS
+    // deployment.
+    //
+    // The nonce is NOW MANDATORY — the old "no nonce needed" argument is dead.
+    // That argument leaned entirely on owner being write-once: once set, a
+    // captured signature couldn't re-attribute the agent because the second
+    // bind reverted. Dropping write-once to enable recovery resurrects
+    // exactly that replay: a captured OLD owner-binding signature (e.g. the one
+    // that first bound the now-leaked owner) could otherwise be replayed to
+    // rotate the fleet BACK to the leaked wallet, undoing the recovery. The
+    // per-agent `bindingNonce` closes this: it increments on every
+    // successful bind/rotate, so every historical signature was signed against
+    // a nonce that is now stale and no longer recovers to an accepted binding.
+    // A fresh rotation requires the new owner to sign the CURRENT nonce, which
+    // only a cooperating (new) owner can produce. `agent` is still msg.sender,
+    // so a stolen signature can't be redirected to a different agent either.
     // =========================================================================
 
-    /// @dev agent → sponsoring owner wallet (address(0) = ownerless, the
-    ///      legacy registerAgent path). Write-once: immutable once non-zero.
+    /// @dev agent → owner wallet (address(0) = ownerless, the legacy
+    ///      registerAgent path). Rotatable by the agent (custody of the
+    ///      agent key authorizes re-binding to any wallet that signs).
     mapping(address => address) public agentOwner;
     /// @dev agent → parent agent in the fleet tree (address(0) = top-level).
     mapping(address => address) public agentParent;
+    /// @dev agent → current binding nonce. Incremented on every successful
+    ///      bind/rotate; the value a fresh OwnerBinding signature must target.
+    mapping(address => uint256) public bindingNonce;
 
-    /// @dev EIP-712 typehash for the owner's sponsorship signature.
-    bytes32 private constant SPONSORSHIP_TYPEHASH =
-        keccak256("Sponsorship(address agent,address parent)");
+    /// @dev EIP-712 typehash for the owner's owner-binding signature.
+    bytes32 private constant OWNER_BINDING_TYPEHASH =
+        keccak256("OwnerBinding(address agent,address parent,uint256 nonce)");
 
-    event AgentSponsored(
+    /// @dev Emitted on every bind AND every rotation. `prevOwner` is the owner
+    ///      immediately before this binding (address(0) on first bind), so the
+    ///      indexer reconstructs the full ownership history — including the
+    ///      leaked→recovered transition — from the event stream alone. Chosen
+    ///      over a separate AgentOwnerRotated event: one event type, one
+    ///      subscription, and first-bind is just the prevOwner==0 case, so the
+    ///      indexer needs no special-casing to fold rotations into fleet trees.
+    event OwnerBound(
         address indexed agent,
         address indexed owner,
-        address indexed parent
+        address indexed parent,
+        address prevOwner,
+        uint256 nonce
     );
 
     error OwnerRequired();
-    error OwnerAlreadySet();
-    error BadSponsorshipSignature();
+    error BadOwnerBindingSignature();
     error ParentNotRegistered();
     error ParentOwnerMismatch();
 
-    /// @notice EIP-712 digest the owner wallet signs to sponsor an agent.
-    ///         Exposed for off-chain signers and tests.
-    /// @param agent  The agent address being sponsored (must equal msg.sender
-    ///               at registration time).
+    /// @notice EIP-712 digest the owner wallet signs to bind an agent.
+    ///         Exposed for off-chain signers and tests. Bind the CURRENT
+    ///         `bindingNonce(agent)` — a signature at a stale nonce will
+    ///         not recover to an accepted binding.
+    /// @param agent  The agent address being bound (must equal msg.sender
+    ///               at binding time).
     /// @param parent The parent agent (address(0) for a top-level agent).
-    function sponsorshipHash(address agent, address parent)
+    /// @param nonce  The agent's binding nonce this signature is valid at.
+    function bindingHash(address agent, address parent, uint256 nonce)
         public
         view
         returns (bytes32)
     {
         return _hashTypedDataV4(
-            keccak256(abi.encode(SPONSORSHIP_TYPEHASH, agent, parent))
+            keccak256(abi.encode(OWNER_BINDING_TYPEHASH, agent, parent, nonce))
         );
     }
 
-    /// @dev Verify the owner's sponsorship signature and the parent/owner
+    /// @dev Verify the (new) owner's owner-binding signature and the parent/owner
     ///      constraints, then bind (msg.sender → owner, parent). Shared by the
-    ///      fresh-registration and retrofit paths. Caller must have already
-    ///      ensured the agent is registered and owner is currently unset.
-    function _attachOwner(
+    ///      fresh-registration, retrofit, and rotation paths. Consumes the
+    ///      agent's current binding nonce (the signature must target it) and
+    ///      increments it, so no signature is ever accepted twice. Caller must
+    ///      have already ensured the agent is registered.
+    function _bindOwner(
         address owner,
         address parentAgent,
         bytes calldata ownerSig
     ) private {
         if (owner == address(0)) revert OwnerRequired();
 
-        // Recover the owner's EIP-712 signature over (this agent, parent).
-        bytes32 digestHash = sponsorshipHash(msg.sender, parentAgent);
+        // Recover the (new) owner's EIP-712 signature over
+        // (this agent, parent, current-nonce). Binding the current nonce is
+        // what makes a captured historical signature un-replayable: after any
+        // successful bind the nonce has moved on, so old signatures recover to
+        // a stale binding the contract no longer accepts.
+        uint256 nonce = bindingNonce[msg.sender];
+        bytes32 digestHash = bindingHash(msg.sender, parentAgent, nonce);
         address signer = digestHash.recover(ownerSig);
-        if (signer != owner) revert BadSponsorshipSignature();
+        if (signer != owner) revert BadOwnerBindingSignature();
 
-        // Parent (if any) must be a registered agent under the SAME owner —
-        // the same-fleet constraint. A top-level agent passes parent = 0.
+        // Parent (if any) must be a registered agent under the SAME (new) owner
+        // — the same-fleet constraint. A top-level agent passes parent = 0.
+        // On rotation this is evaluated against the NEW owner: a fleet migrates
+        // agent by agent, so a child rotated before its parent may temporarily
+        // need parent = 0 (or a parent already rotated to the new owner).
         if (parentAgent != address(0)) {
             if (agents[parentAgent].registeredAt == 0) revert ParentNotRegistered();
             if (agentOwner[parentAgent] != owner) revert ParentOwnerMismatch();
         }
 
+        address prevOwner = agentOwner[msg.sender];
         agentOwner[msg.sender] = owner;
         agentParent[msg.sender] = parentAgent;
-        emit AgentSponsored(msg.sender, owner, parentAgent);
+        bindingNonce[msg.sender] = nonce + 1;
+        emit OwnerBound(msg.sender, owner, parentAgent, prevOwner, nonce);
     }
 
     /// @notice Register the caller as a substrate agent WITH a verified owner
@@ -445,15 +485,17 @@ contract Substrate is EIP712 {
     ///         to registerAgent, plus the owner/parent attribution.
     /// @param lineageHash  Caller-supplied identity hash (see registerAgent).
     /// @param peerId       libp2p PeerId bytes (see registerAgent).
-    /// @param owner        The sponsoring human wallet. Must have signed the
-    ///                     Sponsorship — verified on-chain, never trusted as a
+    /// @param owner        The owner human wallet. Must have signed the
+    ///                     OwnerBinding — verified on-chain, never trusted as a
     ///                     bare claim.
     /// @param parentAgent  Optional parent agent (address(0) = top-level).
     ///                     If set, must be a registered agent whose owner is
     ///                     the same `owner` (same-fleet constraint).
     /// @param ownerSig     EIP-712 signature by `owner` over
-    ///                     Sponsorship{agent: msg.sender, parent: parentAgent}.
-    function registerAgentSponsored(
+    ///                     OwnerBinding{agent: msg.sender, parent: parentAgent,
+    ///                     nonce: bindingNonce[msg.sender]} (0 for a fresh
+    ///                     agent).
+    function registerAgentBound(
         bytes32 lineageHash,
         bytes calldata peerId,
         address owner,
@@ -478,28 +520,55 @@ contract Substrate is EIP712 {
 
         emit AgentRegistered(msg.sender, lineageHash, peerId, block.timestamp);
 
-        // Owner is definitionally unset for a fresh registration, so the
-        // shared attach path runs its verification and binding.
-        _attachOwner(owner, parentAgent, ownerSig);
+        // Fresh registration: nonce is 0, owner unset. The shared bind path
+        // runs verification and the (agent→owner) binding.
+        _bindOwner(owner, parentAgent, ownerSig);
     }
 
-    /// @notice Retrofit owner + parent onto an ALREADY-registered (ownerless)
-    ///         agent — the legacy-agent migration path. Callable once per
-    ///         agent: owner is immutable after set, so re-attribution of a
-    ///         fleet is not a thing. Same verification as the fresh path.
-    /// @dev    msg.sender is the agent. It must already be registered and have
-    ///         no owner yet.
+    /// @notice Attach owner + parent onto an ALREADY-registered agent — the
+    ///         legacy-agent migration path (first bind) AND the recovery
+    ///         rotation path (re-bind). Thin alias for rotateOwner: first
+    ///         attach is simply a rotation from address(0). Retained as an
+    ///         additive external API for callers that think in "attach" terms.
+    /// @dev    msg.sender is the agent; it must already be registered. Whether
+    ///         owner is currently set or not, the (new) owner's signature at
+    ///         the current nonce authorizes the binding.
     function attachOwner(
         address owner,
         address parentAgent,
         bytes calldata ownerSig
     ) external {
         if (agents[msg.sender].registeredAt == 0) revert AgentNotActive();
-        if (agentOwner[msg.sender] != address(0)) revert OwnerAlreadySet();
-        _attachOwner(owner, parentAgent, ownerSig);
+        _bindOwner(owner, parentAgent, ownerSig);
     }
 
-    /// @notice Read an agent's sponsoring owner wallet (address(0) = unset).
+    /// @notice Rotate (or first-set) the owner+parent of the calling agent to
+    ///         `newOwner`. Authorized by CUSTODY of the agent key (msg.sender)
+    ///         plus the NEW owner's EIP-712 signature at the current nonce. The
+    ///         OLD owner does NOT participate — this is the key-loss recovery
+    ///         path, so requiring the (possibly leaked) old key would defeat
+    ///         the purpose. First bind is the address(0)→newOwner case.
+    ///
+    ///         Per-agent rotation: children keep their own bindings. To migrate
+    ///         a fleet after a key leak, rotate each agent; because a child's
+    ///         parent must share the child's new owner, rotate parents before
+    ///         children (or pass parent = 0 and re-parent afterward).
+    /// @param newOwner   The new owner wallet (must sign; != address(0)).
+    /// @param newParent  Parent under newOwner (registered & owned by newOwner)
+    ///                    or address(0) for top-level.
+    /// @param newOwnerSig EIP-712 signature by newOwner over
+    ///                    OwnerBinding{agent: msg.sender, parent: newParent,
+    ///                    nonce: bindingNonce[msg.sender]}.
+    function rotateOwner(
+        address newOwner,
+        address newParent,
+        bytes calldata newOwnerSig
+    ) external {
+        if (agents[msg.sender].registeredAt == 0) revert AgentNotActive();
+        _bindOwner(newOwner, newParent, newOwnerSig);
+    }
+
+    /// @notice Read an agent's owner wallet (address(0) = unset).
     function getAgentOwner(address agent) external view returns (address) {
         return agentOwner[agent];
     }
