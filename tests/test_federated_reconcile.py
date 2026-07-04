@@ -101,6 +101,67 @@ def _make_chain(
 
 
 # ---------------------------------------------------------------------------
+# Tool-rail fixtures (one earning rail: agent_mint = tool mint only)
+# ---------------------------------------------------------------------------
+
+
+def _tool_coords(embed_idx: int = 3) -> list:
+    out = [0.0] * (6 + 1024)
+    out[4] = 0.8               # correctness head
+    out[6 + embed_idx] = 0.5   # distinct embedding-tail position per tool
+    return out
+
+
+def _tool_registration(author: str, digest: str,
+                       embed_idx: int = 3) -> Dict[str, Any]:
+    return {
+        "kind": "sub_claim_sprouted",
+        "seq": 1,
+        "author_agent": author,
+        "tendency_id": "correctness",
+        "parent_id": "solver_root",
+        "node_id": f"tm_{digest[:12]}",
+        "position": "pro",
+        "coords": _tool_coords(embed_idx),
+        "polarity_axis": _tool_coords(embed_idx),
+        "content": f"tool by {author}",
+        "author_post": True,
+        "artifact_digest": digest,
+        "manifest_meta": {"trust_class": "pinned", "author": author},
+    }
+
+
+def _tool_attestation(caller: str, digest: str, seq: int = 1) -> Dict[str, Any]:
+    return {
+        "kind": "tool_used",
+        "seq": seq,
+        "author_agent": caller,
+        "manifest_digest": digest,
+        "tool_author": "",
+        "receipt_digest": f"{caller}_{seq}_" + "r" * 32,
+        "ok": True,
+        "fee_atn": 0.0,
+        "attested": True,
+        "score": 0.8,
+    }
+
+
+def _append_batch(chain: List[EventBatch], rpb: str, kp: Keypair,
+                  events: List[Dict[str, Any]]) -> List[EventBatch]:
+    """Extend a sender's hash-linked chain with one more batch."""
+    prev_hash = chain[-1].content_hash() if chain else b""
+    b = EventBatch(
+        rpb_address=rpb,
+        sender_pubkey=kp.public_key,
+        batch_seq=len(chain) + 1,
+        events=events,
+        prev_batch_hash=prev_hash,
+        timestamp=1_700_000_100.0 + len(chain),
+    )
+    return chain + [b]
+
+
+# ---------------------------------------------------------------------------
 # Bit-identical determinism
 # ---------------------------------------------------------------------------
 
@@ -120,6 +181,19 @@ def test_three_daemons_produce_byte_identical_maps():
     chain_b = _make_chain(rpb, kp_bob, [
         {"charter": (0.0, 0.6, 0.0, 0.0), "embed_idx": 3, "label": "b1"},
     ], agent_id="bob")
+
+    # One earning rail: each agent registers a tool; the OTHER agent
+    # attests it (cross-sender, so the wire-level co-hosting dedup
+    # doesn't fire and both authors mint).
+    dig_a, dig_b = "aa" * 32, "bb" * 32
+    chain_a = _append_batch(chain_a, rpb, kp_alice, [
+        _tool_registration("alice", dig_a, embed_idx=100),
+        _tool_attestation("alice", dig_b, seq=2),
+    ])
+    chain_b = _append_batch(chain_b, rpb, kp_bob, [
+        _tool_registration("bob", dig_b, embed_idx=200),
+        _tool_attestation("bob", dig_a, seq=2),
+    ])
 
     rng = random.Random(7)
     arrivals = [list(chain_a + chain_b) for _ in range(3)]
@@ -154,7 +228,7 @@ def test_three_daemons_produce_byte_identical_maps():
     # surface; the chain anchor doesn't commit it.
     # (We don't assert anything about node_mint here.)
 
-    # Both agents minted something positive.
+    # Both tool authors minted something positive (the only rail).
     assert results[0]["agent_mint"].get("alice", 0) > 0
     assert results[0]["agent_mint"].get("bob", 0) > 0
 
@@ -207,19 +281,35 @@ def test_malformed_sender_contributes_zero_others_unaffected():
     rpb = "rpb_fed_c"
     kp_honest = Keypair.generate()
     kp_bad = Keypair.generate()
+    kp_carol = Keypair.generate()
+    dig_h, dig_e = "cc" * 32, "dd" * 32
     honest_chain = _make_chain(rpb, kp_honest, [
         {"charter": (0.6, 0.0, 0.0, 0.0), "embed_idx": 5, "label": "h1"},
         {"charter": (0.0, 0.0, 0.6, 0.0), "embed_idx": 6, "label": "h2"},
     ], agent_id="honest_alice")
+    honest_chain = _append_batch(honest_chain, rpb, kp_honest,
+                                 [_tool_registration("honest_alice", dig_h)])
     bad_chain = _make_chain(rpb, kp_bad, [
         {"charter": (0.0, 0.6, 0.0, 0.0), "embed_idx": 7, "label": "x1"},
         {"charter": (0.0, 0.0, 0.0, 0.6), "embed_idx": 8, "label": "x2"},
         {"charter": (0.0, 0.6, 0.6, 0.0), "embed_idx": 9, "label": "x3"},
     ], agent_id="malformed_eve")
+    bad_chain = _append_batch(bad_chain, rpb, kp_bad,
+                              [_tool_registration("malformed_eve", dig_e)])
+    # Carol (a surviving third sender) attests alice's tool — so alice
+    # mints — and eve's tool, whose registration DROPS with eve's chain,
+    # so those receipts attribute to nothing.
+    carol_chain = _make_chain(rpb, kp_carol, [
+        {"charter": (0.0, 0.0, 0.6, 0.0), "embed_idx": 12, "label": "c1"},
+    ], agent_id="carol")
+    carol_chain = _append_batch(carol_chain, rpb, kp_carol, [
+        _tool_attestation("carol", dig_h, seq=2),
+        _tool_attestation("carol", dig_e, seq=3),
+    ])
     # Drop the middle batch from bad — gap.
     bad_with_gap = [bad_chain[0], bad_chain[2]]
 
-    full = honest_chain + bad_with_gap
+    full = honest_chain + bad_with_gap + carol_chain
     rng = random.Random(99)
     deliveries = [list(full) for _ in range(3)]
     for d in deliveries:

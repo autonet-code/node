@@ -239,6 +239,19 @@ def federated_reconcile_epoch(
     Returns the same shape as ``reconcile_epoch`` plus:
       - ``output_decimals``: the rounding precision used.
       - ``gate_applied``: whether the mint gate ran.
+
+    ONE EARNING RAIL (ratified 2026-07-04, late): score-movement mint
+    is RETIRED. Usage of a tool is a choice — attested usage is the
+    usefulness signal the economics run on, and text-claim score
+    movement double-counted the same "did it land" question with
+    weaker ground truth (phase8). ``agent_mint`` therefore consists
+    solely of ``extra_node_agent_mint`` (tool-author mint from
+    compute_tool_mint), gate-scaled and pool-normalized. The score/
+    standing machinery is fully retained — standing PRICES tool mint
+    and the gate reads charter debates — it just no longer pays for
+    prose. Work units remain data-plane retrieval artifacts (that
+    value was validated); they earn nothing directly. ``node_mint`` /
+    ``agent_novelty`` remain computed as diagnostics.
     """
     agent_weights = dict(agent_weights or {})
 
@@ -264,11 +277,13 @@ def federated_reconcile_epoch(
 
     for node_id in sorted_node_ids:
         nov = _node_novelty(node_id, snapshots)
-        mint = _node_mint(node_id, snapshots, world=world)
+        score_mint = _node_mint(node_id, snapshots, world=world)
         if nov > 0:
             node_novelty[node_id] = nov
-        if mint > 0:
-            node_mint[node_id] = mint
+        if score_mint > 0:
+            # DIAGNOSTIC ONLY (one earning rail): per-node score
+            # movement is reported but never enters agent_mint.
+            node_mint[node_id] = score_mint
 
         # Attribute novelty proportionally over agents whose events
         # landed under this node. Sort the attribution dict so the
@@ -278,22 +293,13 @@ def federated_reconcile_epoch(
             share = attribution[agent]
             agent_novelty[agent] = agent_novelty.get(agent, 0.0) + nov * share
 
-        if mint > 0:
-            mint_attribution = _attribute_node_mint(node_id, mint, events, world)
-            per_agent: Dict[str, float] = {}
-            for agent in sorted(mint_attribution.keys()):
-                amount = mint_attribution[agent]
-                weight = agent_weights.get(agent, 1.0)
-                weighted = amount * weight
-                agent_mint[agent] = agent_mint.get(agent, 0.0) + weighted
-                per_agent[agent] = per_agent.get(agent, 0.0) + weighted
-            node_agent_mint[node_id] = per_agent
-
-    # Extra per-(node, agent) mint from non-score sources — currently
-    # tool-author mint (compute_tool_mint). Merged BEFORE the gate so a
-    # won charter CON against the anchoring node suppresses it like any
-    # other mint, and before the pool so it competes for the same
-    # emission. Sorted iteration keeps the float-add order canonical.
+    # The ONLY earning rail: tool-author mint (compute_tool_mint),
+    # anchored per manifest claim node. Merged BEFORE the gate so a won
+    # charter CON against the anchoring node suppresses it like any
+    # other mint, and before the pool so pool normalization applies.
+    # ``agent_weights`` (stake-style weighting) applies here as it did
+    # to the retired score rail. Sorted iteration keeps the float-add
+    # order canonical.
     for node_id in sorted((extra_node_agent_mint or {}).keys()):
         extra = extra_node_agent_mint[node_id]
         per_agent = node_agent_mint.setdefault(node_id, {})
@@ -302,9 +308,10 @@ def federated_reconcile_epoch(
             amount = float(extra[agent])
             if amount <= 0.0:
                 continue
-            agent_mint[agent] = agent_mint.get(agent, 0.0) + amount
-            per_agent[agent] = per_agent.get(agent, 0.0) + amount
-            node_total += amount
+            weighted = amount * agent_weights.get(agent, 1.0)
+            agent_mint[agent] = agent_mint.get(agent, 0.0) + weighted
+            per_agent[agent] = per_agent.get(agent, 0.0) + weighted
+            node_total += weighted
         if node_total > 0.0:
             node_mint[node_id] = node_mint.get(node_id, 0.0) + node_total
 
