@@ -1042,6 +1042,75 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": {"digest": digest, "enabled": enabled}}
 
+        # ---- Services market (docs/services_market.md) --------------------
+        # Provider-side rail: publish a monetizable remote API and serve
+        # its requests. register/retire are OWNER surface (selling a tool is
+        # the owner's call — same doctrine as tool grants). service_request
+        # is the PROVIDER-side entry: a paid client's work item, dispatched
+        # to the backing local tool. Payment/voucher validation is the
+        # contracts workstream's job — see _validate_service_payment.
+        if msg_type == "register_service":
+            name = msg.get("name", "")
+            description = msg.get("description", "")
+            input_schema = msg.get("input_schema") or {}
+            ask = msg.get("ask") or {}
+            author = msg.get("agent_id") or "user"
+            backing_tool = msg.get("backing_tool", "")
+            if not name:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'name' field"}
+            try:
+                result = self.runtime.service_store.register(
+                    name=name,
+                    description=description,
+                    input_schema=input_schema,
+                    author=author,
+                    ask=ask,
+                    backing_tool=backing_tool,
+                    output_schema=msg.get("output_schema"),
+                    endpoint_hint=msg.get("endpoint_hint", ""),
+                    version_of=msg.get("version_of"),
+                )
+            except (ValueError, RuntimeError) as exc:
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"digest": result["digest"],
+                               "spec": result["spec"]}}
+
+        if msg_type == "list_services":
+            include_retired = bool(msg.get("include_retired", False))
+            services = []
+            for record in self.runtime.service_store.list(
+                    include_retired=include_retired):
+                s = record.spec
+                services.append({
+                    "digest": record.digest,
+                    "name": record.name,
+                    "description": s.get("description", ""),
+                    "author": record.author,
+                    "ask": record.ask,
+                    "endpoint_hint": s.get("endpoint_hint", ""),
+                    "backing_tool": record.backing_tool,
+                    "retired": record.retired,
+                    "version_of": s.get("version_of"),
+                    "input_schema": s.get("input_schema", {}),
+                })
+            summary = self.runtime.service_store.summary()
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"services": services, "summary": summary}}
+
+        if msg_type == "retire_service":
+            digest = msg.get("digest", "")
+            if not digest:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'digest' field"}
+            if not self.runtime.service_store.retire(digest):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Unknown service digest: {digest[:16]}"}
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"digest": digest, "retired": True}}
+
+        if msg_type == "service_request":
+            return await self._handle_service_request(msg, msg_id)
+
         # Voice service control
         if msg_type == "voice_start":
             result = await self.runtime.start_voice()
@@ -1999,6 +2068,92 @@ class WebSocketBridge:
             return getattr(host, "peer_id", "") or ""
         except Exception:
             return ""
+
+    async def _handle_service_request(
+        self, msg: dict[str, Any], msg_id: Any
+    ) -> dict[str, Any]:
+        """Provider-side service entry (docs/services_market.md §3).
+
+        Wire frame: {spec_digest, request_id, args} → look up spec →
+        validate payment (seam) → dispatch to the backing local tool →
+        record the request in the provider's log → return the result.
+
+        The backing implementation of a v1 service is a registered tool
+        the OWNER chose to sell, so dispatch goes through
+        ``runtime.tool_store.call`` with ``caller_id=None`` — the sale is
+        the owner's sanction, not a lineage-scoped agent call.
+        """
+        spec_digest = msg.get("spec_digest", "")
+        request_id = msg.get("request_id", "")
+        args = msg.get("args") or {}
+        client = msg.get("client", "") or msg.get("client_address", "")
+        if not spec_digest or not request_id:
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "Missing 'spec_digest' or 'request_id' field"}
+
+        record = self.runtime.service_store.get(spec_digest)
+        if record is None:
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"Unknown service digest: {spec_digest[:16]}"}
+        if record.retired:
+            return {"msg_id": msg_id, "ok": False, "error": "Service retired"}
+
+        ask = record.ask
+        token = str(ask.get("token", ""))
+        amount = str(ask.get("amount", ""))
+
+        # Payment/voucher validation seam (contracts workstream owns it).
+        if not self._validate_service_payment(msg, record):
+            self.runtime.service_store.record_request(
+                spec_digest, request_id, client, ok=False,
+                amount=amount, token=token)
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "Payment validation failed"}
+
+        backing = record.backing_tool
+        if not backing:
+            self.runtime.service_store.record_request(
+                spec_digest, request_id, client, ok=False,
+                amount=amount, token=token)
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "Service has no backing implementation"}
+
+        tool_record = self.runtime.tool_store.get(backing)
+        if tool_record is None:
+            tool_record = self.runtime.tool_store.resolve(backing)
+        if tool_record is None:
+            self.runtime.service_store.record_request(
+                spec_digest, request_id, client, ok=False,
+                amount=amount, token=token)
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"Backing tool {backing[:16]} not found"}
+
+        # Owner-sanctioned dispatch: selling a tool IS the owner's choice.
+        result = await self.runtime.tool_store.call(
+            tool_record, args, caller_id=None)
+        ok = "error" not in result
+        self.runtime.service_store.record_request(
+            spec_digest, request_id, client, ok=ok,
+            amount=amount, token=token)
+        if not ok:
+            return {"msg_id": msg_id, "ok": False,
+                    "result": {"request_id": request_id, **result}}
+        return {"msg_id": msg_id, "ok": True,
+                "result": {"request_id": request_id, **result}}
+
+    def _validate_service_payment(
+        self, request: dict[str, Any], record: Any
+    ) -> bool:
+        """Seam for service payment/voucher validation.
+
+        TODO(contracts): implement per docs/services_market.md §2 —
+        v1 escrow-per-request (verify a released deposit for
+        (token, amount, requestId)) or v1.5 payment channel (verify a
+        signed cumulative voucher). The contracts workstream owns
+        ServiceEscrow/channel settlement; until then this returns True so
+        the provider dispatch path is exercisable end-to-end.
+        """
+        return True
 
     async def _handle_register_on_chain(
         self,

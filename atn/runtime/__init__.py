@@ -370,6 +370,12 @@ class Runtime:
         from ..tool_store import ToolStore
         self.tool_store = ToolStore(self, self._config.data_dir / "tools")
 
+        # Published services (services market — docs/services_market.md).
+        # Provider-side registry of monetizable remote APIs. A v1 service
+        # is a local tool the OWNER chose to sell; dispatch rides tool_store.
+        from ..service_store import ServiceStore
+        self.service_store = ServiceStore(self, self._config.data_dir / "services")
+
         # Tool registry
         from ..tool_registry import ToolRegistry
         self.tool_registry = ToolRegistry(self)
