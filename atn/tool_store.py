@@ -85,11 +85,15 @@ class ToolStore:
         self._records: dict[str, ToolRecord] = {}
         self._blobs: Any = None  # lazy; None until substrate package needed
         self._receipt_seq = 0
-        # Optional consensus sink: when the autonet WorldService is up,
-        # this is wired to submit ToolUsed events onto the substrate
-        # event rail (gossip + epoch buffer). Receipts are ALWAYS
-        # recorded locally; the sink is best-effort federation.
+        # Optional consensus sinks: when the autonet WorldService is up,
+        # event_sink submits ToolUsed events onto the substrate event
+        # rail (gossip + epoch buffer) and manifest_sink registers the
+        # manifest on the verdict layer (submit_tool_manifest). Local
+        # state is ALWAYS recorded first; sinks are best-effort
+        # federation — and idempotent, so backfill on late wiring is
+        # safe (manifest claims are content-addressed by digest).
         self.event_sink: Any = None
+        self.manifest_sink: Any = None
         self._load()
         self._receipt_seq = self._count_receipts()
 
@@ -167,7 +171,30 @@ class ToolStore:
         log.info("registered tool %r (%s, %s) by %s -> %s",
                  name, trust_class, "code" if code_digest else
                  (connector_id or endpoint), author, digest[:16])
+        if self.manifest_sink is not None:
+            try:
+                self.manifest_sink(manifest, author)
+            except Exception as exc:
+                log.warning("manifest sink failed for %s: %s", name, exc)
         return {"digest": digest, "manifest": manifest}
+
+    def push_all_manifests(self) -> int:
+        """Re-submit every registered manifest through manifest_sink.
+
+        Called when the substrate comes up after tools were registered
+        offline. Idempotent on the world side (content-addressed claim
+        node per digest). Returns the number pushed."""
+        if self.manifest_sink is None:
+            return 0
+        pushed = 0
+        for record in self._records.values():
+            try:
+                self.manifest_sink(record.manifest, record.author)
+                pushed += 1
+            except Exception as exc:
+                log.warning("manifest backfill failed for %s: %s",
+                            record.name, exc)
+        return pushed
 
     # ------------------------------------------------------------------
     # Scoping

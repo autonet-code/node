@@ -943,7 +943,16 @@ class AutonetBridge:
             def _sink(event: dict, _ws=world_service) -> None:
                 _ws.submit_events([event], equilibrate_after=False)
             tool_store.event_sink = _sink
-            log.info("ToolStore receipts wired into WorldService event rail")
+
+            def _manifest_sink(manifest: dict, author: str, _ws=world_service) -> None:
+                _ws.submit_tool_manifest(manifest, agent_id=author)
+            tool_store.manifest_sink = _manifest_sink
+            # Tools registered while the substrate was down get their
+            # verdict-layer claims now (content-addressed, so re-pushes
+            # dedup instead of double-sprouting).
+            pushed = tool_store.push_all_manifests()
+            log.info("ToolStore wired into WorldService rails "
+                     "(%d manifests backfilled)", pushed)
 
     def _wire_substrate_identity_resolver(self) -> None:
         """Pass an identity resolver to the substrate feed so each

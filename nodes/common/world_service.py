@@ -797,6 +797,60 @@ class WorldService:
                 "root_scores_after": scores_after,
             }
 
+    def submit_tool_manifest(
+        self,
+        manifest: Dict[str, Any],
+        *,
+        agent_id: str = "default",
+        embedder: Optional[Any] = None,
+        equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
+        equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
+    ) -> Dict[str, Any]:
+        """Register a tool manifest on the substrate (docs/tool_substrate.md).
+
+        Same two-plane split as work units: the full manifest is the
+        data-plane artifact (blob store + ArtifactIndex); the verdict
+        plane gets one PRO claim node tagged with the manifest digest,
+        which subsequent debate (``submit_con``, failing-invocation
+        evidence) prices. The observation id is content-addressed from
+        the digest, so re-submitting the same manifest dedups instead
+        of double-sprouting.
+        """
+        from .world_model_substrate.tool_manifest import (
+            manifest_embedding_text,
+            validate_manifest,
+        )
+        from .world_model_substrate.usefulness_coords import (
+            default_usefulness_embedder,
+        )
+
+        errors = validate_manifest(manifest)
+        if errors:
+            return {"error": "invalid tool manifest: " + "; ".join(errors)}
+
+        if embedder is None:
+            embedder = default_usefulness_embedder(dim=self.embedding_dim)
+
+        with self._lock:
+            digest = self._artifact_index.add_artifact(manifest)
+            claim = (f"tool {manifest['name']}: "
+                     f"{manifest['description']}")[:200]
+            coords = self.coords_for_text(
+                manifest_embedding_text(manifest), embedder=embedder,
+            )
+            obs = Observation(id="tm_" + digest[:16], coords=coords, label=claim)
+            receipt = self.submit_observation(
+                obs,
+                agent_id=agent_id,
+                sprout_under_charter=True,
+                sprout_rootless=True,
+                equilibrate_rounds=equilibrate_rounds,
+                equilibrate_tolerance=equilibrate_tolerance,
+                artifact_digest=digest,
+            )
+            receipt["manifest_digest"] = digest
+            return receipt
+
     def infer_artifacts(
         self, query_text: str, k: int = 5, render: bool = False
     ) -> Dict[str, Any]:
