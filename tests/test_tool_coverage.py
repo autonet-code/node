@@ -271,7 +271,10 @@ def test_coverage_lifts_manifest_over_similar_uncovered(tmp_path):
     assert svc._coverage_index.has(d_covered)
     assert not svc._coverage_index.has(d_bare)
 
-    result = svc.infer_artifacts(problem_text, k=5)
+    # Query-side embedder must match the one that produced the attested
+    # problem_coords (production uses the shared default on both sides;
+    # the test injects HashingEmbedder on both).
+    result = svc.infer_artifacts(problem_text, k=5, embedder=embedder)
     order = [a["digest"] for a in result["artifacts"]]
     assert d_covered in order and d_bare in order
     assert order.index(d_covered) < order.index(d_bare), (

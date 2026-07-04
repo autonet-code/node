@@ -134,6 +134,10 @@ def _supporter_event(seq: int, supporter: str, parent_node: str, node_id: str,
 
 def _receipt_event(seq: int, caller: str, digest: str, author: str,
                    *, ok: bool = True) -> Dict[str, Any]:
+    # Cognitive attestations (spec: Attestation section) — the only
+    # receipt tier production mint counts. The sim models attesting
+    # callers; the inference cost of attestation is the qualitative
+    # floor price discussed in MEMO.md, not simulated per-receipt here.
     return {
         "kind": "tool_used",
         "seq": seq,
@@ -143,6 +147,8 @@ def _receipt_event(seq: int, caller: str, digest: str, author: str,
         "receipt_digest": f"r{seq:06d}" * 5,
         "ok": ok,
         "fee_atn": 0.0,
+        "attested": True,
+        "score": 0.8,
     }
 
 
@@ -295,7 +301,13 @@ def run_epoch(tools: List[Tool], rng: random.Random) -> Dict[str, Any]:
         groups.append(group)
 
     # Receipts: graph-neutral (replay skips them), so batching is free.
-    # One group per tool keeps the canonical log tidy.
+    # One group per tool keeps the canonical log tidy. Receipts ride a
+    # SEPARATE signing key from registrations: production's wire-level
+    # dedup excludes attestations co-hosted with the registration batch,
+    # so the sim models the interesting adversary — sybil callers that
+    # EVADE co-hosting detection. (Co-hosted sybils are zeroed by
+    # construction in production; nothing to sweep.)
+    receipt_groups: List[List[Dict[str, Any]]] = []
     for t in tools:
         recs: List[Dict[str, Any]] = []
         for (caller, ok) in t.receipts:
@@ -304,17 +316,20 @@ def run_epoch(tools: List[Tool], rng: random.Random) -> Dict[str, Any]:
             recs.append(ev)
         receipt_events_by_digest[t.digest] = recs
         if recs:
-            groups.append(recs)
+            receipt_groups.append(recs)
 
-    # Shuffle BATCH order to prove order-independence of the close (the
-    # canonical ordering re-sorts anyway); derived RNG keeps it a pure
-    # function of the seed. We shuffle whole groups, not events within a
-    # group, so each tool's reg+supporters stay co-batched.
+    # Shuffle group order within each sender chain to prove order-
+    # independence of the close (canonical ordering re-sorts anyway);
+    # derived RNG keeps it a pure function of the seed. Reg+supporters
+    # stay co-batched per tool.
     shuf = random.Random(rng.random())
     shuf.shuffle(groups)
+    shuf.shuffle(receipt_groups)
 
-    kp = Keypair.generate()          # identity is irrelevant to mint here
-    batches = _batches(groups, kp)
+    kp_reg = Keypair.generate()
+    kp_callers = Keypair.generate()
+    batches = _batches(groups, kp_reg) + _batches(receipt_groups, kp_callers)
+    shuf.shuffle(batches)            # arrival order is irrelevant too
     result = federated_epoch_close(canonical_order(batches))
     return {
         "result": result,

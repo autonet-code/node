@@ -93,12 +93,17 @@ def test_baseline_matches_closed_form():
     assert entry["standing"] == expected_standing
     assert entry["ok_count"] == ok                # 5 OK, 2 failures dropped
 
-    # Production mint == standing * log1p(ok_count).
+    # PRODUCTION now bakes the combo damper in: mint == standing *
+    # Σ over attesting agents of log1p(their ok attestations). Here:
+    # user_0..user_4 each attested ok once (user_0/user_1 also failed
+    # once — failures never count) -> 5 * log1p(1).
+    assert entry["attesters"] == ok
     assert math.isclose(entry["mint"],
-                        expected_standing * math.log1p(ok),
+                        expected_standing * ok * math.log1p(1),
                         rel_tol=1e-9)
 
-    # The sim's baseline damper reproduces production exactly.
+    # The sim's "baseline" damper is the PRE-damper counterfactual
+    # (raw log1p(total ok)) — kept as the sweep's reference point.
     mint_map = sim.compute_damper_mint(epoch, tools, "baseline")
     got = mint_map[digest]
     assert got["standing"] == expected_standing

@@ -882,7 +882,8 @@ class WorldService:
             return receipt
 
     def infer_artifacts(
-        self, query_text: str, k: int = 5, render: bool = False
+        self, query_text: str, k: int = 5, render: bool = False,
+        embedder: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Two-plane inference: retrieve artifacts by embedding similarity
         and re-rank by claim-graph standing (docs/two_plane_inference.md,
@@ -891,6 +892,12 @@ class WorldService:
         Returns the ``_infer_artifacts`` result dict (mode="artifacts").
         When ``render=True``, returns ``{"result": <that dict>, "context":
         render_context(result)}`` instead (docs/ledger_pricing.md Change 3).
+
+        ``embedder`` overrides the query-side embedder — it MUST match
+        the embedder that produced the attested ``problem_coords`` for
+        the coverage-density blend to compare like with like (tests
+        inject HashingEmbedder; production uses the shared default on
+        both sides).
         """
         with self._lock:
             from .world_model_substrate.infer import _infer_artifacts, render_context
@@ -898,7 +905,7 @@ class WorldService:
             # problem_coords (coords_for_text: charter head + embedding
             # tail), so the coverage-density blend compares like with
             # like. Advisory/daemon-local — off the epoch-close path.
-            query_vec = self.coords_for_text(query_text)
+            query_vec = self.coords_for_text(query_text, embedder=embedder)
             result = _infer_artifacts(
                 {"text": query_text},
                 world=self._world,

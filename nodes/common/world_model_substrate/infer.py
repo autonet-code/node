@@ -267,17 +267,23 @@ def _infer_artifacts(
 
         # Retrieval base score: pure claimed cosine by default. For a
         # tool manifest WITH demonstrated coverage, blend claimed cosine
-        # with local density of its attested problem-coords cloud.
+        # with local density of its attested problem-coords cloud —
+        # floored at the claimed cosine: coverage can only LIFT a tool
+        # (demonstrated usage near the query), never sink it below its
+        # claimed position. Penalizing claimed-high/demonstrated-
+        # elsewhere manifests (the SEO case) is a live design question
+        # for the sims, not something to back into via blend arithmetic
+        # on sparse atlases.
         base = cosine
         payload = blob_store.get_json(digest)
         if use_coverage and is_tool_manifest(payload) and coverage_index.has(digest):
             density = coverage_index.density(
                 query_vec, digest, k=COVERAGE_DENSITY_K
             )
-            base = (
+            base = max(cosine, (
                 COVERAGE_CLAIMED_WEIGHT * cosine
                 + COVERAGE_DENSITY_WEIGHT * min(1.0, density)
-            )
+            ))
 
         final = base * (1.0 + math.tanh(standing))
         claims = sorted(

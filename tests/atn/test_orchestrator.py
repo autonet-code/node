@@ -355,7 +355,7 @@ async def test():
         # Unified tools
         "list_tools", "use_tool",
         # Tool substrate (docs/tool_substrate.md)
-        "register_tool",
+        "register_tool", "attest_tools",
         # Planning & goal tools
         "get_goals", "add_goal", "update_goal",
         "get_projects", "add_project", "update_project",
