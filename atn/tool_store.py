@@ -86,8 +86,10 @@ class ToolStore:
         self._dir = Path(tools_dir)
         self._registry_path = self._dir / "registry.jsonl"
         self._receipts_path = self._dir / "receipts.jsonl"
+        self._attestations_path = self._dir / "attestations.jsonl"
         self._records: dict[str, ToolRecord] = {}
         self._blobs: Any = None  # lazy; None until substrate package needed
+        self._embedder: Any = None  # lazy usefulness embedder; injectable for tests
         self._receipt_seq = 0
         # Optional consensus sinks: when the autonet WorldService is up,
         # event_sink submits ToolUsed events onto the substrate event
@@ -99,7 +101,10 @@ class ToolStore:
         self.event_sink: Any = None
         self.manifest_sink: Any = None
         self._load()
-        self._receipt_seq = self._count_receipts()
+        # Seq counter spans BOTH tiers so seqs stay unique within the store
+        # across a reload (mechanical receipts + cognitive attestations both
+        # draw from it).
+        self._receipt_seq = self._count_receipts() + self._count_attestations()
 
     # ------------------------------------------------------------------
     # Registration
@@ -488,6 +493,201 @@ class ToolStore:
 
     def _count_receipts(self) -> int:
         return sum(1 for _ in self._iter_receipts())
+
+    # ------------------------------------------------------------------
+    # Cognitive attestation (docs/tool_substrate.md — two receipt tiers)
+    # ------------------------------------------------------------------
+
+    def _usefulness_embedder(self):
+        """Lazy usefulness embedder (dim=1024), cached on the instance.
+
+        Injectable for tests: pre-set ``self._embedder`` to skip the heavy
+        subprocess/torch worker. Returns None if the substrate package is
+        unavailable — callers must degrade to ``problem_coords=[]``."""
+        if self._embedder is not None:
+            return self._embedder
+        try:
+            from nodes.common.world_model_substrate.usefulness_coords import (
+                default_usefulness_embedder,
+            )
+        except ImportError:
+            return None
+        self._embedder = default_usefulness_embedder(dim=1024)
+        return self._embedder
+
+    def attest_usage(
+        self,
+        caller_id: str | None,
+        judgments: list[dict[str, Any]],
+        context_text: str,
+    ) -> dict[str, Any]:
+        """Record COGNITIVE attestations for a closed work item.
+
+        Unlike mechanical receipts (per call, worthless to mint), an
+        attestation is a deliberate reflection step: the caller judges which
+        registered tools served the work it just finished. This is the only
+        usage the mint counts (docs/tool_substrate.md — two receipt tiers).
+
+        ``judgments`` — list of ``{"tool", "ok", "score"?, "note"?}``. Each
+        tool is resolved via ``self.resolve`` and scoping-checked; a tool the
+        caller may not use (or can't resolve) is skipped and reported, never
+        failing the batch. ``context_text`` (the work item) is embedded ONCE
+        into ``problem_coords``; if the substrate package is unavailable the
+        rows still record locally with ``problem_coords=[]`` — never crash the
+        agent."""
+        caller = caller_id if caller_id else OWNER_AUTHOR
+
+        # Embed the work-item context once. Degrade to [] if the substrate
+        # package (embedder or blob store) is unavailable — never crash.
+        problem_coords: list[float] = []
+        embedder = self._usefulness_embedder()
+        if embedder is not None and context_text:
+            try:
+                problem_coords = [float(v) for v in embedder(context_text)]
+            except Exception as exc:
+                log.warning("attest_usage embed failed: %s", exc)
+
+        try:
+            blobs: Any = self._blob_store()
+        except RuntimeError:
+            blobs = None
+
+        attested = 0
+        skipped: list[dict[str, Any]] = []
+        ts = int(time.time())
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+        for judgment in judgments:
+            tool_ref = str(judgment.get("tool") or "")
+            record = self.resolve(tool_ref)
+            if record is None:
+                skipped.append({"tool": tool_ref, "error": "tool not found"})
+                continue
+            if not self.allowed(caller, record):
+                skipped.append({"tool": tool_ref,
+                                "error": "not in author lineage"})
+                continue
+
+            ok = bool(judgment.get("ok"))
+            raw_score = judgment.get("score")
+            score = 0.0
+            if raw_score is not None:
+                try:
+                    score = max(0.0, min(1.0, float(raw_score)))
+                except (TypeError, ValueError):
+                    score = 0.0
+            note = judgment.get("note")
+
+            review_digest = ""
+            if note and blobs is not None:
+                review = {
+                    "kind": "tool_review",
+                    "manifest_digest": record.digest,
+                    "caller": caller,
+                    "ok": ok,
+                    "score": score,
+                    "note": str(note),
+                    "context": context_text[:2000],
+                    "ts": ts,
+                }
+                try:
+                    review_digest = blobs.add_json(review) or ""
+                except Exception as exc:
+                    log.warning("attestation review blob failed: %s", exc)
+
+            self._receipt_seq += 1
+            row = {
+                "seq": self._receipt_seq,
+                "ts": ts,
+                "manifest_digest": record.digest,
+                "tool_name": record.name,
+                "tool_author": record.author,
+                "caller": caller,
+                "ok": ok,
+                "score": score,
+                "review_digest": review_digest,
+            }
+            receipt_digest = ""
+            if blobs is not None:
+                try:
+                    receipt_digest = blobs.add_json(row) or ""
+                except Exception as exc:
+                    log.warning("attestation blob failed: %s", exc)
+            row["receipt_digest"] = receipt_digest
+
+            with self._attestations_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+
+            if self.event_sink is not None:
+                event = {
+                    "kind": "tool_used",
+                    "seq": self._receipt_seq,
+                    "author_agent": caller,
+                    "manifest_digest": record.digest,
+                    "tool_author": record.author,
+                    "receipt_digest": receipt_digest,
+                    "ok": ok,
+                    "fee_atn": 0.0,
+                    "attested": True,
+                    "score": score,
+                    "problem_coords": list(problem_coords),
+                    "review_digest": review_digest,
+                }
+                try:
+                    self.event_sink(event)
+                except Exception as exc:
+                    log.warning("attested tool_used event sink failed: %s", exc)
+
+            attested += 1
+
+        return {"attested": attested, "skipped": skipped}
+
+    def attestation_summary(self) -> dict[str, dict[str, Any]]:
+        """Per-digest attestation aggregates from ``attestations.jsonl``:
+        ``{attested_count, ok_count, avg_score, last_ts}``. For the Tools
+        screen — the mechanical receipt ledger stays separate."""
+        summary: dict[str, dict[str, Any]] = {}
+        score_totals: dict[str, float] = {}
+        for row in self._iter_attestations():
+            digest = row.get("manifest_digest", "")
+            entry = summary.setdefault(digest, {
+                "attested_count": 0, "ok_count": 0,
+                "avg_score": 0.0, "last_ts": 0,
+            })
+            entry["attested_count"] += 1
+            if row.get("ok"):
+                entry["ok_count"] += 1
+            score_totals[digest] = score_totals.get(digest, 0.0) + float(
+                row.get("score") or 0.0)
+            ts = int(row.get("ts") or 0)
+            if ts > entry["last_ts"]:
+                entry["last_ts"] = ts
+        for digest, entry in summary.items():
+            count = entry["attested_count"]
+            entry["avg_score"] = round(
+                score_totals.get(digest, 0.0) / count, 10) if count else 0.0
+        return summary
+
+    def _iter_attestations(self):
+        if not self._attestations_path.exists():
+            return
+        try:
+            lines = self._attestations_path.read_text(
+                encoding="utf-8").splitlines()
+        except OSError as exc:
+            log.warning("ToolStore could not read attestations: %s", exc)
+            return
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                log.warning("ToolStore skipping corrupt attestation row")
+
+    def _count_attestations(self) -> int:
+        return sum(1 for _ in self._iter_attestations())
 
     # ------------------------------------------------------------------
     # Internals

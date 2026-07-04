@@ -352,3 +352,176 @@ class TestResolutionAndExecution:
             "use_tool", {"name": "echo_tool", "arguments": {"x": "hi"}},
             rt, caller_id="parent")
         assert ok == {"result": {"echo": "hi"}}
+
+
+# ---------------------------------------------------------------------------
+# Cognitive attestation (docs/tool_substrate.md — two receipt tiers)
+# ---------------------------------------------------------------------------
+
+
+def _fake_embedder(text):
+    """Deterministic, dependency-free stand-in for the usefulness embedder
+    so tests never spawn the torch subprocess worker."""
+    return (0.1, 0.2, 0.3) if text else ()
+
+
+class TestAttestation:
+    @pytest.mark.asyncio
+    async def test_attest_end_to_end_emits_attested_event(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)  # author = child
+        store = rt.tool_store
+        store._embedder = _fake_embedder  # avoid heavy embedder
+
+        sunk: list[dict] = []
+        store.event_sink = sunk.append
+
+        out = await execute_tool(
+            "attest_tools",
+            {"judgments": [{"tool": "echo_tool", "ok": True, "score": 0.9,
+                            "note": "did the job"}],
+             "context": "wiring up an echo round-trip"},
+            rt, caller_id="child",
+        )
+        assert out == {"attested": 1, "skipped": []}
+        assert len(sunk) == 1
+        ev = sunk[0]
+        assert ev["kind"] == "tool_used"
+        assert ev["attested"] is True
+        assert ev["author_agent"] == "child"
+        assert ev["tool_author"] == "child"
+        assert ev["manifest_digest"] == res["digest"]
+        assert ev["score"] == 0.9
+        assert ev["fee_atn"] == 0.0
+        assert ev["problem_coords"] == [0.1, 0.2, 0.3]
+        assert ev["review_digest"]  # note was blob-stored
+
+    @pytest.mark.asyncio
+    async def test_out_of_lineage_judgment_skipped(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        await _register_echo(rt)  # author = child
+        store = rt.tool_store
+        store._embedder = _fake_embedder
+
+        sunk: list[dict] = []
+        store.event_sink = sunk.append
+
+        out = await execute_tool(
+            "attest_tools",
+            {"judgments": [{"tool": "echo_tool", "ok": True},
+                           {"tool": "nonexistent", "ok": True}],
+             "context": "sibling tries to attest"},
+            rt, caller_id="sibling",  # out of child's lineage
+        )
+        assert out["attested"] == 0
+        errs = {s["tool"]: s["error"] for s in out["skipped"]}
+        assert "lineage" in errs["echo_tool"]
+        assert "not found" in errs["nonexistent"]
+        assert sunk == []  # nothing emitted for a wholly-skipped batch
+
+    @pytest.mark.asyncio
+    async def test_note_text_lands_in_blob_store(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        await _register_echo(rt)
+        store = rt.tool_store
+        store._embedder = _fake_embedder
+
+        sunk: list[dict] = []
+        store.event_sink = sunk.append
+
+        await execute_tool(
+            "attest_tools",
+            {"judgments": [{"tool": "echo_tool", "ok": False, "score": 0.1,
+                            "note": "flaky on empty input"}],
+             "context": "stress-testing echo"},
+            rt, caller_id="parent",
+        )
+        review_digest = sunk[0]["review_digest"]
+        blob = store._blob_store().get_json(review_digest)
+        assert blob["kind"] == "tool_review"
+        assert blob["note"] == "flaky on empty input"
+        assert blob["caller"] == "parent"
+        assert blob["context"] == "stress-testing echo"
+
+    @pytest.mark.asyncio
+    async def test_attestation_summary_aggregates(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)
+        store = rt.tool_store
+        store._embedder = _fake_embedder
+
+        store.attest_usage(
+            "child", [{"tool": "echo_tool", "ok": True, "score": 0.8}],
+            "work one")
+        store.attest_usage(
+            "child", [{"tool": "echo_tool", "ok": False, "score": 0.4}],
+            "work two")
+
+        summary = store.attestation_summary()
+        entry = summary[res["digest"]]
+        assert entry["attested_count"] == 2
+        assert entry["ok_count"] == 1
+        assert entry["avg_score"] == pytest.approx(0.6)
+        assert entry["last_ts"] > 0
+
+    @pytest.mark.asyncio
+    async def test_mechanical_receipts_unaffected(self, tmp_path):
+        """Mechanical (per-call) receipts carry NO attested field — only
+        the cognitive path sets it."""
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        await _register_echo(rt)
+        store = rt.tool_store
+        store._embedder = _fake_embedder
+
+        sunk: list[dict] = []
+        store.event_sink = sunk.append
+
+        await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="child")
+        assert len(sunk) == 1
+        assert "attested" not in sunk[0]
+
+    @pytest.mark.asyncio
+    async def test_seq_continuity_across_receipt_and_attestation(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        await _register_echo(rt)
+        store = rt.tool_store
+        store._embedder = _fake_embedder
+
+        sunk: list[dict] = []
+        store.event_sink = sunk.append
+
+        await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="child")
+        store.attest_usage(
+            "child", [{"tool": "echo_tool", "ok": True}], "some work")
+        await rt.tool_registry.call_tool("echo_tool", {"x": "2"}, caller_id="child")
+
+        seqs = [ev["seq"] for ev in sunk]
+        assert seqs == [1, 2, 3]  # unique + monotonic across both tiers
+
+        # Seq counter spans both tiers on reload — no collision after restart.
+        reloaded = ToolStore(rt, rt._config.data_dir / "tools")
+        assert reloaded._receipt_seq == 3
+
+    @pytest.mark.asyncio
+    async def test_degrades_without_embedder(self, tmp_path):
+        """If the embedder is unavailable, problem_coords is [] and the
+        attestation still records — never crashes the agent."""
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        await _register_echo(rt)
+        store = rt.tool_store
+        store._embedder = lambda text: (_ for _ in ()).throw(RuntimeError("no torch"))
+
+        sunk: list[dict] = []
+        store.event_sink = sunk.append
+
+        out = store.attest_usage(
+            "child", [{"tool": "echo_tool", "ok": True}], "work item")
+        assert out["attested"] == 1
+        assert sunk[0]["problem_coords"] == []

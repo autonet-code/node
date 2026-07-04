@@ -515,6 +515,43 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
+        name="attest_tools",
+        description=(
+            "Attest which registered tools contributed to a piece of work you "
+            "just finished. Call ONCE when you close a work item, judging the "
+            "tools that helped — not after every call. Your attestation is the "
+            "ONLY usage that counts toward a tool author's mint; a mechanical "
+            "call receipt is worth nothing. Your score/note become debate "
+            "material (a bad score with a trace is a ready-made dispute), not "
+            "mint input — repeated return usage is the real rating. Provide "
+            "'context': what you were working on (embedded to locate the work)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "judgments": {
+                    "type": "array",
+                    "description": "One entry per tool that contributed.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"type": "string", "description": "Tool name, digest, or reg_ prefix."},
+                            "ok": {"type": "boolean", "description": "Did the tool serve the work?"},
+                            "score": {"type": "number", "description": "Optional quality score 0..1."},
+                            "note": {"type": "string", "description": "Optional reviewable justification (blob-stored)."},
+                        },
+                        "required": ["tool", "ok"],
+                    },
+                },
+                "context": {
+                    "type": "string",
+                    "description": "What you were working on — the closed work item.",
+                },
+            },
+            "required": ["judgments", "context"],
+        },
+    ),
+    ToolDefinition(
         name="get_history",
         description="Get execution history summaries for an agent. Returns lightweight records (no full step output) for browsing previous runs.",
         input_schema={
@@ -1771,6 +1808,32 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     }
 
 
+async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Record cognitive attestations for a closed work item.
+
+    The caller is derived (authorship/scoping primitive); owner callers
+    attest as "user". This is the per-work-item reflection step — the only
+    usage that counts toward a tool author's mint (docs/tool_substrate.md).
+    """
+    from ..tool_store import OWNER_AUTHOR
+    from . import is_owner_caller
+
+    judgments = input.get("judgments")
+    if not isinstance(judgments, list):
+        return {"error": "judgments must be an array"}
+    context = str(input.get("context") or "")
+    if not context:
+        return {"error": "Missing required field: 'context'"}
+
+    caller_id = input.get("_caller_id")
+    caller = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
+
+    try:
+        return runtime.tool_store.attest_usage(caller, judgments, context)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Conversation management (UI-facing, not exposed to the orchestrator LLM)
 # ---------------------------------------------------------------------------
@@ -2388,7 +2451,7 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     "connectors": {"list_connectors", "add_connector", "get_connector_tools", "use_connector", "remove_connector"},
     "unified_tools": {"list_tools", "use_tool"},
     # Tool substrate (docs/tool_substrate.md): authoring is opt-in per agent.
-    "toolsmith": {"register_tool"},
+    "toolsmith": {"register_tool", "attest_tools"},
     "planning": {"get_goals", "add_goal", "update_goal", "get_projects", "add_project", "update_project",
                  "propose_task", "list_tasks"},
     "budget": {"get_credit_budget", "set_credit_budget", "get_usage"},
@@ -3074,6 +3137,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "list_tools": _list_tools,
     "use_tool": _use_tool,
     "register_tool": _register_tool,
+    "attest_tools": _attest_tools,
     "get_history": _get_history,
     # Planning & goal tools
     "get_goals": _get_goals,
