@@ -38,6 +38,27 @@ from .adapter import (
     deserialize_world,
     turn_to_observation,
 )
+from .tool_manifest import is_tool_manifest
+
+
+# ---------------------------------------------------------------------------
+# Density-blend constants (tool substrate, docs/tool_substrate.md
+# "Retrieval: density, not centroid"). ADVISORY and daemon-local: these
+# are retrieval-ranking knobs, never consensus inputs, so they iterate
+# freely (docs/two_plane_inference.md constraints). Named at module level
+# so a sim / experiment can sweep them.
+# ---------------------------------------------------------------------------
+
+# For a tool manifest with ANY demonstrated coverage, the retrieval
+# score blends the manifest's CLAIMED cosine (what the author says the
+# tool does) with the LOCAL DENSITY of its attested coverage cloud near
+# the query (what the tool has ACTUALLY served). Equal weight: usage
+# proposes and disposes on even footing with the ask. Cold-start
+# manifests (no coverage) fall back to pure claimed cosine.
+COVERAGE_CLAIMED_WEIGHT = 0.5
+COVERAGE_DENSITY_WEIGHT = 0.5
+# Top-k nearest coverage points used to score local density.
+COVERAGE_DENSITY_K = 5
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +232,8 @@ def _infer_artifacts(
     artifact_index: Any,
     blob_store: Any,
     k: int = 5,
+    coverage_index: Any = None,
+    query_vec: Any = None,
 ) -> Dict[str, Any]:
     """Retrieve artifacts by embedding similarity, re-ranked by graph standing.
 
@@ -218,17 +241,45 @@ def _infer_artifacts(
     verdict layer: artifacts are retrieved from the embedding index and
     re-priced by the net_score of the PRO/CON claim nodes that reference
     each artifact digest.
+
+    Tool-manifest density blend (docs/tool_substrate.md "Retrieval:
+    density, not centroid"): when ``coverage_index`` is provided and a
+    candidate whose payload is a tool manifest HAS demonstrated coverage,
+    its cosine term becomes a blend of the CLAIMED cosine and the LOCAL
+    DENSITY of its attested coverage cloud near ``query_vec``. Manifests
+    with NO coverage (cold start) and all non-manifest artifacts keep the
+    original pure-claimed-cosine behavior byte-for-byte. ``query_vec`` is
+    the query embedded in the same coordinate space as the stored
+    ``problem_coords`` (supplied by the WorldService caller, which owns
+    ``coords_for_text``); if it is None the density path is skipped.
     """
     query = _query_text(input_data)
 
     candidates = artifact_index.search(query, k=k * 3)
     by_digest = _artifact_standing(world)
 
+    use_coverage = coverage_index is not None and query_vec is not None
+
     scored: List[Dict[str, Any]] = []
     for digest, cosine in candidates:
         claim_nodes = by_digest.get(digest, [])
         standing = _standing_of(claim_nodes)
-        final = cosine * (1.0 + math.tanh(standing))
+
+        # Retrieval base score: pure claimed cosine by default. For a
+        # tool manifest WITH demonstrated coverage, blend claimed cosine
+        # with local density of its attested problem-coords cloud.
+        base = cosine
+        payload = blob_store.get_json(digest)
+        if use_coverage and is_tool_manifest(payload) and coverage_index.has(digest):
+            density = coverage_index.density(
+                query_vec, digest, k=COVERAGE_DENSITY_K
+            )
+            base = (
+                COVERAGE_CLAIMED_WEIGHT * cosine
+                + COVERAGE_DENSITY_WEIGHT * min(1.0, density)
+            )
+
+        final = base * (1.0 + math.tanh(standing))
         claims = sorted(
             (
                 {
@@ -246,7 +297,7 @@ def _infer_artifacts(
                 "cosine": cosine,
                 "standing": standing,
                 "final": final,
-                "payload": blob_store.get_json(digest),
+                "payload": payload,
                 "claims": claims,
             }
         )
@@ -335,6 +386,8 @@ def infer_with_world_model(
     artifact_index: Optional[Any] = None,
     blob_store: Optional[Any] = None,
     k: int = 5,
+    coverage_index: Optional[Any] = None,
+    query_vec: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Run inference. Three modes auto-selected unless overridden:
 
@@ -373,6 +426,9 @@ def infer_with_world_model(
             raise ValueError(
                 "artifacts mode requires world, artifact_index, and blob_store"
             )
-        return _infer_artifacts(input_data, world, artifact_index, blob_store, k=k)
+        return _infer_artifacts(
+            input_data, world, artifact_index, blob_store, k=k,
+            coverage_index=coverage_index, query_vec=query_vec,
+        )
     else:
         raise ValueError(f"unknown inference mode: {mode!r}")

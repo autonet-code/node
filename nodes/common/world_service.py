@@ -63,6 +63,7 @@ from .world_persistence import (
 )
 from .blob_store import BlobStore
 from .world_model_substrate.artifact_index import ArtifactIndex
+from .world_model_substrate.coverage import CoverageIndex
 
 
 logger = logging.getLogger(__name__)
@@ -287,6 +288,16 @@ class WorldService:
             index_path=state_dir / "artifact_index.jsonl",
             dim=embedding_dim,
         )
+        # Tool substrate: the demonstrated-coverage atlas (density plane).
+        # Attested tool_used receipts contribute their problem_coords so
+        # retrieval can rank a manifest by the LOCAL DENSITY of where it
+        # has actually served (docs/tool_substrate.md "Retrieval:
+        # density, not centroid"). Same derived-daemon-local doctrine as
+        # the ArtifactIndex: rebuildable, never gossiped, never anchored,
+        # never touches epoch-close determinism.
+        self._coverage_index = CoverageIndex(
+            index_path=state_dir / "coverage_index.jsonl",
+        )
 
         # Try to recover from disk; if nothing exists, the fresh charter world
         # we just built is what we use.
@@ -488,6 +499,15 @@ class WorldService:
 
             # Buffer for the open epoch, if any.
             self._buffer_epoch_events_locked(events)
+
+            # Tool substrate: feed attested tool_used receipts into the
+            # demonstrated-coverage atlas. Runs for BOTH local emission
+            # and remote gossip ingest (both call submit_events) — the
+            # coverage index is derived, daemon-local state, so ingesting
+            # remote receipts here cannot affect epoch-close determinism.
+            # ingest_event self-filters (kind/attested/problem_coords).
+            for ev in events:
+                self._coverage_index.ingest_event(ev)
 
             # Notify local-event subscribers (federation gossip).
             # Remote-origin events skip the fan-out so peer ingest
@@ -874,12 +894,19 @@ class WorldService:
         """
         with self._lock:
             from .world_model_substrate.infer import _infer_artifacts, render_context
+            # Query vector in the SAME coordinate space as attested
+            # problem_coords (coords_for_text: charter head + embedding
+            # tail), so the coverage-density blend compares like with
+            # like. Advisory/daemon-local — off the epoch-close path.
+            query_vec = self.coords_for_text(query_text)
             result = _infer_artifacts(
                 {"text": query_text},
                 world=self._world,
                 artifact_index=self._artifact_index,
                 blob_store=self._blob_store,
                 k=k,
+                coverage_index=self._coverage_index,
+                query_vec=query_vec,
             )
             if render:
                 return {"result": result, "context": render_context(result)}
