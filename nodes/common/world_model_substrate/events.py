@@ -170,16 +170,32 @@ class ToolUsed:
     fee_atn: float = 0.0
     # Demonstrated-utility coordinates (tool_substrate.md v2): embedding
     # of the problem context the CALLER was solving, in the usefulness
-    # space. Retrieval blends a tool's claimed position toward the
-    # centroid of problems it actually solved (anti-SEO: description
-    # proposes, usage disposes). Serialized only when present — same
-    # back-compat rule as every optional event field.
+    # space. Retrieval ranks tools by local DENSITY of these points
+    # (anti-SEO: description proposes, usage disposes). Serialized only
+    # when present — same back-compat rule as every optional event field.
     problem_coords: List[float] = field(default_factory=list)
+    # Two receipt tiers (spec: Attestation section). Mechanical receipts
+    # (attested=False) are per-call exhaust — local ledger material,
+    # worth nothing in mint. Cognitive attestations (attested=True) are
+    # the per-WORK-ITEM reflection where the caller judged the tool;
+    # they are the ONLY usage the mint counts. score/review text are
+    # debate material, never mint inputs; the text lives in the blob
+    # store under review_digest.
+    attested: bool = False
+    score: float = 0.0
+    review_digest: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         if not self.problem_coords:
             d.pop("problem_coords", None)
+        # Back-compat: attestation fields serialize only on attested
+        # receipts, so pre-attestation event logs hash identically.
+        if not self.attested:
+            d.pop("attested", None)
+            d.pop("score", None)
+        if not self.review_digest:
+            d.pop("review_digest", None)
         return d
 
 

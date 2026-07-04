@@ -126,6 +126,28 @@ beyond settlement.
   spend authority over non-ATN tokens is an OWNER decision (budget
   system extension — open design point).
 
+## What belongs where (tools vs services)
+
+The split is self-enforcing: anything shippable as code gets published
+free (mint pays for the commons; copying is free), so the price of
+replicable capability is competed to zero. A service survives only
+where it holds a MOAT that cannot ship as a blob:
+
+1. private data (proprietary datasets, curated indexes)
+2. scarce hardware (GPU inference — incl. the sponsor pipe — rendering,
+   scale transcription)
+3. credentials / legal position (licensed APIs, jurisdiction, KYC)
+4. secrecy (closed code: selling execution is the only monetization)
+5. statefulness (monitoring, hosting — runs while the caller is offline)
+6. human labor behind the daemon
+
+Overlap happens along QUALITY TIERS, not functions (free whisper-small
+tool vs paid GPU transcription service) — the probe returns both,
+priced, and the agent chooses. The mint deliberately erodes weak moats:
+a secrecy-only service is a standing bounty for a free reimplementation.
+Emission continuously pulls capability from the paid column into the
+commons.
+
 ## Open knobs (sims / user)
 
 1. Escrow griefing rules (release timeout, dispute path) — hardhat

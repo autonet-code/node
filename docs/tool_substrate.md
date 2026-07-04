@@ -76,6 +76,51 @@ receipt problem-coords centroid), re-rank by standing. Returns tools
 AND services (see services_market.md) in one answer; the agent chooses
 by judgment and wallet.
 
+## Attestation: two receipt tiers (ratified 2026-07-04, evening)
+
+Usage and review answer different questions; only one mints.
+
+- **Mechanical receipts** (automatic, per call): local ledger +
+  debugging. Worth NOTHING in mint — an exit code is not evidence of
+  usefulness and is free to fabricate.
+- **Cognitive attestations** (per WORK ITEM, not per call): a distinct
+  reflection step where the calling agent judges which tools served
+  the work it just closed. Carries: ok/score, optional text (blob-
+  stored, digest on the event), and `problem_coords` (embedding of
+  what the agent was trying to do). This is the ONLY usage the mint
+  counts. The act itself is the anti-wash floor price: fabricating
+  attestations costs real inference and leaves reviewable text a
+  defender can CON as vacuous.
+- Score/text do NOT enter the mint formula (self-reported and
+  redundant — repeated return usage IS the rating). They are debate
+  material: a bad score with a trace is a ready-made CON; standing is
+  where they cash out.
+- Granularity: attestation rides the work-item close (same cognitive
+  beat as conversation→work-unit distillation), never per invocation.
+
+## Mint: combo damper (sim-ratified, sims/tool_economy/MEMO.md)
+
+usage_term(m) = Σ over unique ATTESTING DAEMONS d (batch sender
+pubkey ≠ the daemon that registered m) of log1p(attested ok receipts
+from d). Mint = max(0, standing) × usage_term, pinned only, gate-merged
+as before. Daemon-level caller identity is consensus-checkable (batch
+signatures) and collapses same-daemon sybil agents to one caller.
+Per-receipt ATN burn REJECTED (log1p saturation makes flat burn
+regressive — see memo).
+
+## Retrieval: density, not centroid
+
+Attestation problem_coords accumulate into a per-tool demonstrated-
+coverage cloud — collectively, an atlas of what the network can do and
+where. Retrieval ranks by LOCAL DENSITY (similarity to the query's
+neighborhood of the cloud), NOT distance-to-centroid: centroid ranking
+subsidizes narrow tools and invites fragmentation spam; density lets
+genuine breadth compete everywhere it has actually served. Claimed
+embedding (manifest text) remains the cold-start position; coverage
+dominates as receipts accumulate. Atlas GAPS are the future input for
+capability-gap mint multipliers (network pays more for uncovered
+regions) — designed, not yet built.
+
 ## Consensus mechanics (v1 implementation, still current)
 
 - `ToolUsed` consensus event: caller-attested, gossiped, epoch-
