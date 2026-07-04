@@ -24,12 +24,20 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
     Returns a canonically-ordered dict:
 
       {manifest_digest: {
-          "count": int,             # all receipts
-          "ok_count": int,          # successful invocations
+          "count": int,             # all receipts (both tiers)
+          "ok_count": int,          # successful invocations (both tiers)
           "fee_total": float,       # Σ fee_atn across receipts
           "tool_author": str,       # from the receipts (first sorted wins
                                     # on disagreement — consensus tie-break)
           "callers": {caller_id: count},
+          # Cognitive-attestation tier (the only mint input — spec:
+          # Attestation section). Keyed by attesting AGENT; the gossip
+          # batch's signing key rides along per attestation ("senders")
+          # solely for the wire-level self-attestation dedup in
+          # compute_tool_mint — it is transport plumbing, never an
+          # economic entity.
+          "attested_ok_by_caller": {caller_id: count},
+          "attester_senders": {caller_id: [sender_hex, ...]},
       }}
 
     Deterministic: events are processed in (author_agent, seq,
@@ -53,15 +61,30 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
                 "fee_total": 0.0,
                 "tool_author": str(ev.get("tool_author") or ""),
                 "callers": {},
+                "attested_ok_by_caller": {},
+                "attester_senders": {},
             }
         entry["count"] += 1
-        if ev.get("ok", True):
+        ok = bool(ev.get("ok", True))
+        if ok:
             entry["ok_count"] += 1
         entry["fee_total"] += float(ev.get("fee_atn") or 0.0)
         caller = str(ev.get("author_agent") or "")
         entry["callers"][caller] = entry["callers"].get(caller, 0) + 1
+        if ok and ev.get("attested"):
+            by = entry["attested_ok_by_caller"]
+            by[caller] = by.get(caller, 0) + 1
+            sender = str(ev.get("sender") or "")
+            senders = entry["attester_senders"].setdefault(caller, [])
+            if sender and sender not in senders:
+                senders.append(sender)
 
     for entry in usage.values():
         entry["fee_total"] = round(entry["fee_total"], _FEE_DECIMALS)
         entry["callers"] = dict(sorted(entry["callers"].items()))
+        entry["attested_ok_by_caller"] = dict(
+            sorted(entry["attested_ok_by_caller"].items()))
+        entry["attester_senders"] = {
+            k: sorted(v) for k, v in sorted(entry["attester_senders"].items())
+        }
     return dict(sorted(usage.items()))

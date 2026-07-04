@@ -15,6 +15,8 @@ import math
 import random
 from typing import Any, Dict, List
 
+import pytest
+
 from nodes.common.canonical_ordering import canonical_order
 from nodes.common.event_gossip import EventBatch, Keypair
 from nodes.common.federated_reconcile import (
@@ -56,8 +58,9 @@ def _registration_event(seq: int = 1, *, trust_class: str = "pinned",
 
 
 def _receipt_event(seq: int, caller: str, *, ok: bool = True,
-                   digest: str = DIGEST) -> Dict[str, Any]:
-    return {
+                   digest: str = DIGEST,
+                   attested: bool = True) -> Dict[str, Any]:
+    ev = {
         "kind": "tool_used",
         "seq": seq,
         "author_agent": caller,
@@ -67,6 +70,12 @@ def _receipt_event(seq: int, caller: str, *, ok: bool = True,
         "ok": ok,
         "fee_atn": 0.0,
     }
+    # Cognitive-attestation tier (the only mint input). Mechanical
+    # receipts omit the fields entirely, like ToolUsed.to_dict does.
+    if attested:
+        ev["attested"] = True
+        ev["score"] = 0.8
+    return ev
 
 
 def _batches(events: List[Dict[str, Any]], keypair: Keypair) -> List[EventBatch]:
@@ -87,13 +96,16 @@ def _batches(events: List[Dict[str, Any]], keypair: Keypair) -> List[EventBatch]
 
 
 def _standard_batches() -> List[EventBatch]:
-    kp = Keypair.generate()
-    return _batches([
-        _registration_event(1),
-        _receipt_event(2, "caller-1"),
-        _receipt_event(3, "caller-2"),
-        _receipt_event(4, "caller-1", ok=False),   # failure: no mint credit
-    ], kp)
+    """Registration and receipts arrive from DIFFERENT signing keys —
+    the wire-level self-attestation dedup excludes same-key callers, so
+    a realistic mint scenario needs a distinct caller wire identity."""
+    kp_author = Keypair.generate()
+    kp_callers = Keypair.generate()
+    return _batches([_registration_event(1)], kp_author) + _batches([
+        _receipt_event(1, "caller-1"),
+        _receipt_event(2, "caller-2"),
+        _receipt_event(3, "caller-1", ok=False),   # failure: no mint credit
+    ], kp_callers)
 
 
 class TestToolMintClose:
@@ -106,7 +118,11 @@ class TestToolMintClose:
         assert entry["ok_count"] == 2                       # failure excluded
         assert entry["standing"] > 0                        # author_post landed
         assert entry["mint"] > 0
-        assert entry["mint"] == entry["standing"] * math.log1p(2)
+        # Combo damper: two attesting agents with one ok attestation
+        # each — usage_term = 2 * log1p(1), NOT log1p(total calls).
+        assert entry["attesters"] == 2
+        assert entry["mint"] == pytest.approx(
+            entry["standing"] * 2 * math.log1p(1))
         # Merged into the consensus attribution map.
         assert result["agent_mint"].get(AUTHOR, 0) >= round(entry["mint"], 6) * 0.5
         assert result["tool_registrations"][DIGEST]["author"] == AUTHOR
@@ -146,6 +162,31 @@ class TestToolMintClose:
         # ...but the registration still carries over (attribution is
         # permanent even for unminted classes).
         assert result["tool_registrations"][DIGEST]["trust_class"] == "attested"
+
+    def test_mechanical_receipts_do_not_mint(self):
+        """Only cognitive attestations count — per-call exhaust is
+        worth nothing (spec: Attestation section)."""
+        kp_author, kp_caller = Keypair.generate(), Keypair.generate()
+        batches = _batches([_registration_event(1)], kp_author) + _batches([
+            _receipt_event(1, "caller-1", attested=False),
+            _receipt_event(2, "caller-2", attested=False),
+        ], kp_caller)
+        result = federated_epoch_close(canonical_order(batches))
+        assert result["tool_mint"] == {}
+
+    def test_co_hosted_attestations_do_not_mint(self):
+        """Wire-level dedup: attestation batches signed with the same
+        key as the registration batch collapse to nothing — sybil
+        agents on the author's own daemon can't pump usage."""
+        kp = Keypair.generate()
+        batches = _batches([
+            _registration_event(1),
+            _receipt_event(2, "sybil-1"),
+            _receipt_event(3, "sybil-2"),
+            _receipt_event(4, "sybil-3"),
+        ], kp)  # ONE signing key for everything
+        result = federated_epoch_close(canonical_order(batches))
+        assert result["tool_mint"] == {}
 
     def test_no_tool_events_null_case(self):
         kp = Keypair.generate()

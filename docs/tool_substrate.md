@@ -100,13 +100,18 @@ Usage and review answer different questions; only one mints.
 
 ## Mint: combo damper (sim-ratified, sims/tool_economy/MEMO.md)
 
-usage_term(m) = Σ over unique ATTESTING DAEMONS d (batch sender
-pubkey ≠ the daemon that registered m) of log1p(attested ok receipts
-from d). Mint = max(0, standing) × usage_term, pinned only, gate-merged
-as before. Daemon-level caller identity is consensus-checkable (batch
-signatures) and collapses same-daemon sybil agents to one caller.
+The AGENT is the only authoritative economic entity — here as
+everywhere on the web3 layer. usage_term(m) = Σ over unique attesting
+AGENTS a (a ≠ the author) of log1p(a's attested ok receipts), with one
+wire-level dedup applied first: receipts whose gossip batch carries the
+same signing key as m's registration batch are excluded (self-
+attestation via co-hosted sybil agents collapses to nothing). That
+batch key is transport plumbing, not an entity — it appears in no
+formula output, no chain surface, no attribution map. Mint =
+max(0, standing) × usage_term, pinned only, gate-merged as before.
 Per-receipt ATN burn REJECTED (log1p saturation makes flat burn
-regressive — see memo).
+regressive — see memo); the cognitive attestation cost is the floor
+price instead.
 
 ## Retrieval: density, not centroid
 

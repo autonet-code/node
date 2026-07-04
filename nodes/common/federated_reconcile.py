@@ -75,13 +75,22 @@ def compute_tool_mint(
 ) -> Dict[str, Any]:
     """Tool-author mint from canonical events (docs/tool_substrate.md v2).
 
-    ``tool_mint(m) = max(0, standing(m)) × log1p(ok_count(m))`` per
-    PINNED manifest with usage this epoch, attributed to the author
-    carried on the registration sprout's ``manifest_meta`` — consensus
-    data, so a blob-store miss can never fork the close. Mint is
-    pinned-only: attested (connector-backed) tools are publishable and
-    debatable but draw no emission, and remote services never enter the
-    substrate at all (docs/services_market.md).
+    ``tool_mint(m) = max(0, standing(m)) × usage_term(m)`` per PINNED
+    manifest, attributed to the author carried on the registration
+    sprout's ``manifest_meta`` — consensus data, so a blob-store miss
+    can never fork the close. Mint is pinned-only: attested (connector-
+    backed) tools are publishable and debatable but draw no emission,
+    and remote services never enter the substrate at all
+    (docs/services_market.md).
+
+    ``usage_term`` is the sim-ratified combo damper (spec: Mint
+    section): Σ over unique attesting AGENTS a ≠ author of
+    log1p(a's attested-ok receipts) — only COGNITIVE attestations
+    count; mechanical receipts are exhaust. One wire-level dedup runs
+    first: a caller whose attestation batches were signed by the same
+    key as the registration batch is excluded (co-hosted sybil agents
+    collapse to nothing). The sender key is transport plumbing — the
+    agent is the only economic entity; the key appears in no output.
 
     Cross-epoch state comes in as one explicit param, derived purely
     from prior epochs' canonical events (so bit-identical everywhere):
@@ -119,7 +128,13 @@ def compute_tool_mint(
     ]
     reg_events.sort(key=lambda e: (e.get("author_agent", ""), e.get("seq", 0)))
     for ev in reg_events:
-        known_regs.setdefault(ev["artifact_digest"], dict(ev["manifest_meta"]))
+        meta = dict(ev["manifest_meta"])
+        # Registration batch's signing key, for the wire-level self-
+        # attestation dedup below. Carried registrations keep the key
+        # from their original epoch (persisted in the carry-over map).
+        if ev.get("sender"):
+            meta.setdefault("sender", str(ev["sender"]))
+        known_regs.setdefault(ev["artifact_digest"], meta)
 
     usage = tool_usage_from_events(events)
     by_digest = _artifact_standing(world)
@@ -137,8 +152,22 @@ def compute_tool_mint(
             continue
         nodes = by_digest.get(digest, [])
         standing = _standing_of(nodes)
-        ok_count = int(usage[digest]["ok_count"])
-        mint = max(0.0, standing) * math.log1p(ok_count)
+        # Combo damper: per-attesting-agent log1p, author excluded,
+        # co-hosted callers (attestation batch signed with the same key
+        # as the registration batch) excluded.
+        reg_sender = str(meta.get("sender") or "")
+        attested_by = usage[digest]["attested_ok_by_caller"]
+        attester_senders = usage[digest]["attester_senders"]
+        usage_term = 0.0
+        attesters = 0
+        for caller in sorted(attested_by.keys()):
+            if caller == author:
+                continue
+            if reg_sender and reg_sender in attester_senders.get(caller, []):
+                continue
+            usage_term += math.log1p(attested_by[caller])
+            attesters += 1
+        mint = max(0.0, standing) * usage_term
         if mint <= 0.0:
             continue
         # Anchor the mint on the manifest's claim node so the
@@ -152,7 +181,9 @@ def compute_tool_mint(
             "author": author,
             "trust_class": TRUST_PINNED,
             "standing": standing,
-            "ok_count": ok_count,
+            "ok_count": int(usage[digest]["ok_count"]),
+            "attesters": attesters,
+            "usage_term": round(usage_term, 10),
             "mint": mint,
         }
         bucket = node_agent.setdefault(node_id, {})
@@ -443,6 +474,7 @@ def federated_epoch_close(
             # Build attribution copies with node_id rewritten to the
             # live id. We do NOT mutate batch.events (the canonical log
             # is fed downstream to the state-sync tracker verbatim).
+            sender_hex = batch.sender_pubkey.hex()
             for ev in batch.events:
                 if ev.get("kind") == "sub_claim_sprouted":
                     live = remap.get(ev.get("node_id", ""))
@@ -450,6 +482,7 @@ def federated_epoch_close(
                         ev = dict(ev)
                         ev["solver_node_id"] = ev.get("node_id")
                         ev["node_id"] = live
+                ev = _annotate_sender(ev, sender_hex)
                 all_events.append(ev)
         snapshots.close = snapshot_node_scores_ordered(world)
     else:
@@ -493,7 +526,9 @@ def federated_epoch_close(
             recorder.sub_claims_after_equilibrate(world, before_ids)
             derived = [e.to_dict() for e in recorder.events]
 
-            all_events.extend(batch.events)
+            sender_hex = batch.sender_pubkey.hex()
+            all_events.extend(_annotate_sender(ev, sender_hex)
+                              for ev in batch.events)
             all_events.extend(derived)
 
         snapshots.record_close(world)
@@ -548,6 +583,27 @@ def federated_epoch_close(
         "n_events": result["n_events"],
     }
     return result
+
+
+def _annotate_sender(ev: Dict[str, Any], sender_hex: str) -> Dict[str, Any]:
+    """Stamp the gossip batch's signing key onto a COPY of the events
+    the tool-mint pass reads (tool_used receipts and manifest_meta
+    registration sprouts).
+
+    The AGENT is the only authoritative economic entity; the sender key
+    is transport plumbing used solely for the wire-level dedup in
+    compute_tool_mint (self-attestation via co-hosted sybil agents
+    collapses to nothing). It never enters formula outputs, attribution
+    maps, or any chain surface. Deterministic: canonical batches carry
+    the key, so every daemon stamps identically. batch.events is never
+    mutated (the canonical log flows downstream verbatim).
+    """
+    if ev.get("kind") == "tool_used" or (
+        ev.get("kind") == "sub_claim_sprouted" and ev.get("manifest_meta")
+    ):
+        ev = dict(ev)
+        ev["sender"] = sender_hex
+    return ev
 
 
 def _author_for_batch(batch) -> str:
