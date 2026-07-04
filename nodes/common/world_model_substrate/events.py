@@ -136,7 +136,35 @@ class ObservationAdded:
         return asdict(self)
 
 
-Event = Any   # SubClaimSprouted | ObservationAdded
+@dataclass
+class ToolUsed:
+    """A tool invocation receipt (tool substrate, docs/tool_substrate.md).
+
+    Consensus event: rides the same gossip/canonical-ordering rail as
+    sprouts so every daemon computes identical per-manifest usage counts
+    at epoch close (mint ∝ standing × usage; attested-class decay resets
+    on fresh receipts). It does NOT touch the claim graph — replay
+    (``aggregate.apply_events``) skips it by design.
+
+    ``author_agent`` is the CALLER — the receipt is an attestation by
+    whoever paid for the call, so wash-trading standing has a floor
+    price. ``tool_author`` is denormalized from the manifest for cheap
+    epoch aggregation.
+    """
+    kind: str = "tool_used"
+    seq: int = 0
+    author_agent: str = ""        # the caller (who attests + pays)
+    manifest_digest: str = ""
+    tool_author: str = ""
+    receipt_digest: str = ""      # blob: {arguments_digest, ok, ts, ...}
+    ok: bool = True
+    fee_atn: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+Event = Any   # SubClaimSprouted | ObservationAdded | ToolUsed
 
 
 def event_from_dict(d: Dict[str, Any]) -> Event:
@@ -145,6 +173,8 @@ def event_from_dict(d: Dict[str, Any]) -> Event:
         return SubClaimSprouted(**d)
     if kind == "observation_added":
         return ObservationAdded(**d)
+    if kind == "tool_used":
+        return ToolUsed(**d)
     raise ValueError(f"unknown event kind: {kind!r}")
 
 

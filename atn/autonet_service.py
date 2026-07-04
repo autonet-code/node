@@ -933,6 +933,18 @@ class AutonetBridge:
         except Exception as e:
             log.warning("event gossip attach failed: %s", e)
 
+        # Tool substrate: route tool_used receipts onto the substrate
+        # event rail (epoch buffer + gossip; the claim graph ignores
+        # them). Local receipt ledger keeps working when this isn't
+        # wired — see ToolStore._record_receipt.
+        world_service = getattr(service, "_world_service", None)
+        tool_store = getattr(self._runtime, "tool_store", None) if self._runtime else None
+        if world_service is not None and tool_store is not None:
+            def _sink(event: dict, _ws=world_service) -> None:
+                _ws.submit_events([event], equilibrate_after=False)
+            tool_store.event_sink = _sink
+            log.info("ToolStore receipts wired into WorldService event rail")
+
     def _wire_substrate_identity_resolver(self) -> None:
         """Pass an identity resolver to the substrate feed so each
         work unit is attributed to the actual agent's 0x address

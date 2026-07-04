@@ -133,8 +133,9 @@ class ToolUsed:
     author_agent: str = ""        # the CALLER (event author = who attests)
     manifest_digest: str = ""
     tool_author: str = ""         # denormalized for cheap epoch aggregation
-    receipt_digest: str = ""      # blob: {input_digest, output_digest, ok, ts}
+    receipt_digest: str = ""      # blob: {arguments_digest, ok, ts, ...}
     ok: bool = True
+    fee_atn: float = 0.0          # carried so fee settlement is consensus-visible
 ```
 
 - Receipts are substrate events because mint ∝ usage must be

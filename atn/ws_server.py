@@ -1024,6 +1024,13 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": {"digest": digest, "revoked_from": agent_id}}
 
+        if msg_type == "tool_earnings":
+            # Off-chain fee ledger derived from usage receipts. On-chain
+            # settlement lands once payForService vs payForInference is
+            # decided (docs/tool_substrate.md open knobs).
+            return {"msg_id": msg_id, "ok": True,
+                    "result": self.runtime.tool_store.balances()}
+
         if msg_type == "set_tool_enabled":
             digest = msg.get("digest", "")
             if not digest:

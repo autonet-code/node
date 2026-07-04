@@ -152,6 +152,10 @@ def apply_events(
             ))
         elif kind == "sub_claim_sprouted":
             pending_sprouts.append(ev)
+        elif kind == "tool_used":
+            # Consensus receipt, not a graph event: counted at epoch
+            # close (tool_usage.py), invisible to the claim graph.
+            pass
         else:
             logger.warning("unknown event kind: %s", kind)
 

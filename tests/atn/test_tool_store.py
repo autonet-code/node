@@ -248,6 +248,60 @@ class TestResolutionAndExecution:
         assert out == {"result": {"echo": "round-trip"}}
 
     @pytest.mark.asyncio
+    async def test_receipts_and_fee_ledger(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await execute_tool(
+            "register_tool",
+            {"name": "paid_echo", "description": "Echo, for a fee.",
+             "input_schema": SCHEMA, "code": ECHO_CODE, "fee_atn": 0.5},
+            rt, caller_id="child")
+
+        sunk: list[dict] = []
+        rt.tool_store.event_sink = sunk.append
+
+        await rt.tool_registry.call_tool("paid_echo", {"x": "1"}, caller_id="parent")
+        await rt.tool_registry.call_tool("paid_echo", {"x": "2"}, caller_id="child")
+
+        # Consensus events emitted, caller attested, fee carried.
+        assert len(sunk) == 2
+        assert sunk[0]["kind"] == "tool_used"
+        assert sunk[0]["author_agent"] == "parent"
+        assert sunk[0]["tool_author"] == "child"
+        assert sunk[0]["manifest_digest"] == res["digest"]
+        assert sunk[0]["ok"] is True
+        assert sunk[0]["fee_atn"] == 0.5
+
+        # Off-chain ledger: author earned, callers spent.
+        balances = rt.tool_store.balances()
+        assert balances["earned"] == {"child": 1.0}
+        assert balances["spent"] == {"parent": 0.5, "child": 0.5}
+        assert balances["usage"][res["digest"]]["ok_count"] == 2
+
+        # Receipt seq survives a reload (no duplicate seq after restart).
+        reloaded = ToolStore(rt, rt._config.data_dir / "tools")
+        assert reloaded._receipt_seq == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_call_recorded_without_fee(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        bad_code = "import sys\nsys.exit(3)\n"
+        await execute_tool(
+            "register_tool",
+            {"name": "broken", "description": "Always fails.",
+             "input_schema": SCHEMA, "code": bad_code, "fee_atn": 0.5},
+            rt, caller_id="child")
+
+        out = await rt.tool_registry.call_tool("broken", {"x": "1"}, caller_id="child")
+        assert "error" in out
+
+        balances = rt.tool_store.balances()
+        assert balances["earned"] == {}          # not served = not paid
+        entry = next(iter(balances["usage"].values()))
+        assert entry["count"] == 1 and entry["ok_count"] == 0
+
+    @pytest.mark.asyncio
     async def test_use_tool_path_carries_caller(self, tmp_path):
         """The agent-facing use_tool executor must thread caller_id into
         the scoping check."""

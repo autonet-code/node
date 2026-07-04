@@ -81,9 +81,17 @@ class ToolStore:
         self._runtime = runtime
         self._dir = Path(tools_dir)
         self._registry_path = self._dir / "registry.jsonl"
+        self._receipts_path = self._dir / "receipts.jsonl"
         self._records: dict[str, ToolRecord] = {}
         self._blobs: Any = None  # lazy; None until substrate package needed
+        self._receipt_seq = 0
+        # Optional consensus sink: when the autonet WorldService is up,
+        # this is wired to submit ToolUsed events onto the substrate
+        # event rail (gossip + epoch buffer). Receipts are ALWAYS
+        # recorded locally; the sink is best-effort federation.
+        self.event_sink: Any = None
         self._load()
+        self._receipt_seq = self._count_receipts()
 
     # ------------------------------------------------------------------
     # Registration
@@ -243,12 +251,17 @@ class ToolStore:
         (``ToolRegistry.call_tool``) — this only dispatches."""
         manifest = record.manifest
         if manifest.get("code_digest"):
-            return await self._call_pinned(record, arguments)
-        if manifest.get("connector_id"):
-            return await self._call_connector(record, arguments)
-        if manifest.get("endpoint"):
-            return await self._call_endpoint(record, arguments)
-        return {"error": f"Tool {record.name!r} has no executable backing"}
+            result = await self._call_pinned(record, arguments)
+        elif manifest.get("connector_id"):
+            result = await self._call_connector(record, arguments)
+        elif manifest.get("endpoint"):
+            result = await self._call_endpoint(record, arguments)
+        else:
+            return {"error": f"Tool {record.name!r} has no executable backing"}
+
+        self._record_receipt(record, arguments, caller_id,
+                             ok="error" not in result)
+        return result
 
     async def _call_pinned(self, record: ToolRecord,
                            arguments: dict[str, Any]) -> dict[str, Any]:
@@ -326,6 +339,120 @@ class ToolStore:
             return {"result": resp.json()}
         except ValueError:
             return {"result": resp.text[:8000]}
+
+    # ------------------------------------------------------------------
+    # Receipts + fee ledger (docs/tool_substrate.md — usage receipts)
+    # ------------------------------------------------------------------
+
+    def _record_receipt(
+        self,
+        record: ToolRecord,
+        arguments: dict[str, Any],
+        caller_id: str | None,
+        *,
+        ok: bool,
+    ) -> None:
+        """Append a usage receipt and (best-effort) emit the consensus
+        ``tool_used`` event. Local ledger first — never lost to a
+        substrate outage; the sink failure is logged, not raised."""
+        import hashlib
+
+        caller = caller_id if caller_id else OWNER_AUTHOR
+        fee = float(record.manifest.get("fee_atn") or 0.0)
+        args_digest = hashlib.sha256(
+            json.dumps(arguments, sort_keys=True).encode("utf-8")).hexdigest()
+        self._receipt_seq += 1
+        receipt = {
+            "seq": self._receipt_seq,
+            "ts": int(time.time()),
+            "manifest_digest": record.digest,
+            "tool_name": record.name,
+            "tool_author": record.author,
+            "caller": caller,
+            "arguments_digest": args_digest,
+            "ok": ok,
+            "fee_atn": fee,
+        }
+        receipt_digest = ""
+        try:
+            receipt_digest = self._blob_store().add_json(receipt)
+        except RuntimeError:
+            pass  # standalone install: ledger row still recorded below
+        receipt["receipt_digest"] = receipt_digest
+
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with self._receipts_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt) + "\n")
+
+        if self.event_sink is not None:
+            event = {
+                "kind": "tool_used",
+                "seq": self._receipt_seq,
+                "author_agent": caller,
+                "manifest_digest": record.digest,
+                "tool_author": record.author,
+                "receipt_digest": receipt_digest,
+                "ok": ok,
+                "fee_atn": fee,
+            }
+            try:
+                self.event_sink(event)
+            except Exception as exc:
+                log.warning("tool_used event sink failed: %s", exc)
+
+    def balances(self) -> dict[str, Any]:
+        """Off-chain fee ledger, derived from the receipts log.
+
+        Earned accrues to tool authors, spent to callers, on successful
+        invocations of fee-bearing tools. Settlement on-chain (labeled
+        ATN transfer at epoch close) is deliberately NOT wired yet —
+        payForService vs widened payForInference is an open decision.
+        """
+        earned: dict[str, float] = {}
+        spent: dict[str, float] = {}
+        usage: dict[str, dict[str, Any]] = {}
+        for receipt in self._iter_receipts():
+            digest = receipt.get("manifest_digest", "")
+            entry = usage.setdefault(digest, {
+                "tool_name": receipt.get("tool_name", ""),
+                "tool_author": receipt.get("tool_author", ""),
+                "count": 0, "ok_count": 0, "fee_total": 0.0,
+            })
+            entry["count"] += 1
+            if receipt.get("ok"):
+                entry["ok_count"] += 1
+                fee = float(receipt.get("fee_atn") or 0.0)
+                if fee > 0:
+                    author = receipt.get("tool_author", "")
+                    caller = receipt.get("caller", "")
+                    entry["fee_total"] = round(entry["fee_total"] + fee, 10)
+                    earned[author] = round(earned.get(author, 0.0) + fee, 10)
+                    spent[caller] = round(spent.get(caller, 0.0) + fee, 10)
+        return {
+            "earned": dict(sorted(earned.items())),
+            "spent": dict(sorted(spent.items())),
+            "usage": dict(sorted(usage.items())),
+        }
+
+    def _iter_receipts(self):
+        if not self._receipts_path.exists():
+            return
+        try:
+            lines = self._receipts_path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            log.warning("ToolStore could not read receipts: %s", exc)
+            return
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                log.warning("ToolStore skipping corrupt receipt row")
+
+    def _count_receipts(self) -> int:
+        return sum(1 for _ in self._iter_receipts())
 
     # ------------------------------------------------------------------
     # Internals

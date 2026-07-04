@@ -1,0 +1,67 @@
+"""Tool usage aggregation — deterministic per-manifest counts from events.
+
+Design: ``docs/tool_substrate.md``. ``tool_used`` receipts ride the
+canonical event rail; at epoch close every honest daemon aggregates them
+with this module and gets bit-identical results (sorted iteration,
+plain integer/float accumulation, rounded fee sums).
+
+This is the consensus input for:
+  - mint: author attribution ∝ standing × usage (reconcile side), and
+  - attested-class standing decay: ``epochs_since_last_receipt`` is
+    derived from which epochs contained receipts for a manifest.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
+_FEE_DECIMALS = 10
+
+
+def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Aggregate ``tool_used`` events into per-manifest usage stats.
+
+    Returns a canonically-ordered dict:
+
+      {manifest_digest: {
+          "count": int,             # all receipts
+          "ok_count": int,          # successful invocations
+          "fee_total": float,       # Σ fee_atn across receipts
+          "tool_author": str,       # from the receipts (first sorted wins
+                                    # on disagreement — consensus tie-break)
+          "callers": {caller_id: count},
+      }}
+
+    Deterministic: events are processed in (author_agent, seq,
+    receipt_digest) order regardless of input order, all maps are
+    key-sorted, fee sums rounded to swamp IEEE jitter.
+    """
+    receipts = [e for e in events if e.get("kind") == "tool_used"
+                and e.get("manifest_digest")]
+    receipts.sort(key=lambda e: (e.get("author_agent", ""),
+                                 e.get("seq", 0),
+                                 e.get("receipt_digest", "")))
+
+    usage: Dict[str, Dict[str, Any]] = {}
+    for ev in receipts:
+        digest = ev["manifest_digest"]
+        entry = usage.get(digest)
+        if entry is None:
+            entry = usage[digest] = {
+                "count": 0,
+                "ok_count": 0,
+                "fee_total": 0.0,
+                "tool_author": str(ev.get("tool_author") or ""),
+                "callers": {},
+            }
+        entry["count"] += 1
+        if ev.get("ok", True):
+            entry["ok_count"] += 1
+        entry["fee_total"] += float(ev.get("fee_atn") or 0.0)
+        caller = str(ev.get("author_agent") or "")
+        entry["callers"][caller] = entry["callers"].get(caller, 0) + 1
+
+    for entry in usage.values():
+        entry["fee_total"] = round(entry["fee_total"], _FEE_DECIMALS)
+        entry["callers"] = dict(sorted(entry["callers"].items()))
+    return dict(sorted(usage.items()))
