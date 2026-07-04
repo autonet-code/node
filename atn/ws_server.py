@@ -1031,6 +1031,77 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": self.runtime.tool_store.balances()}
 
+        if msg_type == "set_tool_published":
+            # Owner surface: flip publish state directly (agents use the
+            # separately-granted publish_tool capability).
+            digest = msg.get("digest", "")
+            if not digest:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'digest' field"}
+            published = bool(msg.get("published", True))
+            if not self.runtime.tool_store.set_published(digest, published):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Unknown tool digest: {digest[:16]}"}
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"digest": digest, "published": published}}
+
+        if msg_type == "probe_tools":
+            # The inference probe as the Tools screen's search: semantic
+            # retrieval over manifests (embedding + standing + coverage)
+            # when the substrate is up; graceful degradation to a plain
+            # substring match over the local store when it isn't.
+            query = str(msg.get("query") or "").strip()
+            k = int(msg.get("k") or 12)
+            if not query:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'query' field"}
+            matches = []
+            source = "local"
+            try:
+                autonet = getattr(self.runtime, "autonet", None)
+                service = getattr(autonet, "_service", None) if autonet else None
+                world_service = getattr(service, "_world_service", None) if service else None
+                if world_service is not None:
+                    from nodes.common.world_model_substrate.tool_manifest import (
+                        is_tool_manifest,
+                    )
+                    result = world_service.infer_artifacts(query, k=max(k * 3, 12))
+                    for art in result.get("artifacts", []):
+                        payload = art.get("payload")
+                        if not is_tool_manifest(payload):
+                            continue
+                        matches.append({
+                            "digest": art.get("digest", ""),
+                            "name": payload.get("name", ""),
+                            "description": payload.get("description", ""),
+                            "author": payload.get("author", ""),
+                            "trust_class": payload.get("trust_class", ""),
+                            "score": art.get("final", 0.0),
+                            "standing": art.get("standing", 0.0),
+                        })
+                        if len(matches) >= k:
+                            break
+                    source = "substrate"
+            except Exception as exc:
+                log.debug("probe_tools substrate path failed: %s", exc)
+            if not matches:
+                needle = query.lower()
+                for record in self.runtime.tool_store.visible_to(None):
+                    hay = f"{record.name} {record.manifest.get('description', '')}".lower()
+                    if all(w in hay for w in needle.split()):
+                        matches.append({
+                            "digest": record.digest,
+                            "name": record.name,
+                            "description": record.manifest.get("description", ""),
+                            "author": record.author,
+                            "trust_class": record.trust_class,
+                            "score": 0.0,
+                            "standing": 0.0,
+                        })
+                        if len(matches) >= k:
+                            break
+                source = "local"
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"matches": matches, "source": source}}
+
         if msg_type == "set_tool_enabled":
             digest = msg.get("digest", "")
             if not digest:
