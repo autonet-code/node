@@ -127,17 +127,20 @@ class TestRegistration:
         assert pushed == []
         assert rt.tool_store.push_all_manifests() == 0     # backfill skips private
 
+        # The sink receives the CONSENSUS author (the agent's 0x
+        # address), not the local id — chain-claimable attribution.
+        child_addr = rt.get_agent("child").identity.address
         res2 = await execute_tool(
             "register_tool",
             {"name": "public_echo", "description": "Echo.", "input_schema": SCHEMA,
              "code": ECHO_CODE, "publish": True},
             rt, caller_id="child")
         assert res2["published"] is True
-        assert pushed == [("public_echo", "child")]
+        assert pushed == [("public_echo", child_addr)]
 
         # Owner flips the private one to published later.
         assert rt.tool_store.set_published(res["digest"], True)
-        assert pushed[-1] == ("echo_tool", "child")
+        assert pushed[-1] == ("echo_tool", child_addr)
         # Publish state survives reload.
         reloaded = ToolStore(rt, rt._config.data_dir / "tools")
         assert reloaded.get(res["digest"]).published is True
@@ -301,11 +304,12 @@ class TestResolutionAndExecution:
         await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="parent")
         await rt.tool_registry.call_tool("echo_tool", {"x": "2"}, caller_id="child")
 
-        # Consensus events emitted, caller attested.
+        # Consensus events emitted, caller attested — the rail carries
+        # 0x identities (chain-claimable); local ids stay in the jsonl.
         assert len(sunk) == 2
         assert sunk[0]["kind"] == "tool_used"
-        assert sunk[0]["author_agent"] == "parent"
-        assert sunk[0]["tool_author"] == "child"
+        assert sunk[0]["author_agent"] == rt.get_agent("parent").identity.address
+        assert sunk[0]["tool_author"] == rt.get_agent("child").identity.address
         assert sunk[0]["manifest_digest"] == res["digest"]
         assert sunk[0]["ok"] is True
 
@@ -387,10 +391,11 @@ class TestAttestation:
         assert out == {"attested": 1, "skipped": []}
         assert len(sunk) == 1
         ev = sunk[0]
+        child_addr = rt.get_agent("child").identity.address
         assert ev["kind"] == "tool_used"
         assert ev["attested"] is True
-        assert ev["author_agent"] == "child"
-        assert ev["tool_author"] == "child"
+        assert ev["author_agent"] == child_addr
+        assert ev["tool_author"] == child_addr
         assert ev["manifest_digest"] == res["digest"]
         assert ev["score"] == 0.9
         assert ev["fee_atn"] == 0.0

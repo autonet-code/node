@@ -45,7 +45,16 @@ _MAX_CODE_BYTES = 512 * 1024
 
 @dataclass
 class ToolRecord:
-    """One registered tool: manifest digest + daemon-local state."""
+    """One registered tool: manifest digest + daemon-local state.
+
+    Two author identities, deliberately distinct (E2E seam #3,
+    docs/local_e2e.md): ``author`` (from the manifest) is the CONSENSUS
+    identity — the agent's 0x address, globally unique and chain-
+    claimable, what mint attribution and the damper's owner map key on.
+    ``author_id`` is the LOCAL agent id used for daemon-side scoping
+    (lineage walks over parent_id need registry ids, and local ids are
+    meaningless network-wide — every daemon has an "assistant").
+    """
     digest: str
     manifest: dict[str, Any]
     grants: set[str] = field(default_factory=set)   # owner-granted agent ids
@@ -54,11 +63,20 @@ class ToolRecord:
     # Private tools are pure local capability — never pushed to the
     # substrate, no consensus footprint. Publishing is a deliberate act.
     published: bool = False
+    # Local author agent id (scoping). Empty on pre-address rows —
+    # author_id falls back to the manifest author.
+    local_author: str = ""
     registered_ts: int = 0
 
     @property
     def author(self) -> str:
+        """Consensus author identity (0x address when available)."""
         return str(self.manifest.get("author") or "")
+
+    @property
+    def author_id(self) -> str:
+        """Local agent id for scoping; manifest author as fallback."""
+        return self.local_author or self.author
 
     @property
     def name(self) -> str:
@@ -74,6 +92,7 @@ class ToolRecord:
             "grants": sorted(self.grants),
             "enabled": self.enabled,
             "published": self.published,
+            "local_author": self.local_author,
             "registered_ts": self.registered_ts,
         }
 
@@ -153,12 +172,16 @@ class ToolStore:
 
         trust_class = "pinned" if code_digest else "attested"
         author_pubkey = self._author_address(author)
+        # Consensus author = the 0x address (chain-claimable, globally
+        # unique — mint keyed by a local id has no on-chain claim path).
+        # The local id stays on the record for daemon-side scoping.
+        consensus_author = self._consensus_identity(author)
 
         manifest = build_tool_manifest(
             name=name,
             description=description,
             input_schema=input_schema,
-            author=author,
+            author=consensus_author,
             trust_class=trust_class,
             author_pubkey=author_pubkey,
             code_digest=code_digest,
@@ -176,6 +199,7 @@ class ToolStore:
             digest=digest,
             manifest=manifest,
             published=bool(publish),
+            local_author=author,
             registered_ts=int(time.time()),
         )
         self._records[digest] = record
@@ -185,7 +209,9 @@ class ToolStore:
                  "published" if publish else "private", author, digest[:16])
         if record.published and self.manifest_sink is not None:
             try:
-                self.manifest_sink(manifest, author)
+                # Consensus author (0x) — same identity the sprout's
+                # author_agent and manifest_meta carry.
+                self.manifest_sink(manifest, consensus_author)
             except Exception as exc:
                 log.warning("manifest sink failed for %s: %s", name, exc)
         return {"digest": digest, "manifest": manifest,
@@ -245,11 +271,11 @@ class ToolStore:
         assert caller_id is not None
         if not record.enabled:
             return False
-        if caller_id == record.author:
+        if caller_id == record.author_id:
             return True
         if caller_id in record.grants:
             return True
-        return caller_id in self._ancestors(record.author)
+        return caller_id in self._ancestors(record.author_id)
 
     def visible_to(self, caller_id: str | None) -> list[ToolRecord]:
         return [r for r in self._records.values() if self.allowed(caller_id, r)]
@@ -428,7 +454,10 @@ class ToolStore:
             event = {
                 "kind": "tool_used",
                 "seq": self._receipt_seq,
-                "author_agent": caller,
+                # Consensus rail carries 0x identities (mint/damper/
+                # owner-map key space); local ids stay in the jsonl
+                # rows for display.
+                "author_agent": self._consensus_identity(caller),
                 "manifest_digest": record.digest,
                 "tool_author": record.author,
                 "receipt_digest": receipt_digest,
@@ -622,7 +651,9 @@ class ToolStore:
                 event = {
                     "kind": "tool_used",
                     "seq": self._receipt_seq,
-                    "author_agent": caller,
+                    # 0x identity on the consensus rail (see
+                    # _record_receipt).
+                    "author_agent": self._consensus_identity(caller),
                     "manifest_digest": record.digest,
                     "tool_author": record.author,
                     "receipt_digest": receipt_digest,
@@ -715,6 +746,22 @@ class ToolStore:
         identity = getattr(defn, "identity", None) if defn else None
         return str(getattr(identity, "address", "") or "")
 
+    def _consensus_identity(self, local_id: str | None) -> str:
+        """Map a local id to its consensus identity (0x address).
+
+        Agents → their identity address; the owner ("user") → the
+        owner wallet when configured. Falls back to the local id so
+        nothing breaks on address-less setups — those mints simply
+        have no chain claim path (documented E2E seam #3)."""
+        if not local_id:
+            return OWNER_AUTHOR
+        if local_id == OWNER_AUTHOR:
+            owner = getattr(
+                getattr(getattr(self._runtime, "_config", None),
+                        "autonet", None), "owner_wallet", "") or ""
+            return owner or OWNER_AUTHOR
+        return self._author_address(local_id) or local_id
+
     def _sign(self, author: str, manifest: dict[str, Any]) -> None:
         """Sign the canonical manifest bytes with the author agent's key.
 
@@ -790,6 +837,7 @@ class ToolStore:
                 grants=set(row.get("grants") or []),
                 enabled=bool(row.get("enabled", True)),
                 published=bool(row.get("published", False)),
+                local_author=str(row.get("local_author") or ""),
                 registered_ts=int(row.get("registered_ts") or 0),
             )
 

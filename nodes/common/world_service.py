@@ -591,8 +591,18 @@ class WorldService:
         equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
         artifact_digest: str = "",
         manifest_meta: Optional[Dict[str, str]] = None,
+        author_post: bool = False,
     ) -> Dict[str, Any]:
         """Apply a single observation to the world.
+
+        ``author_post``: stamp one unit-weight post by ``agent_id`` on
+        the explicit rootless sprout (live world AND event, so replay
+        matches). Registering a claim IS a claim — the self-post gives
+        it standing 1 at birth, fully CON-able like any post. Used by
+        tool-manifest registration (a published tool must be able to
+        mint from attested usage without waiting for third-party
+        endorsement) — same mechanism submit_con uses for targeted
+        disputes.
 
         - ``sprout_under_charter``: cross-tendency edge discovery picks up
           the observation under whichever charter root is closest in the
@@ -649,6 +659,8 @@ class WorldService:
                     # default -> to_dict omits it, old-format parity holds.
                     if artifact_digest and new_node is not None:
                         new_node.artifact_digest = artifact_digest
+                    if author_post and new_node is not None:
+                        new_node.add_post(agent_id)
                     recorder._seq += 1
                     recorder.events.append(SubClaimSprouted(
                         seq=recorder._seq,
@@ -672,6 +684,8 @@ class WorldService:
                         # event so epoch-close tool mint never depends on
                         # blob replication (docs/tool_substrate.md).
                         manifest_meta=dict(manifest_meta or {}),
+                        # Replay must reproduce the live self-post above.
+                        author_post=author_post,
                     ))
 
             # 3. Equilibrate. The events derived here are NOT persisted
@@ -877,6 +891,11 @@ class WorldService:
                     "trust_class": str(manifest.get("trust_class", "")),
                     "author": str(manifest.get("author", "")),
                 },
+                # Registering a claim IS a claim: one unit-weight,
+                # CON-able self-post so a published tool has standing 1
+                # at birth and can mint from attested usage without
+                # waiting for third-party endorsement.
+                author_post=True,
             )
             receipt["manifest_digest"] = digest
             return receipt
