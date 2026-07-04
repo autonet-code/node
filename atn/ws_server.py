@@ -2147,11 +2147,11 @@ class WebSocketBridge:
         """Seam for service payment/voucher validation.
 
         TODO(contracts): implement per docs/services_market.md §2 —
-        v1 escrow-per-request (verify a released deposit for
-        (token, amount, requestId)) or v1.5 payment channel (verify a
-        signed cumulative voucher). The contracts workstream owns
-        ServiceEscrow/channel settlement; until then this returns True so
-        the provider dispatch path is exercisable end-to-end.
+        channel-only settlement (postpaid escrow was deleted, not
+        deferred): verify the request's signed cumulative voucher
+        against the PaymentChannel's voucherHash/current state. Until
+        then this returns True so the provider dispatch path is
+        exercisable end-to-end.
         """
         return True
 

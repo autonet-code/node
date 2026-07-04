@@ -114,7 +114,7 @@ def validate_service_spec(payload: Dict[str, Any]) -> List[str]:
 def _validate_ask(ask: Any) -> List[str]:
     """The ask names the price: {token, amount, unit}. Payment/voucher
     validation is the contracts workstream's job — here we only check the
-    shape so a well-formed ask reaches the escrow seam."""
+    shape so a well-formed ask reaches the payment-channel seam."""
     errors: List[str] = []
     if not isinstance(ask, dict):
         return ["ask must be a dict of {token, amount, unit}"]

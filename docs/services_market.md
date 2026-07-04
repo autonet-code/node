@@ -63,17 +63,22 @@ factory + N deployments + growing audit surface. Instead:
   `updateServiceAsk`, `retireService`. Events → indexer → Firestore
   `services` collection (chain = truth, blob = storage, Firestore =
   web2 cache; exact same doctrine as agents/tools).
-- `ServiceEscrow` — settlement. Two modes:
-  - **v1 escrow-per-request**: client deposits (token, amount,
-    requestId), provider delivers, client releases (or timeout logic —
-    sims decide the griefing rules). Fully atomic, gas-heavy.
-  - **v1.5 payment channel** ("prepaid credits done trustlessly"):
-    client deposits once; hands provider signed vouchers
-    (cumulative_amount, request_id) off-chain per work item; provider
-    claims the latest voucher on close; remainder refunds. Two txs for
-    N requests, per-item granularity preserved: not served = no
-    voucher. Streaming (Sablier-style) only for subscription-shaped
-    services — wrong default for per-item work.
+- Settlement: **the prepaid payment channel, ONLY** (ratified
+  2026-07-04, late — the postpaid escrow was DELETED, not deferred).
+  Rationale: an unarbitrated escrow cannot know delivery truth, so
+  some party must bear the lie — a false "delivered" claim steals the
+  deposit, or a silent client steals the work. The channel dissolves
+  the dilemma by making exposure per-item and PREPAID: client deposits
+  once; each request carries a signed voucher (cumulative_amount)
+  covering that item's ask; the provider serves only voucher-covered
+  requests and closes anytime to collect the cumulative; the remainder
+  refunds after a challenge window. Theft ceiling = ONE voucher, sized
+  by the client, worth less than the review history it burns. No
+  arbitration, no fulfillment oracle, two txs for N requests. Metered
+  hardware (GPU/sponsor-pipe inference) fits natively: the ask's
+  `unit` meters, vouchers stream against consumption. Streaming
+  contracts (Sablier-style) only for subscription-shaped services —
+  wrong default for per-item work.
 
 ### 3. Daemon as server: the wss rail, reused
 

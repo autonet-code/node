@@ -173,7 +173,7 @@ def load_abi(name: str) -> list:
     """Load a compiled contract ABI from Hardhat artifacts.
 
     Contracts live under contracts/core (Substrate, ServiceMarket's
-    ServiceRegistry/ServiceEscrow) and contracts/test (MockERC20). The
+    ServiceRegistry/PaymentChannel) and contracts/test (MockERC20). The
     artifact dir mirrors the source path AND the containing .sol file
     name — but ServiceMarket.sol holds several contracts, so the .sol
     stem differs from the contract name. Scan the artifacts tree for
@@ -209,18 +209,19 @@ async function main() {
   await substrate.waitForDeployment();
   const substrateAddr = await substrate.getAddress();
 
-  // ServiceMarket.sol declares three contracts. Deploy the registry
-  // (constructor takes the substrate address); escrow takes the registry
-  // + two timeouts. MockERC20 for the escrow round-trip if present.
+  // ServiceMarket.sol declares two contracts. Deploy the registry
+  // (constructor takes the substrate address); the payment channel takes a
+  // single challenge-window arg — it is the ONLY settlement rail (the
+  // postpaid escrow was deleted). MockERC20 for the channel round-trip.
   const Registry = await ethers.getContractFactory("ServiceRegistry");
   const registry = await Registry.deploy(substrateAddr);
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
 
-  const Escrow = await ethers.getContractFactory("ServiceEscrow");
-  const escrow = await Escrow.deploy(registryAddr, 3600, 3600);
-  await escrow.waitForDeployment();
-  const escrowAddr = await escrow.getAddress();
+  const Channel = await ethers.getContractFactory("PaymentChannel");
+  const channel = await Channel.deploy(3600);
+  await channel.waitForDeployment();
+  const channelAddr = await channel.getAddress();
 
   let mockErc20 = null;
   try {
@@ -233,7 +234,7 @@ async function main() {
   const out = {
     substrate: substrateAddr,
     serviceRegistry: registryAddr,
-    serviceEscrow: escrowAddr,
+    paymentChannel: channelAddr,
     mockErc20: mockErc20,
   };
   fs.writeFileSync(process.env.DEPLOY_OUT, JSON.stringify(out, null, 2));
@@ -822,7 +823,7 @@ async def amain() -> int:
     # ------------------------------------------------------------------
     # Stage 6 — settlement back to chain
     # ------------------------------------------------------------------
-    s6 = board.stage(6, "settlement (anchor + recordTraining + service)")
+    s6 = board.stage(6, "settlement (anchor + recordTraining + channel)")
     try:
         from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
         from nodes.common.authoritative_submitter import (
@@ -886,7 +887,14 @@ async def amain() -> int:
         assert atn_delta == expected, (atn_delta, expected)
         assert rep_delta > 0
 
-        # --- Service leg: register one Service + one escrow round-trip. ---
+        # --- Service leg: register one Service + one payment-channel
+        # round-trip. The channel is the ONLY settlement rail (the postpaid
+        # escrow was deleted): client=OWNER B opens a channel to the provider
+        # (author) funded with MockERC20, signs ONE off-chain EIP-712 voucher
+        # covering a single item's ask, the provider closes to collect it, and
+        # the unused remainder refunds to the client after the challenge
+        # window. We verify provider delta == voucher amount and the client
+        # refund == deposit - voucher. ---
         try:
             reg_abi = load_abi("ServiceRegistry")
             registry = w3.eth.contract(
@@ -895,24 +903,28 @@ async def amain() -> int:
             spec_digest = bytes.fromhex("cd" * 32)
             token = addresses.get("mockErc20")
             if not token:
-                s6.note("service_leg", "SKIP (no MockERC20 in repo)")
+                s6.note("channel_leg", "SKIP (no MockERC20 in repo)")
             else:
                 token = Web3.to_checksum_address(token)
+                ITEM_ASK = 1000       # one item's ask (the voucher amount)
+                CHANNEL_DEPOSIT = 3000  # client escrows more than one item
                 send_agent_tx(
                     w3,
-                    registry.functions.registerService(spec_digest, token, 1000),
+                    registry.functions.registerService(spec_digest, token, ITEM_ASK),
                     author_key, author_addr)
                 service_id = registry.functions.serviceCount().call()
                 s6.note("service_id", service_id)
 
-                # Escrow round-trip: client=OWNER B funds MockERC20, opens,
-                # provider (author) delivers, client releases.
                 mock_abi = load_abi("MockERC20")
-                mock = w3.eth.contract(
-                    address=token, abi=mock_abi)
-                escrow_addr = Web3.to_checksum_address(addresses["serviceEscrow"])
-                # Mint/allocate mUSD to owner B. MockERC20 likely has a
-                # mint(to, amount) — try it, else assume constructor funded.
+                mock = w3.eth.contract(address=token, abi=mock_abi)
+                channel_addr = Web3.to_checksum_address(
+                    addresses["paymentChannel"])
+                channel_abi = load_abi("PaymentChannel")
+                channel = w3.eth.contract(
+                    address=channel_addr, abi=channel_abi)
+
+                # Mint/allocate mUSD to owner B (the client). MockERC20 likely
+                # has mint(to, amount) — try it, else assume constructor funded.
                 try:
                     tx = mock.functions.mint(owner_b.address, 100000)\
                         .build_transaction({
@@ -942,26 +954,65 @@ async def amain() -> int:
                     if r.status != 1:
                         raise RuntimeError("owner tx reverted")
 
-                escrow_abi = load_abi("ServiceEscrow")
-                escrow = w3.eth.contract(address=escrow_addr, abi=escrow_abi)
-                req_id = bytes.fromhex("ab" * 32)
+                # Client opens the channel (deposit) to the provider.
+                client_mUSD_before = mock.functions.balanceOf(owner_b.address).call()
                 prov_before = mock.functions.balanceOf(author_addr).call()
-                _owner_tx(mock.functions.approve(escrow_addr, 1000), owner_b)
-                _owner_tx(escrow.functions.openRequest(service_id, req_id, 1000),
+                _owner_tx(mock.functions.approve(channel_addr, CHANNEL_DEPOSIT),
                           owner_b)
-                # provider (author) marks delivered.
+                _owner_tx(
+                    channel.functions.openChannel(
+                        author_addr, token, CHANNEL_DEPOSIT),
+                    owner_b)
+                channel_id = channel.functions.channelCount().call()
+
+                # Client signs ONE off-chain EIP-712 voucher for a single
+                # item's ask. Sign the raw typed-data digest the contract
+                # exposes via voucherHash() — same robustness trick as the
+                # owner-binding signer: whatever the contract hashes is what
+                # we sign.
+                from eth_account import Account
+                voucher_digest = channel.functions.voucherHash(
+                    channel_id, ITEM_ASK).call()
+                voucher_digest = bytes(voucher_digest)
+                client_acct = Account.from_key(owner_b._private_key.hex())
+                v_signed = (
+                    Account._sign_hash(voucher_digest, client_acct._private_key)
+                    if hasattr(Account, "_sign_hash")
+                    else client_acct.unsafe_sign_hash(voucher_digest))
+                voucher_sig = bytes(v_signed.signature)
+
+                # Provider (author) closes the channel with the voucher.
                 send_agent_tx(
                     w3,
-                    escrow.functions.markDelivered(owner_b.address, service_id, req_id),
+                    channel.functions.closeChannel(
+                        channel_id, ITEM_ASK, voucher_sig),
                     author_key, author_addr)
-                # client releases.
-                _owner_tx(escrow.functions.release(service_id, req_id), owner_b)
                 prov_after = mock.functions.balanceOf(author_addr).call()
-                s6.note("escrow_provider_delta", prov_after - prov_before)
-                assert prov_after - prov_before == 1000
+                channel_provider_delta = prov_after - prov_before
+                s6.note("channel_provider_delta", channel_provider_delta)
+                assert channel_provider_delta == ITEM_ASK, (
+                    channel_provider_delta, ITEM_ASK)
+
+                # Advance past the challenge window on the running hardhat
+                # node, then withdraw the client's remainder (permissionless).
+                w3.provider.make_request("evm_increaseTime", [3601])
+                w3.provider.make_request("evm_mine", [])
+                send_agent_tx(
+                    w3,
+                    channel.functions.withdrawRemainder(channel_id),
+                    author_key, author_addr)  # anyone can trigger the refund
+                client_mUSD_after = mock.functions.balanceOf(owner_b.address).call()
+                channel_client_refund = (
+                    client_mUSD_after - (client_mUSD_before - CHANNEL_DEPOSIT))
+                s6.note("channel_client_refund", channel_client_refund)
+                # Client got back deposit - voucher; net spend == one voucher.
+                assert channel_client_refund == CHANNEL_DEPOSIT - ITEM_ASK, (
+                    channel_client_refund, CHANNEL_DEPOSIT - ITEM_ASK)
+                net_client_spend = client_mUSD_before - client_mUSD_after
+                assert net_client_spend == ITEM_ASK, (net_client_spend, ITEM_ASK)
         except Exception as se:
-            # Service leg is explicitly allowed to SKIP rather than sink time.
-            s6.note("service_leg", f"SKIP ({se!r})")
+            # Channel leg is explicitly allowed to SKIP rather than sink time.
+            s6.note("channel_leg", f"SKIP ({se!r})")
 
         s6.status = "PASS"
     except Exception as e:

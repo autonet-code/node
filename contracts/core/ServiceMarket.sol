@@ -9,24 +9,28 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 /// @title ServiceMarket — decentralized monetizable APIs (services_market.md)
 ///
-/// Three contracts, one file, one deployment surface for the indexer:
+/// Two contracts, one file, one deployment surface for the indexer:
 ///
 ///   1. ServiceRegistry — provider publishes/updates/retires a Service.
 ///      Provider MUST be a registered agent on Substrate.sol (identity is
 ///      chain-verified via the ISubstrate interface). Events → indexer →
 ///      Firestore `services`. Chain = truth, blob = spec storage.
 ///
-///   2. ServiceEscrow (v1, escrow-per-request) — fully-atomic settlement:
-///      client deposits an ERC20 amount for a (serviceId, requestId),
-///      provider marks delivered, client releases. Timeout paths on BOTH
-///      sides so neither can grief indefinitely (see griefing analysis on
-///      the state machine below).
-///
-///   3. PaymentChannel (v1.5, prepaid credits) — unidirectional channel:
+///   2. PaymentChannel — the ONLY settlement rail (prepaid, unidirectional):
 ///      client opens with a deposit, hands the provider EIP-712 vouchers
 ///      over (channelId, cumulativeAmount) off-chain per work item, provider
 ///      closes claiming the latest cumulative, remainder refunds to client
 ///      after a challenge window.
+///
+/// Channel-only settlement is a ratified decision (services_market.md,
+/// 2026-07-04), not an interim state: the postpaid escrow was DELETED. An
+/// unarbitrated escrow cannot know delivery truth, so some party must bear
+/// the lie — a false "delivered" claim steals the deposit, or a silent
+/// client steals the work. The channel dissolves the dilemma by making
+/// exposure per-item and PREPAID: each request carries a client-signed
+/// voucher covering exactly that item's ask, so the theft ceiling is ONE
+/// voucher, sized by the client — worth less than the review history a
+/// cheating provider burns. No arbitration, no fulfillment oracle.
 ///
 /// Service commerce is deliberately independent of ATN's constitutional
 /// roles: ANY ERC20 is payable, no substrate standing, no mint. The trust
@@ -132,9 +136,9 @@ contract ServiceRegistry {
         emit ServiceAskUpdated(serviceId, msg.sender, token, askAmount);
     }
 
-    /// @notice Retire a service (stops appearing in the storefront). Escrow
-    ///         and channels already open are unaffected — settlement lives
-    ///         in the other contracts, not here.
+    /// @notice Retire a service (stops appearing in the storefront). Channels
+    ///         already open are unaffected — settlement lives in the
+    ///         PaymentChannel contract, not here.
     function retireService(uint256 serviceId) external {
         Service storage s = services[serviceId];
         if (s.provider == address(0)) revert NoSuchService();
@@ -151,247 +155,7 @@ contract ServiceRegistry {
 }
 
 // =============================================================================
-// ServiceEscrow (v1 — escrow-per-request)
-// =============================================================================
-//
-// State machine per (client, provider, serviceId, requestId):
-//
-//   None --openRequest--> Open --markDelivered--> Delivered --release--> Released
-//                          |                          |
-//                          | (after releaseTimeout)   | (after claimTimeout, if
-//                          |  client can reclaim)     |  client silent, provider
-//                          v                          |  can claim)
-//                       Reclaimed                     v
-//                                                   Claimed
-//
-// GRIEFING ANALYSIS
-// -----------------
-//   * Provider never delivers (takes deposit hostage): funds are held in
-//     escrow, not with the provider. Client reclaims after `releaseTimeout`
-//     from openRequest. Provider gains nothing by stalling; worst case the
-//     client's capital is locked for `releaseTimeout` — bounded, refundable.
-//
-//   * Client never releases after honest delivery (services rendered, payment
-//     withheld): provider marked Delivered, so after `claimTimeout` from the
-//     markDelivered time the provider can `claimDelivered` and take the
-//     escrowed amount unilaterally. Client's only lever is to release EARLY
-//     (which they'd do to reward good service / build the provider's reviews)
-//     or to dispute off-chain within the window. No on-chain dispute court in
-//     v1 — the spec says trust is behavioral (receipts/reviews), so the money
-//     path just has to be non-grief; adjudication is social.
-//
-//   * The two timeouts are ordered releaseTimeout (client's reclaim clock,
-//     runs from open) vs claimTimeout (provider's claim clock, runs from
-//     delivery). Because delivery must happen before releaseTimeout expires
-//     (otherwise the client reclaims), and claimTimeout only starts at
-//     delivery, the windows don't overlap into a race: once Delivered, the
-//     client can still release any time, but reclaim is no longer available
-//     (state left Open). First finalizing action wins; all paths are terminal.
-//
-//   * Front-running / griefing the finalizer: release/reclaim/claim each
-//     require the correct caller (client for release/reclaim, provider for
-//     claim) so no third party can force a settlement.
-//
-// Timeouts are constructor args (network can tune per deployment). Amounts
-// are pulled via transferFrom at openRequest so the escrow custodies real
-// tokens, not a promise. SafeERC20 + ReentrancyGuard + CEI throughout.
-
-contract ServiceEscrow is ReentrancyGuard {
-    using SafeERC20 for IERC20;
-
-    ServiceRegistry public immutable registry;
-
-    /// @notice Seconds after openRequest before an undelivered request can be
-    ///         reclaimed by the client.
-    uint256 public immutable releaseTimeout;
-    /// @notice Seconds after markDelivered before a delivered-but-unreleased
-    ///         request can be claimed by the provider.
-    uint256 public immutable claimTimeout;
-
-    enum Status { None, Open, Delivered, Finalized }
-
-    struct Request {
-        address client;
-        address provider;
-        address token;
-        uint256 amount;
-        uint256 serviceId;
-        uint256 openedAt;
-        uint256 deliveredAt;
-        Status status;
-    }
-
-    /// @dev keyed by keccak256(client, serviceId, requestId) so the same
-    ///      requestId can be reused across services/clients without clashing.
-    mapping(bytes32 => Request) public requests;
-
-    event RequestOpened(
-        bytes32 indexed key,
-        address indexed client,
-        address indexed provider,
-        uint256 serviceId,
-        bytes32 requestId,
-        address token,
-        uint256 amount
-    );
-    event RequestDelivered(bytes32 indexed key);
-    event RequestReleased(bytes32 indexed key, address indexed provider, uint256 amount);
-    event RequestReclaimed(bytes32 indexed key, address indexed client, uint256 amount);
-    event RequestClaimed(bytes32 indexed key, address indexed provider, uint256 amount);
-
-    error RequestExists();
-    error RequestNotOpen();
-    error RequestNotDelivered();
-    error NotClient();
-    error NotProvider();
-    error ZeroAmount();
-    error TooEarly();
-    error ServiceInactive();
-    error NoSuchService();
-
-    constructor(
-        address registryAddr,
-        uint256 releaseTimeout_,
-        uint256 claimTimeout_
-    ) {
-        require(registryAddr != address(0), "registry=0");
-        require(releaseTimeout_ > 0 && claimTimeout_ > 0, "timeout=0");
-        registry = ServiceRegistry(registryAddr);
-        releaseTimeout = releaseTimeout_;
-        claimTimeout = claimTimeout_;
-    }
-
-    function requestKey(
-        address client,
-        uint256 serviceId,
-        bytes32 requestId
-    ) public pure returns (bytes32) {
-        return keccak256(abi.encode(client, serviceId, requestId));
-    }
-
-    /// @notice Client opens an escrowed request against a service, funding it
-    ///         from their ERC20 balance (must approve this contract first).
-    ///         The token/provider are read from the registry so the client
-    ///         can't misroute funds; `amount` is client-chosen (may match or
-    ///         exceed the ask — extra is a tip, released with the rest).
-    function openRequest(
-        uint256 serviceId,
-        bytes32 requestId,
-        uint256 amount
-    ) external nonReentrant {
-        if (amount == 0) revert ZeroAmount();
-        ServiceRegistry.Service memory svc = registry.getService(serviceId);
-        if (svc.provider == address(0)) revert NoSuchService();
-        if (!svc.active) revert ServiceInactive();
-
-        bytes32 key = requestKey(msg.sender, serviceId, requestId);
-        if (requests[key].status != Status.None) revert RequestExists();
-
-        requests[key] = Request({
-            client: msg.sender,
-            provider: svc.provider,
-            token: svc.token,
-            amount: amount,
-            serviceId: serviceId,
-            openedAt: block.timestamp,
-            deliveredAt: 0,
-            status: Status.Open
-        });
-
-        // Effects done above; interaction last (CEI). transferFrom pulls the
-        // real tokens into escrow custody.
-        IERC20(svc.token).safeTransferFrom(msg.sender, address(this), amount);
-
-        emit RequestOpened(
-            key, msg.sender, svc.provider, serviceId, requestId, svc.token, amount
-        );
-    }
-
-    /// @notice Provider signals the work item is delivered. Starts the
-    ///         claimTimeout clock and blocks the client's reclaim path.
-    function markDelivered(
-        address client,
-        uint256 serviceId,
-        bytes32 requestId
-    ) external {
-        bytes32 key = requestKey(client, serviceId, requestId);
-        Request storage r = requests[key];
-        if (r.status != Status.Open) revert RequestNotOpen();
-        if (msg.sender != r.provider) revert NotProvider();
-        r.status = Status.Delivered;
-        r.deliveredAt = block.timestamp;
-        emit RequestDelivered(key);
-    }
-
-    /// @notice Client releases escrow to the provider (accepts delivery, or
-    ///         pays out early to reward good service). Works whether the
-    ///         provider marked delivery or not — the client can always pay.
-    function release(uint256 serviceId, bytes32 requestId) external nonReentrant {
-        bytes32 key = requestKey(msg.sender, serviceId, requestId);
-        Request storage r = requests[key];
-        if (r.status != Status.Open && r.status != Status.Delivered) {
-            revert RequestNotOpen();
-        }
-        if (msg.sender != r.client) revert NotClient();
-        uint256 amount = r.amount;
-        address provider = r.provider;
-        address token = r.token;
-        r.status = Status.Finalized;
-        r.amount = 0;
-        IERC20(token).safeTransfer(provider, amount);
-        emit RequestReleased(key, provider, amount);
-    }
-
-    /// @notice Client reclaims escrow for an undelivered request after
-    ///         releaseTimeout. Blocked once the provider marked delivery.
-    function reclaim(uint256 serviceId, bytes32 requestId) external nonReentrant {
-        bytes32 key = requestKey(msg.sender, serviceId, requestId);
-        Request storage r = requests[key];
-        if (r.status != Status.Open) revert RequestNotOpen();
-        if (msg.sender != r.client) revert NotClient();
-        if (block.timestamp < r.openedAt + releaseTimeout) revert TooEarly();
-        uint256 amount = r.amount;
-        address client = r.client;
-        address token = r.token;
-        r.status = Status.Finalized;
-        r.amount = 0;
-        IERC20(token).safeTransfer(client, amount);
-        emit RequestReclaimed(key, client, amount);
-    }
-
-    /// @notice Provider claims escrow for a DELIVERED request the client
-    ///         never released, after claimTimeout from delivery. This is the
-    ///         provider's anti-grief lever against a silent client.
-    function claimDelivered(
-        address client,
-        uint256 serviceId,
-        bytes32 requestId
-    ) external nonReentrant {
-        bytes32 key = requestKey(client, serviceId, requestId);
-        Request storage r = requests[key];
-        if (r.status != Status.Delivered) revert RequestNotDelivered();
-        if (msg.sender != r.provider) revert NotProvider();
-        if (block.timestamp < r.deliveredAt + claimTimeout) revert TooEarly();
-        uint256 amount = r.amount;
-        address provider = r.provider;
-        address token = r.token;
-        r.status = Status.Finalized;
-        r.amount = 0;
-        IERC20(token).safeTransfer(provider, amount);
-        emit RequestClaimed(key, provider, amount);
-    }
-
-    function getRequest(
-        address client,
-        uint256 serviceId,
-        bytes32 requestId
-    ) external view returns (Request memory) {
-        return requests[requestKey(client, serviceId, requestId)];
-    }
-}
-
-// =============================================================================
-// PaymentChannel (v1.5 — prepaid credits, unidirectional)
+// PaymentChannel — prepaid credits, unidirectional (the ONLY settlement rail)
 // =============================================================================
 //
 // "Prepaid credits done trustlessly." Two on-chain txs for N off-chain work
@@ -429,10 +193,12 @@ contract ServiceEscrow is ReentrancyGuard {
 //     funds — those transferred at close, before the window.
 //   * Client double-spend / not-served: since a voucher is only produced by
 //     the CLIENT and only AFTER the client accepts a work item, a provider
-//     that under-delivers simply gets no higher voucher — item-level
-//     granularity, same as escrow, at 1/N the gas.
+//     that under-delivers simply gets no higher voucher — per-item
+//     granularity at 1/N the gas. The theft ceiling is exactly one voucher:
+//     a provider that pockets a voucher and never serves steals at most that
+//     item's increment, so the client's loss is bounded by a single item.
 //
-// The challenge window in v1.5 is a settle-delay for the remainder refund
+// The challenge window is a settle-delay for the remainder refund
 // (giving an honest party time to act) rather than a fraud-proof court —
 // unidirectional channels have no "higher voucher exists" fraud for the
 // PAYER to prove (a higher voucher only helps the provider, who is the one
