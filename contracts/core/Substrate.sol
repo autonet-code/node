@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+
 /// @title Substrate — chain surface for the world-model substrate.
 ///
 /// Substrate-native replacement for the pre-substrate RPB / Registry /
@@ -56,7 +59,15 @@ pragma solidity ^0.8.20;
 ///
 /// 3. Anytime: read ``agentMintTotal(address)`` for cumulative or
 ///    ``mintForEpoch(address, bytes32)`` for per-epoch.
-contract Substrate {
+contract Substrate is EIP712 {
+    using ECDSA for bytes32;
+
+    /// @dev EIP712 domain: name + version. The domain separator folds in
+    ///      chainId + this contract's address, so a sponsorship signature is
+    ///      bound to THIS Substrate deployment on THIS chain — it cannot be
+    ///      replayed against another Substrate instance or a fork.
+    constructor() EIP712("AutonetSubstrate", "1") {}
+
     // =========================================================================
     // Anchor records
     // =========================================================================
@@ -325,6 +336,188 @@ contract Substrate {
 
     function getRegisteredAgent(uint256 index) external view returns (address) {
         return registeredAgentList[index];
+    }
+
+    // =========================================================================
+    // Owner-rooted registration (tool-substrate v2, docs/tool_substrate.md
+    // §Owner-rooted registration)
+    //
+    // The AGENT is the only web3 entity; fleets root in a human WALLET (the
+    // "owner"), never in an installation. The chain records *who and whose*:
+    // (agent → owner) attributes an agent to a sponsoring wallet, and
+    // (agent → parent) records fleet topology. This is pure registration
+    // data — recomputable by anyone, materialized off-chain into fleet trees.
+    //
+    // WHY CRYPTOGRAPHIC VERIFICATION. The off-chain mint damper excludes
+    // attestations from agents under the SAME owner as a tool's author. If
+    // owner were a self-declared field, a sybil operator could register many
+    // agents each claiming a DIFFERENT fabricated owner wallet and thereby
+    // evade the same-owner exclusion. So `owner` is proven: the owner wallet
+    // must have signed an EIP-712 Sponsorship over (agent, parent). The agent
+    // key (msg.sender) countersigns implicitly by being the transaction sender.
+    // Two independent keys must agree, exactly as intended: the human vouches
+    // for the agent, the agent submits.
+    //
+    // REPLAY SAFETY. The Sponsorship struct binds {agent, parent}; the EIP712
+    // domain separator binds {chainId, this contract}. Together these make a
+    // signature usable ONLY to attach THIS agent to THIS owner (the recovered
+    // signer) with THIS parent, on THIS deployment. No nonce is included, and
+    // deliberately so:
+    //   - owner is write-once (immutable after first set — see below), so a
+    //     captured signature can never RE-attribute an already-owned agent;
+    //     the second attach reverts regardless of signature validity.
+    //   - the signature does not authorize value movement or any repeatable
+    //     effect — its only effect is the one-time (agent→owner) binding.
+    //   - `agent` is msg.sender, so a stolen signature can't be redirected to
+    //     a different agent (the tx sender must equal the signed agent).
+    // A nonce would guard against re-attaching a DIFFERENT owner later, but
+    // owner-immutability already forecloses that. Documented as an explicit
+    // design resolution.
+    // =========================================================================
+
+    /// @dev agent → sponsoring owner wallet (address(0) = ownerless, the
+    ///      legacy registerAgent path). Write-once: immutable once non-zero.
+    mapping(address => address) public agentOwner;
+    /// @dev agent → parent agent in the fleet tree (address(0) = top-level).
+    mapping(address => address) public agentParent;
+
+    /// @dev EIP-712 typehash for the owner's sponsorship signature.
+    bytes32 private constant SPONSORSHIP_TYPEHASH =
+        keccak256("Sponsorship(address agent,address parent)");
+
+    event AgentSponsored(
+        address indexed agent,
+        address indexed owner,
+        address indexed parent
+    );
+
+    error OwnerRequired();
+    error OwnerAlreadySet();
+    error BadSponsorshipSignature();
+    error ParentNotRegistered();
+    error ParentOwnerMismatch();
+
+    /// @notice EIP-712 digest the owner wallet signs to sponsor an agent.
+    ///         Exposed for off-chain signers and tests.
+    /// @param agent  The agent address being sponsored (must equal msg.sender
+    ///               at registration time).
+    /// @param parent The parent agent (address(0) for a top-level agent).
+    function sponsorshipHash(address agent, address parent)
+        public
+        view
+        returns (bytes32)
+    {
+        return _hashTypedDataV4(
+            keccak256(abi.encode(SPONSORSHIP_TYPEHASH, agent, parent))
+        );
+    }
+
+    /// @dev Verify the owner's sponsorship signature and the parent/owner
+    ///      constraints, then bind (msg.sender → owner, parent). Shared by the
+    ///      fresh-registration and retrofit paths. Caller must have already
+    ///      ensured the agent is registered and owner is currently unset.
+    function _attachOwner(
+        address owner,
+        address parentAgent,
+        bytes calldata ownerSig
+    ) private {
+        if (owner == address(0)) revert OwnerRequired();
+
+        // Recover the owner's EIP-712 signature over (this agent, parent).
+        bytes32 digestHash = sponsorshipHash(msg.sender, parentAgent);
+        address signer = digestHash.recover(ownerSig);
+        if (signer != owner) revert BadSponsorshipSignature();
+
+        // Parent (if any) must be a registered agent under the SAME owner —
+        // the same-fleet constraint. A top-level agent passes parent = 0.
+        if (parentAgent != address(0)) {
+            if (agents[parentAgent].registeredAt == 0) revert ParentNotRegistered();
+            if (agentOwner[parentAgent] != owner) revert ParentOwnerMismatch();
+        }
+
+        agentOwner[msg.sender] = owner;
+        agentParent[msg.sender] = parentAgent;
+        emit AgentSponsored(msg.sender, owner, parentAgent);
+    }
+
+    /// @notice Register the caller as a substrate agent WITH a verified owner
+    ///         and optional parent (registerAgent v2). Identical registration
+    ///         to registerAgent, plus the owner/parent attribution.
+    /// @param lineageHash  Caller-supplied identity hash (see registerAgent).
+    /// @param peerId       libp2p PeerId bytes (see registerAgent).
+    /// @param owner        The sponsoring human wallet. Must have signed the
+    ///                     Sponsorship — verified on-chain, never trusted as a
+    ///                     bare claim.
+    /// @param parentAgent  Optional parent agent (address(0) = top-level).
+    ///                     If set, must be a registered agent whose owner is
+    ///                     the same `owner` (same-fleet constraint).
+    /// @param ownerSig     EIP-712 signature by `owner` over
+    ///                     Sponsorship{agent: msg.sender, parent: parentAgent}.
+    function registerAgentSponsored(
+        bytes32 lineageHash,
+        bytes calldata peerId,
+        address owner,
+        address parentAgent,
+        bytes calldata ownerSig
+    ) external {
+        if (agents[msg.sender].registeredAt != 0) revert AlreadyRegistered();
+        if (lineageHash == bytes32(0)) revert LineageHashRequired();
+        if (agentByLineage[lineageHash] != address(0)) revert LineageHashAlreadyUsed();
+        if (peerId.length == 0) revert PeerIdRequired();
+
+        agents[msg.sender] = Agent({
+            lineageHash: lineageHash,
+            registeredAt: block.timestamp,
+            active: true,
+            totalTrainingMint: 0,
+            trainingSubmissionCount: 0
+        });
+        agentByLineage[lineageHash] = msg.sender;
+        agentPeerId[msg.sender] = peerId;
+        registeredAgentList.push(msg.sender);
+
+        emit AgentRegistered(msg.sender, lineageHash, peerId, block.timestamp);
+
+        // Owner is definitionally unset for a fresh registration, so the
+        // shared attach path runs its verification and binding.
+        _attachOwner(owner, parentAgent, ownerSig);
+    }
+
+    /// @notice Retrofit owner + parent onto an ALREADY-registered (ownerless)
+    ///         agent — the legacy-agent migration path. Callable once per
+    ///         agent: owner is immutable after set, so re-attribution of a
+    ///         fleet is not a thing. Same verification as the fresh path.
+    /// @dev    msg.sender is the agent. It must already be registered and have
+    ///         no owner yet.
+    function attachOwner(
+        address owner,
+        address parentAgent,
+        bytes calldata ownerSig
+    ) external {
+        if (agents[msg.sender].registeredAt == 0) revert AgentNotActive();
+        if (agentOwner[msg.sender] != address(0)) revert OwnerAlreadySet();
+        _attachOwner(owner, parentAgent, ownerSig);
+    }
+
+    /// @notice Read an agent's sponsoring owner wallet (address(0) = unset).
+    function getAgentOwner(address agent) external view returns (address) {
+        return agentOwner[agent];
+    }
+
+    /// @notice Read an agent's parent in the fleet tree (address(0) = top-level
+    ///         or owner unset).
+    function getAgentParent(address agent) external view returns (address) {
+        return agentParent[agent];
+    }
+
+    /// @notice True iff both agents have a set owner and it is the SAME owner.
+    ///         The off-chain mint damper batch-reads this to exclude same-fleet
+    ///         self-attestation. Returns false when EITHER owner is unset —
+    ///         an unset owner is not "the same owner as" anything.
+    function sameOwner(address agentA, address agentB) external view returns (bool) {
+        address oa = agentOwner[agentA];
+        if (oa == address(0)) return false;
+        return oa == agentOwner[agentB];
     }
 
     // =========================================================================
