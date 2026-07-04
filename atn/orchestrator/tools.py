@@ -488,12 +488,13 @@ _TOOLS: list[ToolDefinition] = [
             "Author a new tool. Provide either `code` (a Python script reading JSON "
             "arguments on stdin and printing a JSON result — becomes a PINNED tool, "
             "behavior locked by content hash) or a `connector_id` (ATTESTED, "
-            "connector-backed). The tool is PRIVATE by default: local capability "
+            "connector-backed). Registration is ALWAYS private: local capability "
             "scoped to you and your superiors; only the user can grant it outside "
-            "that lineage. Pass publish=true to also publish it to the substrate, "
-            "where consensus judges it and you (the author) earn mint from its "
-            "standing and usage — pinned tools only. Remote paid APIs are Services, "
-            "not tools: use the services rail instead of an endpoint."
+            "that lineage. You own what you author. Publishing to the substrate "
+            "(where consensus judges it and you earn mint from standing and usage) "
+            "is the separate publish_tool capability, granted case-by-case. Remote "
+            "paid APIs are Services, not tools: use the services rail instead of "
+            "an endpoint."
         ),
         input_schema={
             "type": "object",
@@ -508,11 +509,26 @@ _TOOLS: list[ToolDefinition] = [
                 "code": {"type": "string", "description": "Python source (pinned tools). Reads JSON args on stdin, prints JSON result on stdout."},
                 "connector_id": {"type": "string", "description": "MCP connector backing this tool (attested); the tool name must match a connector operation."},
                 "provider": {"type": "string", "description": "External provider identity for attested tools (e.g. 'google')."},
-                "publish": {"type": "boolean", "description": "Publish to the substrate (default false = private local tool)."},
                 "dependencies": {"type": "array", "items": {"type": "string"}, "description": "Digests of published tools this tool calls at runtime (pinned only). Declaration = the runtime allowlist; nested calls run under the ORIGINAL caller's authority. Composite tools use the line-framed sandbox protocol (see docs/tool_substrate.md)."},
                 "version_of": {"type": "string", "description": "Digest of the manifest this revises (artifact lineage)."},
             },
             "required": ["name", "description", "input_schema"],
+        },
+    ),
+    ToolDefinition(
+        name="publish_tool",
+        description=(
+            "Publish a tool YOU authored to the substrate: its manifest becomes "
+            "network-visible, debatable, and (pinned tools) mint-eligible. This is "
+            "a separately granted capability — having register_tool does not imply "
+            "having this. You can only publish your own tools."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "digest": {"type": "string", "description": "Manifest digest (or name/reg_ prefix) of a tool you registered."},
+            },
+            "required": ["digest"],
         },
     ),
     ToolDefinition(
@@ -1802,7 +1818,15 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
                          "— use the services rail (docs/services_market.md)"}
 
     caller_id = input.get("_caller_id")
-    author = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
+    owner_caller = is_owner_caller(caller_id)
+    # Publishing is a SEPARATE, case-by-case granted capability
+    # (publish_tool) — register_tool never publishes for agents. Owner
+    # callers may still register-and-publish in one step.
+    if input.get("publish") and not owner_caller:
+        return {"error": "register_tool no longer publishes: registration is "
+                         "always private; publishing is the separate "
+                         "publish_tool capability (granted case-by-case)"}
+    author = OWNER_AUTHOR if owner_caller else str(caller_id)
 
     raw_deps = input.get("dependencies")
     dependencies = None
@@ -1836,6 +1860,35 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         "published": result["published"],
         "unified_name": f"reg_{result['digest'][:12]}",
     }
+
+
+async def _publish_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Publish an authored tool to the substrate.
+
+    The agent OWNS its tool (authorship is structural); publishing is a
+    separately granted capability — the grant IS the gate, case-by-case
+    per agent, no approval queue. Author-only: you publish your own
+    work, nobody else's.
+    """
+    from . import is_owner_caller
+
+    digest = str(input.get("digest") or "")
+    if not digest:
+        return {"error": "Missing required field: 'digest'"}
+    record = runtime.tool_store.resolve(digest)
+    if record is None:
+        return {"error": f"Unknown tool: {digest[:16]}"}
+
+    caller_id = input.get("_caller_id")
+    if caller_id is not None and not is_owner_caller(caller_id):
+        if record.author_id != caller_id:
+            return {"error": "You can only publish tools you authored."}
+
+    if record.published:
+        return {"digest": record.digest, "name": record.name,
+                "published": True, "note": "already published"}
+    runtime.tool_store.set_published(record.digest, True)
+    return {"digest": record.digest, "name": record.name, "published": True}
 
 
 async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -2482,6 +2535,10 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     "unified_tools": {"list_tools", "use_tool"},
     # Tool substrate (docs/tool_substrate.md): authoring is opt-in per agent.
     "toolsmith": {"register_tool", "attest_tools"},
+    # Publishing is deliberately its OWN bundle (user, 2026-07-05):
+    # whether an agent may publish its tools to the substrate is a
+    # case-by-case grant — having toolsmith never implies it.
+    "publishing": {"publish_tool"},
     "planning": {"get_goals", "add_goal", "update_goal", "get_projects", "add_project", "update_project",
                  "propose_task", "list_tasks"},
     "budget": {"get_credit_budget", "set_credit_budget", "get_usage"},
@@ -3167,6 +3224,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "list_tools": _list_tools,
     "use_tool": _use_tool,
     "register_tool": _register_tool,
+    "publish_tool": _publish_tool,
     "attest_tools": _attest_tools,
     "get_history": _get_history,
     # Planning & goal tools

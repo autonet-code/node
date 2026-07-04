@@ -127,20 +127,36 @@ class TestRegistration:
         assert pushed == []
         assert rt.tool_store.push_all_manifests() == 0     # backfill skips private
 
-        # The sink receives the CONSENSUS author (the agent's 0x
-        # address), not the local id — chain-claimable attribution.
-        child_addr = rt.get_agent("child").identity.address
-        res2 = await execute_tool(
+        # register_tool NEVER publishes for agents (user, 2026-07-05):
+        # publishing is the separate publish_tool capability.
+        res_rej = await execute_tool(
             "register_tool",
             {"name": "public_echo", "description": "Echo.", "input_schema": SCHEMA,
              "code": ECHO_CODE, "publish": True},
             rt, caller_id="child")
-        assert res2["published"] is True
-        assert pushed == [("public_echo", child_addr)]
+        assert "publish_tool" in res_rej["error"]
 
-        # Owner flips the private one to published later.
-        assert rt.tool_store.set_published(res["digest"], True)
-        assert pushed[-1] == ("echo_tool", child_addr)
+        # The author publishes its own tool via publish_tool; the sink
+        # receives the CONSENSUS author (0x address), not the local id.
+        child_addr = rt.get_agent("child").identity.address
+        pub = await execute_tool(
+            "publish_tool", {"digest": res["digest"]}, rt, caller_id="child")
+        assert pub["published"] is True
+        assert pushed == [("echo_tool", child_addr)]
+
+        # A non-author agent cannot publish someone else's tool.
+        res2 = await execute_tool(
+            "register_tool",
+            {"name": "sibling_tool", "description": "d", "input_schema": SCHEMA,
+             "code": ECHO_CODE + "# sib\n"},
+            rt, caller_id="sibling")
+        denied = await execute_tool(
+            "publish_tool", {"digest": res2["digest"]}, rt, caller_id="child")
+        assert "you authored" in denied["error"]
+
+        # Owner can flip publish state directly (WS surface).
+        assert rt.tool_store.set_published(res2["digest"], True)
+        assert pushed[-1][0] == "sibling_tool"
         # Publish state survives reload.
         reloaded = ToolStore(rt, rt._config.data_dir / "tools")
         assert reloaded.get(res["digest"]).published is True

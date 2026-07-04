@@ -322,10 +322,15 @@ tree lives on chain as pure registration data:
 ## ATN surface (implemented)
 
 - `register_tool` (agent-callable, `toolsmith` bundle): author derived
-  from caller, never accepted as input. Pinned = inline Python blob
-  run as digest-named subprocess; attested = connector-backed.
-  TODO v2: `publish: bool = false` (private default), owner-gated
-  publish path.
+  from caller, never accepted as input; registration is ALWAYS
+  private. Pinned = inline Python blob run as digest-named subprocess;
+  attested = connector-backed. The agent OWNS what it authors.
+- `publish_tool` (agent-callable, its OWN `publishing` bundle —
+  ratified 2026-07-05): publishing is a case-by-case granted
+  capability; THE GRANT IS THE GATE — no approval queue, no second
+  transaction. Author-only (you publish your own work). Owner
+  publishes anything via the WS surface (`set_tool_enabled` /
+  `set_published`).
 - Scoping enforced twice (listing + call time); cross-lineage grants
   owner-only via WS (`grant_tool`/`revoke_tool`/`set_tool_enabled`).
 - Receipts: local ledger always (`receipts.jsonl`, `tool_earnings`
