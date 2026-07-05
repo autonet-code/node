@@ -89,6 +89,14 @@ class Runtime:
         self.credit_budget = CreditBudgetStore(self._config.data_dir)
         self.sponsor_bindings = SponsorBindingStore(self._config.data_dir)
 
+        # Deterministic metering service (atn/metering.py): daemon-wide dollar
+        # accounting for metered API providers + hidden subscription quota
+        # inference. Owned by the Runtime, consulted pre-flight by the engine
+        # and read by the effective-limits function. Cheap to construct (just
+        # replays two JSONL ledgers under data_dir/metering/).
+        from ..metering import MeteringService
+        self.metering = MeteringService(self._config.data_dir, self._config)
+
         # Shutdown event
         self._shutdown_event: asyncio.Event = asyncio.Event()
 

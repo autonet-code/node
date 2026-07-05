@@ -42,6 +42,43 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+def _flat_budgets(runtime: "Runtime", defn: Any) -> dict[str, Any]:
+    """Normalize an agent's budgets to a flat ``{key: int_limit}`` map for the
+    config surface.
+
+    The stored shape accepts a bare int OR a nested ``{limit, period}`` dict
+    (agent_registry._parse_one_budget). Returning the raw nested shape to a
+    client that expects a scalar per key makes it coerce the dict to 0 — the
+    "40k → 0 tokens in the config tab" bug. Resolving through get_budget_info
+    (which parses every shape to a numeric limit) guarantees a scalar limit per
+    key regardless of how the budget was authored."""
+    if not getattr(defn, "budgets", None):
+        return {}
+    try:
+        info = runtime.registry.get_budget_info(defn.id)
+    except Exception:
+        info = {}
+    if info:
+        # Token limits are conceptually integers; get_budget_info resolves them
+        # as floats. Emit ints so a scalar-expecting client renders cleanly.
+        out: dict[str, Any] = {}
+        for key, entry in info.items():
+            lim = entry.get("limit", 0) or 0
+            out[key] = int(lim) if float(lim).is_integer() else lim
+        return out
+    # Fallback: best-effort flatten without the registry (e.g. detached defn).
+    flat: dict[str, Any] = {}
+    for key, raw in defn.budgets.items():
+        if isinstance(raw, dict):
+            flat[key] = raw.get("limit", raw.get("pct", 0)) or 0
+        else:
+            try:
+                flat[key] = int(raw)
+            except (TypeError, ValueError):
+                flat[key] = 0
+    return flat
+
 # Type for tool executor functions: (runtime, input_dict) -> result_dict
 ToolExecutor = Callable[["Runtime", dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 
@@ -956,7 +993,7 @@ async def _list_agents(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
                 "schedule": defn.schedule,
                 "concurrency": defn.concurrency,
                 "steps": len(defn.steps),
-                "budgets": defn.budgets,
+                "budgets": _flat_budgets(runtime, defn),
                 "path": str(runtime._config.agents_dir / defn.id),
                 "registered_on_chain": defn.identity.registered_on_chain if defn.identity else False,
             }
@@ -980,7 +1017,7 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         "status": status.value if status else "unknown",
         "schedule": defn.schedule,
         "concurrency": defn.concurrency,
-        "budgets": defn.budgets,
+        "budgets": _flat_budgets(runtime, defn),
         "path": str(runtime._config.agents_dir / defn.id),
         "system_prompt": defn.system_prompt or "",
         "task_prompt": defn.task_prompt or "",
@@ -2353,6 +2390,18 @@ async def _get_my_budget_status(runtime: Runtime, input: dict[str, Any]) -> dict
     caller_id = input.get("_caller_id") or ORCHESTRATOR_ID
     own = runtime.registry.get_budget_info(caller_id)
 
+    # Uniform effective-limits rail: an agent WITHOUT a per-agent budget must
+    # see its limits through the SAME shape/verbiage as a budgeted one — for it
+    # the "budget" is the daemon-wide provider ceiling (dollar cap or inferred
+    # subscription remaining). Route both cases through one function.
+    from ..effective_limits import compute_effective_limits
+    effective = compute_effective_limits(
+        caller_id,
+        registry=runtime.registry,
+        metering=getattr(runtime, "metering", None),
+        config=getattr(runtime, "_config", None),
+    ).to_dict()
+
     # Walk ancestors: report each one's cap and remaining headroom for the
     # providers the caller has declared (or for all of theirs if caller has none).
     ancestors: list[dict[str, Any]] = []
@@ -2436,6 +2485,7 @@ async def _get_my_budget_status(runtime: Runtime, input: dict[str, Any]) -> dict
     return {
         "caller_id": caller_id,
         "own": own,
+        "effective_limits": effective,
         "ancestors": ancestors,
         "subscription": subscription,
     }

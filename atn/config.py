@@ -53,6 +53,16 @@ class ProviderConfig:
     # cross-provider listings.  Each entry is either a string ID or a dict
     # {id, name, capability_tier?, context_window?}.
     models: list[Any] = field(default_factory=list)
+    # Daemon-wide HARD dollar expenditure cap for this provider, enforced
+    # pre-flight by the metering service (atn/metering.py). 0.0 => no cap.
+    # For metered API providers (anthropic/openai/…) this is a real spend
+    # ceiling in USD, computed from the cost-per-token table × actual token
+    # counts. For subscription providers (claude_max) it is unused — those are
+    # bounded by the inferred subscription quota, not a dollar figure.
+    dollar_limit: float = 0.0
+    # Rollover window for the dollar cap: "none" (lifetime) | "daily" |
+    # "weekly" | "monthly". Mirrors the per-agent budget period vocabulary.
+    dollar_period: str = "none"
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -715,15 +725,25 @@ def load_config(path: Path | None = None) -> ATNConfig:
         if not isinstance(praw, dict):
             continue
         resolved = _resolve_env(praw)
-        known_keys = {"api_key", "default_model", "base_url", "models"}
+        known_keys = {"api_key", "default_model", "base_url", "models",
+                      "dollar_limit", "dollar_period"}
         models_raw = resolved.get("models", [])
         models = models_raw if isinstance(models_raw, list) else []
+        try:
+            dollar_limit = float(resolved.get("dollar_limit", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            dollar_limit = 0.0
+        dollar_period = str(resolved.get("dollar_period", "none") or "none").lower()
+        if dollar_period not in ("none", "hourly", "daily", "weekly", "monthly"):
+            dollar_period = "none"
         config.providers[name] = ProviderConfig(
             name=name,
             api_key=resolved.get("api_key", ""),
             default_model=resolved.get("default_model", ""),
             base_url=resolved.get("base_url", ""),
             models=models,
+            dollar_limit=dollar_limit,
+            dollar_period=dollar_period,
             extra={k: v for k, v in resolved.items() if k not in known_keys},
         )
 

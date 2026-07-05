@@ -868,6 +868,20 @@ class ExecutionEngine:
                 record.error = f"Budget exceeded (blocked by {blocker})"
                 raise _BudgetExceeded()
 
+            # Pre-execution daemon-wide dollar cap check (metering service).
+            # Enforced the same way as the per-agent budget: a metered provider
+            # over its configured dollar ceiling blocks the run before any
+            # tokens are spent. Subscription providers have no dollar cap here
+            # (they're bounded by the inferred quota), so this is a no-op for
+            # them. Best-effort: a missing metering service never blocks work.
+            metering = getattr(getattr(self, "_runtime_ref", None), "metering", None)
+            if metering is not None:
+                dok, dreason = metering.check_provider_spend(provider_name)
+                if not dok:
+                    record.status = ExecutionStatus.FAILED
+                    record.error = f"Dollar cap exceeded ({dreason})"
+                    raise _BudgetExceeded()
+
             # --- System prompt ---
             # When we build the prompt from the delegate template, identity is
             # NOT in the (cacheable) system prompt — it's delivered in the first
@@ -1274,6 +1288,43 @@ class ExecutionEngine:
             record.token_usage[provider_key].output_tokens += response.usage.output_tokens
             record.token_usage[provider_key].cache_read_tokens += response.usage.cache_read_tokens
             record.token_usage[provider_key].cache_creation_tokens += response.usage.cache_creation_tokens
+
+            # --- Metering service: dollar cost + subscription snapshot -------
+            # Cross-reference the ACTUAL parsed token split against the
+            # cost-per-token table and fold the dollar cost into the daemon-wide
+            # provider spend ledger. For a subscription provider (claude_max)
+            # cost_usd returns None (no per-token price), so the dollar leg is a
+            # no-op and we instead persist a (utilization, cumulative_tokens)
+            # quota snapshot from the bridge's rate-limit stream. Best-effort:
+            # metering never affects the user-visible execution result.
+            _metering = getattr(getattr(self, "_runtime_ref", None), "metering", None)
+            if _metering is not None:
+                try:
+                    _util = None
+                    _cum = None
+                    _rl = getattr(sub_provider, "_rate_limits", None)
+                    if isinstance(_rl, dict):
+                        _five = _rl.get("five_hour") or {}
+                        _u = _five.get("utilization")
+                        if isinstance(_u, (int, float)):
+                            _util = float(_u)
+                            _cum_by_class = getattr(
+                                sub_provider, "_cum_tokens_by_class", None)
+                            if isinstance(_cum_by_class, dict):
+                                _cum = int(sum(_cum_by_class.values()))
+                    _metering.record_usage(
+                        provider_key,
+                        response.model or defn.cognitive_model or "",
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        cache_read_tokens=response.usage.cache_read_tokens,
+                        cache_write_tokens=response.usage.cache_creation_tokens,
+                        utilization=_util,
+                        cumulative_tokens=_cum,
+                    )
+                except Exception:
+                    log.debug("metering record_usage failed; continuing",
+                              exc_info=True)
 
             # Record assistant turn to conversation store (unified for all agents).
             # For the root agent, get_agent_conversation_store returns the
