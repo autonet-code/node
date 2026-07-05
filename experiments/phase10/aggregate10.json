@@ -1,0 +1,352 @@
+{
+  "H1": {
+    "aucE_floor_bar": 0.9,
+    "aucE_floor_held": true,
+    "aucE_worst_H2plus": 1.0,
+    "auc_E": {
+      "H1_S0": 1.0,
+      "H1_S2": 1.0,
+      "H1_S32": 1.0,
+      "H1_S8": 1.0,
+      "H2_S0": 1.0,
+      "H2_S2": 1.0,
+      "H2_S32": 1.0,
+      "H2_S8": 1.0,
+      "H4_S0": 1.0,
+      "H4_S2": 1.0,
+      "H4_S32": 1.0,
+      "H4_S8": 1.0,
+      "H8_S0": 1.0,
+      "H8_S2": 1.0,
+      "H8_S32": 1.0,
+      "H8_S8": 1.0
+    },
+    "auc_T": {
+      "H1_S0": 0.918010752688172,
+      "H1_S2": 0.9220430107526881,
+      "H1_S32": 0.932347670250896,
+      "H1_S8": 0.9359318996415771,
+      "H2_S0": 0.9381720430107527,
+      "H2_S2": 0.921146953405018,
+      "H2_S32": 0.928763440860215,
+      "H2_S8": 0.9587813620071685,
+      "H4_S0": 0.985663082437276,
+      "H4_S2": 0.974910394265233,
+      "H4_S32": 0.967741935483871,
+      "H4_S8": 0.9484767025089605,
+      "H8_S0": 0.9758064516129032,
+      "H8_S2": 0.9829749103942652,
+      "H8_S32": 0.9659498207885304,
+      "H8_S8": 0.9704301075268817
+    },
+    "auc_gap_bar": 0.15,
+    "auc_gap_per_cell": {
+      "H1_S0": 0.081989247311828,
+      "H1_S2": 0.07795698924731187,
+      "H1_S32": 0.06765232974910396,
+      "H1_S8": 0.06406810035842292,
+      "H2_S0": 0.06182795698924726,
+      "H2_S2": 0.07885304659498205,
+      "H2_S32": 0.071236559139785,
+      "H2_S8": 0.04121863799283154,
+      "H4_S0": 0.014336917562724039,
+      "H4_S2": 0.02508960573476704,
+      "H4_S32": 0.032258064516129004,
+      "H4_S8": 0.051523297491039455,
+      "H8_S0": 0.024193548387096753,
+      "H8_S2": 0.01702508960573479,
+      "H8_S32": 0.03405017921146958,
+      "H8_S8": 0.029569892473118253
+    },
+    "confirmed": false,
+    "flip_boundary_E_EXPLORATORY": [
+      {
+        "H": 1,
+        "S": 0,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 1,
+        "S": 2,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 1,
+        "S": 8,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 1,
+        "S": 32,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 2,
+        "S": 0,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 2,
+        "S": 2,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 2,
+        "S": 8,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 2,
+        "S": 32,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 4,
+        "S": 0,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 4,
+        "S": 2,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 4,
+        "S": 8,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 4,
+        "S": 32,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 8,
+        "S": 0,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 8,
+        "S": 2,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 8,
+        "S": 8,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 8,
+        "S": 32,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      }
+    ],
+    "flip_boundary_T_EXPLORATORY": [
+      {
+        "H": 1,
+        "S": 0,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 1,
+        "S": 2,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 1,
+        "S": 8,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 1,
+        "S": 32,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 2,
+        "S": 0,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 2,
+        "S": 2,
+        "defective_still_positive": 16,
+        "flip_rate": 0.5161290322580645,
+        "n_defective": 31
+      },
+      {
+        "H": 2,
+        "S": 8,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 2,
+        "S": 32,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 4,
+        "S": 0,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 4,
+        "S": 2,
+        "defective_still_positive": 4,
+        "flip_rate": 0.12903225806451613,
+        "n_defective": 31
+      },
+      {
+        "H": 4,
+        "S": 8,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 4,
+        "S": 32,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      },
+      {
+        "H": 8,
+        "S": 0,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 8,
+        "S": 2,
+        "defective_still_positive": 0,
+        "flip_rate": 0.0,
+        "n_defective": 31
+      },
+      {
+        "H": 8,
+        "S": 8,
+        "defective_still_positive": 28,
+        "flip_rate": 0.9032258064516129,
+        "n_defective": 31
+      },
+      {
+        "H": 8,
+        "S": 32,
+        "defective_still_positive": 31,
+        "flip_rate": 1.0,
+        "n_defective": 31
+      }
+    ],
+    "mean_auc_gap": 0.04830309139784947,
+    "verdict": "H1 REFUTED: mean AUC(E)-AUC(T)=0.0483 (bar 0.15); AUC(E) floor in H>=2 cells held (worst=1.0000, bar 0.9). CONSEQUENCE: the 'executable ground truth' framing comes OUT of the spec's motivation section; tool mint launches gated on vetting + damper alone."
+  },
+  "H2": {
+    "clean": {
+      "B": {
+        "hit1": 0.12037037037037036,
+        "hit5": 0.24074074074074073,
+        "n": 108,
+        "seo_share_top5": 0.9129629629629629
+      },
+      "D": {
+        "hit1": 0.2962962962962963,
+        "hit5": 0.39814814814814814,
+        "n": 108,
+        "seo_share_top5": 0.85
+      }
+    },
+    "clean_regression": 0.1574074074074074,
+    "clean_tolerance": 0.02,
+    "hit5_gain_bar": 0.1,
+    "hit5_gain_salted": 0.14814814814814814,
+    "retained": true,
+    "salted": {
+      "B": {
+        "hit1": 0.09259259259259259,
+        "hit5": 0.21296296296296297,
+        "n": 108,
+        "seo_share_top5": 0.924074074074074
+      },
+      "C": {
+        "hit1": 0.09259259259259259,
+        "hit5": 0.21296296296296297,
+        "n": 108,
+        "seo_share_top5": 0.924074074074074
+      },
+      "D": {
+        "hit1": 0.3055555555555556,
+        "hit5": 0.3611111111111111,
+        "n": 108,
+        "seo_share_top5": 0.8611111111111112
+      }
+    },
+    "verdict": "H2 RETAIN density blend: salted hit@5(D)-hit@5(B)=+0.1481 >= 0.1 AND clean-corpus regression=+0.1574 >= -0.02. COVERAGE_DENSITY_WEIGHT stays at 0.5."
+  },
+  "H3": {
+    "ci95": [
+      0.29787177413379345,
+      0.6616899365176473
+    ],
+    "expectation": 0.5,
+    "meets_expectation": false,
+    "n_minted": 79,
+    "n_tools": 79,
+    "note": "H3 is a sanity gate, not a pre-committed action \u2014 the mint path already carries its own ratified mechanisms (sims, damper, vetting). rho below expectation is a finding to investigate, not a gate.",
+    "spearman_rho": 0.49250564924078705,
+    "wash_tools_minted": 6
+  },
+  "bootstrap": {
+    "n_resamples": 10000,
+    "seed": 10
+  }
+}

@@ -1,0 +1,10 @@
+# Content-addressed tool blobs: the on-disk bytes MUST hash to the
+# filename (sha256). Any line-ending normalization on add/checkout would
+# break that invariant for every clone, so these are byte-exact.
+tools/** -text
+# Run artifacts are byte-exact records of a pre-registered run.
+*.jsonl -text
+corpus.json -text
+standings.json -text
+aggregate10.json -text
+run.log -text
