@@ -23,6 +23,7 @@ bun.lock
 # Logs
 *.log
 training_run*.log
+test_results.txt
 
 # Data and artifacts
 data/
