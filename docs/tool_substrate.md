@@ -7,14 +7,26 @@ Services market (`docs/services_market.md`). Tools and Services are
 separate economies unified only at the agent's interface (one inference
 probe, one MCP-shaped surface).
 
-## The line: ground truth
+## The line: verifiability
 
-The substrate's verdict layer only holds items with **executable ground
-truth** — a CON can attach a reproducible failing invocation and the
-dispute settles itself. Pinned code has that property. A remote
-endpoint does not (its behavior is unknowable in principle), so it
-never enters the verdict layer. This is the lesson of phase8 applied
-forward: debates without ground truth are weak debates.
+The substrate's verdict layer only holds items whose behavior is
+**locally verifiable** — pinned code can be re-run by anyone; a remote
+endpoint cannot (its behavior is unknowable in principle), so it never
+enters the verdict layer.
+
+PHASE-10 AMENDMENT (2026-07-05, docs/phase10_results.md): the stronger
+motivating claim that used to live here — "executable ground truth
+makes debate decisively better than prose debate" (H1) — was REFUTED
+by its pre-registered bar and, per the pre-commitment, no longer
+motivates the design. Tool mint launches gated on vetting + the
+damper alone. What the measurement DID show (exploratory, not
+re-litigation): evidence-backed standing separated defective from
+correct tools perfectly (AUC 1.000 in every sweep cell, deterministic
+under sybil flood where text ranking leaks), and it is the only arm
+that protects falsely-accused correct tools — so replayable CON
+evidence remains a worthwhile rail on its own merits; it just may not
+be SOLD as the thing prose debate lacked, because well-priored text
+debate ranked nearly as well.
 
 | | Tools (this doc) | Services (services_market.md) |
 |---|---|---|
