@@ -39,7 +39,7 @@ deployment-addresses.json
 .claude/
 
 # Project-specific
-FUNDING_LEADS.md
+docs/FUNDING_LEADS.md
 CLAUDE.md
 RELEASE.md
 rpb_gemini.txt

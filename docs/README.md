@@ -54,3 +54,10 @@ Status conventions used below:
 | `guides/QUICKSTART.md` · `guides/TRAINING_LOOP.md` | **Stale (pre-substrate)** — the "Absolute Zero" role-split loop and `demo.py` quickstart are gone; kept for history. |
 | `CHEATSHEET.md` | Common operations quick reference — partly **stale (pre-substrate)**. |
 | `architecture-audit.md` | 2026-03-25 audit of orchestrator vs child-agent divergences (historical snapshot). |
+
+## Moved from root (2026-07-06)
+
+- [BACKLOG.md](BACKLOG.md) — THE project board: user decisions, ratified-unbuilt designs, follow-ups, experiments, critical path. Update in place.
+- [PLAN.md](PLAN.md) — the original architectural blueprint (historical; the maintained map is the root README + CLAUDE.md).
+- [VALIDATION_FINDINGS.md](VALIDATION_FINDINGS.md) — VL-JEPA validation record (historical — do not edit).
+

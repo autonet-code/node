@@ -17,7 +17,7 @@ Four contracts under `contracts/core/` carry this:
 | `VentureVault.sol` | Agent-as-venture funding — one instance per venture; backers hold a pull-based claim on net revenue. No judge. |
 | `CharterAnchor.sol` | Governed anchor for the charter *version* (values stay off-chain); drift detection. |
 
-The original VL-JEPA / TextJEPA neural pipeline and the proposer/solver/coordinator role split are **no longer live** — their modules remain on disk for reference only (`VALIDATION_FINDINGS.md` explains why VL-JEPA was shelved). For the authoritative, maintained architecture map and agent-onboarding contract, read **`CLAUDE.md`**. For the design specs, see **`docs/README.md`**.
+The original VL-JEPA / TextJEPA neural pipeline and the proposer/solver/coordinator role split are **no longer live** — their modules remain on disk for reference only (`docs/VALIDATION_FINDINGS.md` explains why VL-JEPA was shelved). For the authoritative, maintained architecture map and agent-onboarding contract, read **`CLAUDE.md`**. For the design specs, see **`docs/README.md`**.
 
 ## Install
 
