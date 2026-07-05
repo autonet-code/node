@@ -138,12 +138,13 @@ def _print_help() -> None:
         "\n[bold]Commands:[/]\n"
         "  [cyan]status[/]              Show agents and running executions\n"
         "  [cyan]run[/] <agent_id>      Trigger an agent run\n"
+        "  [cyan]msg[/] <id> <text>     Send a one-off message to an agent (injects if running, else queues + triggers a run)\n"
         "  [cyan]kill[/] <agent_id>     Kill all executions of an agent\n"
         "  [cyan]kill[/] <exec_id>      Kill a specific execution\n"
         "  [cyan]killall[/]             Kill everything\n"
         "  [cyan]activate[/] <id>       Activate an agent for scheduling\n"
         "  [cyan]deactivate[/] <id>     Deactivate an agent\n"
-        "  [cyan]agents[/]              List registered agents\n"
+        "  [cyan]agents[/]              List registered agents (name, status, parent, model, running execs, worker PIDs)\n"
         "  [cyan]reload[/]              Reload agent definitions from YAML files\n"
         "  [cyan]reconcile[/]           Re-verify each agent's on-chain registration (run after a contract redeploy)\n"
         "  [cyan]history[/] <id>        Show execution history for an agent\n"
@@ -151,6 +152,9 @@ def _print_help() -> None:
         "  [cyan]clear[/] <id>          Clear execution history for an agent\n"
         "  [cyan]clearall[/]            Clear all execution history\n"
         "  [cyan]usage[/]               Show subscription utilization (Claude Max /usage equivalent)\n"
+        "  [cyan]tools[/]               List pending tool-adoption proposals awaiting owner approval\n"
+        "  [cyan]approve[/] <digest>    Approve a pending tool-adoption proposal (installs foreign code)\n"
+        "  [cyan]reject[/] <digest>     Reject a pending tool-adoption proposal\n"
         "  [cyan]restart[/]             Stop and re-launch the daemon (picks up code changes)\n"
         "  [cyan]help[/]                Show this message\n"
         "  [cyan]quit[/] / [cyan]q[/]            Shutdown\n"
@@ -182,15 +186,33 @@ async def _handle_command(line: str, runtime: Runtime) -> bool:
         _print_status(runtime)
 
     elif cmd == "agents":
-        for defn, status in runtime.list_agents():
+        agents = runtime.list_agents()
+        # Map each agent to its running execution ids (short) and — when
+        # process isolation is active — its worker process PID(s), so a human
+        # can map OS PIDs back to agents. supervisor._workers is empty when
+        # isolation is off / in-process, so pids stays {} and we render "-".
+        exec_ids: dict[str, list[str]] = {}
+        for eid, rec in runtime._executions.items():
+            exec_ids.setdefault(rec.agent_id, []).append(eid[:8])
+        pids: dict[str, list[int]] = {}
+        supervisor = getattr(runtime, "supervisor", None)
+        for aid, worker in getattr(supervisor, "_workers", {}).items():
+            pids.setdefault(aid, []).append(worker.pid)
+        for defn, status in agents:
             scolor = {"active": "green", "running": "bold yellow",
                       "error": "bold red"}.get(status.value, "dim")
+            running = exec_ids.get(defn.id, [])
+            running_str = ",".join(running) if running else "-"
+            pid_list = pids.get(defn.id, [])
+            pid_str = ",".join(str(p) for p in pid_list) if pid_list else "-"
             console.print(
                 f"  [cyan]{defn.id}[/]  {defn.name:<20}  [{scolor}]{status.value}[/]"
+                f"  parent={defn.parent_id or '-'}  model={defn.model or '-'}"
                 f"  steps={len(defn.steps)}  schedule={defn.schedule or '-'}"
                 f"  concurrency={defn.concurrency}"
+                f"  running={running_str}  pid={pid_str}"
             )
-        if not runtime.list_agents():
+        if not agents:
             console.print("  [dim]No agents registered.[/]")
 
     elif cmd == "reload":
@@ -232,6 +254,33 @@ async def _handle_command(line: str, runtime: Runtime) -> bool:
                 console.print(f"  [yellow]At concurrency limit for {args[0]}[/]")
         except ValueError as e:
             console.print(f"  [red]{e}[/]")
+
+    elif cmd == "msg" and len(args) >= 2:
+        target = args[0]
+        text = line.strip().split(None, 2)[2]
+        # Same rail the WS chat surface uses (send_agent_message). surface=None
+        # marks this a trusted internal caller (the console) — never mic-gated.
+        # Injects into a live run if the agent is running; otherwise queues the
+        # message to the inbox, re-activates an idle/completed agent, and
+        # triggers a run so the message is acted on.
+        result = await runtime.send_agent_message(target, text, surface=None)
+        if result.get("error"):
+            console.print(f"  [red]{result['error']}[/]")
+        else:
+            status = result.get("status", "?")
+            if status == "injected":
+                console.print(f"  [green]Injected into running execution for {target}[/]")
+            elif status == "triggered":
+                eid = result.get("execution_id")
+                eid_str = f" (execution {eid[:8]})" if eid else ""
+                console.print(f"  [green]Queued for {target} + triggered a run{eid_str}[/]")
+            elif status == "queued":
+                console.print(f"  [yellow]Queued for {target} (agent inactive — activate it to run)[/]")
+            else:
+                console.print(f"  [green]Delivered to {target} (status={status})[/]")
+
+    elif cmd == "msg":
+        console.print("  [dim]Usage: msg <agent_id> <message text>[/]")
 
     elif cmd == "kill" and args:
         target = args[0]
@@ -323,6 +372,51 @@ async def _handle_command(line: str, runtime: Runtime) -> bool:
                 "  [dim]No rate-limit data yet. Run at least one turn on a "
                 "subscription provider (claude_max, codex_max) first.[/]"
             )
+
+    elif cmd == "tools":
+        # Pending tool-adoption proposals — the owner surface for approving
+        # foreign code onto this host. Same store method the WS handler calls.
+        proposals = runtime.tool_store.list_adoption_proposals("pending")
+        if not proposals:
+            console.print("  [dim]No pending tool-adoption proposals.[/]")
+        else:
+            t = Table(title="Pending Tool-Adoption Proposals", expand=False)
+            t.add_column("Digest", style="cyan", width=18)
+            t.add_column("Name")
+            t.add_column("Author", width=14)
+            t.add_column("By", width=14)
+            t.add_column("Reason")
+            for p in proposals:
+                digest = str(p.get("digest", ""))
+                t.add_row(
+                    digest[:16], str(p.get("name", "") or "-"),
+                    str(p.get("author", "") or "-")[:14],
+                    str(p.get("proposed_by", "") or "-")[:14],
+                    str(p.get("reason", "") or "-"),
+                )
+            console.print(t)
+            console.print("  [dim]approve <digest> / reject <digest> to resolve.[/]")
+
+    elif cmd == "approve" and args:
+        result = await runtime.tool_store.approve_adoption(args[0].strip().lower())
+        if result.get("error"):
+            console.print(f"  [red]{result['error']}[/]")
+        else:
+            console.print(
+                f"  [green]Approved {result.get('name', args[0])} "
+                f"({result.get('digest', args[0])[:16]}) — adopted for "
+                f"{result.get('adopted_for', '?')}[/]"
+            )
+
+    elif cmd == "reject" and args:
+        result = runtime.tool_store.reject_adoption(args[0].strip().lower())
+        if result.get("error"):
+            console.print(f"  [red]{result['error']}[/]")
+        else:
+            console.print(f"  [green]Rejected {result.get('digest', args[0])[:16]}[/]")
+
+    elif cmd in ("approve", "reject"):
+        console.print(f"  [dim]Usage: {cmd} <digest>[/]")
 
     elif cmd == "clearall":
         n = runtime.execution_log.clear_all()
