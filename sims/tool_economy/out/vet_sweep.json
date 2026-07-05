@@ -1,0 +1,397 @@
+{
+  "bust": [
+    {
+      "careful_royalty_50ep": 33.479,
+      "p_bust": 0.05,
+      "regime": "pivotal",
+      "rubber_busts": 1.0,
+      "rubber_final_weight": 0.5,
+      "rubber_royalty_50ep": 25.5771,
+      "rubber_wins": false
+    },
+    {
+      "careful_royalty_50ep": 22.3193,
+      "p_bust": 0.05,
+      "regime": "redundant",
+      "rubber_busts": 6.67,
+      "rubber_final_weight": 0.1417,
+      "rubber_royalty_50ep": 41.9585,
+      "rubber_wins": true
+    },
+    {
+      "careful_royalty_50ep": 32.4046,
+      "p_bust": 0.2,
+      "regime": "pivotal",
+      "rubber_busts": 2.0,
+      "rubber_final_weight": 0.3611,
+      "rubber_royalty_50ep": 4.0896,
+      "rubber_wins": false
+    },
+    {
+      "careful_royalty_50ep": 21.9959,
+      "p_bust": 0.2,
+      "regime": "redundant",
+      "rubber_busts": 20.67,
+      "rubber_final_weight": 0.0464,
+      "rubber_royalty_50ep": 36.3902,
+      "rubber_wins": true
+    },
+    {
+      "careful_royalty_50ep": 24.884,
+      "p_bust": 0.5,
+      "regime": "pivotal",
+      "rubber_busts": 3.0,
+      "rubber_final_weight": 0.2611,
+      "rubber_royalty_50ep": 2.0101,
+      "rubber_wins": false
+    },
+    {
+      "careful_royalty_50ep": 15.9655,
+      "p_bust": 0.5,
+      "regime": "redundant",
+      "rubber_busts": 46.67,
+      "rubber_final_weight": 0.0214,
+      "rubber_royalty_50ep": 26.7093,
+      "rubber_wins": true
+    }
+  ],
+  "collusion": [
+    {
+      "damper_leak_ungated": 0.0,
+      "evasion": 0.0,
+      "family_mint": 0.0,
+      "greenlight_rate": 0.0,
+      "m_socks": 3,
+      "quorum": 2,
+      "sock_royalty": 0.0
+    },
+    {
+      "damper_leak_ungated": 28.6682,
+      "evasion": 0.3,
+      "family_mint": 25.0846,
+      "greenlight_rate": 0.375,
+      "m_socks": 3,
+      "quorum": 2,
+      "sock_royalty": 1.2542
+    },
+    {
+      "damper_leak_ungated": 86.0045,
+      "evasion": 1.0,
+      "family_mint": 86.0045,
+      "greenlight_rate": 1.0,
+      "m_socks": 3,
+      "quorum": 2,
+      "sock_royalty": 4.3002
+    },
+    {
+      "damper_leak_ungated": 0.0,
+      "evasion": 0.0,
+      "family_mint": 0.0,
+      "greenlight_rate": 0.0,
+      "m_socks": 3,
+      "quorum": 3,
+      "sock_royalty": 0.0
+    },
+    {
+      "damper_leak_ungated": 17.9176,
+      "evasion": 0.3,
+      "family_mint": 0.0,
+      "greenlight_rate": 0.0,
+      "m_socks": 3,
+      "quorum": 3,
+      "sock_royalty": 0.0
+    },
+    {
+      "damper_leak_ungated": 86.0045,
+      "evasion": 1.0,
+      "family_mint": 86.0045,
+      "greenlight_rate": 1.0,
+      "m_socks": 3,
+      "quorum": 3,
+      "sock_royalty": 4.3002
+    }
+  ],
+  "factory": [
+    {
+      "factory_income_per_epoch": 0.346574,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 4,
+      "share": 0.05,
+      "vets_per_epoch_to_beat_author": 40.0,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 0.693147,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 8,
+      "share": 0.05,
+      "vets_per_epoch_to_beat_author": 20.0,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 1.386294,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 16,
+      "share": 0.05,
+      "vets_per_epoch_to_beat_author": 10.0,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 0.693147,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 4,
+      "share": 0.1,
+      "vets_per_epoch_to_beat_author": 20.0,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 1.386294,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 8,
+      "share": 0.1,
+      "vets_per_epoch_to_beat_author": 10.0,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 2.772589,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 16,
+      "share": 0.1,
+      "vets_per_epoch_to_beat_author": 5.0,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 1.386294,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 4,
+      "share": 0.2,
+      "vets_per_epoch_to_beat_author": 10.0,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 2.772589,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 8,
+      "share": 0.2,
+      "vets_per_epoch_to_beat_author": 5.0,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 5.545177,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 16,
+      "share": 0.2,
+      "vets_per_epoch_to_beat_author": 2.5,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 2.079442,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 4,
+      "share": 0.3,
+      "vets_per_epoch_to_beat_author": 6.667,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 4.158883,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 8,
+      "share": 0.3,
+      "vets_per_epoch_to_beat_author": 3.333,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    },
+    {
+      "factory_income_per_epoch": 8.317766,
+      "good_author_income_per_epoch": 13.862944,
+      "k": 16,
+      "share": 0.3,
+      "vets_per_epoch_to_beat_author": 1.667,
+      "vetting_beats_authoring_at_1_per_epoch": false
+    }
+  ],
+  "quorum": [
+    {
+      "collusion_slip_rate": 0.0,
+      "epochs_to_80pct_honest": 1.2,
+      "evasion": 0.0,
+      "m_socks": 3,
+      "quorum": 1
+    },
+    {
+      "collusion_slip_rate": 0.7,
+      "epochs_to_80pct_honest": 1.0,
+      "evasion": 0.3,
+      "m_socks": 3,
+      "quorum": 1
+    },
+    {
+      "collusion_slip_rate": 1.0,
+      "epochs_to_80pct_honest": 1.0,
+      "evasion": 1.0,
+      "m_socks": 3,
+      "quorum": 1
+    },
+    {
+      "collusion_slip_rate": 0.0,
+      "epochs_to_80pct_honest": 2.0,
+      "evasion": 0.0,
+      "m_socks": 3,
+      "quorum": 2
+    },
+    {
+      "collusion_slip_rate": 0.1,
+      "epochs_to_80pct_honest": 2.0,
+      "evasion": 0.3,
+      "m_socks": 3,
+      "quorum": 2
+    },
+    {
+      "collusion_slip_rate": 1.0,
+      "epochs_to_80pct_honest": 1.8,
+      "evasion": 1.0,
+      "m_socks": 3,
+      "quorum": 2
+    },
+    {
+      "collusion_slip_rate": 0.0,
+      "epochs_to_80pct_honest": 2.8,
+      "evasion": 0.0,
+      "m_socks": 3,
+      "quorum": 3
+    },
+    {
+      "collusion_slip_rate": 0.05,
+      "epochs_to_80pct_honest": 2.8,
+      "evasion": 0.3,
+      "m_socks": 3,
+      "quorum": 3
+    },
+    {
+      "collusion_slip_rate": 1.0,
+      "epochs_to_80pct_honest": 2.8,
+      "evasion": 1.0,
+      "m_socks": 3,
+      "quorum": 3
+    },
+    {
+      "collusion_slip_rate": 0.0,
+      "epochs_to_80pct_honest": 5.0,
+      "evasion": 0.0,
+      "m_socks": 3,
+      "quorum": 5
+    },
+    {
+      "collusion_slip_rate": 0.0,
+      "epochs_to_80pct_honest": 5.0,
+      "evasion": 0.3,
+      "m_socks": 3,
+      "quorum": 5
+    },
+    {
+      "collusion_slip_rate": 0.0,
+      "epochs_to_80pct_honest": 5.6,
+      "evasion": 1.0,
+      "m_socks": 3,
+      "quorum": 5
+    }
+  ],
+  "royalty": [
+    {
+      "author_retained_frac_2k": 0.975,
+      "k": 4,
+      "mint_per_epoch": 13.862944,
+      "share": 0.05,
+      "validator_income_frac_of_tool": 0.0125,
+      "validator_income_per_vet": 1.386294
+    },
+    {
+      "author_retained_frac_2k": 0.975,
+      "k": 8,
+      "mint_per_epoch": 13.862944,
+      "share": 0.05,
+      "validator_income_frac_of_tool": 0.0125,
+      "validator_income_per_vet": 2.772589
+    },
+    {
+      "author_retained_frac_2k": 0.975,
+      "k": 16,
+      "mint_per_epoch": 13.862944,
+      "share": 0.05,
+      "validator_income_frac_of_tool": 0.0125,
+      "validator_income_per_vet": 5.545177
+    },
+    {
+      "author_retained_frac_2k": 0.95,
+      "k": 4,
+      "mint_per_epoch": 13.862944,
+      "share": 0.1,
+      "validator_income_frac_of_tool": 0.025,
+      "validator_income_per_vet": 2.772589
+    },
+    {
+      "author_retained_frac_2k": 0.95,
+      "k": 8,
+      "mint_per_epoch": 13.862944,
+      "share": 0.1,
+      "validator_income_frac_of_tool": 0.025,
+      "validator_income_per_vet": 5.545177
+    },
+    {
+      "author_retained_frac_2k": 0.95,
+      "k": 16,
+      "mint_per_epoch": 13.862944,
+      "share": 0.1,
+      "validator_income_frac_of_tool": 0.025,
+      "validator_income_per_vet": 11.090355
+    },
+    {
+      "author_retained_frac_2k": 0.9,
+      "k": 4,
+      "mint_per_epoch": 13.862944,
+      "share": 0.2,
+      "validator_income_frac_of_tool": 0.05,
+      "validator_income_per_vet": 5.545177
+    },
+    {
+      "author_retained_frac_2k": 0.9,
+      "k": 8,
+      "mint_per_epoch": 13.862944,
+      "share": 0.2,
+      "validator_income_frac_of_tool": 0.05,
+      "validator_income_per_vet": 11.090355
+    },
+    {
+      "author_retained_frac_2k": 0.9,
+      "k": 16,
+      "mint_per_epoch": 13.862944,
+      "share": 0.2,
+      "validator_income_frac_of_tool": 0.05,
+      "validator_income_per_vet": 22.18071
+    },
+    {
+      "author_retained_frac_2k": 0.85,
+      "k": 4,
+      "mint_per_epoch": 13.862944,
+      "share": 0.3,
+      "validator_income_frac_of_tool": 0.075,
+      "validator_income_per_vet": 8.317766
+    },
+    {
+      "author_retained_frac_2k": 0.85,
+      "k": 8,
+      "mint_per_epoch": 13.862944,
+      "share": 0.3,
+      "validator_income_frac_of_tool": 0.075,
+      "validator_income_per_vet": 16.635532
+    },
+    {
+      "author_retained_frac_2k": 0.85,
+      "k": 16,
+      "mint_per_epoch": 13.862944,
+      "share": 0.3,
+      "validator_income_frac_of_tool": 0.075,
+      "validator_income_per_vet": 33.271065
+    }
+  ],
+  "seed": 1234
+}
