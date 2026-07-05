@@ -178,7 +178,9 @@ def test_unsubscribe_stops_notifications(tmp_path: Path):
 
 
 def test_read_agent_projection_aggregates_across_epochs(tmp_path: Path):
-    """Sum of an agent's per-epoch mint across the last N epochs."""
+    """Sum of an agent's per-epoch novelty across the last N epochs.
+    Prose activity earns no mint (one rail: tools only) — it shows up
+    as the novelty diagnostic."""
     svc = WorldService(rpb_address="rpb_proj_g", data_root=tmp_path)
     try:
         for i in range(4):
@@ -192,9 +194,11 @@ def test_read_agent_projection_aggregates_across_epochs(tmp_path: Path):
         proj = svc.read_agent_projection("A", last_n_epochs=10)
         assert proj["agent_id"] == "A"
         assert proj["epochs_considered"] == 4
-        # Total = sum of per-epoch mint.
-        per_epoch_sum = sum(e["mint"] for e in proj["per_epoch"])
-        assert proj["total_mint_projection"] == pytest.approx(per_epoch_sum)
+        # Prose never mints; the diagnostic (novelty) aggregates.
+        assert proj["total_mint_projection"] == 0.0
+        assert proj["total_novelty_projection"] > 0
+        per_epoch_sum = sum(e["novelty"] for e in proj["per_epoch"])
+        assert proj["total_novelty_projection"] == pytest.approx(per_epoch_sum)
         # All projections are non-authoritative until Phase 5.
         for e in proj["per_epoch"]:
             assert e["authoritative"] is False

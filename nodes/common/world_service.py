@@ -51,11 +51,13 @@ from .world_model_substrate.events import snapshot_node_scores
 from .world_model_substrate.mint_gate import (
     DEFAULT_CHARTER_IDS,
     apply_mint_gate,
+    charter_violation_score,
 )
 from .world_model_substrate.reconcile import (
     EpochSnapshots,
     apply_emission_pool,
     reconcile_epoch,
+    scale_node_agent_mint_by_violation,
 )
 from .world_persistence import (
     PersistenceConfig,
@@ -298,6 +300,36 @@ class WorldService:
         self._coverage_index = CoverageIndex(
             index_path=state_dir / "coverage_index.jsonl",
         )
+        # Tool substrate: carry-over state for the LOCAL projection
+        # close (registration map digest -> manifest_meta, plus vetting
+        # state), mirroring the federated close driver's carry-over so
+        # a tool registered/greenlit in an earlier epoch still
+        # attributes local tool-mint projections. Display-plane only:
+        # derived, daemon-local, never gossiped, never anchored.
+        self._tool_registrations_path = state_dir / "local_tool_registrations.json"
+        self._tool_registrations: Dict[str, Dict[str, str]] = {}
+        self._tool_vetting_path = state_dir / "local_tool_vetting.json"
+        self._tool_vetting: Dict[str, Any] = {}
+        try:
+            if self._tool_registrations_path.exists():
+                raw = json.loads(
+                    self._tool_registrations_path.read_text(encoding="utf-8")
+                )
+                if isinstance(raw, dict):
+                    self._tool_registrations = {
+                        str(k): dict(v) for k, v in raw.items()
+                        if isinstance(v, dict)
+                    }
+            if self._tool_vetting_path.exists():
+                raw = json.loads(
+                    self._tool_vetting_path.read_text(encoding="utf-8")
+                )
+                if isinstance(raw, dict):
+                    self._tool_vetting = raw
+        except Exception as e:
+            logger.warning(
+                "local tool carry-over load failed: %s", e,
+            )
 
         # Try to recover from disk; if nothing exists, the fresh charter world
         # we just built is what we use.
@@ -413,6 +445,13 @@ class WorldService:
         - Optionally applies the charter mint gate (default: yes).
         - Returns the per-agent mint, per-agent novelty, and per-node
           breakdowns.
+
+        ONE EARNING RAIL: ``agent_mint`` is TOOL-AUTHOR mint only
+        (``compute_tool_mint`` over this epoch's local buffer), same
+        rail as the authoritative federated close. Score-movement
+        numbers remain in the result strictly as labeled diagnostics
+        (``node_mint`` / ``node_novelty`` / ``agent_novelty`` /
+        ``score_agent_mint``) and never enter earnings.
 
         ``cutoff_ts`` (candle close): only events that arrived at or
         before this wall-clock time count for THIS epoch; later ones
@@ -1853,6 +1892,11 @@ class WorldService:
         its closest tendency (highest stake from that tendency on the
         node). This is a best-effort projection — accurate when nodes
         are clearly under one root, approximate when nodes straddle.
+
+        NOTE: ``node_mint`` in close records is a per-node DIAGNOSTIC
+        (score-movement standing plus tool mint at its anchoring
+        nodes), same blend the federated close reports — not per-agent
+        earnings, which flow through the tool rail only.
         """
         with self._lock:
             scores = self._read_root_scores_locked()
@@ -1962,6 +2006,23 @@ class WorldService:
     def _read_root_scores_locked(self) -> Dict[str, float]:
         return dict(self._world.root_scores())
 
+    def _save_tool_state_locked(self) -> None:
+        """Persist the local tool carry-over state (registrations +
+        vetting; best-effort, display-plane only)."""
+        try:
+            self._tool_registrations_path.write_text(
+                json.dumps(dict(sorted(self._tool_registrations.items()))),
+                encoding="utf-8",
+            )
+            self._tool_vetting_path.write_text(
+                json.dumps(self._tool_vetting, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(
+                "local tool carry-over save failed: %s", e,
+            )
+
     def _close_epoch_locked(
         self,
         *,
@@ -1979,6 +2040,7 @@ class WorldService:
                 "agent_novelty": {},
                 "node_mint": {},
                 "node_novelty": {},
+                "tool_mint": {},
                 "total_mint": 0.0,
                 "total_novelty": 0.0,
                 "n_events": 0,
@@ -2018,6 +2080,70 @@ class WorldService:
                 charter_ids=DEFAULT_CHARTER_IDS,
                 gate_strength=gate_strength,
             )
+
+        # ONE EARNING RAIL (mirrors federated_reconcile_epoch): score-
+        # movement mint is a labeled DIAGNOSTIC in the local projection
+        # too. Move reconcile_epoch's score-derived per-agent map out
+        # of the earnings slot and compute ``agent_mint`` with the same
+        # function the authoritative close uses — tool-author mint over
+        # this epoch's local event buffer.
+        from .federated_reconcile import compute_tool_mint
+
+        result["score_agent_mint"] = result.pop("agent_mint", {})
+        tool_result = compute_tool_mint(
+            self._world, events,
+            registrations=dict(self._tool_registrations),
+            vetting=dict(self._tool_vetting),
+        )
+        self._tool_registrations = dict(tool_result["registrations_next"])
+        self._tool_vetting = dict(tool_result.get("vetting_next") or {})
+        self._save_tool_state_locked()
+
+        # Stake-style agent weighting, as on the federated rail.
+        node_agent: Dict[str, Dict[str, float]] = {}
+        for node_id, per_agent in tool_result["node_agent"].items():
+            bucket = node_agent.setdefault(node_id, {})
+            for agent, amount in per_agent.items():
+                weight = (agent_weights or {}).get(agent, 1.0)
+                bucket[agent] = bucket.get(agent, 0.0) + float(amount) * weight
+
+        # Violator-pays gate on the tool rail: scale each anchoring
+        # node's mint by its charter-violation standing BEFORE
+        # aggregating per agent (same as the federated close).
+        node_violation: Dict[str, float] = {}
+        if apply_gate:
+            for node_id in node_agent:
+                node_violation[node_id] = charter_violation_score(
+                    self._world, node_id, DEFAULT_CHARTER_IDS,
+                )
+            tool_agent_mint = scale_node_agent_mint_by_violation(
+                node_agent, node_violation, gate_strength=gate_strength,
+            )
+        else:
+            tool_agent_mint = {}
+            for per_agent in node_agent.values():
+                for agent, amount in per_agent.items():
+                    tool_agent_mint[agent] = (
+                        tool_agent_mint.get(agent, 0.0) + amount
+                    )
+
+        # Fold the (gated) tool mint into the per-node diagnostic so
+        # node-level surfaces show it where the federated close does.
+        node_mint = dict(result.get("node_mint", {}) or {})
+        for node_id, per_agent in node_agent.items():
+            scale = 1.0
+            if apply_gate:
+                scale = max(
+                    0.0,
+                    1.0 - gate_strength * node_violation.get(node_id, 0.0),
+                )
+            gated_total = sum(per_agent.values()) * scale
+            if gated_total > 0:
+                node_mint[node_id] = node_mint.get(node_id, 0.0) + gated_total
+        result["node_mint"] = node_mint
+        result["agent_mint"] = tool_agent_mint
+        result["tool_mint"] = tool_result["per_digest"]
+        result["total_mint"] = sum(tool_agent_mint.values())
         # Fixed-emission normalization (post-gate, so suppressed junk
         # redistributes to survivors). The pool covers the time from
         # the emission clock (last close's effective end) to this
@@ -2041,10 +2167,13 @@ class WorldService:
             "started_at": self._epoch_started_at,
             "closed_at": time.time(),
             "n_events": len(events),
+            # agent_mint / total_mint = tool-author mint (the one
+            # earning rail); node_mint / node_novelty are diagnostics.
             "agent_mint": result.get("agent_mint", {}),
             "agent_novelty": result.get("agent_novelty", {}),
             "node_mint": result.get("node_mint", {}),
             "node_novelty": result.get("node_novelty", {}),
+            "tool_mint": result.get("tool_mint", {}),
             "total_mint": result.get("total_mint", 0.0),
             "total_novelty": result.get("total_novelty", 0.0),
             "gate_applied": apply_gate,
