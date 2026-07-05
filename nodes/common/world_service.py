@@ -989,6 +989,7 @@ class WorldService:
         *,
         agent_id: str = "default",
         embedder: Optional[Any] = None,
+        evidence: Optional[Dict[str, Any]] = None,
         equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
         equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
     ) -> Dict[str, Any]:
@@ -1086,6 +1087,12 @@ class WorldService:
                 content=claim,
                 observation_id=obs_id,
                 author_post=True,
+                # Evidence-replay CON (docs/tool_substrate.md — Evidence):
+                # a reproducible failing invocation rides the CON sprout
+                # (serialize-only-when-present, no close-side effect). Any
+                # daemon may replay it and post support; standing is priced
+                # by those support posts, never by the evidence directly.
+                evidence=dict(evidence) if evidence else {},
             ))
 
             scope = None
@@ -1120,6 +1127,138 @@ class WorldService:
 
             return {
                 "con_node_id": con_node.id,
+                "target_node_id": target_node_id,
+                "tendency_id": owner.id,
+                "events_applied": len(causal_events),
+                "rounds": rounds,
+                "target_score_before": score_before,
+                "target_score_after": target.net_score,
+            }
+
+    def submit_support(
+        self,
+        target_node_id: str,
+        claim: str,
+        *,
+        agent_id: str = "default",
+        embedder: Optional[Any] = None,
+        equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
+        equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
+    ) -> Dict[str, Any]:
+        """Post a targeted PRO: back an existing claim (mirror of
+        ``submit_con``).
+
+        This is the verify-then-support primitive of the evidence-replay
+        rail (docs/tool_substrate.md — Evidence): a daemon that replays a
+        CON's evidence and CONFIRMS it posts one unit-weight PRO under the
+        CON node, adding organic standing to the dispute. There is NO new
+        close-side math — the deterministic close already prices author
+        posts. The whole point is that evidence recruits honest supporters
+        cheaply; each supporter's post stands on its own like any other.
+
+        Same mechanics as ``submit_con`` with the polarity flipped: the
+        PRO child inherits the parent claim's axis (agree) instead of
+        negating it, and carries ``author_post=True`` for immediate
+        standing 1.
+        """
+        from .world_model_substrate.events import SubClaimSprouted
+
+        claim = " ".join((claim or "").split())[:CLAIM_MAX_CHARS]
+        if not claim:
+            raise ValueError("claim text is required")
+
+        coords = self.coords_for_text(claim, embedder=embedder)
+
+        with self._lock:
+            owner = None
+            target = None
+            for tendency in self._world.tendencies.values():
+                node = tendency.tree.get_node(target_node_id)
+                if node is not None:
+                    owner, target = tendency, node
+                    break
+            if target is None:
+                raise ValueError(f"unknown target node: {target_node_id}")
+            if target.id == owner.tree.root_node.id:
+                raise ValueError(
+                    "target is a charter root; support a specific claim, "
+                    "not the tendency root"
+                )
+
+            score_before = target.net_score
+
+            # Polarity: AGREE with the target — inherit its axis when
+            # known, else follow the support text's own direction.
+            parent_claim = owner._node_to_claim.get(target_node_id)
+            if parent_claim is not None and parent_claim.polarity_axis:
+                polarity = tuple(parent_claim.polarity_axis)
+            else:
+                polarity = self._axis_from_coords(coords) or ()
+
+            obs_id = "sup_" + _hash_claim(f"{target_node_id}|{claim}")
+            obs = Observation(id=obs_id, coords=coords, label=claim)
+
+            recorder = _EventRecorder(agent_id=agent_id)
+            before_ids = _all_node_ids(self._world)
+
+            self._world.add_observation(obs)
+            recorder.observation_added(obs)
+
+            pro_node = owner.sprout_child(
+                parent_node_id=target_node_id,
+                position=Position.PRO,
+                anchor=tuple(coords),
+                polarity_axis=polarity,
+                observation=obs,
+                content=claim,
+                world=self._world,
+            )
+            pro_node.add_post(agent_id)
+
+            recorder._seq += 1
+            recorder.events.append(SubClaimSprouted(
+                seq=recorder._seq,
+                author_agent=agent_id,
+                tendency_id=owner.id,
+                parent_id=target_node_id,
+                node_id=pro_node.id,
+                position=Position.PRO.value,
+                coords=list(coords),
+                polarity_axis=list(polarity),
+                content=claim,
+                observation_id=obs_id,
+                author_post=True,
+            ))
+
+            scope = None
+            if _SCOPED_EQUILIBRATE_ENABLED:
+                scope = scope_for_observation(self._world, obs)
+            rounds = 0
+            if scope is None or scope:
+                rounds = equilibrate(
+                    self._world,
+                    max_rounds=equilibrate_rounds,
+                    tolerance=equilibrate_tolerance,
+                    scope=scope,
+                )
+            recorder.sub_claims_after_equilibrate(self._world, before_ids)
+
+            full_events = [e.to_dict() for e in recorder.events]
+            causal_events = [ev for ev in full_events if ev.get("seq", 0) <= 2]
+            self._buffer_epoch_events_locked(full_events)
+            self._broadcast_local_events_locked(causal_events)
+            self._persistence.append_events(
+                causal_events,
+                equilibrate_after=True,
+                equilibrate_rounds=equilibrate_rounds,
+                equilibrate_tolerance=equilibrate_tolerance,
+            )
+            self._events_applied += len(causal_events)
+            self._events_since_snapshot += len(causal_events)
+            self._maybe_snapshot_locked()
+
+            return {
+                "support_node_id": pro_node.id,
                 "target_node_id": target_node_id,
                 "tendency_id": owner.id,
                 "events_applied": len(causal_events),

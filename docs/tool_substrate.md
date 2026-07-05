@@ -378,6 +378,79 @@ refused (the original author's publication stands). Only pinned
 tools adopt; attested/connector tools lean on local credentials that
 don't transfer.
 
+## Evidence-replay CON (ratified 2026-07-05; BUILT same day)
+
+Phase 10 (docs/phase10_results.md) REFUTED the claim that executable
+ground truth makes debate *decisively* better than prose (the pre-
+registered bar), so evidence is NOT sold as the thing prose lacks. But
+the same run showed evidence-backed standing separates defective from
+correct tools perfectly (AUC 1.000, deterministic under sybil flood) and
+is the only arm that PROTECTS falsely-accused correct tools. So a CON
+disputing a pinned tool may carry a reproducible failing invocation —
+retained on its own merits, with the discipline phase 10 demands:
+
+- **Evidence is a payload on the CON sprout, not a scoring input.** A
+  con-position `SubClaimSprouted` carries an optional `evidence` dict
+  `{args_json, expected_digest | expected_error, actual_digest?}`,
+  serialize-only-when-present (same back-compat hashing as
+  `artifact_digest` / `manifest_meta` — pre-evidence logs and their batch
+  hashes are byte-identical). It plays NO part in node ids, coords, or
+  equilibration.
+- **Replay is daemon-local and voluntary.** `ToolStore.replay_evidence`
+  re-runs the pinned code with the evidence args through the ordinary
+  call path (adopted tools replay under their capability guard — the
+  guard's own hard-fail IS the reproducible evidence). It compares:
+  `expected_error` confirms iff the replay errors; `expected_digest`
+  (the CORRECT result the CON says the tool fails to produce) confirms
+  iff the replay succeeds with a *different* canonical result digest.
+- **Evidence recruits verifiers; it does not weight standing.** A daemon
+  that replays and CONFIRMS posts a NORMAL author_post PRO support sprout
+  under the CON (`WorldService.submit_support`). The deterministic close
+  prices that support post like any other — there is NO new close-side
+  math. This is the whole point: an evidence-backed CON is one a hundred
+  honest validators can each independently reproduce and back cheaply,
+  while a non-reproducing accusation recruits no one and spends no
+  standing. A close over evidence-bearing events is bit-identical to the
+  same close without evidence (`tests/test_federated_reconcile.py`).
+- **Agent surface:** `check_evidence` (vetting bundle) exposes the
+  verify-then-support flow in one call — replay, and on confirmation post
+  the support sprout under the CON. `submit_con` accepts an `evidence`
+  kwarg so the CON author records the reproducible invocation.
+
+The lesson encoded: evidence changes WHO gets recruited to a dispute (the
+verifiers who reproduced it), not how much any single post is worth.
+
+## Verifier trials (venture vault rail — daemon side, 2026-07-05)
+
+The vetting pipeline generalizes from "read the code" to "probe the
+moat". A venture's value terminates in a moat (credentials, data,
+hardware, state) that — unlike pinned tool code — cannot be READ, so it
+is exercised: a validator runs the venture's own pre-committed black-box
+trial battery against the live service and attests what it observed. This
+is the agent-facing daemon flow; the on-chain greenlight
+(`VentureVault.attestTrial`) is built in parallel.
+
+- `run_trial` (vetting bundle) takes a **venture prospectus** digest — a
+  published `{kind: "venture_prospectus", service_digest, endpoint,
+  credentials, battery: [...], pass_threshold}` artifact. `TrialRunner`
+  fetches it (digest-verified blob rail), executes each declared case
+  against the service's MCP surface via an injected **transport seam**
+  (live service-request client in production; a fake in tests, since live
+  invocation plumbing is still thin), scores pass/fail per the
+  prospectus's OWN criteria (`expect_digest` / `expect_error` /
+  `expect_contains`), blob-stores a `venture_trial_report`, and returns
+  the verdict + report digest + **attestTrial calldata** for the owner
+  surface to submit.
+- The prospectus PRE-COMMITS `pass_threshold` (fraction, default 1.0):
+  the venture sets the bar before any validator runs it — a black-box
+  trial the author can't move after the fact. Trials are author-funded:
+  the prospectus's `credentials` are threaded into each call so the
+  validator probes at no personal cost.
+- Same doctrine as tool vetting: containment is not replaced (the
+  service runs on the provider's machine — receipts + reviews, not
+  verdicts), and the trial report is reviewable evidence a later dispute
+  argues against.
+
 ## Consensus mechanics (v1 implementation, still current)
 
 - `ToolUsed` consensus event: caller-attested, gossiped, epoch-

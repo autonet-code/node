@@ -948,6 +948,16 @@ class AutonetBridge:
                 _ws.submit_tool_manifest(manifest, agent_id=author)
             tool_store.manifest_sink = _manifest_sink
 
+            # Evidence-replay support post (docs/tool_substrate.md —
+            # Evidence): a validator that replays a CON's evidence and
+            # confirms it posts a PRO support sprout under the CON. No
+            # close-side math — the deterministic close prices the post
+            # like any author post.
+            def _support_sink(con_node_id: str, claim: str,
+                              _ws=world_service) -> dict:
+                return _ws.submit_support(con_node_id, claim)
+            tool_store.support_sink = _support_sink
+
             # Network blob fetch (vetting + adoption): digest-verified
             # pull of foreign manifests/code over the libp2p blob
             # protocol. Absent host → local-only resolution.

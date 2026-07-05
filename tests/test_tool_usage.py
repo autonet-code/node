@@ -11,7 +11,11 @@ import random
 
 from nodes.common.world_model_substrate.adapter import build_charter_world
 from nodes.common.world_model_substrate.aggregate import apply_events
-from nodes.common.world_model_substrate.events import ToolUsed, event_from_dict
+from nodes.common.world_model_substrate.events import (
+    SubClaimSprouted,
+    ToolUsed,
+    event_from_dict,
+)
 from nodes.common.world_model_substrate.tool_usage import tool_usage_from_events
 
 
@@ -113,3 +117,36 @@ def test_vet_field_serializes_only_when_true():
     assert vet["vet"] is True
     restored = event_from_dict(vet)
     assert isinstance(restored, ToolUsed) and restored.vet
+
+
+def test_evidence_field_serializes_only_when_present():
+    """Evidence-replay CON (docs/tool_substrate.md — Evidence): the
+    optional evidence dict rides a CON sprout serialize-only-when-present,
+    so pre-evidence sprout logs hash byte-identically."""
+    plain = SubClaimSprouted(
+        seq=2, author_agent="critic", tendency_id="correctness",
+        parent_id="tm_abc", node_id="con_xyz", position="con",
+        content="disputes the tool", author_post=True).to_dict()
+    assert "evidence" not in plain
+
+    ev = SubClaimSprouted(
+        seq=2, author_agent="critic", tendency_id="correctness",
+        parent_id="tm_abc", node_id="con_xyz", position="con",
+        content="disputes the tool", author_post=True,
+        evidence={"args_json": "{\"x\": \"\"}",
+                  "expected_error": "x is required",
+                  "actual_digest": "de" * 32}).to_dict()
+    assert ev["evidence"]["expected_error"] == "x is required"
+
+    # Round-trip: event_from_dict reconstructs the evidence-bearing sprout.
+    restored = event_from_dict(ev)
+    assert isinstance(restored, SubClaimSprouted)
+    assert restored.evidence["args_json"] == "{\"x\": \"\"}"
+    assert restored.to_dict() == ev
+
+    # An empty evidence dict serializes AWAY (back-compat hashing).
+    empty = SubClaimSprouted(
+        seq=2, author_agent="critic", tendency_id="correctness",
+        parent_id="tm_abc", node_id="con_xyz", position="con",
+        content="disputes the tool", evidence={}).to_dict()
+    assert "evidence" not in empty

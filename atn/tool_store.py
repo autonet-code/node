@@ -142,6 +142,12 @@ class ToolStore:
         # reading the federated close's vetting carry-over — feeds the
         # provenance block on adoption proposals. Absent = "unknown".
         self.vet_status_provider: Any = None
+        # Optional support-post sink (callable: (con_node_id, claim) ->
+        # dict). Wired to WorldService.submit_support so a validator that
+        # replays an evidence-CON and CONFIRMS it can post a PRO support
+        # sprout under the CON in one flow (docs/tool_substrate.md —
+        # Evidence). Absent = replay is diagnostic-only (no support post).
+        self.support_sink: Any = None
         # Adoption proposals (docs/tool_substrate.md — Adoption rail):
         # agent proposes, OWNER approves per-tool. The queue is the one
         # legitimate approval queue in the tool economy.
@@ -1348,6 +1354,195 @@ class ToolStore:
 
         return {"digest": digest, "verdict": verdict,
                 "review_digest": review_digest}
+
+    # ------------------------------------------------------------------
+    # Evidence-replay (docs/tool_substrate.md — Evidence section)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _result_digest(result: dict[str, Any]) -> str:
+        """sha256 of a tool result's canonical ``{"result": ...}`` payload.
+
+        The SAME canonicalization a CON author used to compute
+        ``expected_digest`` / ``actual_digest`` — key-sorted JSON of the
+        inner result value only (errors are compared textually, never by
+        digest, since an error message is not a stable success output)."""
+        import hashlib
+
+        payload = result.get("result")
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True,
+                       default=str).encode("utf-8")).hexdigest()
+
+    async def replay_evidence(
+        self,
+        con_evidence: dict[str, Any],
+        manifest_digest: str,
+    ) -> dict[str, Any]:
+        """Re-run a pinned tool with a CON's evidence args and compare.
+
+        DAEMON-LOCAL and VOLUNTARY (docs/tool_substrate.md — Evidence):
+        a validator replays the failing invocation carried on an
+        evidence-bearing CON to decide whether to SUPPORT it. This never
+        touches the close math — a confirmed replay is grounds for the
+        validator to post a normal support sprout under the CON, and the
+        deterministic close prices that post like any other. Evidence
+        recruits verification; it does not weight standing.
+
+        ``con_evidence`` — ``{"args_json", "expected_digest" |
+        "expected_error", "actual_digest"?}``. The tool runs through the
+        SAME execution path as a normal call (``self.call`` → pinned
+        subprocess), so an ADOPTED tool replays under its capability
+        guard exactly as it would in production — the guard's own
+        hard-fail IS reproducible evidence.
+
+        Returns ``{"confirmed": bool, "kind", "manifest_digest",
+        "observed_digest"?, "observed_error"?, "expected"..., "note"}``.
+        ``confirmed`` is True when the replay reproduces the CON's
+        claimed failure:
+
+          - expected_error: the replay errored (any error confirms a
+            "this input breaks it" claim — the specific text is advisory);
+          - expected_digest: the replay SUCCEEDED but produced a
+            DIFFERENT result digest than the manifest's contract claims
+            (wrong-answer evidence: expected == the correct digest the
+            CON says the tool fails to produce).
+        """
+        record = self.resolve(manifest_digest) or self._records.get(
+            manifest_digest)
+        if record is None:
+            return {"confirmed": False, "error": "tool not resolvable locally "
+                    "— adopt or register it before replaying its evidence"}
+        if not record.manifest.get("code_digest"):
+            return {"confirmed": False,
+                    "error": "only pinned tools have replayable evidence"}
+
+        raw_args = con_evidence.get("args_json")
+        if isinstance(raw_args, str):
+            try:
+                arguments = json.loads(raw_args)
+            except json.JSONDecodeError:
+                return {"confirmed": False,
+                        "error": "evidence args_json is not valid JSON"}
+        elif isinstance(raw_args, dict):
+            arguments = raw_args
+        else:
+            return {"confirmed": False,
+                    "error": "evidence must carry args_json (object or "
+                             "JSON string)"}
+
+        expected_error = con_evidence.get("expected_error")
+        expected_digest = con_evidence.get("expected_digest")
+        if not expected_error and not expected_digest:
+            return {"confirmed": False,
+                    "error": "evidence must state expected_error or "
+                             "expected_digest to be checkable"}
+
+        # Replay through the ordinary call path (guard applies for adopted
+        # code). caller_id=None runs as owner-sanctioned local verification;
+        # scoping is the CON reader's concern, not the replay's.
+        result = await self.call(record, arguments, caller_id=None)
+
+        if "error" in result:
+            observed_error = str(result["error"])
+            # An error confirms an "input breaks it" CON regardless of the
+            # exact message (messages vary by platform; the failure does
+            # not). A wrong-answer CON (expected_digest) is NOT confirmed
+            # by an error — that is a different, unclaimed failure mode.
+            confirmed = bool(expected_error)
+            return {
+                "confirmed": confirmed,
+                "kind": "error",
+                "manifest_digest": record.digest,
+                "observed_error": observed_error[:2000],
+                "expected_error": (str(expected_error)[:2000]
+                                   if expected_error else None),
+                "note": ("replay errored as the CON claims"
+                         if confirmed else
+                         "replay errored, but the CON claimed a wrong-answer "
+                         "(expected_digest) — not the failure observed"),
+            }
+
+        observed_digest = self._result_digest(result)
+        if expected_error:
+            # CON claimed the input errors, but the replay succeeded.
+            return {
+                "confirmed": False,
+                "kind": "result",
+                "manifest_digest": record.digest,
+                "observed_digest": observed_digest,
+                "note": "replay succeeded — the CON's claimed error did "
+                        "not reproduce",
+            }
+
+        # Wrong-answer CON: confirmed when the replay's digest differs
+        # from the correct digest the CON says the tool fails to produce.
+        confirmed = observed_digest != str(expected_digest)
+        # If the CON recorded the buggy actual_digest it observed, a
+        # matching replay is stronger corroboration (fully reproducible).
+        actual_digest = con_evidence.get("actual_digest")
+        reproduced = (bool(actual_digest)
+                      and observed_digest == str(actual_digest))
+        return {
+            "confirmed": confirmed,
+            "kind": "result",
+            "manifest_digest": record.digest,
+            "observed_digest": observed_digest,
+            "expected_digest": str(expected_digest),
+            "reproduced_actual": reproduced,
+            "note": ("replay produced a different result than the correct "
+                     "digest — wrong-answer CON confirmed" if confirmed else
+                     "replay matched the expected-correct digest — the CON "
+                     "does not reproduce"),
+        }
+
+    async def check_evidence(
+        self,
+        caller_id: str | None,
+        manifest_digest: str,
+        evidence: dict[str, Any],
+        *,
+        con_node_id: str = "",
+        support: bool = True,
+    ) -> dict[str, Any]:
+        """Validator verify-then-support flow (docs/tool_substrate.md —
+        Evidence), one call:
+
+          1. REPLAY the CON's evidence against the pinned tool
+             (``replay_evidence``).
+          2. If it CONFIRMS and ``support`` is set and a ``con_node_id``
+             and a wired ``support_sink`` are present, post a normal PRO
+             support sprout under the CON — recruiting the validator's
+             standing behind a dispute they personally reproduced.
+
+        No close-side math changes: the support sprout is priced by the
+        deterministic close exactly like any author post. Evidence
+        recruits verification; it never weights standing directly. When
+        the replay does NOT confirm, nothing is posted — the validator's
+        standing is not spent on a claim they could not reproduce.
+
+        Returns the replay verdict plus, when a support post fired, a
+        ``supported`` block with the new PRO node id.
+        """
+        verdict = await self.replay_evidence(evidence, manifest_digest)
+        out: dict[str, Any] = dict(verdict)
+        out["supported"] = None
+        if not verdict.get("confirmed"):
+            return out
+        if not support or not con_node_id or self.support_sink is None:
+            out["note"] = (str(verdict.get("note") or "")
+                           + " — confirmed; no support posted "
+                           "(support disabled or no CON node / sink)")
+            return out
+        claim = ("reproduced the CON's failing invocation locally "
+                 f"({verdict.get('kind', 'failure')})")
+        try:
+            posted = self.support_sink(con_node_id, claim)
+            out["supported"] = posted
+        except Exception as exc:
+            log.warning("evidence support post failed: %s", exc)
+            out["supported"] = {"error": str(exc)}
+        return out
 
     def attestation_summary(self) -> dict[str, dict[str, Any]]:
         """Per-digest attestation aggregates from ``attestations.jsonl``:

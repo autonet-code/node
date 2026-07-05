@@ -8,6 +8,7 @@ Design: docs/tool_substrate.md.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -1026,3 +1027,165 @@ class TestComposition:
         out = await rt.tool_registry.call_tool(
             "echo_tool", {"x": "sealed"}, caller_id="child")
         assert out == {"result": {"echo": "sealed"}}
+
+
+# ---------------------------------------------------------------------------
+# Evidence-replay CON (docs/tool_substrate.md — Evidence section)
+# ---------------------------------------------------------------------------
+
+
+# A tool that errors when x is missing/empty, else echoes it. Gives us a
+# reproducible failing invocation (empty x) AND a wrong-answer path.
+BUGGY_CODE = (
+    "import sys, json\n"
+    "args = json.load(sys.stdin)\n"
+    "x = args.get('x')\n"
+    "if not x:\n"
+    "    raise ValueError('x is required')\n"
+    "print(json.dumps({'echo': x}))\n"
+)
+
+
+def _result_digest(payload):
+    import hashlib
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+class TestEvidenceReplay:
+    async def _register_buggy(self, rt, caller_id="child"):
+        return await execute_tool(
+            "register_tool",
+            {"name": "buggy_tool", "description": "Errors on empty x.",
+             "input_schema": SCHEMA, "code": BUGGY_CODE},
+            rt, caller_id=caller_id)
+
+    @pytest.mark.asyncio
+    async def test_replay_confirms_error_evidence(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await self._register_buggy(rt)
+        evidence = {"args_json": {"x": ""}, "expected_error": "x is required"}
+        out = await rt.tool_store.replay_evidence(evidence, res["digest"])
+        assert out["confirmed"] is True
+        assert out["kind"] == "error"
+        assert "x is required" in out["observed_error"]
+
+    @pytest.mark.asyncio
+    async def test_replay_refutes_error_that_does_not_reproduce(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await self._register_buggy(rt)
+        # CON claims x='ok' errors — but it doesn't.
+        evidence = {"args_json": {"x": "ok"}, "expected_error": "boom"}
+        out = await rt.tool_store.replay_evidence(evidence, res["digest"])
+        assert out["confirmed"] is False
+        assert out["kind"] == "result"
+
+    @pytest.mark.asyncio
+    async def test_replay_confirms_wrong_answer_evidence(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)   # echoes x
+        # CON claims echo('hi') should produce {"echo": "HELLO"} (the
+        # "correct" contract) but the tool returns {"echo": "hi"}.
+        correct = _result_digest({"echo": "HELLO"})
+        actual = _result_digest({"echo": "hi"})
+        evidence = {"args_json": {"x": "hi"}, "expected_digest": correct,
+                    "actual_digest": actual}
+        out = await rt.tool_store.replay_evidence(evidence, res["digest"])
+        assert out["confirmed"] is True          # observed != correct
+        assert out["reproduced_actual"] is True  # matches the recorded actual
+        assert out["observed_digest"] == actual
+
+    @pytest.mark.asyncio
+    async def test_replay_refutes_when_output_matches_expected(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)
+        correct = _result_digest({"echo": "hi"})   # the tool IS correct
+        evidence = {"args_json": {"x": "hi"}, "expected_digest": correct}
+        out = await rt.tool_store.replay_evidence(evidence, res["digest"])
+        assert out["confirmed"] is False
+
+    @pytest.mark.asyncio
+    async def test_args_json_accepts_string(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await self._register_buggy(rt)
+        evidence = {"args_json": json.dumps({"x": ""}),
+                    "expected_error": "required"}
+        out = await rt.tool_store.replay_evidence(evidence, res["digest"])
+        assert out["confirmed"] is True
+
+    @pytest.mark.asyncio
+    async def test_evidence_requires_a_criterion(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)
+        out = await rt.tool_store.replay_evidence(
+            {"args_json": {"x": "hi"}}, res["digest"])
+        assert out["confirmed"] is False
+        assert "expected_error or expected_digest" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_tool(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "worker")
+        out = await rt.tool_store.replay_evidence(
+            {"args_json": {}, "expected_error": "x"}, "ab" * 32)
+        assert out["confirmed"] is False
+        assert "resolvable" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_check_evidence_verify_then_support(self, tmp_path):
+        """Confirmed replay posts a PRO support sprout under the CON via
+        the wired support_sink; a refuted one posts nothing."""
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await self._register_buggy(rt)
+
+        posted: list = []
+
+        def fake_support_sink(con_node_id, claim):
+            posted.append((con_node_id, claim))
+            return {"support_node_id": "pro_x", "target_node_id": con_node_id}
+
+        rt.tool_store.support_sink = fake_support_sink
+
+        # Confirmed evidence → support posted.
+        confirmed = await execute_tool(
+            "check_evidence",
+            {"manifest_digest": res["digest"],
+             "evidence": {"args_json": {"x": ""}, "expected_error": "req"},
+             "con_node_id": "con_abc"},
+            rt, caller_id="sibling")
+        assert confirmed["confirmed"] is True
+        assert confirmed["supported"]["support_node_id"] == "pro_x"
+        assert posted == [("con_abc", posted[0][1])]
+
+        # Refuted evidence → nothing posted.
+        posted.clear()
+        refuted = await execute_tool(
+            "check_evidence",
+            {"manifest_digest": res["digest"],
+             "evidence": {"args_json": {"x": "ok"}, "expected_error": "req"},
+             "con_node_id": "con_def"},
+            rt, caller_id="sibling")
+        assert refuted["confirmed"] is False
+        assert refuted["supported"] is None
+        assert posted == []
+
+    @pytest.mark.asyncio
+    async def test_check_evidence_confirmed_without_sink_posts_nothing(
+            self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await self._register_buggy(rt)
+        # No support_sink wired, no con_node_id: replay only.
+        out = await rt.tool_store.check_evidence(
+            "sibling", res["digest"],
+            {"args_json": {"x": ""}, "expected_error": "req"})
+        assert out["confirmed"] is True
+        assert out["supported"] is None

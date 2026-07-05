@@ -118,6 +118,20 @@ class SubClaimSprouted:
     # close — so the two fields mint needs ride the canonical event.
     # Same back-compat rule as artifact_digest: omitted when empty.
     manifest_meta: Dict[str, str] = field(default_factory=dict)
+    # Evidence-replay CON (docs/tool_substrate.md — Evidence section;
+    # phase10 follow-up). A CON-position sprout disputing a pinned tool
+    # may carry a REPRODUCIBLE failing invocation: {"args_json",
+    # "expected_digest" | "expected_error", "actual_digest"}. Any daemon
+    # can VOLUNTARILY re-run the pinned code with these args
+    # (ToolStore.replay_evidence) and, if it confirms, post a normal
+    # author_post support sprout under the CON. Evidence RECRUITS honest
+    # verifiers; it does NOT weight standing directly (the deterministic
+    # close prices the resulting support posts with no new math — that is
+    # phase10's lesson encoded). It plays no part in node ids, coords, or
+    # equilibration. Same back-compat rule as every optional field:
+    # serialized ONLY when present, so pre-evidence logs — and their
+    # canonical-ordering batch hashes — are byte-identical.
+    evidence: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -128,6 +142,8 @@ class SubClaimSprouted:
             d.pop("artifact_digest", None)
         if not self.manifest_meta:
             d.pop("manifest_meta", None)
+        if not self.evidence:
+            d.pop("evidence", None)
         return d
 
 

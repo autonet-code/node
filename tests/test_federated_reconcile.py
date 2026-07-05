@@ -465,3 +465,92 @@ def test_reconcile_wrapper_is_deterministic():
     # KEYS won't match across runs. Sum of values must, since the
     # same nodes minted by content even if their ids differ.
     assert sum(r1["node_mint"].values()) == sum(r2["node_mint"].values())
+
+
+# ---------------------------------------------------------------------------
+# Evidence-replay CON — close stays bit-identical + evidence is neutral
+# (docs/tool_substrate.md — Evidence section; phase10 follow-up)
+# ---------------------------------------------------------------------------
+
+
+DIGEST_EV = "ab" * 32
+
+
+def _tool_registration_ev(author: str, digest: str) -> Dict[str, Any]:
+    return _tool_registration(author, digest, embed_idx=5)
+
+
+def _con_under_tool(critic: str, digest: str, seq: int,
+                    *, evidence: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """A CON sprout disputing the tool's manifest claim node. Targets the
+    tool's solver-side node label; replay remaps to the live id and the
+    author_post gives the CON standing 1. Optionally carries evidence."""
+    ev: Dict[str, Any] = {
+        "kind": "sub_claim_sprouted",
+        "seq": seq,
+        "author_agent": critic,
+        "tendency_id": "correctness",
+        "parent_id": f"tm_{digest[:12]}",   # the tool's registration node
+        "node_id": f"con_{digest[:8]}_{seq}",
+        "position": "con",
+        "coords": _tool_coords(6),
+        "polarity_axis": _tool_coords(6),
+        "content": f"tool {digest[:8]} fails on empty input",
+        "author_post": True,
+    }
+    if evidence is not None:
+        ev["evidence"] = evidence
+    return ev
+
+
+def _evidence_batches(*, with_evidence: bool) -> List[EventBatch]:
+    """Registration + attestation + distinct-fleet vets + a CON that may
+    carry evidence. The CON is on the author's chain (its evidence, if
+    any, is close-neutral either way)."""
+    rpb = "rpb_ev"
+    kp_author = Keypair.generate()
+    kp_caller = Keypair.generate()
+    ev = {"args_json": "{\"x\": \"\"}", "expected_error": "x is required",
+          "actual_digest": "de" * 32} if with_evidence else None
+    author_chain = _append_batch([], rpb, kp_author,
+                                 [_tool_registration_ev("toolsmith", DIGEST_EV)])
+    author_chain = _append_batch(author_chain, rpb, kp_author,
+                                 [_con_under_tool("critic", DIGEST_EV, 2,
+                                                  evidence=ev)])
+    caller_chain = _append_batch([], rpb, kp_caller,
+                                 [_tool_attestation("caller-1", DIGEST_EV, seq=1)])
+    return (author_chain + caller_chain
+            + _vet_chains(rpb, [DIGEST_EV]))
+
+
+def test_evidence_bearing_con_close_is_bit_identical():
+    """A CON carrying an evidence dict must produce a bit-identical close
+    across shuffled delivery — evidence rides the sprout but plays no part
+    in node ids, coords, or scoring."""
+    batches = _evidence_batches(with_evidence=True)
+    rng = random.Random(23)
+    results = []
+    for _ in range(3):
+        delivery = list(batches)
+        rng.shuffle(delivery)
+        results.append(federated_epoch_close(canonical_order(delivery)))
+    assert (json.dumps(results[0]["agent_mint"])
+            == json.dumps(results[1]["agent_mint"])
+            == json.dumps(results[2]["agent_mint"]))
+    assert (json.dumps(results[0]["tool_mint"])
+            == json.dumps(results[1]["tool_mint"])
+            == json.dumps(results[2]["tool_mint"]))
+
+
+def test_evidence_is_close_neutral():
+    """The same events with and without evidence on the CON produce the
+    SAME mint — evidence recruits verification off-chain; it does not
+    weight standing in the deterministic close (phase10's lesson)."""
+    with_ev = federated_epoch_close(
+        canonical_order(_evidence_batches(with_evidence=True)))
+    without_ev = federated_epoch_close(
+        canonical_order(_evidence_batches(with_evidence=False)))
+    assert json.dumps(with_ev["agent_mint"]) == json.dumps(
+        without_ev["agent_mint"])
+    assert json.dumps(with_ev["tool_mint"]) == json.dumps(
+        without_ev["tool_mint"])
