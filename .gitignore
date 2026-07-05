@@ -55,3 +55,5 @@ PLAN.md
 
 # Diagnostic output from instrumented seed runs
 /scripts/.instrument_seed_results.json
+# Hardhat build cache (churns on every compile/E2E run)
+cache/
