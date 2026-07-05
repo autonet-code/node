@@ -797,6 +797,38 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
+        name="metering_report",
+        description=(
+            "Daemon-wide operational metering report (admin/ops use). Reads the "
+            "metering service's PERSISTED spend events + subscription snapshots "
+            "and returns a deterministic rollup: per-provider time-bucketed cost "
+            "series with cache-hit ratios and cost-per-ktok (a dropping cache-hit "
+            "ratio or rising cost-per-ktok flags 'prompt caching broken'); "
+            "per-agent burn ranking (which agents are spending); and inferred "
+            "subscription quota + remaining + confidence per subscription "
+            "provider. Pure over persisted ledgers — no live provider calls. Use "
+            "this to detect provider anomalies, budget leaks, and quota "
+            "trajectory. You interpret the numbers in prose; the tool only "
+            "measures."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "window_hours": {
+                    "type": "number",
+                    "description": "How far back to include events. Default 24.",
+                    "default": 24,
+                },
+                "bucket": {
+                    "type": "string",
+                    "enum": ["hour", "day"],
+                    "description": "Time-bucket granularity for the series. Default 'hour'.",
+                    "default": "hour",
+                },
+            },
+        },
+    ),
+    ToolDefinition(
         name="set_credit_budget",
         description="Configure the credit budget for a provider.",
         input_schema={
@@ -2572,6 +2604,29 @@ async def _get_usage(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     return {**result, "cached": False}
 
 
+async def _metering_report(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Daemon-wide operational metering report for the admin agent.
+
+    Thin wrapper over MeteringService.report — all math is deterministic in
+    metering.py; this only shapes the args and handles the missing-service case.
+    """
+    metering = getattr(runtime, "metering", None)
+    if metering is None:
+        return {"error": "metering service unavailable on this daemon"}
+    try:
+        window_hours = float(input.get("window_hours", 24) or 24)
+    except (TypeError, ValueError):
+        window_hours = 24.0
+    bucket = input.get("bucket", "hour")
+    if bucket not in ("hour", "day"):
+        bucket = "hour"
+    try:
+        return metering.report(window_hours=window_hours, bucket=bucket)
+    except Exception as exc:
+        log.warning("metering_report failed: %s", exc, exc_info=True)
+        return {"error": f"metering report failed: {exc}"}
+
+
 async def _set_credit_budget(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     b = runtime.credit_budget.set_budget(
         provider=input["provider"],
@@ -2755,6 +2810,11 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     "planning": {"get_goals", "add_goal", "update_goal", "get_projects", "add_project", "update_project",
                  "propose_task", "list_tasks"},
     "budget": {"get_credit_budget", "set_credit_budget", "get_usage"},
+    # Ops/admin: daemon-wide metering view (cost series, cache anomalies,
+    # per-agent burn, quota trajectory). Its own bundle — reading the whole
+    # daemon's spend is a privileged, admin-only surface, not implied by an
+    # agent knowing its own budget (get_usage / get_my_budget_status).
+    "metering": {"metering_report"},
     "identity": {"register_on_chain"},
     "profile": {"get_user_profile"},
     # "shell" (bash/read_file/write_file/list_directory/search_files) is NOT a
@@ -3453,6 +3513,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "set_credit_budget": _set_credit_budget,
     "get_my_budget_status": _get_my_budget_status,
     "get_usage": _get_usage,
+    "metering_report": _metering_report,
     "propose_task": _propose_task,
     "list_tasks": _list_tasks,
     "get_user_profile": _get_user_profile,

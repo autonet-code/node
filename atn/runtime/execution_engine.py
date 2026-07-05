@@ -1321,6 +1321,7 @@ class ExecutionEngine:
                         cache_write_tokens=response.usage.cache_creation_tokens,
                         utilization=_util,
                         cumulative_tokens=_cum,
+                        agent_id=record.agent_id,
                     )
                 except Exception:
                     log.debug("metering record_usage failed; continuing",

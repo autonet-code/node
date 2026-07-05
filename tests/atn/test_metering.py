@@ -16,6 +16,7 @@ from atn.config import ATNConfig, ProviderConfig
 from atn.metering import (
     MeteringService,
     QuotaEstimate,
+    analyze_spend_events,
     cost_usd,
     infer_quota,
 )
@@ -234,3 +235,119 @@ def test_duplicate_snapshot_not_recorded(tmp_path):
     m.record_snapshot("claude_max", 0.10, 100_000)
     m.record_snapshot("claude_max", 0.10, 100_000)  # identical → skipped
     assert len(m._snapshots["claude_max"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Operational analysis (admin-agent facing) — analyze_spend_events
+# ---------------------------------------------------------------------------
+
+def _spend_event(
+    *, ts: datetime, provider: str = "anthropic", model: str = "claude-opus-4-8",
+    usd: float = 1.0, input_tokens: int = 0, output_tokens: int = 0,
+    cache_read_tokens: int = 0, cache_write_tokens: int = 0,
+    agent_id: str | None = None,
+) -> dict:
+    ev = {
+        "ts": ts.isoformat(), "provider": provider, "model": model, "usd": usd,
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens, "cache_write_tokens": cache_write_tokens,
+    }
+    if agent_id:
+        ev["agent_id"] = agent_id
+    return ev
+
+
+def test_analyze_cache_hit_ratio_drop_is_detectable():
+    """A collapse in cache-read fraction across hours is the 'caching broken'
+    signal — cache_hit_ratio drops and cost_per_ktok rises."""
+    now = datetime(2026, 7, 5, 21, 0, tzinfo=timezone.utc)
+    healthy_h = datetime(2026, 7, 5, 11, 0, tzinfo=timezone.utc)
+    broken_h = datetime(2026, 7, 5, 15, 0, tzinfo=timezone.utc)
+    events = [
+        # Healthy hour: 90k cache_read, 10k fresh input → ratio 0.9.
+        _spend_event(ts=healthy_h, usd=0.145, input_tokens=10_000,
+                     cache_read_tokens=90_000, output_tokens=0),
+        # Broken hour: same total prompt, but all fresh input → ratio 0.0.
+        _spend_event(ts=broken_h, usd=0.500, input_tokens=100_000,
+                     cache_read_tokens=0, output_tokens=0),
+    ]
+    out = analyze_spend_events(events, now=now, window_hours=24, bucket="hour")
+    series = out["per_provider"]["anthropic"]["series"]
+    assert len(series) == 2
+    healthy, broken = series[0], series[1]
+    assert healthy["cache_hit_ratio"] == pytest.approx(0.9)
+    assert broken["cache_hit_ratio"] == pytest.approx(0.0)
+    # Cost per ktok rose because the discounted cache lane disappeared.
+    assert broken["cost_per_ktok"] > healthy["cost_per_ktok"]
+
+
+def test_analyze_per_agent_burn_ranking():
+    now = datetime(2026, 7, 5, 21, 0, tzinfo=timezone.utc)
+    h = datetime(2026, 7, 5, 20, 0, tzinfo=timezone.utc)
+    events = [
+        _spend_event(ts=h, usd=5.0, output_tokens=200_000, agent_id="hog"),
+        _spend_event(ts=h, usd=0.5, output_tokens=20_000, agent_id="tidy"),
+        _spend_event(ts=h, usd=1.0, output_tokens=40_000, agent_id="hog"),
+        _spend_event(ts=h, usd=2.0, output_tokens=80_000),  # no agent → excluded
+    ]
+    out = analyze_spend_events(events, now=now)
+    agents = out["per_agent"]
+    assert [a["agent_id"] for a in agents] == ["hog", "tidy"]
+    assert agents[0]["usd"] == pytest.approx(6.0)
+    assert agents[0]["tokens"] == 240_000
+
+
+def test_analyze_window_excludes_old_events():
+    now = datetime(2026, 7, 5, 21, 0, tzinfo=timezone.utc)
+    recent = datetime(2026, 7, 5, 20, 0, tzinfo=timezone.utc)
+    old = datetime(2026, 7, 3, 20, 0, tzinfo=timezone.utc)  # >24h ago
+    events = [
+        _spend_event(ts=recent, usd=1.0, output_tokens=10_000),
+        _spend_event(ts=old, usd=9.0, output_tokens=90_000),
+    ]
+    out = analyze_spend_events(events, now=now, window_hours=24)
+    assert out["window"]["events"] == 1
+    assert out["per_provider"]["anthropic"]["total_usd"] == pytest.approx(1.0)
+
+
+def test_analyze_empty_and_zero_token_safe():
+    out = analyze_spend_events([])
+    assert out["per_provider"] == {}
+    assert out["per_agent"] == []
+    assert out["window"]["events"] == 0
+    # A usd event with zero tokens must not divide by zero.
+    now = datetime(2026, 7, 5, 21, 0, tzinfo=timezone.utc)
+    out2 = analyze_spend_events(
+        [_spend_event(ts=now, usd=0.001)], now=now)
+    s = out2["per_provider"]["anthropic"]["series"][0]
+    assert s["cache_hit_ratio"] is None
+    assert s["cost_per_ktok"] is None
+
+
+def test_report_combines_providers_agents_subscriptions(tmp_path):
+    cfg = _config_with_cap("anthropic", 100.0)
+    m = MeteringService(tmp_path, cfg)
+    # A metered spend with an agent attribution.
+    m.record_usage("anthropic", "claude-opus-4-8",
+                   output_tokens=1_000_000, agent_id="worker1")  # $25
+    # A subscription snapshot pair so quota inference has something to fit.
+    m.record_snapshot("claude_max", 0.10, 100_000)
+    m.record_snapshot("claude_max", 0.50, 500_000)
+    rep = m.report(window_hours=24, bucket="hour")
+    assert rep["providers"]["anthropic"]["total_usd"] == pytest.approx(25.0)
+    assert rep["providers"]["anthropic"]["posture"]["limit_usd"] == pytest.approx(100.0)
+    assert any(a["agent_id"] == "worker1" for a in rep["agents"])
+    assert rep["subscriptions"]["claude_max"]["quota_tokens"] == pytest.approx(
+        1_000_000, rel=1e-3)
+
+
+def test_report_reads_agent_id_from_persisted_events(tmp_path):
+    """record_usage(agent_id=...) must land in spend.jsonl so report() can
+    attribute burn after a restart."""
+    cfg = ATNConfig()
+    m = MeteringService(tmp_path, cfg)
+    m.record_usage("anthropic", "claude-opus-4-8",
+                   output_tokens=400_000, agent_id="ghost")  # $10
+    m2 = MeteringService(tmp_path, cfg)  # fresh instance, replays the ledger
+    rep = m2.report()
+    assert any(a["agent_id"] == "ghost" for a in rep["agents"])

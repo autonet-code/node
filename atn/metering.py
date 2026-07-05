@@ -277,6 +277,172 @@ def infer_quota(
 
 
 # ---------------------------------------------------------------------------
+# Operational analysis (admin-agent facing)
+# ---------------------------------------------------------------------------
+# Everything below is a PURE function of the persisted spend events + snapshot
+# series. The admin agent's ``metering_report`` tool is a thin wrapper that
+# reads the ledgers and calls these; there is NO new math in the tool layer.
+
+
+def _parse_ts(ts: Any) -> datetime | None:
+    if not isinstance(ts, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _bucket_key(dt: datetime, bucket: str) -> str:
+    """ISO bucket label for a timestamp. 'hour' → YYYY-MM-DDTHH, 'day' → date."""
+    if bucket == "day":
+        return dt.date().isoformat()
+    return dt.strftime("%Y-%m-%dT%H")
+
+
+def analyze_spend_events(
+    events: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    window_hours: float = 24.0,
+    bucket: str = "hour",
+) -> dict[str, Any]:
+    """Deterministic operational rollup over persisted spend events.
+
+    Pure function of the event list (each event is one ``spend.jsonl`` line:
+    ``{ts, provider, model, usd, input_tokens, output_tokens,
+    cache_read_tokens, cache_write_tokens, agent_id?}``). Returns:
+
+      * ``per_provider``: for each provider, a time-bucketed series of
+        ``{bucket, usd, input_tokens, output_tokens, cache_read_tokens,
+        cache_write_tokens, cache_hit_ratio, cost_per_ktok}`` plus totals.
+        ``cache_hit_ratio`` = cache_read / (input + cache_read) — the fraction
+        of prompt tokens served from cache. A DROP in this ratio across
+        buckets is the "prompt caching appears broken" signal. ``cost_per_ktok``
+        = usd / (all tokens / 1000) — a RISE is the same anomaly seen from the
+        cost side.
+      * ``per_agent``: burn ranking — ``[{agent_id, usd, tokens}]`` descending
+        by usd, over the window. Agents with no attributed events are absent.
+      * ``window``: the (start, end) actually covered and event count.
+
+    Only events within ``window_hours`` of ``now`` are included, so the report
+    reflects the recent operational window, not all history.
+    """
+    now = now or datetime.now(timezone.utc)
+    horizon = now.timestamp() - window_hours * 3600.0
+    bucket = "day" if bucket == "day" else "hour"
+
+    # provider -> bucket_key -> accumulator
+    prov_buckets: dict[str, dict[str, dict[str, float]]] = {}
+    prov_totals: dict[str, dict[str, float]] = {}
+    agent_burn: dict[str, dict[str, float]] = {}
+    kept = 0
+    first_ts: datetime | None = None
+    last_ts: datetime | None = None
+
+    for ev in events:
+        dt = _parse_ts(ev.get("ts"))
+        if dt is None or dt.timestamp() < horizon:
+            continue
+        usd = ev.get("usd")
+        if not isinstance(usd, (int, float)):
+            continue
+        prov = ev.get("provider") or "unknown"
+        kept += 1
+        first_ts = dt if first_ts is None or dt < first_ts else first_ts
+        last_ts = dt if last_ts is None or dt > last_ts else last_ts
+
+        it = float(ev.get("input_tokens", 0) or 0)
+        ot = float(ev.get("output_tokens", 0) or 0)
+        cr = float(ev.get("cache_read_tokens", 0) or 0)
+        cw = float(ev.get("cache_write_tokens", 0) or 0)
+
+        bkey = _bucket_key(dt, bucket)
+        b = prov_buckets.setdefault(prov, {}).setdefault(
+            bkey, {"usd": 0.0, "input_tokens": 0.0, "output_tokens": 0.0,
+                   "cache_read_tokens": 0.0, "cache_write_tokens": 0.0})
+        b["usd"] += float(usd)
+        b["input_tokens"] += it
+        b["output_tokens"] += ot
+        b["cache_read_tokens"] += cr
+        b["cache_write_tokens"] += cw
+
+        t = prov_totals.setdefault(
+            prov, {"usd": 0.0, "input_tokens": 0.0, "output_tokens": 0.0,
+                   "cache_read_tokens": 0.0, "cache_write_tokens": 0.0})
+        t["usd"] += float(usd)
+        t["input_tokens"] += it
+        t["output_tokens"] += ot
+        t["cache_read_tokens"] += cr
+        t["cache_write_tokens"] += cw
+
+        aid = ev.get("agent_id")
+        if aid:
+            ab = agent_burn.setdefault(aid, {"usd": 0.0, "tokens": 0.0})
+            ab["usd"] += float(usd)
+            ab["tokens"] += it + ot + cr + cw
+
+    def _cache_hit_ratio(inp: float, cread: float) -> float | None:
+        denom = inp + cread
+        return round(cread / denom, 4) if denom > 0 else None
+
+    def _cost_per_ktok(usd: float, inp: float, out: float, cread: float,
+                       cwrite: float) -> float | None:
+        toks = inp + out + cread + cwrite
+        return round(usd / (toks / 1000.0), 6) if toks > 0 else None
+
+    per_provider: dict[str, Any] = {}
+    for prov, buckets in prov_buckets.items():
+        series = []
+        for bkey in sorted(buckets):
+            acc = buckets[bkey]
+            series.append({
+                "bucket": bkey,
+                "usd": round(acc["usd"], 6),
+                "input_tokens": int(acc["input_tokens"]),
+                "output_tokens": int(acc["output_tokens"]),
+                "cache_read_tokens": int(acc["cache_read_tokens"]),
+                "cache_write_tokens": int(acc["cache_write_tokens"]),
+                "cache_hit_ratio": _cache_hit_ratio(
+                    acc["input_tokens"], acc["cache_read_tokens"]),
+                "cost_per_ktok": _cost_per_ktok(
+                    acc["usd"], acc["input_tokens"], acc["output_tokens"],
+                    acc["cache_read_tokens"], acc["cache_write_tokens"]),
+            })
+        tot = prov_totals[prov]
+        per_provider[prov] = {
+            "series": series,
+            "total_usd": round(tot["usd"], 6),
+            "cache_hit_ratio": _cache_hit_ratio(
+                tot["input_tokens"], tot["cache_read_tokens"]),
+            "cost_per_ktok": _cost_per_ktok(
+                tot["usd"], tot["input_tokens"], tot["output_tokens"],
+                tot["cache_read_tokens"], tot["cache_write_tokens"]),
+        }
+
+    per_agent = sorted(
+        ({"agent_id": a, "usd": round(v["usd"], 6), "tokens": int(v["tokens"])}
+         for a, v in agent_burn.items()),
+        key=lambda r: r["usd"], reverse=True,
+    )
+
+    return {
+        "per_provider": per_provider,
+        "per_agent": per_agent,
+        "window": {
+            "hours": window_hours,
+            "bucket": bucket,
+            "events": kept,
+            "start": first_ts.isoformat() if first_ts else None,
+            "end": last_ts.isoformat() if last_ts else None,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # The service
 # ---------------------------------------------------------------------------
 
@@ -430,6 +596,7 @@ class MeteringService:
         cache_write_tokens: int = 0,
         utilization: float | None = None,
         cumulative_tokens: int | None = None,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """Record one turn's usage.
 
@@ -457,14 +624,17 @@ class MeteringService:
             )
             if usd is not None and usd > 0:
                 self._apply_spend_event(provider, usd, ts)
-                self._append(self._spend_path, {
+                event: dict[str, Any] = {
                     "ts": ts, "provider": provider, "model": model_id,
                     "usd": usd,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cache_read_tokens": cache_read_tokens,
                     "cache_write_tokens": cache_write_tokens,
-                })
+                }
+                if agent_id:
+                    event["agent_id"] = agent_id
+                self._append(self._spend_path, event)
                 result["usd"] = usd
                 result["provider_spend"] = self._spend.get(provider, 0.0)
                 limit, _period = self.dollar_limit(provider)
@@ -552,6 +722,84 @@ class MeteringService:
         with self._lock:
             snaps = list(self._snapshots.get(provider, []))
         return infer_quota(snaps, provider=provider)
+
+    def _read_spend_events(self) -> list[dict[str, Any]]:
+        """Read all persisted spend events from spend.jsonl (append-only audit
+        trail — the full history, not the capped in-memory running total)."""
+        out: list[dict[str, Any]] = []
+        if not self._spend_path.exists():
+            return out
+        try:
+            for line in self._spend_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+        except Exception:
+            log.warning("metering: failed to read spend.jsonl for report",
+                        exc_info=True)
+        return out
+
+    def report(
+        self,
+        *,
+        window_hours: float = 24.0,
+        bucket: str = "hour",
+    ) -> dict[str, Any]:
+        """Operational report for the admin agent — the deterministic view the
+        ``metering_report`` tool surfaces.
+
+        Combines three deterministic sources:
+          * ``providers``: the time-bucketed cost/cache/burn analysis over the
+            persisted spend events (``analyze_spend_events``), keyed by provider,
+            plus the current dollar posture (limit/spent/remaining) for each.
+          * ``agents``: per-agent burn ranking over the window.
+          * ``subscriptions``: for each subscription provider with snapshots, the
+            inferred quota + remaining + confidence (``estimate_quota``).
+
+        Pure over the persisted ledgers — no live provider calls. Bounded by
+        ``window_hours`` so it reflects the recent operational window.
+        """
+        with self._lock:
+            events = self._read_spend_events()
+            snap_providers = list(self._snapshots.keys())
+        analysis = analyze_spend_events(
+            events, window_hours=window_hours, bucket=bucket)
+
+        # Fold in dollar posture per provider so a leak is legible against its
+        # cap in the same object.
+        providers: dict[str, Any] = {}
+        seen = set(analysis["per_provider"].keys())
+        for prov in seen:
+            entry = dict(analysis["per_provider"][prov])
+            entry["posture"] = self.provider_spend(prov)
+            providers[prov] = entry
+        # Also include capped providers with no spend in the window, so a
+        # provider that fell silent is still visible.
+        for posture in self.all_provider_spend():
+            prov = posture["provider"]
+            if prov not in providers:
+                providers[prov] = {
+                    "series": [], "total_usd": 0.0,
+                    "cache_hit_ratio": None, "cost_per_ktok": None,
+                    "posture": posture,
+                }
+
+        subscriptions: dict[str, Any] = {}
+        for prov in snap_providers:
+            subscriptions[prov] = self.estimate_quota(prov).to_dict()
+
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "pricing_as_of": _PRICING_AS_OF,
+            "window": analysis["window"],
+            "providers": providers,
+            "agents": analysis["per_agent"],
+            "subscriptions": subscriptions,
+        }
 
     def all_provider_spend(self) -> list[dict[str, Any]]:
         """Dollar posture for every provider that has a configured cap or any

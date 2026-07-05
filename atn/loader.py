@@ -138,18 +138,52 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         errors.append(LoadError(file, f"'schedule' must be a string like '30s', '5m', '1h'"))
         return None, errors
 
-    # Token budgets per provider
-    budgets: dict[str, int] = {}
+    # Token budgets per provider. Two accepted shapes (see AgentDefinition.budgets
+    # and agent_registry._parse_one_budget):
+    #   provider: 50000                          # bare int = lifetime cap
+    #   provider: {limit: 100000, period: daily} # rolls over on the period
+    #   provider: {pct: 20, of: subscription_5h} # % of a subscription window
+    budgets: dict[str, Any] = {}
     budgets_raw = raw.get("budgets")
+    _VALID_BUDGET_PERIODS = {"none", "hourly", "daily", "weekly", "monthly"}
     if budgets_raw is not None:
         if not isinstance(budgets_raw, dict):
             errors.append(LoadError(file, "'budgets' must be a mapping of provider name to token limit"))
             return None, errors
         for k, v in budgets_raw.items():
-            if not isinstance(v, int) or v < 0:
-                errors.append(LoadError(file, f"budgets['{k}'] must be a non-negative integer"))
+            if isinstance(v, bool):
+                errors.append(LoadError(file, f"budgets['{k}'] must be a non-negative integer or a {{limit, period}} mapping"))
                 return None, errors
-            budgets[str(k)] = v
+            if isinstance(v, int):
+                if v < 0:
+                    errors.append(LoadError(file, f"budgets['{k}'] must be a non-negative integer"))
+                    return None, errors
+                budgets[str(k)] = v
+            elif isinstance(v, dict):
+                # Nested {limit, period} or {pct, of, period}. Validate the
+                # numeric field and (if present) the period against the runtime's
+                # accepted set, so a typo fails at load, not silently at run.
+                if "limit" in v:
+                    lim = v.get("limit")
+                    if not isinstance(lim, int) or isinstance(lim, bool) or lim < 0:
+                        errors.append(LoadError(file, f"budgets['{k}'].limit must be a non-negative integer"))
+                        return None, errors
+                elif "pct" in v:
+                    pct = v.get("pct")
+                    if not isinstance(pct, (int, float)) or isinstance(pct, bool) or pct < 0:
+                        errors.append(LoadError(file, f"budgets['{k}'].pct must be a non-negative number"))
+                        return None, errors
+                else:
+                    errors.append(LoadError(file, f"budgets['{k}'] mapping must contain 'limit' or 'pct'"))
+                    return None, errors
+                period = v.get("period")
+                if period is not None and str(period).lower() not in _VALID_BUDGET_PERIODS:
+                    errors.append(LoadError(file, f"budgets['{k}'].period must be one of {sorted(_VALID_BUDGET_PERIODS)}"))
+                    return None, errors
+                budgets[str(k)] = v
+            else:
+                errors.append(LoadError(file, f"budgets['{k}'] must be a non-negative integer or a {{limit, period}} mapping"))
+                return None, errors
 
     # Connector IDs
     connector_ids: list[str] = []
