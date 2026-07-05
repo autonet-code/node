@@ -251,7 +251,7 @@ Upgradeability of reference defaults: ordinary distro evolution. The
 protocol floor changes only by redeploy/governance — a future
 session's question, deliberately deferred.
 
-## Vetting: the candidate pool (ratified 2026-07-05, design — not built)
+## Vetting: the candidate pool (ratified 2026-07-05; BUILT same day)
 
 Publishing enters a tool into the CANDIDATE pool: visible, debatable,
 NOT yet mint-eligible and not yet adoption-recommended. Admission to
@@ -279,6 +279,44 @@ the substrate proper is a consensus greenlight:
   owner consent remain defense-in-depth beneath it. Greenlight lowers
   friction, never removes walls.
 - Knobs for sims: N, K, royalty share, vet-weight decay.
+
+Implementation (2026-07-05):
+
+- Wire: `vet: true` on the `ToolUsed` rail (serialized only when set —
+  old logs hash identically). Only affirmative vets (`ok=true`) count
+  toward greenlight; a fail-vet is debate material for the verdict
+  layer. `tool_usage.py` aggregates vets separately (`vets_by_caller`,
+  `vet_senders`) — a vet NEVER inflates usage counts.
+- Close (`compute_tool_mint`): `vetting` is a second explicit
+  carry-over param beside `registrations` (same contract: derived from
+  canonical history, rebuildable cache in the driver —
+  `tool_vetting.json`). Three sorted passes before mint math: merge
+  this epoch's vets (exclusions mirror the damper: self-vet,
+  same-registered-owner, vet batch signed with the registration
+  batch's key), bust detection, greenlight evaluation.
+- Greenlight: Σ over distinct fleets (owner-map collapse, fallback
+  per-agent) of the fleet's best vet weight ≥ `VET_QUORUM`. Vet weight
+  = 1/(1+busts). Validators are FROZEN at greenlight — late vets earn
+  nothing; the risk window is the incentive.
+- Royalty: while `royalty_left > 0`, `VET_ROYALTY_SHARE` of the tool's
+  mint splits equally among the frozen validators, taken FROM the
+  author's share (conserved, never printed on top), attributed on the
+  SAME claim node — so a won charter CON suppresses author and
+  validators together. The window ticks once per close, minted or not
+  (calendar epochs — validators can't stretch it by starving usage).
+- Bust: charter violation ≥ `VET_BUST_THRESHOLD` on a greenlit
+  manifest's claim node → remaining royalty zeroed + every validator's
+  bust count incremented (future vet weight halves per bust). The tool
+  itself stays priced-not-policed: the violator-pays gate scales its
+  mint; there is no blacklist bit.
+- Daemon: `vet_tool` core tool in its own case-by-case `vetting`
+  bundle (inspect → manifest + pinned code, fetched by digest over the
+  libp2p blob rail when foreign; attest → verdict + mandatory report,
+  blob-stored as `tool_vet_report`). Self-vet rejected locally too.
+- PROVISIONAL parameters (economic — pending sim sweep + user
+  blessing): `VET_QUORUM=2.0`, `VET_ROYALTY_SHARE=0.1`,
+  `VET_ROYALTY_EPOCHS=8`, `VET_BUST_THRESHOLD=0.5`
+  (`nodes/common/federated_reconcile.py`).
 
 ## Consensus mechanics (v1 implementation, still current)
 

@@ -146,6 +146,34 @@ def _tool_attestation(caller: str, digest: str, seq: int = 1) -> Dict[str, Any]:
     }
 
 
+def _tool_vet(vetter: str, digest: str, seq: int = 1) -> Dict[str, Any]:
+    """Affirmative vet (spec: Vetting section) — greenlights candidates
+    so the tool rail mints. Not usage; excluded from usage counts."""
+    return {
+        "kind": "tool_used",
+        "seq": seq,
+        "author_agent": vetter,
+        "manifest_digest": digest,
+        "tool_author": "",
+        "receipt_digest": f"{vetter}_{seq}_" + "v" * 32,
+        "ok": True,
+        "fee_atn": 0.0,
+        "vet": True,
+    }
+
+
+def _vet_chains(rpb: str, digests: List[str],
+                vetters: int = 2) -> List[EventBatch]:
+    """One single-batch chain per vetter (distinct keypairs, so neither
+    the wire dedup nor the fleet collapse voids the vets)."""
+    out: List[EventBatch] = []
+    for v in range(1, vetters + 1):
+        events = [_tool_vet(f"vetter-{v}", d, seq=i + 1)
+                  for i, d in enumerate(digests)]
+        out.extend(_append_batch([], rpb, Keypair.generate(), events))
+    return out
+
+
 def _append_batch(chain: List[EventBatch], rpb: str, kp: Keypair,
                   events: List[Dict[str, Any]]) -> List[EventBatch]:
     """Extend a sender's hash-linked chain with one more batch."""
@@ -194,9 +222,10 @@ def test_three_daemons_produce_byte_identical_maps():
         _tool_registration("bob", dig_b, embed_idx=200),
         _tool_attestation("bob", dig_a, seq=2),
     ])
+    vets = _vet_chains(rpb, [dig_a, dig_b])
 
     rng = random.Random(7)
-    arrivals = [list(chain_a + chain_b) for _ in range(3)]
+    arrivals = [list(chain_a + chain_b + vets) for _ in range(3)]
     for a in arrivals:
         rng.shuffle(a)
 
@@ -309,7 +338,8 @@ def test_malformed_sender_contributes_zero_others_unaffected():
     # Drop the middle batch from bad — gap.
     bad_with_gap = [bad_chain[0], bad_chain[2]]
 
-    full = honest_chain + bad_with_gap + carol_chain
+    full = (honest_chain + bad_with_gap + carol_chain
+            + _vet_chains(rpb, [dig_h, dig_e]))
     rng = random.Random(99)
     deliveries = [list(full) for _ in range(3)]
     for d in deliveries:

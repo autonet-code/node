@@ -85,6 +85,39 @@ def _receipt_event(seq: int, caller: str, *, ok: bool = True,
     return ev
 
 
+def _vet_event(seq: int, vetter: str, *, digest: str = DIGEST,
+               ok: bool = True) -> Dict[str, Any]:
+    """Third receipt flavor (spec: Vetting section): validator read the
+    pinned code and attests code-adheres + no-malice. Not usage."""
+    return {
+        "kind": "tool_used",
+        "seq": seq,
+        "author_agent": vetter,
+        "manifest_digest": digest,
+        "tool_author": AUTHOR,
+        "receipt_digest": f"v{seq:02d}" * 8,
+        "ok": ok,
+        "fee_atn": 0.0,
+        "vet": True,
+    }
+
+
+def _vet_batches(digests: List[str], *, vetters: int = 2,
+                 seq0: int = 1) -> List[EventBatch]:
+    """Affirmative vets for each digest from ``vetters`` DISTINCT wire
+    identities (each vetter = own keypair, so neither the wire dedup
+    nor the fleet collapse bites). Two default vetters reach
+    VET_QUORUM and greenlight in the same close."""
+    out: List[EventBatch] = []
+    for v in range(1, vetters + 1):
+        events = [
+            _vet_event(seq0 + i, f"vetter-{v}", digest=d)
+            for i, d in enumerate(digests)
+        ]
+        out.extend(_batches(events, Keypair.generate()))
+    return out
+
+
 def _batches(events: List[Dict[str, Any]], keypair: Keypair) -> List[EventBatch]:
     chain: List[EventBatch] = []
     prev_hash = b""
@@ -102,17 +135,22 @@ def _batches(events: List[Dict[str, Any]], keypair: Keypair) -> List[EventBatch]
     return chain
 
 
-def _standard_batches() -> List[EventBatch]:
+def _standard_batches(*, vetted: bool = True) -> List[EventBatch]:
     """Registration and receipts arrive from DIFFERENT signing keys —
     the wire-level self-attestation dedup excludes same-key callers, so
-    a realistic mint scenario needs a distinct caller wire identity."""
+    a realistic mint scenario needs a distinct caller wire identity.
+    ``vetted`` adds the distinct-fleet vets that greenlight the
+    candidate (mint-eligibility, spec: Vetting section)."""
     kp_author = Keypair.generate()
     kp_callers = Keypair.generate()
-    return _batches([_registration_event(1)], kp_author) + _batches([
+    out = _batches([_registration_event(1)], kp_author) + _batches([
         _receipt_event(1, "caller-1"),
         _receipt_event(2, "caller-2"),
         _receipt_event(3, "caller-1", ok=False),   # failure: no mint credit
     ], kp_callers)
+    if vetted:
+        out += _vet_batches([DIGEST])
+    return out
 
 
 class TestToolMintClose:
@@ -146,7 +184,7 @@ class TestToolMintClose:
         kp1, kp2 = Keypair.generate(), Keypair.generate()
         chain1 = _batches([_registration_event(1), _receipt_event(2, "c1")], kp1)
         chain2 = _batches([_receipt_event(1, "c2"), _receipt_event(2, "c3")], kp2)
-        all_batches = chain1 + chain2
+        all_batches = chain1 + chain2 + _vet_batches([DIGEST])
         rng = random.Random(11)
         results = []
         for _ in range(3):
@@ -233,6 +271,19 @@ class TestToolMintClose:
         assert result["tool_registrations"] == {}
 
 
+def _greenlit(digest: str = DIGEST, *, royalty_left: int = 0,
+              validators: List[str] | None = None) -> Dict[str, Any]:
+    """Carried vetting state with ``digest`` already greenlit — for
+    direct compute_tool_mint tests that aren't about the vet flow."""
+    return {"manifests": {digest: {
+        "vets": {v: [] for v in (validators or [])},
+        "greenlit": True,
+        "royalty_left": royalty_left,
+        "validators": sorted(validators or []),
+        "busted": False,
+    }}, "busts": {}}
+
+
 class TestComputeToolMint:
     def _world_with_registration(self):
         world = build_charter_world(embedding_dim=EMBED_DIM)
@@ -248,6 +299,7 @@ class TestComputeToolMint:
         out = compute_tool_mint(
             world, events,
             registrations={DIGEST: {"trust_class": "pinned", "author": AUTHOR}},
+            vetting=_greenlit(),
         )
         assert out["per_digest"][DIGEST]["author"] == AUTHOR
         assert out["per_digest"][DIGEST]["mint"] > 0
@@ -261,6 +313,7 @@ class TestComputeToolMint:
         out = compute_tool_mint(
             world, events,
             registrations={DIGEST: {"trust_class": "pinned", "author": AUTHOR}},
+            vetting=_greenlit(),
         )
         assert out["per_digest"][DIGEST]["author"] == AUTHOR
 
@@ -269,6 +322,167 @@ class TestComputeToolMint:
         out = compute_tool_mint(world, [_receipt_event(1, "caller-1")])
         assert out["per_digest"] == {}
         assert out["registrations_next"] == {}
+
+
+class TestVetting:
+    """Candidate pool → distinct-fleet greenlight → validator royalty →
+    bust slashing (spec: Vetting section)."""
+
+    REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
+
+    def _world(self):
+        world = build_charter_world(embedding_dim=EMBED_DIM)
+        apply_events(world, [_registration_event(1)], equilibrate_after=False)
+        return world
+
+    def test_unvetted_candidate_mints_nothing(self):
+        """Publishing puts a manifest in the CANDIDATE pool: visible,
+        debatable, zero emission until greenlit."""
+        result = federated_epoch_close(
+            canonical_order(_standard_batches(vetted=False)))
+        assert result["tool_mint"] == {}
+        # ...but the candidate's vet state is tracked from the moment
+        # the registration lands (it's just not greenlit).
+        assert result["tool_registrations"][DIGEST]["author"] == AUTHOR
+
+    def test_two_fleet_vets_greenlight_and_mint(self):
+        result = federated_epoch_close(canonical_order(_standard_batches()))
+        entry = result["tool_mint"][DIGEST]
+        assert entry["greenlit"] is True
+        assert entry["validators"] == 2
+        assert entry["mint"] > 0
+        vet_next = result["tool_vetting"]["manifests"][DIGEST]
+        assert vet_next["greenlit"] is True
+        assert vet_next["validators"] == ["vetter-1", "vetter-2"]
+
+    def test_vets_are_not_usage(self):
+        """Vet receipts must not inflate the usage term — greenlight
+        eligibility and usage credit are separate signals."""
+        result = federated_epoch_close(canonical_order(_standard_batches()))
+        entry = result["tool_mint"][DIGEST]
+        # Same usage term as the pre-vetting fixture: two attesting
+        # agents, one ok attestation each.
+        assert entry["usage_term"] == pytest.approx(2 * math.log1p(1))
+
+    def test_same_fleet_vets_do_not_greenlight(self):
+        """Owner-map collapse: two vetters registered under one wallet
+        are ONE fleet — a single fleet cannot greenlight (N=2)."""
+        result = federated_epoch_close(
+            canonical_order(_standard_batches()),
+            agent_owner_map={"vetter-1": "0xV", "vetter-2": "0xV"},
+        )
+        assert result["tool_mint"] == {}
+        assert not result["tool_vetting"]["manifests"][DIGEST]["greenlit"]
+
+    def test_author_fleet_vet_excluded(self):
+        """Self-vetting is structurally void: a vet from the author's
+        own fleet never enters the vet set."""
+        result = federated_epoch_close(
+            canonical_order(_standard_batches()),
+            agent_owner_map={AUTHOR: "0xA", "vetter-1": "0xA"},
+        )
+        m = result["tool_vetting"]["manifests"][DIGEST]
+        assert "vetter-1" not in m["vets"]
+        assert result["tool_mint"] == {}      # one honest fleet < quorum
+
+    def test_co_hosted_vet_excluded(self):
+        """Wire dedup: a vet batch signed with the registration batch's
+        key is the author's own daemon talking to itself."""
+        kp = Keypair.generate()
+        batches = _batches([
+            _registration_event(1),
+            _vet_event(2, "sock-puppet"),
+        ], kp) + _batches(
+            [_receipt_event(1, "caller-1")], Keypair.generate(),
+        ) + _vet_batches([DIGEST], vetters=1)   # one honest vet
+        result = federated_epoch_close(canonical_order(batches))
+        m = result["tool_vetting"]["manifests"][DIGEST]
+        assert "sock-puppet" not in m["vets"]
+        assert result["tool_mint"] == {}
+
+    def test_validator_royalty_split_conserved(self):
+        """While the royalty window is open, validators split their
+        share FROM the author's mint — printed on the same claim node,
+        total conserved."""
+        world = self._world()
+        out = compute_tool_mint(
+            world, [_receipt_event(1, "caller-9")],
+            registrations=self.REGS,
+            vetting=_greenlit(royalty_left=3,
+                              validators=["vetter-1", "vetter-2"]),
+        )
+        entry = out["per_digest"][DIGEST]
+        mint = entry["mint"]
+        node = out["node_agent"][entry["node_id"]]
+        assert node[AUTHOR] == pytest.approx(mint * 0.9)
+        assert node["vetter-1"] == pytest.approx(mint * 0.05)
+        assert node["vetter-2"] == pytest.approx(mint * 0.05)
+        assert sum(node.values()) == pytest.approx(mint)
+        # Window ticked down once this close.
+        assert out["vetting_next"]["manifests"][DIGEST]["royalty_left"] == 2
+
+    def test_royalty_window_expires(self):
+        world = self._world()
+        vetting = _greenlit(royalty_left=1, validators=["vetter-1"])
+        out1 = compute_tool_mint(
+            world, [_receipt_event(1, "caller-9")],
+            registrations=self.REGS, vetting=vetting)
+        entry = out1["per_digest"][DIGEST]
+        assert "vetter-1" in out1["node_agent"][entry["node_id"]]
+        # Next epoch: window closed, author keeps everything.
+        out2 = compute_tool_mint(
+            world, [_receipt_event(1, "caller-9")],
+            registrations=self.REGS, vetting=out1["vetting_next"])
+        entry2 = out2["per_digest"][DIGEST]
+        node2 = out2["node_agent"][entry2["node_id"]]
+        assert "vetter-1" not in node2
+        assert node2[AUTHOR] == pytest.approx(entry2["mint"])
+
+    def test_bust_zeroes_royalty_and_slashes_vet_weight(self, monkeypatch):
+        """Post-greenlight exploit CON (charter violation on the
+        manifest node) ends the royalty and permanently discounts the
+        validators' future vets — the royalty IS the stake."""
+        import nodes.common.federated_reconcile as fr
+        world = self._world()
+        monkeypatch.setattr(fr, "charter_violation_score",
+                            lambda *a, **k: 0.9)
+        out = compute_tool_mint(
+            world, [_receipt_event(1, "caller-9")],
+            registrations=self.REGS,
+            vetting=_greenlit(royalty_left=5,
+                              validators=["vetter-1", "vetter-2"]),
+        )
+        m = out["vetting_next"]["manifests"][DIGEST]
+        assert m["busted"] is True
+        assert m["royalty_left"] == 0
+        assert out["vetting_next"]["busts"] == {"vetter-1": 1, "vetter-2": 1}
+
+    def test_busted_validator_weight_decays(self):
+        """A vetter with one bust carries weight 1/2: together with one
+        clean fleet that's 1.5 < quorum 2 — it takes a third fleet."""
+        world = build_charter_world(embedding_dim=EMBED_DIM)
+        apply_events(world, [_registration_event(1)], equilibrate_after=False)
+        busted_state = {"manifests": {}, "busts": {"vetter-1": 1}}
+
+        def _vets(n):
+            evs = []
+            for v in range(1, n + 1):
+                ev = _vet_event(v, f"vetter-{v}")
+                ev["sender"] = f"aa{v:02d}"      # distinct wire identities
+                evs.append(ev)
+            return evs
+
+        out2 = compute_tool_mint(
+            world, _vets(2) + [_receipt_event(9, "caller-9")],
+            registrations=self.REGS, vetting=busted_state)
+        assert not out2["vetting_next"]["manifests"][DIGEST]["greenlit"]
+        assert out2["per_digest"] == {}
+
+        out3 = compute_tool_mint(
+            world, _vets(3) + [_receipt_event(9, "caller-9")],
+            registrations=self.REGS, vetting=busted_state)
+        assert out3["vetting_next"]["manifests"][DIGEST]["greenlit"]
+        assert out3["per_digest"][DIGEST]["mint"] > 0
 
 
 class TestCompositionFanOut:
@@ -311,7 +525,7 @@ class TestCompositionFanOut:
                                 deps=dep_digest, axis=4),
         ], kp_authors) + _batches([
             _receipt_event(1, "caller-1"),        # attests the COMPOSITE
-        ], kp_caller)
+        ], kp_caller) + _vet_batches([DIGEST, dep_digest])
         result = federated_epoch_close(canonical_order(batches))
         tm = result["tool_mint"]
         assert DIGEST in tm and dep_digest in tm
@@ -341,11 +555,14 @@ class TestCompositionFanOut:
             _registration_event(1, digest=junk, author=AUTHOR, axis=2),
             _registration_event(2, digest=DIGEST, author=AUTHOR,
                                 deps=junk, axis=4),
-        ], kp_authors) + _batches([_receipt_event(1, "caller-1")], kp_caller)
+        ], kp_authors) + _batches(
+            [_receipt_event(1, "caller-1")], kp_caller,
+        ) + _vet_batches([DIGEST, junk])
         plain = _batches([
             _registration_event(1, digest=DIGEST, author=AUTHOR, axis=4),
         ], Keypair.generate()) + _batches(
-            [_receipt_event(1, "caller-1")], Keypair.generate())
+            [_receipt_event(1, "caller-1")], Keypair.generate(),
+        ) + _vet_batches([DIGEST])
 
         r_padded = federated_epoch_close(canonical_order(padded))
         r_plain = federated_epoch_close(canonical_order(plain))
@@ -384,7 +601,7 @@ class TestLoadoutAdoption:
         f2 = _batches([
             _receipt_event(1, "caller-2", loadout=self.DISTRO),
         ], kp_f2)
-        return reg + f1 + f2
+        return reg + f1 + f2 + _vet_batches([self.MODULE, self.DISTRO, DIGEST])
 
     def test_adoption_volume_blind_and_fanned(self):
         owner_map = {

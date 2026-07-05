@@ -99,6 +99,7 @@ class FederatedCloseDriver:
         canonical_tracker: Optional[Any] = None,
         pricing: str = "ledger",
         tool_registrations_path: Optional[Any] = None,
+        tool_vetting_path: Optional[Any] = None,
     ):
         self.gossip = gossip
         self.pricing = pricing
@@ -122,6 +123,15 @@ class FederatedCloseDriver:
         self._tool_registrations: Dict[str, Dict[str, str]] = (
             self._load_tool_registrations()
         )
+        # Vetting carry-over (spec: Vetting section): candidate/greenlit
+        # state + validator bust counts. Same contract as the
+        # registrations map — derived purely from canonical events and
+        # replayed world state, so the on-disk copy is a rebuildable
+        # cache, identical on every honest daemon.
+        self._tool_vetting_path: Optional[Path] = (
+            Path(tool_vetting_path) if tool_vetting_path else None
+        )
+        self._tool_vetting: Dict[str, Any] = self._load_tool_vetting()
         # Owner-rooted damper exclusion (spec: Owner-rooted registration):
         # agent id -> owner wallet, sourced from chain owner-binding data
         # (OwnerBound events / getAgentOwner). Every daemon reading
@@ -161,6 +171,7 @@ class FederatedCloseDriver:
                 pricing=self.pricing,
                 tool_registrations=dict(self._tool_registrations),
                 agent_owner_map=dict(self.agent_owner_map),
+                tool_vetting=dict(self._tool_vetting),
             )
         except Exception as e:
             logger.error(
@@ -175,6 +186,8 @@ class FederatedCloseDriver:
             close_result.get("tool_registrations") or {}
         )
         self._save_tool_registrations()
+        self._tool_vetting = dict(close_result.get("tool_vetting") or {})
+        self._save_tool_vetting()
 
         # Inherit epoch_id from the local close so on-chain dedup
         # (isAnchored(epoch_id)) can reject duplicate submissions.
@@ -260,3 +273,29 @@ class FederatedCloseDriver:
             os.replace(tmp, path)
         except OSError as e:
             logger.warning("failed to persist tool registrations: %s", e)
+
+    def _load_tool_vetting(self) -> Dict[str, Any]:
+        path = self._tool_vetting_path
+        if path is None or not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("tool vetting cache unreadable (%s); starting "
+                           "empty — it rebuilds from canonical events", e)
+        return {}
+
+    def _save_tool_vetting(self) -> None:
+        path = self._tool_vetting_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(self._tool_vetting, sort_keys=True),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist tool vetting state: %s", e)

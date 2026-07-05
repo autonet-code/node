@@ -947,6 +947,18 @@ class AutonetBridge:
             def _manifest_sink(manifest: dict, author: str, _ws=world_service) -> None:
                 _ws.submit_tool_manifest(manifest, agent_id=author)
             tool_store.manifest_sink = _manifest_sink
+
+            # Network blob fetch (vetting + adoption): digest-verified
+            # pull of foreign manifests/code over the libp2p blob
+            # protocol. Absent host → local-only resolution.
+            resolver = self._build_libp2p_blob_resolver()
+            if resolver is not None:
+                async def _fetch(digest: str, _r=resolver) -> bytes | None:
+                    # resolver.get is a blocking cross-thread bridge into
+                    # the trio host — keep it off the asyncio loop.
+                    return await asyncio.to_thread(_r.get, digest)
+                tool_store.blob_fetcher = _fetch
+
             # Tools registered while the substrate was down get their
             # verdict-layer claims now (content-addressed, so re-pushes
             # dedup instead of double-sprouting).

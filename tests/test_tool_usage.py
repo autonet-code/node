@@ -82,3 +82,34 @@ def test_aggregation_deterministic_under_shuffle():
         shuffled = list(events)
         rng.shuffle(shuffled)
         assert tool_usage_from_events(shuffled) == baseline
+
+
+def test_vet_events_aggregate_separately_from_usage():
+    """Vets (third flavor) accumulate in vets_by_caller and never touch
+    usage counts; a negative vet is debate material, not a greenlight
+    input (spec: Vetting section)."""
+    d = "a" * 64
+    vet_yes = ToolUsed(seq=1, author_agent="validator-1", manifest_digest=d,
+                       receipt_digest="v1" * 16, ok=True, vet=True).to_dict()
+    vet_yes["sender"] = "aa11"
+    vet_no = ToolUsed(seq=2, author_agent="validator-2", manifest_digest=d,
+                      receipt_digest="v2" * 16, ok=False, vet=True).to_dict()
+    events = [vet_yes, vet_no, _receipt("caller-1", d, 3)]
+    usage = tool_usage_from_events(events)
+
+    assert usage[d]["count"] == 1                     # the real receipt only
+    assert usage[d]["callers"] == {"caller-1": 1}
+    assert usage[d]["vets_by_caller"] == {"validator-1": 1}
+    assert usage[d]["vet_senders"] == {"validator-1": ["aa11"]}
+
+
+def test_vet_field_serializes_only_when_true():
+    """Back-compat: pre-vetting event logs must hash identically."""
+    plain = ToolUsed(seq=1, author_agent="c", manifest_digest="b" * 64,
+                     receipt_digest="r" * 32).to_dict()
+    assert "vet" not in plain
+    vet = ToolUsed(seq=1, author_agent="c", manifest_digest="b" * 64,
+                   receipt_digest="r" * 32, vet=True).to_dict()
+    assert vet["vet"] is True
+    restored = event_from_dict(vet)
+    assert isinstance(restored, ToolUsed) and restored.vet

@@ -74,6 +74,48 @@ OUTPUT_DECIMALS = 10
 COMPOSITE_ROOT_SHARE = 0.7
 COMPOSITE_MAX_DEPTH = 4
 
+# Vetting pipeline (docs/tool_substrate.md, Vetting section). A published
+# manifest enters the CANDIDATE pool: visible, debatable, NOT mint-
+# eligible. GREENLIGHT = affirmative vets from distinct fleets whose
+# summed weights reach VET_QUORUM; validators then earn a conserved
+# royalty slice of the tool's mint for VET_ROYALTY_EPOCHS closes — the
+# royalty IS the stake: a post-greenlight charter bust (violation ≥
+# VET_BUST_THRESHOLD on the manifest's claim node) zeroes the remaining
+# royalty and permanently discounts each validator's future vet weight
+# (weight = 1/(1+busts) — slashing without a staking contract).
+# PROVISIONAL VALUES: quorum/share/epochs/threshold are economic
+# parameters pending sim sweep + user blessing (sims/tool_economy).
+VET_QUORUM = 2.0
+VET_ROYALTY_SHARE = 0.1
+VET_ROYALTY_EPOCHS = 8
+VET_BUST_THRESHOLD = 0.5
+
+
+def _normalize_vetting(vetting: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Canonicalize carried-over vetting state (sorted, typed, copied).
+
+    Shape: {"manifests": {digest: {vets: {agent: [sender,...]},
+    greenlit, royalty_left, validators, busted}}, "busts": {agent: n}}.
+    Derived purely from prior epochs' canonical events + world state,
+    so — like ``registrations`` — the persisted copy is a rebuildable
+    cache and identical on every honest daemon.
+    """
+    state: Dict[str, Any] = {"manifests": {}, "busts": {}}
+    if not vetting:
+        return state
+    for digest, m in sorted((vetting.get("manifests") or {}).items()):
+        state["manifests"][str(digest)] = {
+            "vets": {str(a): sorted(str(s) for s in senders)
+                     for a, senders in sorted((m.get("vets") or {}).items())},
+            "greenlit": bool(m.get("greenlit")),
+            "royalty_left": int(m.get("royalty_left") or 0),
+            "validators": sorted(str(v) for v in (m.get("validators") or [])),
+            "busted": bool(m.get("busted")),
+        }
+    state["busts"] = {str(k): int(v)
+                      for k, v in sorted((vetting.get("busts") or {}).items())}
+    return state
+
 
 def _composition_shares(
     root: str,
@@ -115,6 +157,11 @@ def compute_tool_mint(
     *,
     registrations: Optional[Dict[str, Dict[str, str]]] = None,
     agent_owner_map: Optional[Dict[str, str]] = None,
+    vetting: Optional[Dict[str, Any]] = None,
+    vet_quorum: float = VET_QUORUM,
+    vet_royalty_share: float = VET_ROYALTY_SHARE,
+    vet_royalty_epochs: int = VET_ROYALTY_EPOCHS,
+    vet_bust_threshold: float = VET_BUST_THRESHOLD,
 ) -> Dict[str, Any]:
     """Tool-author mint from canonical events (docs/tool_substrate.md v2).
 
@@ -155,12 +202,25 @@ def compute_tool_mint(
     fresh-charter close only manifests (re-)sprouted this epoch have
     standing.
 
+    Vetting (spec: Vetting section): ``vetting`` is a second explicit
+    carry-over param (same contract as ``registrations`` — derived from
+    canonical history, rebuildable, identical everywhere). Published
+    manifests are CANDIDATES until greenlit by vets from distinct
+    fleets (Σ fleet weights ≥ ``vet_quorum``; weight = 1/(1+busts));
+    only greenlit manifests mint. While ``royalty_left`` > 0 the
+    validators split ``vet_royalty_share`` of the tool's mint (taken
+    from the author's share, attributed on the same claim node — a won
+    charter CON suppresses both, and a bust zeroes the window and
+    discounts the validators' future vets).
+
     Returns (all maps key-sorted, pure function of canonical inputs):
       {
         "per_digest": {digest: {node_id, author, trust_class, standing,
-                                ok_count, mint}},
+                                ok_count, mint, greenlit, validators,
+                                royalty_left}},
         "node_agent": {node_id: {author: mint}},   # gate-mergeable
         "registrations_next": {digest: manifest_meta},
+        "vetting_next": {"manifests": {...}, "busts": {agent: n}},
       }
     """
     import math
@@ -190,6 +250,82 @@ def compute_tool_mint(
 
     usage = tool_usage_from_events(events)
     by_digest = _artifact_standing(world)
+
+    # ------------------------------------------------------------------
+    # Vetting pipeline (spec: Vetting section) — three deterministic
+    # passes over sorted keys BEFORE any mint math:
+    #   1. merge this epoch's affirmative vets into the carried state
+    #      (same exclusions as the damper: self-vet, same registered
+    #      owner, vet batch signed with the registration batch's key);
+    #   2. bust detection: a greenlit manifest whose claim node carries
+    #      a winning charter violation zeroes its remaining royalty and
+    #      increments every validator's bust count (their future vet
+    #      weight decays as 1/(1+busts));
+    #   3. greenlight: Σ over distinct fleets (owner-map collapse,
+    #      fallback per-agent) of max member weight ≥ vet_quorum →
+    #      greenlit; validators frozen at that instant (late vets earn
+    #      nothing — the risk window is the incentive).
+    # ------------------------------------------------------------------
+    vet_state = _normalize_vetting(vetting)
+    owner_map_all = agent_owner_map or {}
+    for digest in sorted(set(usage) & set(known_regs)):
+        vets_by_caller = usage[digest].get("vets_by_caller") or {}
+        if not vets_by_caller:
+            continue
+        meta = known_regs[digest]
+        author = str(meta.get("author") or "")
+        reg_sender = str(meta.get("sender") or "")
+        author_owner = owner_map_all.get(author, "")
+        m = vet_state["manifests"].setdefault(digest, {
+            "vets": {}, "greenlit": False, "royalty_left": 0,
+            "validators": [], "busted": False,
+        })
+        for vetter in sorted(vets_by_caller.keys()):
+            if vetter == author:
+                continue
+            if author_owner and owner_map_all.get(vetter, "") == author_owner:
+                continue
+            senders = usage[digest].get("vet_senders", {}).get(vetter, [])
+            if reg_sender and reg_sender in senders:
+                continue
+            pooled = m["vets"].setdefault(vetter, [])
+            for s in senders:
+                if s not in pooled:
+                    pooled.append(s)
+            m["vets"][vetter] = sorted(pooled)
+
+    for digest in sorted(vet_state["manifests"].keys()):
+        m = vet_state["manifests"][digest]
+        if not m["greenlit"] or m["busted"]:
+            continue
+        nodes = by_digest.get(digest, [])
+        if not nodes:
+            continue
+        node_id = sorted({n.id for n in nodes})[0]
+        violation = charter_violation_score(
+            world, node_id, DEFAULT_CHARTER_IDS)
+        if violation >= vet_bust_threshold:
+            m["busted"] = True
+            m["royalty_left"] = 0
+            for validator in m["validators"]:
+                vet_state["busts"][validator] = (
+                    vet_state["busts"].get(validator, 0) + 1)
+
+    for digest in sorted(vet_state["manifests"].keys()):
+        m = vet_state["manifests"][digest]
+        if m["greenlit"]:
+            continue
+        fleets: Dict[str, float] = {}
+        for vetter in sorted(m["vets"].keys()):
+            fleet_key = owner_map_all.get(vetter, "") or vetter
+            weight = 1.0 / (1.0 + vet_state["busts"].get(vetter, 0))
+            fleets[fleet_key] = max(fleets.get(fleet_key, 0.0), weight)
+        total_weight = round(
+            sum(fleets[k] for k in sorted(fleets.keys())), 10)
+        if total_weight >= vet_quorum:
+            m["greenlit"] = True
+            m["royalty_left"] = int(vet_royalty_epochs)
+            m["validators"] = sorted(m["vets"].keys())
 
     # Composition fan-out (docs/tool_substrate.md — Composition rule 3):
     # each receipt digest's attested counts distribute over its declared
@@ -265,6 +401,15 @@ def compute_tool_mint(
         # capability it can actually KNOW (hash-locked code).
         if str(meta.get("trust_class") or "") != TRUST_PINNED:
             continue
+        # Vetting gate (spec: Vetting section): a published manifest is
+        # a CANDIDATE — visible, debatable, retrievable — but draws no
+        # emission until greenlit by distinct-fleet vets. Un-greenlit
+        # credit is forfeited, never redistributed (same conservation
+        # rule as dead composition deps).
+        vm = vet_state["manifests"].get(digest)
+        greenlit = bool(vm and vm.get("greenlit"))
+        if vet_quorum > 0 and not greenlit:
+            continue
         nodes = by_digest.get(digest, [])
         standing = _standing_of(nodes)
         # Combo damper: per-attesting-agent log1p, author excluded,
@@ -297,6 +442,16 @@ def compute_tool_mint(
         # lexicographically-first id among the digest's claim nodes.
         node_id = (sorted({n.id for n in nodes})[0] if nodes
                    else f"tool:{digest}")
+        # Validator royalty (spec: Vetting section): while the royalty
+        # window is open, a conserved slice of the tool's mint splits
+        # equally among the validators frozen at greenlight —
+        # composition-style: taken FROM the author's mint, never
+        # printed on top. Everything lands on the SAME claim node, so
+        # a won charter CON suppresses author and validators together
+        # (the royalty is the stake).
+        validators = list(vm["validators"]) if vm else []
+        royalty_live = bool(vm and int(vm.get("royalty_left") or 0) > 0
+                            and validators and vet_royalty_share > 0.0)
         per_digest[digest] = {
             "node_id": node_id,
             "author": author,
@@ -306,15 +461,44 @@ def compute_tool_mint(
             "attesters": attesters,
             "usage_term": round(usage_term, 10),
             "mint": mint,
+            "greenlit": greenlit,
+            "validators": len(validators),
+            "royalty_left": int(vm.get("royalty_left") or 0) if vm else 0,
         }
         bucket = node_agent.setdefault(node_id, {})
-        bucket[author] = bucket.get(author, 0.0) + mint
+        if royalty_live:
+            pool = mint * vet_royalty_share
+            per_validator = pool / len(validators)
+            bucket[author] = bucket.get(author, 0.0) + (mint - pool)
+            for validator in validators:   # sorted since greenlight froze them
+                bucket[validator] = bucket.get(validator, 0.0) + per_validator
+        else:
+            bucket[author] = bucket.get(author, 0.0) + mint
+
+    # Royalty window ticks once per close for every greenlit manifest,
+    # minted or not — "first K epochs" is calendar, not usage-counted,
+    # so validators can't stretch their share by starving usage.
+    for digest in sorted(vet_state["manifests"].keys()):
+        m = vet_state["manifests"][digest]
+        if m["greenlit"] and m["royalty_left"] > 0:
+            m["royalty_left"] -= 1
 
     return {
         "per_digest": dict(sorted(per_digest.items())),
         "node_agent": {k: dict(sorted(v.items()))
                        for k, v in sorted(node_agent.items())},
         "registrations_next": dict(sorted(known_regs.items())),
+        "vetting_next": {
+            "manifests": {d: {
+                "vets": {a: sorted(s)
+                         for a, s in sorted(m["vets"].items())},
+                "greenlit": m["greenlit"],
+                "royalty_left": m["royalty_left"],
+                "validators": sorted(m["validators"]),
+                "busted": m["busted"],
+            } for d, m in sorted(vet_state["manifests"].items())},
+            "busts": dict(sorted(vet_state["busts"].items())),
+        },
     }
 
 
@@ -531,6 +715,7 @@ def federated_epoch_close(
     pricing: str = "ledger",
     tool_registrations: Optional[Dict[str, Dict[str, str]]] = None,
     agent_owner_map: Optional[Dict[str, str]] = None,
+    tool_vetting: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -671,6 +856,7 @@ def federated_epoch_close(
         world, all_events,
         registrations=tool_registrations,
         agent_owner_map=agent_owner_map,
+        vetting=tool_vetting,
     )
 
     result = federated_reconcile_epoch(
@@ -683,6 +869,7 @@ def federated_epoch_close(
     )
     result["tool_mint"] = tool_result["per_digest"]
     result["tool_registrations"] = tool_result["registrations_next"]
+    result["tool_vetting"] = tool_result["vetting_next"]
     result["epoch_root"] = canonical.epoch_root().hex()
     result["n_batches"] = len(canonical.ordered_batches)
     result["n_events"] = len(all_events)

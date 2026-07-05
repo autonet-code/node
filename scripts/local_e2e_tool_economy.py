@@ -598,7 +598,7 @@ async def amain() -> int:
     # ------------------------------------------------------------------
     # Stage 4 — tool economy, daemon side
     # ------------------------------------------------------------------
-    s4 = board.stage(4, "tool economy (register + invoke + attest)")
+    s4 = board.stage(4, "tool economy (register + invoke + attest + vet)")
     captured_events: List[Dict[str, Any]] = []
     captured_manifests: List[Tuple[dict, str]] = []
     reg_events_from_ws: List[Dict[str, Any]] = []
@@ -637,18 +637,26 @@ async def amain() -> int:
         # Stage 5's canonical batch.
         ws.open_epoch("e2e-epoch-1")
 
-        # author-1 registers a pinned echo tool, published.
+        # author-1 registers a pinned echo tool (always private), then
+        # publishes through the separately-granted publish_tool
+        # capability — the production two-step (publish gate, a8b7588).
         reg = await execute_tool(
             "register_tool",
             {"name": "echo_tool", "description": "Echo x back.",
-             "input_schema": SCHEMA, "code": ECHO_CODE, "publish": True},
+             "input_schema": SCHEMA, "code": ECHO_CODE},
             rt_a, caller_id="author-1")
         if "error" in reg:
             raise RuntimeError(f"register_tool failed: {reg}")
         tool_digest = reg["digest"]
         assert reg["author"] == "author-1"
         assert reg["trust_class"] == "pinned"
-        assert reg["published"] is True
+        assert reg["published"] is False
+        pub = await execute_tool(
+            "publish_tool", {"digest": tool_digest},
+            rt_a, caller_id="author-1")
+        if "error" in pub:
+            raise RuntimeError(f"publish_tool failed: {pub}")
+        assert pub["published"] is True
 
         # Grant caller-1 access (out of author-1's lineage), then invoke.
         store.grant(tool_digest, "caller-1")
@@ -664,6 +672,27 @@ async def amain() -> int:
              "context": "wiring up an echo round-trip"},
             rt_a, caller_id="caller-1")
         assert att.get("attested") == 1, att
+
+        # Vetting (spec: Vetting section): a published manifest is a
+        # CANDIDATE — no mint until greenlit by vets from distinct
+        # fleets. Two validators inspect (manifest + pinned code back)
+        # then attest pass with a report.
+        await register_local_agent(rt_a, "vetter-1")
+        await register_local_agent(rt_a, "vetter-2")
+        for v in ("vetter-1", "vetter-2"):
+            inspect = await execute_tool(
+                "vet_tool", {"digest": tool_digest}, rt_a, caller_id=v)
+            assert inspect.get("code") == ECHO_CODE, inspect
+            vet = await execute_tool(
+                "vet_tool",
+                {"digest": tool_digest, "verdict": "pass",
+                 "report": f"{v}: read the code; echoes x, "
+                           "no fs/net/env access"},
+                rt_a, caller_id=v)
+            assert vet.get("verdict") == "pass", vet
+        n_vets = sum(1 for e in captured_events if e.get("vet"))
+        s4.note("vets", n_vets)
+        assert n_vets == 2
 
         # Pull the registration sprout events out of the WorldService's
         # epoch buffer (the manifest sink routed them there). These are the
@@ -741,7 +770,13 @@ async def amain() -> int:
             e["author_post"] = True
             reg_events.append(e)
         use_events = [_remap(e) for e in captured_events
-                      if e.get("kind") == "tool_used"]
+                      if e.get("kind") == "tool_used" and not e.get("vet")]
+        # Vets ride their own wire identities — one keypair per vetter,
+        # modeling validators on distinct daemons (the greenlight counts
+        # distinct FLEETS; co-hosted vets vs the registration key are
+        # excluded outright).
+        vet_events = [_remap(e) for e in captured_events
+                      if e.get("kind") == "tool_used" and e.get("vet")]
 
         # Build a canonical batch chain. Registration (author key) and
         # receipts (caller key) MUST ride different signing keys or the
@@ -762,6 +797,8 @@ async def amain() -> int:
 
         all_batches = (_batches(reg_events, kp_author)
                        + _batches(use_events, kp_caller))
+        for vet_ev in vet_events:
+            all_batches += _batches([vet_ev], Keypair.generate())
 
         def _mk_driver(owner_map):
             gossip = MagicMock(spec=EventGossip)
@@ -796,10 +833,24 @@ async def amain() -> int:
         assert entry["author"] == author_addr, (entry["author"], author_addr)
         assert entry["attesters"] == 1, entry           # caller-1 only
         assert entry["mint"] > 0
+        # Vetting pipeline: greenlit by the two distinct-fleet vets in
+        # THIS close, validators frozen, royalty window open — a slice
+        # of the author's mint lands on the validators (the stake).
+        assert entry["greenlit"] is True, entry
+        assert entry["validators"] == 2, entry
+        vetter_addrs = [rt_a.get_agent(v).identity.address
+                        for v in ("vetter-1", "vetter-2")]
+        vet_mints = [float(close_result["agent_mint"].get(
+            Web3.to_checksum_address(a), 0)
+            or close_result["agent_mint"].get(a, 0)) for a in vetter_addrs]
+        assert all(m > 0 for m in vet_mints), (
+            "validator royalty missing", close_result["agent_mint"])
         author_agent_mint_raw = float(close_result["agent_mint"].get(author_addr, 0))
         assert author_agent_mint_raw > 0
         s5.note("tool_mint_author", entry["author"][:12] + "…")
         s5.note("attesters", entry["attesters"])
+        s5.note("greenlit", entry["greenlit"])
+        s5.note("validator_royalty", [round(m, 8) for m in vet_mints])
         s5.note("tool_mint_raw", round(author_mint_raw, 8))
         s5.note("agent_mint_raw", round(author_agent_mint_raw, 8))
 

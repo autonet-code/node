@@ -326,9 +326,36 @@ def run_epoch(tools: List[Tool], rng: random.Random) -> Dict[str, Any]:
     shuf.shuffle(groups)
     shuf.shuffle(receipt_groups)
 
+    # Vetting greenlight (spec: Vetting section): the damper sweep
+    # studies USAGE gaming, not the vet gate, so every tool gets its
+    # quorum of distinct-fleet vets — wash/seo tools included (the
+    # candidate pool filters malice, not economics; a vetted wash tool
+    # is exactly the adversary the damper must price). The vet-gate's
+    # own knobs (N/K/royalty/collusion) get their own sweep.
+    vet_groups: List[List[Dict[str, Any]]] = []
+    for v in (1, 2):
+        vets: List[Dict[str, Any]] = []
+        for t in tools:
+            seq += 1
+            vets.append({
+                "kind": "tool_used",
+                "seq": seq,
+                "author_agent": f"vetter_{v}",
+                "manifest_digest": t.digest,
+                "tool_author": t.author,
+                "receipt_digest": f"v{seq:06d}" * 5,
+                "ok": True,
+                "fee_atn": 0.0,
+                "vet": True,
+            })
+        vet_groups.append(vets)
+
     kp_reg = Keypair.generate()
     kp_callers = Keypair.generate()
-    batches = _batches(groups, kp_reg) + _batches(receipt_groups, kp_callers)
+    batches = (_batches(groups, kp_reg)
+               + _batches(receipt_groups, kp_callers)
+               + _batches([vet_groups[0]], Keypair.generate())
+               + _batches([vet_groups[1]], Keypair.generate()))
     shuf.shuffle(batches)            # arrival order is irrelevant too
     result = federated_epoch_close(canonical_order(batches))
     return {

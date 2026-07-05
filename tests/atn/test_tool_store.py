@@ -604,6 +604,143 @@ async def _register_composite(rt, dep_digest, caller_id="child",
     )
 
 
+class TestVetting:
+    """Validator rail (docs/tool_substrate.md — Vetting section):
+    inspect → attest, self-vet rejection, report requirement, and the
+    network-fetch path for foreign manifests."""
+
+    @pytest.mark.asyncio
+    async def test_inspect_returns_manifest_and_code(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)  # author = child
+        out = await execute_tool(
+            "vet_tool", {"digest": res["digest"]}, rt, caller_id="sibling",
+        )
+        assert out["manifest"]["name"] == "echo_tool"
+        assert out["code"] == ECHO_CODE
+        assert "verdict" not in out
+
+    @pytest.mark.asyncio
+    async def test_vet_pass_emits_vet_event(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)
+        store = rt.tool_store
+        sunk: list[dict] = []
+        store.event_sink = sunk.append
+
+        out = await execute_tool(
+            "vet_tool",
+            {"digest": res["digest"], "verdict": "pass",
+             "report": "read the code; echoes x, no fs/net access"},
+            rt, caller_id="sibling",
+        )
+        assert out["verdict"] == "pass"
+        assert len(sunk) == 1
+        ev = sunk[0]
+        sibling_addr = rt.get_agent("sibling").identity.address
+        assert ev["kind"] == "tool_used"
+        assert ev["vet"] is True
+        assert ev["ok"] is True
+        assert ev["author_agent"] == sibling_addr
+        assert ev.get("attested") is None       # a vet is NOT usage
+        report = store._blob_store().get_json(ev["review_digest"])
+        assert report["kind"] == "tool_vet_report"
+        assert report["validator"] == sibling_addr
+        # Local ledgers: vet_summary sees it, attestation_summary must not.
+        assert store.vet_summary()[res["digest"]]["pass_count"] == 1
+        assert res["digest"] not in store.attestation_summary()
+
+    @pytest.mark.asyncio
+    async def test_self_vet_rejected(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)  # author = child
+        out = await execute_tool(
+            "vet_tool",
+            {"digest": res["digest"], "verdict": "pass", "report": "lgtm"},
+            rt, caller_id="child",
+        )
+        assert "your own tool" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_verdict_requires_report(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)
+        out = await execute_tool(
+            "vet_tool", {"digest": res["digest"], "verdict": "pass"},
+            rt, caller_id="sibling",
+        )
+        assert "report" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_attested_class_not_vettable(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await execute_tool(
+            "register_tool",
+            {"name": "cal_lookup", "description": "Calendar lookup.",
+             "input_schema": SCHEMA, "connector_id": "gcal"},
+            rt, caller_id="child",
+        )
+        out = await execute_tool(
+            "vet_tool", {"digest": res["digest"]}, rt, caller_id="sibling",
+        )
+        assert "pinned" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_foreign_manifest_fetched_and_vetted(self, tmp_path):
+        """A validator daemon that never registered the tool pulls the
+        manifest + code by digest over the blob fetcher (digest-verified,
+        cached) and vets it."""
+        rt_author = _make_runtime(tmp_path / "a")
+        await _family(rt_author)
+        res = await _register_echo(rt_author)
+        author_blobs = rt_author.tool_store._blob_store()
+        code_digest = res["manifest"] if isinstance(res.get("manifest"), str) \
+            else rt_author.tool_store.get(res["digest"]).manifest["code_digest"]
+
+        rt_val = _make_runtime(tmp_path / "b")
+        await _register_agent(rt_val, "validator")
+        store_val = rt_val.tool_store
+
+        async def _fetch(digest: str) -> bytes | None:
+            return author_blobs.get_bytes(digest)
+        store_val.blob_fetcher = _fetch
+        sunk: list[dict] = []
+        store_val.event_sink = sunk.append
+
+        inspect = await store_val.vet_tool("validator", res["digest"])
+        assert inspect["code"] == ECHO_CODE
+
+        out = await store_val.vet_tool(
+            "validator", res["digest"], verdict="pass",
+            report="fetched by digest; code matches manifest",
+        )
+        assert out["verdict"] == "pass"
+        assert sunk[0]["vet"] is True
+        assert sunk[0]["manifest_digest"] == res["digest"]
+        # The fetched blobs are now cached locally (content-addressed).
+        assert store_val._blob_store().get_bytes(code_digest) is not None
+
+    @pytest.mark.asyncio
+    async def test_corrupt_fetch_rejected(self, tmp_path):
+        """A peer returning bytes that don't hash to the requested
+        digest is ignored — content addressing IS the auth."""
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "validator")
+        store = rt.tool_store
+
+        async def _evil_fetch(digest: str) -> bytes:
+            return b'{"kind": "tool_manifest", "name": "evil"}'
+        store.blob_fetcher = _evil_fetch
+
+        out = await store.vet_tool("validator", "cd" * 32)
+        assert "cannot resolve" in out["error"]
+
+
 class TestComposition:
     @pytest.mark.asyncio
     async def test_composite_calls_dep_and_returns(self, tmp_path):

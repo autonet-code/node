@@ -190,6 +190,15 @@ class ToolUsed:
     # ADOPTION term at close (distinct fleets per loadout), never
     # per-call credit.
     loadout: str = ""
+    # Vetting (spec: Vetting section): the THIRD receipt flavor. A vet
+    # is not usage — the validator read the pinned code and attests
+    # code-adheres-to-manifest + no-malice (ok=True) or objects
+    # (ok=False; debate material, does not count toward greenlight).
+    # Vet events are excluded from usage/attestation aggregation; at
+    # close they accumulate toward the manifest's GREENLIGHT (N vets
+    # from distinct fleets) which gates mint eligibility. review_digest
+    # carries the vet report blob. Serialized only when True.
+    vet: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -204,6 +213,8 @@ class ToolUsed:
             d.pop("review_digest", None)
         if not self.loadout:
             d.pop("loadout", None)
+        if not self.vet:
+            d.pop("vet", None)
         return d
 
 

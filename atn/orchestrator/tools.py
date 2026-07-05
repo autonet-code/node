@@ -532,6 +532,31 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
+        name="vet_tool",
+        description=(
+            "Vet a published candidate tool (validator role — separately "
+            "granted). Call with only a digest to INSPECT: you receive the "
+            "manifest and the pinned source code to read. Then call again "
+            "with verdict 'pass' (code adheres to the manifest and contains "
+            "no malice) or 'fail', plus a report stating what you checked. "
+            "Greenlight takes vets from multiple distinct fleets; you earn a "
+            "royalty share of the tool's mint for the first epochs after "
+            "greenlight — and that royalty is your stake: if the tool is "
+            "later proven exploitative, your remaining royalty is forfeit "
+            "and your future vets carry less weight. You cannot vet your "
+            "own tools."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "digest": {"type": "string", "description": "Manifest digest (64-hex) — local or network-published."},
+                "verdict": {"type": "string", "enum": ["pass", "fail"], "description": "Omit to inspect; set to record your vet."},
+                "report": {"type": "string", "description": "Required with a verdict: what you checked, what you found."},
+            },
+            "required": ["digest"],
+        },
+    ),
+    ToolDefinition(
         name="attest_tools",
         description=(
             "Attest which registered tools contributed to a piece of work you "
@@ -1891,6 +1916,32 @@ async def _publish_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     return {"digest": record.digest, "name": record.name, "published": True}
 
 
+async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Validator rail (docs/tool_substrate.md — Vetting section).
+
+    Inspect (no verdict) → manifest + pinned code; attest (verdict +
+    report) → local vet row + consensus tool_used event with vet=True.
+    The caller is derived, never accepted as input.
+    """
+    from ..tool_store import OWNER_AUTHOR
+    from . import is_owner_caller
+
+    digest = str(input.get("digest") or "").strip()
+    if not digest:
+        return {"error": "Missing required field: 'digest'"}
+    caller_id = input.get("_caller_id")
+    caller = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
+    verdict = input.get("verdict")
+    try:
+        return await runtime.tool_store.vet_tool(
+            caller, digest,
+            verdict=str(verdict) if verdict is not None else None,
+            report=str(input.get("report") or ""),
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Record cognitive attestations for a closed work item.
 
@@ -2539,6 +2590,11 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # whether an agent may publish its tools to the substrate is a
     # case-by-case grant — having toolsmith never implies it.
     "publishing": {"publish_tool"},
+    # Vetting is the validator role (spec: Vetting section) — its own
+    # case-by-case grant, same doctrine as publishing: reading foreign
+    # code and staking your future vet weight is not implied by
+    # authoring or publishing.
+    "vetting": {"vet_tool"},
     "planning": {"get_goals", "add_goal", "update_goal", "get_projects", "add_project", "update_project",
                  "propose_task", "list_tasks"},
     "budget": {"get_credit_budget", "set_credit_budget", "get_usage"},
@@ -3225,6 +3281,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "use_tool": _use_tool,
     "register_tool": _register_tool,
     "publish_tool": _publish_tool,
+    "vet_tool": _vet_tool,
     "attest_tools": _attest_tools,
     "get_history": _get_history,
     # Planning & goal tools

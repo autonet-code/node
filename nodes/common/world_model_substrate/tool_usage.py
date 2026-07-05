@@ -38,6 +38,13 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
           # economic entity.
           "attested_ok_by_caller": {caller_id: count},
           "attester_senders": {caller_id: [sender_hex, ...]},
+          # Vetting tier (spec: Vetting section). Vets are NOT usage —
+          # they are excluded from every count above and only accumulate
+          # toward the manifest's greenlight in compute_tool_mint.
+          # Only ok=True vets are recorded (ok=False is debate material
+          # for the verdict layer, not a greenlight input).
+          "vets_by_caller": {caller_id: count},
+          "vet_senders": {caller_id: [sender_hex, ...]},
       }}
 
     Deterministic: events are processed in (author_agent, seq,
@@ -63,7 +70,22 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
                 "callers": {},
                 "attested_ok_by_caller": {},
                 "attester_senders": {},
+                "vets_by_caller": {},
+                "vet_senders": {},
             }
+        if ev.get("vet"):
+            # Third flavor: a vet is a judgment about the CODE, not a
+            # use of it — it must never inflate usage counts. Only
+            # affirmative vets accumulate (greenlight input).
+            if bool(ev.get("ok", True)):
+                by = entry["vets_by_caller"]
+                caller = str(ev.get("author_agent") or "")
+                by[caller] = by.get(caller, 0) + 1
+                sender = str(ev.get("sender") or "")
+                senders = entry["vet_senders"].setdefault(caller, [])
+                if sender and sender not in senders:
+                    senders.append(sender)
+            continue
         entry["count"] += 1
         ok = bool(ev.get("ok", True))
         if ok:
@@ -86,6 +108,10 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
             sorted(entry["attested_ok_by_caller"].items()))
         entry["attester_senders"] = {
             k: sorted(v) for k, v in sorted(entry["attester_senders"].items())
+        }
+        entry["vets_by_caller"] = dict(sorted(entry["vets_by_caller"].items()))
+        entry["vet_senders"] = {
+            k: sorted(v) for k, v in sorted(entry["vet_senders"].items())
         }
     return dict(sorted(usage.items()))
 

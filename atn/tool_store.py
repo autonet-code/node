@@ -123,6 +123,13 @@ class ToolStore:
         # safe (manifest claims are content-addressed by digest).
         self.event_sink: Any = None
         self.manifest_sink: Any = None
+        # Optional network blob fetch (async callable: digest -> bytes
+        # or None). Wired to the libp2p blob resolver when the autonet
+        # host is up; lets validators vet (and later adopt) manifests
+        # that were published from OTHER daemons. Fetched blobs are
+        # digest-verified (content addressing IS the auth) and cached
+        # into the local blob store.
+        self.blob_fetcher: Any = None
         # Active harness distro digest (docs/tool_substrate.md — "Resident
         # tools, loadouts, distros"). Set by bootstrap_reference_distro at
         # runtime init; stamped onto cognitive attestations so adoption
@@ -918,13 +925,191 @@ class ToolStore:
 
         return {"attested": attested, "skipped": skipped}
 
+    # ------------------------------------------------------------------
+    # Vetting (docs/tool_substrate.md — Vetting section)
+    # ------------------------------------------------------------------
+
+    async def fetch_payload(self, digest: str) -> dict[str, Any] | None:
+        """JSON blob by digest: local blob store first, then the network
+        fetcher. Network bytes are digest-verified and cached locally."""
+        raw = await self.fetch_bytes(digest)
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    async def fetch_bytes(self, digest: str) -> bytes | None:
+        import hashlib
+
+        try:
+            blobs = self._blob_store()
+        except RuntimeError:
+            return None
+        raw = blobs.get_bytes(digest)
+        if raw is not None:
+            return raw
+        if self.blob_fetcher is None:
+            return None
+        try:
+            fetched = await self.blob_fetcher(digest)
+        except Exception as exc:
+            log.warning("blob fetch failed for %s: %s", digest[:16], exc)
+            return None
+        if not fetched:
+            return None
+        if hashlib.sha256(fetched).hexdigest() != digest:
+            log.warning("blob fetch for %s returned wrong content", digest[:16])
+            return None
+        blobs.add_bytes(fetched)
+        return fetched
+
+    async def vet_tool(
+        self,
+        caller_id: str | None,
+        tool_ref: str,
+        verdict: str | None = None,
+        report: str = "",
+    ) -> dict[str, Any]:
+        """Validator flow (spec: Vetting section), two steps in one rail:
+
+        - ``verdict=None`` — INSPECT: resolve the manifest (locally or
+          fetched from the network by digest) and return it with the
+          pinned source code, so the validator can actually read what
+          it is attesting to.
+        - ``verdict="pass"|"fail"`` — ATTEST: record the vet locally and
+          emit the consensus ``tool_used`` event with ``vet=True``.
+          ``report`` (required) is blob-stored as the vet report —
+          validators show their work; the report is what a later
+          exploit CON gets argued against.
+
+        Self-vetting is rejected here for the local-author case; the
+        close voids it structurally anyway (fleet + wire exclusions).
+        A vet is not usage and never touches the receipt ledgers.
+        """
+        caller = caller_id if caller_id else OWNER_AUTHOR
+
+        record = self.resolve(tool_ref)
+        manifest: dict[str, Any] | None = None
+        digest = ""
+        if record is not None:
+            manifest, digest = record.manifest, record.digest
+        elif len(tool_ref) == 64 and all(
+            c in "0123456789abcdef" for c in tool_ref
+        ):
+            payload = await self.fetch_payload(tool_ref)
+            from nodes.common.world_model_substrate.tool_manifest import (
+                is_tool_manifest,
+            )
+            if payload is not None and is_tool_manifest(payload):
+                manifest, digest = payload, tool_ref
+        if manifest is None:
+            return {"error": f"cannot resolve manifest {tool_ref[:16]}: not "
+                             "registered here and not fetchable from the "
+                             "network"}
+
+        if str(manifest.get("trust_class") or "") != "pinned":
+            return {"error": "only pinned tools are vetted — attested/"
+                             "connector tools have no hash-locked code to "
+                             "read (they are also not mint-eligible)"}
+
+        code_digest = str(manifest.get("code_digest") or "")
+        code_raw = await self.fetch_bytes(code_digest) if code_digest else None
+
+        if verdict is None:
+            return {
+                "digest": digest,
+                "manifest": manifest,
+                "code": (code_raw.decode("utf-8", errors="replace")
+                         if code_raw is not None else None),
+                "note": ("review the code against the manifest, then call "
+                         "again with verdict 'pass' or 'fail' and a report"),
+            }
+
+        if verdict not in ("pass", "fail"):
+            return {"error": "verdict must be 'pass' or 'fail'"}
+        if not report.strip():
+            return {"error": "a vet requires a report — state what you "
+                             "checked and what you found"}
+        if record is not None and record.author_id == caller:
+            return {"error": "you cannot vet your own tool"}
+        consensus_caller = self._consensus_identity(caller)
+        if consensus_caller == str(manifest.get("author") or ""):
+            return {"error": "you cannot vet your own tool"}
+        if code_raw is None:
+            return {"error": "code blob unavailable — a vet without the "
+                             "code read is worthless; retry when the blob "
+                             "is fetchable"}
+
+        ok = verdict == "pass"
+        ts = int(time.time())
+        review_digest = ""
+        try:
+            blobs: Any = self._blob_store()
+        except RuntimeError:
+            blobs = None
+        if blobs is not None:
+            try:
+                review_digest = blobs.add_json({
+                    "kind": "tool_vet_report",
+                    "manifest_digest": digest,
+                    "code_digest": code_digest,
+                    "validator": consensus_caller,
+                    "ok": ok,
+                    "report": str(report),
+                    "ts": ts,
+                }) or ""
+            except Exception as exc:
+                log.warning("vet report blob failed: %s", exc)
+
+        self._receipt_seq += 1
+        row = {
+            "seq": self._receipt_seq,
+            "ts": ts,
+            "manifest_digest": digest,
+            "tool_name": str(manifest.get("name") or ""),
+            "tool_author": str(manifest.get("author") or ""),
+            "caller": caller,
+            "ok": ok,
+            "vet": True,
+            "review_digest": review_digest,
+        }
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with self._attestations_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+
+        if self.event_sink is not None:
+            event = {
+                "kind": "tool_used",
+                "seq": self._receipt_seq,
+                "author_agent": consensus_caller,
+                "manifest_digest": digest,
+                "tool_author": str(manifest.get("author") or ""),
+                "receipt_digest": review_digest,
+                "ok": ok,
+                "fee_atn": 0.0,
+                "vet": True,
+                "review_digest": review_digest,
+            }
+            try:
+                self.event_sink(event)
+            except Exception as exc:
+                log.warning("vet event sink failed: %s", exc)
+
+        return {"digest": digest, "verdict": verdict,
+                "review_digest": review_digest}
+
     def attestation_summary(self) -> dict[str, dict[str, Any]]:
         """Per-digest attestation aggregates from ``attestations.jsonl``:
         ``{attested_count, ok_count, avg_score, last_ts}``. For the Tools
-        screen — the mechanical receipt ledger stays separate."""
+        screen — the mechanical receipt ledger stays separate. Vet rows
+        are a different flavor and are excluded (see ``vet_summary``)."""
         summary: dict[str, dict[str, Any]] = {}
         score_totals: dict[str, float] = {}
         for row in self._iter_attestations():
+            if row.get("vet"):
+                continue
             digest = row.get("manifest_digest", "")
             entry = summary.setdefault(digest, {
                 "attested_count": 0, "ok_count": 0,
@@ -942,6 +1127,27 @@ class ToolStore:
             count = entry["attested_count"]
             entry["avg_score"] = round(
                 score_totals.get(digest, 0.0) / count, 10) if count else 0.0
+        return summary
+
+    def vet_summary(self) -> dict[str, dict[str, Any]]:
+        """Per-digest vet aggregates from the local attestation log:
+        ``{vet_count, pass_count, last_ts}``. Local view only — the
+        authoritative candidate/greenlit state is the federated close's
+        vetting carry-over."""
+        summary: dict[str, dict[str, Any]] = {}
+        for row in self._iter_attestations():
+            if not row.get("vet"):
+                continue
+            digest = row.get("manifest_digest", "")
+            entry = summary.setdefault(digest, {
+                "vet_count": 0, "pass_count": 0, "last_ts": 0,
+            })
+            entry["vet_count"] += 1
+            if row.get("ok"):
+                entry["pass_count"] += 1
+            ts = int(row.get("ts") or 0)
+            if ts > entry["last_ts"]:
+                entry["last_ts"] = ts
         return summary
 
     def _iter_attestations(self):
