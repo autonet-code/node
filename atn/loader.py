@@ -170,6 +170,7 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
 
     # --- Parent notification ---
     notify_parent = bool(raw.get("notify_parent", True))
+    wake_parent_on_child = bool(raw.get("wake_parent_on_child", False))
 
     # --- Heartbeat ---
     heartbeat: HeartbeatConfig | None = None
@@ -241,6 +242,7 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         parent_id=parent_id,
         created_by=created_by,
         notify_parent=notify_parent,
+        wake_parent_on_child=wake_parent_on_child,
         cloned_from=raw.get("cloned_from") or None,
         heartbeat=heartbeat,
         expose_as_tool=expose_as_tool,
@@ -359,6 +361,8 @@ def save_agent(defn: AgentDefinition, directory: Path) -> Path:
         data["created_by"] = defn.created_by
     if not defn.notify_parent:
         data["notify_parent"] = False
+    if defn.wake_parent_on_child:
+        data["wake_parent_on_child"] = True
     if defn.cloned_from:
         data["cloned_from"] = defn.cloned_from
 

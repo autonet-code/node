@@ -146,6 +146,14 @@ class AgentRegistry:
         self._wallet_manager = AgentWalletManager()
         # Agent private keys: agent_id -> private_key_hex (parent holds child's key)
         self._agent_keys: dict[str, str] = {}
+        # Optional live-injection hook for child->parent completion pushes.
+        # Wired by the Runtime to SessionManager.send_agent_message-style
+        # delivery: async (parent_id, text) -> bool (True if injected into a
+        # RUNNING parent). Left None in bare/test construction — the caller
+        # then falls back to the inbox path. Kept as a callback (not a direct
+        # SessionManager reference) so the registry stays decoupled from the
+        # conversation/provider layer it is constructed before.
+        self._live_injector: Any = None
 
     # ------------------------------------------------------------------
     # Identity persistence
@@ -817,6 +825,121 @@ class AgentRegistry:
                 queue.append(child.id)
         return descendants
 
+    def reparent_agent(
+        self, agent_id: str, new_parent_id: str | None,
+    ) -> str | None:
+        """Move ``agent_id`` under ``new_parent_id`` (None = promote to root).
+
+        This is the 'regional manager' path: a formerly top-level agent gets a
+        parent placed over it, or a subtree is re-homed. Validates BEFORE
+        mutating and returns an error string (leaving parent_id untouched) on:
+
+          • unknown agent / unknown new parent,
+          • a cycle (new parent is the agent itself or a descendant of it),
+          • spawn-count / depth limits on the new parent's subtree,
+          • budget cascade — the agent's (and every descendant's) declared caps
+            must still fit under the new ancestor chain's headroom.
+
+        On success the parent rail re-activates automatically: get_children /
+        the delegate probes / tool-lineage scoping / budget rollup all read
+        parent_id live. Returns None on success."""
+        defn = self._agents.get(agent_id)
+        if defn is None:
+            return f"Unknown agent: {agent_id}"
+
+        old_parent = defn.parent_id
+        canonical_new = (
+            self._resolve_parent_agent_id(new_parent_id)
+            if new_parent_id else None
+        )
+        if canonical_new == old_parent or (canonical_new is None and old_parent is None):
+            return None  # no-op
+
+        if canonical_new is not None:
+            if canonical_new not in self._agents:
+                return f"Unknown new parent: {new_parent_id}"
+            if canonical_new == agent_id:
+                return "An agent cannot be its own parent."
+            # Cycle guard: the new parent must not live inside the agent's own
+            # subtree (that would orphan the chain into a loop).
+            subtree = self.get_subtree_ids(agent_id)
+            if canonical_new in subtree:
+                return (
+                    f"Reparent would create a cycle: '{canonical_new}' is in "
+                    f"'{agent_id}'s subtree.")
+
+        # Trial-apply on a throwaway so the limit/cascade checks (which read
+        # defn.parent_id via the live registry) see the proposed placement,
+        # then roll back if any check fails.
+        defn.parent_id = canonical_new
+        try:
+            if canonical_new is not None:
+                self._enforce_reparent_limits(defn)
+                self._check_reparent_budget_cascade(agent_id)
+        except ValueError as exc:
+            defn.parent_id = old_parent
+            return str(exc)
+        return None
+
+    def _enforce_reparent_limits(self, defn: AgentDefinition) -> None:
+        """Spawn-count + depth checks for an EXISTING agent being reparented.
+
+        _enforce_spawn_limits short-circuits for agents already in the registry
+        (re-registration is a model swap, not a new spawn); reparenting a live
+        agent needs the checks to actually run, so this is a parallel path that
+        counts the moving agent against the new parent's children and validates
+        the new subtree depth (including the agent's own descendants)."""
+        parent_id = defn.parent_id
+        if parent_id is None:
+            return
+        canonical_parent = self._resolve_parent_agent_id(parent_id)
+        if canonical_parent not in self._agents:
+            return
+        parent_defn = self._agents[canonical_parent]
+        max_children = getattr(parent_defn, "max_children", None) or DEFAULT_MAX_CHILDREN_PER_PARENT
+        # defn is already counted as a child (parent_id set); no +1.
+        existing_children = sum(
+            1 for d in self._agents.values()
+            if d.id != defn.id and (
+                d.parent_id == parent_id or d.parent_id == canonical_parent)
+        )
+        if existing_children + 1 > max_children:
+            raise ValueError(
+                f"Reparent limit exceeded: parent '{canonical_parent}' would have "
+                f"{existing_children + 1} children (limit {max_children}).")
+        # Depth: the DEEPEST descendant of the moving agent must still fit.
+        base_depth = self._depth_below_root(parent_id)  # depth of defn itself
+        max_extra = 0
+        for d in self.get_descendants(defn.id):
+            # distance of d below defn
+            dist = 0
+            cur = d
+            while cur and cur.id != defn.id:
+                dist += 1
+                pid = cur.parent_id
+                cur = self._agents.get(
+                    self._resolve_parent_agent_id(pid)) if pid else None
+                if dist > DEFAULT_MAX_DEPTH_BELOW_ROOT * 4:
+                    break
+            max_extra = max(max_extra, dist)
+        deepest = base_depth + max_extra
+        if deepest > DEFAULT_MAX_DEPTH_BELOW_ROOT:
+            raise ValueError(
+                f"Reparent depth exceeded: '{defn.id}'s deepest descendant would "
+                f"be depth {deepest} below root (limit {DEFAULT_MAX_DEPTH_BELOW_ROOT}).")
+
+    def _check_reparent_budget_cascade(self, agent_id: str) -> None:
+        """Re-run the budget cascade for the moving agent AND every descendant
+        against the NEW ancestor chain (parent_id already updated on the mover).
+
+        Reuses _check_budget_cascade, which walks parent_id live, so pointing
+        the mover at its new parent is enough for the whole subtree to be
+        re-validated from each node upward."""
+        for node_id in [agent_id, *[d.id for d in self.get_descendants(agent_id)]]:
+            node = self._agents.get(node_id)
+            if node and node.budgets and node.parent_id is not None:
+                self._check_budget_cascade(node)
+
     def generate_child_id(self, parent_id: str) -> str:
         count = self._child_counters.get(parent_id, 0) + 1
         self._child_counters[parent_id] = count
@@ -1085,58 +1208,139 @@ class AgentRegistry:
     # Failure propagation
     # ------------------------------------------------------------------
 
+    def _result_summary(self, record: ExecutionRecord) -> str:
+        """A cheap one-line result summary for a terminal notification.
+
+        Pulled from data already on the record — never re-reads a file or
+        re-runs the agent. Failures surface the error; completions surface
+        the tail of the result text when present. Empty string when nothing
+        cheap is available (the parent can still probe for details)."""
+        if record.error:
+            return str(record.error).replace("\n", " ")[:200]
+        out = record.output
+        text = ""
+        if isinstance(out, dict):
+            text = str(out.get("result") or out.get("summary") or "")
+        elif isinstance(out, str):
+            text = out
+        text = text.strip().replace("\n", " ")
+        return text[:200]
+
+    async def _push_terminal_notification(
+        self,
+        child_id: str,
+        record: ExecutionRecord,
+        *,
+        kind: str,
+        priority: MessagePriority,
+        instruction: str,
+        msg_type: MessageType,
+    ) -> None:
+        """Deliver a child's terminal-state notification to its parent.
+
+        Tries a LIVE injection first (if the parent is running and a live
+        injector is wired), so a busy parent sees the completion on its next
+        turn instead of only after its current run ends. Falls back to the
+        inbox when the parent is idle or no injector is available.
+
+        Loop guard: notifications carry ``origin="child_notification"``. A run
+        the parent starts *because of* such a message must not itself emit a
+        notification that re-wakes the child — but that can only happen if the
+        child is (transitively) the parent's parent, which the reparent cycle
+        guard forbids. The batching default (NORMAL priority => no wake) is the
+        first-order protection; this tag lets the wake path stay idempotent."""
+        defn = self._agents.get(child_id)
+        if not defn or not defn.parent_id:
+            return
+        parent_id = self._resolve_parent_agent_id(defn.parent_id)
+        if parent_id not in self._agents:
+            return
+        # Self-parent / trivial cycle: never notify yourself.
+        if parent_id == child_id:
+            return
+
+        summary = self._result_summary(record)
+        full_instruction = instruction
+        if summary:
+            full_instruction += f" Result: {summary}"
+
+        data = {
+            "type": kind,
+            "child_id": child_id,
+            "child_name": defn.name,
+            "status": record.status.value,
+            "error": record.error,
+            "summary": summary,
+            "execution_id": record.execution_id,
+            "origin": "child_notification",
+            "instruction": full_instruction,
+        }
+
+        # Live injection into a running parent (best-effort). A True return
+        # means the running loop received the text; we still leave the parent's
+        # status/idle bookkeeping untouched (it is mid-run).
+        injector = self._live_injector
+        if injector is not None and self._running_count.get(parent_id, 0) > 0:
+            try:
+                if await injector(parent_id, full_instruction):
+                    log.info("Terminal notification: live-injected %s for %s -> parent %s",
+                             kind, child_id, parent_id)
+                    return
+            except Exception:
+                log.warning("live injection failed for %s -> %s; falling back to inbox",
+                            child_id, parent_id, exc_info=True)
+
+        # Inbox fallback. Priority governs whether an idle parent is woken:
+        # HIGH wakes (wake_parent_on_child), NORMAL batches into the next
+        # natural run.
+        self.inbox.post(InboxMessage(
+            id=InboxMessage.generate_id(),
+            source=child_id,
+            target=parent_id,
+            type=msg_type,
+            priority=priority,
+            data=data,
+        ))
+        log.info("Terminal notification: posted %s (%s) for %s -> parent %s",
+                 kind, priority.value, child_id, parent_id)
+
     async def notify_parent_of_failure(
         self, agent_id: str, record: ExecutionRecord,
         active_providers: dict,
     ) -> None:
-        """Failures ALWAYS notify parent regardless of notify_parent flag (safety).
+        """Failures ALWAYS notify the parent regardless of notify_parent.
 
-        No bridge injection — inbox message only.
+        A failure is a safety signal — it wakes the parent (HIGH priority /
+        live injection) even when routine completions are configured to batch.
         """
         if record.status != ExecutionStatus.FAILED:
             return
-        defn = self._agents.get(agent_id)
-        if not defn or not defn.parent_id:
-            return
-        resolved_parent = self._resolve_parent_agent_id(defn.parent_id)
-        if resolved_parent not in self._agents:
-            return
-
-        msg = InboxMessage(
-            id=InboxMessage.generate_id(),
-            source=agent_id,
-            target=resolved_parent,
-            type=MessageType.ALERT,
+        await self._push_terminal_notification(
+            agent_id, record,
+            kind="child_error",
             priority=MessagePriority.HIGH,
-            data={
-                "type": "child_error",
-                "child_agent": agent_id,
-                "child_name": defn.name,
-                "error": record.error or "Unknown error",
-                "execution_id": record.execution_id,
-                "instruction": (
-                    f"Your child agent '{defn.name}' ({agent_id}) failed: "
-                    f"{record.error or 'Unknown error'}. "
-                    f"Investigate and decide whether to retry, fix, or escalate."
-                ),
-            },
-        )
-        self.inbox.post(msg)
-        log.info(
-            "Failure propagation: posted child_error ALERT for %s -> parent %s",
-            agent_id, resolved_parent,
+            msg_type=MessageType.ALERT,
+            instruction=(
+                f"Your child agent '{self._agents.get(agent_id).name if self._agents.get(agent_id) else agent_id}' "
+                f"({agent_id}) failed: {record.error or 'Unknown error'}. "
+                f"Investigate and decide whether to retry, fix, or escalate."
+            ),
         )
 
     async def on_agent_completed(
         self, agent_id: str, record: ExecutionRecord,
         active_providers: dict,
     ) -> None:
-        """Handle agent completion: update status and optionally notify parent.
+        """Handle agent reaching a terminal state: update status and push a
+        completion notification to the parent.
 
-        No bridge injection (send_user_message) — inbox message only.
-        When notify_parent=False, skip notification entirely (child uses
-        post_message explicitly when it has something to report).
-        """
+        Terminal = COMPLETED or KILLED here (FAILED has its own always-on
+        path in notify_parent_of_failure). When notify_parent=False, skip the
+        push entirely (the child uses post_message explicitly if it has
+        something to report). Whether an idle parent is WOKEN by the push is
+        the parent's ``wake_parent_on_child`` choice — default off, so
+        completions batch into the parent's next natural run; a running parent
+        always gets a live injection."""
         defn = self._agents.get(agent_id)
         if not defn:
             return
@@ -1147,7 +1351,12 @@ class AgentRegistry:
                 self._status[agent_id] = AgentStatus.COMPLETED
         self._last_idle[agent_id] = datetime.now(timezone.utc)
 
-        # Check notify_parent flag — if False, skip notification entirely
+        # Only COMPLETED / KILLED flow through here as completions; FAILED is
+        # handled by notify_parent_of_failure (always notifies).
+        if record.status not in (ExecutionStatus.COMPLETED, ExecutionStatus.KILLED):
+            return
+
+        # notify_parent=False → child reports explicitly; skip the auto-push.
         if not defn.notify_parent:
             return
 
@@ -1158,29 +1367,20 @@ class AgentRegistry:
         if resolved_parent not in self._agents:
             return
 
-        # Lean notification — no 2000-char result preview blob.
-        # Parent uses get_children_status / get_output / file tools for details.
+        parent_defn = self._agents[resolved_parent]
+        wake = bool(getattr(parent_defn, "wake_parent_on_child", False))
+        priority = MessagePriority.HIGH if wake else MessagePriority.NORMAL
         status_str = record.status.value
-        msg = InboxMessage(
-            id=InboxMessage.generate_id(),
-            source=agent_id,
-            target=resolved_parent,
-            type=MessageType.WORK,
-            priority=MessagePriority.HIGH,
-            data={
-                "type": "child_completed",
-                "child_id": agent_id,
-                "child_name": defn.name,
-                "status": status_str,
-                "error": record.error,
-                "instruction": (
-                    f"Your child agent '{defn.name}' ({agent_id}) has {status_str}. "
-                    f"Use get_children_status or read its conversation file for details."
-                ),
-            },
+        await self._push_terminal_notification(
+            agent_id, record,
+            kind="child_completed",
+            priority=priority,
+            msg_type=MessageType.WORK,
+            instruction=(
+                f"Your child agent '{defn.name}' ({agent_id}) has {status_str}. "
+                f"Use get_children_status or read its conversation file for details."
+            ),
         )
-        self.inbox.post(msg)
-        log.info("Completion notification: posted child_completed for %s -> parent %s", agent_id, resolved_parent)
 
 
 # ------------------------------------------------------------------

@@ -308,14 +308,17 @@ class TestInnateWakeUp:
             eid = await rt.trigger_run("child-1", source="test")
             await _wait_runs(rt)
 
-        # Parent should have a HIGH-priority WORK message in its inbox.
-        # The notification is LEAN by design: no result blob — the
-        # parent pulls details via get_children_status / get_output.
+        # Parent should have a NORMAL-priority WORK message in its inbox.
+        # NORMAL is the batching default (Task B): a completion queues into
+        # the parent's next natural run rather than waking an idle parent
+        # (that is the opt-in wake_parent_on_child path). The notification is
+        # LEAN by design: no result blob — the parent pulls details via
+        # get_children_status / get_output.
         msgs = rt.inbox.peek("parent-1")
         assert len(msgs) >= 1
         child_msg = [m for m in msgs if m.data.get("type") == "child_completed"]
         assert len(child_msg) == 1
-        assert child_msg[0].priority == MessagePriority.HIGH
+        assert child_msg[0].priority == MessagePriority.NORMAL
         assert child_msg[0].data["child_id"] == "child-1"
         assert child_msg[0].data["status"] == "completed"
         assert "get_children_status" in child_msg[0].data["instruction"]
@@ -354,8 +357,11 @@ class TestInnateWakeUp:
             assert rt.inbox.count(aid) == 0
 
     @pytest.mark.asyncio
-    async def test_inject_into_parent_bridge_session(self, bus, tmp_path):
-        """If parent has active provider, message is injected directly."""
+    async def test_no_live_inject_when_parent_idle(self, bus, tmp_path):
+        """A parent that merely HAS a cached provider but is NOT running gets
+        the completion via the inbox, not a live injection. Live injection is
+        gated on the parent actually running (_running_count > 0); an idle
+        parent with a warm provider must still batch via the inbox."""
         rt = _make_runtime(bus, tmp_path)
 
         parent = AgentDefinition(
@@ -367,7 +373,7 @@ class TestInnateWakeUp:
         await rt.register_agent(parent)
         await rt.activate_agent("parent-2")
 
-        # Simulate parent having an active bridge session
+        # Cached provider present but the parent is idle (running_count 0).
         parent_bridge = AsyncMock()
         parent_bridge.send_user_message = AsyncMock()
         rt._active_providers["parent-2"] = parent_bridge
@@ -398,9 +404,7 @@ class TestInnateWakeUp:
             await rt.trigger_run("child-2", source="test")
             await _wait_runs(rt)
 
-        # Bridge injection was removed: completion notifies via the
-        # inbox ONLY, even when the parent has an active session
-        # (on_agent_completed docstring — "No bridge injection").
+        # Parent idle → no live injection; the completion lands in the inbox.
         parent_bridge.send_user_message.assert_not_called()
         msgs = rt.inbox.peek("parent-2")
         child_msg = [m for m in msgs if m.data.get("type") == "child_completed"]
@@ -834,10 +838,14 @@ class TestInnateWakeUpInstruction:
             await rt.trigger_run("child-fail", source="test")
             await asyncio.sleep(0.5)
 
+        # A FAILED child notifies via the always-on failure path, which posts
+        # a child_error ALERT (not a child_completed). Failures always wake the
+        # parent (HIGH priority) regardless of wake_parent_on_child.
         msgs = rt.inbox.peek("parent-fail")
-        child_msgs = [m for m in msgs if m.data.get("type") == "child_completed"]
+        child_msgs = [m for m in msgs if m.data.get("type") == "child_error"]
         assert len(child_msgs) == 1
 
         data = child_msgs[0].data
         assert "failed" in data["instruction"]
         assert data["status"] == "failed"
+        assert child_msgs[0].priority == MessagePriority.HIGH

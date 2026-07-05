@@ -236,6 +236,13 @@ class AgentDefinition:
     # When True (default), framework posts a lean completion notification
     # to the parent's inbox.  When False, child must use post_message
     # explicitly if it has something to report.  Failures always notify.
+    wake_parent_on_child: bool = False      # if True, a child's terminal
+    # notification wakes this (the PARENT) with an immediate run instead of
+    # batching into its next natural run. This flag lives on the PARENT — it
+    # governs how the parent reacts to any child finishing. Default False:
+    # completions inject live if the parent is already running, otherwise
+    # queue at NORMAL priority so they accumulate for the next scheduled /
+    # heartbeat / manually-triggered run (a busy fleet won't thrash).
 
     # --- Heartbeat ---
     heartbeat: HeartbeatConfig | None = None

@@ -99,6 +99,24 @@ _TOOLS: list[ToolDefinition] = [
                     "type": "boolean",
                     "description": "If false, skip auto-notification to parent on completion. Default: true.",
                 },
+                "wake_parent_on_child": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, a child reaching a terminal state wakes THIS "
+                        "agent (as parent) with an immediate run instead of "
+                        "batching the notification into its next natural run. "
+                        "Default: false."
+                    ),
+                },
+                "parent_id": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Reparent this agent under a new parent (the 'regional "
+                        "manager' path), or null to promote it to top-level. "
+                        "Rejected on cycles or if the new subtree breaks spawn/"
+                        "depth/budget limits."
+                    ),
+                },
                 "concurrency": {"type": "integer", "description": "Max parallel executions."},
                 "budgets": {
                     "type": "object",
@@ -1100,6 +1118,9 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     if "notify_parent" in input:
         defn.notify_parent = input["notify_parent"]
         changed.append("notify_parent")
+    if "wake_parent_on_child" in input:
+        defn.wake_parent_on_child = bool(input["wake_parent_on_child"])
+        changed.append("wake_parent_on_child")
     if "concurrency" in input:
         defn.concurrency = input["concurrency"]
         changed.append("concurrency")
@@ -1125,6 +1146,31 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             return {"error": cascade_err}
         defn.budgets = input["budgets"]
         changed.append("budgets")
+    if "parent_id" in input:
+        # Reparenting (the "regional manager" path): place a parent over a
+        # formerly top-level agent, or re-home a subtree. Access control:
+        # the owner is unconstrained; an agent may reparent only its OWN
+        # direct child (delegating it further down) or adopt an agent under
+        # ITSELF (become the new parent). It may never reparent a stranger
+        # or move itself. The registry validates cycles / spawn+depth limits /
+        # budget cascade and rolls back on any violation.
+        caller_id = input.get("_caller_id")
+        new_parent = input["parent_id"] or None
+        from . import is_owner_caller
+        if caller_id is not None and not is_owner_caller(caller_id):
+            if caller_id == agent_id:
+                return {"error": "An agent cannot reparent itself."}
+            is_current_parent = defn.parent_id == caller_id
+            is_new_parent = new_parent == caller_id
+            if not (is_current_parent or is_new_parent):
+                return {"error": "Reparenting is limited to the owner, the "
+                                 "agent's current parent, or the adopting "
+                                 "new parent."}
+        err = runtime.registry.reparent_agent(agent_id, new_parent)
+        if err:
+            return {"error": err}
+        changed.append("parent_id")
+
     if "connector_ids" in input:
         defn.connector_ids = input["connector_ids"]
         changed.append("connector_ids")

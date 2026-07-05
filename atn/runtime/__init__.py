@@ -288,6 +288,27 @@ class Runtime:
         # Wire session_manager into engine (circular dep resolved here)
         self.engine.session_manager = self.sessions
 
+        # Wire the registry's live-injection hook for child->parent completion
+        # pushes (Task B). The registry is constructed before SessionManager,
+        # so it holds a callback rather than a direct reference. This is
+        # INJECTION-ONLY (never the trigger/inbox side of send_agent_message):
+        # it delivers into a running parent's live provider loop and returns
+        # False otherwise, so the caller's batching intent (queue at NORMAL,
+        # no wake) is preserved even if the parent finished between the
+        # running-check and here. A True return means the text reached the
+        # running loop.
+        async def _inject_parent(parent_id: str, text: str) -> bool:
+            if self.registry._running_count.get(parent_id, 0) <= 0:
+                return False
+            provider = self.providers._active_providers.get(parent_id)
+            if provider is None:
+                return False
+            store = self.sessions.get_agent_conversation_store(parent_id)
+            store.add_user_turn(text)
+            await provider.send_user_message(text)
+            return True
+        self.registry._live_injector = _inject_parent
+
         self.scheduler = Scheduler(
             registry=self.registry,
             engine=self.engine,
