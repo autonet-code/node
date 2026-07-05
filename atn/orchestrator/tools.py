@@ -510,6 +510,7 @@ _TOOLS: list[ToolDefinition] = [
                 "connector_id": {"type": "string", "description": "MCP connector backing this tool (attested); the tool name must match a connector operation."},
                 "provider": {"type": "string", "description": "External provider identity for attested tools (e.g. 'google')."},
                 "dependencies": {"type": "array", "items": {"type": "string"}, "description": "Digests of published tools this tool calls at runtime (pinned only). Declaration = the runtime allowlist; nested calls run under the ORIGINAL caller's authority. Composite tools use the line-framed sandbox protocol (see docs/tool_substrate.md)."},
+                "capabilities": {"type": "object", "description": "What the code needs from the host, deny-by-default: {net: bool, fs: bool, spawn: bool, env: [VAR,...]}. On adopting daemons this IS the sandbox policy — undeclared use hard-fails, so declare honestly. Omit if the tool only reads stdin and writes stdout."},
                 "version_of": {"type": "string", "description": "Digest of the manifest this revises (artifact lineage)."},
             },
             "required": ["name", "description", "input_schema"],
@@ -529,6 +530,28 @@ _TOOLS: list[ToolDefinition] = [
                 "digest": {"type": "string", "description": "Manifest digest (or name/reg_ prefix) of a tool you registered."},
             },
             "required": ["digest"],
+        },
+    ),
+    ToolDefinition(
+        name="adopt_tool",
+        description=(
+            "Propose adopting a tool published on the network (find digests "
+            "with the substrate probe). Adoption installs FOREIGN CODE on "
+            "this host, so you only PROPOSE: the owner sees the manifest, "
+            "its declared capabilities (the sandbox policy it will run "
+            "under — deny-by-default), signature, and vet status, and "
+            "approves or rejects per tool. If approved, the tool becomes "
+            "callable by you and your lineage, runs contained, and its "
+            "ORIGINAL author keeps earning from your attestations. Give a "
+            "concrete reason: what work needs it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "digest": {"type": "string", "description": "64-hex manifest digest of the published tool."},
+                "reason": {"type": "string", "description": "Why you need it — shown to the owner."},
+            },
+            "required": ["digest", "reason"],
         },
     ),
     ToolDefinition(
@@ -1862,6 +1885,11 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
             return {"error": "dependencies must be a list of manifest digests"}
         dependencies = raw_deps or None
 
+    capabilities = input.get("capabilities")
+    if capabilities is not None and not isinstance(capabilities, dict):
+        return {"error": "capabilities must be an object "
+                         "({net, fs, spawn, env})"}
+
     try:
         result = runtime.tool_store.register(
             name=name,
@@ -1874,6 +1902,7 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
             version_of=input.get("version_of") or None,
             publish=bool(input.get("publish", False)),
             dependencies=dependencies,
+            capabilities=capabilities or None,
         )
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}
@@ -1905,6 +1934,9 @@ async def _publish_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         return {"error": f"Unknown tool: {digest[:16]}"}
 
     caller_id = input.get("_caller_id")
+    if record.origin == "adopted":
+        return {"error": "adopted tools cannot be re-published — the "
+                         "original author's publication stands"}
     if caller_id is not None and not is_owner_caller(caller_id):
         if record.author_id != caller_id:
             return {"error": "You can only publish tools you authored."}
@@ -1914,6 +1946,31 @@ async def _publish_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
                 "published": True, "note": "already published"}
     runtime.tool_store.set_published(record.digest, True)
     return {"digest": record.digest, "name": record.name, "published": True}
+
+
+async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Adoption rail, agent half (docs/tool_substrate.md — Adoption).
+
+    Proposes only — installation is the owner's WS-surface decision
+    (approve_adoption). The caller is derived, never accepted as input.
+    """
+    from ..tool_store import OWNER_AUTHOR
+    from . import is_owner_caller
+
+    digest = str(input.get("digest") or "").strip()
+    if not digest:
+        return {"error": "Missing required field: 'digest'"}
+    reason = str(input.get("reason") or "").strip()
+    if not reason:
+        return {"error": "Missing required field: 'reason' — the owner "
+                         "decides on your justification"}
+    caller_id = input.get("_caller_id")
+    caller = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
+    try:
+        return await runtime.tool_store.propose_adoption(
+            caller, digest, reason=reason)
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -2595,6 +2652,10 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # code and staking your future vet weight is not implied by
     # authoring or publishing.
     "vetting": {"vet_tool"},
+    # Adoption (spec: Adoption rail) — the agent may PROPOSE installing
+    # network tools; the owner approves per tool. Case-by-case grant:
+    # publishing risks reputation, adoption risks the host.
+    "adoption": {"adopt_tool"},
     "planning": {"get_goals", "add_goal", "update_goal", "get_projects", "add_project", "update_project",
                  "propose_task", "list_tasks"},
     "budget": {"get_credit_budget", "set_credit_budget", "get_usage"},
@@ -3282,6 +3343,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "register_tool": _register_tool,
     "publish_tool": _publish_tool,
     "vet_tool": _vet_tool,
+    "adopt_tool": _adopt_tool,
     "attest_tools": _attest_tools,
     "get_history": _get_history,
     # Planning & goal tools

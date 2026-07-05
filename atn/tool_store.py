@@ -68,9 +68,16 @@ class ToolRecord:
     # substrate, no consensus footprint. Publishing is a deliberate act.
     published: bool = False
     # Local author agent id (scoping). Empty on pre-address rows —
-    # author_id falls back to the manifest author.
+    # author_id falls back to the manifest author. For ADOPTED records
+    # this is the adopting agent — adoption scopes to the adopter's
+    # lineage while manifest.author (the original 0x) keeps earning.
     local_author: str = ""
     registered_ts: int = 0
+    # "authored" (default) | "adopted". Adopted records carry foreign
+    # code: they execute ONLY under the capability guard
+    # (atn/tool_guard.py — scrubbed env, sandbox cwd, deny-by-default
+    # audit hook) and can never be re-published by the adopter.
+    origin: str = "authored"
 
     @property
     def author(self) -> str:
@@ -98,6 +105,7 @@ class ToolRecord:
             "published": self.published,
             "local_author": self.local_author,
             "registered_ts": self.registered_ts,
+            "origin": self.origin,
         }
 
 
@@ -130,6 +138,15 @@ class ToolStore:
         # digest-verified (content addressing IS the auth) and cached
         # into the local blob store.
         self.blob_fetcher: Any = None
+        # Optional vet-status lookup (callable: digest -> dict | None)
+        # reading the federated close's vetting carry-over — feeds the
+        # provenance block on adoption proposals. Absent = "unknown".
+        self.vet_status_provider: Any = None
+        # Adoption proposals (docs/tool_substrate.md — Adoption rail):
+        # agent proposes, OWNER approves per-tool. The queue is the one
+        # legitimate approval queue in the tool economy.
+        self._proposals_path = self._dir / "adoption_proposals.json"
+        self._proposals: dict[str, dict[str, Any]] = self._load_proposals()
         # Active harness distro digest (docs/tool_substrate.md — "Resident
         # tools, loadouts, distros"). Set by bootstrap_reference_distro at
         # runtime init; stamped onto cognitive attestations so adoption
@@ -159,6 +176,7 @@ class ToolStore:
         version_of: str | None = None,
         publish: bool = False,
         dependencies: list[str] | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build, sign, store, and index a tool manifest. Returns
         ``{"digest", "manifest"}`` or raises ValueError on bad input.
@@ -231,6 +249,7 @@ class ToolStore:
             connector_id=connector_id,
             version_of=version_of,
             dependencies=deps or None,
+            capabilities=capabilities,
             created_ts=int(time.time()),
         )
         self._sign(author, manifest)
@@ -261,9 +280,13 @@ class ToolStore:
     def set_published(self, digest: str, published: bool) -> bool:
         """Owner-gated publish/unpublish. Publishing pushes the manifest
         to the substrate; unpublishing only stops future pushes (the
-        substrate is forward-only — existing claims stand)."""
+        substrate is forward-only — existing claims stand). Adopted
+        records are not ours to publish — the original author's
+        publication stands."""
         record = self._records.get(digest)
         if record is None:
+            return False
+        if record.origin == "adopted":
             return False
         record.published = bool(published)
         self._persist()
@@ -403,12 +426,55 @@ class ToolStore:
                              ok="error" not in result, via=via)
         return result
 
+    def _exec_spec(
+        self, record: ToolRecord, script: Path,
+    ) -> tuple[list[str], dict[str, str] | None, str | None]:
+        """(argv, env, cwd) for a pinned tool subprocess.
+
+        Authored tools run bare (the author judged their own code).
+        ADOPTED tools run contained (docs/tool_substrate.md — Adoption):
+
+          - argv wraps the script in atn/tool_guard.py, whose audit
+            hook hard-fails undeclared net/fs/spawn use;
+          - env is scrubbed to the minimum Python needs plus ONLY the
+            variables the capability manifest declares — secrets in
+            the daemon's environment never reach foreign code;
+          - cwd is a per-tool sandbox directory under the tool store.
+        """
+        import sys
+        if record.origin != "adopted":
+            return [sys.executable, str(script)], None, None
+
+        caps = record.manifest.get("capabilities") or {}
+        sandbox = self._dir / "sandbox" / record.digest[:16]
+        sandbox.mkdir(parents=True, exist_ok=True)
+
+        env: dict[str, str] = {
+            "PATH": os.path.dirname(sys.executable),
+            "TEMP": str(sandbox),
+            "TMP": str(sandbox),
+            "PYTHONIOENCODING": "utf-8",
+        }
+        # Windows: python/network runtime needs SystemRoot.
+        for keep in ("SYSTEMROOT", "SystemRoot", "WINDIR"):
+            if keep in os.environ:
+                env[keep] = os.environ[keep]
+        for name in caps.get("env") or []:
+            if name in os.environ:
+                env[name] = os.environ[name]
+        env["ATN_TOOL_POLICY"] = json.dumps({
+            "net": bool(caps.get("net")),
+            "fs": bool(caps.get("fs")),
+            "spawn": bool(caps.get("spawn")),
+        })
+        guard = Path(__file__).with_name("tool_guard.py")
+        return ([sys.executable, str(guard), str(script)], env, str(sandbox))
+
     async def _call_pinned(self, record: ToolRecord,
                            arguments: dict[str, Any]) -> dict[str, Any]:
         """Run the pinned code blob as a subprocess: JSON args on stdin,
         JSON result on stdout. The blob is materialized to a cache file
         named by its digest, so what runs is exactly what was judged."""
-        import sys
         code_digest = record.manifest["code_digest"]
         blobs = self._blob_store()
         raw = blobs.get_bytes(code_digest)
@@ -421,12 +487,14 @@ class ToolStore:
         if not script.exists():
             script.write_bytes(raw)
 
+        argv, env, cwd = self._exec_spec(record, script)
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, str(script),
+                *argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env, cwd=cwd,
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(json.dumps(arguments).encode("utf-8")),
@@ -479,7 +547,6 @@ class ToolStore:
         nested mechanical receipt self-records tagged to this composite,
         and ``_depth=depth+1`` so ``_COMPOSITE_MAX_DEPTH`` bounds recursion.
         """
-        import sys
         code_digest = record.manifest["code_digest"]
         declared: set[str] = set(record.manifest.get("dependencies") or [])
         blobs = self._blob_store()
@@ -496,12 +563,14 @@ class ToolStore:
         if not script.exists():
             script.write_bytes(raw)
 
+        argv, env, cwd = self._exec_spec(record, script)
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, str(script),
+                *argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env, cwd=cwd,
             )
         except Exception as exc:
             return {"error": f"tool subprocess failed to start: {exc}"}
@@ -926,6 +995,186 @@ class ToolStore:
         return {"attested": attested, "skipped": skipped}
 
     # ------------------------------------------------------------------
+    # Adoption (docs/tool_substrate.md — Adoption rail)
+    # ------------------------------------------------------------------
+
+    async def propose_adoption(
+        self, caller_id: str | None, digest: str, reason: str = "",
+    ) -> dict[str, Any]:
+        """Agent-side half of the install rail: PROPOSE, never install.
+
+        Adoption is foreign code entering the host — the one place a
+        real approval queue is legitimate. The proposal fetches and
+        digest-verifies the manifest, then packages what the owner
+        needs to decide: declared capabilities (the sandbox policy it
+        will run under), signature presence, and the network vet
+        status (greenlit / candidate / busted) when the close state is
+        available. Nothing executes until approve_adoption.
+        """
+        caller = caller_id if caller_id else OWNER_AUTHOR
+        digest = digest.strip().lower()
+        if len(digest) != 64 or any(c not in "0123456789abcdef"
+                                    for c in digest):
+            return {"error": "digest must be the 64-hex manifest digest "
+                             "(probe the substrate to find one)"}
+        if digest in self._records:
+            return {"error": "already available locally"}
+        existing = self._proposals.get(digest)
+        if existing is not None and existing.get("status") == "pending":
+            return {"status": "pending", "digest": digest,
+                    "note": "already proposed; awaiting owner approval"}
+
+        payload = await self.fetch_payload(digest)
+        from nodes.common.world_model_substrate.tool_manifest import (
+            is_tool_manifest,
+        )
+        if payload is None or not is_tool_manifest(payload):
+            return {"error": f"cannot resolve manifest {digest[:16]}: not "
+                             "fetchable from the network"}
+        if str(payload.get("trust_class") or "") != "pinned":
+            return {"error": "only pinned tools can be adopted — attested "
+                             "tools lean on connectors/credentials that "
+                             "don't transfer between daemons"}
+
+        vet_status: dict[str, Any] | None = None
+        if self.vet_status_provider is not None:
+            try:
+                vet_status = self.vet_status_provider(digest)
+            except Exception as exc:
+                log.warning("vet status lookup failed: %s", exc)
+
+        caps = dict(payload.get("capabilities") or {})
+        proposal = {
+            "digest": digest,
+            "name": str(payload.get("name") or ""),
+            "description": str(payload.get("description") or ""),
+            "author": str(payload.get("author") or ""),
+            "proposed_by": caller,
+            "reason": str(reason or ""),
+            "ts": int(time.time()),
+            "status": "pending",
+            "capabilities": caps,
+            "provenance": {
+                "signed": self._verify_manifest_sig(payload),
+                "greenlit": (bool(vet_status.get("greenlit"))
+                             if vet_status else None),
+                "busted": (bool(vet_status.get("busted"))
+                           if vet_status else None),
+                "vets": (len(vet_status.get("vets") or {})
+                         if vet_status else None),
+                "dependencies": len(payload.get("dependencies") or []),
+            },
+        }
+        self._proposals[digest] = proposal
+        self._save_proposals()
+        log.info("adoption proposed: %s (%s) by %s",
+                 proposal["name"], digest[:16], caller)
+        return {"status": "pending", "digest": digest,
+                "capabilities": caps, "provenance": proposal["provenance"],
+                "note": "proposed; awaiting owner approval"}
+
+    def list_adoption_proposals(
+        self, status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = sorted(self._proposals.values(), key=lambda r: -r.get("ts", 0))
+        if status:
+            rows = [r for r in rows if r.get("status") == status]
+        return [dict(r) for r in rows]
+
+    async def approve_adoption(self, digest: str) -> dict[str, Any]:
+        """Owner-side half (WS surface, never an agent tool): verify,
+        install as an ADOPTED record — original author preserved on the
+        manifest (their mint keeps flowing from our attestations),
+        adopter-lineage scoping via local_author, contained execution
+        via origin="adopted"."""
+        proposal = self._proposals.get(digest)
+        if proposal is None or proposal.get("status") != "pending":
+            return {"error": "no pending proposal for that digest"}
+        payload = await self.fetch_payload(digest)
+        from nodes.common.world_model_substrate.tool_manifest import (
+            is_tool_manifest,
+        )
+        if payload is None or not is_tool_manifest(payload):
+            return {"error": "manifest blob no longer resolvable"}
+        code_digest = str(payload.get("code_digest") or "")
+        code_raw = await self.fetch_bytes(code_digest) if code_digest else None
+        if code_raw is None:
+            return {"error": "code blob not fetchable — refusing to install "
+                             "a manifest whose code can't be pinned locally"}
+
+        record = ToolRecord(
+            digest=digest,
+            manifest=payload,
+            local_author=str(proposal.get("proposed_by") or ""),
+            registered_ts=int(time.time()),
+            origin="adopted",
+        )
+        self._records[digest] = record
+        proposal["status"] = "approved"
+        proposal["resolved_ts"] = int(time.time())
+        self._persist()
+        self._save_proposals()
+        log.info("adoption approved: %s (%s) for %s",
+                 record.name, digest[:16], record.local_author)
+        return {"digest": digest, "name": record.name,
+                "origin": "adopted", "author": record.author,
+                "adopted_for": record.local_author}
+
+    def reject_adoption(self, digest: str, reason: str = "") -> dict[str, Any]:
+        proposal = self._proposals.get(digest)
+        if proposal is None or proposal.get("status") != "pending":
+            return {"error": "no pending proposal for that digest"}
+        proposal["status"] = "rejected"
+        proposal["resolved_ts"] = int(time.time())
+        if reason:
+            proposal["reject_reason"] = str(reason)
+        self._save_proposals()
+        return {"digest": digest, "status": "rejected"}
+
+    def _verify_manifest_sig(self, manifest: dict[str, Any]) -> bool | None:
+        """True = signature recovers to the manifest author; False =
+        present but WRONG (red flag: re-attribution attempt); None = no
+        signature / verification unavailable. Content addressing already
+        guarantees integrity — this proves the AUTHORSHIP claim."""
+        sig = manifest.get("author_sig")
+        if not sig:
+            return None
+        try:
+            from eth_account import Account
+            from eth_account.messages import encode_defunct
+            from nodes.common.world_model_substrate.tool_manifest import (
+                canonical_manifest_bytes,
+            )
+            recovered = Account.recover_message(
+                encode_defunct(canonical_manifest_bytes(manifest)),
+                signature=bytes.fromhex(str(sig).removeprefix("0x")),
+            )
+            return recovered.lower() == str(
+                manifest.get("author") or "").lower()
+        except Exception as exc:
+            log.debug("manifest sig verification unavailable: %s", exc)
+            return None
+
+    def _load_proposals(self) -> dict[str, dict[str, Any]]:
+        if not self._proposals_path.exists():
+            return {}
+        try:
+            data = json.loads(self._proposals_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): dict(v) for k, v in data.items()
+                        if isinstance(v, dict)}
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("adoption proposals unreadable: %s", exc)
+        return {}
+
+    def _save_proposals(self) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        tmp = self._proposals_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._proposals, sort_keys=True),
+                       encoding="utf-8")
+        os.replace(tmp, self._proposals_path)
+
+    # ------------------------------------------------------------------
     # Vetting (docs/tool_substrate.md — Vetting section)
     # ------------------------------------------------------------------
 
@@ -1290,6 +1539,7 @@ class ToolStore:
                 published=bool(row.get("published", False)),
                 local_author=str(row.get("local_author") or ""),
                 registered_ts=int(row.get("registered_ts") or 0),
+                origin=str(row.get("origin") or "authored"),
             )
 
     def _persist(self) -> None:

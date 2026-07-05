@@ -318,6 +318,54 @@ Implementation (2026-07-05):
   `VET_ROYALTY_EPOCHS=8`, `VET_BUST_THRESHOLD=0.5`
   (`nodes/common/federated_reconcile.py`).
 
+## Adoption rail (ratified 2026-07-05; BUILT same day)
+
+Adoption is the install path: a tool published from a FOREIGN daemon
+becoming callable on this host. It is the one place in the tool
+economy where "price, don't police" is insufficient on its own —
+standing is a lagging indicator and the first victim of a malicious
+tool pays before any CON lands. Four layers, none load-bearing alone:
+
+1. **Containment.** Adopted records (`origin="adopted"`) execute ONLY
+   under the capability guard: `atn/tool_guard.py` wraps the pinned
+   script with a deny-by-default `sys.addaudithook` (net / fs outside
+   the sandbox cwd / spawn each hard-fail unless declared), the
+   environment is scrubbed to the Python minimum plus ONLY the
+   variables the manifest's `capabilities` block declares, and cwd is
+   a per-tool sandbox dir. The manifest `capabilities` field
+   ({net, fs, spawn, env:[...]}) is thus simultaneously honest
+   labeling (shown at consent time) and the enforced policy —
+   undeclared use dies with a traceback naming the capability, which
+   is exactly the reproducible evidence a CON wants. An audit hook is
+   a tripwire, not a wall (ctypes can step around it): the OS-level
+   isolated runner (vault track) remains the wall when it lands;
+   authored tools run unguarded (the author judged their own code).
+2. **Consent.** The one legitimate approval queue: `adopt_tool`
+   (agent tool, its own case-by-case `adoption` bundle) only PROPOSES
+   — digest-verified manifest fetch, declared capabilities,
+   provenance — and the OWNER approves per tool on the WS surface
+   (`list_adoption_proposals` / `approve_adoption` /
+   `reject_adoption`), never an agent rail. Publishing risks
+   reputation; adoption risks the host.
+3. **Provenance friction.** The proposal carries: signature VERIFIED
+   against the manifest author (not just presence — a wrong sig is a
+   re-attribution red flag), greenlit/busted/vet-count from the
+   close's vetting state, dependency count. Reference posture, not
+   law: the owner can approve anything.
+4. **Evidence economics.** Post-adoption exploit = reproducible CON
+   against the pinned digest (already built) → violator-pays gate +
+   validator bust cascade (Vetting section).
+
+Mechanics: fetch over the libp2p blob rail (`blob_fetcher`, digest-
+verified, cached into the local blob store); the local `ToolRecord`
+keeps the ORIGINAL manifest — `author` stays the foreign 0x (our
+attestations keep minting to them, cross-daemon royalties by
+construction), `local_author` = the adopting agent (adopter-lineage
+scoping), `published=False` and re-publication is structurally
+refused (the original author's publication stands). Only pinned
+tools adopt; attested/connector tools lean on local credentials that
+don't transfer.
+
 ## Consensus mechanics (v1 implementation, still current)
 
 - `ToolUsed` consensus event: caller-attested, gossiped, epoch-

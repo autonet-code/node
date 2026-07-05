@@ -959,6 +959,17 @@ class AutonetBridge:
                     return await asyncio.to_thread(_r.get, digest)
                 tool_store.blob_fetcher = _fetch
 
+            # Vet status for adoption provenance: read the federated
+            # close driver's vetting carry-over (candidate/greenlit/
+            # busted per digest). Best-effort — absent driver = unknown.
+            def _vet_status(digest: str, _svc=service):
+                drv = getattr(_svc, "_federated_close_driver", None)
+                vetting = getattr(drv, "_tool_vetting", None) if drv else None
+                if isinstance(vetting, dict):
+                    return (vetting.get("manifests") or {}).get(digest)
+                return None
+            tool_store.vet_status_provider = _vet_status
+
             # Tools registered while the substrate was down get their
             # verdict-layer claims now (content-addressed, so re-pushes
             # dedup instead of double-sprouting).

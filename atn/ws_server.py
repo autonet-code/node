@@ -995,6 +995,9 @@ class WebSocketBridge:
                     "fee_atn": m.get("fee_atn", 0),
                     "grants": sorted(record.grants),
                     "enabled": record.enabled,
+                    "published": record.published,
+                    "origin": record.origin,
+                    "capabilities": m.get("capabilities", {}),
                     "version_of": m.get("version_of"),
                     "input_schema": m.get("input_schema", {}),
                 })
@@ -1043,6 +1046,35 @@ class WebSocketBridge:
                         "error": f"Unknown tool digest: {digest[:16]}"}
             return {"msg_id": msg_id, "ok": True,
                     "result": {"digest": digest, "published": published}}
+
+        # Adoption rail (docs/tool_substrate.md — Adoption): the approval
+        # queue is HUMAN-ONLY by construction, like grants. Agents can
+        # only propose (adopt_tool, case-by-case granted); installing
+        # foreign code is the owner's call, always per-tool.
+        if msg_type == "list_adoption_proposals":
+            status = msg.get("status") or None
+            rows = self.runtime.tool_store.list_adoption_proposals(status)
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"proposals": rows}}
+
+        if msg_type == "approve_adoption":
+            digest = msg.get("digest", "")
+            if not digest:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'digest' field"}
+            result = await self.runtime.tool_store.approve_adoption(digest)
+            if "error" in result:
+                return {"msg_id": msg_id, "ok": False, "error": result["error"]}
+            return {"msg_id": msg_id, "ok": True, "result": result}
+
+        if msg_type == "reject_adoption":
+            digest = msg.get("digest", "")
+            if not digest:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'digest' field"}
+            result = self.runtime.tool_store.reject_adoption(
+                digest, reason=str(msg.get("reason") or ""))
+            if "error" in result:
+                return {"msg_id": msg_id, "ok": False, "error": result["error"]}
+            return {"msg_id": msg_id, "ok": True, "result": result}
 
         if msg_type == "probe_tools":
             # The inference probe as the Tools screen's search: semantic

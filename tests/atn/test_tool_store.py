@@ -604,6 +604,197 @@ async def _register_composite(rt, dep_digest, caller_id="child",
     )
 
 
+class TestAdoption:
+    """Adoption rail (docs/tool_substrate.md — Adoption): agent proposes,
+    owner approves per tool, foreign code runs contained."""
+
+    async def _publish_on_author_daemon(self, tmp_path, code=ECHO_CODE,
+                                        capabilities=None):
+        """A separate 'network' daemon that authored + published a tool;
+        returns (runtime, digest, blob_store) for the adopter to fetch
+        from."""
+        rt = _make_runtime(tmp_path / "author_daemon")
+        await _register_agent(rt, "foreign-author")
+        args = {"name": "net_tool", "description": "A network-published tool.",
+                "input_schema": SCHEMA, "code": code}
+        if capabilities:
+            args["capabilities"] = capabilities
+        res = await execute_tool("register_tool", args, rt,
+                                 caller_id="foreign-author")
+        assert "error" not in res, res
+        return rt, res["digest"], rt.tool_store._blob_store()
+
+    async def _adopter(self, tmp_path, source_blobs):
+        rt = _make_runtime(tmp_path / "adopter_daemon")
+        await _register_agent(rt, "worker")
+
+        async def _fetch(digest: str) -> bytes | None:
+            return source_blobs.get_bytes(digest)
+        rt.tool_store.blob_fetcher = _fetch
+        return rt
+
+    @pytest.mark.asyncio
+    async def test_propose_approve_call_roundtrip(self, tmp_path):
+        _, digest, blobs = await self._publish_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+
+        out = await execute_tool(
+            "adopt_tool", {"digest": digest, "reason": "need echo for X"},
+            rt, caller_id="worker")
+        assert out["status"] == "pending"
+        assert store.get(digest) is None            # NOT installed yet
+
+        pending = store.list_adoption_proposals("pending")
+        assert len(pending) == 1
+        assert pending[0]["proposed_by"] == "worker"
+        assert pending[0]["provenance"]["signed"] is True
+
+        approved = await store.approve_adoption(digest)
+        assert approved["origin"] == "adopted"
+        record = store.get(digest)
+        assert record is not None
+        assert record.origin == "adopted"
+        # Original author preserved (their mint keeps flowing);
+        # scoping keys on the adopter.
+        assert record.author != "worker"
+        assert record.local_author == "worker"
+        assert store.allowed("worker", record)
+
+        result = await store.call(record, {"x": "hi"}, caller_id="worker")
+        assert result == {"result": {"echo": "hi"}}
+
+    @pytest.mark.asyncio
+    async def test_reason_required_and_reject_flow(self, tmp_path):
+        _, digest, blobs = await self._publish_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+        out = await execute_tool(
+            "adopt_tool", {"digest": digest}, rt, caller_id="worker")
+        assert "reason" in out["error"]
+
+        await execute_tool(
+            "adopt_tool", {"digest": digest, "reason": "want it"},
+            rt, caller_id="worker")
+        rej = rt.tool_store.reject_adoption(digest, reason="not needed")
+        assert rej["status"] == "rejected"
+        assert rt.tool_store.get(digest) is None
+        # A rejected proposal doesn't block a later re-proposal cycle
+        # via approve (status pending required).
+        res = await rt.tool_store.approve_adoption(digest)
+        assert "error" in res
+
+    @pytest.mark.asyncio
+    async def test_adopted_cannot_be_republished(self, tmp_path):
+        _, digest, blobs = await self._publish_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        out = await execute_tool(
+            "publish_tool", {"digest": digest}, rt, caller_id="worker")
+        assert "adopted" in out["error"]
+        assert store.set_published(digest, True) is False
+
+    @pytest.mark.asyncio
+    async def test_undeclared_network_hard_fails(self, tmp_path):
+        evil = (
+            "import sys, json, socket\n"
+            "json.load(sys.stdin)\n"
+            "s = socket.socket()\n"
+            "print(json.dumps({'ok': True}))\n"
+        )
+        _, digest, blobs = await self._publish_on_author_daemon(
+            tmp_path, code=evil)
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        record = store.get(digest)
+        result = await store.call(record, {"x": "1"}, caller_id="worker")
+        assert "error" in result
+        assert "undeclared capability: net" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_declared_network_is_allowed(self, tmp_path):
+        code = (
+            "import sys, json, socket\n"
+            "json.load(sys.stdin)\n"
+            "s = socket.socket(); s.close()\n"
+            "print(json.dumps({'made_socket': True}))\n"
+        )
+        _, digest, blobs = await self._publish_on_author_daemon(
+            tmp_path, code=code, capabilities={"net": True})
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        record = store.get(digest)
+        result = await store.call(record, {"x": "1"}, caller_id="worker")
+        assert result == {"result": {"made_socket": True}}
+
+    @pytest.mark.asyncio
+    async def test_env_scrubbed_for_adopted_code(self, tmp_path,
+                                                 monkeypatch):
+        monkeypatch.setenv("ATN_TEST_SECRET", "hunter2")
+        code = (
+            "import sys, json, os\n"
+            "json.load(sys.stdin)\n"
+            "print(json.dumps({'secret': os.environ.get('ATN_TEST_SECRET'),"
+            " 'policy': os.environ.get('ATN_TOOL_POLICY')}))\n"
+        )
+        _, digest, blobs = await self._publish_on_author_daemon(
+            tmp_path, code=code)
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        record = store.get(digest)
+        result = await store.call(record, {"x": "1"}, caller_id="worker")
+        # Secrets never reach foreign code; the policy var is popped
+        # before the tool runs.
+        assert result == {"result": {"secret": None, "policy": None}}
+
+    @pytest.mark.asyncio
+    async def test_declared_env_passes_through(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ATN_TEST_TOKEN", "tok123")
+        code = (
+            "import sys, json, os\n"
+            "json.load(sys.stdin)\n"
+            "print(json.dumps({'tok': os.environ.get('ATN_TEST_TOKEN')}))\n"
+        )
+        _, digest, blobs = await self._publish_on_author_daemon(
+            tmp_path, code=code, capabilities={"env": ["ATN_TEST_TOKEN"]})
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        record = store.get(digest)
+        result = await store.call(record, {"x": "1"}, caller_id="worker")
+        assert result == {"result": {"tok": "tok123"}}
+
+    @pytest.mark.asyncio
+    async def test_authored_tools_run_unguarded(self, tmp_path,
+                                                monkeypatch):
+        """The guard is adoption-specific: an agent's OWN tool still
+        sees the parent environment (author judged their own code)."""
+        monkeypatch.setenv("ATN_TEST_SECRET", "mine")
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        code = (
+            "import sys, json, os\n"
+            "json.load(sys.stdin)\n"
+            "print(json.dumps({'secret': os.environ.get('ATN_TEST_SECRET')}))\n"
+        )
+        res = await execute_tool(
+            "register_tool",
+            {"name": "own_tool", "description": "Own tool.",
+             "input_schema": SCHEMA, "code": code},
+            rt, caller_id="child")
+        record = rt.tool_store.get(res["digest"])
+        result = await rt.tool_store.call(record, {}, caller_id="child")
+        assert result == {"result": {"secret": "mine"}}
+
+
 class TestVetting:
     """Validator rail (docs/tool_substrate.md — Vetting section):
     inspect → attest, self-vet rejection, report requirement, and the
