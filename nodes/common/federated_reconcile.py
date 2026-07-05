@@ -886,6 +886,12 @@ def federated_epoch_close(
     # + ``agent_novelty`` (keyed by user-supplied agent_id) plus
     # ``epoch_root``. Per-node fields stay in ``result`` for local
     # diagnostics only.
+    # Charter version hash: the anchored charter this close ran against. A
+    # charter change is a forward-only fork boundary, so the hash belongs in
+    # the authoritative payload (imported lazily to keep the import block small
+    # and avoid a circular import via adapter).
+    from .world_model_substrate.charter_version import charter_hash as _charter_hash
+
     result["authoritative_payload"] = {
         "schema": 1,
         "epoch_root": result["epoch_root"],
@@ -896,6 +902,7 @@ def federated_epoch_close(
         "output_decimals": result.get("output_decimals", output_decimals),
         "gate_applied": result.get("gate_applied", False),
         "pricing": pricing,
+        "charter_hash": _charter_hash(),
         "n_batches": result["n_batches"],
         "n_events": result["n_events"],
     }

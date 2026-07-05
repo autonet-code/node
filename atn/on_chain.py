@@ -601,3 +601,96 @@ class OnChainService:
         except Exception as e:
             log.debug("Failed to read substrate state: %s", e)
             return None
+
+
+# ---------------------------------------------------------------------------
+# CharterAnchor (governed charter-version anchor)
+# ---------------------------------------------------------------------------
+
+CHARTER_ANCHOR_ABI = [
+    {
+        "inputs": [],
+        "name": "currentCharter",
+        "outputs": [
+            {"internalType": "uint256", "name": "version", "type": "uint256"},
+            {"internalType": "bytes32", "name": "hash", "type": "bytes32"},
+            {"internalType": "string", "name": "uri", "type": "string"},
+            {"internalType": "bytes32", "name": "prevHash", "type": "bytes32"},
+            {"internalType": "uint256", "name": "timestamp", "type": "uint256"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "versionCount",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+
+def _read_current_charter_hash(w3, anchor_address: str) -> tuple[int, str] | None:
+    """Read (version, charterHash-hex) from CharterAnchor.currentCharter().
+
+    Returns None if nothing is anchored yet (the view reverts with
+    ``NoCharter``) or the read fails. ``w3`` is a connected Web3 instance (or
+    any object exposing the same ``eth.contract(...).functions.*.call()``
+    surface — the tests pass a fake reader).
+    """
+    from web3 import Web3
+
+    contract = w3.eth.contract(
+        address=Web3.to_checksum_address(anchor_address),
+        abi=CHARTER_ANCHOR_ABI,
+    )
+    version, chain_hash, _uri, _prev, _ts = contract.functions.currentCharter().call()
+    hexhash = chain_hash.hex() if isinstance(chain_hash, bytes) else str(chain_hash)
+    if hexhash.startswith("0x"):
+        hexhash = hexhash[2:]
+    return int(version), hexhash.lower()
+
+
+def verify_charter_against_anchor(w3, anchor_address: str) -> dict[str, Any]:
+    """Compare the local charter_hash to the on-chain anchored charter.
+
+    Reads ``CharterAnchor.currentCharter()`` and diffs its charterHash against
+    the daemon's locally-computed :func:`charter_hash`. On mismatch the daemon
+    logs a LOUD warning — this is a forward-only fork boundary and a divergent
+    daemon would produce a different close (following the anchored charter is
+    future migration work; detection comes first).
+
+    Returns a dict: ``{match, local_hash, chain_hash, chain_version}``.
+    ``match`` is None when the anchor read failed or nothing is anchored yet.
+    """
+    from nodes.common.world_model_substrate.charter_version import charter_hash
+
+    local = charter_hash()
+    try:
+        read = _read_current_charter_hash(w3, anchor_address)
+    except Exception as e:  # includes the NoCharter revert
+        log.debug("Charter anchor read failed (%s); cannot verify.", e)
+        return {"match": None, "local_hash": local, "chain_hash": None,
+                "chain_version": None}
+
+    if read is None:
+        return {"match": None, "local_hash": local, "chain_hash": None,
+                "chain_version": None}
+
+    chain_version, chain_hash = read
+    match = (chain_hash == local)
+    if not match:
+        log.warning(
+            "CHARTER DIVERGENCE: local charter_hash=%s does NOT match anchored "
+            "charter v%d hash=%s (anchor=%s). This daemon is running a different "
+            "charter than the jurisdiction's governor anchored — its closes will "
+            "not be bit-identical to the canonical charter. Follow-the-anchor "
+            "migration is future work; this is detection only.",
+            local, chain_version, chain_hash, anchor_address,
+        )
+    else:
+        log.info("Charter matches anchored version v%d (hash=%s).",
+                 chain_version, chain_hash)
+    return {"match": match, "local_hash": local, "chain_hash": chain_hash,
+            "chain_version": chain_version}

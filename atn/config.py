@@ -217,6 +217,10 @@ class RPBConfig:
     substrate_address: str = ""         # Deployed Substrate.sol address. Read by
                                         # OnChainService; falls back to
                                         # rpb_contract_address if empty.
+    charter_anchor_address: str = ""    # Optional: deployed CharterAnchor.sol
+                                        # address. When set, the daemon can
+                                        # compare its local charter_hash against
+                                        # the anchored version and warn on drift.
     registry_address: str = ""          # Discovered from RepToken.registryAddress()
     token_address: str = ""             # Discovered from Governor.token()
     economy_address: str = ""           # Discovered from RepToken.economyAddress()
@@ -658,6 +662,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
         jurisdiction_id=resolved.get("jurisdiction_id", "autonet"),
         rpb_contract_address=resolved.get("rpb_contract_address", ""),
         substrate_address=resolved.get("substrate_address", ""),
+        charter_anchor_address=resolved.get("charter_anchor_address", ""),
         registry_address=resolved.get("registry_address", ""),
         token_address=resolved.get("token_address", ""),
         economy_address=resolved.get("economy_address", ""),

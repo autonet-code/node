@@ -109,6 +109,13 @@ def build_charter_world(bandwidth: float = 1.5, embedding_dim: int = 0) -> World
     """
     if embedding_dim < 0:
         raise ValueError(f"embedding_dim must be >= 0, got {embedding_dim}")
+    # Log the active charter version hash. Imported lazily to avoid a circular
+    # import (charter_version derives its payload from CHARTER in this module).
+    try:
+        from .charter_version import charter_hash as _charter_hash
+        logger.debug("build_charter_world: active charter_hash=%s", _charter_hash())
+    except Exception:  # pragma: no cover - never let hashing break world build
+        pass
     world = World()
     for entry in CHARTER:
         i = entry["axis_index"]
