@@ -405,6 +405,14 @@ class Runtime:
         from ..service_store import ServiceStore
         self.service_store = ServiceStore(self, self._config.data_dir / "services")
 
+        # Service verifier trials (venture vault rail — docs/tool_substrate.md
+        # Verifier trials). Probes a venture's service moat against its
+        # published prospectus battery. The transport (live service-request
+        # client) is wired when the WS surface is up; None until then, so
+        # trials fail loud rather than silently pass.
+        from ..trial_runner import TrialRunner
+        self.trial_runner = TrialRunner(self)
+
         # Tool registry
         from ..tool_registry import ToolRegistry
         self.tool_registry = ToolRegistry(self)
