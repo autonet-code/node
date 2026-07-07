@@ -160,6 +160,79 @@ use (tools stay free), verify usage (impossible), or prune anything.
 | Monetization | epoch mint (emission pays for commons) | per-work-item fees, any ERC20 |
 | Boundary case | connector-backed tools: run locally with the user's own credentials → tools (evidence-grade marker `attested`, no mint) | anything with an ask price and a counterparty |
 
+## Doctrine (2026-07-08): the capability ratchet and the absorption frontier
+
+Two dynamics, ratified in discussion, that together carry the
+decentralization value proposition. Both are mechanisms already in the
+build — this section names what they compound into.
+
+**1. The capability ratchet.** A published tool is cognition
+crystallized: the reasoning it took to author it (often frontier-model
+reasoning) is spent once, then every invocation afterwards costs only
+ROUTING — discovery (review-ranked `probe_tools`) plus a schema-guided
+call. Authoring is expensive cognition; invoking is cheap cognition.
+The substrate is therefore a one-way pump from the first to the
+second, and composition (declared-dep DAGs, attribution conserved
+downward) turns single tools into an abstraction ladder: each layer
+makes the next authorable by a smaller model. Consequence: the
+minimum model tier needed for a given task falls as the corpus grows,
+which is precisely "gradually less dependent on centralized
+providers."
+
+Honest bounds, so the claim stays scrutable:
+
+- Tools crystallize **procedures**. Orchestration — decomposing the
+  task, selecting among thousands of tools, interpreting failure —
+  is itself cognition and stays with the model. Discovery ranking
+  attacks the selection half; the decomposition half it cannot.
+- Open-ended synthesis (novel reasoning, judgment, ambiguity) does
+  not factor into pinned code. This is the two-plane doctrine's
+  boundary restated economically: substrate = retrieval + procedure,
+  LLM = judgment; the ratchet lowers the floor for the toolable
+  fraction of work and grows that fraction — it never reaches 1.0.
+- Small models are today measurably worse at multi-step tool
+  orchestration; the ratchet bets that shrinking per-step depth
+  outpaces the orchestration burden of a bigger library. That is an
+  empirical bet, not a theorem.
+
+Which is why it is PRE-COMMITTED AS FALSIFIABLE: phase 11 (proposed,
+unregistered — docs/BACKLOG.md) measures the minimum model tier that
+clears a task suite bare vs substrate-assisted, prediction: the gap
+widens as the corpus grows. If phase 11 refutes it, this section gets
+a dated retraction, not a quiet edit.
+
+**2. The absorption frontier.** A service can only charge for what
+the substrate cannot do for free — a rational caller never pays for
+what `probe_tools` serves at price zero. Two consequences:
+
+- **Paid demand is the gap map.** Service revenue concentration is
+  the strongest capability-gap signal the network has: it marks
+  exactly what the commons lacks, weighted by what users actually pay.
+  (This is the concrete input the capability-gap pricing doctrine was
+  waiting for — if gap-weighted mint multipliers are ever
+  implemented, service spend is the signal to read.)
+- **Replicable services self-destruct into the commons.** Any service
+  whose function can be re-expressed as pinned code invites
+  absorption: emission pays whoever distills it into a free tool, and
+  the price-zero commons undercuts the paid rail. The service's own
+  success finances and advertises its replacement. What durably
+  remains a Service is the in-principle-remote core — proprietary
+  data, credentials, hardware, anything whose execution is unknowable
+  by construction (the same line that already denies Services
+  substrate standing). Even there, absorption nibbles: wrappers,
+  protocols, and glue toolize, squeezing the paid margin down to the
+  truly scarce kernel.
+
+Bounds, again: absorption is incentive, not automation — someone must
+author the replacement, and the pump's strength is the emission rate
+(unset, decision #1). Providers keep genuinely proprietary cores
+off-chain forever; the frontier moves, it doesn't close. And the flow
+runs both ways: a more capable commons does MORE work and therefore
+buys MORE of the scarce remote things (compute, data, hardware) — the
+market and the commons grow each other. Division of labor, stated
+plainly: **the commons absorbs the replicable; the market prices the
+scarce.**
+
 ## Three tiers of tools (daemon standpoint)
 
 1. **Private** — registered by an agent purely for local capability

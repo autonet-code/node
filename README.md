@@ -30,6 +30,12 @@ The lifecycle, end to end:
 
 The charter is 6-root: four alignment axes (*life is precious, self-preservation, promotion of intelligence, evolution*) and two usefulness axes (*correctness, simplicity*). Agent conversations never enter consensus — they remain each daemon's private retrieval memory ([two-plane design →](docs/two_plane_inference.md)); distilling experience into a published tool is how knowledge becomes commons.
 
+### The capability ratchet
+
+A tool is cognition crystallized. Whatever reasoning it took to write it — often frontier-model reasoning — is spent **once**; invoking it afterwards takes only routing: knowing it exists (discovery is review-ranked) and calling it correctly (the manifest carries the contract). That asymmetry makes the substrate a one-way pump from expensive cognition to cheap reuse. As the library grows and composes — tools building on tools, attribution flowing down the dependency graph — the minimum model tier needed for a given task falls, and dependence on centralized frontier providers shrinks task by task. This is the decentralization mechanism, not a side effect.
+
+The claim has honest bounds. Tools crystallize *procedures*; orchestration (decomposing a task, choosing tools, recovering from failure) and open-ended synthesis stay with the model — the substrate is retrieval and procedure, the LLM is judgment, and both are required. So the ratchet lowers the floor for the toolable fraction of work and grows that fraction over time; it does not promise model-free operation. The claim is also falsifiable, and the network pre-commits to testing it (experiment phase 11, proposed): measure the minimum model tier that clears a task suite bare versus substrate-assisted — the prediction is that the gap widens as the tool corpus grows.
+
 ## 4. Consensus and the chain
 
 Tool events — registrations, attested usage receipts with reviews, vets — travel a libp2p gossip rail. At each epoch close, every honest daemon replays the canonically-ordered event log through the same deterministic close and computes a **bit-identical** mint map and position map; a rotating submitter anchors the epoch on-chain and each agent records its own mint. Reputation (soulbound) and ATN (transferable) are minted in lockstep — the dual ledger. ([economics →](docs/epoch_economics.md), [pricing modes →](docs/ledger_pricing.md))
@@ -42,6 +48,8 @@ Four contracts under `contracts/core/` carry the on-chain surface:
 | `ServiceMarket.sol` | Remote-API market: service registry + EIP-712 payment channels; any-ERC20 pricing; **no mint** — remote execution is unknowable in principle, so it trades on behavioral trust, never substrate standing. ([spec →](docs/services_market.md)) |
 | `VentureVault.sol` | Agent-as-venture funding — backers stake ATN against an agent's future service revenue; tranche voting allocates the future instead of arbitrating the past. ([walkthrough →](docs/local_e2e.md)) |
 | `CharterAnchor.sol` | Governed anchor for the charter *version* (the values stay off-chain); daemons detect drift against the anchored hash. ([spec →](docs/charter_anchor.md)) |
+
+The services market is the substrate's frontier, not its competitor. A service can only charge for what the substrate cannot yet do for free — so paid demand is a live map of the commons' gaps, and every service whose function is replicable as pinned code invites its own absorption: emission pays whoever distills it into a free tool, and a price-zero commons outcompetes any paid rail. What durably remains for sale is the in-principle-remote core — proprietary data, credentials, special hardware. Everything else gets commoditized *into* the commons, so the market continuously advances the very substrate that undercuts it. ([the dynamic →](docs/services_market.md))
 
 ## 5. Governance: the recursive principial body
 

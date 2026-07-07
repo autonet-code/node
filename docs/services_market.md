@@ -153,6 +153,15 @@ a secrecy-only service is a standing bounty for a free reimplementation.
 Emission continuously pulls capability from the paid column into the
 commons.
 
+Named as doctrine (2026-07-08, "the absorption frontier" —
+docs/tool_substrate.md): paid service demand is the network's gap map
+— revenue concentration marks exactly what the commons lacks, weighted
+by willingness to pay — and any service replicable as pinned code
+finances and advertises its own replacement. The commons absorbs the
+replicable; the market prices the scarce. The two grow each other: a
+more capable commons does more work and buys more of the genuinely
+scarce remote things.
+
 ## Open knobs (sims / user)
 
 1. Escrow griefing rules (release timeout, dispute path) — hardhat
