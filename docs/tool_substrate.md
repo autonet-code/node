@@ -122,21 +122,28 @@ verifiable anchor in-system is ATN itself.
 5. **One weight, both rails.** The same household weight multiplies
    the damped usage term (mint) and the review evidence mass (position
    drift): a voice that can't mint can't move position either.
-6. **Snapshot-pinned reads.** `voice_weights` (and the owner map read
-   with it) is a close input refreshed by the driver's `voice_source`
-   hook just before each close (`nodes/common/voice_state.py`), with
-   every read PINNED to the previous epoch's anchor block
+6. **Snapshot-pinned reads, checkpoint-served.** `voice_weights` (and
+   the owner map read with it) is a close input refreshed by the
+   driver's `voice_source` hook just before each close
+   (`nodes/common/voice_state.py`), with every input derived AS OF the
+   previous epoch's anchor block
    (`getAnchor(anchorCount-1).blockNumber`, stored on-chain at
    submission). The snapshot is on-chain, agreed, and pre-dates the
-   epoch — so all daemons derive identical maps no matter when their
+   epoch — all daemons derive identical maps no matter when their
    refresh fires, and a wallet funded mid-epoch (after seeing what's
-   worth pumping) carries no weight until the next epoch. No anchor
-   yet = no agreed snapshot: empty maps, close runs `weights=None`
-   (uniform 1.0 — correct for epoch 1, nothing has minted). Ops note:
-   pinned reads need the RPC node to serve state at the anchor block —
-   on non-archive public RPCs an epoch longer than the node's state
-   retention (~128 blocks typ.) makes the refresh fail (driver keeps
-   the previous maps and logs).
+   worth pumping) carries no weight until the next epoch. NO ARCHIVE
+   NODE NEEDED: Substrate.sol's ATN carries IVotes-MECHANISM
+   checkpoints (`Checkpoints.Trace208` history pushed on every
+   mint/transfer; `balanceOfAt` / `atnTotalSupplyAt` served from
+   current state — deliberately WITHOUT the delegation layer, because
+   `getPastVotes` semantics return 0 for undelegated accounts and
+   would mute every wallet by default), and the agent set + owner map
+   derive from `AgentRegistered`/`OwnerBound` event logs up to the
+   snapshot block (last binding per agent wins). No anchor yet = no
+   agreed snapshot: empty maps, close runs `weights=None` (uniform
+   1.0 — correct for epoch 1, nothing has minted). Chain tests:
+   `tests/test_voice_snapshot.py` (incl. the pin property: a transfer
+   after the anchor does not change the epoch's weights).
 
 Character shift accepted openly: capital = voice. Holders are the
 actors with the most to lose from junk mint debasing ATN, and every

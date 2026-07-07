@@ -73,28 +73,50 @@ def _coord(charter, embed_idx, mag):
     return tuple(out)
 
 
-def _make_chain(rpb: str, kp: Keypair, agent_id: str, n: int = 2) -> List[EventBatch]:
-    chain: List[EventBatch] = []
-    prev = b""
-    for i in range(1, n + 1):
-        coords = [0.0] * (4 + 1024)
-        coords[2] = 0.5
-        coords[4 + (10 * (i + 1))] = 0.5
-        ev = {
-            "kind": "observation_added",
-            "seq": 1,
-            "author_agent": agent_id,
-            "obs_id": f"obs_{agent_id}_{i}",
-            "coords": coords,
-            "label": f"{agent_id}_{i}",
+def _make_chain(rpb: str, agent_id: str) -> List[EventBatch]:
+    """v3 mint fixture (mint = tool usage only): the agent authors a
+    pinned tool that gets vetted (distinct-fleet greenlight) and used
+    by third-party attesting callers. Observation events alone no
+    longer mint anything."""
+    digest = "72" * 32
+    coords = [0.0] * (6 + 1024)
+    coords[4] = 0.8
+    coords[6 + 3] = 0.5
+    reg = {
+        "kind": "sub_claim_sprouted", "seq": 1,
+        "author_agent": agent_id, "tendency_id": "correctness",
+        "parent_id": "solver_root", "node_id": f"tm_{digest[:12]}",
+        "position": "pro", "coords": list(coords),
+        "polarity_axis": list(coords),
+        "content": f"tool {digest[:8]}", "author_post": True,
+        "artifact_digest": digest,
+        "manifest_meta": {"trust_class": "pinned", "author": agent_id},
+    }
+    def _vet(vetter, seq):
+        return {
+            "kind": "tool_used", "seq": seq, "author_agent": vetter,
+            "manifest_digest": digest, "tool_author": agent_id,
+            "receipt_digest": f"v{seq:02d}" * 8, "ok": True,
+            "fee_atn": 0.0, "vet": True,
         }
-        b = EventBatch(
-            rpb_address=rpb, sender_pubkey=kp.public_key,
-            batch_seq=i, events=[ev], prev_batch_hash=prev,
-            timestamp=1_700_000_000.0 + i,
+    def _receipt(caller, seq):
+        return {
+            "kind": "tool_used", "seq": seq, "author_agent": caller,
+            "manifest_digest": digest, "tool_author": agent_id,
+            "receipt_digest": f"r{seq:02d}" * 8, "ok": True,
+            "fee_atn": 0.0, "attested": True, "score": 0.8,
+        }
+    def _one(ev):
+        return EventBatch(
+            rpb_address=rpb, sender_pubkey=Keypair.generate().public_key,
+            batch_seq=1, events=[ev], prev_batch_hash=b"",
+            timestamp=1_700_000_000.0,
         )
-        chain.append(b); prev = b.content_hash()
-    return chain
+    return [
+        _one(reg),
+        _one(_vet("vetter-1", 1)), _one(_vet("vetter-2", 1)),
+        _one(_receipt("caller-1", 1)), _one(_receipt("caller-2", 2)),
+    ]
 
 
 def _give_agent_some_atn(chain_fixture, agent_id: str, agent_addr: str) -> int:
@@ -103,8 +125,7 @@ def _give_agent_some_atn(chain_fixture, agent_id: str, agent_addr: str) -> int:
     w3 = chain_fixture["w3"]
     deployer = chain_fixture["deployer"]
     rpb = "rpb_72_seed"
-    kp = Keypair.generate()
-    batches = _make_chain(rpb, kp, agent_id, n=2)
+    batches = _make_chain(rpb, agent_id)
     canonical = canonical_order(batches)
     result = federated_epoch_close(canonical)
     epoch_id = "e_72_seed"

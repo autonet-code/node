@@ -42,17 +42,19 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   Owner page in atn_web (wallet dropdown). Tests:
   `tests/test_voice_weights.py` (10) + all close families green.
   Reads are PINNED to the previous epoch's anchor block
-  (`getAnchor(...).blockNumber`) — all daemons derive identical maps
-  regardless of read timing; no anchor = weights off (epoch 1).
-  REMAINING: (a) ops — pinned reads need the RPC to serve state at the
-  anchor block; on a non-archive public RPC an epoch longer than state
-  retention (~128 blocks typ.) makes the refresh fail (driver keeps
-  previous maps + logs) — pick an archive endpoint or shorten epochs;
-  (b) the ε floor is the residual sybil surface — bounded, but the
-  dormant CON/bust rail stays the named backstop; (c) covert harm
-  still has ONLY vetting as its dedicated defense — vet params (below)
-  remain load-bearing. NOTE: this changes close output again — same
-  flag-day window as v3 (fleet is still one daemon).
+  (`getAnchor(...).blockNumber`) and served WITHOUT archive state:
+  Substrate.sol ATN now carries IVotes-mechanism checkpoints
+  (`balanceOfAt`/`atnTotalSupplyAt`, Trace208, no delegation layer —
+  undelegated getPastVotes would read 0) and the agent/owner maps
+  derive from event logs up to the snapshot. Chain tests
+  `tests/test_voice_snapshot.py` (pin property verified); stale
+  phase5_6/phase7_2 mint fixtures migrated to v3 tool events.
+  REMAINING: (a) the ε floor is the residual sybil surface — bounded,
+  but the dormant CON/bust rail stays the named backstop; (b) covert
+  harm still has ONLY vetting as its dedicated defense — vet params
+  (below) remain load-bearing. NOTE: close output changed + CONTRACT
+  changed (checkpoints) — the shadownet redeploy now carries this too;
+  same flag-day window as v3 (fleet is still one daemon).
 - world_persistence: checkpoint doesn't persist `artifact_digest` →
   viz `kind` tagging and ratings-lift ranking degrade after a daemon
   restart until the next close reapplies positions (carry-over maps

@@ -16,16 +16,24 @@ splitting a balance across any number of wallets or agents never gains
 weight; ``epsilon`` bounds what a zero-balance identity can carry and
 lets a cold-start network (supply == 0) bootstrap.
 
-Determinism contract: STRONGER than a "same chain state" hope — every
-read is PINNED to the previous epoch's anchor block
-(``getAnchor(anchorCount-1).blockNumber``, stored on-chain at
-submission). All daemons therefore price this epoch's voices from the
-identical snapshot no matter when their refresh fires, and a wallet
-funded mid-epoch (after seeing what's worth pumping) carries no weight
-until the next epoch. No prior anchor = no agreed snapshot: the
-refresh returns empty maps and the close runs with weights=None (the
-uniform pre-voice behavior) — correct for epoch 1, where nothing has
-minted yet anyway.
+Determinism contract: every input is derived AS OF the previous
+epoch's anchor block (``getAnchor(anchorCount-1).blockNumber``, stored
+on-chain at submission), so all daemons price this epoch's voices from
+the identical snapshot no matter when their refresh fires, and a
+wallet funded mid-epoch (after seeing what's worth pumping) carries no
+weight until the next epoch. NO ARCHIVE NODE REQUIRED:
+
+  - balances + supply read through the contract's CHECKPOINTED
+    endpoints (``balanceOfAt`` / ``atnTotalSupplyAt`` — IVotes-style
+    Trace208 history without the delegation layer), served from
+    current state;
+  - the agent set + owner map derive from ``AgentRegistered`` /
+    ``OwnerBound`` event logs up to the snapshot block (last binding
+    per agent wins) — logs are retained by non-archive nodes too.
+
+No prior anchor = no agreed snapshot: the refresh returns empty maps
+and the close runs with weights=None (the uniform pre-voice behavior)
+— correct for epoch 1, where nothing has minted yet anyway.
 """
 
 from __future__ import annotations
@@ -38,41 +46,6 @@ from .federated_reconcile import VOICE_EPSILON
 logger = logging.getLogger(__name__)
 
 _VOICE_ABI = [
-    {
-        "inputs": [],
-        "name": "registeredAgentCount",
-        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [{"internalType": "uint256", "name": "index", "type": "uint256"}],
-        "name": "getRegisteredAgent",
-        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [{"internalType": "address", "name": "", "type": "address"}],
-        "name": "agentOwner",
-        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [{"internalType": "address", "name": "agent", "type": "address"}],
-        "name": "balanceOf",
-        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [],
-        "name": "atnTotalSupply",
-        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
     {
         "inputs": [],
         "name": "anchorCount",
@@ -103,37 +76,81 @@ _VOICE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "agent", "type": "address"},
+            {"internalType": "uint256", "name": "blockNumber", "type": "uint256"},
+        ],
+        "name": "balanceOfAt",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "uint256", "name": "blockNumber", "type": "uint256"}],
+        "name": "atnTotalSupplyAt",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "address", "name": "agent",       "type": "address"},
+            {"indexed": True,  "internalType": "bytes32", "name": "lineageHash", "type": "bytes32"},
+            {"indexed": False, "internalType": "bytes",   "name": "peerId",      "type": "bytes"},
+            {"indexed": False, "internalType": "uint256", "name": "timestamp",   "type": "uint256"},
+        ],
+        "name": "AgentRegistered",
+        "type": "event",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "address", "name": "agent",     "type": "address"},
+            {"indexed": True,  "internalType": "address", "name": "owner",     "type": "address"},
+            {"indexed": True,  "internalType": "address", "name": "parent",    "type": "address"},
+            {"indexed": False, "internalType": "address", "name": "prevOwner", "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "nonce",     "type": "uint256"},
+        ],
+        "name": "OwnerBound",
+        "type": "event",
+    },
 ]
 
 _ZERO = "0x0000000000000000000000000000000000000000"
 
 
+def _get_logs(event, to_block: int):
+    """Fetch an event's logs [0, to_block] across web3.py arg-naming
+    versions (v6 camelCase, v7 snake_case)."""
+    try:
+        return event.get_logs(from_block=0, to_block=to_block)
+    except TypeError:
+        return event.get_logs(fromBlock=0, toBlock=to_block)
+
+
 def read_voice_state(
     substrate_address: str,
-    rpc_url: str,
+    rpc_url: str = "",
     *,
     epsilon: float = VOICE_EPSILON,
+    web3: Any = None,
 ) -> Dict[str, Any]:
     """Read {owner_map, voice_weights, supply, snapshot_block} from
-    Substrate.sol, PINNED to the previous epoch's anchor block.
-
-    The snapshot block is ``getAnchor(anchorCount-1).blockNumber`` —
-    on-chain, agreed, and pre-dating this epoch — so every daemon
-    derives the identical maps regardless of when its refresh fires.
-    With no anchor yet (epoch 1) there is no agreed snapshot: returns
-    empty maps (close runs weights=None, the uniform behavior).
+    Substrate.sol as of the previous epoch's anchor block.
 
     ``owner_map``: agent address -> owner wallet (lowercased 0x), only
-    for agents with a bound owner. ``voice_weights``: household key ->
-    epsilon + household_ATN/supply, rounded to 9 decimals; keys are
-    owner wallets for bound fleets and agent addresses for unbound
-    agents (matching the close's household fallback). Raises on RPC
-    failure — the driver's refresh hook catches and keeps the previous
-    maps.
+    for agents with a bound owner at the snapshot. ``voice_weights``:
+    household key -> epsilon + household_ATN/supply, rounded to 9
+    decimals; keys are owner wallets for bound fleets and agent
+    addresses for unbound agents (matching the close's household
+    fallback). Raises on RPC failure — the driver's refresh hook
+    catches and keeps the previous maps.
     """
     from web3 import Web3
 
-    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    w3 = web3 if web3 is not None else Web3(Web3.HTTPProvider(rpc_url))
     contract = w3.eth.contract(
         address=Web3.to_checksum_address(substrate_address), abi=_VOICE_ABI,
     )
@@ -149,33 +166,46 @@ def read_voice_state(
     anchor = contract.functions.getAnchor(anchor_count - 1).call()
     block = int(anchor[7])  # Anchor.blockNumber (struct field 7)
 
-    def _call(fn):
-        return fn.call(block_identifier=block)
+    # Agent set + owner map from event logs up to the snapshot block —
+    # deterministic (chain history) and served by non-archive nodes.
+    # Last OwnerBound per agent wins (rotation support), ordered by
+    # (blockNumber, logIndex).
+    agents = sorted({
+        str(log["args"]["agent"]).lower()
+        for log in _get_logs(contract.events.AgentRegistered, block)
+    })
+    bindings = sorted(
+        _get_logs(contract.events.OwnerBound, block),
+        key=lambda log: (int(log["blockNumber"]), int(log["logIndex"])),
+    )
+    owner_of: Dict[str, str] = {}
+    for log in bindings:
+        owner_of[str(log["args"]["agent"]).lower()] = (
+            str(log["args"]["owner"]).lower())
 
-    count = _call(contract.functions.registeredAgentCount())
-    supply = _call(contract.functions.atnTotalSupply())
+    supply = int(contract.functions.atnTotalSupplyAt(block).call())
+
+    def _balance_at(addr: str) -> int:
+        return int(contract.functions.balanceOfAt(
+            Web3.to_checksum_address(addr), block).call())
 
     owner_map: Dict[str, str] = {}
     # household key -> raw balance sum (int, exact — floats only at the
     # final ratio so accumulation order can't jitter the weights).
     house_balance: Dict[str, int] = {}
     seen_owners: set = set()
-    for i in range(count):
-        agent = _call(contract.functions.getRegisteredAgent(i))
-        agent_lc = str(agent).lower()
-        owner = _call(contract.functions.agentOwner(agent))
-        owner_lc = str(owner).lower()
-        bal = int(_call(contract.functions.balanceOf(agent)))
-        if owner_lc and owner_lc != _ZERO:
-            owner_map[agent_lc] = owner_lc
-            house_balance[owner_lc] = house_balance.get(owner_lc, 0) + bal
-            if owner_lc not in seen_owners:
-                seen_owners.add(owner_lc)
-                house_balance[owner_lc] += int(
-                    _call(contract.functions.balanceOf(owner)))
+    for agent in agents:
+        owner = owner_of.get(agent, "")
+        bal = _balance_at(agent)
+        if owner and owner != _ZERO:
+            owner_map[agent] = owner
+            house_balance[owner] = house_balance.get(owner, 0) + bal
+            if owner not in seen_owners:
+                seen_owners.add(owner)
+                house_balance[owner] += _balance_at(owner)
         else:
             # Unbound agent: its own household (matches _household()).
-            house_balance[agent_lc] = house_balance.get(agent_lc, 0) + bal
+            house_balance[agent] = house_balance.get(agent, 0) + bal
 
     voice_weights: Dict[str, float] = {}
     for house in sorted(house_balance.keys()):

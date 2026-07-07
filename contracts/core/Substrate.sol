@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol";
 
 /// @title Substrate — chain surface for the world-model substrate.
 ///
@@ -749,6 +750,8 @@ contract Substrate is EIP712 {
         // inference fees once the inference-as-a-service path lands.
         _atnBalance[msg.sender] += amount;
         atnTotalSupply += amount;
+        _checkpointATN(msg.sender);
+        _atnSupplyHistory.push(uint48(block.number), uint208(atnTotalSupply));
         emit ATNTransfer(address(0), msg.sender, amount);
 
         emit TrainingRecorded(
@@ -799,6 +802,31 @@ contract Substrate is EIP712 {
     mapping(address => mapping(address => uint256)) private _atnAllowance;
     uint256 public atnTotalSupply;
 
+    // Checkpointed balance history (the IVotes MECHANISM without the
+    // delegation layer — deliberate: getPastVotes-style semantics
+    // return 0 for accounts that never delegate, which would mute
+    // every wallet by default; the substrate's voice weighting needs
+    // past BALANCES, not past votes). Every balance mutation pushes a
+    // (block, balance) checkpoint, so historical balances are read
+    // from CURRENT state: balanceOfAt works on any node, no archive
+    // state required. Used by the federated close's voice weighting,
+    // which prices each household's review/usage credit from balances
+    // at the previous epoch's anchor block (nodes/common/voice_state.py).
+    using Checkpoints for Checkpoints.Trace208;
+    mapping(address => Checkpoints.Trace208) private _atnBalanceHistory;
+    Checkpoints.Trace208 private _atnSupplyHistory;
+
+    /// @dev Push the account's CURRENT balance as a checkpoint at this
+    ///      block. Same-block pushes overwrite (Trace208 semantics), so
+    ///      multiple transfers in one block leave one final checkpoint.
+    ///      uint208 cannot overflow: balances are bounded by total mint
+    ///      volume (1e6-scaled federation amounts).
+    function _checkpointATN(address account) private {
+        _atnBalanceHistory[account].push(
+            uint48(block.number), uint208(_atnBalance[account])
+        );
+    }
+
     event ATNTransfer(address indexed from, address indexed to, uint256 amount);
     event ATNApproval(address indexed owner, address indexed spender, uint256 amount);
 
@@ -808,6 +836,26 @@ contract Substrate is EIP712 {
 
     function balanceOf(address agent) external view returns (uint256) {
         return _atnBalance[agent];
+    }
+
+    /// @notice ATN balance as of the END of `blockNumber` (latest
+    ///         checkpoint at or before it; 0 if none). Served from
+    ///         current state — works on non-archive nodes.
+    function balanceOfAt(address agent, uint256 blockNumber)
+        external
+        view
+        returns (uint256)
+    {
+        return _atnBalanceHistory[agent].upperLookup(uint48(blockNumber));
+    }
+
+    /// @notice Total ATN supply as of the END of `blockNumber`.
+    function atnTotalSupplyAt(uint256 blockNumber)
+        external
+        view
+        returns (uint256)
+    {
+        return _atnSupplyHistory.upperLookup(uint48(blockNumber));
     }
 
     function allowance(address owner, address spender) external view returns (uint256) {
@@ -820,6 +868,8 @@ contract Substrate is EIP712 {
         if (bal < amount) revert InsufficientATN(amount, bal);
         unchecked { _atnBalance[msg.sender] = bal - amount; }
         _atnBalance[to] += amount;
+        _checkpointATN(msg.sender);
+        _checkpointATN(to);
         emit ATNTransfer(msg.sender, to, amount);
         return true;
     }
@@ -843,6 +893,8 @@ contract Substrate is EIP712 {
         }
         unchecked { _atnBalance[from] = bal - amount; }
         _atnBalance[to] += amount;
+        _checkpointATN(from);
+        _checkpointATN(to);
         emit ATNTransfer(from, to, amount);
         return true;
     }
@@ -893,6 +945,8 @@ contract Substrate is EIP712 {
         if (bal < amount) revert InsufficientATN(amount, bal);
         unchecked { _atnBalance[msg.sender] = bal - amount; }
         _atnBalance[recipient] += amount;
+        _checkpointATN(msg.sender);
+        _checkpointATN(recipient);
         emit ATNTransfer(msg.sender, recipient, amount);
         emit InferencePayment(msg.sender, recipient, amount, requestId);
         return true;
