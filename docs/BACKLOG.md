@@ -121,9 +121,17 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
 - Registrations carry-over GC (someday): the consensus map grows
   monotonically; mechanical GC = drop digests with zero usage for N
   epochs, re-registration re-admits. Not a design item.
-- Shadownet: deployed Substrate.sol predates the entire tool/vault/
-  anchor surface; redeploy is a user-gated batch (user removed the
-  old task; it returns when they say so).
+- ~~Shadownet redeploy~~ — DONE 2026-07-08 (user-gated, user said go):
+  Substrate `0x112F617De881ef0e94B010d9756aa8aef2794208` (checkpointed
+  ATN + owner binding + endpoint surface), CharterAnchor
+  `0x2B239bBE...c47C` (governor = deployer pending #7 handoff; charter
+  v1 anchored, hash 5756ed3a...), ServiceRegistry `0x080346d2...6400`.
+  PaymentChannel NOT deployed (challengeWindow = decision #4).
+  registry.json + Firestore settings/network updated, indexer@shadownet
+  restarted, testnet smoke green (anchor + dual mint verified on-chain),
+  live read_voice_state verified (snapshot-pinned, ε floor pre-mint).
+  REMAINING user-side: restart daemon(s) onto this build, re-register
+  agents (rpb_reconcile_registrations flips them local-unregistered).
 - atn_web: Flutter SDK one-line patch (VS 2026 generator) dies on
   flutter upgrade; CMAKE_POLICY_VERSION_MINIMUM=3.5 needed per local
   windows build until firebase fixes its CMakeLists.

@@ -71,30 +71,59 @@ def _load_substrate_abi():
 
 
 def _make_chain(rpb, kp, agent_id, charter_axis, n, embedding_dim):
-    chain = []
-    prev = b""
-    for i in range(1, n + 1):
-        coords = [0.0] * (6 + embedding_dim)
-        coords[charter_axis] = 0.5
-        coords[6 + (charter_axis * 5) + (i % embedding_dim)] = 0.5
-        ev = {
-            "kind": "observation_added",
-            "seq": 1,
-            "author_agent": agent_id,
-            "obs_id": f"obs_{agent_id}_{i}",
-            "coords": coords,
-            "label": f"{agent_id}_{i}",
+    """v3 mint fixture (mint = tool usage only): the agent authors a
+    pinned tool that gets a distinct-fleet greenlight and third-party
+    attested usage. Observation events alone no longer mint."""
+    import hashlib
+
+    digest = hashlib.sha256(f"smoke-tool-{agent_id}".encode()).hexdigest()
+    coords = [0.0] * (6 + embedding_dim)
+    coords[4] = 0.8
+    coords[6 + (charter_axis % embedding_dim)] = 0.5
+    reg = {
+        "kind": "sub_claim_sprouted", "seq": 1,
+        "author_agent": agent_id, "tendency_id": "correctness",
+        "parent_id": "solver_root", "node_id": f"tm_{digest[:12]}",
+        "position": "pro", "coords": list(coords),
+        "polarity_axis": list(coords),
+        "content": f"tool {digest[:8]}", "author_post": True,
+        "artifact_digest": digest,
+        "manifest_meta": {"trust_class": "pinned", "author": agent_id},
+    }
+
+    def _vet(vetter):
+        return {
+            "kind": "tool_used", "seq": 1, "author_agent": vetter,
+            "manifest_digest": digest, "tool_author": agent_id,
+            "receipt_digest": hashlib.sha256(
+                f"vet-{agent_id}-{vetter}".encode()).hexdigest(),
+            "ok": True, "fee_atn": 0.0, "vet": True,
         }
-        b = EventBatch(
-            rpb_address=rpb,
-            sender_pubkey=kp.public_key,
-            batch_seq=i,
-            events=[ev],
-            prev_batch_hash=prev,
-            timestamp=1.0 + i,
-        )
-        chain.append(b)
-        prev = b.content_hash()
+
+    def _receipt(caller):
+        return {
+            "kind": "tool_used", "seq": 1, "author_agent": caller,
+            "manifest_digest": digest, "tool_author": agent_id,
+            "receipt_digest": hashlib.sha256(
+                f"use-{agent_id}-{caller}".encode()).hexdigest(),
+            "ok": True, "fee_atn": 0.0, "attested": True, "score": 0.8,
+        }
+
+    events = [reg, _vet("vetter-1"), _vet("vetter-2"),
+              _receipt("caller-1"), _receipt("caller-2")]
+    # The registration rides this agent's keypair; every vet/receipt
+    # gets its own wire identity (the wire-level self-attestation
+    # dedup would otherwise zero the mint).
+    chain = [EventBatch(
+        rpb_address=rpb, sender_pubkey=kp.public_key, batch_seq=1,
+        events=[events[0]], prev_batch_hash=b"", timestamp=1.0,
+    )]
+    for ev in events[1:]:
+        chain.append(EventBatch(
+            rpb_address=rpb, sender_pubkey=Keypair.generate().public_key,
+            batch_seq=1, events=[ev], prev_batch_hash=b"",
+            timestamp=1.0,
+        ))
     return chain
 
 

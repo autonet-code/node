@@ -1,0 +1,12 @@
+{
+  "network": "shadownet",
+  "chainId": 127823,
+  "substrate_address": "0x112F617De881ef0e94B010d9756aa8aef2794208",
+  "charter_anchor_address": "0x2B239bBE423300dF238268A2Eb7192946FF7c47C",
+  "charter_hash": "5756ed3aa1831533c6ae7a1728cd6af73241c787049080ac3469d5b40f841cd5",
+  "charter_uri": "https://github.com/autonet-code/node/blob/master/nodes/common/world_model_substrate/adapter.py",
+  "service_registry_address": "0x080346d24D43bF938932E16964CabbAa4A916400",
+  "payment_channel_address": null,
+  "deployer": "0x06E5b15Bc39f921e1503073dBb8A5dA2Fc6220E9",
+  "deployed_at": "2026-07-07T21:11:13.452Z"
+}

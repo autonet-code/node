@@ -121,13 +121,66 @@ _VOICE_ABI = [
 _ZERO = "0x0000000000000000000000000000000000000000"
 
 
-def _get_logs(event, to_block: int):
-    """Fetch an event's logs [0, to_block] across web3.py arg-naming
-    versions (v6 camelCase, v7 snake_case)."""
+# (rpc_url-ish key, address) -> deployment block. Found once per
+# process; the contract's creation block never changes.
+_DEPLOY_BLOCK_CACHE: Dict[Any, int] = {}
+
+
+def _deployment_block(w3, address: str) -> int:
+    """Lowest block at which the contract has code (binary search on
+    eth_getCode, ~log2(head) RPC calls, cached). Event scans start
+    here instead of block 0 — public RPCs cap eth_getLogs ranges."""
+    key = (id(w3.provider), address.lower())
+    hit = _DEPLOY_BLOCK_CACHE.get(key)
+    if hit is not None:
+        return hit
+    lo, hi = 0, w3.eth.block_number
+    if not w3.eth.get_code(address, block_identifier=hi):
+        return hi  # no code at head — nothing to scan anyway
+    while lo < hi:
+        mid = (lo + hi) // 2
+        try:
+            has_code = bool(w3.eth.get_code(address, block_identifier=mid))
+        except Exception:
+            # Non-archive node can't serve old getCode — assume no code
+            # there and keep moving up; worst case we start the scan a
+            # little late, never early.
+            has_code = False
+        if has_code:
+            hi = mid
+        else:
+            lo = mid + 1
+    _DEPLOY_BLOCK_CACHE[key] = lo
+    return lo
+
+
+def _get_logs_range(event, from_block: int, to_block: int):
     try:
-        return event.get_logs(from_block=0, to_block=to_block)
+        return event.get_logs(from_block=from_block, to_block=to_block)
     except TypeError:
-        return event.get_logs(fromBlock=0, toBlock=to_block)
+        return event.get_logs(fromBlock=from_block, toBlock=to_block)
+
+
+def _get_logs(event, w3, address: str, to_block: int):
+    """Fetch an event's logs [deployment, to_block], splitting the
+    range adaptively when the RPC rejects it as too large (public
+    endpoints cap eth_getLogs spans)."""
+    start = _deployment_block(w3, address)
+    if start > to_block:
+        return []
+    spans = [(start, to_block)]
+    out = []
+    while spans:
+        lo, hi = spans.pop()
+        try:
+            out.extend(_get_logs_range(event, lo, hi))
+        except Exception as e:
+            if lo >= hi or "range" not in str(e).lower():
+                raise
+            mid = (lo + hi) // 2
+            spans.append((mid + 1, hi))
+            spans.append((lo, mid))
+    return out
 
 
 def read_voice_state(
@@ -172,10 +225,11 @@ def read_voice_state(
     # (blockNumber, logIndex).
     agents = sorted({
         str(log["args"]["agent"]).lower()
-        for log in _get_logs(contract.events.AgentRegistered, block)
+        for log in _get_logs(
+            contract.events.AgentRegistered, w3, contract.address, block)
     })
     bindings = sorted(
-        _get_logs(contract.events.OwnerBound, block),
+        _get_logs(contract.events.OwnerBound, w3, contract.address, block),
         key=lambda log: (int(log["blockNumber"]), int(log["logIndex"])),
     )
     owner_of: Dict[str, str] = {}
