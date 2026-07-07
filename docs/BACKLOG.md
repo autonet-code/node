@@ -15,11 +15,13 @@ idempotency fix, and the README-as-living-paper ("Autonet — The
 Recursive Principial Body") now serving both app whitepaper surfaces.
 
 **V3 OPS (time-sensitive):**
-- **FLAG-DAY: restart every daemon onto the v3 build BEFORE the next
-  federated close** — v3 changed the close output/CID; a mixed fleet
-  forks. The restart also collapses the duplicated harness records
-  (13× per boot pre-fix) and activates `economy_graph`/`tool_reviews`
-  for the new UI surfaces.
+- **FLAG-DAY: restart every daemon onto v0.5.0 BEFORE the next
+  federated close** (`pip install -U autonet-computer` — released
+  2026-07-08, carries v3 + voice weighting + the new shadownet
+  addresses via registry.json). v3/voice changed the close output/CID;
+  a mixed fleet forks. The restart also collapses the duplicated
+  harness records, activates `economy_graph`/`tool_reviews`, and
+  points at the redeployed Substrate — agents must re-register.
 - Deploy Firestore rules for `substrate_viz` (world-readable,
   client-unwritable) + run the substrate publisher next to a daemon
   (`scripts/indexer/` is gitignored ops — lives outside the repo).
