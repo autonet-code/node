@@ -125,6 +125,14 @@ SUBSTRATE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # Owner binding (agent -> owner wallet; zero address = unbound)
+    {
+        "inputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "name": "agentOwner",
+        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     # Per-agent balances
     {
         "inputs": [{"internalType": "address", "name": "agent", "type": "address"}],
@@ -547,6 +555,53 @@ class OnChainService:
             }
         except Exception as e:
             log.debug("Failed to read balances for %s: %s", address, e)
+            return None
+
+    async def get_fleet_voice(self, owner: str) -> dict[str, Any] | None:
+        """Read an owner's fleet: their wallet balance plus every bound
+        agent's ATN + reputation, and the network supply.
+
+        ``fleet_total_raw`` (owner balance + Σ agent balances) is the
+        household's "voice" numerator — the number the federated close
+        weights the fleet's reviews and usage by (see
+        nodes/common/voice_state.py). Raw integer chain units; the WS
+        layer scales for display.
+        """
+        try:
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            owner_addr = w3.to_checksum_address(owner)
+            owner_raw = int(contract.functions.balanceOf(owner_addr).call())
+            fleet_raw = owner_raw
+            agents: list[dict[str, Any]] = []
+            count = contract.functions.registeredAgentCount().call()
+            for i in range(count):
+                try:
+                    addr = contract.functions.getRegisteredAgent(i).call()
+                    bound = contract.functions.agentOwner(addr).call()
+                    if str(bound).lower() != str(owner_addr).lower():
+                        continue
+                    bal = int(contract.functions.balanceOf(addr).call())
+                    rep = int(contract.functions.agentReputation(addr).call())
+                    agents.append({
+                        "agent_id": str(addr),
+                        "balance_raw": bal,
+                        "reputation_raw": rep,
+                    })
+                    fleet_raw += bal
+                except Exception as e:
+                    log.debug("fleet_voice: agent %d read failed: %s", i, e)
+                    continue
+            supply_raw = int(contract.functions.atnTotalSupply().call())
+            return {
+                "owner": str(owner_addr),
+                "owner_balance_raw": owner_raw,
+                "fleet_total_raw": fleet_raw,
+                "supply_raw": supply_raw,
+                "agents": agents,
+            }
+        except Exception as e:
+            log.debug("Failed to read fleet voice for %s: %s", owner, e)
             return None
 
     async def get_all_registered_agents(self) -> list[dict[str, Any]]:

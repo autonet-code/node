@@ -152,6 +152,37 @@ class FederatedCloseDriver:
         # sourcing is wired (registerAgent v2 deploy) — the wire-level
         # batch-key dedup remains the interim floor.
         self.agent_owner_map: Dict[str, str] = {}
+        # Household voice weights (spec: balance-weighted voice addendum):
+        # household key (owner wallet, or agent id when unbound) ->
+        # epsilon + household_ATN / supply. Same trust contract as the
+        # owner map: chain-derived, identical at every daemon reading the
+        # same anchored state. Empty map -> close runs with weights=None
+        # (every household weighs 1.0, the no-chain behavior).
+        self.voice_weights: Dict[str, float] = {}
+        # Optional zero-arg refresh hook returning
+        # {"owner_map": {...}, "voice_weights": {...}} — wired by the
+        # host when chain access exists (see AutonetService.
+        # attach_chain_submission). Called at the top of each run so the
+        # close prices this epoch's voices from current chain state; on
+        # failure the previous maps stand (stale beats forked).
+        self.voice_source: Optional[Any] = None
+
+    def _refresh_voice(self) -> None:
+        if self.voice_source is None:
+            return
+        try:
+            state = self.voice_source() or {}
+            owner_map = state.get("owner_map")
+            weights = state.get("voice_weights")
+            if isinstance(owner_map, dict):
+                self.agent_owner_map = {
+                    str(k): str(v) for k, v in owner_map.items()}
+            if isinstance(weights, dict):
+                self.voice_weights = {
+                    str(k): float(v) for k, v in weights.items()}
+        except Exception as e:
+            logger.warning(
+                "voice-state refresh failed (keeping previous maps): %s", e)
 
     def run(self, local_close_result: Dict[str, Any]) -> Optional[FederatedCloseResult]:
         """Drive one federated close given the local close's result.
@@ -164,6 +195,8 @@ class FederatedCloseDriver:
         if not batches:
             logger.debug("federated close: no batches buffered, skipping")
             return None
+
+        self._refresh_voice()
 
         canonical = canonical_order(batches)
         if not canonical.ordered_batches:
@@ -183,6 +216,8 @@ class FederatedCloseDriver:
                 pricing=self.pricing,
                 tool_registrations=dict(self._tool_registrations),
                 agent_owner_map=dict(self.agent_owner_map),
+                voice_weights=(dict(self.voice_weights)
+                               if self.voice_weights else None),
                 tool_vetting=dict(self._tool_vetting),
                 tool_positions=dict(self._tool_positions),
             )

@@ -86,6 +86,59 @@ CON/bust rail. Covert harm invisible to satisfied users has ONLY the
 vetting entry gate as its dedicated defense — vetting is where that
 strength must live.
 
+## Decision (2026-07-08, addendum): balance-weighted voice
+
+Ratified in discussion, same day as v3, as the answer to the sybil
+trade above. Premise accepted first: **usage is unverifiable** —
+attestations are self-reported and nothing stops a custom framework
+from fabricating them. So the defense doesn't verify activity, it
+prices the identity behind it. Wallets are free; the only scarce,
+verifiable anchor in-system is ATN itself.
+
+1. **The household is the economic unit.** A caller's household is its
+   proven owner wallet (Substrate.sol's EIP-712 owner binding — the
+   owner signs at registration, so households can't be fabricated);
+   unbound callers stand as their own household. Registering an agent
+   is what lends it the owner's voice.
+2. **Collapse before damping.** Usage counts and review cells pool per
+   household BEFORE log1p — N co-owned agents are ONE voice
+   (`log1p(Σ counts)`, not N log1p terms). This closes the per-agent
+   amplification the old per-caller damper allowed. The author-house
+   comparison subsumes the self- and same-owner exclusions; the wire
+   dedup applies to the household's pooled sender keys.
+3. **Voice weight = ε + household_ATN / supply**, where household_ATN
+   is the owner wallet's balance plus every bound agent's balance
+   (agent mint stays on the agent address; the family's earnings count
+   without a sweep). **LINEAR in balance by design**: linearity is
+   splitting-invariance — dividing a balance across any number of
+   wallets or agents never gains weight. Resist any future urge to
+   damp it (log/caps reintroduce a splitting advantage).
+4. **ε (`VOICE_EPSILON`, provisional 0.05) is the floor** for unknown
+   or zero-balance households: it bounds what a throwaway identity can
+   contribute AND bootstraps a cold-start network (supply = 0 → every
+   voice = ε, i.e. uniform). The ε floor is the residual sybil surface
+   — damage is bounded at ε per fabricated identity while the real
+   economy outgrows it.
+5. **One weight, both rails.** The same household weight multiplies
+   the damped usage term (mint) and the review evidence mass (position
+   drift): a voice that can't mint can't move position either.
+6. **Trust contract**: `voice_weights` is a close input with the same
+   contract as `agent_owner_map` — chain-derived, identical at every
+   daemon reading the same chain state, refreshed by the driver's
+   `voice_source` hook just before each close
+   (`nodes/common/voice_state.py`). `voice_weights=None` (no chain) =
+   every household weighs 1.0. Known gap, accepted like the owner
+   map's: reads are not yet pinned to the prior anchor block — a
+   lagging chain view can fork a close; block-pinned reads are the
+   named upgrade before multi-daemon closes with live balances.
+
+Character shift accepted openly: capital = voice. Holders are the
+actors with the most to lose from junk mint debasing ATN, and every
+legitimate agent has a funded owner by construction ("AI can only
+execute if tokens are spent"), so the mute set is precisely the
+throwaway wallets. What this deliberately does NOT do: charge for tool
+use (tools stay free), verify usage (impossible), or prune anything.
+
 | | Tools (this doc) | Services (services_market.md) |
 |---|---|---|
 | Execution | local — your daemon, your data | remote — provider's machine |

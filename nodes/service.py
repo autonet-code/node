@@ -962,6 +962,17 @@ class AutonetService:
 
         self._chain_submission_driver = driver
         self.add_federated_close_subscriber(driver.handle_federated_close)
+
+        # Household voice sourcing (balance-weighted voice addendum):
+        # chain access exists here, so wire the close driver's refresh
+        # hook — each close prices voices (and the owner-map exclusions)
+        # from current chain state. Failures inside the hook keep the
+        # previous maps (handled by the driver).
+        def _voice_source():
+            from .common.voice_state import read_voice_state
+            return read_voice_state(cfg.substrate_address, cfg.rpc_url)
+
+        self._federated_close_driver.voice_source = _voice_source
         logger.info(
             "Chain submission attached (substrate=%s)", cfg.substrate_address,
         )

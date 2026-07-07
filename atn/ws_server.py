@@ -1991,6 +1991,72 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        if msg_type == "fleet_voice":
+            # Owner section (balance-weighted voice addendum): the
+            # owner's fleet — wallet balance + every bound agent's
+            # ATN/reputation — and the derived voice weight the close
+            # prices the household's reviews and usage with.
+            owner = msg.get("owner", "")
+            if not owner:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'owner'"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": True, "result": {
+                        "owner": owner, "available": False,
+                        "reason": "Substrate not configured on this daemon",
+                    }}
+                raw = await svc.get_fleet_voice(owner)
+                if raw is None:
+                    return {"msg_id": msg_id, "ok": True, "result": {
+                        "owner": owner, "available": False,
+                        "reason": "Chain read failed — is the RPC reachable?",
+                    }}
+                try:
+                    from nodes.common.federated_reconcile import (
+                        VOICE_EPSILON as _eps,
+                    )
+                except Exception:
+                    _eps = 0.05
+                _scale = 1_000_000.0  # chain units are ATN x 1e6
+                local_names: dict[str, str] = {}
+                try:
+                    for defn, _status in self.runtime.list_agents():
+                        ident = getattr(defn, "identity", None)
+                        addr = (getattr(ident, "address", "") or "").lower()
+                        if addr:
+                            local_names[addr] = (
+                                getattr(defn, "name", "") or defn.id)
+                except Exception:
+                    pass
+                agents = []
+                for a in raw["agents"]:
+                    addr = str(a["agent_id"])
+                    agents.append({
+                        "agent_id": addr,
+                        "name": local_names.get(addr.lower(), ""),
+                        "local": addr.lower() in local_names,
+                        "balance": a["balance_raw"] / _scale,
+                        "reputation": a["reputation_raw"] / _scale,
+                    })
+                supply_raw = int(raw["supply_raw"])
+                share = ((raw["fleet_total_raw"] / supply_raw)
+                         if supply_raw > 0 else 0.0)
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "owner": raw["owner"],
+                    "available": True,
+                    "reason": "",
+                    "owner_balance": raw["owner_balance_raw"] / _scale,
+                    "fleet_total": raw["fleet_total_raw"] / _scale,
+                    "supply": supply_raw / _scale,
+                    "voice_weight": round(_eps + share, 6),
+                    "epsilon": _eps,
+                    "agents": agents,
+                }}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
         if msg_type == "rpb_agent_record":
             address = msg.get("address", "")
             if not address:

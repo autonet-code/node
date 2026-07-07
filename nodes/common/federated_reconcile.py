@@ -90,6 +90,21 @@ VET_ROYALTY_SHARE = 0.1
 VET_ROYALTY_EPOCHS = 8
 VET_BUST_THRESHOLD = 0.5
 
+# Household voice (docs/tool_substrate.md, Decision 2026-07-08 addendum:
+# balance-weighted voice). A "household" is the economic identity behind
+# a caller: its registered owner wallet (proven on-chain by the EIP-712
+# owner binding), falling back to the agent id when unbound. Usage and
+# review mass collapse per household BEFORE damping (log1p once per
+# household — N agents under one owner are one voice, closing the
+# per-agent log1p amplification), then multiply by the household's
+# voice weight: epsilon + household_ATN / total_supply, LINEAR in
+# balance so splitting a balance across wallets never gains weight.
+# VOICE_EPSILON is the floor for households the weight map doesn't
+# know — it bounds what a zero-balance sybil identity can contribute
+# and is what lets a cold-start network (supply = 0) bootstrap.
+# PROVISIONAL VALUE pending user blessing (economics parameter).
+VOICE_EPSILON = 0.05
+
 
 def _normalize_vetting(vetting: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Canonicalize carried-over vetting state (sorted, typed, copied).
@@ -157,6 +172,7 @@ def compute_tool_mint(
     *,
     registrations: Optional[Dict[str, Dict[str, str]]] = None,
     agent_owner_map: Optional[Dict[str, str]] = None,
+    voice_weights: Optional[Dict[str, float]] = None,
     vetting: Optional[Dict[str, Any]] = None,
     positions: Optional[Dict[str, Dict[str, Any]]] = None,
     vet_quorum: float = VET_QUORUM,
@@ -176,23 +192,33 @@ def compute_tool_mint(
     remote services never enter the substrate at all
     (docs/services_market.md).
 
-    ``usage_term`` is the sim-ratified combo damper (spec: Mint
-    section): Σ over unique attesting AGENTS a ≠ author of
-    log1p(a's attested-ok receipts) — only COGNITIVE attestations
-    count; mechanical receipts are exhaust. Two exclusions run first:
+    ``usage_term`` is the combo damper collapsed to HOUSEHOLDS
+    (Decision 2026-07-08 addendum: balance-weighted voice): callers
+    group by their proven owner wallet (``agent_owner_map``; unbound
+    callers are their own household), attested-ok counts sum per
+    household, log1p damps ONCE per household, and the damped value
+    multiplies the household's voice weight (``voice_weights``,
+    keyed by household: epsilon + household ATN / supply, linear so
+    balance-splitting is weight-neutral). ``voice_weights=None`` (no
+    chain access) means every household weighs 1.0 — the pre-voice
+    behavior; a non-None map defaults unknown households to
+    ``VOICE_EPSILON``. Only COGNITIVE attestations count; mechanical
+    receipts are exhaust. Two exclusions run first:
 
       1. Owner-rooted (final form, spec "Owner-rooted registration"):
-         a caller whose registered owner wallet equals the author's is
-         excluded. ``agent_owner_map`` (agent id → owner 0x) is an
+         the author's own household is excluded — this subsumes the
+         self-attestation check and the same-owner check in one
+         comparison. ``agent_owner_map`` (agent id → owner 0x) is an
          explicit carry-over input like ``registrations`` — sourced
-         from chain sponsorship data by the driver, identical at every
-         daemon, absent entries = unknown owner = no exclusion.
-      2. Wire-level (interim floor until sponsored registrations are
-         ubiquitous): a caller whose attestation batches were signed
-         with the same key as the registration batch is excluded
-         (co-hosted sybil agents collapse to nothing). The sender key
-         is transport plumbing — the agent is the only economic
-         entity; the key appears in no output.
+         from chain owner-binding data by the driver, identical at
+         every daemon, absent entries = unknown owner = the caller is
+         its own household.
+      2. Wire-level (interim floor until bound registrations are
+         ubiquitous): a household ANY of whose attestation batches
+         were signed with the same key as the registration batch is
+         excluded (co-hosted sybil agents collapse to nothing). The
+         sender key is transport plumbing — the agent is the only
+         economic entity; the key appears in no output.
 
     Cross-epoch state comes in as one explicit param, derived purely
     from prior epochs' canonical events (so bit-identical everywhere):
@@ -339,18 +365,32 @@ def compute_tool_mint(
         d: [x for x in str(m.get("deps") or "").split(",") if x]
         for d, m in known_regs.items()
     }
+
+    # Household collapse (voice addendum): the economic unit behind a
+    # caller is its proven owner wallet; unbound callers stand alone.
+    def _household(agent_id: str) -> str:
+        return owner_map_all.get(agent_id, "") or agent_id
+
+    # eff buckets are keyed by HOUSEHOLD: counts sum across a
+    # household's agents at each attested composite, then log1p damps
+    # once — N co-owned agents are one voice, not N log1p terms.
     eff: Dict[str, Dict[str, float]] = {}
-    caller_senders: Dict[str, set] = {}
+    house_senders: Dict[str, set] = {}
     for digest in sorted(set(usage) & set(known_regs)):
         shares = _composition_shares(digest, deps_of)
         entry = usage[digest]
+        counts: Dict[str, int] = {}
         for caller in sorted(entry["attested_ok_by_caller"].keys()):
-            damped = math.log1p(entry["attested_ok_by_caller"][caller])
-            caller_senders.setdefault(caller, set()).update(
+            house = _household(caller)
+            counts[house] = (counts.get(house, 0)
+                             + int(entry["attested_ok_by_caller"][caller]))
+            house_senders.setdefault(house, set()).update(
                 entry["attester_senders"].get(caller, []))
+        for house in sorted(counts.keys()):
+            damped = math.log1p(counts[house])
             for target in sorted(shares.keys()):
                 bucket = eff.setdefault(target, {})
-                bucket[caller] = bucket.get(caller, 0.0) + damped * shares[target]
+                bucket[house] = bucket.get(house, 0.0) + damped * shares[target]
 
     # Resident grammar — ADOPTION (spec: Resident tools, loadouts,
     # distros): loadout stamps on attestations credit the distro by
@@ -365,24 +405,23 @@ def compute_tool_mint(
     # the union of the fleet's senders.
     from .world_model_substrate.tool_usage import loadout_adoption_from_events
     adoption = loadout_adoption_from_events(events)
-    owner_map_early = agent_owner_map or {}
     for loadout in sorted(set(adoption) & set(known_regs)):
         shares = _composition_shares(loadout, deps_of)
         entry = adoption[loadout]
         fleets: Dict[str, List[str]] = {}
         for caller in sorted(entry["by_caller"].keys()):
-            fleet_key = owner_map_early.get(caller, "") or caller
-            fleets.setdefault(fleet_key, []).append(caller)
+            fleets.setdefault(_household(caller), []).append(caller)
         for fleet_key in sorted(fleets.keys()):
-            members = fleets[fleet_key]
-            rep = members[0]  # sorted representative
-            pooled = caller_senders.setdefault(rep, set())
-            for member in members:
+            # Fleet == household: credit lands on the household key
+            # directly, senders pool there for the wire dedup below.
+            pooled = house_senders.setdefault(fleet_key, set())
+            for member in fleets[fleet_key]:
                 pooled.update(entry["senders"].get(member, []))
             damped = math.log1p(1)
             for target in sorted(shares.keys()):
                 bucket = eff.setdefault(target, {})
-                bucket[rep] = bucket.get(rep, 0.0) + damped * shares[target]
+                bucket[fleet_key] = (bucket.get(fleet_key, 0.0)
+                                     + damped * shares[target])
 
     per_digest: Dict[str, Dict[str, Any]] = {}
     node_agent: Dict[str, Dict[str, float]] = {}
@@ -405,26 +444,26 @@ def compute_tool_mint(
         if vet_quorum > 0 and not greenlit:
             continue
         nodes = by_digest.get(digest, [])
-        # Combo damper: per-attesting-agent log1p, author excluded,
-        # co-hosted callers (attestation batch signed with the same key
-        # as the registration batch) excluded.
+        # Combo damper over HOUSEHOLDS: counts collapsed + log1p'd at
+        # fan-out time, author's household excluded (subsumes self and
+        # same-owner), co-hosted households (any attestation batch
+        # signed with the registration batch's key) excluded, then each
+        # household's damped credit scales by its voice weight.
         reg_sender = str(meta.get("sender") or "")
-        owner_map = agent_owner_map or {}
-        author_owner = owner_map.get(author, "")
+        author_house = _household(author)
         attested_by = eff[digest]
         usage_term = 0.0
         attesters = 0
-        for caller in sorted(attested_by.keys()):
-            if caller == author:
+        for house in sorted(attested_by.keys()):
+            if house == author_house:
                 continue
-            # Owner-rooted exclusion: same registered owner = same fleet.
-            if author_owner and owner_map.get(caller, "") == author_owner:
+            if reg_sender and reg_sender in house_senders.get(house, set()):
                 continue
-            if reg_sender and reg_sender in caller_senders.get(caller, set()):
-                continue
-            # Already damped at fan-out time (log1p once per caller per
-            # attested composite) — sum linearly here.
-            usage_term += attested_by[caller]
+            w_voice = 1.0
+            if voice_weights is not None:
+                w_voice = round(
+                    float(voice_weights.get(house, VOICE_EPSILON)), 9)
+            usage_term += attested_by[house] * w_voice
             attesters += 1
         # v3 (spec Decision 2026-07-08): USAGE ALONE mints. The standing
         # multiplier is retired — reviews rank discovery and drift
@@ -505,29 +544,49 @@ def compute_tool_mint(
             meta = known_regs[digest]
             author = str(meta.get("author") or "")
             reg_sender = str(meta.get("sender") or "")
-            author_owner = owner_map_all.get(author, "")
+            author_house = _household(author)
             reviews = entry.get("axis_reviews_by_caller") or {}
+            # Household collapse mirrors the mint damper exactly: a
+            # household's review cells pool per axis across its agents,
+            # log1p damps the pooled count once, and the result scales
+            # by the household's voice weight — a voice that can't mint
+            # can't move position either, and never more than its
+            # balance-weighted share.
+            house_cells: Dict[str, Dict[str, Dict[str, float]]] = {}
+            house_rev_senders: Dict[str, set] = {}
+            for caller in sorted(reviews.keys()):
+                house = _household(caller)
+                house_rev_senders.setdefault(house, set()).update(
+                    entry.get("attester_senders", {}).get(caller, []))
+                for axis_id in sorted(reviews[caller].keys()):
+                    cell = reviews[caller][axis_id]
+                    agg = house_cells.setdefault(house, {}).setdefault(
+                        str(axis_id), {"sum": 0.0, "n": 0})
+                    agg["sum"] += float(cell.get("sum") or 0.0)
+                    agg["n"] += int(cell.get("n") or 0)
             add_mass = [0.0] * N_DIMS
             add_val = [0.0] * N_DIMS
-            for caller in sorted(reviews.keys()):
-                if caller == author:
+            for house in sorted(house_cells.keys()):
+                if house == author_house:
                     continue
-                if author_owner and owner_map_all.get(caller, "") == author_owner:
+                if reg_sender and reg_sender in house_rev_senders.get(
+                        house, set()):
                     continue
-                senders = entry.get("attester_senders", {}).get(caller, [])
-                if reg_sender and reg_sender in senders:
-                    continue
-                for axis_id in sorted(reviews[caller].keys()):
-                    idx = axis_index.get(str(axis_id))
+                w_voice = 1.0
+                if voice_weights is not None:
+                    w_voice = round(
+                        float(voice_weights.get(house, VOICE_EPSILON)), 9)
+                for axis_id in sorted(house_cells[house].keys()):
+                    idx = axis_index.get(axis_id)
                     if idx is None:
                         continue
-                    cell = reviews[caller][axis_id]
-                    n = int(cell.get("n") or 0)
+                    cell = house_cells[house][axis_id]
+                    n = int(cell["n"])
                     if n <= 0:
                         continue
-                    w = math.log1p(n)
+                    w = math.log1p(n) * w_voice
                     add_mass[idx] += w
-                    add_val[idx] += w * (float(cell.get("sum") or 0.0) / n)
+                    add_val[idx] += w * (cell["sum"] / n)
             for i in range(N_DIMS):
                 if add_mass[i] > 0.0:
                     head[i] = ((mass[i] * head[i] + add_val[i])
@@ -819,6 +878,7 @@ def federated_epoch_close(
     pricing: str = "ledger",
     tool_registrations: Optional[Dict[str, Dict[str, str]]] = None,
     agent_owner_map: Optional[Dict[str, str]] = None,
+    voice_weights: Optional[Dict[str, float]] = None,
     tool_vetting: Optional[Dict[str, Any]] = None,
     tool_positions: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
@@ -961,6 +1021,7 @@ def federated_epoch_close(
         world, all_events,
         registrations=tool_registrations,
         agent_owner_map=agent_owner_map,
+        voice_weights=voice_weights,
         vetting=tool_vetting,
         positions=tool_positions,
     )

@@ -30,18 +30,25 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   unrun.
 
 **TO FIX / HARDEN:**
-- **The v3 sybil trade (accepted at ratification, needs a plan before
-  real value flows):** reviews now drive both ranking and position
-  with no adversarial gate — a ring of colluding callers can pump a
-  tool's rating, discovery placement, and mint. Standing defenses:
-  vetting entry gate, per-caller log1p damping, owner-map + wire-key
-  exclusions, and the cognitive cost of attestations. Named
-  mitigation: reactivate the dormant CON/bust rail (kept in-tree).
-  Covert harm invisible to satisfied users has ONLY vetting as its
-  dedicated defense — vetting params (below) are therefore
-  load-bearing. Decide the tripwire: what observable signal (review
-  ring topology? mint concentration? owner-map clustering?) wakes the
-  dormant rail.
+- **The v3 sybil trade — MITIGATION BUILT 2026-07-08 (balance-weighted
+  voice, spec addendum in `docs/tool_substrate.md`):** callers now
+  collapse to HOUSEHOLDS (proven owner wallet) before log1p damping,
+  and each household's usage/review credit scales by
+  `ε + household_ATN/supply` (linear ⇒ balance-splitting is
+  weight-neutral; zero-balance identities carry at most ε = 0.05
+  PROVISIONAL, needs blessing). Wired: close math
+  (`federated_reconcile.py`), chain sourcing
+  (`voice_state.py` → driver `voice_source` hook), `fleet_voice` WS +
+  Owner page in atn_web (wallet dropdown). Tests:
+  `tests/test_voice_weights.py` (10) + all close families green.
+  REMAINING: (a) reads not yet pinned to the prior anchor block — a
+  lagging chain view can fork a multi-daemon close (same accepted gap
+  as agent_owner_map; pin before live multi-daemon closes); (b) the ε
+  floor is the residual sybil surface — bounded, but the dormant
+  CON/bust rail stays the named backstop; (c) covert harm still has
+  ONLY vetting as its dedicated defense — vet params (below) remain
+  load-bearing. NOTE: this changes close output again — same flag-day
+  window as v3 (fleet is still one daemon).
 - world_persistence: checkpoint doesn't persist `artifact_digest` →
   viz `kind` tagging and ratings-lift ranking degrade after a daemon
   restart until the next close reapplies positions (carry-over maps
