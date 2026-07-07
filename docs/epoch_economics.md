@@ -1,11 +1,77 @@
-# Epoch Economics — Fixed Emission & Candle Close
+# Epoch Economics — Fee-Recycled Emission & Candle Close
 
-Status: fixed emission IMPLEMENTED (2026-06-10, config-gated); candle
-close IMPLEMENTED for the local daemon path (2026-06-11) — federated
-candle + chain-derived seed still pending (see below). Local dev config:
-100 ATN/day, 2-day epochs + 1-day candle window.
+Status: fee-recycled emission IMPLEMENTED end to end (2026-07-08 —
+contract fee rail, close-side pool, driver wiring; see the Decision
+below). The 2026-06-10 fixed-emission normalizer (`apply_emission_pool`)
+is the mechanism it rides on. Candle close IMPLEMENTED for the local
+daemon path (2026-06-11) — federated candle + chain-derived seed still
+pending (see below).
 
-## Fixed emission (implemented)
+## Decision (2026-07-08): fee-recycled emission
+
+Ratified in discussion; replaces "pick an ATN-per-time-unit constant"
+as the emission model. The pool at each federated close is
+
+    pool(N) = BASE_EMISSION_PER_EPOCH + recycled(N)
+    recycled(N) = Σ ServiceFee.burned in the snapshot anchor's window
+
+so emission tracks real economic activity in the services economy
+instead of a clock, with a small clock-based floor.
+
+**The fee rail (Substrate.sol, implemented).** Every `payForInference`
+takes `SERVICE_FEE_BPS` (250 = 2.5%, PROVISIONAL) of the gross:
+`FEE_TREASURY_BPS` (5000 = half, PROVISIONAL) of the fee transfers to
+the immutable `treasury` address (set at construction — no admin key
+to repoint; the DAO's native revenue rail), and the remainder BURNS
+(supply decreases, checkpointed). The recipient receives the net.
+`ServiceFee(payer, recipient, amount, burned, toTreasury)` is emitted
+per collection.
+
+**The recycling (close side, implemented).** `read_voice_state`
+(nodes/common/voice_state.py) sums `ServiceFee.burned` over the
+window between the previous two anchors — every fee lands in exactly
+one window — and returns `emission_pool = base + recycled`; the
+federated-close driver passes it to `federated_epoch_close`, where
+`apply_emission_pool` normalizes mints pro-rata. Burn-and-remint is
+recycling implemented on the existing mint rail: no new payout
+machinery, no change to `recordTrainingForEpoch`.
+
+**Why this shape (the scrutiny that produced it):**
+
+- *Wash-proof by conservation.* Volume-linked PRINTING invites wash
+  trading (fake volume is free — money in a circle). Fee-funding
+  inverts it: pumping volume pays real fees into a pool you only ever
+  share pro-rata — every wash cycle is strictly value-losing.
+  (`test_self_payment_still_pays_the_fee` pins the miniature case.)
+- *The floor is the faucet, not a salary.* Mint is ATN's only supply
+  path; a zero floor would deadlock the economy at zero supply forever
+  (no ATN → no service payments → no fees → no pool). BASE
+  (`BASE_EMISSION_PER_EPOCH` = 100.0, PROVISIONAL) primes the pump and
+  damps the bust side of pro-cyclicality: it pays the same in a slump,
+  when building the commons should be cheapest.
+- *Doctrine closure.* Paid service demand is the gap map (absorption
+  frontier, docs/tool_substrate.md); this makes the commons' funding
+  proportional to the size of the map — the market finances its own
+  commoditization, mechanically.
+
+Epoch 1 (no anchor yet): no agreed fee window exists — the pool is
+the floor alone. Tests: `tests/test_voice_snapshot.py`
+(`TestFeeRecycledEmission` — one-window conservation),
+`tests/test_phase7_2_pay_for_inference.py` (fee split / burn /
+treasury), `tests/test_epoch_emission.py` (the normalizer).
+
+PROVISIONAL parameters awaiting blessing: `SERVICE_FEE_BPS`,
+`FEE_TREASURY_BPS` (on-chain constants — changing them is a
+redeploy), `BASE_EMISSION_PER_EPOCH` (close-side constant —
+consensus-relevant, flag-day to change).
+
+## Fixed emission — the normalizer (implemented)
+
+(As of 2026-07-08 this section describes the MECHANISM the
+fee-recycled decision above rides on. The `epoch_emission_rate`
+config knob below still exists and still gates the LOCAL close's
+projection; the FEDERATED close's pool now comes from the fee rail
+via the driver's voice-state refresh, not from config.)
 
 Problem: `mint(node) = max(0, score_change) × survival` is uncapped —
 every claim prints new tokens, supply scales with activity, and junk

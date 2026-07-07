@@ -31,6 +31,7 @@ from nodes.common.canonical_ordering import canonical_order
 from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
 from nodes.common.event_gossip import EventBatch, Keypair
 from nodes.common.federated_reconcile import (
+    BASE_EMISSION_PER_EPOCH,
     VOICE_EPSILON,
     federated_epoch_close,
 )
@@ -49,7 +50,7 @@ def _load_substrate() -> Tuple[list, str]:
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
     contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor().transact({"from": deployer, "gas": 8_000_000})
+    tx = contract.constructor(deployer).transact({"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
     return receipt.contractAddress
@@ -207,6 +208,9 @@ class TestVoiceStateSnapshot:
         assert state["snapshot_block"] is None
         assert state["voice_weights"] == {}
         assert state["owner_map"] == {}
+        # Epoch 1: floor-only pool (the faucet), nothing recycled yet.
+        assert state["emission_pool"] == BASE_EMISSION_PER_EPOCH
+        assert state["recycled"] == 0.0
 
     def test_weights_pinned_to_anchor_block(self, fx):
         """The architecture guarantee: activity AFTER the anchor cannot
@@ -243,3 +247,42 @@ class TestVoiceStateSnapshot:
         state_2b = read_voice_state(fx["addr"], web3=fx["w3"])
         assert state_2b["voice_weights"] == state_2["voice_weights"]
         assert state_2b["snapshot_block"] == state_2["snapshot_block"]
+
+
+class TestFeeRecycledEmission:
+    def test_burned_fees_enter_exactly_one_window(self, fx):
+        """A service payment's burned fee share raises the pool for the
+        FIRST close whose snapshot window contains it, then leaves —
+        recycling conserves; nothing is counted twice."""
+        w3, contract = fx["w3"], fx["contract"]
+        # Epoch 1: anchor + mint so a payer has ATN.
+        r1, res1 = _anchor_epoch(fx, fx["agent_addrs"], "e_f1", "rpb_f1")
+        payer, amount = _mint_for(fx, r1, res1, "e_f1")
+
+        # Pay for a service — the fee burns + treasury share moves.
+        other = next(a for a in fx["agent_addrs"] if a != payer)
+        supply_before = contract.functions.atnTotalSupply().call()
+        pay = amount // 2
+        fee = pay * 250 // 10_000
+        to_treasury = fee * 5_000 // 10_000
+        burned = fee - to_treasury
+        tx = contract.functions.payForInference(
+            other, pay, Web3.keccak(text="svc-req")).transact(
+            {"from": payer, "gas": 300_000})
+        assert w3.eth.wait_for_transaction_receipt(tx).status == 1
+        assert (contract.functions.atnTotalSupply().call()
+                == supply_before - burned)
+
+        # Anchor epoch 2 — its window contains the payment.
+        _anchor_epoch(fx, fx["agent_addrs"], "e_f2", "rpb_f2")
+        state = read_voice_state(fx["addr"], web3=fx["w3"])
+        assert state["recycled"] == pytest.approx(burned / 1_000_000.0)
+        assert state["emission_pool"] == pytest.approx(
+            BASE_EMISSION_PER_EPOCH + burned / 1_000_000.0)
+
+        # Anchor epoch 3 with no payments — the fee has left the
+        # window; pool falls back to the floor.
+        _anchor_epoch(fx, fx["agent_addrs"], "e_f3", "rpb_f3")
+        state_3 = read_voice_state(fx["addr"], web3=fx["w3"])
+        assert state_3["recycled"] == 0.0
+        assert state_3["emission_pool"] == BASE_EMISSION_PER_EPOCH

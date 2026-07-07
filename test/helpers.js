@@ -4,7 +4,7 @@ const digest = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
 
 async function deploySubstrate() {
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy();
+  const substrate = await Substrate.deploy((await ethers.getSigners())[0].address);
   await substrate.waitForDeployment();
   return substrate;
 }

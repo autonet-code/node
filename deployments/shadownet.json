@@ -2,8 +2,9 @@
   "network": "shadownet",
   "chainId": 127823,
   "rpc_url": "https://node.shadownet.etherlink.com",
-  "substrate_address": "0x112F617De881ef0e94B010d9756aa8aef2794208",
+  "substrate_address": "0xA828227281ac7cfd95A677E9c0ED1F05A07026Ef",
+  "treasury": "0x7c83FF7b0356DbE332BFC527F1Ea73283974aEA2",
   "deployer": "0x06E5b15Bc39f921e1503073dBb8A5dA2Fc6220E9",
-  "deployment_tx": "0x3d50ba6ba856833de3efd6f4696ae6ac249f7d360d6fcff0f23c6a3f7784a29f",
-  "deployed_at": "2026-07-07T21:09:23.777Z"
+  "deployment_tx": "0xc58971545c519517f7ffd80d3b8dcbc3f9b3af9a8a89a4b841f82a24637723f0",
+  "deployed_at": "2026-07-07T22:45:33.104Z"
 }

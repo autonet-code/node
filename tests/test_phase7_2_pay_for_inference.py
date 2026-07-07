@@ -9,9 +9,11 @@ Validates:
   3. Insufficient balance reverts; no state change.
   4. Recipient = zero address reverts (no value gets stuck).
   5. Reputation untouched on both sides — payments are pure ATN flows.
-  6. atnTotalSupply unchanged by payments (it's still a transfer, not
-     a mint or burn).
-  7. Multiple payments accumulate cleanly on the recipient.
+  6. The service fee (fee-recycled emission, docs/epoch_economics.md):
+     SERVICE_FEE_BPS of the gross splits into a burned share (supply
+     decreases; the close re-mints it as the recycled emission pool)
+     and a treasury share (transferred to the immutable treasury).
+  7. Multiple payments accumulate cleanly on the recipient (net of fee).
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ def _load_substrate() -> Tuple[list, str]:
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
     contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor().transact({"from": deployer, "gas": 8_000_000})
+    tx = contract.constructor(deployer).transact({"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
     return receipt.contractAddress
@@ -71,6 +73,14 @@ def _coord(charter, embed_idx, mag):
     out = list(charter) + [0.0] * 1024
     out[4 + embed_idx] = mag
     return tuple(out)
+
+
+def _fee_parts(amount: int) -> Tuple[int, int, int]:
+    """(fee, burned, to_treasury) for a gross payment — mirrors the
+    contract's integer math (SERVICE_FEE_BPS=250, FEE_TREASURY_BPS=5000)."""
+    fee = amount * 250 // 10_000
+    to_treasury = fee * 5_000 // 10_000
+    return fee, fee - to_treasury, to_treasury
 
 
 def _make_chain(rpb: str, agent_id: str) -> List[EventBatch]:
@@ -184,13 +194,16 @@ def test_pay_for_inference_moves_balance_and_emits_event(chain):
     assert payer_initial > 0
     recipient_before = contract.functions.balanceOf(recipient).call()
     supply_before = contract.functions.atnTotalSupply().call()
+    treasury = contract.functions.treasury().call()
+    treasury_before = contract.functions.balanceOf(treasury).call()
 
     pay_amount = payer_initial // 4
+    fee, burned, to_treasury = _fee_parts(pay_amount)
     request_id = Web3.keccak(text="inference-request-abc123")
 
     tx = contract.functions.payForInference(
         recipient, pay_amount, request_id,
-    ).transact({"from": payer_addr, "gas": 200_000})
+    ).transact({"from": payer_addr, "gas": 400_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
 
@@ -199,10 +212,14 @@ def test_pay_for_inference_moves_balance_and_emits_event(chain):
     supply_after = contract.functions.atnTotalSupply().call()
 
     assert payer_after == payer_initial - pay_amount
-    assert recipient_after == recipient_before + pay_amount
-    assert supply_after == supply_before  # transfer, not mint/burn
+    assert recipient_after == recipient_before + pay_amount - fee
+    # Burned share leaves supply (re-minted by the close as the
+    # recycled emission pool); treasury share lands at the treasury.
+    assert supply_after == supply_before - burned
+    assert (contract.functions.balanceOf(treasury).call()
+            == treasury_before + to_treasury)
 
-    # InferencePayment event with the right fields.
+    # InferencePayment event carries the GROSS amount.
     inf_events = contract.events.InferencePayment().process_receipt(receipt)
     assert len(inf_events) == 1
     args = inf_events[0]["args"]
@@ -211,13 +228,19 @@ def test_pay_for_inference_moves_balance_and_emits_event(chain):
     assert args["amount"] == pay_amount
     assert args["requestId"] == request_id
 
-    # ATNTransfer event also fires.
+    # ServiceFee event carries the split the close reads.
+    fee_events = contract.events.ServiceFee().process_receipt(receipt)
+    assert len(fee_events) == 1
+    fargs = fee_events[0]["args"]
+    assert fargs["amount"] == pay_amount
+    assert fargs["burned"] == burned
+    assert fargs["toTreasury"] == to_treasury
+
+    # ATNTransfer events: net to recipient + treasury share.
     xfer_events = contract.events.ATNTransfer().process_receipt(receipt)
-    assert len(xfer_events) == 1
-    xfer = xfer_events[0]["args"]
-    assert xfer["from"] == payer_addr
-    assert xfer["to"] == recipient
-    assert xfer["amount"] == pay_amount
+    by_to = {e["args"]["to"]: e["args"]["amount"] for e in xfer_events}
+    assert by_to[recipient] == pay_amount - fee
+    assert by_to[treasury] == to_treasury
 
 
 def test_request_id_indexed_for_filtering(chain):
@@ -242,19 +265,20 @@ def test_multiple_payments_accumulate_on_recipient(chain):
     recipient_before = contract.functions.balanceOf(recipient).call()
 
     pay_each = payer_initial // 8
-    total_paid = 0
+    fee_each, _, _ = _fee_parts(pay_each)
+    total_net = 0
     for i in range(3):
         rid = Web3.keccak(text=f"req-{i}")
         tx = contract.functions.payForInference(
             recipient, pay_each, rid,
-        ).transact({"from": payer_addr, "gas": 200_000})
+        ).transact({"from": payer_addr, "gas": 400_000})
         receipt = w3.eth.wait_for_transaction_receipt(tx)
         assert receipt.status == 1
-        total_paid += pay_each
+        total_net += pay_each - fee_each
 
     assert (
         contract.functions.balanceOf(recipient).call()
-        == recipient_before + total_paid
+        == recipient_before + total_net
     )
 
 
@@ -276,7 +300,7 @@ def test_pay_for_inference_with_insufficient_balance_reverts(chain):
     try:
         tx = contract.functions.payForInference(
             recipient, 100, rid,
-        ).transact({"from": poor_payer, "gas": 200_000})
+        ).transact({"from": poor_payer, "gas": 400_000})
         rcpt = w3.eth.wait_for_transaction_receipt(tx)
         if rcpt.status != 1:
             rejected = True
@@ -299,7 +323,7 @@ def test_pay_to_zero_address_reverts(chain):
     try:
         tx = contract.functions.payForInference(
             "0x0000000000000000000000000000000000000000", 1, rid,
-        ).transact({"from": payer_addr, "gas": 200_000})
+        ).transact({"from": payer_addr, "gas": 400_000})
         rcpt = w3.eth.wait_for_transaction_receipt(tx)
         if rcpt.status != 1:
             rejected = True
@@ -331,7 +355,7 @@ def test_payment_does_not_change_reputation_on_either_side(chain):
     rid = Web3.keccak(text="rep-isolation")
     tx = contract.functions.payForInference(
         recipient, pay_amount, rid,
-    ).transact({"from": payer_addr, "gas": 200_000})
+    ).transact({"from": payer_addr, "gas": 400_000})
     w3.eth.wait_for_transaction_receipt(tx)
 
     payer_rep_after = contract.functions.agentReputation(payer_addr).call()
@@ -360,14 +384,16 @@ def test_payment_to_unregistered_address_works(chain):
 
     _give_agent_some_atn(chain, payer_addr, payer_addr)
     pay_amount = 12345
+    fee, _, _ = _fee_parts(pay_amount)
     rid = Web3.keccak(text="anon-recipient")
 
     tx = contract.functions.payForInference(
         unregistered_recipient, pay_amount, rid,
-    ).transact({"from": payer_addr, "gas": 200_000})
+    ).transact({"from": payer_addr, "gas": 400_000})
     rcpt = w3.eth.wait_for_transaction_receipt(tx)
     assert rcpt.status == 1
-    assert contract.functions.balanceOf(unregistered_recipient).call() == pay_amount
+    assert (contract.functions.balanceOf(unregistered_recipient).call()
+            == pay_amount - fee)
 
 
 # ---------------------------------------------------------------------------
@@ -375,9 +401,11 @@ def test_payment_to_unregistered_address_works(chain):
 # ---------------------------------------------------------------------------
 
 
-def test_self_payment_is_a_no_op_in_balance_terms(chain):
-    """payForInference(self, ...) shouldn't crash and shouldn't
-    double-count. End balance unchanged."""
+def test_self_payment_still_pays_the_fee(chain):
+    """payForInference(self, ...) shouldn't crash or double-count —
+    and the fee applies regardless: self-payment costs the fee. This
+    is the wash-trading defense in miniature — cycling volume through
+    yourself burns real ATN into the shared pool."""
     w3 = chain["w3"]
     contract = chain["contract"]
     payer_addr = chain["agent_addrs"][0]
@@ -385,10 +413,11 @@ def test_self_payment_is_a_no_op_in_balance_terms(chain):
 
     rid = Web3.keccak(text="self-pay")
     pay = initial // 4
+    fee, _, _ = _fee_parts(pay)
     tx = contract.functions.payForInference(
         payer_addr, pay, rid,
-    ).transact({"from": payer_addr, "gas": 200_000})
+    ).transact({"from": payer_addr, "gas": 400_000})
     rcpt = w3.eth.wait_for_transaction_receipt(tx)
     assert rcpt.status == 1
-    # Balance unchanged: subtract then add same amount.
-    assert contract.functions.balanceOf(payer_addr).call() == initial
+    # Subtract gross, add back net: the fee is the only movement.
+    assert contract.functions.balanceOf(payer_addr).call() == initial - fee

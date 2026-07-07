@@ -105,6 +105,22 @@ VET_BUST_THRESHOLD = 0.5
 # PROVISIONAL VALUE pending user blessing (economics parameter).
 VOICE_EPSILON = 0.05
 
+# Fee-recycled emission (docs/epoch_economics.md, Decision 2026-07-08):
+#   pool(N) = BASE_EMISSION_PER_EPOCH + recycled(N)
+# where recycled(N) = Σ ServiceFee.burned between the previous two
+# anchors (read on-chain by voice_state.read_voice_state, same pinned
+# rail as voice weights). The burned share of every service fee leaves
+# supply at payment time and re-enters here — burn-and-remint is
+# recycling on the existing mint rail, wash-proof by conservation
+# (pumping volume pays real fees into a pool shared pro-rata). The
+# BASE floor is the faucet: mint is ATN's only supply path, so a
+# zero floor would deadlock the economy at zero supply forever. It
+# also pays the same in a slump (counter-cyclical damping).
+# PROVISIONAL VALUE pending user blessing (economics parameter);
+# the fee/treasury split lives on-chain (Substrate.sol
+# SERVICE_FEE_BPS / FEE_TREASURY_BPS).
+BASE_EMISSION_PER_EPOCH = 100.0
+
 
 def _normalize_vetting(vetting: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Canonicalize carried-over vetting state (sorted, typed, copied).

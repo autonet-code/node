@@ -13,9 +13,9 @@
       "contracts": {
         "dao": "0x7c83FF7b0356DbE332BFC527F1Ea73283974aEA2",
         "rpb": "",
-        "substrate": "0x112F617De881ef0e94B010d9756aa8aef2794208",
-        "charter_anchor": "0x2B239bBE423300dF238268A2Eb7192946FF7c47C",
-        "service_registry": "0x080346d24D43bF938932E16964CabbAa4A916400"
+        "substrate": "0xA828227281ac7cfd95A677E9c0ED1F05A07026Ef",
+        "charter_anchor": "0x65c9FBFDECaa65954917FC14f0Fa5edD3ce7d32D",
+        "service_registry": "0xCe4D4899B1F5804cDfAe2A2d891A64d63320c90C"
       }
     }
   }

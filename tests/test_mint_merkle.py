@@ -109,7 +109,7 @@ def chain():
     w3 = Web3(EthereumTesterProvider())
     deployer = w3.eth.accounts[0]
     contract_f = w3.eth.contract(abi=data["abi"], bytecode=data["bytecode"])
-    tx = contract_f.constructor().transact({"from": deployer, "gas": 8_000_000})
+    tx = contract_f.constructor(deployer).transact({"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
     contract = w3.eth.contract(address=receipt.contractAddress, abi=data["abi"])

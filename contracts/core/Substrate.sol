@@ -67,7 +67,12 @@ contract Substrate is EIP712 {
     ///      chainId + this contract's address, so an owner-binding signature is
     ///      bound to THIS Substrate deployment on THIS chain — it cannot be
     ///      replayed against another Substrate instance or a fork.
-    constructor() EIP712("AutonetSubstrate", "1") {}
+    /// @param treasury_ The DAO treasury address receiving the treasury share
+    ///        of the service fee (see payForInference). Immutable — there is
+    ///        no admin key to repoint it; changing it is a redeploy.
+    constructor(address treasury_) EIP712("AutonetSubstrate", "1") {
+        treasury = treasury_;
+    }
 
     // =========================================================================
     // Anchor records
@@ -926,6 +931,40 @@ contract Substrate is EIP712 {
         bytes32 indexed requestId
     );
 
+    // -------------------------------------------------------------------------
+    // Service fee (fee-recycled emission, docs/epoch_economics.md).
+    //
+    // A fee on every labeled service payment, split two ways:
+    //   - the BURNED share leaves supply here and re-enters as the recycled
+    //     component of the next epoch's emission pool (the federated close
+    //     reads ServiceFee logs between anchors) — burn-and-remint is
+    //     recycling implemented on the existing mint rail, and it is what
+    //     makes volume-linked emission wash-proof: pumping volume pays real
+    //     fees into a pool you only ever share pro-rata;
+    //   - the TREASURY share transfers to the immutable DAO treasury.
+    //
+    // PROVISIONAL VALUES pending user blessing (economics parameters).
+    // -------------------------------------------------------------------------
+
+    /// @notice Fee on payForInference, in basis points of the gross amount.
+    uint16 public constant SERVICE_FEE_BPS = 250;      // 2.5%
+    /// @notice Share OF THE FEE that goes to the treasury; the rest burns.
+    uint16 public constant FEE_TREASURY_BPS = 5000;    // half/half
+    uint16 public constant BPS_DENOM = 10_000;
+
+    /// @notice DAO treasury (set at construction; no admin key to repoint).
+    address public immutable treasury;
+
+    /// @notice Emitted per fee collection. `burned` is what the federated
+    ///         close sums into the next epoch's recycled emission pool.
+    event ServiceFee(
+        address indexed payer,
+        address indexed recipient,
+        uint256 amount,
+        uint256 burned,
+        uint256 toTreasury
+    );
+
     /// @notice Pay a serving agent for an inference request.
     /// @param recipient The serving agent's address (the on-chain
     ///                  identity of the agent that handled the
@@ -943,12 +982,37 @@ contract Substrate is EIP712 {
         if (recipient == address(0)) revert TransferToZero();
         uint256 bal = _atnBalance[msg.sender];
         if (bal < amount) revert InsufficientATN(amount, bal);
+
+        // Service fee: burned share exits supply (recycled into the next
+        // epoch's emission pool by the close), treasury share transfers.
+        uint256 fee = (amount * SERVICE_FEE_BPS) / BPS_DENOM;
+        uint256 toTreasury = treasury != address(0)
+            ? (fee * FEE_TREASURY_BPS) / BPS_DENOM
+            : 0;
+        uint256 burned = fee - toTreasury;
+        uint256 net = amount - fee;
+
         unchecked { _atnBalance[msg.sender] = bal - amount; }
-        _atnBalance[recipient] += amount;
+        _atnBalance[recipient] += net;
         _checkpointATN(msg.sender);
         _checkpointATN(recipient);
-        emit ATNTransfer(msg.sender, recipient, amount);
+        if (toTreasury > 0) {
+            _atnBalance[treasury] += toTreasury;
+            _checkpointATN(treasury);
+            emit ATNTransfer(msg.sender, treasury, toTreasury);
+        }
+        if (burned > 0) {
+            atnTotalSupply -= burned;
+            _atnSupplyHistory.push(
+                uint48(block.number), uint208(atnTotalSupply)
+            );
+        }
+
+        emit ATNTransfer(msg.sender, recipient, net);
         emit InferencePayment(msg.sender, recipient, amount, requestId);
+        if (fee > 0) {
+            emit ServiceFee(msg.sender, recipient, amount, burned, toTreasury);
+        }
         return true;
     }
 }

@@ -41,7 +41,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from .federated_reconcile import VOICE_EPSILON
+from .federated_reconcile import BASE_EMISSION_PER_EPOCH, VOICE_EPSILON
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,23 @@ _VOICE_ABI = [
         "name": "OwnerBound",
         "type": "event",
     },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "address", "name": "payer",      "type": "address"},
+            {"indexed": True,  "internalType": "address", "name": "recipient",  "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "amount",     "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "burned",     "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "toTreasury", "type": "uint256"},
+        ],
+        "name": "ServiceFee",
+        "type": "event",
+    },
 ]
+
+# Chain amounts are ATN x 1e6 (the agent-side submitter scaling);
+# emission pools are float ATN units on the close side.
+_ATN_SCALE = 1_000_000.0
 
 _ZERO = "0x0000000000000000000000000000000000000000"
 
@@ -190,8 +206,11 @@ def read_voice_state(
     epsilon: float = VOICE_EPSILON,
     web3: Any = None,
 ) -> Dict[str, Any]:
-    """Read {owner_map, voice_weights, supply, snapshot_block} from
-    Substrate.sol as of the previous epoch's anchor block.
+    """Read {owner_map, voice_weights, supply, snapshot_block,
+    emission_pool, recycled} from Substrate.sol as of the previous
+    epoch's anchor block. ``emission_pool`` = BASE_EMISSION_PER_EPOCH +
+    the burned fee shares (ServiceFee logs) in the snapshot anchor's
+    window — the fee-recycled emission input to the close.
 
     ``owner_map``: agent address -> owner wallet (lowercased 0x), only
     for agents with a bound owner at the snapshot. ``voice_weights``:
@@ -210,14 +229,32 @@ def read_voice_state(
 
     anchor_count = contract.functions.anchorCount().call()
     if anchor_count == 0:
+        # No agreed snapshot yet (epoch 1): no voices, floor-only pool.
         return {
             "owner_map": {},
             "voice_weights": {},
             "supply": 0,
             "snapshot_block": None,
+            "emission_pool": BASE_EMISSION_PER_EPOCH,
+            "recycled": 0.0,
         }
     anchor = contract.functions.getAnchor(anchor_count - 1).call()
     block = int(anchor[7])  # Anchor.blockNumber (struct field 7)
+
+    # Fee-recycled emission: sum the burned fee shares in this anchor's
+    # window — (previous anchor block, this anchor block]. Every fee
+    # lands in exactly one window, so recycling conserves across epochs.
+    if anchor_count >= 2:
+        prev_anchor = contract.functions.getAnchor(anchor_count - 2).call()
+        window_start = int(prev_anchor[7]) + 1
+    else:
+        window_start = _deployment_block(w3, contract.address)
+    burned_raw = 0
+    for log in _get_logs(contract.events.ServiceFee, w3,
+                         contract.address, block):
+        if int(log["blockNumber"]) >= window_start:
+            burned_raw += int(log["args"]["burned"])
+    recycled = burned_raw / _ATN_SCALE
 
     # Agent set + owner map from event logs up to the snapshot block —
     # deterministic (chain history) and served by non-archive nodes.
@@ -271,4 +308,6 @@ def read_voice_state(
         "voice_weights": voice_weights,
         "supply": int(supply),
         "snapshot_block": block,
+        "emission_pool": round(BASE_EMISSION_PER_EPOCH + recycled, 10),
+        "recycled": round(recycled, 10),
     }

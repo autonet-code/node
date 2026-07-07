@@ -64,7 +64,7 @@ def _load_substrate() -> Tuple[list, str]:
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
     contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor().transact({"from": deployer, "gas": 8_000_000})
+    tx = contract.constructor(deployer).transact({"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
     return receipt.contractAddress
@@ -106,34 +106,61 @@ def chain():
 def _make_chain(
     rpb: str, kp: Keypair, agent_id: str, charter_axis: int, n: int = 2,
 ) -> List[EventBatch]:
-    """Build a small canonical chain of batches for one agent, with
-    observations biased toward a chosen charter axis so each agent
-    creates their own region of contested sub-claims (ensures all
-    agents in the test get attributed mint)."""
-    chain: List[EventBatch] = []
-    prev = b""
-    for i in range(1, n + 1):
-        coords = [0.0] * (6 + 1024)
-        coords[charter_axis] = 0.5
-        coords[6 + (charter_axis * 50) + (10 * (i + 1))] = 0.5
-        ev = {
-            "kind": "observation_added",
-            "seq": 1,
-            "author_agent": agent_id,
-            "obs_id": f"obs_{agent_id}_{i}",
-            "coords": coords,
-            "label": f"{agent_id}_{i}",
+    """v3 mint fixture (mint = tool usage only): each agent authors a
+    pinned tool (digest derived from the agent id), vetted by a
+    distinct fleet and used by third-party attesting callers.
+    Observation events alone no longer mint."""
+    import hashlib
+
+    digest = hashlib.sha256(f"tool-{agent_id}".encode()).hexdigest()
+    coords = [0.0] * (6 + 1024)
+    coords[4] = 0.8
+    coords[6 + (charter_axis % 1024)] = 0.5
+    reg = {
+        "kind": "sub_claim_sprouted", "seq": 1,
+        "author_agent": agent_id, "tendency_id": "correctness",
+        "parent_id": "solver_root", "node_id": f"tm_{digest[:12]}",
+        "position": "pro", "coords": list(coords),
+        "polarity_axis": list(coords),
+        "content": f"tool {digest[:8]}", "author_post": True,
+        "artifact_digest": digest,
+        "manifest_meta": {"trust_class": "pinned", "author": agent_id},
+    }
+
+    def _vet(vetter):
+        return {
+            "kind": "tool_used", "seq": 1, "author_agent": vetter,
+            "manifest_digest": digest, "tool_author": agent_id,
+            "receipt_digest": hashlib.sha256(
+                f"vet-{agent_id}-{vetter}".encode()).hexdigest(),
+            "ok": True, "fee_atn": 0.0, "vet": True,
         }
-        b = EventBatch(
-            rpb_address=rpb,
-            sender_pubkey=kp.public_key,
-            batch_seq=i,
-            events=[ev],
-            prev_batch_hash=prev,
-            timestamp=1_700_000_000.0 + i,
-        )
-        chain.append(b)
-        prev = b.content_hash()
+
+    def _receipt(caller):
+        return {
+            "kind": "tool_used", "seq": 1, "author_agent": caller,
+            "manifest_digest": digest, "tool_author": agent_id,
+            "receipt_digest": hashlib.sha256(
+                f"use-{agent_id}-{caller}".encode()).hexdigest(),
+            "ok": True, "fee_atn": 0.0, "attested": True, "score": 0.8,
+        }
+
+    events = [reg, _vet("vetter-1"), _vet("vetter-2"),
+              _receipt("caller-1"), _receipt("caller-2")]
+    # Registration rides this agent's keypair; every vet/receipt gets
+    # its own wire identity (the wire-level dedup would otherwise zero
+    # the mint).
+    chain = [EventBatch(
+        rpb_address=rpb, sender_pubkey=kp.public_key, batch_seq=1,
+        events=[events[0]], prev_batch_hash=b"",
+        timestamp=1_700_000_000.0,
+    )]
+    for ev in events[1:]:
+        chain.append(EventBatch(
+            rpb_address=rpb, sender_pubkey=Keypair.generate().public_key,
+            batch_seq=1, events=[ev], prev_batch_hash=b"",
+            timestamp=1_700_000_000.0,
+        ))
     return chain
 
 

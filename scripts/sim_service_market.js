@@ -72,7 +72,7 @@ async function main() {
 
   // --- deploy stack ---
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy();
+  const substrate = await Substrate.deploy((await ethers.getSigners())[0].address);
   await substrate.waitForDeployment();
 
   const Reg = await ethers.getContractFactory("ServiceRegistry");

@@ -66,9 +66,14 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   the category notes (they still get the injected closing review turn).
 
 **USER-ONLY DECISIONS (nothing proceeds without these):**
-1. Emission rate — fixed pool vs floating; fixed recommended. Sets
-   inflation + backer dilution modelability. (Still unset; every mint
-   number is provisional until this is blessed.)
+1. ~~Emission rate~~ — shape RATIFIED + BUILT 2026-07-08:
+   **fee-recycled emission** (`docs/epoch_economics.md` Decision) —
+   pool = BASE floor + burned service fees recycled (wash-proof by
+   conservation; treasury share to the DAO). Remaining user-only:
+   bless the PROVISIONAL values — SERVICE_FEE_BPS (2.5%),
+   FEE_TREASURY_BPS (50% of fee), BASE_EMISSION_PER_EPOCH (100 ATN).
+   Fee params are on-chain constants (redeploy to change); BASE is
+   consensus-flag-day.
 2. repPerReputation rate on ReputationMirror (default 1:1, timelock-
    governed) — the direction/quality exchange rate; flagged as the
    most consequential unbuilt decision; wants sims.

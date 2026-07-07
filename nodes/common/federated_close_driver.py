@@ -159,6 +159,12 @@ class FederatedCloseDriver:
         # same anchored state. Empty map -> close runs with weights=None
         # (every household weighs 1.0, the no-chain behavior).
         self.voice_weights: Dict[str, float] = {}
+        # Fee-recycled emission pool (docs/epoch_economics.md): base
+        # floor + burned service fees in the snapshot anchor's window,
+        # computed by the same voice_source refresh. None (no chain
+        # source) = no normalization — raw mint units, the legacy/local
+        # behavior.
+        self.emission_pool: Optional[float] = None
         # Optional zero-arg refresh hook returning
         # {"owner_map": {...}, "voice_weights": {...}} — wired by the
         # host when chain access exists (see AutonetService.
@@ -180,6 +186,9 @@ class FederatedCloseDriver:
             if isinstance(weights, dict):
                 self.voice_weights = {
                     str(k): float(v) for k, v in weights.items()}
+            pool = state.get("emission_pool")
+            if pool is not None:
+                self.emission_pool = float(pool)
         except Exception as e:
             logger.warning(
                 "voice-state refresh failed (keeping previous maps): %s", e)
@@ -218,6 +227,7 @@ class FederatedCloseDriver:
                 agent_owner_map=dict(self.agent_owner_map),
                 voice_weights=(dict(self.voice_weights)
                                if self.voice_weights else None),
+                emission_pool=self.emission_pool,
                 tool_vetting=dict(self._tool_vetting),
                 tool_positions=dict(self._tool_positions),
             )

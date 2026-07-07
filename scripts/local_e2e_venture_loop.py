@@ -671,7 +671,13 @@ async def amain(from_stage: str = "A", to_stage: str = "G") -> int:
         assert vault.functions.tranchesClaimed().call() == 1
 
         # --- Customer pays the service via payForInference into the vault.
+        # The Substrate service fee (fee-recycled emission,
+        # docs/epoch_economics.md) is taken at payment time: the vault
+        # receives the NET amount; the burned share re-enters as the
+        # next epoch's recycled emission pool.
         REVENUE = 1000
+        SERVICE_FEE = REVENUE * 250 // 10_000          # 25 (2.5%)
+        NET_REVENUE = REVENUE - SERVICE_FEE            # 975 lands at the vault
         faucet.fund(CUSTOMER.address, REVENUE)
         _fund_gas(w3, HH_KEYS[0], DEPLOYER.address, CUSTOMER.address, ether=1)
         req_id = _keccak(b"inference-request-1")
@@ -680,28 +686,28 @@ async def amain(from_stage: str = "A", to_stage: str = "G") -> int:
             substrate.functions.payForInference(vault_addr, REVENUE, req_id),
             HH_KEYS[6], CUSTOMER.address)
 
-        # claimRevenue splits: 60% → backers, 40% → agent.
+        # claimRevenue splits the NET: 60% → backers, 40% → agent.
         _owner_tx(w3, vault.functions.claimRevenue(), HH_KEYS[0],
                   DEPLOYER.address)
-        to_backers = (REVENUE * TERMS_BPS) // 10_000   # 600
-        to_agent = REVENUE - to_backers                # 400
-        # Backer pro-rata within the 600: b1 600/1000 = 360, b2 = 240.
+        to_backers = (NET_REVENUE * TERMS_BPS) // 10_000   # 585
+        to_agent = NET_REVENUE - to_backers                # 390
+        # Backer pro-rata within the 585: b1 600/1000 = 351, b2 = 234.
         pend_b1 = vault.functions.pendingBackerRevenue(BACKER1.address).call()
         pend_b2 = vault.functions.pendingBackerRevenue(BACKER2.address).call()
-        assert pend_b1 == (to_backers * B1) // RAISE_MIN == 360, pend_b1
-        assert pend_b2 == (to_backers * B2) // RAISE_MIN == 240, pend_b2
+        assert pend_b1 == (to_backers * B1) // RAISE_MIN == 351, pend_b1
+        assert pend_b2 == (to_backers * B2) // RAISE_MIN == 234, pend_b2
 
         # Backers claim pro-rata; assert to the wei.
         b1_before = substrate.functions.balanceOf(BACKER1.address).call()
         _owner_tx(w3, vault.functions.claimBackerRevenue(), HH_KEYS[4],
                   BACKER1.address)
         assert substrate.functions.balanceOf(BACKER1.address).call() \
-            - b1_before == 360
+            - b1_before == 351
         b2_before = substrate.functions.balanceOf(BACKER2.address).call()
         _owner_tx(w3, vault.functions.claimBackerRevenue(), HH_KEYS[5],
                   BACKER2.address)
         assert substrate.functions.balanceOf(BACKER2.address).call() \
-            - b2_before == 240
+            - b2_before == 234
 
         # Agent claims its 40% remainder.
         ag_before = substrate.functions.balanceOf(venture["address"]).call()
@@ -735,10 +741,11 @@ async def amain(from_stage: str = "A", to_stage: str = "G") -> int:
         assert vault.functions.tranchesClaimed().call() > claimed_before
 
         sE.note("per_tranche", per_tranche)
+        sE.note("service_fee", SERVICE_FEE)
         sE.note("revenue_to_backers", to_backers)
         sE.note("revenue_to_agent", to_agent)
-        sE.note("backer1_share", 360)
-        sE.note("backer2_share", 240)
+        sE.note("backer1_share", 351)
+        sE.note("backer2_share", 234)
         sE.note("halt_blocked_tranche", True)
         sE.note("unhalt_restored", True)
         sE.status = "PASS"

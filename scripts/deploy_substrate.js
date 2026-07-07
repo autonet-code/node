@@ -27,9 +27,15 @@ async function main() {
     throw new Error("Deployer has zero balance");
   }
 
+  // DAO treasury for the service-fee split (immutable; no admin key to
+  // repoint). Defaults to the deployer for local runs; pass TREASURY for
+  // real networks (shadownet: the trustless DAO address in registry.json).
+  const treasury = process.env.TREASURY || deployer.address;
+  console.log(`Treasury: ${treasury}`);
+
   console.log("Deploying Substrate.sol...");
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy();
+  const substrate = await Substrate.deploy(treasury);
   await substrate.waitForDeployment();
   const address = await substrate.getAddress();
   const tx = substrate.deploymentTransaction();
@@ -47,6 +53,7 @@ async function main() {
     chainId: network.config.chainId,
     rpc_url: network.config.url || null,
     substrate_address: address,
+    treasury: treasury,
     deployer: deployer.address,
     deployment_tx: tx ? tx.hash : null,
     deployed_at: new Date().toISOString(),
