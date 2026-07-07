@@ -46,6 +46,23 @@ def generate_policy_map(ks) -> dict:
     return {svc: svc for svc in ks.list_services()}
 
 
+def write_policy_map(ks) -> str:
+    """Regenerate + persist the service->policy map. Returns the map path.
+
+    Called by ``main`` below and by the WS ``secrets_put``/``secrets_delete``
+    handlers after a vault mutation. NOTE: the broker caches this map at
+    import, so a newly ADDED service needs a broker restart to become
+    grantable; rotation of an existing name works live."""
+    mapping = generate_policy_map(ks)
+    mp = _policy_map_path(ks)
+    d = os.path.dirname(mp)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(mp, "w", encoding="utf-8") as f:
+        json.dump(mapping, f, indent=2)
+    return mp
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     ks = _keystore()
@@ -56,11 +73,8 @@ def main(argv=None) -> int:
     print(f"[vault] identity     : ready (age public key {pub})")
 
     # 2. service->policy identity map — what the broker + daemon read to authorize.
+    mp = write_policy_map(ks)
     mapping = generate_policy_map(ks)
-    mp = _policy_map_path(ks)
-    os.makedirs(os.path.dirname(mp), exist_ok=True)
-    with open(mp, "w", encoding="utf-8") as f:
-        json.dump(mapping, f, indent=2)
     print(f"[vault] policy map   : {mp} ({len(mapping)} service(s))")
     if not mapping:
         print("[vault] note         : vault is empty. Add secrets with "

@@ -94,6 +94,10 @@ class EventType(Enum):
 
     # Security (stub — full monitor is the security track)
     SECURITY_ALARM = "security.alarm"
+    # Secret-access audit trail (names-only; see runtime/secret_audit.py).
+    # Mirrors SECURITY_ALARM's convention: the agent travels as event
+    # ``source``, the data carries NO agent_id key and NEVER a value/path.
+    SECRET_ACCESS = "security.secret_access"
 
     # Generic / custom events
     CUSTOM = "custom"

@@ -107,6 +107,18 @@ def put_secret(service, value):
     _write_vault(d)
 
 
+def delete_secret(service):
+    """Remove one secret from the encrypted vault. (Admin op, not agent-facing.)
+    Returns True if it existed. The caller regenerates the policy map; live
+    staged copies are untouched (session teardown / sweep reclaims them)."""
+    d = _read_vault()
+    if service not in d:
+        return False
+    del d[service]
+    _write_vault(d)
+    return True
+
+
 def list_services():
     """Service NAMES in the vault (no values). Admin/debug."""
     return sorted(_read_vault().keys())

@@ -359,12 +359,20 @@ class SecurityMonitor:
                   src_agent, ", ".join(fresh))
 
     def _record_names(self, names: list[str]) -> None:
-        """Append to the durable NAMES-only store via kevin/secret_alarm."""
+        """Append to the durable NAMES-only store via kevin/secret_alarm.
+
+        The vendored in-wheel copy is authoritative (same pattern as the
+        keystore import in worker_host.py); a dev checkout of kevin on the
+        path is the fallback. Before the vendored copy existed this import
+        silently failed everywhere and secret_alarms.json was never written."""
         try:
-            from secret_alarm import record_alarm  # type: ignore
-            import secret_alarm as _sa  # type: ignore
-        except Exception:  # noqa: BLE001 — store is optional; scan still fires the event
-            return
+            from atn._vendor.kevin import secret_alarm as _sa  # type: ignore
+        except Exception:  # noqa: BLE001
+            try:
+                import secret_alarm as _sa  # type: ignore
+            except Exception:  # noqa: BLE001 — store is optional; scan still fires the event
+                return
+        record_alarm = _sa.record_alarm
         # Relocate the module-level store under our data_dir if we have one.
         if self._alarm_store_path:
             try:

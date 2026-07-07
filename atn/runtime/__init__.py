@@ -244,6 +244,12 @@ class Runtime:
             self.events, data_dir=self._config.data_dir)
         self.security_monitor.start()
 
+        # Names-only secret-access audit trail (which agent used which secret,
+        # when). Fed by the grant/stage/revoke hooks below and by the owner's
+        # WS mutations (secrets_put/secrets_delete). Loop bound in start().
+        from .secret_audit import SecretAuditLog
+        self.secret_audit = SecretAuditLog(self.events, self._config.data_dir)
+
         def _value_push_sink(exposure: dict) -> None:
             # Owner-authenticated push frame -> live-set. The raw value lives
             # ONLY here (and the worker's staged file); it is dropped at revoke.
@@ -257,6 +263,19 @@ class Runtime:
                 )
             except Exception:  # noqa: BLE001 — a bad push must not kill anything
                 log.debug("value-push -> add_exposure failed", exc_info=True)
+            # Audit: push receipt == the broker staged this secret for the
+            # worker (the broker fails staging closed if the push doesn't
+            # land). NAME only — never the value or the staged path. Runs on
+            # the atn-vpush thread; SecretAuditLog hops to the loop itself.
+            try:
+                self.secret_audit.record(
+                    "staged",
+                    agent_id=exposure.get("agent_id") or "",
+                    services=[exposure.get("secret_name") or ""],
+                    pid=exposure.get("pid"),
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("value-push -> audit record failed", exc_info=True)
 
         try:
             self._broker_client.arm_value_push(_value_push_sink)
@@ -548,6 +567,11 @@ class Runtime:
         self._grants[int(pid)] = {"agent_id": agent_id, "services": list(l_child)}
         log.info("secret-grant: session minted for agent=%s pid=%s services=%s",
                  agent_id, pid, l_child)
+        try:
+            self.secret_audit.record(
+                "granted", agent_id=agent_id, services=list(l_child), pid=pid)
+        except Exception:  # noqa: BLE001 — audit must never break the grant
+            log.debug("secret-grant: audit record failed", exc_info=True)
         return None
 
     def _on_pid_revoked(self, pid: int, agent_id: str | None) -> None:
@@ -582,6 +606,16 @@ class Runtime:
             except Exception:  # noqa: BLE001
                 log.debug("secret-revoke: drop_exposure failed for pid=%s",
                           pid, exc_info=True)
+            # (c') Audit the teardown (names only).
+            try:
+                self.secret_audit.record(
+                    "revoked",
+                    agent_id=agent_id or grant.get("agent_id") or "",
+                    services=list(grant.get("services") or []),
+                    pid=pid,
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("secret-revoke: audit record failed", exc_info=True)
 
         # (c) Drain any stale stash keyed by this agent (e.g. a grant was stashed
         # at Seam A but the worker died before Seam B popped it). Uses the
@@ -591,6 +625,13 @@ class Runtime:
         return None
 
     async def start(self) -> None:
+        # Bind the runtime loop into the audit trail so records written from
+        # the vpush/supervisor threads can emit their live SECRET_ACCESS event.
+        try:
+            self.secret_audit.bind_loop(asyncio.get_running_loop())
+        except RuntimeError:
+            pass
+
         # Recover crashed executions
         recovered = self.execution_log.recover_running()
         if recovered:
