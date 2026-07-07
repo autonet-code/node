@@ -321,6 +321,27 @@ async def run_cognitive_loop(
 
     response = await provider.send_orchestrate(**send_kwargs)
 
+    # v3 review step for providers whose loop can't inject it (the SDK
+    # bridge): one follow-up turn on the same session prompting
+    # attest_tools. Mirrors the in-process engine block exactly.
+    from ..delegate_prompts import REVIEW_STEP_PROMPT, needs_review_reinvoke
+    _review_session = getattr(provider, "_session_id", "") or ""
+    if _review_session and needs_review_reinvoke(
+            provider, accumulated_tool_calls, response.stop_reason):
+        log.info("[%s] review step: follow-up attest turn", agent_label)
+        try:
+            review_kwargs = dict(send_kwargs)
+            review_kwargs.pop("history", None)  # session carries context
+            review_kwargs.update(
+                message=REVIEW_STEP_PROMPT,
+                max_turns=4,
+                session_id=_review_session,
+            )
+            await provider.send_orchestrate(**review_kwargs)
+        except Exception:
+            log.warning("[%s] review follow-up turn failed; continuing",
+                        agent_label, exc_info=True)
+
     # --- Derive the output + status (mirrors the in-process result block). ---
     result_text = response.text or ""
     u = response.usage

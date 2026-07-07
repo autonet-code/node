@@ -235,6 +235,36 @@ class ToolStore:
                 raise ValueError(
                     f"declared dependency {dep_digest[:16]}... is disabled")
 
+        # Idempotency — content-addressed in SPIRIT, not just bytes: the
+        # manifest bakes ``created_ts``, so re-registering byte-identical
+        # content would mint a fresh digest every time (observed live: the
+        # harness bootstrap re-registered per boot → 13 copies of every
+        # atn_* module). Match the identity-defining fields instead and
+        # return the existing record.
+        for existing in self._records.values():
+            m = existing.manifest
+            if (existing.local_author == author
+                    and existing.origin == "authored"
+                    and m.get("name") == name
+                    and m.get("trust_class") == trust_class
+                    and (m.get("code_digest") or "") == code_digest
+                    and (m.get("entrypoint") or "") == entrypoint
+                    and (m.get("provider") or "") == provider
+                    and (m.get("connector_id") or "") == connector_id
+                    and m.get("description") == description
+                    and list(m.get("dependencies") or []) == deps
+                    and (m.get("capabilities") or None) == (capabilities or None)
+                    and m.get("version_of") == version_of
+                    and m.get("input_schema") == input_schema):
+                if publish and not existing.published:
+                    self.set_published(existing.digest, True)
+                log.debug("register: content-identical to %s; reusing",
+                          existing.digest[:16])
+                return {"digest": existing.digest,
+                        "manifest": existing.manifest,
+                        "published": existing.published,
+                        "existing": True}
+
         author_pubkey = self._author_address(author)
         # Consensus author = the 0x address (chain-claimable, globally
         # unique — mint keyed by a local id has no on-chain claim path).
@@ -282,6 +312,41 @@ class ToolStore:
                 log.warning("manifest sink failed for %s: %s", name, exc)
         return {"digest": digest, "manifest": manifest,
                 "published": record.published}
+
+    def prune_superseded_local(
+        self, *, name: str, author: str, keep_digest: str,
+    ) -> int:
+        """Drop UNPUBLISHED locally-authored records that share ``name`` +
+        ``author`` with ``keep_digest`` but carry a different digest — the
+        stale re-registrations left behind by pre-idempotency boots and by
+        dev code drift (each source change mints a new digest with no
+        version chain). Grants on pruned records migrate to the kept one.
+
+        Local-plane only, deliberately conservative: published records are
+        never pruned (their substrate registration is forward-only) and
+        adopted records are not ours to touch. Blobs stay (content-
+        addressed, harmless). Returns the number of records removed.
+        """
+        keep = self._records.get(keep_digest)
+        if keep is None:
+            return 0
+        stale = [
+            record for digest, record in self._records.items()
+            if digest != keep_digest
+            and record.local_author == author
+            and record.manifest.get("name") == name
+            and not record.published
+            and record.origin == "authored"
+        ]
+        if not stale:
+            return 0
+        for record in stale:
+            keep.grants.update(record.grants)
+            self._records.pop(record.digest, None)
+        self._persist()
+        log.info("pruned %d superseded local record(s) of %r (kept %s)",
+                 len(stale), name, keep_digest[:16])
+        return len(stale)
 
     def set_published(self, digest: str, published: bool) -> bool:
         """Owner-gated publish/unpublish. Publishing pushes the manifest
@@ -926,6 +991,17 @@ class ToolStore:
                     score = max(0.0, min(1.0, float(raw_score)))
                 except (TypeError, ValueError):
                     score = 0.0
+            # v3 per-charter-axis signed review scores (spec Decision
+            # 2026-07-08): {axis_id: [-1, +1]}, unknown/garbage entries
+            # dropped, axes the reviewer didn't score simply absent.
+            axes: dict[str, float] = {}
+            raw_axes = judgment.get("axes")
+            if isinstance(raw_axes, dict):
+                for axis_id, value in raw_axes.items():
+                    try:
+                        axes[str(axis_id)] = max(-1.0, min(1.0, float(value)))
+                    except (TypeError, ValueError):
+                        continue
             note = judgment.get("note")
 
             review_digest = ""
@@ -940,6 +1016,8 @@ class ToolStore:
                     "context": context_text[:2000],
                     "ts": ts,
                 }
+                if axes:
+                    review["axes"] = dict(sorted(axes.items()))
                 try:
                     review_digest = blobs.add_json(review) or ""
                 except Exception as exc:
@@ -957,6 +1035,8 @@ class ToolStore:
                 "score": score,
                 "review_digest": review_digest,
             }
+            if axes:
+                row["axes"] = dict(sorted(axes.items()))
             # Stamp the active harness distro (docs/tool_substrate.md —
             # loadout digest is atomic with the attestation). Only when set.
             if self.active_loadout:
@@ -989,6 +1069,8 @@ class ToolStore:
                     "problem_coords": list(problem_coords),
                     "review_digest": review_digest,
                 }
+                if axes:
+                    event["axes"] = dict(sorted(axes.items()))
                 if self.active_loadout:
                     event["loadout"] = self.active_loadout
                 try:
@@ -999,6 +1081,64 @@ class ToolStore:
             attested += 1
 
         return {"attested": attested, "skipped": skipped}
+
+    def recent_attestations(
+        self, digest: str, *, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """The most recent local attestation rows for one manifest digest
+        (newest first), with review-note text resolved from the blob
+        store when available. Feeds the Substrate view's review drawer
+        (v3). Local-plane only — this daemon's attestations.jsonl."""
+        digest = str(digest or "").strip().lower()
+        if not digest or not self._attestations_path.exists():
+            return []
+        try:
+            limit = max(1, min(int(limit), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        rows: list[dict[str, Any]] = []
+        try:
+            with self._attestations_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if row.get("manifest_digest") != digest:
+                        continue
+                    rows.append(row)
+        except OSError:
+            return []
+        rows = rows[-limit:][::-1]  # newest first
+
+        blobs: Any = None
+        try:
+            blobs = self._blob_store()
+        except RuntimeError:
+            blobs = None
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            entry: dict[str, Any] = {
+                "ts": row.get("ts"),
+                "caller": row.get("caller", ""),
+                "ok": bool(row.get("ok")),
+                "score": row.get("score"),
+                "axes": row.get("axes") or {},
+                "note": "",
+            }
+            review_digest = str(row.get("review_digest") or "")
+            if review_digest and blobs is not None:
+                try:
+                    review = blobs.get_json(review_digest)
+                    if isinstance(review, dict):
+                        entry["note"] = str(review.get("note") or "")[:2000]
+                except Exception:  # noqa: BLE001 — note is best-effort
+                    pass
+            out.append(entry)
+        return out
 
     # ------------------------------------------------------------------
     # Adoption (docs/tool_substrate.md — Adoption rail)

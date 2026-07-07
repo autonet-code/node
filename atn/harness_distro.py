@@ -147,6 +147,19 @@ def bootstrap_reference_distro(runtime: "Runtime") -> str | None:
                 log.warning("harness distro: module %r failed: %s", bundle, exc)
                 continue
             module_digests.append(res["digest"])
+            # Bootstrap hygiene: dev code drift mints a new module digest
+            # (content-addressed, no version chain), and pre-idempotency
+            # boots left one copy per start. Superseded local records are
+            # noise — drop them, keeping only the digest just registered.
+            try:
+                store.prune_superseded_local(
+                    name=f"atn_{bundle}",
+                    author=_BOOTSTRAP_AUTHOR,
+                    keep_digest=res["digest"],
+                )
+            except Exception as exc:  # noqa: BLE001 — hygiene, never fatal
+                log.debug("harness distro: prune failed for %r: %s",
+                          bundle, exc)
 
         if not module_digests:
             log.warning("harness distro: no modules registered; skipping distro")
@@ -184,6 +197,14 @@ def bootstrap_reference_distro(runtime: "Runtime") -> str | None:
             return None
 
         distro_digest = distro["digest"]
+        try:
+            store.prune_superseded_local(
+                name=DISTRO_NAME,
+                author=_BOOTSTRAP_AUTHOR,
+                keep_digest=distro_digest,
+            )
+        except Exception as exc:  # noqa: BLE001 — hygiene, never fatal
+            log.debug("harness distro: distro prune failed: %s", exc)
         store.active_loadout = distro_digest
         log.info("harness distro bootstrapped: %s (%d modules)",
                  distro_digest[:16], len(module_digests))

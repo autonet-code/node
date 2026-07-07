@@ -522,7 +522,11 @@ _TOOLS: list[ToolDefinition] = [
         name="use_tool",
         description=(
             "Call any tool by name — core ATN tools, MCP connectors, or pipeline agents. "
-            "Use list_tools first to see available tools and their input schemas."
+            "Use list_tools first to see available tools and their input schemas. "
+            "REVIEW STEP: if you invoke registered (network) tools, the work item "
+            "is not closed until you call attest_tools once at the end, reviewing "
+            "the tools that mattered with per-charter-axis scores — reviews are "
+            "the signal that routes every agent's tool discovery."
         ),
         input_schema={
             "type": "object",
@@ -690,14 +694,21 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="attest_tools",
         description=(
-            "Attest which registered tools contributed to a piece of work you "
+            "Review which registered tools contributed to a piece of work you "
             "just finished. Call ONCE when you close a work item, judging the "
             "tools that helped — not after every call. Your attestation is the "
             "ONLY usage that counts toward a tool author's mint; a mechanical "
-            "call receipt is worth nothing. Your score/note become debate "
-            "material (a bad score with a trace is a ready-made dispute), not "
-            "mint input — repeated return usage is the real rating. Provide "
-            "'context': what you were working on (embedded to locate the work)."
+            "call receipt is worth nothing. Rate per charter axis in 'axes' "
+            "when you have a real signal: signed scores in -1..+1 for any of "
+            "correctness (did what it claimed, no bugs), simplicity (minimal, "
+            "not over-engineered), life_precious, self_preservation, "
+            "promotion_of_intelligence, evolution. Score only axes you "
+            "actually observed — omit the rest. Your axis scores move the "
+            "tool's position in charter space and rank it in library search "
+            "(good reviews get a tool found and used more — that is how "
+            "reviews pay authors); they never change the mint amount "
+            "directly. Provide 'context': what you were working on "
+            "(embedded to locate the work)."
         ),
         input_schema={
             "type": "object",
@@ -710,7 +721,18 @@ _TOOLS: list[ToolDefinition] = [
                         "properties": {
                             "tool": {"type": "string", "description": "Tool name, digest, or reg_ prefix."},
                             "ok": {"type": "boolean", "description": "Did the tool serve the work?"},
-                            "score": {"type": "number", "description": "Optional quality score 0..1."},
+                            "score": {"type": "number", "description": "Optional overall quality score 0..1."},
+                            "axes": {
+                                "type": "object",
+                                "description": (
+                                    "Optional per-charter-axis signed scores, -1..+1. "
+                                    "Keys: life_precious, self_preservation, "
+                                    "promotion_of_intelligence, evolution, "
+                                    "correctness, simplicity. Only include axes "
+                                    "you observed."
+                                ),
+                                "additionalProperties": {"type": "number"},
+                            },
                             "note": {"type": "string", "description": "Optional reviewable justification (blob-stored)."},
                         },
                         "required": ["tool", "ok"],
@@ -722,6 +744,33 @@ _TOOLS: list[ToolDefinition] = [
                 },
             },
             "required": ["judgments", "context"],
+        },
+    ),
+    ToolDefinition(
+        name="probe_tools",
+        description=(
+            "Search the network tool library semantically before building "
+            "something yourself or asking for a grant. Returns published "
+            "tools ranked by relevance to your problem, lifted by their "
+            "review ratings (per-charter-axis scores from agents that "
+            "actually used them). Each match carries digest, name, "
+            "description, author, rating and the 6-axis charter position. "
+            "Use the digest with adopt_tool (if granted) or ask your owner "
+            "to grant/adopt it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What you need the tool to do.",
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "Max matches (default 8).",
+                },
+            },
+            "required": ["query"],
         },
     ),
     ToolDefinition(
@@ -1296,6 +1345,16 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     if "connector_ids" in input:
         defn.connector_ids = input["connector_ids"]
         changed.append("connector_ids")
+    if "secrets_allowance" in input:
+        # The AUTHORED wish only (resolve_spec form: none/all/bundle/literal).
+        # Safe to edit from any caller the subtree gate already admitted: the
+        # ENFORCED grant is still the daemon-side intersection with the
+        # parent's allowance at spawn (worker_host monotone clamp), so a wider
+        # wish can never widen the actual grant. Takes effect at next spawn —
+        # a live worker keeps the session it was minted.
+        raw = input["secrets_allowance"]
+        defn.secrets_allowance = (str(raw).strip() or None) if raw is not None else None
+        changed.append("secrets_allowance")
     if "tools" in input:
         defn.tools = input["tools"]
         changed.append("tools")
@@ -2245,6 +2304,69 @@ async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         return {"error": str(exc)}
 
 
+async def _probe_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Agent-facing library search (v3): semantic retrieval over published
+    tool manifests, ranked by review-drifted ratings. Falls back to a
+    substring match over the local store when the substrate is down."""
+    query = str(input.get("query") or "").strip()
+    if not query:
+        return {"error": "Missing required field: 'query'"}
+    try:
+        k = max(1, min(int(input.get("k") or 8), 25))
+    except (TypeError, ValueError):
+        k = 8
+
+    matches: list[dict[str, Any]] = []
+    source = "local"
+    try:
+        autonet = getattr(runtime, "autonet", None)
+        service = getattr(autonet, "_service", None) if autonet else None
+        world_service = getattr(service, "_world_service", None) if service else None
+        if world_service is not None:
+            from nodes.common.world_model_substrate.tool_manifest import (
+                is_tool_manifest,
+            )
+            result = world_service.infer_artifacts(query, k=max(k * 3, 12))
+            for art in result.get("artifacts", []):
+                payload = art.get("payload")
+                if not is_tool_manifest(payload):
+                    continue
+                matches.append({
+                    "digest": art.get("digest", ""),
+                    "name": payload.get("name", ""),
+                    "description": payload.get("description", ""),
+                    "author": payload.get("author", ""),
+                    "trust_class": payload.get("trust_class", ""),
+                    "score": art.get("final", 0.0),
+                    "rating": art.get("rating", 0.0),
+                    "axes": art.get("axes", []),
+                })
+                if len(matches) >= k:
+                    break
+            source = "substrate"
+    except Exception as exc:
+        log.debug("probe_tools substrate path failed: %s", exc)
+    if not matches:
+        needle = query.lower()
+        for record in runtime.tool_store.visible_to(None):
+            hay = f"{record.name} {record.manifest.get('description', '')}".lower()
+            if all(w in hay for w in needle.split()):
+                matches.append({
+                    "digest": record.digest,
+                    "name": record.name,
+                    "description": record.manifest.get("description", ""),
+                    "author": record.author,
+                    "trust_class": record.trust_class,
+                    "score": 0.0,
+                    "rating": 0.0,
+                    "axes": [],
+                })
+                if len(matches) >= k:
+                    break
+        source = "local"
+    return {"matches": matches, "source": source}
+
+
 # ---------------------------------------------------------------------------
 # Conversation management (UI-facing, not exposed to the orchestrator LLM)
 # ---------------------------------------------------------------------------
@@ -2896,8 +3018,15 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     "lifecycle": {"activate_agent", "deactivate_agent", "kill_agent", "kill_execution",
                   "remove_agent", "compact_agent"},
     "connectors": {"list_connectors", "add_connector", "get_connector_tools", "use_connector", "remove_connector"},
-    "unified_tools": {"list_tools", "use_tool"},
-    # Tool substrate (docs/tool_substrate.md): authoring is opt-in per agent.
+    # Discovery (probe_tools) and the post-use review (attest_tools) ride
+    # the same bundle as list/use (v3): every agent that can USE registered
+    # tools must be able to search for them and review them — the review is
+    # the signal that routes discovery, so a use-without-review surface
+    # would be a broken grant.
+    "unified_tools": {"list_tools", "use_tool", "probe_tools", "attest_tools"},
+    # Tool substrate (docs/tool_substrate.md): authoring is opt-in per
+    # agent. attest_tools also stays here for back-compat with existing
+    # toolsmith-only grants.
     "toolsmith": {"register_tool", "attest_tools"},
     # Publishing is deliberately its OWN bundle (user, 2026-07-05):
     # whether an agent may publish its tools to the substrate is a
@@ -3604,6 +3733,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     # Unified tools
     "list_tools": _list_tools,
     "use_tool": _use_tool,
+    "probe_tools": _probe_tools,
     "register_tool": _register_tool,
     "publish_tool": _publish_tool,
     "vet_tool": _vet_tool,

@@ -110,8 +110,9 @@ def test_feed_does_not_run_until_threshold_reached(tmp_path: Path):
 
 def test_feed_drives_work_units_into_world(tmp_path: Path):
     """Once the threshold trips, the feed builds work units from the
-    synthetic conversations and submits them to the WorldService.
-    The world state must reflect that."""
+    synthetic conversations and ingests them. v3 (Decision 2026-07-08):
+    ingestion is LOCAL ONLY — the artifact index grows; the consensus
+    world does NOT (no sprouts, no events)."""
     atn_root = _build_atn_dir(tmp_path, n_conversations=3)
     svc = WorldService(rpb_address="rpb_feed_b", data_root=tmp_path / "world")
     try:
@@ -128,10 +129,13 @@ def test_feed_drives_work_units_into_world(tmp_path: Path):
         metrics = feed.run_cycle()
         assert metrics is not None, "feed should have run"
         assert metrics["units_processed"] == 3, metrics
-        assert metrics["events_appended"] > 0, metrics
+        assert metrics["events_appended"] == 0, metrics
         nodes_after = svc.stats()["n_nodes"]
-        assert nodes_after > nodes_before, \
-            f"expected world to grow: before={nodes_before}, after={nodes_after}"
+        assert nodes_after == nodes_before, \
+            f"work units must not sprout: before={nodes_before}, after={nodes_after}"
+        # The artifact plane grew: the payloads are locally retrievable.
+        hits = svc._artifact_index.search("edge cases in arithmetic", k=3)
+        assert hits, "ingested work units must be searchable locally"
     finally:
         svc.shutdown()
 

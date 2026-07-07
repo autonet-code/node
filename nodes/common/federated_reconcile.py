@@ -158,19 +158,22 @@ def compute_tool_mint(
     registrations: Optional[Dict[str, Dict[str, str]]] = None,
     agent_owner_map: Optional[Dict[str, str]] = None,
     vetting: Optional[Dict[str, Any]] = None,
+    positions: Optional[Dict[str, Dict[str, Any]]] = None,
     vet_quorum: float = VET_QUORUM,
     vet_royalty_share: float = VET_ROYALTY_SHARE,
     vet_royalty_epochs: int = VET_ROYALTY_EPOCHS,
     vet_bust_threshold: float = VET_BUST_THRESHOLD,
 ) -> Dict[str, Any]:
-    """Tool-author mint from canonical events (docs/tool_substrate.md v2).
+    """Tool-author mint from canonical events (docs/tool_substrate.md v3).
 
-    ``tool_mint(m) = max(0, standing(m)) × usage_term(m)`` per PINNED
-    manifest, attributed to the author carried on the registration
-    sprout's ``manifest_meta`` — consensus data, so a blob-store miss
-    can never fork the close. Mint is pinned-only: attested (connector-
-    backed) tools are publishable and debatable but draw no emission,
-    and remote services never enter the substrate at all
+    ``tool_mint(m) = usage_term(m)`` per PINNED manifest (v3, Decision
+    2026-07-08: usage alone mints — the v2 standing multiplier is
+    retired; reviews rank discovery and drift position instead),
+    attributed to the author carried on the registration sprout's
+    ``manifest_meta`` — consensus data, so a blob-store miss can never
+    fork the close. Mint is pinned-only: attested (connector-backed)
+    tools are publishable and reviewable but draw no emission, and
+    remote services never enter the substrate at all
     (docs/services_market.md).
 
     ``usage_term`` is the sim-ratified combo damper (spec: Mint
@@ -215,17 +218,18 @@ def compute_tool_mint(
 
     Returns (all maps key-sorted, pure function of canonical inputs):
       {
-        "per_digest": {digest: {node_id, author, trust_class, standing,
-                                ok_count, mint, greenlit, validators,
-                                royalty_left}},
+        "per_digest": {digest: {node_id, author, trust_class,
+                                ok_count, attesters, usage_term, mint,
+                                greenlit, validators, royalty_left}},
         "node_agent": {node_id: {author: mint}},   # gate-mergeable
         "registrations_next": {digest: manifest_meta},
         "vetting_next": {"manifests": {...}, "busts": {agent: n}},
+        "positions_next": {digest: {"head": [N_DIMS], "mass": [N_DIMS]}},
       }
     """
     import math
 
-    from .world_model_substrate.infer import _artifact_standing, _standing_of
+    from .world_model_substrate.infer import _artifact_standing
     from .world_model_substrate.tool_manifest import TRUST_PINNED
     from .world_model_substrate.tool_usage import tool_usage_from_events
 
@@ -294,22 +298,12 @@ def compute_tool_mint(
                     pooled.append(s)
             m["vets"][vetter] = sorted(pooled)
 
-    for digest in sorted(vet_state["manifests"].keys()):
-        m = vet_state["manifests"][digest]
-        if not m["greenlit"] or m["busted"]:
-            continue
-        nodes = by_digest.get(digest, [])
-        if not nodes:
-            continue
-        node_id = sorted({n.id for n in nodes})[0]
-        violation = charter_violation_score(
-            world, node_id, DEFAULT_CHARTER_IDS)
-        if violation >= vet_bust_threshold:
-            m["busted"] = True
-            m["royalty_left"] = 0
-            for validator in m["validators"]:
-                vet_state["busts"][validator] = (
-                    vet_state["busts"].get(validator, 0) + 1)
+    # v3 (spec Decision 2026-07-08): the CON-triggered bust of a greenlit
+    # manifest is DORMANT — debate machinery left the live path, so there
+    # is no charter-violation signal to trigger it. The bust fields
+    # (busted, busts) remain in the carried state so validator weights
+    # keep honoring any historical busts and the rail can be reactivated
+    # (the named mitigation if review-only defenses prove insufficient).
 
     for digest in sorted(vet_state["manifests"].keys()):
         m = vet_state["manifests"][digest]
@@ -411,7 +405,6 @@ def compute_tool_mint(
         if vet_quorum > 0 and not greenlit:
             continue
         nodes = by_digest.get(digest, [])
-        standing = _standing_of(nodes)
         # Combo damper: per-attesting-agent log1p, author excluded,
         # co-hosted callers (attestation batch signed with the same key
         # as the registration batch) excluded.
@@ -433,22 +426,23 @@ def compute_tool_mint(
             # attested composite) — sum linearly here.
             usage_term += attested_by[caller]
             attesters += 1
-        mint = max(0.0, standing) * usage_term
+        # v3 (spec Decision 2026-07-08): USAGE ALONE mints. The standing
+        # multiplier is retired — reviews rank discovery and drift
+        # position; they never scale the mint amount.
+        mint = usage_term
         if mint <= 0.0:
             continue
         # Anchor the mint on the manifest's claim node so the
-        # violator-pays gate prices it: a won charter CON against the
-        # tool suppresses exactly this share. Deterministic node pick:
-        # lexicographically-first id among the digest's claim nodes.
+        # Deterministic node pick: lexicographically-first id among the
+        # digest's claim nodes (the manifest anchor; also where the v3
+        # position drift writes the reviewed charter head).
         node_id = (sorted({n.id for n in nodes})[0] if nodes
                    else f"tool:{digest}")
         # Validator royalty (spec: Vetting section): while the royalty
         # window is open, a conserved slice of the tool's mint splits
         # equally among the validators frozen at greenlight —
         # composition-style: taken FROM the author's mint, never
-        # printed on top. Everything lands on the SAME claim node, so
-        # a won charter CON suppresses author and validators together
-        # (the royalty is the stake).
+        # printed on top.
         validators = list(vm["validators"]) if vm else []
         royalty_live = bool(vm and int(vm.get("royalty_left") or 0) > 0
                             and validators and vet_royalty_share > 0.0)
@@ -456,7 +450,6 @@ def compute_tool_mint(
             "node_id": node_id,
             "author": author,
             "trust_class": TRUST_PINNED,
-            "standing": standing,
             "ok_count": int(usage.get(digest, {}).get("ok_count", 0)),
             "attesters": attesters,
             "usage_term": round(usage_term, 10),
@@ -483,11 +476,74 @@ def compute_tool_mint(
         if m["greenlit"] and m["royalty_left"] > 0:
             m["royalty_left"] -= 1
 
+    # ------------------------------------------------------------------
+    # v3 position drift (spec Decision 2026-07-08): each tool's charter
+    # head is the per-axis mint-weighted running centroid of review
+    # scores. Per-axis mass so a review that scored only `correctness`
+    # never drags the unscored axes; the author prior is a zero head
+    # with 1.0 damped unit of mass per axis ("the author counts as one
+    # damped attestation"). Same exclusions as the usage damper — a
+    # caller whose attestations don't mint can't move position either.
+    # Pure function of (carried positions, canonical events) over sorted
+    # keys → bit-identical on every daemon.
+    # ------------------------------------------------------------------
+    from .world_model_substrate.adapter import CHARTER, N_DIMS
+    axis_index = {str(e["id"]): int(e["axis_index"]) for e in CHARTER}
+
+    carried_pos = positions or {}
+    positions_next: Dict[str, Dict[str, Any]] = {}
+    for digest in sorted(known_regs.keys()):
+        prior = carried_pos.get(digest) or {}
+        head = [float(x) for x in (prior.get("head") or [])]
+        mass = [float(x) for x in (prior.get("mass") or [])]
+        if len(head) != N_DIMS:
+            head = [0.0] * N_DIMS
+        if len(mass) != N_DIMS:
+            mass = [1.0] * N_DIMS
+        entry = usage.get(digest)
+        if entry:
+            meta = known_regs[digest]
+            author = str(meta.get("author") or "")
+            reg_sender = str(meta.get("sender") or "")
+            author_owner = owner_map_all.get(author, "")
+            reviews = entry.get("axis_reviews_by_caller") or {}
+            add_mass = [0.0] * N_DIMS
+            add_val = [0.0] * N_DIMS
+            for caller in sorted(reviews.keys()):
+                if caller == author:
+                    continue
+                if author_owner and owner_map_all.get(caller, "") == author_owner:
+                    continue
+                senders = entry.get("attester_senders", {}).get(caller, [])
+                if reg_sender and reg_sender in senders:
+                    continue
+                for axis_id in sorted(reviews[caller].keys()):
+                    idx = axis_index.get(str(axis_id))
+                    if idx is None:
+                        continue
+                    cell = reviews[caller][axis_id]
+                    n = int(cell.get("n") or 0)
+                    if n <= 0:
+                        continue
+                    w = math.log1p(n)
+                    add_mass[idx] += w
+                    add_val[idx] += w * (float(cell.get("sum") or 0.0) / n)
+            for i in range(N_DIMS):
+                if add_mass[i] > 0.0:
+                    head[i] = ((mass[i] * head[i] + add_val[i])
+                               / (mass[i] + add_mass[i]))
+                    mass[i] = mass[i] + add_mass[i]
+        positions_next[digest] = {
+            "head": [round(h, 9) for h in head],
+            "mass": [round(m_val, 9) for m_val in mass],
+        }
+
     return {
         "per_digest": dict(sorted(per_digest.items())),
         "node_agent": {k: dict(sorted(v.items()))
                        for k, v in sorted(node_agent.items())},
         "registrations_next": dict(sorted(known_regs.items())),
+        "positions_next": positions_next,
         "vetting_next": {
             "manifests": {d: {
                 "vets": {a: sorted(s)
@@ -700,13 +756,61 @@ def federated_reconcile_epoch(
     return result
 
 
+def apply_tool_positions(
+    world: World, positions: Dict[str, Dict[str, Any]],
+) -> int:
+    """Write drifted charter heads onto manifest claim nodes (v3 drift).
+
+    For every node whose ``artifact_digest`` appears in ``positions``,
+    the head (first ``len(pos["head"])`` coords) of BOTH coordinate
+    stores is replaced: the per-tendency ``CoordinateClaim.anchor``
+    (what serialize_world / checkpoints read) and the backing
+    ``world.observations`` entry (what the visualization surfaces
+    read). Embedding tails are untouched. Deterministic: purely a
+    function of (world, positions).
+
+    Returns the number of (tendency, node) coordinate writes.
+    """
+    from dataclasses import replace as _dc_replace
+
+    if not positions:
+        return 0
+    updated = 0
+    seen_obs: set = set()
+    for tendency in world.tendencies.values():
+        for node in tendency.tree.all_nodes():
+            digest = getattr(node, "artifact_digest", "") or ""
+            pos = positions.get(digest) if digest else None
+            if not pos:
+                continue
+            head = tuple(float(x) for x in (pos.get("head") or ()))
+            if not head:
+                continue
+            claim = tendency._node_to_claim.get(node.id)
+            if claim is not None and claim.anchor and len(claim.anchor) >= len(head):
+                claim.anchor = head + tuple(claim.anchor)[len(head):]
+                updated += 1
+            obs_id = getattr(node, "observation_id", None)
+            if obs_id and obs_id not in seen_obs:
+                obs = world.observations.get(obs_id)
+                if obs is not None and obs.coords and len(obs.coords) >= len(head):
+                    world.observations[obs_id] = _dc_replace(
+                        obs, coords=head + tuple(obs.coords)[len(head):])
+                    seen_obs.add(obs_id)
+    return updated
+
+
 def federated_epoch_close(
     canonical: CanonicalOrder,
     *,
     seed_world: Optional[World] = None,
     bandwidth: float = 1.5,
     embedding_dim: int = 1024,
-    apply_gate: bool = True,
+    # v3 (spec Decision 2026-07-08): the violator-pays gate is DORMANT —
+    # debate machinery left the live path, so there are no charter CONs
+    # to price. The machinery stays intact behind the flag for the named
+    # future mitigation; default OFF.
+    apply_gate: bool = False,
     gate_strength: float = 1.0,
     output_decimals: int = OUTPUT_DECIMALS,
     equilibrate_rounds: int = 8,
@@ -716,6 +820,7 @@ def federated_epoch_close(
     tool_registrations: Optional[Dict[str, Dict[str, str]]] = None,
     agent_owner_map: Optional[Dict[str, str]] = None,
     tool_vetting: Optional[Dict[str, Any]] = None,
+    tool_positions: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -847,17 +952,24 @@ def federated_epoch_close(
 
         snapshots.record_close(world)
 
-    # Tool substrate: author mint ∝ standing × usage (pinned only),
-    # anchored on the manifest's claim node so the violator-pays gate
-    # prices it (docs/tool_substrate.md v2). Pure function of the
-    # replayed world + canonical events + explicitly-passed carry-over
-    # registrations, so the bit-identical guarantee holds.
+    # Tool substrate: author mint = usage_term (pinned only, v3 —
+    # docs/tool_substrate.md Decision 2026-07-08), anchored on the
+    # manifest's claim node. Pure function of the replayed world +
+    # canonical events + explicitly-passed carry-over registrations,
+    # so the bit-identical guarantee holds.
     tool_result = compute_tool_mint(
         world, all_events,
         registrations=tool_registrations,
         agent_owner_map=agent_owner_map,
         vetting=tool_vetting,
+        positions=tool_positions,
     )
+    # v3 position drift: write the reviewed charter heads onto the replay
+    # world so the checkpoint (world_cid) and any world reader carry the
+    # drifted positions forward. Coords never feed scores, so the score
+    # snapshots above are unaffected; the write is a pure function of
+    # (carry, canonical events) — bit-identical everywhere.
+    apply_tool_positions(world, tool_result["positions_next"])
 
     result = federated_reconcile_epoch(
         world, snapshots, all_events,
@@ -870,6 +982,7 @@ def federated_epoch_close(
     result["tool_mint"] = tool_result["per_digest"]
     result["tool_registrations"] = tool_result["registrations_next"]
     result["tool_vetting"] = tool_result["vetting_next"]
+    result["tool_positions"] = tool_result["positions_next"]
     result["epoch_root"] = canonical.epoch_root().hex()
     result["n_batches"] = len(canonical.ordered_batches)
     result["n_events"] = len(all_events)

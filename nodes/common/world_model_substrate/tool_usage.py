@@ -38,6 +38,14 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
           # economic entity.
           "attested_ok_by_caller": {caller_id: count},
           "attester_senders": {caller_id: [sender_hex, ...]},
+          # v3 per-axis review scores (spec Decision 2026-07-08).
+          # Per attesting agent, per charter axis: sum + count of the
+          # signed scores that agent submitted. compute_tool_mint damps
+          # per caller (log1p) and applies the same exclusions as the
+          # usage term, then folds the result into the tool's drifted
+          # charter head. Axes an agent never scored are simply absent.
+          "axis_reviews_by_caller": {caller_id: {axis_id: {"sum": float,
+                                                           "n": int}}},
           # Vetting tier (spec: Vetting section). Vets are NOT usage —
           # they are excluded from every count above and only accumulate
           # toward the manifest's greenlight in compute_tool_mint.
@@ -70,6 +78,7 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
                 "callers": {},
                 "attested_ok_by_caller": {},
                 "attester_senders": {},
+                "axis_reviews_by_caller": {},
                 "vets_by_caller": {},
                 "vet_senders": {},
             }
@@ -100,6 +109,20 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
             senders = entry["attester_senders"].setdefault(caller, [])
             if sender and sender not in senders:
                 senders.append(sender)
+            # v3 per-axis review scores ride only attested-ok receipts.
+            raw_axes = ev.get("axes")
+            if isinstance(raw_axes, dict) and raw_axes:
+                per_caller = entry["axis_reviews_by_caller"].setdefault(
+                    caller, {})
+                for axis_id in sorted(raw_axes):
+                    try:
+                        value = max(-1.0, min(1.0, float(raw_axes[axis_id])))
+                    except (TypeError, ValueError):
+                        continue
+                    cell = per_caller.setdefault(
+                        str(axis_id), {"sum": 0.0, "n": 0})
+                    cell["sum"] += value
+                    cell["n"] += 1
 
     for entry in usage.values():
         entry["fee_total"] = round(entry["fee_total"], _FEE_DECIMALS)
@@ -108,6 +131,15 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
             sorted(entry["attested_ok_by_caller"].items()))
         entry["attester_senders"] = {
             k: sorted(v) for k, v in sorted(entry["attester_senders"].items())
+        }
+        entry["axis_reviews_by_caller"] = {
+            caller: {
+                axis: {"sum": round(cell["sum"], _FEE_DECIMALS),
+                       "n": cell["n"]}
+                for axis, cell in sorted(axes.items())
+            }
+            for caller, axes in sorted(
+                entry["axis_reviews_by_caller"].items())
         }
         entry["vets_by_caller"] = dict(sorted(entry["vets_by_caller"].items()))
         entry["vet_senders"] = {

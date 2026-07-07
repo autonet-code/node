@@ -84,6 +84,60 @@ Tokens are paid for — keep tool calls purposeful and output tight.
 """
 
 
+# The v3 review-step closing prompt (docs/tool_substrate.md, Decision
+# 2026-07-08). Injected by the generic provider loop (providers/base.py)
+# as a synthetic turn, and sent as a follow-up session turn by the
+# execution engine / worker loop for providers whose loop can't inject
+# (BridgeProvider — the SDK owns its loop). Keep the "Work item closing"
+# phrase stable: tests and log greps key on it.
+REVIEW_STEP_PROMPT = (
+    "Work item closing — one last step: you used registered tools this "
+    "run but did not review them. Call attest_tools ONCE now with one "
+    "judgment per tool that mattered: ok, and per-charter-axis scores in "
+    "'axes' (-1..+1) for the axes you actually observed (correctness, "
+    "simplicity, and any alignment axis you have real signal on). Honest "
+    "reviews are what route the whole network's tool discovery. Then "
+    "finish — do not redo any work."
+)
+
+# Tool names whose presence in a run marks it as REGISTERED-TOOL usage
+# (the review step's trigger set) — and the review call that satisfies it.
+_REVIEW_TRIGGER_TOOLS = frozenset({"use_tool", "register_tool"})
+_REVIEW_TOOL = "attest_tools"
+
+# stop_reasons after which a review re-invoke would be wrong (aborted or
+# resource-limited runs get no extra turn).
+_REVIEW_SKIP_STOP_REASONS = frozenset({
+    "interrupted", "budget_exceeded", "context_overflow",
+    "per_turn_input_exceeded", "provider_error", "loop_detected",
+    "repeat_call_limit",
+})
+
+
+def needs_review_reinvoke(
+    provider: object,
+    accumulated_tool_calls: list,
+    stop_reason: str | None,
+) -> bool:
+    """Whether the CALLER must run the review step as a follow-up turn.
+
+    True only when: the provider's own loop does NOT handle the review
+    injection (``handles_review_step`` is False — BridgeProvider), the
+    run completed normally, it invoked registered tools, and it never
+    attested. Pure over its inputs so it is unit-testable.
+    """
+    if getattr(provider, "handles_review_step", True):
+        return False
+    if (stop_reason or "") in _REVIEW_SKIP_STOP_REASONS:
+        return False
+    names = set()
+    for call in accumulated_tool_calls or []:
+        name = call.get("tool") if isinstance(call, dict) else None
+        if name:
+            names.add(str(name))
+    return bool(_REVIEW_TRIGGER_TOOLS & names) and _REVIEW_TOOL not in names
+
+
 # Appended to the common base per granted tool category. Keys match the
 # category names in orchestrator/tools.py. Stable strings only — these are
 # part of the cached prefix for every agent sharing the category set.
@@ -120,6 +174,29 @@ spawning an agent — a goal without an agent is a note, not a plan.
 get_usage shows your provider usage and budget headroom — check it before \
 starting long work and pace yourself; a budget abort mid-task loses the \
 work in flight.
+""",
+    "unified_tools": """\
+
+## Registered tools & the review step
+probe_tools searches the network tool library semantically — check it \
+before building something yourself. use_tool invokes a registered tool by \
+name. THE REVIEW STEP IS PART OF THE WORK: when you close a work item in \
+which registered tools participated, call attest_tools once with a judgment \
+per tool — ok, plus per-charter-axis scores in 'axes' (-1..+1) for the axes \
+you actually observed (correctness: did what it claimed; simplicity: \
+minimal, not over-engineered; plus any alignment axis you have real signal \
+on). Your reviews are the only signal that positions tools in charter space \
+and routes every agent's future tool discovery — an unreviewed usage is \
+half-finished work. Score only what you saw; omit the rest.
+""",
+    "toolsmith": """\
+
+## Authoring tools
+register_tool publishes capability as pinned code. attest_tools is the \
+post-use review beat (see the review step above if you also hold \
+unified_tools): one call per closed work item, per-axis honest scores. \
+As an author, your own tools earn only from OTHER agents' attested usage — \
+self-reviews are excluded by the damper.
 """,
 }
 

@@ -61,8 +61,11 @@ class ArtifactIndex:
 - The per-work-unit claim node keeps its claim-text content and gains
   `artifact_digest` (stored on the node as attribute and on the
   emitted SubClaimSprouted event).
+  **[SUPERSEDED by v3 — see Addendum 2026-07-08: work units no longer
+  sprout claim nodes at all; ingestion stops at `add_artifact`.]**
 - `submit_con` unchanged (disputes target claim nodes, which now
-  transitively price artifacts).
+  transitively price artifacts). **[STALE as of v3: `submit_con` /
+  `submit_support` are retired from the live path.]**
 
 ### 4. Inference (`infer.py`)
 
@@ -140,3 +143,22 @@ design end-to-end. Two findings feed back into this document:
   `docs/phase9_depth_experiment.md`. This does not change the artifact
   plane / verdict plane split above — it changes how standing on the
   verdict plane is computed by default.
+
+## Addendum: substrate v3 (2026-07-08)
+
+Per the v3 decision (`docs/tool_substrate.md`, Decision 2026-07-08),
+the verdict plane narrows to TOOL MANIFESTS only:
+
+- **Work units leave consensus.** `submit_work_units` stops sprouting
+  claim nodes; ingestion is `add_artifact` only (the ArtifactIndex was
+  always daemon-local and never gossiped — §1 stands unchanged).
+  Retrieval over work-unit artifacts becomes pure embedding ranking,
+  which is exactly the arm phase8 validated (+0.367, payloads-only).
+- **Re-rank formula (§4) changes for tool manifests**: standing is
+  retired; `final = cosine × (1 + tanh(mean(head[correctness],
+  head[simplicity])))` where `head` is the tool's review-drifted
+  charter head. Work-unit artifacts rank by pure cosine (their claim
+  nodes no longer exist). The coverage-density blend is unchanged.
+- `submit_con` / `submit_support` retire from the live path; the
+  arm-B render rule (standing ranks, never fills the prompt) carries
+  over as "ratings rank, never fill the prompt".

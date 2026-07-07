@@ -1268,6 +1268,38 @@ class ExecutionEngine:
 
             response = await sub_provider.send_orchestrate(**send_kwargs)
 
+            # v3 review step for providers whose loop can't inject it
+            # (BridgeProvider — the SDK owns its loop): one follow-up turn
+            # on the SAME session prompting attest_tools. Self-gating on
+            # the run's actual tool calls (use_tool/register_tool without
+            # attest_tools), normal completions only, one-shot, and the
+            # attest lands via the same _tool_executor. The ORIGINAL
+            # response stays the execution result — the review turn is
+            # bookkeeping, never the answer.
+            from ..delegate_prompts import (
+                REVIEW_STEP_PROMPT,
+                needs_review_reinvoke,
+            )
+            _review_session = getattr(sub_provider, "_session_id", "") or ""
+            if _review_session and needs_review_reinvoke(
+                    sub_provider, _accumulated_tool_calls,
+                    response.stop_reason) and not cancel.is_set():
+                log.info("Review step: follow-up attest turn for agent %s",
+                         defn.id)
+                try:
+                    review_kwargs = dict(send_kwargs)
+                    review_kwargs.pop("history", None)  # session carries it
+                    review_kwargs.update(
+                        message=REVIEW_STEP_PROMPT,
+                        max_turns=4,
+                        session_id=_review_session,
+                    )
+                    await sub_provider.send_orchestrate(**review_kwargs)
+                except Exception:
+                    log.warning(
+                        "review follow-up turn failed for %s; continuing",
+                        defn.id, exc_info=True)
+
             # Steering that was accepted mid-run but not consumed before the
             # loop ended must not be lost (finding 8 contract): re-post each
             # item to the agent's inbox so the next run picks it up.

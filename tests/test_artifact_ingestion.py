@@ -207,16 +207,23 @@ class TestWorldServiceIngestion:
             embedder=HashingEmbedder(dim=EMBED_DIM),
         )
         assert receipt["units_processed"] == 1
-
-        # The work-unit node in the live world carries the digest.
-        wu_node = None
+        # v3 (Decision 2026-07-08): work units are LOCAL ONLY — no claim
+        # node is sprouted, no consensus event is appended.
+        assert receipt["events_appended"] == 0
         for tendency in svc._world.tendencies.values():
             for node in tendency.tree.all_nodes():
-                if (node.observation_id or "").startswith("wu_"):
-                    wu_node = node
-                    break
-        assert wu_node is not None
-        digest = getattr(wu_node, "artifact_digest", "")
+                assert not (node.observation_id or "").startswith("wu_")
+
+        # Ingestion still lands in the artifact plane: index + blob.
+        digests = [
+            d for d in svc._artifact_index.all_digests()
+        ] if hasattr(svc._artifact_index, "all_digests") else []
+        # Fall back to a search when the index has no digest listing.
+        if not digests:
+            hits = svc._artifact_index.search(problem, k=1)
+            assert hits, "work unit must be retrievable from the index"
+            digests = [hits[0][0]]
+        digest = digests[0]
         assert digest and len(digest) == 64
         assert svc._artifact_index.has(digest)
 

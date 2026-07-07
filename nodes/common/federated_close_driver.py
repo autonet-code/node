@@ -100,6 +100,7 @@ class FederatedCloseDriver:
         pricing: str = "ledger",
         tool_registrations_path: Optional[Any] = None,
         tool_vetting_path: Optional[Any] = None,
+        tool_positions_path: Optional[Any] = None,
     ):
         self.gossip = gossip
         self.pricing = pricing
@@ -132,6 +133,17 @@ class FederatedCloseDriver:
             Path(tool_vetting_path) if tool_vetting_path else None
         )
         self._tool_vetting: Dict[str, Any] = self._load_tool_vetting()
+        # v3 position-drift carry-over (spec Decision 2026-07-08):
+        # digest -> {"head": [6], "mass": [6]} — the mint-weighted review
+        # centroid state. Same contract as registrations/vetting: derived
+        # purely from canonical events, the on-disk copy is a rebuildable
+        # cache, identical on every honest daemon.
+        self._tool_positions_path: Optional[Path] = (
+            Path(tool_positions_path) if tool_positions_path else None
+        )
+        self._tool_positions: Dict[str, Dict[str, Any]] = (
+            self._load_tool_positions()
+        )
         # Owner-rooted damper exclusion (spec: Owner-rooted registration):
         # agent id -> owner wallet, sourced from chain owner-binding data
         # (OwnerBound events / getAgentOwner). Every daemon reading
@@ -172,6 +184,7 @@ class FederatedCloseDriver:
                 tool_registrations=dict(self._tool_registrations),
                 agent_owner_map=dict(self.agent_owner_map),
                 tool_vetting=dict(self._tool_vetting),
+                tool_positions=dict(self._tool_positions),
             )
         except Exception as e:
             logger.error(
@@ -188,6 +201,8 @@ class FederatedCloseDriver:
         self._save_tool_registrations()
         self._tool_vetting = dict(close_result.get("tool_vetting") or {})
         self._save_tool_vetting()
+        self._tool_positions = dict(close_result.get("tool_positions") or {})
+        self._save_tool_positions()
 
         # Inherit epoch_id from the local close so on-chain dedup
         # (isAnchored(epoch_id)) can reject duplicate submissions.
@@ -299,3 +314,32 @@ class FederatedCloseDriver:
             os.replace(tmp, path)
         except OSError as e:
             logger.warning("failed to persist tool vetting state: %s", e)
+
+    def _load_tool_positions(self) -> Dict[str, Dict[str, Any]]:
+        path = self._tool_positions_path
+        if path is None or not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): dict(v) for k, v in data.items()
+                        if isinstance(v, dict)}
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("tool positions cache unreadable (%s); starting "
+                           "empty — it rebuilds from canonical events", e)
+        return {}
+
+    def _save_tool_positions(self) -> None:
+        path = self._tool_positions_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(dict(sorted(self._tool_positions.items()))),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist tool positions: %s", e)

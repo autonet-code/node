@@ -1,5 +1,13 @@
 # Tool-economy wash-trading damper — decision memo
 
+> **QUARANTINED (2026-07-08, substrate v3):** this simulator models the
+> v2 mint (`standing × usage`) and the debate gate, both retired by
+> `docs/tool_substrate.md` Decision 2026-07-08 (mint is usage-only;
+> reviews drift position instead of debate). The damper findings
+> (log1p per caller, out-of-lineage exclusions) CARRIED OVER unchanged
+> — only the standing multiplier context is stale. Re-run the sweep
+> against usage-only mint before citing absolute numbers.
+
 **For:** project owner (economics blessing, `docs/tool_substrate.md` open
 knob #1)
 **From:** pre-registered game-theory simulator (`sims/tool_economy/`)

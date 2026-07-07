@@ -1,11 +1,16 @@
-# Tool substrate v2: tools as the primary substrate item
+# Tool substrate v3: tools as the ONLY substrate item; reviews replace debates
 
-Status: DESIGN v2 — ratified in discussion 2026-07-04. Supersedes v1
-(same day): the **attested trust class and standing decay are retired**
-from the substrate; remote/endpoint-backed offerings moved to the
-Services market (`docs/services_market.md`). Tools and Services are
-separate economies unified only at the agent's interface (one inference
-probe, one MCP-shaped surface).
+Status: DESIGN v3 — ratified in discussion 2026-07-08 (see the Decision
+section below). Supersedes v2 (2026-07-04) in four places: mint is
+usage-only, attestations carry per-axis review scores that drift the
+tool's charter position at close, work units leave consensus, and the
+CON/PRO debate machinery retires from the live path. Everything else
+(trust classes, vetting, composition, adoption, Services split) stands.
+v2 note kept for history: the **attested trust class and standing decay
+are retired** from the substrate; remote/endpoint-backed offerings moved
+to the Services market (`docs/services_market.md`). Tools and Services
+are separate economies unified only at the agent's interface (one
+inference probe, one MCP-shaped surface).
 
 ## The line: verifiability
 
@@ -27,6 +32,59 @@ that protects falsely-accused correct tools — so replayable CON
 evidence remains a worthwhile rail on its own merits; it just may not
 be SOLD as the thing prose debate lacked, because well-priored text
 debate ranked nearly as well.
+
+## Decision (2026-07-08): substrate v3 — reviews replace debates
+
+Ratified in discussion. The v2 refactor stopped halfway: work units
+still rode full consensus while earning nothing, tool charter positions
+were static, mint was scaled by debate standing nobody engaged with,
+and ranking read claim standing. v3 completes the paradigm:
+
+1. **Manifest defines the tool.** Its embedding sets the topical
+   position (embedding tail); the 6-dim charter head enters at ZERO
+   (neutral) — a tool EARNS its alignment/usefulness position, the
+   author never claims one.
+2. **Reviews, not debates.** The agentic loop's post-use attestation is
+   a self-report on the agent's OWN usage — there is no opponent, so
+   "debate" was the wrong name. Attestations may carry per-charter-axis
+   signed scores in [-1, +1].
+3. **Reviews rank discovery.** Library retrieval ranks best-reviewed
+   tools first (usefulness axes of the drifted head lift the cosine).
+4. **Usage alone mints.** `mint = usage_term` — the damped, exclusion-
+   filtered attested-usage mass. No standing multiplier, no violator
+   gate on the tool rail. Reviews affect earnings only indirectly, by
+   steering future usage through ranking.
+5. **Position drifts at close** as the mint-weighted running centroid
+   of review axis scores:
+   `head' = (mass·head + axis_mass·axis_mean) / (mass + axis_mass)`,
+   `mass' = mass + axis_mass`, where `axis_mass` is the same per-caller
+   log1p-damped, exclusion-filtered evidence mass that prices mint —
+   restricted to axes-bearing attestations (axis-less usage mints but
+   does not move position). Prior: zero head, mass = 1.0 damped unit
+   ("the author counts as one damped attestation"). No free drift-rate
+   parameter; heavily-used tools have proportional inertia.
+6. **No pruning.** Low-rated tools die by ranking burial: not
+   retrieved → not pulled → not used → not paid. The carry-over map
+   grows monotonically; mechanical GC (drop digests with zero usage for
+   N epochs, re-registration re-admits) is a someday note, not design.
+7. **Work units leave consensus.** The conversation/capsule feed writes
+   to the daemon-local ArtifactIndex only (retrieval feedstock); no
+   sprouts, no gossip, no close participation. Distillation into a
+   published tool is the sanctioned way experience enters consensus.
+8. **Debate machinery retires from the live path**: `submit_con` /
+   `submit_support` and the violator-pays gate on the tool rail are
+   removed; `mint_gate.py` stays in-tree, dormant. The CON-triggered
+   bust of a greenlit tool goes dormant with it.
+
+**Known-open risk (accepted):** reviews now drive both ranking and
+position with no adversarial gate; a sybil ring of callers can pump a
+tool. Standing defenses: vetting entry gate (validators read the pinned
+code; royalty-as-stake), per-caller log1p damping, owner-map and
+wire-key exclusions, and the cognitive cost of attestations. Named
+future mitigation if it proves insufficient: reactivate the dormant
+CON/bust rail. Covert harm invisible to satisfied users has ONLY the
+vetting entry gate as its dedicated defense — vetting is where that
+strength must live.
 
 | | Tools (this doc) | Services (services_market.md) |
 |---|---|---|
@@ -78,15 +136,18 @@ level up:
    space) so a tool's effective position drifts from where its author
    SAYS it lives toward the centroid of problems it has ACTUALLY
    solved. Anti-SEO: self-description proposes, usage disposes.
-3. **Verified** — debate. PRO/CON claims about the manifest; the
-   canonical CON is a failing-invocation artifact, replayable forever
-   against the pinned code digest.
+3. **Reviewed** (v3; formerly "Verified" via debate) — per-axis review
+   scores on cognitive attestations accumulate into the tool's drifted
+   charter position. The v2 PRO/CON debate rail is retired from the
+   live path; replayable failing-invocation evidence remains a
+   worthwhile artifact to attach to a negative review's note.
 
 **Inference probe** (`mode="artifacts"` over manifests): rank by
 cosine against demonstrated coverage (blend of claimed embedding and
-receipt problem-coords centroid), re-rank by standing. Returns tools
-AND services (see services_market.md) in one answer; the agent chooses
-by judgment and wallet.
+receipt problem-coords centroid), re-rank by the RATINGS LIFT — the
+usefulness axes (correctness, simplicity) of the drifted head. Returns
+tools AND services (see services_market.md) in one answer; the agent
+chooses by judgment and wallet.
 
 ## Attestation: two receipt tiers (ratified 2026-07-04, evening)
 
@@ -97,16 +158,17 @@ Usage and review answer different questions; only one mints.
   usefulness and is free to fabricate.
 - **Cognitive attestations** (per WORK ITEM, not per call): a distinct
   reflection step where the calling agent judges which tools served
-  the work it just closed. Carries: ok/score, optional text (blob-
+  the work it just closed. Carries: ok/score, optional per-charter-axis
+  signed scores `axes: {axis_id: [-1, +1]}` (v3), optional text (blob-
   stored, digest on the event), and `problem_coords` (embedding of
   what the agent was trying to do). This is the ONLY usage the mint
   counts. The act itself is the anti-wash floor price: fabricating
-  attestations costs real inference and leaves reviewable text a
-  defender can CON as vacuous.
-- Score/text do NOT enter the mint formula (self-reported and
-  redundant — repeated return usage IS the rating). They are debate
-  material: a bad score with a trace is a ready-made CON; standing is
-  where they cash out.
+  attestations costs real inference and leaves reviewable text.
+- v3: scores STILL do not enter the mint formula (usage volume is the
+  denominator of value); the per-axis scores cash out as POSITION —
+  the drifted head — which ranks discovery and therefore steers future
+  usage. Indirect, honest: good reviews → found first → used more →
+  paid more.
 - Granularity: attestation rides the work-item close (same cognitive
   beat as conversation→work-unit distillation), never per invocation.
 
@@ -119,11 +181,14 @@ wire-level dedup applied first: receipts whose gossip batch carries the
 same signing key as m's registration batch are excluded (self-
 attestation via co-hosted sybil agents collapses to nothing). That
 batch key is transport plumbing, not an entity — it appears in no
-formula output, no chain surface, no attribution map. Mint =
-max(0, standing) × usage_term, pinned only, gate-merged as before.
-Per-receipt ATN burn REJECTED (log1p saturation makes flat burn
-regressive — see memo); the cognitive attestation cost is the floor
-price instead.
+formula output, no chain surface, no attribution map.
+
+**Mint = usage_term** (v3; formerly `max(0, standing) × usage_term`),
+pinned only, greenlight-gated, royalty-split. The standing multiplier
+and the violator-pays gate on the tool rail are retired — reviews rank
+and reposition, usage pays. Per-receipt ATN burn REJECTED (log1p
+saturation makes flat burn regressive — see memo); the cognitive
+attestation cost is the floor price instead.
 
 ## Retrieval: density, not centroid
 
@@ -451,24 +516,29 @@ is the agent-facing daemon flow; the on-chain greenlight
   verdicts), and the trial report is reviewable evidence a later dispute
   argues against.
 
-## Consensus mechanics (v1 implementation, still current)
+## Consensus mechanics (v3)
 
 - `ToolUsed` consensus event: caller-attested, gossiped, epoch-
-  buffered, graph-neutral (replay skips it). Aggregated
-  deterministically by `tool_usage.py`.
-- Registration sprout carries `manifest_meta` ({trust_class, author})
-  so epoch close never depends on blob replication.
-- Charter space UNCHANGED: manifests enter with zeroed 6-dim charter
-  head + embedding tail; alignment placement emerges from debate; the
-  violator-pays gate reads charter CONs as always.
-- Mint (`compute_tool_mint`): **pinned only** now. Author earns
-  `f(standing, usage)` anchored on the manifest claim node so the gate
-  prices it. Cross-epoch carry-over: `tool_registrations` +
-  `tool_receipt_history` params (both derived from canonical events).
-- Wash-trading dampers (OPEN — sims decide): pinned calls are free, so
-  receipts are free mint-pump. Candidates: count only out-of-lineage
-  callers, caller-diversity weighting, per-receipt burn. The Python
-  epoch simulator sweeps these.
+  buffered, graph-neutral (replay skips it). Now optionally carries
+  `axes` (per-charter-axis signed scores, serialized only when
+  present so legacy event hashes are unchanged). Aggregated
+  deterministically by `tool_usage.py` (usage counts + per-axis sums
+  with the same damping/exclusions).
+- Registration sprout carries `manifest_meta` ({trust_class, author,
+  deps}) so epoch close never depends on blob replication. Work-unit
+  sprouts are GONE — the only sprouts on the wire are tool manifests.
+- Charter space: manifests enter with zeroed 6-dim charter head +
+  embedding tail; the head then DRIFTS at each close via the
+  mint-weighted review centroid (see the v3 Decision section),
+  carried across epochs in the `tool_positions` map (same
+  derived-from-canonical-events contract as `tool_registrations`).
+- Mint (`compute_tool_mint`): **pinned only**, `mint = usage_term`,
+  greenlight-gated, royalty-split. Cross-epoch carry-over:
+  `tool_registrations` + `tool_vetting` + `tool_positions` (all
+  derived from canonical events, rebuildable, identical everywhere).
+- Wash-trading dampers: per-caller log1p + owner-map + wire-key
+  exclusions are live; the sims swept the alternatives
+  (sims/tool_economy — pre-v3, uses standing; quarantined).
 
 ## On-chain (with the Services contract work)
 

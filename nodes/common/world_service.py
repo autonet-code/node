@@ -310,6 +310,9 @@ class WorldService:
         self._tool_registrations: Dict[str, Dict[str, str]] = {}
         self._tool_vetting_path = state_dir / "local_tool_vetting.json"
         self._tool_vetting: Dict[str, Any] = {}
+        # v3 position drift carry-over: digest -> {"head": [6], "mass": [6]}.
+        self._tool_positions_path = state_dir / "local_tool_positions.json"
+        self._tool_positions: Dict[str, Dict[str, Any]] = {}
         try:
             if self._tool_registrations_path.exists():
                 raw = json.loads(
@@ -326,6 +329,15 @@ class WorldService:
                 )
                 if isinstance(raw, dict):
                     self._tool_vetting = raw
+            if self._tool_positions_path.exists():
+                raw = json.loads(
+                    self._tool_positions_path.read_text(encoding="utf-8")
+                )
+                if isinstance(raw, dict):
+                    self._tool_positions = {
+                        str(k): dict(v) for k, v in raw.items()
+                        if isinstance(v, dict)
+                    }
         except Exception as e:
             logger.warning(
                 "local tool carry-over load failed: %s", e,
@@ -433,7 +445,10 @@ class WorldService:
     def close_epoch(
         self,
         *,
-        apply_gate: bool = True,
+        # v3 (docs/tool_substrate.md Decision 2026-07-08): the charter
+        # mint gate is DORMANT — no debate on the live path. Machinery
+        # kept behind the flag; default OFF.
+        apply_gate: bool = False,
         gate_strength: float = 1.0,
         agent_weights: Optional[Dict[str, float]] = None,
         cutoff_ts: Optional[float] = None,
@@ -442,7 +457,8 @@ class WorldService:
 
         - Records the close snapshot.
         - Runs ``reconcile_epoch`` against buffered events.
-        - Optionally applies the charter mint gate (default: yes).
+        - Optionally applies the charter mint gate (v3 default: no —
+          dormant with the debate rail).
         - Returns the per-agent mint, per-agent novelty, and per-node
           breakdowns.
 
@@ -797,32 +813,23 @@ class WorldService:
         equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
         equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
     ) -> Dict[str, Any]:
-        """Submit a list of (problem, resolution, outcome) tuples.
+        """Ingest (problem, resolution, outcome) tuples — LOCAL ONLY (v3).
 
-        Each work unit is condensed to a claim text (``_claim_text``)
-        which serves three roles at once:
-          - the event's ``label``: the human-readable, disputable
-            record of what was concluded;
-          - the embedder input: the coordinate tail is derived from
-            the claim alone, so any peer can recompute the embedding
-            from the event and prove fabricated coords;
-          - the observation id: content-addressed from the claim, so
-            identical conclusions dedup.
+        Substrate v3 (docs/tool_substrate.md, Decision 2026-07-08): work
+        units left consensus. Ingestion stops at the daemon-local
+        ArtifactIndex (retrieval feedstock for ``infer_artifacts``) —
+        no claim node is sprouted, nothing is gossiped, buffered, or
+        closed. Distilling experience into a PUBLISHED TOOL is the
+        sanctioned way it enters consensus.
 
-        Charter head is zeros: alignment placement is not self-graded;
-        it emerges from subsequent network activity (targeted PRO/CON
-        posts — see ``submit_con``).
+        The ``embedder`` / ``equilibrate_*`` parameters are retained for
+        signature compatibility; the artifact index embeds payloads with
+        its own embedder on ``add_artifact``.
 
-        Each observation is submitted via ``submit_observation`` with
-        ``sprout_rootless=True`` so the locator can find them later.
-
-        Returns a summary receipt with per-unit event counts and
-        score deltas.
+        Returns a summary receipt (``events_appended`` is always 0 now —
+        kept for caller compatibility).
         """
-        from .world_model_substrate.usefulness_coords import (
-            default_usefulness_embedder,
-        )
-
+        del embedder, equilibrate_rounds, equilibrate_tolerance  # v3: unused
         if not work_units:
             return {
                 "units_processed": 0,
@@ -830,50 +837,21 @@ class WorldService:
                 "rounds": 0,
             }
 
-        if embedder is None:
-            embedder = default_usefulness_embedder(dim=self.embedding_dim)
-
         with self._lock:
-            scores_before = self._world.root_scores()
-            total_events = 0
-            total_rounds = 0
-
             for unit in work_units:
                 problem, resolution, outcome = unit
-                claim = _claim_text(problem, resolution)
-                coords = self.coords_for_text(claim, embedder=embedder)
-
-                obs_id = "wu_" + _hash_claim(claim)
-                obs = Observation(id=obs_id, coords=coords, label=claim)
-
-                # Two-plane substrate: store the full work-unit payload in
-                # the artifact index (data plane) and thread the digest
-                # into the sprouted node + event (verdict plane).
-                artifact_digest = self._artifact_index.add_artifact({
+                # Data plane only: full payload into the local artifact
+                # index. Content-addressed, so duplicates dedup there.
+                self._artifact_index.add_artifact({
                     "problem": problem,
                     "resolution": resolution,
                     "outcome": _outcome_to_dict(outcome),
                 })
 
-                receipt = self.submit_observation(
-                    obs,
-                    agent_id=agent_id,
-                    sprout_under_charter=True,
-                    sprout_rootless=True,
-                    equilibrate_rounds=equilibrate_rounds,
-                    equilibrate_tolerance=equilibrate_tolerance,
-                    artifact_digest=artifact_digest,
-                )
-                total_events += receipt["events_applied"]
-                total_rounds += receipt["rounds"]
-
-            scores_after = self._world.root_scores()
             return {
                 "units_processed": len(work_units),
-                "events_appended": total_events,
-                "rounds": total_rounds,
-                "root_scores_before": scores_before,
-                "root_scores_after": scores_after,
+                "events_appended": 0,
+                "rounds": 0,
             }
 
     def submit_tool_manifest(
@@ -982,6 +960,14 @@ class WorldService:
                 return {"result": result, "context": render_context(result)}
             return result
 
+    # ------------------------------------------------------------------
+    # LEGACY (v3, docs/tool_substrate.md Decision 2026-07-08): the debate
+    # rail left the live path — submit_con/submit_support no longer have
+    # any economic effect (mint is usage-only, the gate is dormant, tool
+    # ranking reads review-drifted ratings). They remain solely as the
+    # evidence-recording rail behind tool_store.check_evidence (a
+    # validator replaying an evidence-CON records its confirmation here).
+    # ------------------------------------------------------------------
     def submit_con(
         self,
         target_node_id: str,
@@ -1633,6 +1619,12 @@ class WorldService:
             if parent_id:
                 allowed_descendants = self._descendants_of_locked(parent_id)
 
+            # Tool-registration digests: a node anchoring a registered
+            # manifest renders as kind="tool" (work-unit artifacts use
+            # wu_-prefixed observation ids and are not in this map, so
+            # they correctly stay "claim").
+            reg_digests = set(self._tool_registrations)
+
             # Walk every tendency's tree, collect node entries.
             entries: List[Dict[str, Any]] = []
             for tendency_id, tendency in self._world.tendencies.items():
@@ -1668,6 +1660,8 @@ class WorldService:
                         "scores": self._per_tendency_scores_locked(node),
                         "parent_id": getattr(node, "parent_id", None),
                         "recent_mint": recent_mint_map.get(node_id, 0.0),
+                        "kind": ("tool" if getattr(node, "artifact_digest", "")
+                                 in reg_digests else "claim"),
                     })
 
         # Sort by recent mint desc, take top N for visualization.
@@ -1798,6 +1792,7 @@ class WorldService:
                     except (TypeError, ValueError):
                         continue
 
+            reg_digests = set(self._tool_registrations)
             descendants = self._descendants_of_locked(parent_id)
             if not descendants:
                 empty = {
@@ -1837,6 +1832,8 @@ class WorldService:
                         "scores": self._per_tendency_scores_locked(node),
                         "parent_id": getattr(node, "parent_id", None),
                         "recent_mint": recent_mint_map.get(node_id, 0.0),
+                        "kind": ("tool" if getattr(node, "artifact_digest", "")
+                                 in reg_digests else "claim"),
                     })
 
             entries.sort(key=lambda e: e["recent_mint"], reverse=True)
@@ -2057,26 +2054,152 @@ class WorldService:
             except Exception as e:
                 logger.debug("substrate distribution: tendency walk failed: %s", e)
 
-        # Aggregate node_mint across recent epochs and project onto roots.
+        # Aggregate node_mint across recent epochs and project onto roots,
+        # split by item KIND. A node anchoring a tool manifest's mint is
+        # "tool" with a "vetting" slice while its royalty window is open
+        # (reconstructs the royalty rule; ``royalty_left`` in the record
+        # is the pre-decrement value). Everything else is "claim". Same
+        # best-effort caveat as the root projection: ``node_mint`` at an
+        # anchor blends the score-movement diagnostic into the tool slice.
+        from .federated_reconcile import VET_ROYALTY_SHARE
+
+        _KINDS = ("claim", "tool", "vetting")
         root_mint: Dict[str, float] = {rid: 0.0 for rid in scores}
+        root_kinds: Dict[str, Dict[str, float]] = {
+            rid: {k: 0.0 for k in _KINDS} for rid in scores
+        }
+        kind_totals: Dict[str, float] = {k: 0.0 for k in _KINDS}
         total = 0.0
         for record in recent:
             node_mint_map = record.get("node_mint") or {}
+            anchors: Dict[str, Dict[str, Any]] = {}
+            for entry in (record.get("tool_mint") or {}).values():
+                nid = entry.get("node_id") if isinstance(entry, dict) else None
+                if nid:
+                    anchors[nid] = entry
             for node_id, mint in node_mint_map.items():
                 try:
                     m = float(mint)
                 except (TypeError, ValueError):
                     continue
+                entry = anchors.get(node_id)
+                if entry is not None:
+                    vet_slice = 0.0
+                    if (int(entry.get("royalty_left") or 0) > 0
+                            and int(entry.get("validators") or 0) > 0):
+                        vet_slice = m * VET_ROYALTY_SHARE
+                    slices = {"tool": m - vet_slice, "vetting": vet_slice}
+                else:
+                    slices = {"claim": m}
                 root_id = node_to_root.get(node_id)
                 if root_id and root_id in root_mint:
                     root_mint[root_id] += m
+                    for kind, amount in slices.items():
+                        root_kinds[root_id][kind] += amount
+                for kind, amount in slices.items():
+                    kind_totals[kind] += amount
                 total += m
 
         return {
             "root_scores": scores,
             "root_mint_recent": root_mint,
+            "root_kinds": root_kinds,
+            "kind_totals": kind_totals,
             "epochs_considered": len(recent),
             "total_mint_recent": total,
+        }
+
+    def read_economy_graph(self, *, last_n_epochs: int = 10) -> Dict[str, Any]:
+        """The tool-economy graph for visualization (docs/tool_substrate.md).
+
+        One read for everything the economy view needs: the consensus
+        registration map (digest → author + declared dependency DAG),
+        vetting state, and recent per-digest mint summed over the last
+        ``n`` closed epochs. NAMES are not consensus data (manifest_meta
+        carries author/trust_class/deps only) — callers resolve display
+        names from the local tool store and fall back to the digest.
+
+        Returns:
+          {
+            "registrations": {digest: {author, trust_class, deps: [...]}},
+            "vetting": {digest: {greenlit, validators, royalty_left, busted}},
+            "recent_tool_mint": {digest: float},
+            "positions": {digest: {head: [6], mass: [6], rating: float}},
+            "last_epoch": {epoch_id, closed_at, total_mint, tool_mint} | None,
+            "epochs_considered": int,
+          }
+
+        ``positions`` (v3) is the review-drifted charter head per tool;
+        ``rating`` is the usefulness lift (mean of the correctness and
+        simplicity axes) that ranks library retrieval.
+        """
+        from .world_model_substrate.adapter import CHARTER
+
+        axis_by_id = {str(e["id"]): int(e["axis_index"]) for e in CHARTER}
+        useful = [axis_by_id[a] for a in ("correctness", "simplicity")
+                  if a in axis_by_id]
+
+        with self._lock:
+            registrations = {
+                digest: {
+                    "author": str(meta.get("author") or ""),
+                    "trust_class": str(meta.get("trust_class") or ""),
+                    "deps": [d for d in str(meta.get("deps") or "").split(",")
+                             if d],
+                }
+                for digest, meta in self._tool_registrations.items()
+            }
+            vet_manifests = (self._tool_vetting or {}).get("manifests") or {}
+            vetting = {
+                digest: {
+                    "greenlit": bool(m.get("greenlit")),
+                    "validators": len(m.get("validators") or []),
+                    "royalty_left": int(m.get("royalty_left") or 0),
+                    "busted": bool(m.get("busted")),
+                }
+                for digest, m in vet_manifests.items()
+            }
+            positions = {}
+            for digest, pos in self._tool_positions.items():
+                head = [float(x) for x in (pos.get("head") or [])]
+                rating = (sum(head[i] for i in useful) / len(useful)
+                          if head and useful else 0.0)
+                positions[digest] = {
+                    "head": head,
+                    "mass": [float(x) for x in (pos.get("mass") or [])],
+                    "rating": round(rating, 9),
+                }
+            recent = list(self._epoch_history[-last_n_epochs:])
+
+        recent_mint: Dict[str, float] = {}
+        for record in recent:
+            for digest, entry in (record.get("tool_mint") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    recent_mint[digest] = (
+                        recent_mint.get(digest, 0.0)
+                        + float(entry.get("mint") or 0.0)
+                    )
+                except (TypeError, ValueError):
+                    continue
+
+        last = recent[-1] if recent else None
+        last_epoch = None
+        if last is not None:
+            last_epoch = {
+                "epoch_id": last.get("epoch_id"),
+                "closed_at": last.get("closed_at"),
+                "total_mint": last.get("total_mint", 0.0),
+                "tool_mint": last.get("tool_mint") or {},
+            }
+        return {
+            "registrations": registrations,
+            "vetting": vetting,
+            "recent_tool_mint": recent_mint,
+            "positions": positions,
+            "last_epoch": last_epoch,
+            "epochs_considered": len(recent),
         }
 
     def _broadcast_epoch_closed(self, record: Dict[str, Any]) -> None:
@@ -2157,6 +2280,10 @@ class WorldService:
                 json.dumps(self._tool_vetting, sort_keys=True),
                 encoding="utf-8",
             )
+            self._tool_positions_path.write_text(
+                json.dumps(dict(sorted(self._tool_positions.items()))),
+                encoding="utf-8",
+            )
         except Exception as e:
             logger.warning(
                 "local tool carry-over save failed: %s", e,
@@ -2233,10 +2360,17 @@ class WorldService:
             self._world, events,
             registrations=dict(self._tool_registrations),
             vetting=dict(self._tool_vetting),
+            positions=dict(self._tool_positions),
         )
         self._tool_registrations = dict(tool_result["registrations_next"])
         self._tool_vetting = dict(tool_result.get("vetting_next") or {})
+        self._tool_positions = dict(tool_result.get("positions_next") or {})
         self._save_tool_state_locked()
+        # v3 position drift: write the reviewed charter heads onto the
+        # live world (claim anchors + observation coords) so retrieval
+        # ranking and the viz surfaces see the drifted positions.
+        from .federated_reconcile import apply_tool_positions
+        apply_tool_positions(self._world, self._tool_positions)
 
         # Stake-style agent weighting, as on the federated rail.
         node_agent: Dict[str, Dict[str, float]] = {}
@@ -2313,6 +2447,7 @@ class WorldService:
             "node_mint": result.get("node_mint", {}),
             "node_novelty": result.get("node_novelty", {}),
             "tool_mint": result.get("tool_mint", {}),
+            "tool_positions": dict(self._tool_positions),
             "total_mint": result.get("total_mint", 0.0),
             "total_novelty": result.get("total_novelty", 0.0),
             "gate_applied": apply_gate,

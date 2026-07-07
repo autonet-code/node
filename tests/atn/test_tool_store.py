@@ -1189,3 +1189,79 @@ class TestEvidenceReplay:
             {"args_json": {"x": ""}, "expected_error": "req"})
         assert out["confirmed"] is True
         assert out["supported"] is None
+
+
+# ---------------------------------------------------------------------------
+# Registration idempotency + bootstrap hygiene (the 13-copies-per-boot bug:
+# created_ts baked into the manifest defeated content addressing, so every
+# daemon start re-registered the whole harness under fresh digests)
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotencyAndPrune:
+    def test_identical_register_reuses_record(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        store = rt.tool_store
+        kwargs = dict(
+            name="idem_probe_tool",
+            description="idempotency probe",
+            input_schema={"type": "object"},
+            author="user",
+            code="def probe(): ...",
+        )
+        first = store.register(**kwargs)
+        second = store.register(**kwargs)
+        assert second["digest"] == first["digest"]
+        assert second.get("existing") is True
+        assert len([r for r in store._records.values()
+                    if r.name == "idem_probe_tool"]) == 1
+
+    def test_changed_code_still_mints_new_digest(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        store = rt.tool_store
+        base = dict(
+            name="idem_probe_tool",
+            description="idempotency probe",
+            input_schema={"type": "object"},
+            author="user",
+        )
+        first = store.register(code="def probe(): ...", **base)
+        second = store.register(code="def probe(): pass", **base)
+        assert second["digest"] != first["digest"]
+
+    def test_prune_superseded_migrates_grants_and_keeps_published(
+            self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        store = rt.tool_store
+        base = dict(
+            name="idem_probe_tool",
+            description="idempotency probe",
+            input_schema={"type": "object"},
+            author="user",
+        )
+        old = store.register(code="v1", **base)
+        published = store.register(code="v2", **base)
+        store.set_published(published["digest"], True)
+        newest = store.register(code="v3", **base)
+        store.grant(old["digest"], "agent-a")
+
+        pruned = store.prune_superseded_local(
+            name="idem_probe_tool", author="user",
+            keep_digest=newest["digest"])
+        assert pruned == 1                       # only the unpublished v1
+        assert old["digest"] not in store._records
+        assert published["digest"] in store._records   # published survives
+        # Grants migrated to the kept record.
+        assert "agent-a" in store._records[newest["digest"]].grants
+
+    def test_harness_provision_is_idempotent(self, tmp_path):
+        from atn.harness_distro import bootstrap_reference_distro
+        rt = _make_runtime(tmp_path)
+        d1 = bootstrap_reference_distro(rt)
+        if d1 is None:
+            pytest.skip("substrate package unavailable in this env")
+        count1 = len(rt.tool_store._records)
+        d2 = bootstrap_reference_distro(rt)
+        count2 = len(rt.tool_store._records)
+        assert d1 == d2
+        assert count1 == count2                  # no growth across boots

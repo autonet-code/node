@@ -161,13 +161,13 @@ class TestToolMintClose:
         entry = tm[DIGEST]
         assert entry["author"] == AUTHOR
         assert entry["ok_count"] == 2                       # failure excluded
-        assert entry["standing"] > 0                        # author_post landed
         assert entry["mint"] > 0
         # Combo damper: two attesting agents with one ok attestation
         # each — usage_term = 2 * log1p(1), NOT log1p(total calls).
         assert entry["attesters"] == 2
-        assert entry["mint"] == pytest.approx(
-            entry["standing"] * 2 * math.log1p(1))
+        # v3: usage ALONE mints (no standing multiplier).
+        assert entry["mint"] == pytest.approx(2 * math.log1p(1))
+        assert "standing" not in entry
         # Merged into the consensus attribution map.
         assert result["agent_mint"].get(AUTHOR, 0) >= round(entry["mint"], 6) * 0.5
         assert result["tool_registrations"][DIGEST]["author"] == AUTHOR
@@ -247,8 +247,7 @@ class TestToolMintClose:
             canonical_order(batches), agent_owner_map=owner_map)
         entry = result["tool_mint"][DIGEST]
         assert entry["attesters"] == 1          # only caller-2 counts
-        assert entry["mint"] == pytest.approx(
-            entry["standing"] * math.log1p(1))
+        assert entry["mint"] == pytest.approx(math.log1p(1))  # v3 usage-only
 
     def test_unknown_owner_is_not_excluded(self):
         """Absent map entries = unknown owner = no exclusion (the map is
@@ -438,12 +437,14 @@ class TestVetting:
         assert "vetter-1" not in node2
         assert node2[AUTHOR] == pytest.approx(entry2["mint"])
 
-    def test_bust_zeroes_royalty_and_slashes_vet_weight(self, monkeypatch):
-        """Post-greenlight exploit CON (charter violation on the
-        manifest node) ends the royalty and permanently discounts the
-        validators' future vets — the royalty IS the stake."""
+    def test_bust_rail_is_dormant_but_history_honored(self, monkeypatch):
+        """v3 (Decision 2026-07-08): the CON-triggered bust is DORMANT —
+        a charter violation no longer busts a greenlit tool (debate left
+        the live path). Carried historical busts still discount vet
+        weight (see test_busted_validator_weight_decays)."""
         import nodes.common.federated_reconcile as fr
         world = self._world()
+        # Even a screaming violation signal must not trigger a bust now.
         monkeypatch.setattr(fr, "charter_violation_score",
                             lambda *a, **k: 0.9)
         out = compute_tool_mint(
@@ -453,9 +454,9 @@ class TestVetting:
                               validators=["vetter-1", "vetter-2"]),
         )
         m = out["vetting_next"]["manifests"][DIGEST]
-        assert m["busted"] is True
-        assert m["royalty_left"] == 0
-        assert out["vetting_next"]["busts"] == {"vetter-1": 1, "vetter-2": 1}
+        assert m["busted"] is False
+        assert m["royalty_left"] == 4            # normal window tick only
+        assert out["vetting_next"]["busts"] == {}
 
     def test_busted_validator_weight_decays(self):
         """A vetter with one bust carries weight 1/2: together with one
@@ -539,11 +540,9 @@ class TestCompositionFanOut:
         # Conservation of the damped quantity across the DAG.
         assert (tm[DIGEST]["usage_term"] + tm[dep_digest]["usage_term"]
                 == pytest.approx(damped))
-        # Both mints positive, each priced by its OWN standing.
-        assert tm[DIGEST]["mint"] == pytest.approx(
-            tm[DIGEST]["standing"] * damped * 0.7)
-        assert tm[dep_digest]["mint"] == pytest.approx(
-            tm[dep_digest]["standing"] * damped * 0.3)
+        # v3: mint = usage share directly (no standing multiplier).
+        assert tm[DIGEST]["mint"] == pytest.approx(damped * 0.7)
+        assert tm[dep_digest]["mint"] == pytest.approx(damped * 0.3)
 
     def test_self_dep_padding_cannot_amplify(self):
         """An author padding a composite with their own junk deps moves

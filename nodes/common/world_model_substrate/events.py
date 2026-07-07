@@ -200,6 +200,14 @@ class ToolUsed:
     attested: bool = False
     score: float = 0.0
     review_digest: str = ""
+    # Per-charter-axis review scores (v3, spec Decision 2026-07-08):
+    # {axis_id: float in [-1, +1]}, axis ids = adapter.CHARTER order.
+    # Signed self-report on the caller's OWN usage. At close these
+    # accumulate (same damping/exclusions as usage) into the tool's
+    # drifted charter head — they rank discovery and move position,
+    # never the mint amount. Serialized only when present so legacy
+    # event logs hash identically.
+    axes: Dict[str, float] = field(default_factory=dict)
     # Resident-tool grammar (spec: Resident tools, loadouts, distros):
     # digest of the harness distro the attesting agent ran under —
     # atomic with the attestation, no swap-time reasoning. Feeds the
@@ -225,6 +233,16 @@ class ToolUsed:
         if not self.attested:
             d.pop("attested", None)
             d.pop("score", None)
+        # v3 per-axis scores: only when present (pre-v3 logs unchanged).
+        # Sorted keys + rounded values so the serialized form (and the
+        # gossip batch hash) is deterministic across daemons.
+        if self.axes:
+            d["axes"] = {
+                k: round(max(-1.0, min(1.0, float(v))), 6)
+                for k, v in sorted(self.axes.items())
+            }
+        else:
+            d.pop("axes", None)
         if not self.review_digest:
             d.pop("review_digest", None)
         if not self.loadout:

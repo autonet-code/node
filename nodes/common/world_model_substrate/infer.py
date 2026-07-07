@@ -226,6 +226,23 @@ def _standing_of(nodes: List[Any]) -> float:
     return standing
 
 
+def _tool_head(world: Any, claim_nodes: List[Any]) -> List[float]:
+    """The tool's (review-drifted) charter head, read off the anchor
+    node's backing observation coords. Deterministic node pick (sorted
+    ids); empty list when no observation is resolvable."""
+    from .adapter import N_DIMS
+
+    for node in sorted(claim_nodes, key=lambda n: getattr(n, "id", "")):
+        obs_id = getattr(node, "observation_id", None)
+        if not obs_id:
+            continue
+        obs = world.observations.get(obs_id)
+        coords = getattr(obs, "coords", None) if obs is not None else None
+        if coords is not None and len(coords) >= N_DIMS:
+            return [float(c) for c in coords[:N_DIMS]]
+    return []
+
+
 def _infer_artifacts(
     input_data: Dict[str, Any],
     world: Any,
@@ -260,6 +277,15 @@ def _infer_artifacts(
 
     use_coverage = coverage_index is not None and query_vec is not None
 
+    from .adapter import CHARTER
+
+    # Usefulness axes of the charter head (v3 ratings lift): correctness
+    # and simplicity, resolved by id so a charter reorder can't silently
+    # skew ranking.
+    _axis_by_id = {str(e["id"]): int(e["axis_index"]) for e in CHARTER}
+    _useful_axes = [_axis_by_id[a] for a in ("correctness", "simplicity")
+                    if a in _axis_by_id]
+
     scored: List[Dict[str, Any]] = []
     for digest, cosine in candidates:
         claim_nodes = by_digest.get(digest, [])
@@ -276,7 +302,8 @@ def _infer_artifacts(
         # on sparse atlases.
         base = cosine
         payload = blob_store.get_json(digest)
-        if use_coverage and is_tool_manifest(payload) and coverage_index.has(digest):
+        manifest = is_tool_manifest(payload)
+        if use_coverage and manifest and coverage_index.has(digest):
             density = coverage_index.density(
                 query_vec, digest, k=COVERAGE_DENSITY_K
             )
@@ -285,7 +312,21 @@ def _infer_artifacts(
                 + COVERAGE_DENSITY_WEIGHT * min(1.0, density)
             ))
 
-        final = base * (1.0 + math.tanh(standing))
+        # v3 re-rank (docs/two_plane_inference.md Addendum 2026-07-08):
+        # tool manifests are lifted by their REVIEW-DRIFTED usefulness
+        # axes (correctness, simplicity) instead of debate standing;
+        # everything else keeps the legacy standing term, which is a
+        # no-op (×1.0) for artifacts without claim nodes — i.e. work
+        # units rank by pure cosine post-v3.
+        rating = 0.0
+        head: List[float] = []
+        if manifest:
+            head = _tool_head(world, claim_nodes)
+            if head and _useful_axes:
+                rating = sum(head[i] for i in _useful_axes) / len(_useful_axes)
+            final = base * (1.0 + math.tanh(rating))
+        else:
+            final = base * (1.0 + math.tanh(standing))
         claims = sorted(
             (
                 {
@@ -302,6 +343,8 @@ def _infer_artifacts(
                 "digest": digest,
                 "cosine": cosine,
                 "standing": standing,
+                "rating": round(rating, 9),
+                "axes": [round(h, 9) for h in head],
                 "final": final,
                 "payload": payload,
                 "claims": claims,

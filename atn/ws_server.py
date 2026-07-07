@@ -69,6 +69,23 @@ KEY_LOCAL_ONLY_MESSAGES = frozenset({
     "autonet_publish_standards",
     "autonet_claim_reward",
     "register_agent_on_chain",
+    # Vault mutations carry a raw secret VALUE in the payload; over a
+    # proxied/remote link the WS hop is plain ws://, so it would cross the
+    # wire in plaintext. Reads (secrets_status/usage/alarms) are names-only
+    # and stay owner-gated but remotely reachable.
+    "secrets_put",
+    "secrets_delete",
+})
+
+# The secrets vault surface (owner-only, HUMAN-ONLY by construction: these
+# exist solely as WS handlers and are never registered in any agent tool
+# surface). Values are WRITE-ONLY — no handler ever returns one.
+_SECRETS_MESSAGES = frozenset({
+    "secrets_status",
+    "secrets_put",
+    "secrets_delete",
+    "secrets_usage_log",
+    "secrets_alarms",
 })
 
 # Tools an authed-but-SCOPED (non-full-fleet) session may NOT call: they read
@@ -999,6 +1016,7 @@ class WebSocketBridge:
                     "origin": record.origin,
                     "capabilities": m.get("capabilities", {}),
                     "version_of": m.get("version_of"),
+                    "dependencies": m.get("dependencies") or [],
                     "input_schema": m.get("input_schema", {}),
                 })
             return {"msg_id": msg_id, "ok": True, "result": {"tools": tools}}
@@ -1026,6 +1044,17 @@ class WebSocketBridge:
                         "error": f"Unknown tool digest: {digest[:16]}"}
             return {"msg_id": msg_id, "ok": True,
                     "result": {"digest": digest, "revoked_from": agent_id}}
+
+        # Secrets vault surface — owner/full-fleet only (same HUMAN-ONLY
+        # construction as clone_agent: WS handlers only, no agent tool ever
+        # names these). Gate 1 already forced secrets_put/secrets_delete onto
+        # the local listener.
+        if msg_type in _SECRETS_MESSAGES:
+            if session.scope_ids is not None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "secrets management is owner-only and not "
+                                 "available to a scoped session"}
+            return await self._handle_secrets_message(msg_type, msg, msg_id)
 
         if msg_type == "tool_earnings":
             # Off-chain fee ledger derived from usage receipts. On-chain
@@ -1107,7 +1136,10 @@ class WebSocketBridge:
                             "author": payload.get("author", ""),
                             "trust_class": payload.get("trust_class", ""),
                             "score": art.get("final", 0.0),
-                            "standing": art.get("standing", 0.0),
+                            # v3: review-drifted rating + charter head
+                            # replace debate standing.
+                            "rating": art.get("rating", 0.0),
+                            "axes": art.get("axes", []),
                         })
                         if len(matches) >= k:
                             break
@@ -1126,7 +1158,8 @@ class WebSocketBridge:
                             "author": record.author,
                             "trust_class": record.trust_class,
                             "score": 0.0,
-                            "standing": 0.0,
+                            "rating": 0.0,
+                            "axes": [],
                         })
                         if len(matches) >= k:
                             break
@@ -1726,45 +1759,15 @@ class WebSocketBridge:
             except Exception as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
-        # Targeted dispute: attach a CON child under a specific
-        # substrate node. The claim text is the dispute's referent and
-        # the embedder input; the author must be an on-chain-registered
-        # agent (same attribution policy as the substrate feed).
+        # substrate_post_con RETIRED (v3, docs/tool_substrate.md Decision
+        # 2026-07-08): debates left the live path — reviews (attest_tools
+        # per-axis scores) are how the network judges tools now. The
+        # WorldService submit_con/submit_support methods remain only as
+        # the evidence-recording rail behind check_evidence.
         if msg_type == "substrate_post_con":
-            autonet = getattr(self.runtime, "autonet", None)
-            service = getattr(autonet, "_service", None) if autonet else None
-            world_service = getattr(service, "_world_service", None) if service else None
-            if world_service is None:
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "autonet world service not running"}
-            target_node_id = str(msg.get("target_node_id", "") or "")
-            claim = str(msg.get("claim", "") or "")
-            local_agent_id = str(msg.get("agent_id", "") or "")
-            if not target_node_id or not claim:
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "target_node_id and claim are required"}
-            agent_def = self.runtime.registry.get_agent(local_agent_id) \
-                if local_agent_id else None
-            identity = getattr(agent_def, "identity", None)
-            if (identity is None or not identity.address
-                    or not identity.registered_on_chain):
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "agent_id must name an on-chain-registered "
-                                 "agent (disputes are attributed to its 0x "
-                                 "address)"}
-            try:
-                receipt = await asyncio.to_thread(
-                    world_service.submit_con,
-                    target_node_id,
-                    claim,
-                    agent_id=identity.address,
-                )
-                return {"msg_id": msg_id, "ok": True, **receipt}
-            except ValueError as exc:
-                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
-            except Exception as exc:
-                log.error("substrate_post_con failed: %s", exc, exc_info=True)
-                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "substrate_post_con was retired (substrate v3): "
+                             "review tools via attest_tools axis scores"}
 
         if msg_type == "rpb_substrate_nodes":
             try:
@@ -1860,6 +1863,114 @@ class WebSocketBridge:
                     }}
                 result = world_service.read_substrate_distribution(last_n_epochs=last_n)
                 return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        # Tool-economy graph — registrations + declared-dep DAG + vetting
+        # + recent per-digest mint (world consensus state), merged with the
+        # local tool store (display names) and the service store (asks).
+        # Powers the economy visualization. Empty result when the world
+        # service isn't up yet.
+        if msg_type == "economy_graph":
+            try:
+                last_n = int(msg.get("last_n_epochs", 10))
+                autonet = getattr(self.runtime, "autonet", None)
+                service = getattr(autonet, "_service", None) if autonet else None
+                world_service = getattr(service, "_world_service", None) if service else None
+
+                tools = []
+                store = getattr(self.runtime, "tool_store", None)
+                if store is not None:
+                    for record in store.visible_to(None):
+                        m = record.manifest
+                        tools.append({
+                            "digest": record.digest,
+                            "name": record.name,
+                            "description": m.get("description", ""),
+                            "author": m.get("author", ""),
+                            "trust_class": m.get("trust_class", ""),
+                            "origin": record.origin,
+                            "published": record.published,
+                            "enabled": record.enabled,
+                            "fee_atn": m.get("fee_atn", 0),
+                            "version_of": m.get("version_of"),
+                            "dependencies": m.get("dependencies") or [],
+                            "local": True,
+                        })
+
+                services = []
+                svc_store = getattr(self.runtime, "service_store", None)
+                if svc_store is not None:
+                    for rec in svc_store.list(include_retired=True):
+                        services.append({
+                            "digest": rec.digest,
+                            "name": rec.name,
+                            "description": str(rec.spec.get("description") or ""),
+                            "author": rec.author,
+                            "ask": rec.ask,
+                            "backing_tool": rec.backing_tool,
+                            "retired": rec.retired,
+                        })
+
+                world = (world_service.read_economy_graph(last_n_epochs=last_n)
+                         if world_service is not None else {
+                             "registrations": {}, "vetting": {},
+                             "recent_tool_mint": {}, "last_epoch": None,
+                             "epochs_considered": 0,
+                         })
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "tools": tools,
+                    "services": services,
+                    **world,
+                }}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        # Recent reviews for one tool (v3) — the Substrate view's review
+        # drawer. Local attestation rows (axes, score, note text) plus
+        # the tool's drifted position/vetting from the world service.
+        if msg_type == "tool_reviews":
+            digest = str(msg.get("digest") or "").strip().lower()
+            if not digest:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'digest' field"}
+            try:
+                reviews = self.runtime.tool_store.recent_attestations(
+                    digest, limit=int(msg.get("limit") or 50))
+                autonet = getattr(self.runtime, "autonet", None)
+                service = getattr(autonet, "_service", None) if autonet else None
+                world_service = getattr(service, "_world_service", None) if service else None
+                position: dict[str, Any] = {}
+                vetting: dict[str, Any] = {}
+                usage: dict[str, Any] = {}
+                if world_service is not None:
+                    eg = world_service.read_economy_graph(last_n_epochs=10)
+                    position = dict(eg.get("positions", {}).get(digest) or {})
+                    vetting = dict(eg.get("vetting", {}).get(digest) or {})
+                    # Usage/mint economics for the tool window: recent mint
+                    # over the window + the last close's per-digest entry
+                    # (ok_count, attesters, usage_term, mint).
+                    usage = {
+                        "recent_mint": float(
+                            (eg.get("recent_tool_mint") or {}).get(digest)
+                            or 0.0),
+                        "epochs_considered": eg.get("epochs_considered", 0),
+                    }
+                    last = eg.get("last_epoch") or {}
+                    entry = (last.get("tool_mint") or {}).get(digest)
+                    if isinstance(entry, dict):
+                        usage["last_epoch"] = {
+                            "ok_count": entry.get("ok_count", 0),
+                            "attesters": entry.get("attesters", 0),
+                            "usage_term": entry.get("usage_term", 0.0),
+                            "mint": entry.get("mint", 0.0),
+                        }
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "digest": digest,
+                    "reviews": reviews,
+                    "position": position,
+                    "vetting": vetting,
+                    "usage": usage,
+                }}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
@@ -2153,6 +2264,200 @@ class WebSocketBridge:
         if result.get("error"):
             return {"msg_id": msg_id, "ok": False, "error": result["error"]}
         return {"msg_id": msg_id, "ok": True, "result": result}
+
+    # ------------------------------------------------------------------
+    # Secrets vault surface (owner-only; values are WRITE-ONLY)
+    # ------------------------------------------------------------------
+
+    def _live_secret_holders(self, service: str) -> list[str]:
+        """Agents whose LIVE broker session includes ``service`` — they may
+        hold a staged copy of the OLD value until release/exit."""
+        holders = {
+            str(g.get("agent_id"))
+            for g in self.runtime._grants.values()
+            if g.get("agent_id") and service in (g.get("services") or [])
+        }
+        return sorted(holders)
+
+    async def _handle_secrets_message(self, msg_type: str, msg: dict[str, Any],
+                                      msg_id: Any) -> dict[str, Any]:
+        """The five secrets_* handlers. Caller (_handle_message) has already
+        enforced owner/full-fleet scope and the local-listener custody gate on
+        the mutating types. NO handler ever returns a secret VALUE."""
+        # Log/alarm reads need no keystore — handle them first so they work
+        # even when pyrage/the vault is not provisioned.
+        if msg_type == "secrets_usage_log":
+            audit = getattr(self.runtime, "secret_audit", None)
+            if audit is None:
+                return {"msg_id": msg_id, "ok": True, "result": {"entries": []}}
+            entries = audit.tail(
+                limit=msg.get("limit", 200),
+                agent_id=msg.get("agent_id") or None,
+                service=msg.get("service") or None,
+            )
+            return {"msg_id": msg_id, "ok": True, "result": {"entries": entries}}
+
+        if msg_type == "secrets_alarms":
+            path = Path(self.runtime._config.data_dir) / "security" / "secret_alarms.json"
+            alarms: list[dict[str, Any]] = []
+            try:
+                if path.exists():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(data, list):
+                        alarms = data
+            except (OSError, ValueError):
+                log.debug("secrets_alarms: store unreadable", exc_info=True)
+            return {"msg_id": msg_id, "ok": True, "result": {"alarms": alarms}}
+
+        from .vault_setup import _keystore, write_policy_map
+        try:
+            ks = _keystore()
+        except Exception as exc:  # noqa: BLE001 — pyrage missing / vault absent
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"vault keystore unavailable: {exc}"}
+
+        if msg_type == "secrets_status":
+            try:
+                services = ks.list_services()
+            except Exception as exc:  # noqa: BLE001
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"vault unreadable: {exc}"}
+
+            # Live grants: pid -> {agent_id, services} inverted to per-agent.
+            live: dict[str, dict[str, Any]] = {}
+            for pid, g in self.runtime._grants.items():
+                aid = g.get("agent_id")
+                if aid:
+                    live[str(aid)] = {"pid": pid,
+                                      "services": list(g.get("services") or [])}
+
+            def _resolve_wish(wish: str | None) -> list[str]:
+                # Mirrors worker_host._resolve_parent_allowance's mapping.
+                if not wish:
+                    return []
+                tokens = [t.strip().lower() for t in str(wish).split(",") if t.strip()]
+                if not tokens or any(t == "none" for t in tokens):
+                    return []
+                if any(t == "all" for t in tokens):
+                    return list(services)
+                try:
+                    return list(ks.resolve_spec(wish))
+                except Exception:  # noqa: BLE001 — fail closed
+                    return []
+
+            assignments: dict[str, dict[str, Any]] = {}
+            for agent_id, defn in self.runtime.registry._agents.items():
+                wish = getattr(defn, "secrets_allowance", None)
+                lg = live.get(agent_id)
+                pending = self.runtime._pending_grants.get(agent_id)
+                if not wish and lg is None and not pending:
+                    continue  # nothing secret-related about this agent
+                assignments[agent_id] = {
+                    "name": getattr(defn, "name", agent_id),
+                    "allowance_spec": wish,
+                    "resolved": _resolve_wish(wish),
+                    "pending": list(pending or []),
+                    "granted": list(lg["services"]) if lg else [],
+                    "pid": lg["pid"] if lg else None,
+                    "live": lg is not None,
+                }
+
+            # Plane B — connector/provider credentials (presence only; managed
+            # through their existing flows, surfaced here for completeness).
+            connectors = {
+                cid: self.runtime.credential_store.exists(cid)
+                for cid in self.runtime.connectors.list_available()
+            }
+            providers: list[dict[str, Any]] = []
+            try:
+                for p in await self.runtime.provider_list():
+                    providers.append({"id": p.get("id"),
+                                      "configured": bool(p.get("configured"))})
+            except Exception:  # noqa: BLE001 — display-only, degrade quietly
+                log.debug("secrets_status: provider_list failed", exc_info=True)
+
+            monitor = getattr(self.runtime, "security_monitor", None)
+            try:
+                push_armed = bool(self.runtime._broker_client.value_push_armed)
+            except Exception:  # noqa: BLE001
+                push_armed = False
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "services": services,
+                "isolation_enabled": bool(
+                    self.runtime._config.worker_isolation.enabled),
+                "monitor_healthy": bool(monitor.is_healthy()) if monitor else False,
+                "push_armed": push_armed,
+                "default_root_allowance":
+                    self.runtime._config.secrets.default_root_allowance,
+                "assignments": assignments,
+                "connectors": connectors,
+                "providers": providers,
+            }}
+
+        if msg_type == "secrets_put":
+            service = str(msg.get("service", "")).strip()
+            value = msg.get("value", "")
+            if not service:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'service' field"}
+            if "," in service or any(c.isspace() for c in service):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Service names must not contain commas or "
+                                 "whitespace (they double as allowance-spec tokens)"}
+            if service.lower() in ("none", "all"):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"'{service}' is a reserved allowance-spec keyword"}
+            if not isinstance(value, str) or not value:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'value' field"}
+            try:
+                existed = service in ks.list_services()
+                ks.put_secret(service, value)
+                write_policy_map(ks)
+            except Exception as exc:  # noqa: BLE001
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"vault write failed: {exc}"}
+            del value  # drop our reference to the raw value promptly
+            live_holders = self._live_secret_holders(service)
+            audit = getattr(self.runtime, "secret_audit", None)
+            if audit is not None:
+                audit.record("rotated" if existed else "added",
+                             agent_id="owner", services=[service])
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "service": service,
+                "status": "rotated" if existed else "created",
+                # The broker caches the policy map at import; a NEW service
+                # needs a broker restart before it is grantable. Rotation of
+                # an existing name works live.
+                "broker_restart_required": not existed,
+                # Rotation does NOT re-stage: these agents may keep the old
+                # value until their session ends.
+                "live_holders": live_holders,
+            }}
+
+        if msg_type == "secrets_delete":
+            service = str(msg.get("service", "")).strip()
+            if not service:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'service' field"}
+            try:
+                removed = ks.delete_secret(service)
+                write_policy_map(ks)
+            except Exception as exc:  # noqa: BLE001
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"vault write failed: {exc}"}
+            if not removed:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Unknown service: '{service}'"}
+            live_holders = self._live_secret_holders(service)
+            audit = getattr(self.runtime, "secret_audit", None)
+            if audit is not None:
+                audit.record("deleted", agent_id="owner", services=[service])
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "service": service,
+                "status": "deleted",
+                "live_holders": live_holders,
+            }}
+
+        return {"msg_id": msg_id, "ok": False,
+                "error": f"Unknown secrets message: {msg_type}"}
 
     # ------------------------------------------------------------------
     # On-chain registration helpers

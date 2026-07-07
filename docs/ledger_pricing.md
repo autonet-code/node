@@ -5,6 +5,12 @@ moves from score-movement-under-geometric-equilibration to explicit
 debate standing. Equilibration becomes an opt-in experimental kernel.
 Emission rate/schedule untouched (still config-gated, still unset).
 
+**v3 note (2026-07-08, docs/tool_substrate.md Decision):** on the live
+tool rail, standing has since been retired from mint entirely
+(`mint = usage_term`) and Change 2's violator-pays gate is dormant —
+work units no longer mint at all, and tool mint is not debate-gated.
+Change 1 (ledger replay determinism) and Change 3 (arm-B render) stand.
+
 ## Change 1 — pricing mode in the epoch close (owner: reconcile agent)
 
 `federated_epoch_close(..., pricing="ledger" | "equilibrated")`,

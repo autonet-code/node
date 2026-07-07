@@ -234,6 +234,14 @@ class Provider(ABC):
     event_bus: Any = None
     source_agent_id: str = ""
 
+    # v3 review step: True when this provider's own orchestrate loop
+    # injects the closing attest turn (the generic base loop does). A
+    # provider that runs an external loop it can't inject into (the SDK
+    # bridge) overrides this to False, and the CALLER runs the review
+    # step as a follow-up session turn (delegate_prompts.
+    # needs_review_reinvoke).
+    handles_review_step: bool = True
+
     # Session tracking (works for ALL providers, not just bridge)
     _cumulative_input_tokens: int = 0
     _cumulative_output_tokens: int = 0
@@ -417,6 +425,7 @@ class Provider(ABC):
         repeat_call_limit: int | None = None,
         usage_recorder: Any = None,
         history: list[dict[str, Any]] | None = None,
+        review_tools: bool = True,
         **_unused: Any,
     ) -> ProviderResponse:
         """Multi-turn orchestration with tool relay.
@@ -488,6 +497,15 @@ class Provider(ABC):
         # correct before we abort.
         osc_fingerprints: list[str] = []
         loop_warning_issued = False
+        # v3 review step (docs/tool_substrate.md, Decision 2026-07-08): the
+        # post-use review is CORE — per-axis scores are the only signal that
+        # ranks library retrieval and drifts tool positions. Track which
+        # framework tools the run called; if it used registered tools
+        # (use_tool / register_tool) and never attested, inject ONE closing
+        # review turn at the natural end instead of finalizing. Self-gating:
+        # runs that never touched registered tools are unaffected.
+        called_tool_names: set[str] = set()
+        review_injected = False
 
         # Per-request output cap comes from the model spec (§7), bounded at 16k
         # so a huge output ceiling doesn't shrink the usable input budget.
@@ -733,7 +751,32 @@ class Provider(ABC):
 
             # No tool calls or not a tool_use stop — we're done
             if not response.tool_calls or response.stop_reason != "tool_use":
-                return Provider._finalize_orchestrate(self, 
+                # v3 review step: one closing turn before finalize when the
+                # run used registered tools without attesting. Mirrors the
+                # loop-warning injection pattern (synthetic user turn +
+                # continue) and spends an iteration of the SAME max_turns
+                # budget — never extends it. One-shot: if the agent still
+                # doesn't attest on the extra turn, the next natural end
+                # finalizes normally.
+                if (review_tools and not review_injected
+                        and tool_executor is not None
+                        and ({"use_tool", "register_tool"} & called_tool_names)
+                        and "attest_tools" not in called_tool_names):
+                    review_injected = True
+                    log.info(
+                        "Review step: injecting closing attest turn for "
+                        "agent %s", self.source_agent_id or "?",
+                    )
+                    if response.text:
+                        # Keep the agent's final answer in history so the
+                        # review turn doesn't erase it.
+                        messages.append(
+                            {"role": "assistant", "content": response.text})
+                    from ..delegate_prompts import REVIEW_STEP_PROMPT
+                    messages.append(
+                        {"role": "user", "content": REVIEW_STEP_PROMPT})
+                    continue
+                return Provider._finalize_orchestrate(self,
                     response, messages, cumulative_usage,
                 )
 
@@ -748,6 +791,7 @@ class Provider(ABC):
             if response.text:
                 assistant_content.append({"type": "text", "text": response.text})
             for tc in response.tool_calls:
+                called_tool_names.add(tc.name)
                 assistant_content.append({
                     "type": "tool_use",
                     "id": tc.id,

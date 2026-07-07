@@ -133,6 +133,11 @@ class BridgeProvider(Provider):
     cleans up.
     """
 
+    # The SDK owns the agentic loop — this provider cannot inject the v3
+    # closing review turn mid-loop. The caller (execution engine / worker
+    # loop) runs the review step as a follow-up turn on the same session.
+    handles_review_step: bool = False
+
     def __init__(
         self,
         model: str = "sonnet",
