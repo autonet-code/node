@@ -1,23 +1,71 @@
 # Autonet Backlog
 
-Consolidated 2026-07-06 after the bring-it-home sprint. This is THE
-board; update in place as items land or get ratified.
+Consolidated 2026-07-06; updated 2026-07-08 after substrate v3. This is
+THE board; update in place as items land or get ratified.
 
-State: economy + framework MVP-complete and merged to master (NOT
-pushed). Venture-loop E2E 8/8, tool-economy E2E 7/7. Repo tidied,
-README rewritten, docs indexed. See [[venture-vault-design]] and
-[[tool-substrate-refactor]] for the full ledgers.
+State: **substrate v3 shipped and PUBLIC** (master pushed 2026-07-08).
+Reviews replace debates (`docs/tool_substrate.md`, Decision 2026-07-08):
+mint = usage alone, per-axis reviews drift tool positions, work units
+left consensus, debate rail retired/dormant. Both economy E2Es
+re-verified green ON v3 against a live chain (tool economy 7/7 — mint =
+log1p(1) exactly; venture loop 8/8). Also landed: Secrets tab + vault
+audit trail, the unified Substrate visualization, Tools Local/Substrate
+catalog, review step wired into the agentic loop, register()
+idempotency fix, and the README-as-living-paper ("Autonet — The
+Recursive Principial Body") now serving both app whitepaper surfaces.
+
+**V3 OPS (time-sensitive):**
+- **FLAG-DAY: restart every daemon onto the v3 build BEFORE the next
+  federated close** — v3 changed the close output/CID; a mixed fleet
+  forks. The restart also collapses the duplicated harness records
+  (13× per boot pre-fix) and activates `economy_graph`/`tool_reviews`
+  for the new UI surfaces.
+- Deploy Firestore rules for `substrate_viz` (world-readable,
+  client-unwritable) + run the substrate publisher next to a daemon
+  (`scripts/indexer/` is gitignored ops — lives outside the repo).
+- Chrome visual pass on the unified Substrate view (organic-feel knobs:
+  `organic_blob.dart` constants, `_kDescendFraction`,
+  `_kOpennessSpeed`).
+- Secrets broker E2E (vault setup + `ATN_WORKER_ISOLATION=1`) still
+  unrun.
+
+**TO FIX / HARDEN:**
+- **The v3 sybil trade (accepted at ratification, needs a plan before
+  real value flows):** reviews now drive both ranking and position
+  with no adversarial gate — a ring of colluding callers can pump a
+  tool's rating, discovery placement, and mint. Standing defenses:
+  vetting entry gate, per-caller log1p damping, owner-map + wire-key
+  exclusions, and the cognitive cost of attestations. Named
+  mitigation: reactivate the dormant CON/bust rail (kept in-tree).
+  Covert harm invisible to satisfied users has ONLY vetting as its
+  dedicated defense — vetting params (below) are therefore
+  load-bearing. Decide the tripwire: what observable signal (review
+  ring topology? mint concentration? owner-map clustering?) wakes the
+  dormant rail.
+- world_persistence: checkpoint doesn't persist `artifact_digest` →
+  viz `kind` tagging and ratings-lift ranking degrade after a daemon
+  restart until the next close reapplies positions (carry-over maps
+  survive; the anchor-node attribute doesn't).
+- Agentic-loop review guidance lives only in tool descriptions +
+  `_TOOL_CATEGORY_NOTES`; agents with a custom `system_prompt` bypass
+  the category notes (they still get the injected closing review turn).
 
 **USER-ONLY DECISIONS (nothing proceeds without these):**
 1. Emission rate — fixed pool vs floating; fixed recommended. Sets
-   inflation + backer dilution modelability.
+   inflation + backer dilution modelability. (Still unset; every mint
+   number is provisional until this is blessed.)
 2. repPerReputation rate on ReputationMirror (default 1:1, timelock-
    governed) — the direction/quality exchange rate; flagged as the
    most consequential unbuilt decision; wants sims.
 3. Vet params blessing: sim says N=3 (code has 2.0); royalty×weight
    slash fix (rubber-stamper out-earns careful vetter in deep pools).
+   Post-v3 these are LOAD-BEARING — vetting is the only dedicated
+   defense against covert harm (see sybil trade above). Note the
+   tool-economy sim memo is quarantined (models v2 mint); re-run the
+   sweep against usage-only mint before citing absolute numbers.
 4. Channel challengeWindow (E2E uses 3600s).
-5. Push master to origin (the entire economy is local-only commits).
+5. ~~Push master to origin~~ — DONE 2026-07-08 (no tag, no release).
+   atn_web commits remain local-only.
 6. CLAUDE.md is gitignored — machine-onboarding contract doesn't
    travel with clones. Commit / genericize / keep local?
 7. Charter-anchor governor handoff: deploy the jurisdiction DAO suite
@@ -39,7 +87,7 @@ README rewritten, docs indexed. See [[venture-vault-design]] and
 - Verifier rewards migration: mint-funded bootstrap → bps-of-raise
   fee once volume exists.
 - Capability-gap pricing: coverage-atlas gaps as mint multiplier
-  (doctrine in CLAUDE.md, never implemented).
+  (doctrine only, never implemented).
 
 **ENGINEERING FOLLOW-UPS (flagged by builders, none blocking):**
 - TrialRunner: transport seam → wire to live WS service-request
@@ -47,14 +95,19 @@ README rewritten, docs indexed. See [[venture-vault-design]] and
   submits directly (currently returns calldata).
 - Orchestrator drawer: add the 120s stall timeout the chat surface
   got (silent-stall symmetry).
-- world_persistence: checkpoint doesn't persist artifact_digest →
-  tool STANDING doesn't survive daemon restart on the local
-  projection (carry-over maps do).
 - Adopted tools: OS-level isolated runner (vault track) as the wall
   behind tool_guard's audit-hook tripwire; macOS isolation untested.
-- Indexer (EightRice/indexer, apps/autonet): mirror the new events —
-  ToolRegistered, VentureCreated, CharterAnchored, service registry —
-  into Firestore collections.
+- Indexer: mirror the new events — ToolRegistered, VentureCreated,
+  CharterAnchored, service registry — into Firestore collections
+  (`tools`/`services` collections are documented as future, not
+  implemented).
+- MCP server quirk: any Claude Code session with the atn MCP
+  configured silently stands up a full runtime on :7700 — should
+  attach to an existing daemon when one is running, self-host only
+  otherwise.
+- Registrations carry-over GC (someday): the consensus map grows
+  monotonically; mechanical GC = drop digests with zero usage for N
+  epochs, re-registration re-admits. Not a design item.
 - Shadownet: deployed Substrate.sol predates the entire tool/vault/
   anchor surface; redeploy is a user-gated batch (user removed the
   old task; it returns when they say so).
@@ -64,7 +117,9 @@ README rewritten, docs indexed. See [[venture-vault-design]] and
 
 **EXPERIMENTS:**
 - Phase 9 (equilibration at depth) — still unrun, still the
-  pre-committed FINAL test of the equilibrated kernel.
+  pre-committed FINAL test of the equilibrated kernel. (Post-v3 the
+  live path doesn't read equilibration, but the pre-commitment
+  stands: run it or formally retire it via a dated decision.)
 - Phase 11 (proposed, unregistered): minimum-model-tier gap bare vs
   substrate-assisted, claim = gap widens as tool corpus grows — the
   decentralization mandate made falsifiable. Phase-10 harness reuses.
@@ -73,5 +128,6 @@ README rewritten, docs indexed. See [[venture-vault-design]] and
 beachhead — a paid service category with real buyers where crypto
 settlement is an advantage (hardware/compute rental for agents = best
 named candidate). Show one other human the venture-loop E2E; fund one
-tiny real venture. The network begins the moment it isn't just its
-author.
+tiny real venture. The v3 flywheel (reviews → ranking → usage → mint)
+cannot spin with one participant. The network begins the moment it
+isn't just its author.
