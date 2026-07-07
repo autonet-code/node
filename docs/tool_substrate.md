@@ -122,15 +122,21 @@ verifiable anchor in-system is ATN itself.
 5. **One weight, both rails.** The same household weight multiplies
    the damped usage term (mint) and the review evidence mass (position
    drift): a voice that can't mint can't move position either.
-6. **Trust contract**: `voice_weights` is a close input with the same
-   contract as `agent_owner_map` — chain-derived, identical at every
-   daemon reading the same chain state, refreshed by the driver's
-   `voice_source` hook just before each close
-   (`nodes/common/voice_state.py`). `voice_weights=None` (no chain) =
-   every household weighs 1.0. Known gap, accepted like the owner
-   map's: reads are not yet pinned to the prior anchor block — a
-   lagging chain view can fork a close; block-pinned reads are the
-   named upgrade before multi-daemon closes with live balances.
+6. **Snapshot-pinned reads.** `voice_weights` (and the owner map read
+   with it) is a close input refreshed by the driver's `voice_source`
+   hook just before each close (`nodes/common/voice_state.py`), with
+   every read PINNED to the previous epoch's anchor block
+   (`getAnchor(anchorCount-1).blockNumber`, stored on-chain at
+   submission). The snapshot is on-chain, agreed, and pre-dates the
+   epoch — so all daemons derive identical maps no matter when their
+   refresh fires, and a wallet funded mid-epoch (after seeing what's
+   worth pumping) carries no weight until the next epoch. No anchor
+   yet = no agreed snapshot: empty maps, close runs `weights=None`
+   (uniform 1.0 — correct for epoch 1, nothing has minted). Ops note:
+   pinned reads need the RPC node to serve state at the anchor block —
+   on non-archive public RPCs an epoch longer than the node's state
+   retention (~128 blocks typ.) makes the refresh fail (driver keeps
+   the previous maps and logs).
 
 Character shift accepted openly: capital = voice. Holders are the
 actors with the most to lose from junk mint debasing ATN, and every

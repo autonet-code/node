@@ -41,14 +41,18 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   (`voice_state.py` → driver `voice_source` hook), `fleet_voice` WS +
   Owner page in atn_web (wallet dropdown). Tests:
   `tests/test_voice_weights.py` (10) + all close families green.
-  REMAINING: (a) reads not yet pinned to the prior anchor block — a
-  lagging chain view can fork a multi-daemon close (same accepted gap
-  as agent_owner_map; pin before live multi-daemon closes); (b) the ε
-  floor is the residual sybil surface — bounded, but the dormant
-  CON/bust rail stays the named backstop; (c) covert harm still has
-  ONLY vetting as its dedicated defense — vet params (below) remain
-  load-bearing. NOTE: this changes close output again — same flag-day
-  window as v3 (fleet is still one daemon).
+  Reads are PINNED to the previous epoch's anchor block
+  (`getAnchor(...).blockNumber`) — all daemons derive identical maps
+  regardless of read timing; no anchor = weights off (epoch 1).
+  REMAINING: (a) ops — pinned reads need the RPC to serve state at the
+  anchor block; on a non-archive public RPC an epoch longer than state
+  retention (~128 blocks typ.) makes the refresh fail (driver keeps
+  previous maps + logs) — pick an archive endpoint or shorten epochs;
+  (b) the ε floor is the residual sybil surface — bounded, but the
+  dormant CON/bust rail stays the named backstop; (c) covert harm
+  still has ONLY vetting as its dedicated defense — vet params (below)
+  remain load-bearing. NOTE: this changes close output again — same
+  flag-day window as v3 (fleet is still one daemon).
 - world_persistence: checkpoint doesn't persist `artifact_digest` →
   viz `kind` tagging and ratings-lift ranking degrade after a daemon
   restart until the next close reapplies positions (carry-over maps
