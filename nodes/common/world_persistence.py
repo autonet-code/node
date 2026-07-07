@@ -288,6 +288,11 @@ class WorldPersistence:
             )
 
         world = restore_world(checkpoint["world"])
+        # Rehydrate the dynamic artifact_digest attribute from its
+        # metadata mirror (viz kind tags + ratings-lift ranking would
+        # otherwise degrade until the next close).
+        from .world_model_substrate.aggregate import lift_artifact_digests
+        lift_artifact_digests(world)
 
         # Tail replay past the checkpoint offset. Markers before the
         # boundary are no-ops (their batches are inside the checkpoint);

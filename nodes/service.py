@@ -877,6 +877,29 @@ class AutonetService:
             tool_vetting_path=tool_vetting_path,
         )
 
+        # Household voice + fee-recycled emission sourcing. Wired here —
+        # NOT in attach_chain_submission — because these are CLOSE
+        # INPUTS every honest daemon must derive identically: they gate
+        # on chain READ access (substrate_address + rpc_url) only. A
+        # read-only daemon that skipped this would close with
+        # weights=None / floor pool while submitters close with real
+        # values — a deterministic fork. No private key involved.
+        try:
+            bc = getattr(self.config, "blockchain", None)
+            substrate_addr = getattr(bc, "substrate_address", "") or ""
+            rpc_url = getattr(bc, "rpc_url", "") or ""
+        except Exception:
+            substrate_addr, rpc_url = "", ""
+        if substrate_addr and rpc_url:
+            def _voice_source():
+                from .common.voice_state import read_voice_state
+                return read_voice_state(substrate_addr, rpc_url)
+
+            self._federated_close_driver.voice_source = _voice_source
+            logger.info(
+                "Voice/emission source wired (substrate=%s)", substrate_addr,
+            )
+
         def _on_local_close(local_result):
             try:
                 fed = self._federated_close_driver.run(local_result)
@@ -962,17 +985,10 @@ class AutonetService:
 
         self._chain_submission_driver = driver
         self.add_federated_close_subscriber(driver.handle_federated_close)
-
-        # Household voice sourcing (balance-weighted voice addendum):
-        # chain access exists here, so wire the close driver's refresh
-        # hook — each close prices voices (and the owner-map exclusions)
-        # from current chain state. Failures inside the hook keep the
-        # previous maps (handled by the driver).
-        def _voice_source():
-            from .common.voice_state import read_voice_state
-            return read_voice_state(cfg.substrate_address, cfg.rpc_url)
-
-        self._federated_close_driver.voice_source = _voice_source
+        # (Voice/emission sourcing is deliberately NOT wired here: it
+        # gates on chain READ access and is attached with the close
+        # driver itself — see the driver construction above — so
+        # read-only daemons derive the same close inputs as submitters.)
         logger.info(
             "Chain submission attached (substrate=%s)", cfg.substrate_address,
         )

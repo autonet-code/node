@@ -1056,7 +1056,21 @@ def federated_epoch_close(
         emission_pool=emission_pool,
         extra_node_agent_mint=tool_result["node_agent"],
     )
-    result["tool_mint"] = tool_result["per_digest"]
+    # Keep tool_mint in the SAME UNITS as agent_mint: when the emission
+    # pool normalized agent mints, scale the per-digest display values
+    # by the identical factor (usage_term stays raw — it's the input
+    # signal, not a payout). Sorted iteration + rounding for the
+    # bit-identical guarantee.
+    per_digest = tool_result["per_digest"]
+    _pool = result.get("emission_pool")
+    _raw_total = float(result.get("raw_mint_total") or 0.0)
+    if _pool is not None and _raw_total > 0.0:
+        _scale = float(_pool) / _raw_total
+        per_digest = {
+            d: {**e, "mint": round(e["mint"] * _scale, output_decimals)}
+            for d, e in sorted(per_digest.items())
+        }
+    result["tool_mint"] = per_digest
     result["tool_registrations"] = tool_result["registrations_next"]
     result["tool_vetting"] = tool_result["vetting_next"]
     result["tool_positions"] = tool_result["positions_next"]

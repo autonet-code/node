@@ -147,8 +147,9 @@ class CanonicalWorldTracker:
         **kwargs: Any,
     ) -> "CanonicalWorldTracker":
         """Resume the tracker from a decoded checkpoint (rejoin path)."""
+        from .world_model_substrate.aggregate import lift_artifact_digests
         return cls(
-            world=restore_world(checkpoint["world"]),
+            world=lift_artifact_digests(restore_world(checkpoint["world"])),
             prev_world_cid=cid,
             **kwargs,
         )
@@ -292,7 +293,8 @@ def catch_up_from_chain(
             f"anchor for {epoch_id}"
         )
 
-    world = restore_world(checkpoint["world"])
+    from .world_model_substrate.aggregate import lift_artifact_digests
+    world = lift_artifact_digests(restore_world(checkpoint["world"]))
     logger.info(
         "catch-up: restored canonical world at epoch %s (cid=%s)",
         epoch_id, world_cid[:16],

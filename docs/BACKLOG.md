@@ -57,10 +57,12 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   (below) remain load-bearing. NOTE: close output changed + CONTRACT
   changed (checkpoints) — the shadownet redeploy now carries this too;
   same flag-day window as v3 (fleet is still one daemon).
-- world_persistence: checkpoint doesn't persist `artifact_digest` →
-  viz `kind` tagging and ratings-lift ranking degrade after a daemon
-  restart until the next close reapplies positions (carry-over maps
-  survive; the anchor-node attribute doesn't).
+- ~~world_persistence artifact_digest gap~~ — FIXED 2026-07-08:
+  digest mirrored into node.metadata (serializer carries it) +
+  `lift_artifact_digests` rehydrates after every restore_world
+  (world_persistence + both state_sync paths); roundtrip test pins it.
+  NOTE: metadata now carries the digest → checkpoint content/world_cid
+  changes — rides the open flag-day window.
 - Agentic-loop review guidance lives only in tool descriptions +
   `_TOOL_CATEGORY_NOTES`; agents with a custom `system_prompt` bypass
   the category notes (they still get the injected closing review turn).

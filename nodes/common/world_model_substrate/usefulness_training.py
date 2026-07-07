@@ -313,6 +313,9 @@ def train_world_model_on_usefulness(
                         )),
                     })
                     new_node.artifact_digest = digest
+                    # Metadata mirror: survives checkpoint restore
+                    # (see aggregate.lift_artifact_digests).
+                    new_node.metadata["artifact_digest"] = digest
             equilibrate(world, max_rounds=4, tolerance=1e-3)
             recorder.sub_claims_after_equilibrate(world, before_ids)
             n_observations += 1

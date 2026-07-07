@@ -241,11 +241,16 @@ def apply_events(
                     new_node.observation_id = obs_id
                 # Carry artifact_digest through replay so replica worlds
                 # can price artifacts by this node's standing (two-plane
-                # inference). Runtime-only attribute: not serialized, not
-                # hashed, no effect on ids/coords/equilibration.
+                # inference). The attribute is the hot-path read; the
+                # metadata mirror is what survives checkpoint restore
+                # (the vendored serializer carries metadata verbatim,
+                # dynamic attributes don't) — lift_artifact_digests()
+                # rehydrates the attribute after restore. Inert to
+                # ids/coords/equilibration either way.
                 digest = ev.get("artifact_digest", "")
                 if digest:
                     new_node.artifact_digest = digest
+                    new_node.metadata["artifact_digest"] = digest
                 # Authored post (targeted disputes): one unit-weight
                 # post by the event's author. Idempotent across replay
                 # waves because each event is applied exactly once.
@@ -265,6 +270,28 @@ def apply_events(
     # Ledger pricing skips this: net_score over causal events only.
     if equilibrate_after:
         equilibrate(world, max_rounds=8, tolerance=1e-3)
+    return world
+
+
+def lift_artifact_digests(world: World) -> World:
+    """Rehydrate the dynamic ``artifact_digest`` node attribute from
+    the metadata mirror after a checkpoint restore.
+
+    The vendored serializer (world_model/generalized/serialize.py)
+    carries ``node.metadata`` verbatim but knows nothing about dynamic
+    attributes, so a restored world would lose its tool-manifest
+    tagging — viz ``kind`` labels and the ratings lift in
+    ``infer_artifacts`` would silently degrade until the next close
+    reapplied positions. Call this after every ``restore_world``.
+    Idempotent; nodes without a mirror are untouched.
+    """
+    for tendency in world.tendencies.values():
+        for node in tendency.tree.all_nodes():
+            if getattr(node, "artifact_digest", ""):
+                continue
+            digest = (node.metadata or {}).get("artifact_digest", "")
+            if digest:
+                node.artifact_digest = digest
     return world
 
 

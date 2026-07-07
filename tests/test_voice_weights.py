@@ -211,6 +211,19 @@ class TestVoiceWeights:
         assert r_none["tool_mint"][DIGEST]["mint"] == pytest.approx(
             math.log1p(1))
 
+    def test_emission_pool_scales_tool_mint_display(self):
+        """With a pool, tool_mint stays in the SAME units as agent_mint:
+        one tool earning everything → its per-digest mint == the pool,
+        and agent_mint (author 90% + validator royalties 10%) sums to
+        the pool. usage_term stays raw (input signal, not payout)."""
+        batches = _scenario([_receipt_event(1, "agent-a")])
+        result = federated_epoch_close(
+            canonical_order(batches), emission_pool=50.0)
+        entry = result["tool_mint"][DIGEST]
+        assert entry["mint"] == pytest.approx(50.0)
+        assert entry["usage_term"] == pytest.approx(math.log1p(1))
+        assert sum(result["agent_mint"].values()) == pytest.approx(50.0)
+
     def test_double_close_with_weights_bit_identical(self):
         batches = _scenario([
             _receipt_event(1, "agent-a"),

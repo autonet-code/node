@@ -714,6 +714,9 @@ class WorldService:
                     # default -> to_dict omits it, old-format parity holds.
                     if artifact_digest and new_node is not None:
                         new_node.artifact_digest = artifact_digest
+                        # Metadata mirror: survives checkpoint restore
+                        # (see aggregate.lift_artifact_digests).
+                        new_node.metadata["artifact_digest"] = artifact_digest
                     if author_post and new_node is not None:
                         new_node.add_post(agent_id)
                     recorder._seq += 1

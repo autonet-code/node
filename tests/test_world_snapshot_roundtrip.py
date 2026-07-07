@@ -150,3 +150,37 @@ def test_real_log_checkpoint_matches_full_replay():
 
     assert worlds_equal(world, restored)
     assert snapshot_node_scores(world) == snapshot_node_scores(restored)
+
+
+def test_artifact_digest_survives_restore():
+    """The tool-manifest tag: the dynamic ``artifact_digest`` attribute
+    is mirrored into node.metadata (which the serializer carries) and
+    rehydrated by ``lift_artifact_digests`` after restore — viz kind
+    tags and the ratings lift must not degrade across a daemon reboot."""
+    from nodes.common.world_model_substrate.aggregate import (
+        lift_artifact_digests,
+    )
+
+    digest = "ab" * 32
+    world = build_charter_world(bandwidth=1.5, embedding_dim=64)
+    coords = [0.0] * (6 + 64)
+    coords[4] = 0.8
+    apply_events(world, [{
+        "kind": "sub_claim_sprouted", "seq": 1,
+        "author_agent": "toolsmith", "tendency_id": "correctness",
+        "parent_id": "solver_root", "node_id": "tm_roundtrip",
+        "position": "pro", "coords": coords, "polarity_axis": coords,
+        "content": "tool roundtrip", "author_post": True,
+        "artifact_digest": digest,
+        "manifest_meta": {"trust_class": "pinned", "author": "toolsmith"},
+    }])
+
+    def _tagged(w):
+        return {
+            getattr(n, "artifact_digest", "")
+            for t in w.tendencies.values() for n in t.tree.all_nodes()
+        } - {""}
+
+    assert _tagged(world) == {digest}
+    restored = lift_artifact_digests(restore_world(snapshot_world(world)))
+    assert _tagged(restored) == {digest}
