@@ -9,9 +9,14 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///        of the autonet economy).
 ///
 /// One instance PER VENTURE (deploy-per-venture, like Project clones). ATN — the
-/// Substrate.sol token — is the ONLY currency. The AGENT is the investable unit:
-/// backers fund an agent's inference burn, the agent converts proven utility
-/// into service revenue, and backers hold a pull-based claim on the vault's NET
+/// Substrate.sol token — is the ONLY currency. The AGENT is the investable unit,
+/// but the venture is a HUMAN + AGENT operation: the moat verifiers probe is
+/// usually the human's data, hardware, credentials, or labor, not the model
+/// (every competitor rents the same models). Backers therefore fund the
+/// venture's whole operating burn — the tranche drip is unrestricted ATN to the
+/// agent address, and the agent's owner is paid from it like any other cost;
+/// nothing earmarks it for inference. The venture converts proven utility into
+/// service revenue, and backers hold a pull-based claim on the vault's NET
 /// revenue (never the artifact — handing over pinned code would leak the moat).
 ///
 /// NO JUDGE ANYWHERE (venture_vault_design.md, ratified 2026-07-05). The
