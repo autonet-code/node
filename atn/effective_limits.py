@@ -57,6 +57,57 @@ class EffectiveLimits:
         }
 
 
+def humanize_magnitude(n: float) -> str:
+    """Short human-readable magnitude: 512 -> '512', 38_200 -> '38.2k',
+    1_200_000 -> '1.2M'. Best-effort; never raises."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "0"
+    neg = n < 0
+    n = abs(n)
+    if n < 1000:
+        s = str(int(round(n)))
+    elif n < 1_000_000:
+        s = f"{n / 1000:.1f}k"
+    else:
+        s = f"{n / 1_000_000:.1f}M"
+    return f"-{s}" if neg else s
+
+
+def format_budget_line(
+    limits: "EffectiveLimits",
+    last_turn_tokens: int | None = None,
+) -> str:
+    """Compose the one-line budget stamp injected into the newest incoming
+    message so an agent sees its economic state at every decision point.
+
+    Returns ``[Budget: unlimited]`` when no bounded budget binds the agent, else
+    ``[Budget: <remaining> credits remaining | last turn: ~<n>]``. The last-turn
+    segment is dropped when there is no prior metered turn (or the budget is
+    unlimited). Pure — safe to unit-test in isolation.
+    """
+    entry = limits.entries[0] if getattr(limits, "entries", None) else None
+    remaining_part = "unlimited"
+    if entry is not None:
+        limit = entry.get("limit")
+        remaining = entry.get("remaining")
+        unit = entry.get("unit", "tokens")
+        if (limit is not None and limit > 0
+                and remaining is not None and remaining >= 0):
+            if unit == "usd":
+                remaining_part = f"${remaining:,.2f} remaining"
+            else:
+                remaining_part = f"{humanize_magnitude(remaining)} credits remaining"
+
+    line = f"[Budget: {remaining_part}"
+    # Only surface last-turn cost alongside a bounded budget — an unlimited
+    # agent's stamp stays the terse ``[Budget: unlimited]`` per spec.
+    if remaining_part != "unlimited" and last_turn_tokens:
+        line += f" | last turn: ~{humanize_magnitude(last_turn_tokens)}"
+    return line + "]"
+
+
 def _agent_provider_name(defn: Any, config: Any) -> str:
     """Best-effort resolve the provider NAME an agent runs on, WITHOUT
     instantiating a provider. Uses the explicit provider field when it names a

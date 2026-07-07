@@ -821,6 +821,52 @@ class ExecutionEngine:
     # Cognitive agent execution
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Per-turn budget stamp
+    # ------------------------------------------------------------------
+
+    def _last_turn_tokens(self, agent_id: str, current_execution_id: str) -> int | None:
+        """Metered budget-tokens of the agent's most recent PRIOR execution turn.
+
+        Sums ``TokenUsage.budget_tokens()`` (the exact quantity charged to the
+        budget ledger — input + cache-write + output, cache-read excluded)
+        across providers for the newest execution that is NOT the in-flight one.
+        Returns None when there is no prior metered turn. Best-effort."""
+        try:
+            history = self.execution_log.get_history(agent_id, limit=8)
+        except Exception:
+            return None
+        for rec in reversed(history):
+            if rec.execution_id == current_execution_id:
+                continue
+            total = sum(u.budget_tokens() for u in rec.token_usage.values())
+            if total > 0:
+                return total
+        return None
+
+    def _budget_stamp(self, defn: AgentDefinition, record: ExecutionRecord) -> str:
+        """One-line budget status for the newest incoming message, e.g.
+        ``[Budget: 38.2k credits remaining | last turn: ~2.1k]`` — or
+        ``[Budget: unlimited]`` for an unbudgeted agent. Surfaces the EXISTING
+        effective-limits + per-turn metering; builds no new accounting. Returns
+        "" (no stamp) if anything is unavailable — never blocks a run."""
+        try:
+            from ..effective_limits import (
+                compute_effective_limits, format_budget_line,
+            )
+            rt = getattr(self, "_runtime_ref", None)
+            limits = compute_effective_limits(
+                defn.id,
+                registry=self.registry,
+                metering=getattr(rt, "metering", None),
+                config=getattr(rt, "_config", None),
+            )
+            last = self._last_turn_tokens(defn.id, record.execution_id)
+            return format_budget_line(limits, last)
+        except Exception:
+            log.debug("budget stamp failed; continuing", exc_info=True)
+            return ""
+
     async def _execute_cognitive_agent(
         self,
         defn: AgentDefinition,
@@ -1072,11 +1118,20 @@ class ExecutionEngine:
                     else:
                         system_prompt = self._append_history_to_prompt(system_prompt, prior_turns)
 
-            # --- Inject UTC time ---
+            # --- Inject UTC time + budget status ---
+            # Both ride the newest incoming message ONLY (never the system prompt
+            # or older history) so the moving prompt-cache breakpoint isn't
+            # invalidated by a changing value. The budget line follows the time
+            # line inside the same leading stamp block; conversation.py's
+            # "[Current time:" strip removes them together at the first \n\n.
             from datetime import timezone as _tz
             now = datetime.now(_tz.utc)
             time_line = f"Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')} ({now.strftime('%A, %B %d, %Y')})"
-            user_message = f"[{time_line}]\n\n{user_message}"
+            stamp = f"[{time_line}]"
+            budget_line = self._budget_stamp(defn, record)
+            if budget_line:
+                stamp = f"{stamp}\n{budget_line}"
+            user_message = f"{stamp}\n\n{user_message}"
 
             # --- P4 worker-isolation cutover (flag-gated, API providers only) ---
             # The shared context above (system prompt, drained inbox, prompt
