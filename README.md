@@ -124,7 +124,7 @@ See [`docs/local_e2e.md`](docs/local_e2e.md) for what each proves.
 | `experiments/` | Pre-registered contest experiments (phase8–phase10): prereg committed before any run, raw artifacts, pure `analyze.py`. |
 | `scripts/` | Deploy, install, and operational scripts. `scripts/debug/` groups profiling/repro scripts. |
 | `tests/` | Test suite (~630 tests — run targeted subsets, never the whole thing). |
-| `legacy/pre-substrate/` | Dead-paradigm files preserved with history (orchestrator sim, VL-JEPA demo/validate, FedAvg-era self-tests). Not the live path. |
+| `legacy/pre-substrate/` | Earlier-paradigm files preserved with history. Not the live path. |
 | `docs/` | The paper (see §7) + experiment records + reference. Start at [`docs/README.md`](docs/README.md). |
 
 See `CLAUDE.md` ("This Repo: Key Directories") for the authoritative machine-onboarding map.
