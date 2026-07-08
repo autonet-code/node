@@ -179,7 +179,7 @@ class InferenceProviderMatch:
     ----------
     peer_id:        libp2p peer id of the daemon hosting the agent
     agent_address: 0x address of the agent (used for payment routing
-                    via Substrate.payForInference)
+                    via Substrate.payForService)
     renderer_model: e.g. "qwen3:4b"; same field as in the inference dict
     price_atn:      per-probe price scaled like the on-chain side
     inference:      full inference dict (carries any extras)
@@ -246,7 +246,7 @@ class NodeCapability:
     #   - "price_atn":      int  (ATN per probe, scaled to uint256
     #                              like the chain side)
     #   - "agent_address":  str  (0x address that should receive
-    #                              payForInference funds)
+    #                              payForService funds)
     #   - "schema":         int  (1, for forward-compat)
     inference: Dict = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)

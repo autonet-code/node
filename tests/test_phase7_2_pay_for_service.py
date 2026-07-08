@@ -1,9 +1,9 @@
-"""Phase 7.2: payForInference — structured ATN transfer for inference fees.
+"""Phase 7.2: payForService — structured ATN transfer for service fees.
 
 Validates:
 
   1. Happy path: caller pays recipient; balances move; both ATNTransfer
-     and InferencePayment events fire with correct fields.
+     and ServicePayment events fire with correct fields.
   2. requestId is propagated as the third indexed topic on the event,
      so off-chain auditors can match payments to requests.
   3. Insufficient balance reverts; no state change.
@@ -53,7 +53,9 @@ def _load_substrate() -> Tuple[list, str]:
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
     contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor(deployer).transact({"from": deployer, "gas": 8_000_000})
+    tx = contract.constructor(
+        deployer, "0x0000000000000000000000000000000000000000"
+    ).transact({"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
     return receipt.contractAddress
@@ -184,7 +186,7 @@ def chain():
 # ---------------------------------------------------------------------------
 
 
-def test_pay_for_inference_moves_balance_and_emits_event(chain):
+def test_pay_for_service_moves_balance_and_emits_event(chain):
     w3 = chain["w3"]
     contract = chain["contract"]
     payer_addr = chain["agent_addrs"][0]
@@ -201,7 +203,7 @@ def test_pay_for_inference_moves_balance_and_emits_event(chain):
     fee, burned, to_treasury = _fee_parts(pay_amount)
     request_id = Web3.keccak(text="inference-request-abc123")
 
-    tx = contract.functions.payForInference(
+    tx = contract.functions.payForService(
         recipient, pay_amount, request_id,
     ).transact({"from": payer_addr, "gas": 400_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
@@ -219,8 +221,8 @@ def test_pay_for_inference_moves_balance_and_emits_event(chain):
     assert (contract.functions.balanceOf(treasury).call()
             == treasury_before + to_treasury)
 
-    # InferencePayment event carries the GROSS amount.
-    inf_events = contract.events.InferencePayment().process_receipt(receipt)
+    # ServicePayment event carries the GROSS amount.
+    inf_events = contract.events.ServicePayment().process_receipt(receipt)
     assert len(inf_events) == 1
     args = inf_events[0]["args"]
     assert args["payer"] == payer_addr
@@ -245,11 +247,11 @@ def test_pay_for_inference_moves_balance_and_emits_event(chain):
 
 def test_request_id_indexed_for_filtering(chain):
     """The requestId is indexed so off-chain auditors can filter
-    InferencePayment logs by request id."""
+    ServicePayment logs by request id."""
     abi = chain["abi"]
     inf_event = next(
         e for e in abi
-        if e.get("type") == "event" and e.get("name") == "InferencePayment"
+        if e.get("type") == "event" and e.get("name") == "ServicePayment"
     )
     req_param = next(p for p in inf_event["inputs"] if p["name"] == "requestId")
     assert req_param["indexed"] is True
@@ -269,7 +271,7 @@ def test_multiple_payments_accumulate_on_recipient(chain):
     total_net = 0
     for i in range(3):
         rid = Web3.keccak(text=f"req-{i}")
-        tx = contract.functions.payForInference(
+        tx = contract.functions.payForService(
             recipient, pay_each, rid,
         ).transact({"from": payer_addr, "gas": 400_000})
         receipt = w3.eth.wait_for_transaction_receipt(tx)
@@ -287,7 +289,7 @@ def test_multiple_payments_accumulate_on_recipient(chain):
 # ---------------------------------------------------------------------------
 
 
-def test_pay_for_inference_with_insufficient_balance_reverts(chain):
+def test_pay_for_service_with_insufficient_balance_reverts(chain):
     w3 = chain["w3"]
     contract = chain["contract"]
     # agent_addrs[2] hasn't received any training mint -> zero balance.
@@ -298,7 +300,7 @@ def test_pay_for_inference_with_insufficient_balance_reverts(chain):
     rid = Web3.keccak(text="rejected-tx")
     rejected = False
     try:
-        tx = contract.functions.payForInference(
+        tx = contract.functions.payForService(
             recipient, 100, rid,
         ).transact({"from": poor_payer, "gas": 400_000})
         rcpt = w3.eth.wait_for_transaction_receipt(tx)
@@ -321,7 +323,7 @@ def test_pay_to_zero_address_reverts(chain):
     rid = Web3.keccak(text="zero-target")
     rejected = False
     try:
-        tx = contract.functions.payForInference(
+        tx = contract.functions.payForService(
             "0x0000000000000000000000000000000000000000", 1, rid,
         ).transact({"from": payer_addr, "gas": 400_000})
         rcpt = w3.eth.wait_for_transaction_receipt(tx)
@@ -353,7 +355,7 @@ def test_payment_does_not_change_reputation_on_either_side(chain):
 
     pay_amount = contract.functions.balanceOf(payer_addr).call() // 2
     rid = Web3.keccak(text="rep-isolation")
-    tx = contract.functions.payForInference(
+    tx = contract.functions.payForService(
         recipient, pay_amount, rid,
     ).transact({"from": payer_addr, "gas": 400_000})
     w3.eth.wait_for_transaction_receipt(tx)
@@ -387,7 +389,7 @@ def test_payment_to_unregistered_address_works(chain):
     fee, _, _ = _fee_parts(pay_amount)
     rid = Web3.keccak(text="anon-recipient")
 
-    tx = contract.functions.payForInference(
+    tx = contract.functions.payForService(
         unregistered_recipient, pay_amount, rid,
     ).transact({"from": payer_addr, "gas": 400_000})
     rcpt = w3.eth.wait_for_transaction_receipt(tx)
@@ -402,7 +404,7 @@ def test_payment_to_unregistered_address_works(chain):
 
 
 def test_self_payment_still_pays_the_fee(chain):
-    """payForInference(self, ...) shouldn't crash or double-count —
+    """payForService(self, ...) shouldn't crash or double-count —
     and the fee applies regardless: self-payment costs the fee. This
     is the wash-trading defense in miniature — cycling volume through
     yourself burns real ATN into the shared pool."""
@@ -414,7 +416,7 @@ def test_self_payment_still_pays_the_fee(chain):
     rid = Web3.keccak(text="self-pay")
     pay = initial // 4
     fee, _, _ = _fee_parts(pay)
-    tx = contract.functions.payForInference(
+    tx = contract.functions.payForService(
         payer_addr, pay, rid,
     ).transact({"from": payer_addr, "gas": 400_000})
     rcpt = w3.eth.wait_for_transaction_receipt(tx)

@@ -77,7 +77,7 @@ def _load_substrate() -> Tuple[list, str]:
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
     contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor(deployer).transact({"from": deployer, "gas": 8_000_000})
+    tx = contract.constructor(deployer, "0x0000000000000000000000000000000000000000").transact({"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
     return receipt.contractAddress

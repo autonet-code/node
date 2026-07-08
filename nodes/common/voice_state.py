@@ -1,35 +1,51 @@
 """Household voice state — chain-derived owner map + voice weights.
 
-Spec: docs/tool_substrate.md, Decision 2026-07-08 addendum
-(balance-weighted voice). The federated close collapses callers to
+Spec: docs/tool_substrate.md, Decision 2026-07-08 ("ATN = money,
+reputation = voice"). The federated close collapses callers to
 HOUSEHOLDS (proven owner wallet, per Substrate.sol's EIP-712 owner
 binding) and scales each household's damped usage/review credit by a
-voice weight that is LINEAR in the household's ATN:
+voice weight that is LINEAR in the household's REPUTATION:
 
-    weight(house) = epsilon + household_ATN / atnTotalSupply
+    weight(house) = epsilon + household_reputation / reputationTotalSupply
 
-where household_ATN = owner wallet balance + Σ balances of every agent
-bound to that owner (agent mint stays on the agent address —
-``recordTrainingForEpoch`` mints to msg.sender — so the family's
-earnings count without a sweep). Linearity is the sybil property:
-splitting a balance across any number of wallets or agents never gains
-weight; ``epsilon`` bounds what a zero-balance identity can carry and
-lets a cold-start network (supply == 0) bootstrap.
+where household_reputation = Σ reputation of every agent bound to that
+owner (agent mint stays on the agent address — ``recordTrainingForEpoch``
+mints reputation to msg.sender — so the family's earnings count without
+a sweep). Linearity is the sybil property: splitting reputation across
+any number of agents never gains weight; ``epsilon`` bounds what a
+zero-reputation identity can carry and lets a cold-start network
+(supply == 0) bootstrap.
+
+OWNER-WALLET REPUTATION NOTE: unlike the old balance-weighted formula,
+there is NO owner-wallet term. Reputation is soulbound and minted ONLY
+by ``recordTrainingForEpoch`` to the agent (msg.sender), so a plain
+owner wallet — which never trains — has zero reputation. We therefore
+do NOT add ``reputationOfAt(owner)`` for a bare owner wallet: it is
+always zero and would only be non-zero if the owner ADDRESS is itself a
+registered agent, in which case it already appears in the agent set and
+its reputation is summed into its household there. Double-counting is
+avoided because the owner is only added via the agent-iteration path,
+never as a separate seed term. (Contrast the money view: ATN balances
+CAN sit on an owner wallet, so the fleet_voice money read still counts
+owner balance — but that is money, not voice.)
 
 Determinism contract: every input is derived AS OF the previous
 epoch's anchor block (``getAnchor(anchorCount-1).blockNumber``, stored
 on-chain at submission), so all daemons price this epoch's voices from
-the identical snapshot no matter when their refresh fires, and a
-wallet funded mid-epoch (after seeing what's worth pumping) carries no
-weight until the next epoch. NO ARCHIVE NODE REQUIRED:
+the identical snapshot no matter when their refresh fires, and an agent
+that mints mid-epoch (after seeing what's worth pumping) carries no
+extra weight until the next epoch. NO ARCHIVE NODE REQUIRED:
 
-  - balances + supply read through the contract's CHECKPOINTED
-    endpoints (``balanceOfAt`` / ``atnTotalSupplyAt`` — IVotes-style
-    Trace208 history without the delegation layer), served from
-    current state;
+  - reputation + reputation supply read through the contract's
+    CHECKPOINTED endpoints (``reputationOfAt`` /
+    ``reputationTotalSupplyAt`` — IVotes-style Trace208 history without
+    the delegation layer), served from current state;
   - the agent set + owner map derive from ``AgentRegistered`` /
     ``OwnerBound`` event logs up to the snapshot block (last binding
     per agent wins) — logs are retained by non-archive nodes too.
+
+The emission pool (base floor + burned ServiceFee shares) is MONEY and
+stays ATN-denominated — it is untouched by the voice=reputation switch.
 
 No prior anchor = no agreed snapshot: the refresh returns empty maps
 and the close runs with weights=None (the uniform pre-voice behavior)
@@ -81,14 +97,14 @@ _VOICE_ABI = [
             {"internalType": "address", "name": "agent", "type": "address"},
             {"internalType": "uint256", "name": "blockNumber", "type": "uint256"},
         ],
-        "name": "balanceOfAt",
+        "name": "reputationOfAt",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function",
     },
     {
         "inputs": [{"internalType": "uint256", "name": "blockNumber", "type": "uint256"}],
-        "name": "atnTotalSupplyAt",
+        "name": "reputationTotalSupplyAt",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function",
@@ -207,14 +223,21 @@ def read_voice_state(
     web3: Any = None,
 ) -> Dict[str, Any]:
     """Read {owner_map, voice_weights, supply, snapshot_block,
-    emission_pool, recycled} from Substrate.sol as of the previous
-    epoch's anchor block. ``emission_pool`` = BASE_EMISSION_PER_EPOCH +
-    the burned fee shares (ServiceFee logs) in the snapshot anchor's
-    window — the fee-recycled emission input to the close.
+    emission_pool, recycled, weight_source} from Substrate.sol as of the
+    previous epoch's anchor block. ``emission_pool`` =
+    BASE_EMISSION_PER_EPOCH + the burned fee shares (ServiceFee logs) in
+    the snapshot anchor's window — the fee-recycled emission input to the
+    close. The emission pool is MONEY and stays ATN-denominated.
+
+    Voice weights are REPUTATION-based (ratified 2026-07-08: ATN = money,
+    reputation = voice). ``supply`` is the REPUTATION total supply used
+    as the weight denominator (NOT the ATN supply); ``weight_source`` is
+    the literal string ``"reputation"`` so any consumer that historically
+    read ``supply`` as ATN can detect the switch.
 
     ``owner_map``: agent address -> owner wallet (lowercased 0x), only
     for agents with a bound owner at the snapshot. ``voice_weights``:
-    household key -> epsilon + household_ATN/supply, rounded to 9
+    household key -> epsilon + household_reputation/supply, rounded to 9
     decimals; keys are owner wallets for bound fleets and agent
     addresses for unbound agents (matching the close's household
     fallback). Raises on RPC failure — the driver's refresh hook
@@ -237,6 +260,7 @@ def read_voice_state(
             "snapshot_block": None,
             "emission_pool": BASE_EMISSION_PER_EPOCH,
             "recycled": 0.0,
+            "weight_source": "reputation",
         }
     anchor = contract.functions.getAnchor(anchor_count - 1).call()
     block = int(anchor[7])  # Anchor.blockNumber (struct field 7)
@@ -274,40 +298,46 @@ def read_voice_state(
         owner_of[str(log["args"]["agent"]).lower()] = (
             str(log["args"]["owner"]).lower())
 
-    supply = int(contract.functions.atnTotalSupplyAt(block).call())
+    # Denominator is REPUTATION supply (voice), not ATN supply (money).
+    supply = int(contract.functions.reputationTotalSupplyAt(block).call())
 
-    def _balance_at(addr: str) -> int:
-        return int(contract.functions.balanceOfAt(
+    def _reputation_at(addr: str) -> int:
+        return int(contract.functions.reputationOfAt(
             Web3.to_checksum_address(addr), block).call())
 
     owner_map: Dict[str, str] = {}
-    # household key -> raw balance sum (int, exact — floats only at the
+    # household key -> raw reputation sum (int, exact — floats only at the
     # final ratio so accumulation order can't jitter the weights).
-    house_balance: Dict[str, int] = {}
-    seen_owners: set = set()
+    house_rep: Dict[str, int] = {}
     for agent in agents:
         owner = owner_of.get(agent, "")
-        bal = _balance_at(agent)
+        rep = _reputation_at(agent)
         if owner and owner != _ZERO:
+            # Bound agent: reputation rolls up to the owner household.
+            # NO separate owner-wallet reputation term — a bare owner
+            # wallet never trains, so reputationOfAt(owner) is always
+            # zero. If the owner address is itself a registered agent it
+            # already appears in ``agents`` and is summed via this loop
+            # (its household is then its own owner binding); adding it as
+            # a seed here would double-count. See module docstring.
             owner_map[agent] = owner
-            house_balance[owner] = house_balance.get(owner, 0) + bal
-            if owner not in seen_owners:
-                seen_owners.add(owner)
-                house_balance[owner] += _balance_at(owner)
+            house_rep[owner] = house_rep.get(owner, 0) + rep
         else:
             # Unbound agent: its own household (matches _household()).
-            house_balance[agent] = house_balance.get(agent, 0) + bal
+            house_rep[agent] = house_rep.get(agent, 0) + rep
 
     voice_weights: Dict[str, float] = {}
-    for house in sorted(house_balance.keys()):
-        share = (house_balance[house] / supply) if supply > 0 else 0.0
+    for house in sorted(house_rep.keys()):
+        share = (house_rep[house] / supply) if supply > 0 else 0.0
         voice_weights[house] = round(epsilon + share, 9)
 
     return {
         "owner_map": owner_map,
         "voice_weights": voice_weights,
+        # Reputation supply — the voice-weight denominator (not ATN).
         "supply": int(supply),
         "snapshot_block": block,
         "emission_pool": round(BASE_EMISSION_PER_EPOCH + recycled, 10),
         "recycled": round(recycled, 10),
+        "weight_source": "reputation",
     }

@@ -43,7 +43,7 @@ describe("Substrate owner-rooted registration (OwnerBound)", function () {
     [deployer, ownerW, otherOwnerW, agentA, agentB, agentC, stranger] =
       await ethers.getSigners();
     const Substrate = await ethers.getContractFactory("Substrate");
-    substrate = await Substrate.deploy((await ethers.getSigners())[0].address);
+    substrate = await Substrate.deploy((await ethers.getSigners())[0].address, "0x0000000000000000000000000000000000000000");
     await substrate.waitForDeployment();
   });
 

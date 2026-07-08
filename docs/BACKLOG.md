@@ -102,6 +102,24 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
     — deploy script prints the calldata.
 
 **RATIFIED, NOT BUILT:**
+- **ATN = money, reputation = voice (2026-07-08 evening) — the
+  jurisdiction merge, attempt 6.** Once ATN is buyable, balance-based
+  voice = purchasable review power (pumped ratings would rig
+  probe_tools discovery). Decision: switch the close's voice-weight
+  source from ATN balance to SOULBOUND REPUTATION (earn-only, minted
+  1:1 with ATN, non-transferable) — same household collapse, same
+  pinned-anchor reads (needs rep-at-block derivation: checkpoint or
+  TrainingRecorded logs). ATN stays purely economic. ParityVault
+  (buy-only v1): CoinOffering clone minting Substrate ATN via an
+  IMMUTABLE minter address in Substrate's constructor (no-admin-keys
+  preserved); payment tokens + rates = jurisdiction Registry entries
+  (`jurisdiction.parity.<token>`), timelock-governed; ERC20 proceeds →
+  DAO treasury. Rides the owed redeploy (payForService rename + clean
+  genesis via sacrificial smoke instance). BLOCKED on user: make the
+  trustless-contracts DAO factory deploy a jurisdiction WITH a
+  coin-offering-shaped satellite slot; then the genesis event chains
+  #7 (CharterAnchor governor handoff) + #10 (ReputationMirror
+  activation) + the ParityVault minter grant.
 - Tokenized vault shares (2026-07-06): ERC20 per vault, book-value
   redemption (burn → unvested principal + accrued revenue),
   checkpointed halt votes, CoinOffering dividend pattern ported.
@@ -112,6 +130,20 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   (doctrine only, never implemented).
 
 **ENGINEERING FOLLOW-UPS (flagged by builders, none blocking):**
+- **Owner binding is UNWIRED in the live path (2026-07-08):** the daemon
+  registers agents via plain `registerAgent` (ownerless, `agentOwner=0x0`);
+  `registerAgentBound`/`rotateOwner` exist only in the contract + tests +
+  E2E script. Balance-weighted voice therefore falls back to
+  household=agent-id for every real agent — the human-wallet household
+  model is built but unreachable from the product. Wire: frontend collects
+  the EIP-712 OwnerBinding signature from the connected wallet during
+  registration (fold into the existing popup flow), daemon submits
+  registerAgentBound; Owner page gets a "rebind fleet to this wallet"
+  surface (rotateOwner) — also the key-loss recovery UI.
+- Rename `payForInference` → `payForService` (next redeploy): it settles
+  services/venture revenue generally; "inference" is residue from the
+  decentralized-inference framing and invites conflation with the
+  sponsor/dependent provider pipe (which never touches ATN).
 - TrialRunner: transport seam → wire to live WS service-request
   client; OnChainService needs a generic contract-call so attestTrial
   submits directly (currently returns calldata).

@@ -18,7 +18,7 @@ describe("Substrate.registerTool (ToolRegistered)", function () {
   beforeEach(async function () {
     [owner, agentA, agentB, stranger] = await ethers.getSigners();
     const Substrate = await ethers.getContractFactory("Substrate");
-    substrate = await Substrate.deploy((await ethers.getSigners())[0].address);
+    substrate = await Substrate.deploy((await ethers.getSigners())[0].address, "0x0000000000000000000000000000000000000000");
     await substrate.waitForDeployment();
     await registerAgent(substrate, agentA, "lineA");
     await registerAgent(substrate, agentB, "lineB");

@@ -145,7 +145,7 @@ revenue share (`demoDividends.js:64,95-102`).
   (`Substrate.sol:9-13,32-42`): epoch **anchoring only** (the mint math is the
   off-chain deterministic close), agent registry with owner-binding, training
   records minting reputation+ATN in lockstep (`:710-760`), and a bare
-  `payForInference` labeled-transfer (`:886`). Capability scoring, evolution
+  `payForService` labeled-transfer (`:886`). Capability scoring, evolution
   proposals, sponsorship hierarchies are explicitly called out as
   "pre-substrate concepts" that do **not** live on Substrate.sol (`:40-42`).
 - **Dead bridge script.** `autonet/scripts/e2e_jurisdiction_integration.py`

@@ -33,9 +33,18 @@ async function main() {
   const treasury = process.env.TREASURY || deployer.address;
   console.log(`Treasury: ${treasury}`);
 
+  // Vault minter: the single address allowed to mint purchased ATN via
+  // mintFromVault (the DAO-repo VentureVault). Immutable; no admin key.
+  // Defaults to the zero address (feature off) — pass VAULT_MINTER once the
+  // vault contract address is known.
+  const vaultMinter =
+    process.env.VAULT_MINTER ||
+    "0x0000000000000000000000000000000000000000";
+  console.log(`VaultMinter: ${vaultMinter}`);
+
   console.log("Deploying Substrate.sol...");
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy(treasury);
+  const substrate = await Substrate.deploy(treasury, vaultMinter);
   await substrate.waitForDeployment();
   const address = await substrate.getAddress();
   const tx = substrate.deploymentTransaction();
@@ -54,6 +63,7 @@ async function main() {
     rpc_url: network.config.url || null,
     substrate_address: address,
     treasury: treasury,
+    vault_minter: vaultMinter,
     deployer: deployer.address,
     deployment_tx: tx ? tx.hash : null,
     deployed_at: new Date().toISOString(),

@@ -18,7 +18,7 @@ as the emission model. The pool at each federated close is
 so emission tracks real economic activity in the services economy
 instead of a clock, with a small clock-based floor.
 
-**The fee rail (Substrate.sol, implemented).** Every `payForInference`
+**The fee rail (Substrate.sol, implemented).** Every `payForService`
 takes `SERVICE_FEE_BPS` (250 = 2.5%, PROVISIONAL) of the gross:
 `FEE_TREASURY_BPS` (5000 = half, PROVISIONAL) of the fee transfers to
 the immutable `treasury` address (set at construction — no admin key
@@ -57,7 +57,7 @@ machinery, no change to `recordTrainingForEpoch`.
 Epoch 1 (no anchor yet): no agreed fee window exists — the pool is
 the floor alone. Tests: `tests/test_voice_snapshot.py`
 (`TestFeeRecycledEmission` — one-window conservation),
-`tests/test_phase7_2_pay_for_inference.py` (fee split / burn /
+`tests/test_phase7_2_pay_for_service.py` (fee split / burn /
 treasury), `tests/test_epoch_emission.py` (the normalizer).
 
 PROVISIONAL parameters awaiting blessing: `SERVICE_FEE_BPS`,

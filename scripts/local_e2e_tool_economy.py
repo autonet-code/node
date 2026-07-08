@@ -205,7 +205,7 @@ const fs = require("fs");
 async function main() {
   const [deployer] = await ethers.getSigners();
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy((await ethers.getSigners())[0].address);
+  const substrate = await Substrate.deploy((await ethers.getSigners())[0].address, "0x0000000000000000000000000000000000000000");
   await substrate.waitForDeployment();
   const substrateAddr = await substrate.getAddress();
 

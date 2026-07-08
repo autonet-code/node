@@ -68,10 +68,18 @@ contract Substrate is EIP712 {
     ///      bound to THIS Substrate deployment on THIS chain — it cannot be
     ///      replayed against another Substrate instance or a fork.
     /// @param treasury_ The DAO treasury address receiving the treasury share
-    ///        of the service fee (see payForInference). Immutable — there is
+    ///        of the service fee (see payForService). Immutable — there is
     ///        no admin key to repoint it; changing it is a redeploy.
-    constructor(address treasury_) EIP712("AutonetSubstrate", "1") {
+    /// @param vaultMinter_ The single privileged address (the DAO-repo
+    ///        VentureVault) allowed to mint ATN for purchased funding via
+    ///        mintFromVault. Immutable — no admin key to repoint it.
+    ///        Zero address = no vault: mintFromVault always reverts and the
+    ///        purchased-money feature is off.
+    constructor(address treasury_, address vaultMinter_)
+        EIP712("AutonetSubstrate", "1")
+    {
         treasury = treasury_;
+        vaultMinter = vaultMinter_;
     }
 
     // =========================================================================
@@ -678,11 +686,49 @@ contract Substrate is EIP712 {
     ///      agents' agentMintTotal).
     uint256 public networkMintTotal;
 
+    // Checkpointed reputation history (the IVotes MECHANISM without the
+    // delegation layer, mirroring the ATN checkpoints below). Reputation
+    // is the SOULBOUND voice measure: it only ever increases (one write
+    // site — recordTrainingForEpoch) and never transfers, so unlike the
+    // ATN pair there is exactly ONE checkpoint mutation per account, at
+    // the mint. Historical reputation reads from CURRENT state:
+    // reputationOfAt works on any node, no archive required. Used by the
+    // federated close's voice weighting (nodes/common/voice_state.py) —
+    // ratified 2026-07-08: ATN = money, reputation = voice, so voice
+    // weight is priced from reputation, not balances.
+    using Checkpoints for Checkpoints.Trace208;
+    mapping(address => Checkpoints.Trace208) private _reputationHistory;
+    Checkpoints.Trace208 private _reputationSupplyHistory;
+
     /// @notice Reputation alias for agentMintTotal. Same storage,
     ///         different semantic — reputation is the soulbound
     ///         contribution measure, never decreases, untransferable.
     function agentReputation(address agent) external view returns (uint256) {
         return agentMintTotal[agent];
+    }
+
+    /// @notice Reputation of `agent` as of the END of `blockNumber`
+    ///         (latest checkpoint at or before it; 0 if none). Served
+    ///         from current state — works on non-archive nodes. Same
+    ///         upperLookup semantics as balanceOfAt, but the underlying
+    ///         quantity is soulbound and monotonic (never decreases).
+    function reputationOfAt(address agent, uint256 blockNumber)
+        external
+        view
+        returns (uint256)
+    {
+        return _reputationHistory[agent].upperLookup(uint48(blockNumber));
+    }
+
+    /// @notice Total reputation (== networkMintTotal) as of the END of
+    ///         `blockNumber`. The denominator for reputation-weighted
+    ///         voice at a pinned snapshot block.
+    function reputationTotalSupplyAt(uint256 blockNumber)
+        external
+        view
+        returns (uint256)
+    {
+        return _reputationSupplyHistory.upperLookup(uint48(blockNumber));
     }
 
     event TrainingRecorded(
@@ -749,15 +795,24 @@ contract Substrate is EIP712 {
         agents[msg.sender].totalTrainingMint += amount;
         agents[msg.sender].trainingSubmissionCount += 1;
 
+        // Checkpoint the soulbound reputation ledger at this block. This
+        // is the ONLY reputation checkpoint write site — reputation never
+        // decreases and never transfers, so there is nothing to mirror on
+        // any other path (mintFromVault deliberately mints ATN only). The
+        // federated close reads reputationOfAt / reputationTotalSupplyAt
+        // at the previous anchor block to price voice weights.
+        _reputationHistory[msg.sender].push(
+            uint48(block.number), uint208(agentMintTotal[msg.sender])
+        );
+        _reputationSupplyHistory.push(
+            uint48(block.number), uint208(networkMintTotal)
+        );
+
         // Phase 7.1: training mints both ledgers at the same amount.
         // Reputation (agentMintTotal, just bumped above) is soulbound.
         // ATN balance is transferable — the agent can spend it on
         // inference fees once the inference-as-a-service path lands.
-        _atnBalance[msg.sender] += amount;
-        atnTotalSupply += amount;
-        _checkpointATN(msg.sender);
-        _atnSupplyHistory.push(uint48(block.number), uint208(atnTotalSupply));
-        emit ATNTransfer(address(0), msg.sender, amount);
+        _mintATN(msg.sender, amount);
 
         emit TrainingRecorded(
             msg.sender,
@@ -817,7 +872,8 @@ contract Substrate is EIP712 {
     // state required. Used by the federated close's voice weighting,
     // which prices each household's review/usage credit from balances
     // at the previous epoch's anchor block (nodes/common/voice_state.py).
-    using Checkpoints for Checkpoints.Trace208;
+    // (``using Checkpoints for Checkpoints.Trace208`` is declared once,
+    // with the reputation history above.)
     mapping(address => Checkpoints.Trace208) private _atnBalanceHistory;
     Checkpoints.Trace208 private _atnSupplyHistory;
 
@@ -830,6 +886,21 @@ contract Substrate is EIP712 {
         _atnBalanceHistory[account].push(
             uint48(block.number), uint208(_atnBalance[account])
         );
+    }
+
+    /// @dev The one ATN mint primitive: bumps balance + supply, checkpoints
+    ///      both, and emits the canonical mint transfer (from address(0)).
+    ///      Deliberately mints ATN ONLY — it does NOT touch reputation
+    ///      (agentMintTotal). Callers that also mint reputation (the
+    ///      training path) bump it themselves; purchased-money paths
+    ///      (mintFromVault) must not, because ATN is money and reputation
+    ///      is earned voice (ratified 2026-07-08).
+    function _mintATN(address to, uint256 amount) private {
+        _atnBalance[to] += amount;
+        atnTotalSupply += amount;
+        _checkpointATN(to);
+        _atnSupplyHistory.push(uint48(block.number), uint208(atnTotalSupply));
+        emit ATNTransfer(address(0), to, amount);
     }
 
     event ATNTransfer(address indexed from, address indexed to, uint256 amount);
@@ -905,26 +976,26 @@ contract Substrate is EIP712 {
     }
 
     // =========================================================================
-    // Inference payments (Phase 7.2)
+    // Service payments (Phase 7.2)
     //
-    // payForInference is a thin wrapper around transfer that emits a
+    // payForService is a thin wrapper around transfer that emits a
     // structured event tagged with an off-chain request id. The event
     // lets the network audit which on-chain payments matched which
-    // inference requests; the request id is opaque to the contract
+    // service requests; the request id is opaque to the contract
     // (typically a sha256/keccak of the request body).
     //
     // No special pricing logic on chain. The price is whatever the
     // caller pays. Daemons advertise their price off-chain (libp2p
-    // capability gossip); requesting agents call payForInference with
+    // capability gossip); requesting agents call payForService with
     // that amount before the serving agent agrees to serve.
     //
     // The contract does not enforce that the payment matches a real
-    // inference request — that's the off-chain protocol's job. This
+    // service request — that's the off-chain protocol's job. This
     // function just provides a labeled payment rail with audit-grade
     // event tagging.
     // =========================================================================
 
-    event InferencePayment(
+    event ServicePayment(
         address indexed payer,
         address indexed recipient,
         uint256 amount,
@@ -946,7 +1017,7 @@ contract Substrate is EIP712 {
     // PROVISIONAL VALUES pending user blessing (economics parameters).
     // -------------------------------------------------------------------------
 
-    /// @notice Fee on payForInference, in basis points of the gross amount.
+    /// @notice Fee on payForService, in basis points of the gross amount.
     uint16 public constant SERVICE_FEE_BPS = 250;      // 2.5%
     /// @notice Share OF THE FEE that goes to the treasury; the rest burns.
     uint16 public constant FEE_TREASURY_BPS = 5000;    // half/half
@@ -954,6 +1025,54 @@ contract Substrate is EIP712 {
 
     /// @notice DAO treasury (set at construction; no admin key to repoint).
     address public immutable treasury;
+
+    // -------------------------------------------------------------------------
+    // Vault minter (purchased-money rail).
+    //
+    // ATN has exactly two mint origins: EARNED voice via
+    // recordTrainingForEpoch (mints reputation + ATN in lockstep), and
+    // PURCHASED money via mintFromVault (mints ATN ONLY). The two are kept
+    // strictly separate on purpose (ratified 2026-07-08: ATN = money,
+    // reputation = voice). A venture backer who buys ATN through the
+    // DAO-repo VentureVault must never gain soulbound reputation from that
+    // purchase — money can be bought, voice must be earned.
+    //
+    // vaultMinter is the single privileged address (the VentureVault
+    // contract) allowed to call mintFromVault. It is immutable — there is
+    // no admin key to repoint it; changing it is a redeploy. Zero address =
+    // no vault: the feature is off and mintFromVault always reverts.
+    // -------------------------------------------------------------------------
+
+    /// @notice The single address allowed to mint purchased ATN via
+    ///         mintFromVault (the DAO-repo VentureVault). Immutable;
+    ///         zero address = feature off.
+    address public immutable vaultMinter;
+
+    /// @notice Emitted when the vault mints purchased ATN. Distinct from
+    ///         ATNTransfer(address(0), ...) so indexers can separate
+    ///         purchased money from earned mint. No reputation is minted.
+    event VaultMint(address indexed to, uint256 amount);
+
+    error NotVaultMinter();
+    error VaultDisabled();
+
+    /// @notice Mint purchased ATN to `to`. Callable ONLY by the immutable
+    ///         vaultMinter (the DAO-repo VentureVault, through a minimal
+    ///         IAutonetATN interface).
+    /// @dev Mints ATN ONLY — balance, supply, and checkpoints move exactly
+    ///      like the recordTrainingForEpoch mint path, but reputation
+    ///      (agentMintTotal) is deliberately NOT touched: this is purchased
+    ///      money, not earned voice (ratified 2026-07-08). If vaultMinter is
+    ///      the zero address the feature is off and this always reverts.
+    /// @param to     Recipient of the purchased ATN.
+    /// @param amount ATN to mint.
+    function mintFromVault(address to, uint256 amount) external {
+        if (vaultMinter == address(0)) revert VaultDisabled();
+        if (msg.sender != vaultMinter) revert NotVaultMinter();
+        if (to == address(0)) revert TransferToZero();
+        _mintATN(to, amount);
+        emit VaultMint(to, amount);
+    }
 
     /// @notice Emitted per fee collection. `burned` is what the federated
     ///         close sums into the next epoch's recycled emission pool.
@@ -965,16 +1084,16 @@ contract Substrate is EIP712 {
         uint256 toTreasury
     );
 
-    /// @notice Pay a serving agent for an inference request.
+    /// @notice Pay a serving agent for a service request.
     /// @param recipient The serving agent's address (the on-chain
     ///                  identity of the agent that handled the
     ///                  request — not the daemon process that
     ///                  carried the bytes).
     /// @param amount    ATN to transfer.
     /// @param requestId Opaque off-chain request id (e.g. keccak256
-    ///                  of the inference request body) — emitted in
+    ///                  of the service request body) — emitted in
     ///                  the event so the request can be matched.
-    function payForInference(
+    function payForService(
         address recipient,
         uint256 amount,
         bytes32 requestId
@@ -1009,7 +1128,7 @@ contract Substrate is EIP712 {
         }
 
         emit ATNTransfer(msg.sender, recipient, net);
-        emit InferencePayment(msg.sender, recipient, amount, requestId);
+        emit ServicePayment(msg.sender, recipient, amount, requestId);
         if (fee > 0) {
             emit ServiceFee(msg.sender, recipient, amount, burned, toTreasury);
         }

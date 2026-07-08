@@ -228,7 +228,7 @@ Eight stages (0 bootstrap + A–G), each verified:
   transport, submit `attestTrial` on chain from their own keys;
   greenlight; a verifier claims its fee slice.
 - **E tranches + revenue** — agent claims tranche 1; a customer pays via
-  `payForInference(vault, …)`; `claimRevenue` splits 60/40; backers claim
+  `payForService(vault, …)`; `claimRevenue` splits 60/40; backers claim
   pro-rata (360/240, asserted to the wei); a ≥1/3 backer halts the next
   tranche (asserted unclaimable), un-halts, and the tranche is claimable
   again.

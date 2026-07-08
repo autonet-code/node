@@ -506,7 +506,7 @@ contract VentureVault is ReentrancyGuard {
     /// @notice Split ATN revenue sitting in the vault into the backer accumulator
     ///          (termsBps) and the agent's owed balance (remainder). Anyone may
     ///          call; it processes any ATN that arrived since the last split
-    ///          (payForInference lands ATN here by transfer, unlabeled to the
+    ///          (payForService lands ATN here by transfer, unlabeled to the
     ///          split — so we measure the vault's unallocated balance).
     /// @dev    Unallocated = current ATN balance − (unspent raise + verifier fee
     ///          pool still owed + revenue already owed to backers/agent). We track

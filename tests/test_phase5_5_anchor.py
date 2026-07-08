@@ -75,7 +75,11 @@ def chain():
     abi, bytecode = _load_artifact(EPOCH_ANCHOR_JSON)
     w3 = Web3(EthereumTesterProvider())
     deployer = w3.eth.accounts[0]
-    addr = _deploy(w3, deployer, abi, bytecode)
+    addr = _deploy(
+        w3, deployer, abi, bytecode,
+        deployer,  # treasury
+        "0x0000000000000000000000000000000000000000",  # vaultMinter (off)
+    )
     contract = w3.eth.contract(address=addr, abi=abi)
     return {
         "w3": w3,

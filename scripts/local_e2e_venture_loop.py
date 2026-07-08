@@ -28,7 +28,7 @@ venture-loop contracts + rails end-to-end against a real deployment:
      greenlight and a claimable verifier fee.
 
   E. Tranches + revenue — advance time, agent claims a tranche; a funded
-     customer pays the service via ``payForInference(vault, amount, req)``;
+     customer pays the service via ``payForService(vault, amount, req)``;
      ``claimRevenue`` splits termsBps→backers / remainder→agent; backers
      claim pro-rata (60/40 math asserted to the wei); halt vote (one
      backer ≥1/3) freezes the next tranche, un-halt restores it.
@@ -670,7 +670,7 @@ async def amain(from_stage: str = "A", to_stage: str = "G") -> int:
             agent_after - agent_before, per_tranche)
         assert vault.functions.tranchesClaimed().call() == 1
 
-        # --- Customer pays the service via payForInference into the vault.
+        # --- Customer pays the service via payForService into the vault.
         # The Substrate service fee (fee-recycled emission,
         # docs/epoch_economics.md) is taken at payment time: the vault
         # receives the NET amount; the burned share re-enters as the
@@ -683,7 +683,7 @@ async def amain(from_stage: str = "A", to_stage: str = "G") -> int:
         req_id = _keccak(b"inference-request-1")
         _owner_tx(
             w3,
-            substrate.functions.payForInference(vault_addr, REVENUE, req_id),
+            substrate.functions.payForService(vault_addr, REVENUE, req_id),
             HH_KEYS[6], CUSTOMER.address)
 
         # claimRevenue splits the NET: 60% → backers, 40% → agent.

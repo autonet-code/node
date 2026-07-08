@@ -11,7 +11,7 @@ const { time } = require("@nomicfoundation/hardhat-network-helpers");
 const digest = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
 
 // Substrate's service fee (fee-recycled emission) is taken from every
-// payForInference at SERVICE_FEE_BPS. Revenue tests want exact round
+// payForService at SERVICE_FEE_BPS. Revenue tests want exact round
 // amounts landing at the vault, so gross-up: smallest g whose net
 // (g - fee(g)) equals the desired amount.
 function grossFor(net) {
@@ -22,7 +22,7 @@ function grossFor(net) {
 
 async function deploySubstrate() {
   const Substrate = await ethers.getContractFactory("Substrate");
-  const s = await Substrate.deploy((await ethers.getSigners())[0].address);
+  const s = await Substrate.deploy((await ethers.getSigners())[0].address, "0x0000000000000000000000000000000000000000");
   await s.waitForDeployment();
   return s;
 }
@@ -684,14 +684,14 @@ describe("VentureVault", function () {
       return vault;
     }
 
-    // Revenue lands via payForInference (a labeled transfer to the vault).
+    // Revenue lands via payForService (a labeled transfer to the vault).
     // Grossed-up so the vault receives exactly `amount` net of the fee.
     async function dropRevenue(vault, amount) {
       const gross = grossFor(amount);
       await fundATN(substrate, faucet, faucet, faucet.address, gross);
       await substrate
         .connect(faucet)
-        .payForInference(await vault.getAddress(), gross, digest("req"));
+        .payForService(await vault.getAddress(), gross, digest("req"));
     }
 
     it("splits termsBps to backers pro-rata, remainder to agent; multiple drops", async function () {
@@ -813,7 +813,7 @@ describe("VentureVault", function () {
       await fundATN(substrate, faucet, faucet, faucet.address, gross);
       await substrate
         .connect(faucet)
-        .payForInference(await vault.getAddress(), gross, digest("req"));
+        .payForService(await vault.getAddress(), gross, digest("req"));
       await vault.claimRevenue(); // 300 backers, 700 agent owed
 
       await vault.connect(timelockW).daoVeto();
@@ -889,7 +889,7 @@ describe("VentureVault", function () {
     await fundATN(substrate, faucet, faucet, faucet.address, gross);
     await substrate
       .connect(faucet)
-      .payForInference(await vault.getAddress(), gross, digest("req"));
+      .payForService(await vault.getAddress(), gross, digest("req"));
     await vault.claimRevenue(); // 600 backers, 1400 agent
     await vault.connect(b1).claimBackerRevenue(); // 360
     await vault.connect(b2).claimBackerRevenue(); // 240
