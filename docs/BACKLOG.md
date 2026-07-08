@@ -130,6 +130,15 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   (doctrine only, never implemented).
 
 **ENGINEERING FOLLOW-UPS (flagged by builders, none blocking):**
+- Jurisdiction governance timing: the genesis deploy's VOTING_PERIOD
+  constant (50400, "~1 week in blocks") lands on-chain as 3,024,000s
+  (~35 days — timestamp clock, units mismatch). Make votingDelay/
+  votingPeriod/timelock minDelay env-configurable in
+  deploy-autonet-jurisdiction.js and use short values on shadownet.
+  Consequence today: the genesis proposal (mirror minter grant +
+  charter v1 anchor) was submitted+voted 2026-07-08 but executes
+  ~2026-08-12. Until then: mirror can't mint RepToken, charter anchor
+  is empty (drift detection idle). Everything else is live.
 - **Owner binding is UNWIRED in the live path (2026-07-08):** the daemon
   registers agents via plain `registerAgent` (ownerless, `agentOwner=0x0`);
   `registerAgentBound`/`rotateOwner` exist only in the contract + tests +
