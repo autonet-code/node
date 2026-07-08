@@ -15,13 +15,12 @@ idempotency fix, and the README-as-living-paper ("Autonet — The
 Recursive Principial Body") now serving both app whitepaper surfaces.
 
 **V3 OPS (time-sensitive):**
-- **FLAG-DAY: restart every daemon onto v0.5.0 BEFORE the next
-  federated close** (`pip install -U autonet-computer` — released
-  2026-07-08, carries v3 + voice weighting + the new shadownet
-  addresses via registry.json). v3/voice changed the close output/CID;
-  a mixed fleet forks. The restart also collapses the duplicated
-  harness records, activates `economy_graph`/`tool_reviews`, and
-  points at the redeployed Substrate — agents must re-register.
+- **FLAG-DAY (updated post-genesis 2026-07-08 evening): daemons need
+  the CURRENT MASTER build (v0.6.0 unreleased — release pending user
+  go), not v0.5.x** — payForService rename + reputation-source voice
+  + vault minter changed contract ABI and close inputs; v0.5.x builds
+  cannot talk to the genesis Substrate. Restart onto master (or the
+  next release) + re-register agents (now with owner-binding popups).
 - Deploy Firestore rules for `substrate_viz` (world-readable,
   client-unwritable) + run the substrate publisher next to a daemon
   (`scripts/indexer/` is gitignored ops — lives outside the repo).
@@ -90,18 +89,27 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
    atn_web commits remain local-only.
 6. CLAUDE.md is gitignored — machine-onboarding contract doesn't
    travel with clones. Commit / genericize / keep local?
-7. Charter-anchor governor handoff: deploy the jurisdiction DAO suite
-   and point CharterAnchor's governor at the timelock (genesis charter
-   hash 5756ed3a...).
+7. ~~Charter-anchor governor handoff~~ — DONE 2026-07-08 (genesis):
+   CharterAnchor redeployed with governor = jurisdiction timelock;
+   charter v1 anchoring rides the pending genesis proposal (executes
+   ~2026-08-12 given the 35-day voting period).
 8. Admin agent: merged but placeholder budget (100k tokens/day) —
    tune + enable; it starts spending on a 30m schedule once live.
 9. Microsoft Store: pay $19, fill the two msix identity placeholders;
    create WINGET_GH_TOKEN; first winget submission via wingetcreate
    new. (RELEASING.md in atn_web has the checklist.)
-10. ReputationMirror activation: governor executes setMinter(mirror)
-    — deploy script prints the calldata.
+10. ~~ReputationMirror activation~~ — proposal SUBMITTED + VOTED
+    2026-07-08 (bundled with charter v1 anchor); executes ~2026-08-12
+    (35-day voting period, see governance-timing follow-up).
 
 **RATIFIED, NOT BUILT:**
+- ~~ATN = money, reputation = voice~~ — BUILT + DEPLOYED 2026-07-08
+  (genesis): voice weights read soulbound reputation at the pinned
+  block (reputationOfAt checkpoints); AutonetVault (renamed from
+  ParityVault) live on shadownet as Substrate's immutable minter,
+  buy-only, parity via jurisdiction Registry entries; vault mint moves
+  balance, never voice. Genesis addresses in registry.json. Historical
+  design entry follows:
 - **ATN = money, reputation = voice (2026-07-08 evening) — the
   jurisdiction merge, attempt 6.** Once ATN is buyable, balance-based
   voice = purchasable review power (pumped ratings would rig
