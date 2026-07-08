@@ -61,6 +61,43 @@ SUBSTRATE_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    # Owner-rooted registration (docs/tool_substrate.md §Owner-rooted
+    # registration). The AGENT (msg.sender) submits; the OWNER wallet has
+    # signed an EIP-712 OwnerBinding{agent, parent, nonce} over the domain
+    # ("AutonetSubstrate", "1", chainId, this contract). rotateOwner needs
+    # NO old-owner sig (key-loss recovery); the per-agent bindingNonce closes
+    # replay.
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "lineageHash",  "type": "bytes32"},
+            {"internalType": "bytes",   "name": "peerId",       "type": "bytes"},
+            {"internalType": "address", "name": "owner",        "type": "address"},
+            {"internalType": "address", "name": "parentAgent",  "type": "address"},
+            {"internalType": "bytes",   "name": "ownerSig",     "type": "bytes"},
+        ],
+        "name": "registerAgentBound",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "newOwner",    "type": "address"},
+            {"internalType": "address", "name": "newParent",   "type": "address"},
+            {"internalType": "bytes",   "name": "newOwnerSig", "type": "bytes"},
+        ],
+        "name": "rotateOwner",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "name": "bindingNonce",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     {
         "inputs": [{"internalType": "address", "name": "agent", "type": "address"}],
         "name": "isRegistered",
@@ -213,6 +250,18 @@ SUBSTRATE_ABI = [
             {"indexed": False, "internalType": "bytes",   "name": "peerId", "type": "bytes"},
         ],
         "name": "PeerIdUpdated",
+        "type": "event",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "address", "name": "agent",     "type": "address"},
+            {"indexed": True,  "internalType": "address", "name": "owner",     "type": "address"},
+            {"indexed": True,  "internalType": "address", "name": "parent",    "type": "address"},
+            {"indexed": False, "internalType": "address", "name": "prevOwner", "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "nonce",     "type": "uint256"},
+        ],
+        "name": "OwnerBound",
         "type": "event",
     },
 ]
@@ -400,6 +449,197 @@ class OnChainService:
             log.exception("Failed to register agent on chain")
             return {"success": False, "error": str(e)}
 
+    async def register_agent_bound(
+        self,
+        identity: "AgentIdentity",
+        private_key: str,
+        peer_id: str | bytes,
+        owner: str,
+        owner_sig: str | bytes,
+        parent: str = "",
+    ) -> dict[str, Any]:
+        """Sign and submit a ``registerAgentBound`` transaction.
+
+        Mirrors :meth:`register_agent`, but binds the agent to a proven
+        ``owner`` wallet (and optional ``parent`` agent). ``owner_sig`` is
+        the owner wallet's EIP-712 ``OwnerBinding{agent, parent, nonce}``
+        signature over the domain ("AutonetSubstrate", "1", chainId, this
+        contract) at the agent's CURRENT ``bindingNonce`` — the contract
+        verifies it on-chain (BadOwnerBindingSignature revert on mismatch).
+        The tx is signed by the AGENT key (msg.sender), exactly like the
+        legacy path. ``parent`` defaults to the zero address (top-level).
+        """
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            account = Account.from_key(private_key)
+
+            lineage_bytes = _to_bytes32(identity.lineage_hash)
+            peer_bytes = _to_peer_id_bytes(peer_id)
+            owner_addr = w3.to_checksum_address(owner)
+            parent_addr = w3.to_checksum_address(parent) if parent else ZERO_ADDRESS
+            sig_bytes = (owner_sig if isinstance(owner_sig, bytes)
+                         else bytes.fromhex(owner_sig[2:] if owner_sig.startswith("0x")
+                                            else owner_sig))
+
+            nonce = w3.eth.get_transaction_count(account.address)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+
+            try:
+                estimated = contract.functions.registerAgentBound(
+                    lineage_bytes, peer_bytes, owner_addr, parent_addr, sig_bytes,
+                ).estimate_gas({"from": account.address})
+                gas_limit = max(int(estimated * 12 // 10), 500_000)
+            except Exception:
+                gas_limit = 1_500_000
+
+            tx = contract.functions.registerAgentBound(
+                lineage_bytes, peer_bytes, owner_addr, parent_addr, sig_bytes,
+            ).build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": gas_limit,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": chain_id,
+            })
+
+            signed = account.sign_transaction(tx)
+            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            tx_hash = w3.eth.send_raw_transaction(raw)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            if receipt.status == 1:
+                log.info(
+                    "Agent registered (bound to %s) on substrate: %s tx=%s",
+                    owner_addr, account.address, tx_hash.hex(),
+                )
+                return {
+                    "success": True,
+                    "tx_hash": tx_hash.hex(),
+                    "agent_address": account.address,
+                    "owner": owner_addr,
+                    "parent": parent_addr,
+                }
+            return {
+                "success": False,
+                "error": "Transaction reverted",
+                "tx_hash": tx_hash.hex(),
+            }
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to register (bound) agent on chain")
+            return {"success": False, "error": str(e)}
+
+    async def rotate_owner(
+        self,
+        private_key: str,
+        new_owner: str,
+        new_owner_sig: str | bytes,
+        new_parent: str = "",
+    ) -> dict[str, Any]:
+        """Sign and submit a ``rotateOwner`` transaction.
+
+        Rotates (or first-sets) the calling agent's owner+parent to
+        ``new_owner``. Authorized by CUSTODY of the agent key (the tx
+        signer = msg.sender) plus the NEW owner's EIP-712 signature at the
+        agent's current binding nonce. The OLD owner does NOT participate —
+        this is the key-loss recovery path. ``new_parent`` defaults to the
+        zero address (top-level).
+        """
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            account = Account.from_key(private_key)
+
+            owner_addr = w3.to_checksum_address(new_owner)
+            parent_addr = (w3.to_checksum_address(new_parent)
+                           if new_parent else ZERO_ADDRESS)
+            sig_bytes = (new_owner_sig if isinstance(new_owner_sig, bytes)
+                         else bytes.fromhex(new_owner_sig[2:]
+                                            if new_owner_sig.startswith("0x")
+                                            else new_owner_sig))
+
+            nonce = w3.eth.get_transaction_count(account.address)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+
+            try:
+                estimated = contract.functions.rotateOwner(
+                    owner_addr, parent_addr, sig_bytes,
+                ).estimate_gas({"from": account.address})
+                gas_limit = max(int(estimated * 12 // 10), 200_000)
+            except Exception:
+                gas_limit = 400_000
+
+            tx = contract.functions.rotateOwner(
+                owner_addr, parent_addr, sig_bytes,
+            ).build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": gas_limit,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": chain_id,
+            })
+
+            signed = account.sign_transaction(tx)
+            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            tx_hash = w3.eth.send_raw_transaction(raw)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            if receipt.status == 1:
+                log.info(
+                    "Agent %s owner rotated to %s tx=%s",
+                    account.address, owner_addr, tx_hash.hex(),
+                )
+                return {
+                    "success": True,
+                    "tx_hash": tx_hash.hex(),
+                    "agent_address": account.address,
+                    "owner": owner_addr,
+                    "parent": parent_addr,
+                }
+            return {
+                "success": False,
+                "error": "Transaction reverted",
+                "tx_hash": tx_hash.hex(),
+            }
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to rotate owner on chain")
+            return {"success": False, "error": str(e)}
+
+    async def binding_nonce(self, address: str) -> int:
+        """Read an agent's current owner-binding nonce (0 if never bound).
+
+        This is the nonce the owner wallet must sign the next OwnerBinding
+        against. Returns 0 on any read failure (a never-bound agent is at
+        nonce 0 anyway).
+        """
+        try:
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            return int(contract.functions.bindingNonce(
+                w3.to_checksum_address(address)).call())
+        except Exception:
+            log.debug("bindingNonce read failed for %s", address, exc_info=True)
+            return 0
+
+    async def get_agent_owner(self, address: str) -> str:
+        """Read an agent's bound owner wallet (zero address if unbound)."""
+        try:
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            return contract.functions.agentOwner(
+                w3.to_checksum_address(address)).call()
+        except Exception:
+            log.debug("agentOwner read failed for %s", address, exc_info=True)
+            return ZERO_ADDRESS
+
     def build_update_peer_id_call_data(self, peer_id: str | bytes) -> str:
         """Build ABI-encoded call data for ``updatePeerId(peerId)``."""
         contract = self._get_contract()
@@ -558,13 +798,21 @@ class OnChainService:
             return None
 
     async def get_fleet_voice(self, owner: str) -> dict[str, Any] | None:
-        """Read an owner's fleet: their wallet balance plus every bound
-        agent's ATN + reputation, and the network supply.
+        """Read an owner's fleet: their wallet ATN plus every bound
+        agent's ATN + reputation, the network ATN supply (money) AND the
+        network reputation supply (voice).
 
-        ``fleet_total_raw`` (owner balance + Σ agent balances) is the
-        household's "voice" numerator — the number the federated close
+        VOICE is REPUTATION (ratified 2026-07-08: ATN = money, reputation
+        = voice). ``fleet_reputation_raw`` (Σ bound agents' reputation) is
+        the household's voice numerator — the number the federated close
         weights the fleet's reviews and usage by (see
-        nodes/common/voice_state.py). Raw integer chain units; the WS
+        nodes/common/voice_state.py), over ``rep_supply_raw``. Owner
+        wallets never earn reputation, so there is no owner-wallet
+        reputation term.
+
+        MONEY figures (owner balance, fleet ATN total, ATN supply) are
+        still reported for the Owner page's money panel, but they no
+        longer drive the voice weight. Raw integer chain units; the WS
         layer scales for display.
         """
         try:
@@ -572,7 +820,8 @@ class OnChainService:
             contract = self._get_contract(w3)
             owner_addr = w3.to_checksum_address(owner)
             owner_raw = int(contract.functions.balanceOf(owner_addr).call())
-            fleet_raw = owner_raw
+            fleet_raw = owner_raw            # money: owner + Σ agent ATN
+            fleet_rep_raw = 0                # voice: Σ agent reputation
             agents: list[dict[str, Any]] = []
             count = contract.functions.registeredAgentCount().call()
             for i in range(count):
@@ -589,15 +838,19 @@ class OnChainService:
                         "reputation_raw": rep,
                     })
                     fleet_raw += bal
+                    fleet_rep_raw += rep
                 except Exception as e:
                     log.debug("fleet_voice: agent %d read failed: %s", i, e)
                     continue
             supply_raw = int(contract.functions.atnTotalSupply().call())
+            rep_supply_raw = int(contract.functions.networkMintTotal().call())
             return {
                 "owner": str(owner_addr),
                 "owner_balance_raw": owner_raw,
                 "fleet_total_raw": fleet_raw,
+                "fleet_reputation_raw": fleet_rep_raw,
                 "supply_raw": supply_raw,
+                "rep_supply_raw": rep_supply_raw,
                 "agents": agents,
             }
         except Exception as e:

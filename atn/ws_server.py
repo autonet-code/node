@@ -1058,8 +1058,8 @@ class WebSocketBridge:
 
         if msg_type == "tool_earnings":
             # Off-chain fee ledger derived from usage receipts. On-chain
-            # settlement lands once payForService vs payForInference is
-            # decided (docs/tool_substrate.md open knobs).
+            # settlement (labeled ATN transfer via payForService) is not
+            # wired yet (docs/tool_substrate.md open knobs).
             return {"msg_id": msg_id, "ok": True,
                     "result": self.runtime.tool_store.balances()}
 
@@ -1596,6 +1596,12 @@ class WebSocketBridge:
             is_root = msg.get("is_root", False)
             private_key = msg.get("private_key", "")
             sponsor_address = msg.get("sponsor_address", "")
+            # Owner-rooted registration (optional). When owner_sig is present
+            # the agent is registered via registerAgentBound(owner, parent,
+            # ownerSig); absent → plain registerAgent exactly as before.
+            owner = msg.get("owner", "")
+            parent = msg.get("parent", "")
+            owner_sig = msg.get("owner_sig", "")
             if not agent_id:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id'"}
             try:
@@ -1604,6 +1610,9 @@ class WebSocketBridge:
                     is_root=is_root,
                     private_key=private_key,
                     sponsor_address=sponsor_address,
+                    owner=owner,
+                    parent=parent,
+                    owner_sig=owner_sig,
                 )
                 # Surface the agent's private key on a SUCCESSFUL registration
                 # so the (local) user can import it into MetaMask and later sign
@@ -1992,10 +2001,12 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
         if msg_type == "fleet_voice":
-            # Owner section (balance-weighted voice addendum): the
-            # owner's fleet — wallet balance + every bound agent's
-            # ATN/reputation — and the derived voice weight the close
-            # prices the household's reviews and usage with.
+            # Owner section (ratified 2026-07-08: ATN = money, reputation
+            # = voice): the owner's fleet — wallet balance + every bound
+            # agent's ATN/reputation — and the derived voice weight the
+            # close prices the household's reviews and usage with. The
+            # voice weight is now REPUTATION-based (fleet reputation / rep
+            # supply); ATN figures are still reported as money info.
             owner = msg.get("owner", "")
             if not owner:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'owner'"}
@@ -2040,20 +2051,159 @@ class WebSocketBridge:
                         "balance": a["balance_raw"] / _scale,
                         "reputation": a["reputation_raw"] / _scale,
                     })
+                # MONEY: ATN supply + fleet ATN total (reported, not voted).
                 supply_raw = int(raw["supply_raw"])
-                share = ((raw["fleet_total_raw"] / supply_raw)
-                         if supply_raw > 0 else 0.0)
+                # VOICE: reputation supply + fleet reputation drive weight.
+                rep_supply_raw = int(raw.get("rep_supply_raw", 0))
+                fleet_rep_raw = int(raw.get("fleet_reputation_raw", 0))
+                share = ((fleet_rep_raw / rep_supply_raw)
+                         if rep_supply_raw > 0 else 0.0)
                 return {"msg_id": msg_id, "ok": True, "result": {
                     "owner": raw["owner"],
                     "available": True,
                     "reason": "",
+                    # Money panel (unchanged fields).
                     "owner_balance": raw["owner_balance_raw"] / _scale,
                     "fleet_total": raw["fleet_total_raw"] / _scale,
                     "supply": supply_raw / _scale,
+                    # Voice panel (NEW — weight derives from reputation).
+                    "fleet_reputation": fleet_rep_raw / _scale,
+                    "rep_supply": rep_supply_raw / _scale,
+                    "weight_source": "reputation",
                     "voice_weight": round(_eps + share, 6),
                     "epsilon": _eps,
                     "agents": agents,
                 }}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "owner_binding_status":
+            # Report on-chain owner-binding state for every LOCAL agent, so
+            # the Owner page can show which agents are bound / to whom / at
+            # what nonce and drive registerAgentBound / rotateOwner. Chain
+            # reads are batched politely (one web3 per call); a chain-
+            # unreachable daemon returns ok:false with a clear reason.
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": "Substrate not configured on this daemon"}
+                # Local agents (defn.identity.address, like fleet_voice).
+                local: list[tuple[str, str, str]] = []  # (agent_id, name, addr)
+                try:
+                    for defn, _status in self.runtime.list_agents():
+                        ident = getattr(defn, "identity", None)
+                        addr = (getattr(ident, "address", "") or "")
+                        if addr:
+                            local.append((
+                                defn.id,
+                                getattr(defn, "name", "") or defn.id,
+                                addr,
+                            ))
+                except Exception as e:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": f"Could not enumerate local agents: {e}"}
+
+                chain_id = getattr(self.runtime._config.rpb, "chain_id", 0)
+                sub_addr = svc._substrate_address()
+                _zero = "0x0000000000000000000000000000000000000000"
+                agents_out = []
+                owner_filter = (msg.get("owner", "") or "").lower()
+                for agent_id, name, addr in local:
+                    try:
+                        bound = await svc.get_agent_owner(addr)
+                        nonce = await svc.binding_nonce(addr)
+                        registered = await svc.is_registered(addr)
+                    except Exception as e:
+                        # Chain read failed mid-batch — surface the failure
+                        # rather than reporting misleading "unbound" states.
+                        return {"msg_id": msg_id, "ok": False,
+                                "error": f"Chain read failed for {addr}: {e}"}
+                    owner_str = ("" if not bound or str(bound).lower() == _zero
+                                 else str(bound))
+                    if owner_filter and owner_str.lower() != owner_filter:
+                        continue
+                    agents_out.append({
+                        "agent_id": agent_id,
+                        "name": name,
+                        "address": addr,
+                        "registered": bool(registered),
+                        "owner": owner_str,
+                        "binding_nonce": int(nonce),
+                    })
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "substrate_address": sub_addr,
+                    "chain_id": chain_id,
+                    "agents": agents_out,
+                }}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+
+        if msg_type == "rotate_owner":
+            # Rotate (or first-set) the owner+parent of one or more LOCAL
+            # agents. Each binding carries the NEW owner's EIP-712 signature
+            # at the agent's current nonce; the daemon submits rotateOwner
+            # signed by THAT agent's own daemon-held key. No raw keys cross
+            # the wire (only signatures), so this stays owner-authed but
+            # remotely reachable — unlike register_agent_on_chain. Per-agent
+            # failures don't abort the batch.
+            new_owner = msg.get("new_owner", "")
+            parent = msg.get("parent", "")
+            bindings = msg.get("bindings", [])
+            if not new_owner:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'new_owner'"}
+            if not isinstance(bindings, list) or not bindings:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Missing 'bindings' (list of {address, sig})"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+                if not svc.available:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": "Substrate not configured on this daemon"}
+                # address (lowercased) -> local agent_id, for key lookup.
+                by_addr: dict[str, str] = {}
+                for defn, _status in self.runtime.list_agents():
+                    ident = getattr(defn, "identity", None)
+                    a = (getattr(ident, "address", "") or "").lower()
+                    if a:
+                        by_addr[a] = defn.id
+                results = []
+                for b in bindings:
+                    addr = str(b.get("address", "") or "")
+                    sig = str(b.get("sig", "") or "")
+                    if not addr or not sig:
+                        results.append({"address": addr, "ok": False,
+                                        "error": "missing address or sig"})
+                        continue
+                    agent_id = by_addr.get(addr.lower())
+                    if not agent_id:
+                        results.append({"address": addr, "ok": False,
+                                        "error": "no local agent with that address"})
+                        continue
+                    key = self.runtime.registry.get_agent_key(agent_id)
+                    if not key:
+                        results.append({"address": addr, "ok": False,
+                                        "error": "no daemon-held key for that agent"})
+                        continue
+                    try:
+                        r = await svc.rotate_owner(
+                            private_key=key,
+                            new_owner=new_owner,
+                            new_owner_sig=sig,
+                            new_parent=parent,
+                        )
+                    except Exception as e:
+                        results.append({"address": addr, "ok": False, "error": str(e)})
+                        continue
+                    if r.get("success"):
+                        results.append({"address": addr, "ok": True,
+                                        "tx_hash": r.get("tx_hash", "")})
+                    else:
+                        results.append({"address": addr, "ok": False,
+                                        "error": r.get("error", "rotateOwner reverted")})
+                return {"msg_id": msg_id, "ok": True, "result": {"results": results}}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
@@ -2635,6 +2785,9 @@ class WebSocketBridge:
         is_root: bool = False,
         private_key: str = "",
         sponsor_address: str = "",
+        owner: str = "",
+        parent: str = "",
+        owner_sig: str = "",
     ) -> dict[str, Any]:
         """Handle agent registration on the RPB contract.
 
@@ -2740,11 +2893,28 @@ class WebSocketBridge:
                          "in a moment.",
             }
 
-        result = await svc.register_agent(
-            identity=identity,
-            private_key=key,
-            peer_id=peer_id,
-        )
+        # Owner-rooted path: an owner wallet signature (owner_sig) turns this
+        # into registerAgentBound, attributing the agent to the proven owner
+        # wallet + optional parent. Absent → plain ownerless registerAgent
+        # exactly as before. The contract verifies the signature on-chain.
+        if owner_sig:
+            if not owner:
+                return {"success": False,
+                        "error": "owner_sig present but 'owner' address missing"}
+            result = await svc.register_agent_bound(
+                identity=identity,
+                private_key=key,
+                peer_id=peer_id,
+                owner=owner,
+                owner_sig=owner_sig,
+                parent=parent,
+            )
+        else:
+            result = await svc.register_agent(
+                identity=identity,
+                private_key=key,
+                peer_id=peer_id,
+            )
         if result.get("success"):
             identity.registered_on_chain = True
             identity.registration_tx = result.get("tx_hash")
