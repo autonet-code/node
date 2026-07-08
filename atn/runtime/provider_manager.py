@@ -61,6 +61,9 @@ _MODEL_TIERS: dict[str, int] = {
     "claude-opus-4-8": 4,
     "claude-opus-4-7": 4,
     "claude-opus-4": 4,
+    "claude-sonnet-5": 3,
+    "claude-sonnet-4-7": 3,
+    "claude-sonnet-4-6": 3,
     "claude-sonnet-4": 3,
     "claude-haiku-4": 2,
     "claude-sonnet-3.5": 3,
@@ -106,6 +109,7 @@ _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "claude-fable-5",    "name": "Claude Fable 5"},
         {"id": "claude-opus-4-8",   "name": "Claude Opus 4.8"},
         {"id": "claude-opus-4-7",   "name": "Claude Opus 4.7"},
+        {"id": "claude-sonnet-5",   "name": "Claude Sonnet 5"},
         {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
         {"id": "claude-opus-4-6",   "name": "Claude Opus 4.6"},
         {"id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5"},
@@ -120,6 +124,7 @@ _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "claude-fable-5",    "name": "Claude Fable 5"},
         {"id": "claude-opus-4-8",   "name": "Claude Opus 4.8"},
         {"id": "claude-opus-4-7",   "name": "Claude Opus 4.7"},
+        {"id": "claude-sonnet-5",   "name": "Claude Sonnet 5"},
         {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
         {"id": "claude-opus-4-6",   "name": "Claude Opus 4.6"},
         {"id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5"},
@@ -282,6 +287,15 @@ class ProviderManager:
         self._ollama_tags_cache: set[str] | None = None
         self._ollama_tags_cache_ts: float = 0.0
         self._ollama_tags_ttl: float = 60.0
+
+        # Live model-catalog cache for API providers that expose a /models
+        # endpoint (anthropic, openai, gemini). Maps provider_id -> list of
+        # {"id", "name"} dicts fetched from the provider, merged (union by id)
+        # with the curated _PROVIDER_MODELS list in get_available_models.
+        # In-memory, ~1h TTL. Empty/absent → curated list only.
+        self._catalog_cache: dict[str, list[dict[str, str]]] = {}
+        self._catalog_cache_ts: dict[str, float] = {}
+        self._catalog_ttl: float = 3600.0
 
     # ------------------------------------------------------------------
     # API key resolution
@@ -729,7 +743,10 @@ class ProviderManager:
 
         out: list[dict[str, Any]] = []
         for pid in target_ids:
-            entries = list(_PROVIDER_MODELS.get(pid, []))
+            # Curated list unioned with any cached live-fetched catalog (the
+            # cache is primed asynchronously by refresh_model_catalogs /
+            # provider_list; get_available_models stays sync).
+            entries = self._merged_provider_models(pid)
             # For custom providers, fall back to user-supplied list on the
             # provider config (set via the custom-provider form).
             if not entries and pid in self._custom_providers:
@@ -764,6 +781,11 @@ class ProviderManager:
     # ------------------------------------------------------------------
 
     async def provider_list(self) -> list[dict[str, Any]]:
+        # Prime the live model-catalog cache (best-effort, ~1h TTL) so the
+        # per-provider model lists below reflect newly-released models beyond
+        # the curated set. Network failure → curated list only, no error.
+        await self.refresh_model_catalogs()
+
         cognitive = self._executors.get(StepType.COGNITIVE)
         registered: set[str] = set()
         if isinstance(cognitive, CognitiveStepExecutor):
@@ -1221,77 +1243,232 @@ class ProviderManager:
         except httpx.TimeoutException:
             raise ValueError(f"Timeout connecting to {provider_id} API")
 
-    async def _ensure_bridge_deps(self) -> None:
-        """Auto-install bridge dependencies (bun install) if missing."""
+    # ------------------------------------------------------------------
+    # Live model-catalog fetch (anthropic / openai / gemini)
+    # ------------------------------------------------------------------
+
+    # Providers whose catalog we fetch live. claude_max / codex_max are curated
+    # only (no catalog API); ollama has its own /api/tags probe.
+    _CATALOG_PROVIDERS = ("anthropic", "openai", "gemini")
+
+    @staticmethod
+    def _openai_chat_capable(model_id: str) -> bool:
+        """Filter OpenAI /v1/models noise down to chat-capable families.
+
+        /v1/models returns embeddings, whisper, tts, dall-e, moderation, etc.
+        Keep gpt-* and reasoning o-series (o1/o3/o4-...); drop the rest."""
+        mid = model_id.lower()
+        _NOISE = ("embed", "whisper", "tts", "dall-e", "dalle", "moderation",
+                  "audio", "realtime", "image", "search", "transcribe", "davinci",
+                  "babbage", "instruct-0", "codex")
+        if any(tok in mid for tok in _NOISE):
+            return False
+        if mid.startswith("gpt-"):
+            return True
+        # Reasoning o-series: o1, o3, o4-mini, ... but not "o1-embedding" (caught
+        # above). Require o + digit.
+        if len(mid) >= 2 and mid[0] == "o" and mid[1].isdigit():
+            return True
+        return False
+
+    async def _fetch_provider_catalog(self, provider_id: str) -> list[dict[str, str]]:
+        """Fetch the live model list for an API provider. Returns a list of
+        {"id","name"} dicts, or [] on any failure (network, auth, parse).
+        Cached in-memory with ~1h TTL. No key → []."""
+        import time as _time
+        if provider_id not in self._CATALOG_PROVIDERS:
+            return []
+        now = _time.monotonic()
+        cached = self._catalog_cache.get(provider_id)
+        if cached is not None and (now - self._catalog_cache_ts.get(provider_id, 0.0)) < self._catalog_ttl:
+            return cached
+
+        api_key = self._resolve_api_key(provider_id)
+        if not api_key:
+            return []
+
+        import httpx
         try:
-            import bridge as _bridge_pkg
-            bridge_dir = Path(_bridge_pkg.__file__).resolve().parent
-        except ImportError:
-            bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
+            ids: list[str] = []
+            # 5s, not 15: this primes the provider-card UI; a slow catalog
+            # endpoint must not stall the first provider_list open.
+            async with httpx.AsyncClient(timeout=5) as client:
+                if provider_id == "anthropic":
+                    resp = await client.get(
+                        "https://api.anthropic.com/v1/models",
+                        headers={
+                            "x-api-key": api_key,
+                            "anthropic-version": "2023-06-01",
+                        },
+                    )
+                    if resp.status_code != 200:
+                        return self._catalog_cache.get(provider_id, [])
+                    data = resp.json().get("data", [])
+                    ids = [m.get("id", "") for m in data if m.get("id")]
+                elif provider_id == "openai":
+                    resp = await client.get(
+                        "https://api.openai.com/v1/models",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
+                    if resp.status_code != 200:
+                        return self._catalog_cache.get(provider_id, [])
+                    data = resp.json().get("data", [])
+                    ids = [m.get("id", "") for m in data
+                           if m.get("id") and self._openai_chat_capable(m["id"])]
+                elif provider_id == "gemini":
+                    defaults = self._PROVIDER_DEFAULTS.get("gemini", {})
+                    base_url = defaults.get("base_url", "")
+                    resp = await client.get(
+                        f"{base_url}/models",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
+                    if resp.status_code != 200:
+                        return self._catalog_cache.get(provider_id, [])
+                    # OpenAI-compat shape: {"data": [{"id": "..."}]}. Strip the
+                    # "models/" prefix the native Gemini API uses if present.
+                    data = resp.json().get("data", [])
+                    for m in data:
+                        mid = m.get("id", "")
+                        if not mid:
+                            continue
+                        mid = mid.split("/", 1)[1] if mid.startswith("models/") else mid
+                        if mid.startswith("gemini-"):
+                            ids.append(mid)
+            catalog = [{"id": mid, "name": mid} for mid in dict.fromkeys(ids)]
+            self._catalog_cache[provider_id] = catalog
+            self._catalog_cache_ts[provider_id] = now
+            return catalog
+        except Exception as exc:  # noqa: BLE001 — network failure → curated only
+            log.debug("Model-catalog fetch for %s failed: %s", provider_id, exc)
+            # Serve stale cache if we have one; else empty (curated only).
+            return self._catalog_cache.get(provider_id, [])
+
+    async def refresh_model_catalogs(self) -> None:
+        """Prime the live-catalog cache for all API providers that have a key.
+        Call before building provider entries so get_available_models can merge
+        fetched ids. Best-effort — never raises."""
+        import asyncio as _asyncio
+        tasks = []
+        for pid in self._CATALOG_PROVIDERS:
+            if self._resolve_api_key(pid):
+                tasks.append(self._fetch_provider_catalog(pid))
+        if tasks:
+            await _asyncio.gather(*tasks, return_exceptions=True)
+
+    def _merged_provider_models(self, provider_id: str) -> list[dict[str, str]]:
+        """Curated list for ``provider_id`` unioned with any cached live-fetch
+        ids. Curated entries keep their order/metadata; fetched-only ids are
+        appended with the id as the display name. No cache → curated only."""
+        curated = list(_PROVIDER_MODELS.get(provider_id, []))
+        fetched = self._catalog_cache.get(provider_id)
+        if not fetched:
+            return curated
+        seen = {e["id"] for e in curated}
+        merged = list(curated)
+        for e in fetched:
+            if e["id"] not in seen:
+                merged.append({"id": e["id"], "name": e.get("name", e["id"])})
+                seen.add(e["id"])
+        return merged
+
+    async def _ensure_bridge_deps(self) -> None:
+        """Stage the bridge sources into ``~/.atn/bridge`` and install its
+        dependencies there (site-packages is often read-only). Loud failure:
+        raises ``ValueError`` — surfaced to the frontend provider card — when
+        neither bun nor npm is available, or the install fails.
+
+        Dev fast-path (repo checkout with node_modules already next to the
+        packaged sources) is used in place with no copy/install.
+        """
+        from ..providers.bridge import stage_bridge_sources, _node_modules_ready
+
+        try:
+            bridge_dir, needs_install = stage_bridge_sources()
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                f"Claude Max bridge sources could not be staged into "
+                f"~/.atn/bridge: {exc}"
+            )
+
         pkg_json = bridge_dir / "package.json"
-        node_modules = bridge_dir / "node_modules"
-        # SDK 0.2.119+ ships sdk.mjs (no bundled cli.js). Either marker means
-        # node_modules is populated.
-        sdk_dir = node_modules / "@anthropic-ai" / "claude-agent-sdk"
-        cli_js = sdk_dir / "cli.js"
-        sdk_mjs = sdk_dir / "sdk.mjs"
-
-        if cli_js.exists() or sdk_mjs.exists():
-            return  # Already installed
-
         if not pkg_json.exists():
-            log.warning("Bridge package.json not found at %s", bridge_dir)
-            return
+            raise ValueError(
+                f"Claude Max bridge is missing package.json (looked in "
+                f"{bridge_dir}). The install is corrupt — reinstall the atn "
+                "package."
+            )
 
-        # Check bun is available; auto-install if missing
+        if not needs_install and _node_modules_ready(bridge_dir):
+            return  # Already installed and sources unchanged.
+
         import shutil
+        # Prefer bun; auto-install it if absent (its failure is now loud too).
         bun = shutil.which("bun")
         if not bun:
             bun = await self._auto_install_bun()
-        if not bun:
-            # Fall back to npm if available
-            npm = shutil.which("npm")
-            if npm:
-                log.info("bun not available, falling back to npm install...")
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        npm, "install",
-                        cwd=str(bridge_dir),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-                    if proc.returncode == 0:
-                        log.info("Bridge dependencies installed via npm")
-                    return
-                except Exception as e:
-                    log.warning("npm install failed: %s", e)
-            log.warning("Neither bun nor npm found — cannot auto-install bridge dependencies. "
-                        "Install bun: https://bun.sh/docs/installation")
-            return
 
-        # Run bun install in the bridge directory
-        log.info("Installing bridge dependencies in %s ...", bridge_dir)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                bun, "install",
-                cwd=str(bridge_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+        install_err = ""
+        if bun:
+            log.info("Installing bridge dependencies with bun in %s ...", bridge_dir)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    bun, "install",
+                    cwd=str(bridge_dir),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+                if proc.returncode == 0 and _node_modules_ready(bridge_dir):
+                    log.info("Bridge dependencies installed successfully (bun)")
+                    return
+                install_err = (stderr.decode(errors="replace")[:400]
+                               or f"bun install exit {proc.returncode}")
+            except asyncio.TimeoutError:
+                install_err = "bun install timed out after 180s"
+            except Exception as e:  # noqa: BLE001
+                install_err = f"bun install error: {e}"
+
+        # Fall back to npm.
+        npm = shutil.which("npm")
+        if npm:
+            log.info("Installing bridge dependencies with npm in %s ...", bridge_dir)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    npm, "install",
+                    cwd=str(bridge_dir),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+                if proc.returncode == 0 and _node_modules_ready(bridge_dir):
+                    log.info("Bridge dependencies installed successfully (npm)")
+                    return
+                install_err = (stderr.decode(errors="replace")[:400]
+                               or f"npm install exit {proc.returncode}") or install_err
+            except asyncio.TimeoutError:
+                install_err = "npm install timed out after 300s"
+            except Exception as e:  # noqa: BLE001
+                install_err = f"npm install error: {e}"
+
+        # If we get here, install did not succeed. Fail LOUD.
+        if not bun and not npm:
+            raise ValueError(
+                "Claude Max bridge dependencies could not be installed: neither "
+                "'bun' nor 'npm' was found (and bun auto-install failed). "
+                "Install bun from https://bun.sh and reconnect the provider."
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-            if proc.returncode == 0:
-                log.info("Bridge dependencies installed successfully")
-            else:
-                log.warning("bun install failed (exit %s): %s",
-                            proc.returncode, stderr.decode(errors="replace")[:500])
-        except asyncio.TimeoutError:
-            log.warning("bun install timed out")
-        except Exception as e:
-            log.warning("Failed to install bridge dependencies: %s", e)
+        raise ValueError(
+            "Claude Max bridge dependencies failed to install "
+            f"(in {bridge_dir}): {install_err or 'unknown error'}. "
+            "Install bun from https://bun.sh and reconnect the provider."
+        )
 
     async def _auto_install_bun(self) -> str | None:
-        """Download and install bun without requiring npm/node."""
+        """Download and install bun without requiring npm/node.
+
+        Returns the bun path on success, ``None`` on failure. Failure is
+        non-fatal here (the caller falls back to npm, then fails loud), but
+        it is logged clearly rather than buried."""
         import shutil
         import sys
 
@@ -1312,7 +1489,7 @@ class ProviderManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-            await asyncio.wait_for(proc.communicate(), timeout=120)
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
             if proc.returncode == 0:
                 # Bun installs to ~/.bun/bin — refresh PATH
                 bun_bin = Path.home() / ".bun" / "bin"
@@ -1322,9 +1499,12 @@ class ProviderManager:
                 if bun:
                     log.info("bun installed successfully: %s", bun)
                     return bun
-            log.warning("bun install script exited with code %s", proc.returncode)
+            log.warning(
+                "bun auto-install failed (exit %s): %s",
+                proc.returncode, stderr.decode(errors="replace")[:300],
+            )
         except asyncio.TimeoutError:
-            log.warning("bun install timed out")
+            log.warning("bun auto-install timed out after 120s")
         except Exception as e:
             log.warning("Failed to auto-install bun: %s", e)
         return None
@@ -1337,11 +1517,11 @@ class ProviderManager:
         the legacy bundled cli.js for older SDK installs.
         """
         import shutil
-        try:
-            import bridge as _bridge_pkg
-            bridge_dir = Path(_bridge_pkg.__file__).resolve().parent
-        except ImportError:
-            bridge_dir = Path(__file__).resolve().parent.parent.parent / "bridge"
+        from ..providers.bridge import resolve_bridge_dir
+        # node_modules now lives in the runtime dir (~/.atn/bridge) unless the
+        # dev fast-path put it next to the packaged sources — resolve_bridge_dir
+        # returns whichever is authoritative.
+        bridge_dir = resolve_bridge_dir()
         nm = bridge_dir / "node_modules" / "@anthropic-ai"
 
         # Prefer a TRUE executable (.exe / native binary). On Windows the npm

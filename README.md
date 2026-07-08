@@ -82,18 +82,25 @@ The original long-form whitepaper (v3) is preserved at [autonet-code/whitepaper]
 ## Install
 
 ```bash
-pip install autonet-computer                  # Agent framework (local operation)
+pip install autonet-computer                  # Full node: agent framework + chain registration + substrate/P2P
 pip install autonet-computer[voice]           # + voice / TTS
-pip install autonet-computer[network]         # + blockchain, P2P, substrate (full node)
-pip install autonet-computer[network,voice]   # everything
+pip install autonet-computer[training]        # + native training stack (torch, transformers, mss)
+pip install autonet-computer[training,voice]  # everything
 ```
+
+The base install is a fully functional node — agent orchestration, on-chain
+registration, and substrate event gossip / federated close all work out of the
+box. The `[training]` extra adds only the compute-heavy native-training deps
+(JEPA / FedAvg / model sharding), which are off the live path. (`[network]`
+still resolves as a back-compat alias for `[training]` plus the optional UPnP
+helper.)
 
 Or from source:
 
 ```bash
 git clone https://github.com/autonet-code/node.git
 cd node
-pip install -e ".[network]"
+pip install -e .          # add "[training]" for the native-training stack
 ```
 
 Start the agent framework:

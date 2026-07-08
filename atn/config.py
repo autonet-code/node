@@ -5,7 +5,7 @@ variable interpolation via ${VAR_NAME} syntax.
 
 Config layout:
     data_dir:    ~/.atn              # global state, pidfiles
-    agents_dir:  ./agents            # agent directories (project-local, gitignored)
+    agents_dir:  ~/.atn/agents       # agent directories (or ./agents if it exists in CWD)
 
     orchestrator:
       provider: anthropic            # which provider the orchestrator uses
@@ -36,6 +36,24 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_DIR = Path.home() / ".atn"
 _ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def _default_agents_dir(data_dir: Path | None = None) -> Path:
+    """Resolve the default agents directory.
+
+    - If ``./agents`` exists in the CWD (a dev running from the repo, or a
+      user who deliberately created one), use it — back-compat.
+    - Otherwise root it under the data dir (``~/.atn/agents``), so pip users
+      launching ``atn`` from an arbitrary CWD don't get a stray ``agents/``
+      mkdir'd wherever they happen to be.
+
+    The directory is NOT created here; consumers mkdir on demand.
+    """
+    cwd_agents = Path("agents")
+    if cwd_agents.is_dir():
+        return cwd_agents
+    base = data_dir if data_dir is not None else _DEFAULT_DIR
+    return base / "agents"
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +296,11 @@ class TraceLoggingConfig:
 
 @dataclass
 class AutoUpdateConfig:
-    """Silent daemon auto-update (opt-in).
+    """Silent daemon auto-update (ON by default; set enabled: false to opt out).
+
+    Default-on is load-bearing for consensus: federated closes fork on a
+    mixed fleet, so laggard daemons are a network hazard, not just a stale
+    install. Staging is the safe half — the daemon never restarts itself.
 
     When ``enabled``, a background task polls the release source (default
     PyPI) on ``check_interval_secs``. A newer release is downloaded, its
@@ -304,7 +326,7 @@ class AutoUpdateConfig:
           pypi_index_url: ""           # "" → pypi.org default
           package_name: autonet-computer
     """
-    enabled: bool = False
+    enabled: bool = True
     check_interval_secs: int = 86400     # daily
     source: str = "pypi"                 # pypi | git | http | blob_store
     pypi_index_url: str = ""             # "" → pypi.org JSON API default
@@ -361,7 +383,7 @@ class SecretsConfig:
 class ATNConfig:
     """Top-level ATN configuration."""
     data_dir: Path = field(default_factory=lambda: _DEFAULT_DIR)
-    agents_dir: Path = field(default_factory=lambda: Path("agents"))
+    agents_dir: Path = field(default_factory=lambda: _default_agents_dir())
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
@@ -381,50 +403,165 @@ class ATNConfig:
 
 
 # ---------------------------------------------------------------------------
-# Registry seed — repo-level jurisdiction defaults
+# Registry seed — network jurisdiction defaults (public chain addresses)
 # ---------------------------------------------------------------------------
+#
+# Resolution order (see _load_registry_seed):
+#   1. repo-root registry.json next to the source tree (dev override) — this
+#      is the ONLY copy present when running from a git checkout;
+#   2. else the cached copy at ~/.atn/registry.json, refreshed on boot from
+#      the canonical GitHub raw URL with a short timeout. Pip-installed wheels
+#      have NO repo-root file, so this is their sole source of network config.
+#
+# The registry contains only public chain addresses + a public RPC URL, so it
+# is safe to fetch over plain HTTPS. It is a SEED: user config.yaml values
+# (blockchain/rpb/autonet sections) still override it downstream.
+
+# Canonical location of the published registry. Override with ATN_REGISTRY_URL
+# for testing / private forks.
+_DEFAULT_REGISTRY_URL = (
+    "https://raw.githubusercontent.com/autonet-code/node/master/registry.json"
+)
+# Where the fetched copy is cached for offline/degraded boots.
+_REGISTRY_CACHE_PATH = _DEFAULT_DIR / "registry.json"
+# Short worst-case network wait at first boot; never blocks meaningfully.
+_REGISTRY_FETCH_TIMEOUT = 4.0
+
+
+def _registry_url() -> str:
+    """The registry fetch URL, honoring the ATN_REGISTRY_URL override."""
+    return os.environ.get("ATN_REGISTRY_URL", "").strip() or _DEFAULT_REGISTRY_URL
+
+
+def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str, Any]:
+    """Flatten a parsed registry document into an RPBConfig-mergeable seed.
+
+    Empty dict if the jurisdiction isn't listed.
+    """
+    entry = data.get("jurisdictions", {}).get(jurisdiction_id)
+    if not entry:
+        return {}
+    seed: dict[str, Any] = {"jurisdiction_id": jurisdiction_id}
+    net = entry.get("network", {})
+    if net.get("rpc_url"):
+        seed["rpc_url"] = net["rpc_url"]
+    if net.get("chain_id"):
+        seed["chain_id"] = net["chain_id"]
+    if net.get("gas_symbol"):
+        seed["gas_symbol"] = net["gas_symbol"]
+    if net.get("gas_decimals") is not None:
+        seed["gas_decimals"] = int(net["gas_decimals"])
+    contracts = entry.get("contracts", {})
+    if contracts.get("dao"):
+        seed["dao_address"] = contracts["dao"]
+    if contracts.get("rpb"):
+        seed["rpb_contract_address"] = contracts["rpb"]
+    if contracts.get("substrate"):
+        seed["substrate_address"] = contracts["substrate"]
+    if contracts.get("charter_anchor"):
+        seed["charter_anchor_address"] = contracts["charter_anchor"]
+    if contracts.get("service_registry"):
+        seed["registry_address"] = contracts["service_registry"]
+    return seed
+
+
+def _repo_registry_path() -> Path:
+    """Path to the repo-root registry.json (present only in a source checkout)."""
+    return Path(__file__).resolve().parent.parent / "registry.json"
+
+
+def _refresh_registry_cache() -> dict[str, Any] | None:
+    """Fetch the registry from GitHub and atomically update the local cache.
+
+    Returns the parsed document on success, or None on any failure (network
+    error, timeout, bad JSON). Never raises.
+    """
+    url = _registry_url()
+    try:
+        # httpx is a core dependency; requests is too, but httpx is already
+        # imported across the daemon so we prefer it here.
+        import httpx
+
+        resp = httpx.get(url, timeout=_REGISTRY_FETCH_TIMEOUT,
+                         follow_redirects=True)
+        resp.raise_for_status()
+        text = resp.text
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            return None
+    except Exception as exc:
+        log.debug("Registry fetch from %s failed: %s", url, exc)
+        return None
+    # Atomically write the cache (temp file + replace) so a partial write
+    # never corrupts the stale copy we fall back to.
+    try:
+        _REGISTRY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _REGISTRY_CACHE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, _REGISTRY_CACHE_PATH)
+    except Exception as exc:
+        log.debug("Registry cache write failed: %s", exc)
+        # Still usable this boot even if we couldn't persist it.
+    return data
+
 
 def _load_registry_seed(jurisdiction_id: str = "autonet") -> dict[str, Any]:
-    """Load network + contract defaults from registry.json in the repo root.
+    """Resolve network + contract defaults for ``jurisdiction_id``.
+
+    Resolution order:
+      1. repo-root registry.json (dev override — kept first);
+      2. else GitHub fetch → ~/.atn/registry.json cache (refreshed on boot);
+      3. else the stale cache (silent);
+      4. else {} with ONE clear warning (degraded: network features off).
 
     Returns a flat dict suitable for merging into the RPBConfig builder.
-    Empty dict if the file is missing or the jurisdiction isn't listed.
     """
-    # registry.json lives at the repo root (parent of atn/)
-    registry_path = Path(__file__).resolve().parent.parent / "registry.json"
-    if not registry_path.is_file():
+    # 1. Repo-root file wins (dev running from a source checkout).
+    repo_path = _repo_registry_path()
+    if repo_path.is_file():
+        try:
+            data = json.loads(repo_path.read_text(encoding="utf-8"))
+            seed = _parse_registry_data(data, jurisdiction_id)
+            log.info("Registry seed (repo) for '%s': dao=%s, substrate=%s",
+                     jurisdiction_id,
+                     (seed.get("dao_address") or "")[:10] or "(none)",
+                     (seed.get("substrate_address") or "")[:10] or "(none)")
+            return seed
+        except Exception:
+            log.warning("Failed to parse repo registry.json", exc_info=True)
+            # Fall through to the network/cache path rather than dying.
+
+    # 2. Try a fresh fetch (updates the cache atomically on success).
+    data = _refresh_registry_cache()
+    source = "github"
+
+    # 3. Fall back to the stale cache if the fetch failed.
+    if data is None and _REGISTRY_CACHE_PATH.is_file():
+        try:
+            data = json.loads(_REGISTRY_CACHE_PATH.read_text(encoding="utf-8"))
+            source = "cache"
+        except Exception:
+            log.debug("Stale registry cache unreadable", exc_info=True)
+            data = None
+
+    # 4. Nothing available — degrade loudly, exactly once.
+    if data is None:
+        log.warning(
+            "network registry unavailable — substrate features disabled "
+            "until reachable (tried %s; no cache at %s)",
+            _registry_url(), _REGISTRY_CACHE_PATH)
         return {}
+
     try:
-        data = json.loads(registry_path.read_text(encoding="utf-8"))
-        entry = data.get("jurisdictions", {}).get(jurisdiction_id)
-        if not entry:
-            return {}
-        seed: dict[str, Any] = {}
-        seed["jurisdiction_id"] = jurisdiction_id
-        net = entry.get("network", {})
-        if net.get("rpc_url"):
-            seed["rpc_url"] = net["rpc_url"]
-        if net.get("chain_id"):
-            seed["chain_id"] = net["chain_id"]
-        if net.get("gas_symbol"):
-            seed["gas_symbol"] = net["gas_symbol"]
-        if net.get("gas_decimals") is not None:
-            seed["gas_decimals"] = int(net["gas_decimals"])
-        contracts = entry.get("contracts", {})
-        if contracts.get("dao"):
-            seed["dao_address"] = contracts["dao"]
-        if contracts.get("rpb"):
-            seed["rpb_contract_address"] = contracts["rpb"]
-        if contracts.get("substrate"):
-            seed["substrate_address"] = contracts["substrate"]
-        log.info("Registry seed for '%s': dao=%s, substrate=%s",
-                 jurisdiction_id,
-                 seed.get("dao_address", "")[:10] or "(none)",
-                 seed.get("substrate_address", "")[:10] or "(none)")
-        return seed
+        seed = _parse_registry_data(data, jurisdiction_id)
     except Exception:
-        log.warning("Failed to load registry.json", exc_info=True)
+        log.warning("Failed to parse registry (%s)", source, exc_info=True)
         return {}
+    log.info("Registry seed (%s) for '%s': dao=%s, substrate=%s",
+             source, jurisdiction_id,
+             (seed.get("dao_address") or "")[:10] or "(none)",
+             (seed.get("substrate_address") or "")[:10] or "(none)")
+    return seed
 
 
 # ---------------------------------------------------------------------------
@@ -563,9 +700,16 @@ def load_config(path: Path | None = None) -> ATNConfig:
         if not config.data_dir.is_absolute():
             config.data_dir = (config_dir / config.data_dir).resolve()
     if "agents_dir" in raw:
+        # User explicitly set agents_dir — honor it verbatim (resolved against
+        # the config file location when relative). Unaffected by the default.
         config.agents_dir = _expand_path(raw["agents_dir"])
         if not config.agents_dir.is_absolute():
             config.agents_dir = (config_dir / config.agents_dir).resolve()
+    else:
+        # No explicit agents_dir: re-derive the default so it tracks whatever
+        # data_dir resolved to above (the dataclass default was computed with
+        # the pre-override data_dir).
+        config.agents_dir = _default_agents_dir(config.data_dir)
 
     # Orchestrator
     orch_raw = raw.get("orchestrator", {})
@@ -692,7 +836,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
     auto_update_raw = raw.get("auto_update", {})
     if isinstance(auto_update_raw, dict):
         config.auto_update = AutoUpdateConfig(
-            enabled=auto_update_raw.get("enabled", False),
+            enabled=auto_update_raw.get("enabled", True),
             check_interval_secs=auto_update_raw.get("check_interval_secs", 86400),
             source=auto_update_raw.get("source", "pypi"),
             pypi_index_url=auto_update_raw.get("pypi_index_url", ""),

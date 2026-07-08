@@ -22,7 +22,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    # ATN core (agent framework) — local operation, no network deps
+    # ATN core (agent framework + full-node participation). A plain
+    # `pip install autonet-computer` gives a functional node: agent
+    # orchestration, chain registration, and substrate/p2p close. Only the
+    # native-training stack is optional (see [training]).
     "rich>=13.0",
     "pyyaml>=6.0",
     "httpx>=0.27",
@@ -40,6 +43,31 @@ dependencies = [
     # _identity has a /proc fast path that does not need it, but the supervisor
     # does. Small, pure-ish, ships in core.
     "psutil>=5.9.0",
+    # --- Full-node participation (register + gossip + substrate close) ---
+    # These are on the LIVE product path, so a plain `pip install
+    # autonet-computer` yields a fully functional node. Only genuinely
+    # compute-heavy training deps stay optional (see [training] below).
+    #
+    # Blockchain: agent registration + on-chain service. atn/on_chain.py,
+    # atn/runtime/agent_registry.py, nodes/common/crypto.py all lazy-import
+    # web3/eth-account; eth-utils.keccak is used unguarded at module level in
+    # nodes/common/mint_merkle.py. cryptography (gossip ed25519 signing) ships
+    # transitively with these.
+    "web3>=6.0.0",
+    "eth-account>=0.10.0",
+    "eth-utils>=2.0.0",
+    # P2P: libp2p event gossip + federated close transport (nodes/common/p2p.py,
+    # blob_resolver.py). multiaddr ships with libp2p. trio is the required
+    # async runtime for the libp2p host. (miniupnpc is NOT imported anywhere in
+    # code — UPnP defaults off — so it stays optional under [network] below.)
+    "libp2p>=0.6.0",
+    "trio>=0.22.0",
+    # Substrate engine math: numpy is imported UNGUARDED at module level on the
+    # live federated-close path — nodes/common/world_model_substrate/reconcile.py
+    # does `from world_model.generalized import World`, whose __init__ pulls
+    # equilibrate.py (`import numpy as np`). Also coverage.py / artifact_index.py
+    # (daemon-local retrieval). Pure-Python wheels, cheap. Must be core.
+    "numpy>=1.24.0",
 ]
 # Note: the substrate runtime needs the world-model engine. It's
 # vendored under nodes/common/world_model_substrate/_engine/ so
@@ -52,25 +80,30 @@ Repository = "https://github.com/autonet-code/node"
 Issues = "https://github.com/autonet-code/node/issues"
 
 [project.optional-dependencies]
-# Network: blockchain + P2P + training + full node operation
-network = [
-    # Blockchain
-    "web3>=6.0.0",
-    "eth-account>=0.10.0",
-    "eth-utils>=2.0.0",
-    # P2P
-    "libp2p>=0.6.0",
-    "trio>=0.22.0",
-    "miniupnpc>=2.0",
-    # Training (JEPA, FedAvg, model sharding)
+# Native training: JEPA / FedAvg / model-sharding stack. These are the only
+# genuinely compute-heavy deps and are NOT on the live product path — every
+# torch/transformers/mss import on atn/ + nodes/common/ (outside the shelved
+# JEPA modules ml.py, jepa.py, vl_jepa.py, text_jepa.py) is behind a
+# try/except or a lazy in-function import. scipy is not imported by any live
+# module either; it lives here with the rest of the training stack.
+training = [
     "torch>=2.0.0",
-    "numpy>=1.24.0",
     "scipy>=1.10.0",
     # LLM backbone (open-weights encoder for JEPA)
     "transformers>=4.40.0",
     "accelerate>=0.28.0",
-    # System monitoring (psutil moved to core for the isolation supervisor)
+    # Screen capture (perception input for training/observation)
     "mss>=9.0.0",
+]
+# Back-compat alias. The full-node deps (web3, eth-account, eth-utils, libp2p,
+# trio, numpy) moved to core so `pip install autonet-computer` is a working
+# node — see the block in [project].dependencies. This extra now carries only
+# the optional UPnP helper (never imported in code; UPnP defaults off) plus the
+# training stack, so existing `autonet-computer[network]` instructions still
+# resolve. Prefer `[training]` for the training stack going forward.
+network = [
+    "autonet-computer[training]",
+    "miniupnpc>=2.0",
 ]
 # Core voice: TTS output + audio mixing
 voice = [

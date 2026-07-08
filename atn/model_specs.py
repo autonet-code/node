@@ -102,6 +102,21 @@ _MODELS: tuple[ModelSpec, ...] = (
         relative_cost=5.0, default_channel="claude_max",
         orchestrator_capable=True,
     ),
+    # Sonnet 5 — next-gen sonnet-class. No 1M-context evidence in-repo, so it
+    # takes the standard 200k window; cost structure copied from Sonnet 4.6
+    # (sonnet baseline). Referenced widely across the test suite.
+    ModelSpec(
+        id="claude-sonnet-5", family="claude", klass="sonnet",
+        display_name="Claude Sonnet 5",
+        context_window=200_000, max_output_tokens=64_000,
+        relative_cost=1.0, default_channel="claude_max",
+    ),
+    ModelSpec(
+        id="claude-sonnet-4-7", family="claude", klass="sonnet",
+        display_name="Claude Sonnet 4.7",
+        context_window=1_000_000, max_output_tokens=64_000,
+        relative_cost=1.0, default_channel="claude_max",
+    ),
     ModelSpec(
         id="claude-sonnet-4-6", family="claude", klass="sonnet",
         display_name="Claude Sonnet 4.6",

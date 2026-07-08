@@ -37,8 +37,21 @@ from ..events import Event, EventBus, EventType
 
 log = logging.getLogger(__name__)
 
-# Locate the bridge directory: try importlib first (pip install), then relative path (dev)
-def _find_bridge_dir() -> Path:
+# Bridge source files that ship as package-data (pyproject: package-data
+# "bridge" = ["*.ts", "package.json", "bun.lock"]). These are copied into the
+# runtime dir; their hashes form the version stamp.
+_BRIDGE_SOURCE_GLOBS = ("*.ts", "package.json", "bun.lock")
+# Marker files under node_modules/@anthropic-ai/claude-agent-sdk that mean the
+# dependency install succeeded (SDK 0.2.119+ ships sdk.mjs, older cli.js).
+_SDK_MARKER_RELS = (
+    Path("@anthropic-ai") / "claude-agent-sdk" / "cli.js",
+    Path("@anthropic-ai") / "claude-agent-sdk" / "sdk.mjs",
+)
+
+
+def _packaged_bridge_dir() -> Path:
+    """Directory holding the packaged bridge sources: the importable ``bridge``
+    package (pip install) or the repo-checkout ``bridge/`` (dev)."""
     try:
         import bridge as _bridge_pkg
         return Path(_bridge_pkg.__file__).resolve().parent
@@ -46,7 +59,112 @@ def _find_bridge_dir() -> Path:
         pass
     return Path(__file__).resolve().parent.parent.parent / "bridge"
 
-_BRIDGE_DIR = _find_bridge_dir()
+
+def _runtime_bridge_home() -> Path:
+    """Writable per-user runtime dir the bridge is copied to and run from."""
+    return Path.home() / ".atn" / "bridge"
+
+
+def _source_stamp(src_dir: Path) -> str:
+    """Content marker over the packaged bridge sources — hash of each source
+    file's (name, sha256). Changing any *.ts / package.json / bun.lock changes
+    the stamp, which triggers a re-copy + re-install into the runtime dir."""
+    import hashlib
+    h = hashlib.sha256()
+    files: list[Path] = []
+    for pat in _BRIDGE_SOURCE_GLOBS:
+        files.extend(sorted(src_dir.glob(pat)))
+    for f in sorted(set(files), key=lambda p: p.name):
+        try:
+            h.update(f.name.encode())
+            h.update(hashlib.sha256(f.read_bytes()).digest())
+        except OSError:
+            continue
+    return h.hexdigest()
+
+
+def _node_modules_ready(bridge_dir: Path) -> bool:
+    """True if the SDK dependency install is present under ``bridge_dir``."""
+    nm = bridge_dir / "node_modules"
+    return any((nm / rel).exists() for rel in _SDK_MARKER_RELS)
+
+
+def _dir_is_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".atn_write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def resolve_bridge_dir() -> Path:
+    """Resolve the directory the bridge process should run from.
+
+    Dev fast-path: if the packaged sources sit next to an already-installed,
+    writable ``node_modules`` (a repo checkout that ran ``bun install`` in
+    place), use that directory directly — no copy.
+
+    Otherwise the runtime dir is ``~/.atn/bridge``: on first use, or when the
+    packaged source stamp differs from the staged copy, the sources are copied
+    there (the caller then installs deps there). site-packages is often
+    read-only, so we never install into the packaged dir.
+    """
+    src = _packaged_bridge_dir()
+    # Dev fast-path: node_modules already present next to the sources AND the
+    # dir is writable (a real checkout, not read-only site-packages).
+    if _node_modules_ready(src) and _dir_is_writable(src):
+        return src
+    return _runtime_bridge_home()
+
+
+def stage_bridge_sources() -> tuple[Path, bool]:
+    """Ensure the runtime bridge dir holds the current packaged sources.
+
+    Returns ``(bridge_dir, needs_install)``. When the resolved dir is the dev
+    checkout, this is a no-op (``needs_install`` reflects whether node_modules
+    is present). When it is ``~/.atn/bridge``, sources are (re-)copied whenever
+    the stamp differs, and ``needs_install`` is True if deps are missing OR the
+    sources were just refreshed.
+    """
+    import shutil
+    src = _packaged_bridge_dir()
+    bridge_dir = resolve_bridge_dir()
+
+    if bridge_dir == src:
+        # Dev fast-path — use in place.
+        return bridge_dir, not _node_modules_ready(bridge_dir)
+
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    stamp_file = bridge_dir / ".source_stamp"
+    want = _source_stamp(src)
+    have = ""
+    try:
+        have = stamp_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        have = ""
+
+    refreshed = False
+    if want != have:
+        for pat in _BRIDGE_SOURCE_GLOBS:
+            for f in src.glob(pat):
+                try:
+                    shutil.copy2(f, bridge_dir / f.name)
+                except OSError as exc:
+                    log.warning("Failed to copy bridge source %s: %s", f.name, exc)
+        try:
+            stamp_file.write_text(want, encoding="utf-8")
+        except OSError:
+            pass
+        refreshed = True
+
+    needs_install = refreshed or not _node_modules_ready(bridge_dir)
+    return bridge_dir, needs_install
+
+
+_BRIDGE_DIR = resolve_bridge_dir()
 _BRIDGE_SCRIPT = _BRIDGE_DIR / "claude-bridge.ts"
 
 
@@ -1399,18 +1517,31 @@ class BridgeProvider(Provider):
         if self._process and self._process.returncode is None:
             return
 
+        # If pointed at the default runtime script but the sources haven't been
+        # staged yet (provider constructed before configure_provider ran the
+        # install), stage them now so the script/node_modules checks below are
+        # against the real runtime dir. A custom bridge_script is left as-is.
+        if self._bridge_script == _BRIDGE_SCRIPT and not self._bridge_script.exists():
+            try:
+                staged_dir, _ = stage_bridge_sources()
+                self._bridge_script = staged_dir / "claude-bridge.ts"
+            except Exception as exc:  # noqa: BLE001 — staging is best-effort here
+                log.warning("Bridge source staging failed: %s", exc)
+
         if not self._bridge_script.exists():
             raise ProviderError(
-                f"Bridge script not found: {self._bridge_script}",
+                f"Bridge script not found: {self._bridge_script}. "
+                "The Claude Max bridge sources failed to stage — reconnect the "
+                "Claude Max provider to reinstall.",
                 provider="claude_max",
             )
 
-        # Check that node_modules exist
-        node_modules = self._bridge_script.parent / "node_modules"
-        if not node_modules.exists():
+        # Check that node_modules exist (SDK marker under the bridge dir).
+        if not _node_modules_ready(self._bridge_script.parent):
             raise ProviderError(
-                f"Bridge dependencies not installed. "
-                f"Run: cd {self._bridge_script.parent} && bun install  (or npm install)",
+                f"Claude Max bridge dependencies not installed in "
+                f"{self._bridge_script.parent}. Reconnect the Claude Max "
+                "provider to install them (needs bun or npm).",
                 provider="claude_max",
             )
 
