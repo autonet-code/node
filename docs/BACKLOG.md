@@ -89,18 +89,16 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
    atn_web commits remain local-only.
 6. CLAUDE.md is gitignored — machine-onboarding contract doesn't
    travel with clones. Commit / genericize / keep local?
-7. ~~Charter-anchor governor handoff~~ — DONE 2026-07-08 (genesis):
-   CharterAnchor redeployed with governor = jurisdiction timelock;
-   charter v1 anchoring rides the pending genesis proposal (executes
-   ~2026-08-12 given the 35-day voting period).
+7. ~~Charter-anchor governor handoff~~ — DONE 2026-07-08 (genesis v2):
+   CharterAnchor governor = jurisdiction timelock; charter v1 ANCHORED
+   on-chain via executed DAO proposal.
 8. Admin agent: merged but placeholder budget (100k tokens/day) —
    tune + enable; it starts spending on a 30m schedule once live.
 9. Microsoft Store: pay $19, fill the two msix identity placeholders;
    create WINGET_GH_TOKEN; first winget submission via wingetcreate
    new. (RELEASING.md in atn_web has the checklist.)
-10. ~~ReputationMirror activation~~ — proposal SUBMITTED + VOTED
-    2026-07-08 (bundled with charter v1 anchor); executes ~2026-08-12
-    (35-day voting period, see governance-timing follow-up).
+10. ~~ReputationMirror activation~~ — DONE 2026-07-08 (genesis v2):
+    setMinter(mirror) EXECUTED via DAO proposal; mirror can mint.
 
 **RATIFIED, NOT BUILT:**
 - ~~ATN = money, reputation = voice~~ — BUILT + DEPLOYED 2026-07-08
@@ -143,10 +141,13 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   (~35 days — timestamp clock, units mismatch). Make votingDelay/
   votingPeriod/timelock minDelay env-configurable in
   deploy-autonet-jurisdiction.js and use short values on shadownet.
-  Consequence today: the genesis proposal (mirror minter grant +
-  charter v1 anchor) was submitted+voted 2026-07-08 but executes
-  ~2026-08-12. Until then: mirror can't mint RepToken, charter anchor
-  is empty (drift detection idle). Everything else is live.
+  RESOLVED same evening: durations made env-configurable (seconds,
+  no hidden x60), jurisdiction REDEPLOYED with 0/120s/0 (genesis v2,
+  all addresses rotated - registry.json is truth), and the genesis
+  proposal (mirror minter grant + charter v1 anchor) went
+  propose->vote->queue->execute LIVE in ~3 minutes. Mirror IS a
+  RepToken minter; charter v1 IS anchored. Etherlink log-range cap
+  requires PROPOSAL_ID/FROM_BLOCK on the proposal scripts.
 - **Owner binding is UNWIRED in the live path (2026-07-08):** the daemon
   registers agents via plain `registerAgent` (ownerless, `agentOwner=0x0`);
   `registerAgentBound`/`rotateOwner` exist only in the contract + tests +
