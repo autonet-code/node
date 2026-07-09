@@ -235,9 +235,12 @@ def test_agent_reads_anchor_and_submits_authoritative_mint(chain):
     agent_ids = list(agent_addrs)
 
     result, epoch_id, resolver = _build_close_and_anchor(chain, agent_ids)
+    # Rebuild the blob exactly as the anchorer does (v4.1: agent_rep is
+    # encoded into the blob alongside agent_mint) so the CID matches.
     expected_blob_mint = decode_agent_mint_blob(resolver.get(
         result["authoritative_payload"]["agent_mint"]
-        and cid_for_blob(encode_agent_mint_blob(result["agent_mint"]))
+        and cid_for_blob(encode_agent_mint_blob(
+            result["agent_mint"], agent_rep=result.get("agent_rep")))
     ))
 
     # Pick the first agent that actually has mint; submit for it.

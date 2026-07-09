@@ -1,0 +1,14 @@
+{
+  "scenario": "niche_discovery_v4_1",
+  "params": {
+    "delta": 0.7
+  },
+  "verdict": {
+    "niche_rating": -0.268,
+    "niche_surfaces_alone": true,
+    "niche_rank_score_alone": 0.5906,
+    "niche_pos_in_crowd": 9,
+    "buried_in_crowd": true,
+    "PROPERTY_HOLDS": true
+  }
+}

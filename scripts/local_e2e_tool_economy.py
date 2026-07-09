@@ -771,10 +771,10 @@ async def amain() -> int:
             reg_events.append(e)
         use_events = [_remap(e) for e in captured_events
                       if e.get("kind") == "tool_used" and not e.get("vet")]
-        # Vets ride their own wire identities — one keypair per vetter,
-        # modeling validators on distinct daemons (the greenlight counts
-        # distinct FLEETS; co-hosted vets vs the registration key are
-        # excluded outright).
+        # Vets (v4.1: inspection reviews) ride their own wire identities —
+        # one keypair per inspector, modeling validators on distinct
+        # daemons. Inspections mint nothing; they only drift position (and
+        # co-hosted vets vs the registration key are still excluded).
         vet_events = [_remap(e) for e in captured_events
                       if e.get("kind") == "tool_used" and e.get("vet")]
 
@@ -833,23 +833,28 @@ async def amain() -> int:
         assert entry["author"] == author_addr, (entry["author"], author_addr)
         assert entry["attesters"] == 1, entry           # caller-1 only
         assert entry["mint"] > 0
-        # Vetting pipeline: greenlit by the two distinct-fleet vets in
-        # THIS close, validators frozen, royalty window open — a slice
-        # of the author's mint lands on the validators (the stake).
-        assert entry["greenlit"] is True, entry
-        assert entry["validators"] == 2, entry
+        # v4.1 (ratified 2026-07-09): the vet GATE is REMOVED — the tool
+        # mints from first attested use with NO greenlight requirement,
+        # and the AUTHOR KEEPS 100% (no validator royalty split). The vet
+        # events in this run survive only as inspection reviews (they'd
+        # drift position if they carried axes); they mint nothing. So the
+        # validators must receive NOTHING from this close.
         vetter_addrs = [rt_a.get_agent(v).identity.address
                         for v in ("vetter-1", "vetter-2")]
         vet_mints = [float(close_result["agent_mint"].get(
             Web3.to_checksum_address(a), 0)
             or close_result["agent_mint"].get(a, 0)) for a in vetter_addrs]
-        assert all(m > 0 for m in vet_mints), (
-            "validator royalty missing", close_result["agent_mint"])
+        assert all(m == 0 for m in vet_mints), (
+            "validators must not earn royalty under v4.1 (gate removed)",
+            close_result["agent_mint"])
         author_agent_mint_raw = float(close_result["agent_mint"].get(author_addr, 0))
         assert author_agent_mint_raw > 0
+        # Author keeps the full tool mint (no royalty carved out).
+        assert abs(author_agent_mint_raw - author_mint_raw) < 1e-6, (
+            author_agent_mint_raw, author_mint_raw)
         s5.note("tool_mint_author", entry["author"][:12] + "…")
         s5.note("attesters", entry["attesters"])
-        s5.note("greenlit", entry["greenlit"])
+        s5.note("vet_gate", "removed (v4.1); author keeps 100%")
         s5.note("validator_royalty", [round(m, 8) for m in vet_mints])
         s5.note("tool_mint_raw", round(author_mint_raw, 8))
         s5.note("agent_mint_raw", round(author_agent_mint_raw, 8))

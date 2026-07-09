@@ -256,6 +256,8 @@ def read_voice_state(
         return {
             "owner_map": {},
             "voice_weights": {},
+            "rep_shares": {},
+            "rep_supply": 0,
             "supply": 0,
             "snapshot_block": None,
             "emission_pool": BASE_EMISSION_PER_EPOCH,
@@ -327,13 +329,21 @@ def read_voice_state(
             house_rep[agent] = house_rep.get(agent, 0) + rep
 
     voice_weights: Dict[str, float] = {}
+    # v4.1 gradient trust: the RAW rep share (no epsilon floor). The close
+    # needs this un-floored share for drift weight and the rep/ATN mint
+    # split; voice_weights keeps the epsilon floor for mint bootstrap.
+    rep_shares: Dict[str, float] = {}
     for house in sorted(house_rep.keys()):
         share = (house_rep[house] / supply) if supply > 0 else 0.0
         voice_weights[house] = round(epsilon + share, 9)
+        rep_shares[house] = round(share, 9)
 
     return {
         "owner_map": owner_map,
         "voice_weights": voice_weights,
+        # v4.1: raw rep share per household (un-floored) + supply alias.
+        "rep_shares": rep_shares,
+        "rep_supply": int(supply),
         # Reputation supply — the voice-weight denominator (not ATN).
         "supply": int(supply),
         "snapshot_block": block,

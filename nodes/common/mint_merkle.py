@@ -2,28 +2,49 @@
 
 Counterpart of ``Substrate.recordTrainingForEpoch``'s proof check:
 mint amounts stop being self-reported — the anchor commits a root over
-(agent address, scaled amount) leaves, and each agent proves its own
-leaf when claiming.
+(agent address, scaled ATN amount, scaled reputation amount) leaves,
+and each agent proves its own leaf when claiming.
+
+v4.1 "gradient trust": the leaf commits BOTH ledgers. ``amount`` is the
+ATN (money) mint; ``repAmount`` is the reputation (soulbound voice)
+mint, computed by the close as only the portion attributable to
+reputation-holding callers. Committing repAmount into the leaf is what
+makes it federation-ratified — a claimant cannot self-report a higher
+repAmount (e.g. repAmount == amount) to bootstrap voice from zero-rep
+usage; a lied-about repAmount is an unprovable leaf.
 
 Encoding (must match the contract byte-for-byte):
 
-  leaf  = keccak256(bytes.concat(keccak256(abi.encode(address, uint256))))
-          (double-hashed, OpenZeppelin convention, so a 64-byte leaf
-          preimage can never be confused with an interior node)
+  leaf  = keccak256(bytes.concat(keccak256(
+              abi.encode(address, uint256 amount, uint256 repAmount))))
+          (double-hashed, OpenZeppelin convention, so a leaf preimage
+          can never be confused with an interior node)
   node  = keccak256(sorted_pair(a, b))   — ascending byte order, so
           proofs carry no left/right index bits
   odd levels promote the unpaired node unchanged
   single-leaf tree: root == leaf, proof == []
 
 Scaling: the same ``int(raw_float * mint_scale)`` truncation the
-agent-side submitter applies (authoritative_submitter, default 1e6).
-Both sides MUST route through ``scale_mint`` here — a one-ulp float
+agent-side submitter applies (authoritative_submitter, default 1e6),
+applied identically to both the ATN and the reputation floats. Both
+sides MUST route through ``scale_mint`` here — a one-ulp float
 disagreement means an unprovable leaf.
+
+Reputation map (``agent_rep``): OPTIONAL everywhere, keyword-only.
+``None`` means lockstep — repAmount == amount for every leaf, which
+reproduces the pre-v4.1 behavior exactly (rep and ATN mint at the same
+value). When provided, a missing key means zero reputation for that
+agent. The close guarantees rep <= mint per agent; the shared
+truncation preserves the inequality on the scaled integers, so the
+contract's ``repAmount <= amount`` require always passes for honest
+leaves.
 
 Only keys that parse as 0x addresses enter the tree: the contract can
 only verify msg.sender, and non-address agent ids could never claim
-on-chain anyway. Zero shares are excluded (the contract treats zero
-as a no-op without a proof).
+on-chain anyway. Zero ATN shares are excluded (the contract treats zero
+as a no-op without a proof); zero REPUTATION with positive ATN is a
+legitimate leaf (the v4.1 case where all of an author's usage came from
+zero-reputation callers).
 """
 
 from __future__ import annotations
@@ -49,27 +70,42 @@ def scale_mint(raw: float, mint_scale: int = DEFAULT_MINT_SCALE) -> int:
 def mint_leaves(
     agent_mint: Dict[str, float],
     mint_scale: int = DEFAULT_MINT_SCALE,
-) -> List[Tuple[str, int]]:
-    """Address-keyed, nonzero, deterministically-ordered leaf entries.
+    *,
+    agent_rep: Optional[Dict[str, float]] = None,
+) -> List[Tuple[str, int, int]]:
+    """Address-keyed, nonzero-ATN, deterministically-ordered leaf entries.
 
-    Returns [(checksum_address, scaled_amount)] sorted by lowercase
-    address. Non-address keys (test agents, pubkey-hex authors) are
-    skipped — they have no on-chain claim path.
+    Returns [(checksum_address, scaled_amount, scaled_rep)] sorted by
+    lowercase address. Non-address keys (test agents, pubkey-hex authors)
+    are skipped — they have no on-chain claim path.
+
+    ``agent_rep`` is the decoupled reputation map (v4.1). ``None`` =
+    lockstep: scaled_rep == scaled_amount for every leaf. When provided,
+    a missing key yields scaled_rep == 0 (positive ATN with zero voice
+    is legitimate).
     """
-    entries: List[Tuple[str, int]] = []
+    entries: List[Tuple[str, int, int]] = []
     for key, raw in agent_mint.items():
         if not is_address(str(key)):
             continue
         scaled = scale_mint(float(raw), mint_scale)
         if scaled <= 0:
             continue
-        entries.append((to_checksum_address(str(key)), scaled))
+        if agent_rep is None:
+            scaled_rep = scaled                      # lockstep
+        else:
+            scaled_rep = scale_mint(
+                float(agent_rep.get(key, 0.0)), mint_scale)
+            if scaled_rep < 0:
+                scaled_rep = 0
+        entries.append((to_checksum_address(str(key)), scaled, scaled_rep))
     entries.sort(key=lambda e: e[0].lower())
     return entries
 
 
-def _leaf_hash(address: str, amount: int) -> bytes:
-    return keccak(keccak(abi_encode(["address", "uint256"], [address, amount])))
+def _leaf_hash(address: str, amount: int, rep_amount: int) -> bytes:
+    return keccak(keccak(abi_encode(
+        ["address", "uint256", "uint256"], [address, amount, rep_amount])))
 
 
 def _hash_pair(a: bytes, b: bytes) -> bytes:
@@ -93,14 +129,17 @@ def _build_levels(leaf_hashes: List[bytes]) -> List[List[bytes]]:
 def mint_merkle_root(
     agent_mint: Dict[str, float],
     mint_scale: int = DEFAULT_MINT_SCALE,
+    *,
+    agent_rep: Optional[Dict[str, float]] = None,
 ) -> bytes:
-    """Root over the mint map. EMPTY_ROOT (32 zero bytes) when no
-    claimable entries exist — the contract rejects claims against it.
+    """Root over the mint (+ decoupled reputation) map. EMPTY_ROOT
+    (32 zero bytes) when no claimable entries exist — the contract
+    rejects claims against it.
     """
-    entries = mint_leaves(agent_mint, mint_scale)
+    entries = mint_leaves(agent_mint, mint_scale, agent_rep=agent_rep)
     if not entries:
         return EMPTY_ROOT
-    levels = _build_levels([_leaf_hash(a, m) for a, m in entries])
+    levels = _build_levels([_leaf_hash(a, m, r) for a, m, r in entries])
     return levels[-1][0]
 
 
@@ -108,20 +147,23 @@ def mint_merkle_proof(
     agent_mint: Dict[str, float],
     address: str,
     mint_scale: int = DEFAULT_MINT_SCALE,
+    *,
+    agent_rep: Optional[Dict[str, float]] = None,
 ) -> Optional[List[bytes]]:
     """Proof for one agent's leaf, or None when the agent has no
-    claimable share. A single-leaf tree yields an empty proof.
+    claimable ATN share. A single-leaf tree yields an empty proof.
+    Must be built with the SAME ``agent_rep`` the root was built with.
     """
-    entries = mint_leaves(agent_mint, mint_scale)
+    entries = mint_leaves(agent_mint, mint_scale, agent_rep=agent_rep)
     target = None
-    for i, (addr, _amt) in enumerate(entries):
+    for i, (addr, _amt, _rep) in enumerate(entries):
         if addr.lower() == str(address).lower():
             target = i
             break
     if target is None:
         return None
 
-    levels = _build_levels([_leaf_hash(a, m) for a, m in entries])
+    levels = _build_levels([_leaf_hash(a, m, r) for a, m, r in entries])
     proof: List[bytes] = []
     idx = target
     for level in levels[:-1]:
@@ -138,10 +180,15 @@ def verify_mint_proof(
     address: str,
     amount: int,
     proof: List[bytes],
+    *,
+    rep_amount: Optional[int] = None,
 ) -> bool:
     """Python mirror of the contract's check, for tests and pre-flight
-    validation before spending gas."""
-    computed = _leaf_hash(to_checksum_address(address), amount)
+    validation before spending gas. ``rep_amount=None`` = lockstep
+    (rep_amount == amount), matching the default leaf construction."""
+    if rep_amount is None:
+        rep_amount = amount
+    computed = _leaf_hash(to_checksum_address(address), amount, rep_amount)
     for p in proof:
         computed = _hash_pair(computed, p)
     return computed == root

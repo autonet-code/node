@@ -1,0 +1,198 @@
+{
+  "scenario": "consensus_capture_v4_1",
+  "params": {
+    "epochs": 120,
+    "delta": 0.7,
+    "target_moves": [
+      0.2,
+      0.5,
+      0.8
+    ],
+    "tool_mass_levels": [
+      3.0,
+      10.0,
+      30.0
+    ]
+  },
+  "reversal_records": [
+    {
+      "epoch": 0,
+      "rating": 0.0,
+      "capturer_cred": 1.0
+    },
+    {
+      "epoch": 5,
+      "rating": -0.314631845,
+      "capturer_cred": 1.0
+    },
+    {
+      "epoch": 10,
+      "rating": -0.437089262,
+      "capturer_cred": 1.0
+    },
+    {
+      "epoch": 15,
+      "rating": -0.504786252,
+      "capturer_cred": 1.0
+    },
+    {
+      "epoch": 20,
+      "rating": -0.548749738,
+      "capturer_cred": 1.0
+    },
+    {
+      "epoch": 25,
+      "rating": -0.580084945,
+      "capturer_cred": 1.0
+    },
+    {
+      "epoch": 30,
+      "rating": -0.251054379,
+      "capturer_cred": 0.9278800083650417
+    },
+    {
+      "epoch": 35,
+      "rating": -0.202874135,
+      "capturer_cred": 0.6789691404415713
+    },
+    {
+      "epoch": 40,
+      "rating": -0.163167147,
+      "capturer_cred": 0.4155667824178579
+    },
+    {
+      "epoch": 45,
+      "rating": -0.129699674,
+      "capturer_cred": 0.21798588469283936
+    },
+    {
+      "epoch": 50,
+      "rating": -0.100981892,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 55,
+      "rating": -0.0759778,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 60,
+      "rating": -0.053942089,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 65,
+      "rating": -0.034323246,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 70,
+      "rating": -0.016703353,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 75,
+      "rating": -0.000759217,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 80,
+      "rating": 0.013763525,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 85,
+      "rating": 0.027068158,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 90,
+      "rating": 0.039319357,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 95,
+      "rating": 0.05065213,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 100,
+      "rating": 0.061178351,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 105,
+      "rating": 0.070991623,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 110,
+      "rating": 0.080170945,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 115,
+      "rating": 0.088783517,
+      "capturer_cred": 0.1
+    },
+    {
+      "epoch": 119,
+      "rating": 0.095304489,
+      "capturer_cred": 0.1
+    }
+  ],
+  "verdict": {
+    "capture_cost_curve": [
+      {
+        "tool_review_mass": 3.0,
+        "target_score_move": 0.2,
+        "attacker_rep_share_needed": 0.8579
+      },
+      {
+        "tool_review_mass": 3.0,
+        "target_score_move": 0.5,
+        "attacker_rep_share_needed": 0.9542
+      },
+      {
+        "tool_review_mass": 3.0,
+        "target_score_move": 0.8,
+        "attacker_rep_share_needed": 0.9681
+      },
+      {
+        "tool_review_mass": 10.0,
+        "target_score_move": 0.2,
+        "attacker_rep_share_needed": 0.9108
+      },
+      {
+        "tool_review_mass": 10.0,
+        "target_score_move": 0.5,
+        "attacker_rep_share_needed": 0.9542
+      },
+      {
+        "tool_review_mass": 10.0,
+        "target_score_move": 0.8,
+        "attacker_rep_share_needed": 0.9681
+      },
+      {
+        "tool_review_mass": 30.0,
+        "target_score_move": 0.2,
+        "attacker_rep_share_needed": 0.9108
+      },
+      {
+        "tool_review_mass": 30.0,
+        "target_score_move": 0.5,
+        "attacker_rep_share_needed": 0.9542
+      },
+      {
+        "tool_review_mass": 30.0,
+        "target_score_move": 0.8,
+        "attacker_rep_share_needed": 0.9681
+      }
+    ],
+    "cost_scales_with_mass": true,
+    "reversal_recovered": true,
+    "reversal_final_rating": 0.095304489,
+    "capturers_docked_to_floor": true,
+    "recovery_epoch": 76
+  }
+}

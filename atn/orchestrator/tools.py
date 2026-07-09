@@ -616,24 +616,39 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="vet_tool",
         description=(
-            "Vet a published candidate tool (validator role — separately "
+            "Inspect an unreviewed published tool to price its risk before "
+            "you or your owner trust it (validator role — separately "
             "granted). Call with only a digest to INSPECT: you receive the "
             "manifest and the pinned source code to read. Then call again "
             "with verdict 'pass' (code adheres to the manifest and contains "
-            "no malice) or 'fail', plus a report stating what you checked. "
-            "Greenlight takes vets from multiple distinct fleets; you earn a "
-            "royalty share of the tool's mint for the first epochs after "
-            "greenlight — and that royalty is your stake: if the tool is "
-            "later proven exploitative, your remaining royalty is forfeit "
-            "and your future vets carry less weight. You cannot vet your "
-            "own tools."
+            "no malice) or 'fail', a report stating what you checked, and "
+            "optional per-charter-axis 'axes' scores (-1..+1) for what you "
+            "read. Your inspection is a review with no usage receipt: it "
+            "moves the tool's PUBLIC rating and charter position — weighted "
+            "by YOUR reputation and credibility, so a zero-reputation "
+            "inspector moves nothing. There is no royalty, no earnings, no "
+            "greenlight quorum, and no gate: inspection does not unlock the "
+            "tool or pay you — it is how the network prices an unreviewed "
+            "tool so agents can decide whether to use it. You cannot vet "
+            "your own tools."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "digest": {"type": "string", "description": "Manifest digest (64-hex) — local or network-published."},
-                "verdict": {"type": "string", "enum": ["pass", "fail"], "description": "Omit to inspect; set to record your vet."},
+                "verdict": {"type": "string", "enum": ["pass", "fail"], "description": "Omit to inspect; set to record your inspection review."},
                 "report": {"type": "string", "description": "Required with a verdict: what you checked, what you found."},
+                "axes": {
+                    "type": "object",
+                    "description": (
+                        "Optional per-charter-axis scores from reading the code, "
+                        "-1..+1. Keys: life_precious, self_preservation, "
+                        "promotion_of_intelligence, evolution, correctness, "
+                        "simplicity. Only include axes you can judge from the "
+                        "source; these move the tool's public position/rating."
+                    ),
+                    "additionalProperties": {"type": "number"},
+                },
             },
             "required": ["digest"],
         },
@@ -750,13 +765,19 @@ _TOOLS: list[ToolDefinition] = [
         name="probe_tools",
         description=(
             "Search the network tool library semantically before building "
-            "something yourself or asking for a grant. Returns published "
-            "tools ranked by relevance to your problem, lifted by their "
-            "review ratings (per-charter-axis scores from agents that "
-            "actually used them). Each match carries digest, name, "
-            "description, author, rating and the 6-axis charter position. "
-            "Use the digest with adopt_tool (if granted) or ask your owner "
-            "to grant/adopt it."
+            "something yourself or asking for a grant. Search is UNFILTERED: "
+            "a niche tool surfaces on topic match regardless of its score, "
+            "and good ratings only lift it higher — so read the trust "
+            "picture on each match to price risk yourself. Each match "
+            "carries digest, name, description, author, 'rating' and the "
+            "6-axis charter position ('axes'), plus 'review_mass' (how much "
+            "earned reputation is behind the score) and 'inspections' (how "
+            "many agents read the code). Read it like this: high 'rating' "
+            "with high 'review_mass' = trusted by earned voice, safe to use; "
+            "'review_mass' near zero = nobody has reviewed it yet, inspect "
+            "it (vet_tool) or verify before trusting; a bad (negative) "
+            "rating = avoid or verify. Use the digest with adopt_tool (if "
+            "granted) or ask your owner to grant/adopt it."
         ),
         input_schema={
             "type": "object",
@@ -2201,11 +2222,15 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
 
 
 async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Validator rail (docs/tool_substrate.md — Vetting section).
+    """Inspection-review rail (v4.1 gradient trust — memory
+    tool-economy-v4-gradient-trust).
 
     Inspect (no verdict) → manifest + pinned code; attest (verdict +
-    report) → local vet row + consensus tool_used event with vet=True.
-    The caller is derived, never accepted as input.
+    report + optional per-axis scores) → local inspection row +
+    consensus tool_used event with vet=True. The inspection moves the
+    tool's public position/rating (weighted by the caller's reputation
+    × credibility) and mints NOTHING. The caller is derived, never
+    accepted as input.
     """
     from ..tool_store import OWNER_AUTHOR
     from . import is_owner_caller
@@ -2216,11 +2241,14 @@ async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     caller_id = input.get("_caller_id")
     caller = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
     verdict = input.get("verdict")
+    raw_axes = input.get("axes")
+    axes = raw_axes if isinstance(raw_axes, dict) else None
     try:
         return await runtime.tool_store.vet_tool(
             caller, digest,
             verdict=str(verdict) if verdict is not None else None,
             report=str(input.get("report") or ""),
+            axes=axes,
         )
     except Exception as exc:
         return {"error": str(exc)}
@@ -2326,21 +2354,27 @@ async def _probe_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
             from nodes.common.world_model_substrate.tool_manifest import (
                 is_tool_manifest,
             )
+            # v4.1 trust picture: join review mass + inspection count from
+            # the economy graph so each match carries how much earned voice
+            # is behind its score (same close state the tool_reviews /
+            # economy_graph surfaces read — no new close read invented).
+            eg = _economy_graph_snapshot(world_service)
+            positions = eg.get("positions", {})
+            vetting = eg.get("vetting", {})
             result = world_service.infer_artifacts(query, k=max(k * 3, 12))
             for art in result.get("artifacts", []):
                 payload = art.get("payload")
                 if not is_tool_manifest(payload):
                     continue
-                matches.append({
-                    "digest": art.get("digest", ""),
-                    "name": payload.get("name", ""),
-                    "description": payload.get("description", ""),
-                    "author": payload.get("author", ""),
-                    "trust_class": payload.get("trust_class", ""),
-                    "score": art.get("final", 0.0),
-                    "rating": art.get("rating", 0.0),
-                    "axes": art.get("axes", []),
-                })
+                digest = art.get("digest", "")
+                matches.append(_trust_row(
+                    digest, payload,
+                    score=art.get("final", 0.0),
+                    rating=art.get("rating", 0.0),
+                    axes=art.get("axes", []),
+                    positions=positions, vetting=vetting,
+                    tool_store=runtime.tool_store,
+                ))
                 if len(matches) >= k:
                     break
             source = "substrate"
@@ -2360,11 +2394,72 @@ async def _probe_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
                     "score": 0.0,
                     "rating": 0.0,
                     "axes": [],
+                    "mass": [],
+                    "review_mass": 0.0,
+                    "inspections": 0,
                 })
                 if len(matches) >= k:
                     break
         source = "local"
     return {"matches": matches, "source": source}
+
+
+def _economy_graph_snapshot(world_service: Any) -> dict[str, Any]:
+    """Best-effort economy-graph read for the probe trust picture; an
+    empty dict on any failure keeps probe_tools working without it."""
+    try:
+        return world_service.read_economy_graph(last_n_epochs=10) or {}
+    except Exception as exc:  # noqa: BLE001 — trust picture is additive
+        log.debug("probe_tools economy graph read failed: %s", exc)
+        return {}
+
+
+def _trust_row(
+    digest: str,
+    payload: dict[str, Any],
+    *,
+    score: Any,
+    rating: Any,
+    axes: Any,
+    positions: dict[str, Any],
+    vetting: dict[str, Any],
+    tool_store: Any,
+) -> dict[str, Any]:
+    """One probe_tools match enriched with the v4.1 trust picture:
+    review mass (how much earned voice is behind the score), inspection
+    count, and author household when resolvable locally."""
+    pos = positions.get(digest) or {}
+    mass = [float(x) for x in (pos.get("mass") or [])]
+    vet = vetting.get(digest) or {}
+    author = payload.get("author", "")
+    row: dict[str, Any] = {
+        "digest": digest,
+        "name": payload.get("name", ""),
+        "description": payload.get("description", ""),
+        "author": author,
+        "trust_class": payload.get("trust_class", ""),
+        "score": score,
+        "rating": rating,
+        "axes": axes,
+        # Trust picture (v4.1): mass = per-axis review weight behind the
+        # drifted score; review_mass = its peak (zero = nobody has
+        # reviewed — inspect before trusting); inspections = code reads.
+        "mass": mass,
+        "review_mass": max(mass) if mass else 0.0,
+        "inspections": int(vet.get("validators") or 0),
+    }
+    household = _resolve_household(tool_store, author)
+    if household:
+        row["author_household"] = household
+    return row
+
+
+def _resolve_household(tool_store: Any, author: str) -> str:
+    """Author household from local state when available; empty otherwise.
+    Households are close-side aggregation — locally we can only surface
+    the author's own address, so this stays best-effort and never fails
+    the probe."""
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -3032,11 +3127,11 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # whether an agent may publish its tools to the substrate is a
     # case-by-case grant — having toolsmith never implies it.
     "publishing": {"publish_tool"},
-    # Vetting is the validator role (spec: Vetting section) — its own
-    # case-by-case grant, same doctrine as publishing: reading foreign
-    # code and staking your future vet weight is not implied by
-    # authoring or publishing. It also carries the two evidence-grade
-    # validator flows: check_evidence (replay an evidence-CON and back it
+    # Vetting is the validator/inspection role (v4.1 gradient trust) —
+    # its own case-by-case grant, same doctrine as publishing: reading
+    # foreign code and moving a tool's public rating with your reputation
+    # is not implied by authoring or publishing. It also carries the two
+    # evidence-grade validator flows: check_evidence (replay an evidence-CON and back it
     # — Evidence section) and run_trial (probe a venture's service moat
     # against its prospectus battery — Verifier trials).
     "vetting": {"vet_tool", "check_evidence", "run_trial"},

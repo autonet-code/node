@@ -1,0 +1,506 @@
+{
+  "scenario": "spam_burial_v4",
+  "params": {
+    "epochs": 120,
+    "beta": 0.1,
+    "M_values": [
+      5,
+      20,
+      50
+    ],
+    "K_top": 5
+  },
+  "sweep": [
+    {
+      "M": 5,
+      "final_honest_rank_pos": 1,
+      "final_spam_in_topk": 4,
+      "final_honest_in_topk": true,
+      "records": [
+        {
+          "epoch": 0,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 5,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 10,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 15,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 20,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 25,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 30,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 35,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 40,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 45,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 50,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 55,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 60,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 65,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 70,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 75,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 80,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 85,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 90,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 95,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 100,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 105,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 110,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 115,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 119,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        }
+      ]
+    },
+    {
+      "M": 20,
+      "final_honest_rank_pos": 1,
+      "final_spam_in_topk": 4,
+      "final_honest_in_topk": true,
+      "records": [
+        {
+          "epoch": 0,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 5,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 10,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 15,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 20,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 25,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 30,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 35,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 40,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 45,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 50,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 55,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 60,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 65,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 70,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 75,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 80,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 85,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 90,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 95,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 100,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 105,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 110,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 115,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 119,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        }
+      ]
+    },
+    {
+      "M": 50,
+      "final_honest_rank_pos": 1,
+      "final_spam_in_topk": 4,
+      "final_honest_in_topk": true,
+      "records": [
+        {
+          "epoch": 0,
+          "honest_rank_pos": 41,
+          "spam_in_topk": 5,
+          "honest_in_topk": false
+        },
+        {
+          "epoch": 5,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 10,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 15,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 20,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 25,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 30,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 35,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 40,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 45,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 50,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 55,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 60,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 65,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 70,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 75,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 80,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 85,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 90,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 95,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 100,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 105,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 110,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 115,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        },
+        {
+          "epoch": 119,
+          "honest_rank_pos": 1,
+          "spam_in_topk": 4,
+          "honest_in_topk": true
+        }
+      ]
+    }
+  ],
+  "verdict": {
+    "honest_rank_pos_by_M": {
+      "5": 1,
+      "20": 1,
+      "50": 1
+    },
+    "spam_in_topk_by_M": {
+      "5": 4,
+      "20": 4,
+      "50": 4
+    },
+    "honest_in_topk_by_M": {
+      "5": true,
+      "20": true,
+      "50": true
+    }
+  }
+}

@@ -845,6 +845,36 @@ class TestVetting:
         assert res["digest"] not in store.attestation_summary()
 
     @pytest.mark.asyncio
+    async def test_vet_axes_ride_event_and_report(self, tmp_path):
+        """v4.1: an inspection carries optional per-charter-axis scores
+        that ride the vet event and land in the report blob, so the close
+        can drift the tool's position like a usage review. It still mints
+        nothing (no ``attested`` flag)."""
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)
+        store = rt.tool_store
+        sunk: list[dict] = []
+        store.event_sink = sunk.append
+
+        out = await execute_tool(
+            "vet_tool",
+            {"digest": res["digest"], "verdict": "pass",
+             "report": "read the code; echoes x cleanly",
+             "axes": {"correctness": 0.9, "simplicity": 0.5,
+                      "bogus_axis": "nope"}},
+            rt, caller_id="sibling",
+        )
+        assert out["verdict"] == "pass"
+        ev = sunk[0]
+        assert ev["vet"] is True
+        assert ev.get("attested") is None            # still not usage
+        # Garbage axis dropped; valid axes clamped-through and sorted.
+        assert ev["axes"] == {"correctness": 0.9, "simplicity": 0.5}
+        report = store._blob_store().get_json(ev["review_digest"])
+        assert report["axes"] == {"correctness": 0.9, "simplicity": 0.5}
+
+    @pytest.mark.asyncio
     async def test_self_vet_rejected(self, tmp_path):
         rt = _make_runtime(tmp_path)
         await _family(rt)
@@ -1265,3 +1295,41 @@ class TestIdempotencyAndPrune:
         count2 = len(rt.tool_store._records)
         assert d1 == d2
         assert count1 == count2                  # no growth across boots
+
+
+class TestProbeTrustPicture:
+    """v4.1 probe_tools trust picture: each match joins review mass +
+    inspection count from the economy graph so agents can price risk."""
+
+    def test_trust_row_joins_mass_and_inspections(self):
+        from atn.orchestrator.tools import _trust_row
+
+        digest = "ab" * 32
+        payload = {"name": "t", "description": "d", "author": "0xAuthor",
+                   "trust_class": "pinned"}
+        positions = {digest: {"mass": [0.0, 2.0, 5.0, 0.0, 3.0, 1.0]}}
+        vetting = {digest: {"validators": 4}}
+        row = _trust_row(
+            digest, payload, score=0.8, rating=0.6, axes=[0.1] * 6,
+            positions=positions, vetting=vetting, tool_store=None,
+        )
+        assert row["mass"] == [0.0, 2.0, 5.0, 0.0, 3.0, 1.0]
+        assert row["review_mass"] == 5.0        # peak per-axis mass
+        assert row["inspections"] == 4
+        assert row["rating"] == 0.6
+        assert "author_household" not in row    # empty → omitted
+
+    def test_trust_row_unreviewed_tool_reads_zero(self):
+        from atn.orchestrator.tools import _trust_row
+
+        digest = "cd" * 32
+        payload = {"name": "u", "description": "d", "author": "0xA",
+                   "trust_class": "pinned"}
+        row = _trust_row(
+            digest, payload, score=0.3, rating=0.0, axes=[],
+            positions={}, vetting={}, tool_store=None,
+        )
+        # No position, no inspections → the "nobody reviewed it" signal.
+        assert row["mass"] == []
+        assert row["review_mass"] == 0.0
+        assert row["inspections"] == 0

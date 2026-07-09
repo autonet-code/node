@@ -1124,13 +1124,26 @@ class WebSocketBridge:
                     from nodes.common.world_model_substrate.tool_manifest import (
                         is_tool_manifest,
                     )
+                    # v4.1 trust picture: join review mass + inspection
+                    # count from the economy graph (same close state the
+                    # tool_reviews / economy_graph surfaces read).
+                    try:
+                        eg = world_service.read_economy_graph(last_n_epochs=10) or {}
+                    except Exception:
+                        eg = {}
+                    positions = eg.get("positions", {})
+                    vetting = eg.get("vetting", {})
                     result = world_service.infer_artifacts(query, k=max(k * 3, 12))
                     for art in result.get("artifacts", []):
                         payload = art.get("payload")
                         if not is_tool_manifest(payload):
                             continue
+                        digest = art.get("digest", "")
+                        pos = positions.get(digest) or {}
+                        mass = [float(x) for x in (pos.get("mass") or [])]
+                        vet = vetting.get(digest) or {}
                         matches.append({
-                            "digest": art.get("digest", ""),
+                            "digest": digest,
                             "name": payload.get("name", ""),
                             "description": payload.get("description", ""),
                             "author": payload.get("author", ""),
@@ -1140,6 +1153,11 @@ class WebSocketBridge:
                             # replace debate standing.
                             "rating": art.get("rating", 0.0),
                             "axes": art.get("axes", []),
+                            # v4.1 trust picture (see probe_tools tool desc):
+                            # per-axis review mass, its peak, inspection count.
+                            "mass": mass,
+                            "review_mass": max(mass) if mass else 0.0,
+                            "inspections": int(vet.get("validators") or 0),
                         })
                         if len(matches) >= k:
                             break
@@ -1160,6 +1178,9 @@ class WebSocketBridge:
                             "score": 0.0,
                             "rating": 0.0,
                             "axes": [],
+                            "mass": [],
+                            "review_mass": 0.0,
+                            "inspections": 0,
                         })
                         if len(matches) >= k:
                             break

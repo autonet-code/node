@@ -10,8 +10,12 @@ graph standing. Equilibration continues to run only on the claim layer.
 Rationale: experiments showed the graph-as-retrieval-index loses to
 plain embedding retrieval (experiment_utility.py, May 2026) and the
 locate→render path returned labels, not payloads (phase6 artifact,
-May 2026). The substrate's differentiator is vetted-ness (debate-priced
-verdicts), not retrieval mechanics.
+May 2026). The substrate's differentiator is the trust picture it
+attaches to a tool, not retrieval mechanics. (This was written as
+"debate-priced verdicts"; the debate rail retired at v3 and the vetting
+gate at v4.1 — the live differentiator is now the rep-weighted review
+scores that drift a tool's position and rank discovery. See
+`docs/tool_substrate.md`, Decision 2026-07-09.)
 
 ## Components
 

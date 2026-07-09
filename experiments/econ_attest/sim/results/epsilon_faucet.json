@@ -1,0 +1,989 @@
+{
+  "scenario": "epsilon_faucet",
+  "params": {
+    "epochs": 120,
+    "seed": 3,
+    "K_values": [
+      0,
+      5,
+      20,
+      50,
+      100,
+      200
+    ]
+  },
+  "sweep": [
+    {
+      "K": 0,
+      "final_pool_share": 0.0,
+      "first_pool_share": 0.0,
+      "share_growth": 0.0,
+      "final_voice_sum": 0,
+      "records": [
+        {
+          "epoch": 0,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 5,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 10,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 15,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 20,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 25,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 30,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 35,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 40,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 45,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 50,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 55,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 60,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 65,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 70,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 75,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 80,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 85,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 90,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 95,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 100,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 105,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 110,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 115,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        },
+        {
+          "epoch": 119,
+          "sybil_mint": 0,
+          "sybil_pool_share": 0.0,
+          "sybil_voice_sum": 0
+        }
+      ]
+    },
+    {
+      "K": 5,
+      "final_pool_share": 0.04782174524028693,
+      "first_pool_share": 0.040756539180163025,
+      "share_growth": 0.007065206060123903,
+      "final_voice_sum": 0.30258127,
+      "records": [
+        {
+          "epoch": 0,
+          "sybil_mint": 4.075653918,
+          "sybil_pool_share": 0.040756539180163025,
+          "sybil_voice_sum": 0.286680885
+        },
+        {
+          "epoch": 5,
+          "sybil_mint": 5.147722529999999,
+          "sybil_pool_share": 0.051477225300926584,
+          "sybil_voice_sum": 0.29476024
+        },
+        {
+          "epoch": 10,
+          "sybil_mint": 5.4937562035,
+          "sybil_pool_share": 0.05493756203516482,
+          "sybil_voice_sum": 0.29704006
+        },
+        {
+          "epoch": 15,
+          "sybil_mint": 5.5327583925,
+          "sybil_pool_share": 0.055327583924889345,
+          "sybil_voice_sum": 0.29869844
+        },
+        {
+          "epoch": 20,
+          "sybil_mint": 4.990632378,
+          "sybil_pool_share": 0.049906323780099814,
+          "sybil_voice_sum": 0.29948103
+        },
+        {
+          "epoch": 25,
+          "sybil_mint": 5.409988555,
+          "sybil_pool_share": 0.0540998855498918,
+          "sybil_voice_sum": 0.30000277
+        },
+        {
+          "epoch": 30,
+          "sybil_mint": 5.1945322455,
+          "sybil_pool_share": 0.05194532245505194,
+          "sybil_voice_sum": 0.300523085
+        },
+        {
+          "epoch": 35,
+          "sybil_mint": 5.4482756645,
+          "sybil_pool_share": 0.054482756644945514,
+          "sybil_voice_sum": 0.300987255
+        },
+        {
+          "epoch": 40,
+          "sybil_mint": 4.7586704345,
+          "sybil_pool_share": 0.047586704345095175,
+          "sybil_voice_sum": 0.301205785
+        },
+        {
+          "epoch": 45,
+          "sybil_mint": 5.033090725,
+          "sybil_pool_share": 0.05033090725,
+          "sybil_voice_sum": 0.3012221
+        },
+        {
+          "epoch": 50,
+          "sybil_mint": 5.600577598999999,
+          "sybil_pool_share": 0.05600577598988798,
+          "sybil_voice_sum": 0.30149251
+        },
+        {
+          "epoch": 55,
+          "sybil_mint": 5.825113223500001,
+          "sybil_pool_share": 0.05825113223505826,
+          "sybil_voice_sum": 0.30168882
+        },
+        {
+          "epoch": 60,
+          "sybil_mint": 5.7327397395,
+          "sybil_pool_share": 0.05732739739511466,
+          "sybil_voice_sum": 0.30192259
+        },
+        {
+          "epoch": 65,
+          "sybil_mint": 5.2822660914999995,
+          "sybil_pool_share": 0.05282266091478871,
+          "sybil_voice_sum": 0.30190206
+        },
+        {
+          "epoch": 70,
+          "sybil_mint": 5.5349027705,
+          "sybil_pool_share": 0.055349027704889295,
+          "sybil_voice_sum": 0.302073345
+        },
+        {
+          "epoch": 75,
+          "sybil_mint": 4.9484397115,
+          "sybil_pool_share": 0.049484397114999995,
+          "sybil_voice_sum": 0.30216228500000003
+        },
+        {
+          "epoch": 80,
+          "sybil_mint": 4.9490157505,
+          "sybil_pool_share": 0.04949015750495051,
+          "sybil_voice_sum": 0.302201115
+        },
+        {
+          "epoch": 85,
+          "sybil_mint": 5.1342152164999995,
+          "sybil_pool_share": 0.051342152164743284,
+          "sybil_voice_sum": 0.302199825
+        },
+        {
+          "epoch": 90,
+          "sybil_mint": 4.997807762,
+          "sybil_pool_share": 0.049978077620149934,
+          "sybil_voice_sum": 0.302268685
+        },
+        {
+          "epoch": 95,
+          "sybil_mint": 5.696754934,
+          "sybil_pool_share": 0.056967549340227866,
+          "sybil_voice_sum": 0.30237893
+        },
+        {
+          "epoch": 100,
+          "sybil_mint": 5.338960244499999,
+          "sybil_pool_share": 0.053389602445053384,
+          "sybil_voice_sum": 0.302499645
+        },
+        {
+          "epoch": 105,
+          "sybil_mint": 5.088337206,
+          "sybil_pool_share": 0.05088337205994912,
+          "sybil_voice_sum": 0.302485475
+        },
+        {
+          "epoch": 110,
+          "sybil_mint": 5.5012659365,
+          "sybil_pool_share": 0.05501265936494499,
+          "sybil_voice_sum": 0.302522995
+        },
+        {
+          "epoch": 115,
+          "sybil_mint": 5.8997807165000005,
+          "sybil_pool_share": 0.05899780716523599,
+          "sybil_voice_sum": 0.30259825
+        },
+        {
+          "epoch": 119,
+          "sybil_mint": 4.782174524,
+          "sybil_pool_share": 0.04782174524028693,
+          "sybil_voice_sum": 0.30258127
+        }
+      ]
+    },
+    {
+      "K": 20,
+      "final_pool_share": 0.17224334982172246,
+      "first_pool_share": 0.1651599434608258,
+      "share_growth": 0.00708340636089666,
+      "final_voice_sum": 1.1766264,
+      "records": [
+        {
+          "epoch": 0,
+          "sybil_mint": 16.515994346,
+          "sybil_pool_share": 0.1651599434608258,
+          "sybil_voice_sum": 1.14864394
+        },
+        {
+          "epoch": 5,
+          "sybil_mint": 17.539260458,
+          "sybil_pool_share": 0.1753926045805262,
+          "sybil_voice_sum": 1.15614178
+        },
+        {
+          "epoch": 10,
+          "sybil_mint": 17.954937854,
+          "sybil_pool_share": 0.17954937853982045,
+          "sybil_voice_sum": 1.16090628
+        },
+        {
+          "epoch": 15,
+          "sybil_mint": 17.242209466,
+          "sybil_pool_share": 0.1724220946617242,
+          "sybil_voice_sum": 1.1646961999999998
+        },
+        {
+          "epoch": 20,
+          "sybil_mint": 17.212155576,
+          "sybil_pool_share": 0.1721215557608606,
+          "sybil_voice_sum": 1.1680161999999998
+        },
+        {
+          "epoch": 25,
+          "sybil_mint": 16.612466322,
+          "sybil_pool_share": 0.1661246632201661,
+          "sybil_voice_sum": 1.17034614
+        },
+        {
+          "epoch": 30,
+          "sybil_mint": 17.655761102,
+          "sybil_pool_share": 0.17655761102088277,
+          "sybil_voice_sum": 1.17234052
+        },
+        {
+          "epoch": 35,
+          "sybil_mint": 18.649610354,
+          "sybil_pool_share": 0.18649610353869453,
+          "sybil_voice_sum": 1.17344552
+        },
+        {
+          "epoch": 40,
+          "sybil_mint": 17.743123354,
+          "sybil_pool_share": 0.17743123353804827,
+          "sybil_voice_sum": 1.17386004
+        },
+        {
+          "epoch": 45,
+          "sybil_mint": 17.420637388,
+          "sybil_pool_share": 0.1742063738798258,
+          "sybil_voice_sum": 1.17438814
+        },
+        {
+          "epoch": 50,
+          "sybil_mint": 17.641523714,
+          "sybil_pool_share": 0.17641523713929436,
+          "sybil_voice_sum": 1.17472588
+        },
+        {
+          "epoch": 55,
+          "sybil_mint": 18.132781996,
+          "sybil_pool_share": 0.18132781996,
+          "sybil_voice_sum": 1.17506088
+        },
+        {
+          "epoch": 60,
+          "sybil_mint": 17.781873502,
+          "sybil_pool_share": 0.17781873501893308,
+          "sybil_voice_sum": 1.1752871
+        },
+        {
+          "epoch": 65,
+          "sybil_mint": 19.683147406,
+          "sybil_pool_share": 0.196831474058819,
+          "sybil_voice_sum": 1.17573308
+        },
+        {
+          "epoch": 70,
+          "sybil_mint": 17.447236824,
+          "sybil_pool_share": 0.17447236824087237,
+          "sybil_voice_sum": 1.17575152
+        },
+        {
+          "epoch": 75,
+          "sybil_mint": 16.337378424,
+          "sybil_pool_share": 0.16337378423901977,
+          "sybil_voice_sum": 1.17573984
+        },
+        {
+          "epoch": 80,
+          "sybil_mint": 18.006552204,
+          "sybil_pool_share": 0.18006552204126045,
+          "sybil_voice_sum": 1.17600266
+        },
+        {
+          "epoch": 85,
+          "sybil_mint": 17.87365282,
+          "sybil_pool_share": 0.17873652820125116,
+          "sybil_voice_sum": 1.17629424
+        },
+        {
+          "epoch": 90,
+          "sybil_mint": 17.098759542,
+          "sybil_pool_share": 0.17098759542,
+          "sybil_voice_sum": 1.1765660599999999
+        },
+        {
+          "epoch": 95,
+          "sybil_mint": 18.185810316,
+          "sybil_pool_share": 0.18185810315945444,
+          "sybil_voice_sum": 1.1764792
+        },
+        {
+          "epoch": 100,
+          "sybil_mint": 17.666920236000003,
+          "sybil_pool_share": 0.17666920236000003,
+          "sybil_voice_sum": 1.17674528
+        },
+        {
+          "epoch": 105,
+          "sybil_mint": 17.45942108,
+          "sybil_pool_share": 0.17459421080122214,
+          "sybil_voice_sum": 1.1767440999999998
+        },
+        {
+          "epoch": 110,
+          "sybil_mint": 17.43729141,
+          "sybil_pool_share": 0.174372914101395,
+          "sybil_voice_sum": 1.176731
+        },
+        {
+          "epoch": 115,
+          "sybil_mint": 16.926124220000002,
+          "sybil_pool_share": 0.1692612422015234,
+          "sybil_voice_sum": 1.1766789599999998
+        },
+        {
+          "epoch": 119,
+          "sybil_mint": 17.224334982000002,
+          "sybil_pool_share": 0.17224334982172246,
+          "sybil_voice_sum": 1.1766264
+        }
+      ]
+    },
+    {
+      "K": 50,
+      "final_pool_share": 0.33927225004796435,
+      "first_pool_share": 0.3166063597585484,
+      "share_growth": 0.022665890289415958,
+      "final_voice_sum": 2.841586,
+      "records": [
+        {
+          "epoch": 0,
+          "sybil_mint": 31.660635975,
+          "sybil_pool_share": 0.3166063597585484,
+          "sybil_voice_sum": 2.7849457
+        },
+        {
+          "epoch": 5,
+          "sybil_mint": 35.19930582,
+          "sybil_pool_share": 0.3519930581880322,
+          "sybil_voice_sum": 2.8122082
+        },
+        {
+          "epoch": 10,
+          "sybil_mint": 33.766813805,
+          "sybil_pool_share": 0.337668138055065,
+          "sybil_voice_sum": 2.81712645
+        },
+        {
+          "epoch": 15,
+          "sybil_mint": 33.228300194999996,
+          "sybil_pool_share": 0.33228300194867083,
+          "sybil_voice_sum": 2.82484855
+        },
+        {
+          "epoch": 20,
+          "sybil_mint": 34.556345405,
+          "sybil_pool_share": 0.34556345404377986,
+          "sybil_voice_sum": 2.82833405
+        },
+        {
+          "epoch": 25,
+          "sybil_mint": 33.911801665,
+          "sybil_pool_share": 0.3391180166527129,
+          "sybil_voice_sum": 2.8293914
+        },
+        {
+          "epoch": 30,
+          "sybil_mint": 33.853969379999995,
+          "sybil_pool_share": 0.3385396938030468,
+          "sybil_voice_sum": 2.8306679
+        },
+        {
+          "epoch": 35,
+          "sybil_mint": 32.950739385,
+          "sybil_pool_share": 0.32950739385098854,
+          "sybil_voice_sum": 2.83221045
+        },
+        {
+          "epoch": 40,
+          "sybil_mint": 34.602255715000005,
+          "sybil_pool_share": 0.34602255714861596,
+          "sybil_voice_sum": 2.8335289
+        },
+        {
+          "epoch": 45,
+          "sybil_mint": 34.36437044,
+          "sybil_pool_share": 0.34364370439518904,
+          "sybil_voice_sum": 2.8343732
+        },
+        {
+          "epoch": 50,
+          "sybil_mint": 36.78390221,
+          "sybil_pool_share": 0.36783902210331054,
+          "sybil_voice_sum": 2.83538925
+        },
+        {
+          "epoch": 55,
+          "sybil_mint": 33.404212465,
+          "sybil_pool_share": 0.3340421246583511,
+          "sybil_voice_sum": 2.8363540499999997
+        },
+        {
+          "epoch": 60,
+          "sybil_mint": 35.62772528,
+          "sybil_pool_share": 0.3562772528028502,
+          "sybil_voice_sum": 2.83709235
+        },
+        {
+          "epoch": 65,
+          "sybil_mint": 34.759257874999996,
+          "sybil_pool_share": 0.34759257874930477,
+          "sybil_voice_sum": 2.8374934
+        },
+        {
+          "epoch": 70,
+          "sybil_mint": 35.731127035,
+          "sybil_pool_share": 0.35731127035357313,
+          "sybil_voice_sum": 2.8383171
+        },
+        {
+          "epoch": 75,
+          "sybil_mint": 35.75671347,
+          "sybil_pool_share": 0.3575671346967819,
+          "sybil_voice_sum": 2.83935955
+        },
+        {
+          "epoch": 80,
+          "sybil_mint": 34.704929995,
+          "sybil_pool_share": 0.34704929995971734,
+          "sybil_voice_sum": 2.83967015
+        },
+        {
+          "epoch": 85,
+          "sybil_mint": 35.263580215000005,
+          "sybil_pool_share": 0.35263580214894213,
+          "sybil_voice_sum": 2.83993065
+        },
+        {
+          "epoch": 90,
+          "sybil_mint": 35.357180835,
+          "sybil_pool_share": 0.3535718083538893,
+          "sybil_voice_sum": 2.8402393000000004
+        },
+        {
+          "epoch": 95,
+          "sybil_mint": 35.216702305000005,
+          "sybil_pool_share": 0.3521670230577477,
+          "sybil_voice_sum": 2.84073645
+        },
+        {
+          "epoch": 100,
+          "sybil_mint": 36.211259285000004,
+          "sybil_pool_share": 0.36211259284529257,
+          "sybil_voice_sum": 2.8412713
+        },
+        {
+          "epoch": 105,
+          "sybil_mint": 35.44215779,
+          "sybil_pool_share": 0.3544215778964558,
+          "sybil_voice_sum": 2.84145895
+        },
+        {
+          "epoch": 110,
+          "sybil_mint": 33.690626745,
+          "sybil_pool_share": 0.3369062674587596,
+          "sybil_voice_sum": 2.84140055
+        },
+        {
+          "epoch": 115,
+          "sybil_mint": 32.91223489,
+          "sybil_pool_share": 0.32912234889308845,
+          "sybil_voice_sum": 2.84159455
+        },
+        {
+          "epoch": 119,
+          "sybil_mint": 33.927225005,
+          "sybil_pool_share": 0.33927225004796435,
+          "sybil_voice_sum": 2.841586
+        }
+      ]
+    },
+    {
+      "K": 100,
+      "final_pool_share": 0.511504111696931,
+      "first_pool_share": 0.4720329336518526,
+      "share_growth": 0.03947117804507838,
+      "final_voice_sum": 5.5023129,
+      "records": [
+        {
+          "epoch": 0,
+          "sybil_mint": 47.20329337,
+          "sybil_pool_share": 0.4720329336518526,
+          "sybil_voice_sum": 5.4248296
+        },
+        {
+          "epoch": 5,
+          "sybil_mint": 49.97561264,
+          "sybil_pool_share": 0.499756126377511,
+          "sybil_voice_sum": 5.4463490000000006
+        },
+        {
+          "epoch": 10,
+          "sybil_mint": 50.387461970000004,
+          "sybil_pool_share": 0.5038746197075582,
+          "sybil_voice_sum": 5.4634898000000005
+        },
+        {
+          "epoch": 15,
+          "sybil_mint": 50.10032708999999,
+          "sybil_pool_share": 0.5010032709060119,
+          "sybil_voice_sum": 5.478192
+        },
+        {
+          "epoch": 20,
+          "sybil_mint": 49.74124362,
+          "sybil_pool_share": 0.49741243619751296,
+          "sybil_voice_sum": 5.485982
+        },
+        {
+          "epoch": 25,
+          "sybil_mint": 49.75548427,
+          "sybil_pool_share": 0.49755484268159045,
+          "sybil_voice_sum": 5.4888829999999995
+        },
+        {
+          "epoch": 30,
+          "sybil_mint": 51.646976030000005,
+          "sybil_pool_share": 0.5164697603160106,
+          "sybil_voice_sum": 5.4935658
+        },
+        {
+          "epoch": 35,
+          "sybil_mint": 50.84405815,
+          "sybil_pool_share": 0.5084405815086436,
+          "sybil_voice_sum": 5.4960544
+        },
+        {
+          "epoch": 40,
+          "sybil_mint": 47.9663517,
+          "sybil_pool_share": 0.47966351699088633,
+          "sybil_voice_sum": 5.4966816000000005
+        },
+        {
+          "epoch": 45,
+          "sybil_mint": 48.08681358,
+          "sybil_pool_share": 0.480868135796153,
+          "sybil_voice_sum": 5.4962656999999995
+        },
+        {
+          "epoch": 50,
+          "sybil_mint": 51.129157719999995,
+          "sybil_pool_share": 0.5112915772051129,
+          "sybil_voice_sum": 5.497826900000001
+        },
+        {
+          "epoch": 55,
+          "sybil_mint": 52.81380045,
+          "sybil_pool_share": 0.5281380044857402,
+          "sybil_voice_sum": 5.4997202000000005
+        },
+        {
+          "epoch": 60,
+          "sybil_mint": 49.82739276,
+          "sybil_pool_share": 0.4982739276049828,
+          "sybil_voice_sum": 5.5005742
+        },
+        {
+          "epoch": 65,
+          "sybil_mint": 51.66477694,
+          "sybil_pool_share": 0.5166477694160161,
+          "sybil_voice_sum": 5.5009786
+        },
+        {
+          "epoch": 70,
+          "sybil_mint": 50.71525698,
+          "sybil_pool_share": 0.5071525697939142,
+          "sybil_voice_sum": 5.501498600000001
+        },
+        {
+          "epoch": 75,
+          "sybil_mint": 51.26632840999999,
+          "sybil_pool_share": 0.5126632841251204,
+          "sybil_voice_sum": 5.5021768
+        },
+        {
+          "epoch": 80,
+          "sybil_mint": 51.110231029999994,
+          "sybil_pool_share": 0.5111023103194218,
+          "sybil_voice_sum": 5.5023861
+        },
+        {
+          "epoch": 85,
+          "sybil_mint": 51.07182398,
+          "sybil_pool_share": 0.5107182397739534,
+          "sybil_voice_sum": 5.5027884
+        },
+        {
+          "epoch": 90,
+          "sybil_mint": 47.68122714,
+          "sybil_pool_share": 0.47681227138188115,
+          "sybil_voice_sum": 5.5022746
+        },
+        {
+          "epoch": 95,
+          "sybil_mint": 51.266863259999994,
+          "sybil_pool_share": 0.5126686325794932,
+          "sybil_voice_sum": 5.5022643
+        },
+        {
+          "epoch": 100,
+          "sybil_mint": 52.46981606,
+          "sybil_pool_share": 0.5246981606157409,
+          "sybil_voice_sum": 5.5021769
+        },
+        {
+          "epoch": 105,
+          "sybil_mint": 49.28012386,
+          "sybil_pool_share": 0.4928012386029568,
+          "sybil_voice_sum": 5.5023833
+        },
+        {
+          "epoch": 110,
+          "sybil_mint": 49.59380831,
+          "sybil_pool_share": 0.4959380831119025,
+          "sybil_voice_sum": 5.5022910000000005
+        },
+        {
+          "epoch": 115,
+          "sybil_mint": 50.54310693,
+          "sybil_pool_share": 0.5054310693171847,
+          "sybil_voice_sum": 5.502260199999999
+        },
+        {
+          "epoch": 119,
+          "sybil_mint": 51.15041117,
+          "sybil_pool_share": 0.511504111696931,
+          "sybil_voice_sum": 5.5023129
+        }
+      ]
+    },
+    {
+      "K": 200,
+      "final_pool_share": 0.6702995150435694,
+      "first_pool_share": 0.6569555768427022,
+      "share_growth": 0.013343938200867211,
+      "final_voice_sum": 10.6583578,
+      "records": [
+        {
+          "epoch": 0,
+          "sybil_mint": 65.69555768000001,
+          "sybil_pool_share": 0.6569555768427022,
+          "sybil_voice_sum": 10.59126
+        },
+        {
+          "epoch": 5,
+          "sybil_mint": 65.88214762,
+          "sybil_pool_share": 0.6588214761934117,
+          "sybil_voice_sum": 10.5902128
+        },
+        {
+          "epoch": 10,
+          "sybil_mint": 65.35463418,
+          "sybil_pool_share": 0.6535463418098032,
+          "sybil_voice_sum": 10.6092024
+        },
+        {
+          "epoch": 15,
+          "sybil_mint": 67.22238288,
+          "sybil_pool_share": 0.6722238288470557,
+          "sybil_voice_sum": 10.6269484
+        },
+        {
+          "epoch": 20,
+          "sybil_mint": 65.63845286,
+          "sybil_pool_share": 0.6563845285967181,
+          "sybil_voice_sum": 10.63529
+        },
+        {
+          "epoch": 25,
+          "sybil_mint": 66.07564416,
+          "sybil_pool_share": 0.6607564416574858,
+          "sybil_voice_sum": 10.6416912
+        },
+        {
+          "epoch": 30,
+          "sybil_mint": 65.49278778,
+          "sybil_pool_share": 0.6549278778327464,
+          "sybil_voice_sum": 10.645099
+        },
+        {
+          "epoch": 35,
+          "sybil_mint": 65.68125078,
+          "sybil_pool_share": 0.6568125077697866,
+          "sybil_voice_sum": 10.647510200000001
+        },
+        {
+          "epoch": 40,
+          "sybil_mint": 66.87113496,
+          "sybil_pool_share": 0.6687113495859571,
+          "sybil_voice_sum": 10.649146199999999
+        },
+        {
+          "epoch": 45,
+          "sybil_mint": 64.92034298,
+          "sybil_pool_share": 0.649203429796754,
+          "sybil_voice_sum": 10.6500146
+        },
+        {
+          "epoch": 50,
+          "sybil_mint": 67.31568946,
+          "sybil_pool_share": 0.6731568946572183,
+          "sybil_voice_sum": 10.6519724
+        },
+        {
+          "epoch": 55,
+          "sybil_mint": 64.9407815,
+          "sybil_pool_share": 0.6494078150337692,
+          "sybil_voice_sum": 10.6525752
+        },
+        {
+          "epoch": 60,
+          "sybil_mint": 64.62929238000001,
+          "sybil_pool_share": 0.6462929237812577,
+          "sybil_voice_sum": 10.652868
+        },
+        {
+          "epoch": 65,
+          "sybil_mint": 67.60616522000001,
+          "sybil_pool_share": 0.6760616522236623,
+          "sybil_voice_sum": 10.6539624
+        },
+        {
+          "epoch": 70,
+          "sybil_mint": 66.05356526,
+          "sybil_pool_share": 0.6605356526343478,
+          "sybil_voice_sum": 10.6543894
+        },
+        {
+          "epoch": 75,
+          "sybil_mint": 65.7325572,
+          "sybil_pool_share": 0.6573255720124892,
+          "sybil_voice_sum": 10.655245200000001
+        },
+        {
+          "epoch": 80,
+          "sybil_mint": 66.60610985999999,
+          "sybil_pool_share": 0.6660610986412957,
+          "sybil_voice_sum": 10.656023600000001
+        },
+        {
+          "epoch": 85,
+          "sybil_mint": 64.81798702,
+          "sybil_pool_share": 0.6481798701766656,
+          "sybil_voice_sum": 10.6560982
+        },
+        {
+          "epoch": 90,
+          "sybil_mint": 67.09783408,
+          "sybil_pool_share": 0.6709783408308649,
+          "sybil_voice_sum": 10.6565704
+        },
+        {
+          "epoch": 95,
+          "sybil_mint": 64.58976778,
+          "sybil_pool_share": 0.6458976778232522,
+          "sybil_voice_sum": 10.656818999999999
+        },
+        {
+          "epoch": 100,
+          "sybil_mint": 67.93412921999999,
+          "sybil_pool_share": 0.6793412922346463,
+          "sybil_voice_sum": 10.6571598
+        },
+        {
+          "epoch": 105,
+          "sybil_mint": 65.18369434,
+          "sybil_pool_share": 0.6518369434619246,
+          "sybil_voice_sum": 10.6575086
+        },
+        {
+          "epoch": 110,
+          "sybil_mint": 67.88216317999999,
+          "sybil_pool_share": 0.6788216317830293,
+          "sybil_voice_sum": 10.6576516
+        },
+        {
+          "epoch": 115,
+          "sybil_mint": 66.73179462,
+          "sybil_pool_share": 0.6673179462140136,
+          "sybil_voice_sum": 10.657754
+        },
+        {
+          "epoch": 119,
+          "sybil_mint": 67.0299515,
+          "sybil_pool_share": 0.6702995150435694,
+          "sybil_voice_sum": 10.6583578
+        }
+      ]
+    }
+  ],
+  "verdict": {
+    "final_pool_share_by_K": {
+      "0": 0.0,
+      "5": 0.04782,
+      "20": 0.17224,
+      "50": 0.33927,
+      "100": 0.5115,
+      "200": 0.6703
+    },
+    "share_growth_by_K": {
+      "0": 0.0,
+      "5": 0.00707,
+      "20": 0.00708,
+      "50": 0.02267,
+      "100": 0.03947,
+      "200": 0.01334
+    }
+  }
+}

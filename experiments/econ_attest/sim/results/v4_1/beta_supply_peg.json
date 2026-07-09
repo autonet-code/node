@@ -1,0 +1,250 @@
+{
+  "scenario": "beta_supply_peg_v4_1",
+  "params": {
+    "seed": 30,
+    "epochs": 300,
+    "beta_min": 0.05,
+    "forms": [
+      "hyperbolic",
+      "exponential"
+    ],
+    "S0_epochs": [
+      10,
+      50,
+      200
+    ],
+    "windows": {
+      "early": [
+        30,
+        60
+      ],
+      "middle": [
+        130,
+        160
+      ],
+      "late": [
+        240,
+        270
+      ]
+    },
+    "ring_K": {
+      "early": 200,
+      "middle": 200,
+      "late": 200
+    }
+  },
+  "grid": [
+    {
+      "form": "hyperbolic",
+      "S0_epochs": 10,
+      "S0": 1000.0,
+      "stage_corr": {
+        "early": 0.6923,
+        "middle": 0.4778,
+        "late": 0.8944
+      },
+      "stage_corr_drop": {
+        "early": 0.2071,
+        "middle": 0.2519,
+        "late": -0.7075
+      },
+      "worst_corr_drop": 0.2519,
+      "stage_ring_atn_share": {
+        "early": 0.3527,
+        "middle": 0.1219,
+        "late": 0.0848
+      },
+      "late_ring_skim": 0.0848,
+      "ring_voice_share_max": 0.0,
+      "final_supply": 22592.6,
+      "beta_at_windows": {
+        "early": 0.4991,
+        "middle": 0.1483,
+        "late": 0.0989
+      }
+    },
+    {
+      "form": "hyperbolic",
+      "S0_epochs": 50,
+      "S0": 5000.0,
+      "stage_corr": {
+        "early": 0.9673,
+        "middle": 0.932,
+        "late": 0.9334
+      },
+      "stage_corr_drop": {
+        "early": -0.0678,
+        "middle": -0.2024,
+        "late": -0.7465
+      },
+      "worst_corr_drop": -0.0678,
+      "stage_ring_atn_share": {
+        "early": 0.653,
+        "middle": 0.5806,
+        "late": 0.3817
+      },
+      "late_ring_skim": 0.3817,
+      "ring_voice_share_max": 0.0,
+      "final_supply": 9738.8,
+      "beta_at_windows": {
+        "early": 0.9225,
+        "middle": 0.706,
+        "late": 0.4451
+      }
+    },
+    {
+      "form": "hyperbolic",
+      "S0_epochs": 200,
+      "S0": 20000.0,
+      "stage_corr": {
+        "early": 0.8994,
+        "middle": 0.7902,
+        "late": 0.6833
+      },
+      "stage_corr_drop": {
+        "early": 0.0,
+        "middle": -0.0606,
+        "late": -0.4964
+      },
+      "worst_corr_drop": 0.0,
+      "stage_ring_atn_share": {
+        "early": 0.687,
+        "middle": 0.7749,
+        "late": 0.7696
+      },
+      "late_ring_skim": 0.7696,
+      "ring_voice_share_max": 0.0,
+      "final_supply": 2940.0,
+      "beta_at_windows": {
+        "early": 0.9821,
+        "middle": 0.9421,
+        "late": 0.8973
+      }
+    },
+    {
+      "form": "exponential",
+      "S0_epochs": 10,
+      "S0": 1000.0,
+      "stage_corr": {
+        "early": 0.5876,
+        "middle": 0.4439,
+        "late": 0.8908
+      },
+      "stage_corr_drop": {
+        "early": 0.3118,
+        "middle": 0.2857,
+        "late": -0.7039
+      },
+      "worst_corr_drop": 0.3118,
+      "stage_ring_atn_share": {
+        "early": 0.164,
+        "middle": 0.0411,
+        "late": 0.0429
+      },
+      "late_ring_skim": 0.0429,
+      "ring_voice_share_max": 0.0,
+      "final_supply": 25899.9,
+      "beta_at_windows": {
+        "early": 0.2331,
+        "middle": 0.05,
+        "late": 0.05
+      }
+    },
+    {
+      "form": "exponential",
+      "S0_epochs": 50,
+      "S0": 5000.0,
+      "stage_corr": {
+        "early": 0.9739,
+        "middle": 0.7654,
+        "late": 0.8934
+      },
+      "stage_corr_drop": {
+        "early": -0.0745,
+        "middle": -0.0357,
+        "late": -0.7065
+      },
+      "worst_corr_drop": -0.0357,
+      "stage_ring_atn_share": {
+        "early": 0.6462,
+        "middle": 0.4712,
+        "late": 0.1117
+      },
+      "late_ring_skim": 0.1117,
+      "ring_voice_share_max": 0.0,
+      "final_supply": 14394.2,
+      "beta_at_windows": {
+        "early": 0.9129,
+        "middle": 0.573,
+        "late": 0.1302
+      }
+    },
+    {
+      "form": "exponential",
+      "S0_epochs": 200,
+      "S0": 20000.0,
+      "stage_corr": {
+        "early": 0.8994,
+        "middle": 0.7992,
+        "late": 0.7444
+      },
+      "stage_corr_drop": {
+        "early": 0.0,
+        "middle": -0.0696,
+        "late": -0.5574
+      },
+      "worst_corr_drop": 0.0,
+      "stage_ring_atn_share": {
+        "early": 0.687,
+        "middle": 0.7705,
+        "late": 0.758
+      },
+      "late_ring_skim": 0.758,
+      "ring_voice_share_max": 0.0,
+      "final_supply": 3062.9,
+      "beta_at_windows": {
+        "early": 0.981,
+        "middle": 0.9369,
+        "late": 0.8837
+      }
+    }
+  ],
+  "peg_check": {
+    "supply_with_rings_final": 9738.8,
+    "supply_without_rings_final": 9944.9,
+    "max_supply_gap": 206.1053,
+    "max_beta_gap": 0.008768,
+    "worst_beta_tightening": 0.0
+  },
+  "verdict": {
+    "uncapped_stage_corr": {
+      "early": 0.8994,
+      "middle": 0.7296,
+      "late": 0.1869
+    },
+    "uncapped_stage_ring_skim": {
+      "early": 0.687,
+      "middle": 0.8034,
+      "late": 0.8441
+    },
+    "peg_check_max_supply_gap": 206.1053,
+    "peg_check_rel_supply_gap": 0.020725,
+    "peg_check_max_beta_gap": 0.008768,
+    "peg_check_worst_beta_tightening": 0.0,
+    "peg_check_supply_direction": "rings SLOW honest supply (pool dilution) -> \u03b2 looser, honest-favorable",
+    "ring_voice_ever": 0.0,
+    "recommended": {
+      "form": "exponential",
+      "S0_epochs": 10,
+      "S0": 1000.0,
+      "worst_corr_drop": 0.3118,
+      "late_ring_skim": 0.0429,
+      "beta_at_windows": {
+        "early": 0.2331,
+        "middle": 0.05,
+        "late": 0.05
+      }
+    },
+    "any_feasible": true
+  }
+}

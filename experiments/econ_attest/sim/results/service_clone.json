@@ -1,0 +1,4768 @@
+{
+  "scenario": "service_clone",
+  "params": {
+    "epochs": 200,
+    "seed": 5,
+    "phi_values": [
+      0.3,
+      0.7,
+      1.0
+    ],
+    "rediscovery_costs": [
+      0.0,
+      5.0,
+      20.0,
+      50.0
+    ],
+    "demand": 200.0,
+    "service_price": 0.5,
+    "c_local": 0.2,
+    "clone_epoch": 40,
+    "fee_recycle": true
+  },
+  "sweep": [
+    {
+      "clone_cum_mint": 1793.3980739600004,
+      "final_service_rev": 70.0,
+      "payback_epoch": 40,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 70.0,
+          "clone_mint": 11.5471984087,
+          "clone_cum_mint": 56.82567025489999,
+          "clone_rank": 1.0841029084767255,
+          "pool": 100.875
+        },
+        {
+          "epoch": 50,
+          "service_rev": 70.0,
+          "clone_mint": 10.7876422539,
+          "clone_cum_mint": 114.66734910799998,
+          "clone_rank": 1.1369512799743065,
+          "pool": 100.875
+        },
+        {
+          "epoch": 55,
+          "service_rev": 70.0,
+          "clone_mint": 10.2656435621,
+          "clone_cum_mint": 168.28121734839996,
+          "clone_rank": 1.1533623158876485,
+          "pool": 100.875
+        },
+        {
+          "epoch": 60,
+          "service_rev": 70.0,
+          "clone_mint": 8.3260413837,
+          "clone_cum_mint": 225.12912434019995,
+          "clone_rank": 1.1638994298535494,
+          "pool": 100.875
+        },
+        {
+          "epoch": 65,
+          "service_rev": 70.0,
+          "clone_mint": 12.6740953996,
+          "clone_cum_mint": 280.36960435979995,
+          "clone_rank": 1.1695621155312526,
+          "pool": 100.875
+        },
+        {
+          "epoch": 70,
+          "service_rev": 70.0,
+          "clone_mint": 10.9760906196,
+          "clone_cum_mint": 338.5050822392999,
+          "clone_rank": 1.1700797622824766,
+          "pool": 100.875
+        },
+        {
+          "epoch": 75,
+          "service_rev": 70.0,
+          "clone_mint": 11.0234125256,
+          "clone_cum_mint": 391.04715259689993,
+          "clone_rank": 1.1726728935001125,
+          "pool": 100.875
+        },
+        {
+          "epoch": 80,
+          "service_rev": 70.0,
+          "clone_mint": 10.7963231487,
+          "clone_cum_mint": 445.0432670433999,
+          "clone_rank": 1.1756661234169759,
+          "pool": 100.875
+        },
+        {
+          "epoch": 85,
+          "service_rev": 70.0,
+          "clone_mint": 10.7485778442,
+          "clone_cum_mint": 503.0099535565999,
+          "clone_rank": 1.1786631730728836,
+          "pool": 100.875
+        },
+        {
+          "epoch": 90,
+          "service_rev": 70.0,
+          "clone_mint": 11.1965474116,
+          "clone_cum_mint": 558.8639705144,
+          "clone_rank": 1.1820884441062272,
+          "pool": 100.875
+        },
+        {
+          "epoch": 95,
+          "service_rev": 70.0,
+          "clone_mint": 10.1199140842,
+          "clone_cum_mint": 614.630718575,
+          "clone_rank": 1.1846648325431457,
+          "pool": 100.875
+        },
+        {
+          "epoch": 100,
+          "service_rev": 70.0,
+          "clone_mint": 12.2155830923,
+          "clone_cum_mint": 671.2193804742,
+          "clone_rank": 1.1859933250655803,
+          "pool": 100.875
+        },
+        {
+          "epoch": 105,
+          "service_rev": 70.0,
+          "clone_mint": 11.1976178346,
+          "clone_cum_mint": 728.480224685,
+          "clone_rank": 1.187367270240411,
+          "pool": 100.875
+        },
+        {
+          "epoch": 110,
+          "service_rev": 70.0,
+          "clone_mint": 12.1257537782,
+          "clone_cum_mint": 788.1054663107,
+          "clone_rank": 1.186415427268932,
+          "pool": 100.875
+        },
+        {
+          "epoch": 115,
+          "service_rev": 70.0,
+          "clone_mint": 11.3598321857,
+          "clone_cum_mint": 842.8298314118,
+          "clone_rank": 1.1859659495837285,
+          "pool": 100.875
+        },
+        {
+          "epoch": 120,
+          "service_rev": 70.0,
+          "clone_mint": 10.7277945098,
+          "clone_cum_mint": 899.4394463123,
+          "clone_rank": 1.186945877103101,
+          "pool": 100.875
+        },
+        {
+          "epoch": 125,
+          "service_rev": 70.0,
+          "clone_mint": 10.2224672345,
+          "clone_cum_mint": 952.9518828747,
+          "clone_rank": 1.187377051012848,
+          "pool": 100.875
+        },
+        {
+          "epoch": 130,
+          "service_rev": 70.0,
+          "clone_mint": 11.3796283495,
+          "clone_cum_mint": 1009.7955073424,
+          "clone_rank": 1.1888534536487063,
+          "pool": 100.875
+        },
+        {
+          "epoch": 135,
+          "service_rev": 70.0,
+          "clone_mint": 11.750196928,
+          "clone_cum_mint": 1067.0384703524,
+          "clone_rank": 1.1895116351811836,
+          "pool": 100.875
+        },
+        {
+          "epoch": 140,
+          "service_rev": 70.0,
+          "clone_mint": 10.8245774606,
+          "clone_cum_mint": 1122.8856802516,
+          "clone_rank": 1.1906443472401709,
+          "pool": 100.875
+        },
+        {
+          "epoch": 145,
+          "service_rev": 70.0,
+          "clone_mint": 12.1232303063,
+          "clone_cum_mint": 1182.5479825856,
+          "clone_rank": 1.1908936447930492,
+          "pool": 100.875
+        },
+        {
+          "epoch": 150,
+          "service_rev": 70.0,
+          "clone_mint": 11.1045992703,
+          "clone_cum_mint": 1239.3088926631,
+          "clone_rank": 1.1918899697846663,
+          "pool": 100.875
+        },
+        {
+          "epoch": 155,
+          "service_rev": 70.0,
+          "clone_mint": 11.6179207827,
+          "clone_cum_mint": 1295.8257069989,
+          "clone_rank": 1.1920926876640394,
+          "pool": 100.875
+        },
+        {
+          "epoch": 160,
+          "service_rev": 70.0,
+          "clone_mint": 10.7012529739,
+          "clone_cum_mint": 1354.3931156877002,
+          "clone_rank": 1.1922047708377115,
+          "pool": 100.875
+        },
+        {
+          "epoch": 165,
+          "service_rev": 70.0,
+          "clone_mint": 10.6927242295,
+          "clone_cum_mint": 1412.5247060983004,
+          "clone_rank": 1.1917133128834136,
+          "pool": 100.875
+        },
+        {
+          "epoch": 170,
+          "service_rev": 70.0,
+          "clone_mint": 10.0608726423,
+          "clone_cum_mint": 1467.5892395657004,
+          "clone_rank": 1.1923032821385657,
+          "pool": 100.875
+        },
+        {
+          "epoch": 175,
+          "service_rev": 70.0,
+          "clone_mint": 11.0027677339,
+          "clone_cum_mint": 1524.1701813881007,
+          "clone_rank": 1.192338403841338,
+          "pool": 100.875
+        },
+        {
+          "epoch": 180,
+          "service_rev": 70.0,
+          "clone_mint": 10.6597607773,
+          "clone_cum_mint": 1579.4163478616008,
+          "clone_rank": 1.192214225935615,
+          "pool": 100.875
+        },
+        {
+          "epoch": 185,
+          "service_rev": 70.0,
+          "clone_mint": 11.1319054923,
+          "clone_cum_mint": 1636.897340398801,
+          "clone_rank": 1.192510398200298,
+          "pool": 100.875
+        },
+        {
+          "epoch": 190,
+          "service_rev": 70.0,
+          "clone_mint": 13.2035772363,
+          "clone_cum_mint": 1693.5443410987007,
+          "clone_rank": 1.193007376348793,
+          "pool": 100.875
+        },
+        {
+          "epoch": 195,
+          "service_rev": 70.0,
+          "clone_mint": 10.7200020472,
+          "clone_cum_mint": 1749.5455005393005,
+          "clone_rank": 1.1932717893294849,
+          "pool": 100.875
+        },
+        {
+          "epoch": 199,
+          "service_rev": 70.0,
+          "clone_mint": 11.4282712798,
+          "clone_cum_mint": 1793.3980739600004,
+          "clone_rank": 1.1939355671549983,
+          "pool": 100.875
+        }
+      ],
+      "phi": 0.3,
+      "rediscovery_cost": 0.0
+    },
+    {
+      "clone_cum_mint": 1787.572597475399,
+      "final_service_rev": 70.0,
+      "payback_epoch": 41,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 70.0,
+          "clone_mint": 11.1985100103,
+          "clone_cum_mint": 54.9022073627,
+          "clone_rank": 1.0643837982394317,
+          "pool": 100.875
+        },
+        {
+          "epoch": 50,
+          "service_rev": 70.0,
+          "clone_mint": 10.3255835764,
+          "clone_cum_mint": 108.3761182378,
+          "clone_rank": 1.1166700704227317,
+          "pool": 100.875
+        },
+        {
+          "epoch": 55,
+          "service_rev": 70.0,
+          "clone_mint": 11.9411056117,
+          "clone_cum_mint": 167.10329487090002,
+          "clone_rank": 1.1395169790470627,
+          "pool": 100.875
+        },
+        {
+          "epoch": 60,
+          "service_rev": 70.0,
+          "clone_mint": 11.4544231285,
+          "clone_cum_mint": 226.60824831160002,
+          "clone_rank": 1.1514094515190612,
+          "pool": 100.875
+        },
+        {
+          "epoch": 65,
+          "service_rev": 70.0,
+          "clone_mint": 12.288120646,
+          "clone_cum_mint": 287.32704437079997,
+          "clone_rank": 1.160074235208532,
+          "pool": 100.875
+        },
+        {
+          "epoch": 70,
+          "service_rev": 70.0,
+          "clone_mint": 9.4886898675,
+          "clone_cum_mint": 344.35545588059995,
+          "clone_rank": 1.1668432083911608,
+          "pool": 100.875
+        },
+        {
+          "epoch": 75,
+          "service_rev": 70.0,
+          "clone_mint": 11.217704791,
+          "clone_cum_mint": 400.05545849829997,
+          "clone_rank": 1.168553701362434,
+          "pool": 100.875
+        },
+        {
+          "epoch": 80,
+          "service_rev": 70.0,
+          "clone_mint": 11.3994936297,
+          "clone_cum_mint": 456.5264273886999,
+          "clone_rank": 1.1723849695261652,
+          "pool": 100.875
+        },
+        {
+          "epoch": 85,
+          "service_rev": 70.0,
+          "clone_mint": 11.6838540205,
+          "clone_cum_mint": 511.04636819589996,
+          "clone_rank": 1.1762518203015542,
+          "pool": 100.875
+        },
+        {
+          "epoch": 90,
+          "service_rev": 70.0,
+          "clone_mint": 9.4644438311,
+          "clone_cum_mint": 566.3154614935,
+          "clone_rank": 1.1778837037375984,
+          "pool": 100.875
+        },
+        {
+          "epoch": 95,
+          "service_rev": 70.0,
+          "clone_mint": 10.87659179,
+          "clone_cum_mint": 624.8191783306,
+          "clone_rank": 1.1807200396751516,
+          "pool": 100.875
+        },
+        {
+          "epoch": 100,
+          "service_rev": 70.0,
+          "clone_mint": 12.8265852034,
+          "clone_cum_mint": 684.2522254945,
+          "clone_rank": 1.1824442197334444,
+          "pool": 100.875
+        },
+        {
+          "epoch": 105,
+          "service_rev": 70.0,
+          "clone_mint": 11.7408490283,
+          "clone_cum_mint": 740.1070986661999,
+          "clone_rank": 1.182680578388211,
+          "pool": 100.875
+        },
+        {
+          "epoch": 110,
+          "service_rev": 70.0,
+          "clone_mint": 12.2597255372,
+          "clone_cum_mint": 800.1485550926999,
+          "clone_rank": 1.184140298156862,
+          "pool": 100.875
+        },
+        {
+          "epoch": 115,
+          "service_rev": 70.0,
+          "clone_mint": 11.214635901,
+          "clone_cum_mint": 856.8871519108999,
+          "clone_rank": 1.1856030585520174,
+          "pool": 100.875
+        },
+        {
+          "epoch": 120,
+          "service_rev": 70.0,
+          "clone_mint": 10.9533945948,
+          "clone_cum_mint": 911.8259515210999,
+          "clone_rank": 1.1864280417719317,
+          "pool": 100.875
+        },
+        {
+          "epoch": 125,
+          "service_rev": 70.0,
+          "clone_mint": 12.7067053845,
+          "clone_cum_mint": 967.4096122294999,
+          "clone_rank": 1.1865958168444886,
+          "pool": 100.875
+        },
+        {
+          "epoch": 130,
+          "service_rev": 70.0,
+          "clone_mint": 13.0028832186,
+          "clone_cum_mint": 1029.6626941099998,
+          "clone_rank": 1.1860704997785287,
+          "pool": 100.875
+        },
+        {
+          "epoch": 135,
+          "service_rev": 70.0,
+          "clone_mint": 10.9312132742,
+          "clone_cum_mint": 1084.8745111965,
+          "clone_rank": 1.1867637479010786,
+          "pool": 100.875
+        },
+        {
+          "epoch": 140,
+          "service_rev": 70.0,
+          "clone_mint": 9.7685885521,
+          "clone_cum_mint": 1136.8525702386999,
+          "clone_rank": 1.1872758145683189,
+          "pool": 100.875
+        },
+        {
+          "epoch": 145,
+          "service_rev": 70.0,
+          "clone_mint": 10.5889211538,
+          "clone_cum_mint": 1194.2899031123995,
+          "clone_rank": 1.1873015392258106,
+          "pool": 100.875
+        },
+        {
+          "epoch": 150,
+          "service_rev": 70.0,
+          "clone_mint": 12.7294110252,
+          "clone_cum_mint": 1250.0955615969995,
+          "clone_rank": 1.1875162895320195,
+          "pool": 100.875
+        },
+        {
+          "epoch": 155,
+          "service_rev": 70.0,
+          "clone_mint": 10.6268316305,
+          "clone_cum_mint": 1299.4486595346993,
+          "clone_rank": 1.187795876213708,
+          "pool": 100.875
+        },
+        {
+          "epoch": 160,
+          "service_rev": 70.0,
+          "clone_mint": 11.4507407427,
+          "clone_cum_mint": 1356.1130782679993,
+          "clone_rank": 1.1886366189455777,
+          "pool": 100.875
+        },
+        {
+          "epoch": 165,
+          "service_rev": 70.0,
+          "clone_mint": 11.8448820813,
+          "clone_cum_mint": 1413.3369185353995,
+          "clone_rank": 1.1890310438954064,
+          "pool": 100.875
+        },
+        {
+          "epoch": 170,
+          "service_rev": 70.0,
+          "clone_mint": 9.8477479577,
+          "clone_cum_mint": 1465.8744470032996,
+          "clone_rank": 1.1886949884775957,
+          "pool": 100.875
+        },
+        {
+          "epoch": 175,
+          "service_rev": 70.0,
+          "clone_mint": 11.7926361173,
+          "clone_cum_mint": 1519.5178055529996,
+          "clone_rank": 1.1895710208945418,
+          "pool": 100.875
+        },
+        {
+          "epoch": 180,
+          "service_rev": 70.0,
+          "clone_mint": 11.7030485565,
+          "clone_cum_mint": 1578.6964471019994,
+          "clone_rank": 1.1897068661395371,
+          "pool": 100.875
+        },
+        {
+          "epoch": 185,
+          "service_rev": 70.0,
+          "clone_mint": 10.0608726423,
+          "clone_cum_mint": 1634.0093418041995,
+          "clone_rank": 1.1895762033004467,
+          "pool": 100.875
+        },
+        {
+          "epoch": 190,
+          "service_rev": 70.0,
+          "clone_mint": 11.2922079177,
+          "clone_cum_mint": 1688.8356611461993,
+          "clone_rank": 1.189726645644505,
+          "pool": 100.875
+        },
+        {
+          "epoch": 195,
+          "service_rev": 70.0,
+          "clone_mint": 11.2641105909,
+          "clone_cum_mint": 1743.207242851799,
+          "clone_rank": 1.1899778359939923,
+          "pool": 100.875
+        },
+        {
+          "epoch": 199,
+          "service_rev": 70.0,
+          "clone_mint": 11.8664064796,
+          "clone_cum_mint": 1787.572597475399,
+          "clone_rank": 1.1902725526343585,
+          "pool": 100.875
+        }
+      ],
+      "phi": 0.3,
+      "rediscovery_cost": 5.0
+    },
+    {
+      "clone_cum_mint": 1766.5174191638005,
+      "final_service_rev": 70.0,
+      "payback_epoch": 42,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 70.0,
+          "clone_mint": 10.9129452584,
+          "clone_cum_mint": 53.5572212676,
+          "clone_rank": 1.0693482288559684,
+          "pool": 100.875
+        },
+        {
+          "epoch": 50,
+          "service_rev": 70.0,
+          "clone_mint": 9.5470582686,
+          "clone_cum_mint": 108.5978646742,
+          "clone_rank": 1.129114737428505,
+          "pool": 100.875
+        },
+        {
+          "epoch": 55,
+          "service_rev": 70.0,
+          "clone_mint": 9.5521486351,
+          "clone_cum_mint": 162.24967944199997,
+          "clone_rank": 1.1548309841246942,
+          "pool": 100.875
+        },
+        {
+          "epoch": 60,
+          "service_rev": 70.0,
+          "clone_mint": 9.4236704748,
+          "clone_cum_mint": 214.14726939639996,
+          "clone_rank": 1.1634747444327915,
+          "pool": 100.875
+        },
+        {
+          "epoch": 65,
+          "service_rev": 70.0,
+          "clone_mint": 12.2597255372,
+          "clone_cum_mint": 265.9260683490999,
+          "clone_rank": 1.1689488773446524,
+          "pool": 100.875
+        },
+        {
+          "epoch": 70,
+          "service_rev": 70.0,
+          "clone_mint": 11.9538244644,
+          "clone_cum_mint": 323.95940907959994,
+          "clone_rank": 1.1723339312187042,
+          "pool": 100.875
+        },
+        {
+          "epoch": 75,
+          "service_rev": 70.0,
+          "clone_mint": 11.0439200415,
+          "clone_cum_mint": 379.92426422929987,
+          "clone_rank": 1.1764790792624409,
+          "pool": 100.875
+        },
+        {
+          "epoch": 80,
+          "service_rev": 70.0,
+          "clone_mint": 11.8664064792,
+          "clone_cum_mint": 437.8166457761999,
+          "clone_rank": 1.1805774824934874,
+          "pool": 100.875
+        },
+        {
+          "epoch": 85,
+          "service_rev": 70.0,
+          "clone_mint": 11.617920783,
+          "clone_cum_mint": 492.5108377049999,
+          "clone_rank": 1.1832439671204653,
+          "pool": 100.875
+        },
+        {
+          "epoch": 90,
+          "service_rev": 70.0,
+          "clone_mint": 11.5972876162,
+          "clone_cum_mint": 549.5553280622998,
+          "clone_rank": 1.1841333016407423,
+          "pool": 100.875
+        },
+        {
+          "epoch": 95,
+          "service_rev": 70.0,
+          "clone_mint": 10.9332215884,
+          "clone_cum_mint": 600.9330465653998,
+          "clone_rank": 1.1840575794452466,
+          "pool": 100.875
+        },
+        {
+          "epoch": 100,
+          "service_rev": 70.0,
+          "clone_mint": 9.9208593255,
+          "clone_cum_mint": 655.6199564788998,
+          "clone_rank": 1.1862755067578994,
+          "pool": 100.875
+        },
+        {
+          "epoch": 105,
+          "service_rev": 70.0,
+          "clone_mint": 11.5972876169,
+          "clone_cum_mint": 712.3371967672998,
+          "clone_rank": 1.1883850999813772,
+          "pool": 100.875
+        },
+        {
+          "epoch": 110,
+          "service_rev": 70.0,
+          "clone_mint": 11.5676535718,
+          "clone_cum_mint": 763.1881555957997,
+          "clone_rank": 1.188621710644628,
+          "pool": 100.875
+        },
+        {
+          "epoch": 115,
+          "service_rev": 70.0,
+          "clone_mint": 11.1976178346,
+          "clone_cum_mint": 816.5111626146997,
+          "clone_rank": 1.1890492981432648,
+          "pool": 100.875
+        },
+        {
+          "epoch": 120,
+          "service_rev": 70.0,
+          "clone_mint": 11.6838540205,
+          "clone_cum_mint": 870.3583756757997,
+          "clone_rank": 1.1897725415697478,
+          "pool": 100.875
+        },
+        {
+          "epoch": 125,
+          "service_rev": 70.0,
+          "clone_mint": 12.0167511645,
+          "clone_cum_mint": 932.0792965842996,
+          "clone_rank": 1.1896563455677707,
+          "pool": 100.875
+        },
+        {
+          "epoch": 130,
+          "service_rev": 70.0,
+          "clone_mint": 11.2697188648,
+          "clone_cum_mint": 989.2093594226997,
+          "clone_rank": 1.189613744107247,
+          "pool": 100.875
+        },
+        {
+          "epoch": 135,
+          "service_rev": 70.0,
+          "clone_mint": 12.3093537354,
+          "clone_cum_mint": 1048.0876845217997,
+          "clone_rank": 1.1898385489484373,
+          "pool": 100.875
+        },
+        {
+          "epoch": 140,
+          "service_rev": 70.0,
+          "clone_mint": 11.292207918,
+          "clone_cum_mint": 1101.6169387156997,
+          "clone_rank": 1.1896623933039883,
+          "pool": 100.875
+        },
+        {
+          "epoch": 145,
+          "service_rev": 70.0,
+          "clone_mint": 12.4358112317,
+          "clone_cum_mint": 1160.5641867133995,
+          "clone_rank": 1.1908080328585031,
+          "pool": 100.875
+        },
+        {
+          "epoch": 150,
+          "service_rev": 70.0,
+          "clone_mint": 9.3504037744,
+          "clone_cum_mint": 1212.8567324655996,
+          "clone_rank": 1.1917545723342946,
+          "pool": 100.875
+        },
+        {
+          "epoch": 155,
+          "service_rev": 70.0,
+          "clone_mint": 9.7685885524,
+          "clone_cum_mint": 1271.2871430332998,
+          "clone_rank": 1.1920547920079452,
+          "pool": 100.875
+        },
+        {
+          "epoch": 160,
+          "service_rev": 70.0,
+          "clone_mint": 9.0924227297,
+          "clone_cum_mint": 1324.8877891782997,
+          "clone_rank": 1.1918623683510594,
+          "pool": 100.875
+        },
+        {
+          "epoch": 165,
+          "service_rev": 70.0,
+          "clone_mint": 11.1889444634,
+          "clone_cum_mint": 1380.1708180956998,
+          "clone_rank": 1.1913887945488317,
+          "pool": 100.875
+        },
+        {
+          "epoch": 170,
+          "service_rev": 70.0,
+          "clone_mint": 11.7408490283,
+          "clone_cum_mint": 1437.1914713979997,
+          "clone_rank": 1.191137060521528,
+          "pool": 100.875
+        },
+        {
+          "epoch": 175,
+          "service_rev": 70.0,
+          "clone_mint": 10.9533945948,
+          "clone_cum_mint": 1493.3779862519,
+          "clone_rank": 1.1916653158389372,
+          "pool": 100.875
+        },
+        {
+          "epoch": 180,
+          "service_rev": 70.0,
+          "clone_mint": 10.1545351637,
+          "clone_cum_mint": 1549.4656986129,
+          "clone_rank": 1.1922009628064996,
+          "pool": 100.875
+        },
+        {
+          "epoch": 185,
+          "service_rev": 70.0,
+          "clone_mint": 11.3401047774,
+          "clone_cum_mint": 1605.7059816503001,
+          "clone_rank": 1.1928647661943357,
+          "pool": 100.875
+        },
+        {
+          "epoch": 190,
+          "service_rev": 70.0,
+          "clone_mint": 10.0118879968,
+          "clone_cum_mint": 1664.9252584427004,
+          "clone_rank": 1.192811728667352,
+          "pool": 100.875
+        },
+        {
+          "epoch": 195,
+          "service_rev": 70.0,
+          "clone_mint": 10.6734991167,
+          "clone_cum_mint": 1720.6088356379005,
+          "clone_rank": 1.19303264107312,
+          "pool": 100.875
+        },
+        {
+          "epoch": 199,
+          "service_rev": 70.0,
+          "clone_mint": 11.8759554632,
+          "clone_cum_mint": 1766.5174191638005,
+          "clone_rank": 1.1931109617176054,
+          "pool": 100.875
+        }
+      ],
+      "phi": 0.3,
+      "rediscovery_cost": 20.0
+    },
+    {
+      "clone_cum_mint": 1786.2558351506993,
+      "final_service_rev": 70.0,
+      "payback_epoch": 45,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 70.0,
+          "clone_mint": 11.8139708814,
+          "clone_cum_mint": 57.8189723438,
+          "clone_rank": 1.0554907934785964,
+          "pool": 100.875
+        },
+        {
+          "epoch": 50,
+          "service_rev": 70.0,
+          "clone_mint": 12.7067053834,
+          "clone_cum_mint": 116.448495356,
+          "clone_rank": 1.1165038811406935,
+          "pool": 100.875
+        },
+        {
+          "epoch": 55,
+          "service_rev": 70.0,
+          "clone_mint": 11.8975930452,
+          "clone_cum_mint": 172.62171625450003,
+          "clone_rank": 1.1375260400992264,
+          "pool": 100.875
+        },
+        {
+          "epoch": 60,
+          "service_rev": 70.0,
+          "clone_mint": 11.2835742581,
+          "clone_cum_mint": 228.38762229910006,
+          "clone_rank": 1.1528657917885923,
+          "pool": 100.875
+        },
+        {
+          "epoch": 65,
+          "service_rev": 70.0,
+          "clone_mint": 12.4454243592,
+          "clone_cum_mint": 287.6272416835001,
+          "clone_rank": 1.1625475899227684,
+          "pool": 100.875
+        },
+        {
+          "epoch": 70,
+          "service_rev": 70.0,
+          "clone_mint": 11.4083056629,
+          "clone_cum_mint": 342.89969808730007,
+          "clone_rank": 1.165756565145896,
+          "pool": 100.875
+        },
+        {
+          "epoch": 75,
+          "service_rev": 70.0,
+          "clone_mint": 11.7890878131,
+          "clone_cum_mint": 402.95522046110005,
+          "clone_rank": 1.1708749923664943,
+          "pool": 100.875
+        },
+        {
+          "epoch": 80,
+          "service_rev": 70.0,
+          "clone_mint": 11.5822152852,
+          "clone_cum_mint": 459.6998917482001,
+          "clone_rank": 1.1747780915690837,
+          "pool": 100.875
+        },
+        {
+          "epoch": 85,
+          "service_rev": 70.0,
+          "clone_mint": 9.8318873155,
+          "clone_cum_mint": 512.9506169229,
+          "clone_rank": 1.1750942457097102,
+          "pool": 100.875
+        },
+        {
+          "epoch": 90,
+          "service_rev": 70.0,
+          "clone_mint": 12.921689544,
+          "clone_cum_mint": 572.9138170019,
+          "clone_rank": 1.1789266345659293,
+          "pool": 100.875
+        },
+        {
+          "epoch": 95,
+          "service_rev": 70.0,
+          "clone_mint": 10.8685817422,
+          "clone_cum_mint": 625.3820698006001,
+          "clone_rank": 1.1805035748737316,
+          "pool": 100.875
+        },
+        {
+          "epoch": 100,
+          "service_rev": 70.0,
+          "clone_mint": 12.1357248957,
+          "clone_cum_mint": 683.4069198044002,
+          "clone_rank": 1.1819539727555703,
+          "pool": 100.875
+        },
+        {
+          "epoch": 105,
+          "service_rev": 70.0,
+          "clone_mint": 11.8566346279,
+          "clone_cum_mint": 741.4287818295003,
+          "clone_rank": 1.1831619749225997,
+          "pool": 100.875
+        },
+        {
+          "epoch": 110,
+          "service_rev": 70.0,
+          "clone_mint": 10.8444945168,
+          "clone_cum_mint": 797.4722769113002,
+          "clone_rank": 1.1853121227768155,
+          "pool": 100.875
+        },
+        {
+          "epoch": 115,
+          "service_rev": 70.0,
+          "clone_mint": 11.5676535728,
+          "clone_cum_mint": 852.5887591056004,
+          "clone_rank": 1.1860449091514043,
+          "pool": 100.875
+        },
+        {
+          "epoch": 120,
+          "service_rev": 70.0,
+          "clone_mint": 12.864693947,
+          "clone_cum_mint": 914.1846393632003,
+          "clone_rank": 1.1853768446624027,
+          "pool": 100.875
+        },
+        {
+          "epoch": 125,
+          "service_rev": 70.0,
+          "clone_mint": 11.7890878128,
+          "clone_cum_mint": 970.0098945892003,
+          "clone_rank": 1.1851716276790476,
+          "pool": 100.875
+        },
+        {
+          "epoch": 130,
+          "service_rev": 70.0,
+          "clone_mint": 12.1946719964,
+          "clone_cum_mint": 1026.6439466126003,
+          "clone_rank": 1.1857733614437784,
+          "pool": 100.875
+        },
+        {
+          "epoch": 135,
+          "service_rev": 70.0,
+          "clone_mint": 11.3117688901,
+          "clone_cum_mint": 1078.0360427902,
+          "clone_rank": 1.1869215115204188,
+          "pool": 100.875
+        },
+        {
+          "epoch": 140,
+          "service_rev": 70.0,
+          "clone_mint": 11.2447139577,
+          "clone_cum_mint": 1135.9035151145001,
+          "clone_rank": 1.18798575492798,
+          "pool": 100.875
+        },
+        {
+          "epoch": 145,
+          "service_rev": 70.0,
+          "clone_mint": 12.7852116125,
+          "clone_cum_mint": 1196.3250513753,
+          "clone_rank": 1.1887119241885475,
+          "pool": 100.875
+        },
+        {
+          "epoch": 150,
+          "service_rev": 70.0,
+          "clone_mint": 9.3340682694,
+          "clone_cum_mint": 1250.4821113856,
+          "clone_rank": 1.1886166919096868,
+          "pool": 100.875
+        },
+        {
+          "epoch": 155,
+          "service_rev": 70.0,
+          "clone_mint": 11.4773318484,
+          "clone_cum_mint": 1304.7686645908998,
+          "clone_rank": 1.1892527714596017,
+          "pool": 100.875
+        },
+        {
+          "epoch": 160,
+          "service_rev": 70.0,
+          "clone_mint": 10.5512802008,
+          "clone_cum_mint": 1362.8077141105998,
+          "clone_rank": 1.189294862881679,
+          "pool": 100.875
+        },
+        {
+          "epoch": 165,
+          "service_rev": 70.0,
+          "clone_mint": 10.6926621488,
+          "clone_cum_mint": 1421.3172690594,
+          "clone_rank": 1.1890821855900333,
+          "pool": 100.875
+        },
+        {
+          "epoch": 170,
+          "service_rev": 70.0,
+          "clone_mint": 9.7135642033,
+          "clone_cum_mint": 1472.9317655515997,
+          "clone_rank": 1.1901606498410509,
+          "pool": 100.875
+        },
+        {
+          "epoch": 175,
+          "service_rev": 70.0,
+          "clone_mint": 11.5972876158,
+          "clone_cum_mint": 1528.6332191231998,
+          "clone_rank": 1.1904716458640883,
+          "pool": 100.875
+        },
+        {
+          "epoch": 180,
+          "service_rev": 70.0,
+          "clone_mint": 11.4773318481,
+          "clone_cum_mint": 1584.2198257232997,
+          "clone_rank": 1.1913033925694183,
+          "pool": 100.875
+        },
+        {
+          "epoch": 185,
+          "service_rev": 70.0,
+          "clone_mint": 11.4483069033,
+          "clone_cum_mint": 1639.0768938820995,
+          "clone_rank": 1.1914554079329327,
+          "pool": 100.875
+        },
+        {
+          "epoch": 190,
+          "service_rev": 70.0,
+          "clone_mint": 10.0025161217,
+          "clone_cum_mint": 1693.3766269742996,
+          "clone_rank": 1.1914986222689314,
+          "pool": 100.875
+        },
+        {
+          "epoch": 195,
+          "service_rev": 70.0,
+          "clone_mint": 10.8555505557,
+          "clone_cum_mint": 1743.6070216909995,
+          "clone_rank": 1.1917715346307958,
+          "pool": 100.875
+        },
+        {
+          "epoch": 199,
+          "service_rev": 70.0,
+          "clone_mint": 10.8357360149,
+          "clone_cum_mint": 1786.2558351506993,
+          "clone_rank": 1.192350651360858,
+          "pool": 100.875
+        }
+      ],
+      "phi": 0.3,
+      "rediscovery_cost": 50.0
+    },
+    {
+      "clone_cum_mint": 3595.156452920001,
+      "final_service_rev": 30.000000000000004,
+      "payback_epoch": 40,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.4912117222,
+          "clone_cum_mint": 115.63042877250001,
+          "clone_rank": 1.1280126812703235,
+          "pool": 100.375
+        },
+        {
+          "epoch": 50,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.7560432701,
+          "clone_cum_mint": 223.34598014960005,
+          "clone_rank": 1.1587497771443358,
+          "pool": 100.375
+        },
+        {
+          "epoch": 55,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.6316362377,
+          "clone_cum_mint": 333.27609581530004,
+          "clone_rank": 1.172394655428255,
+          "pool": 100.375
+        },
+        {
+          "epoch": 60,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.7422368253,
+          "clone_cum_mint": 453.4928994899,
+          "clone_rank": 1.1815496498229234,
+          "pool": 100.375
+        },
+        {
+          "epoch": 65,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.8312059348,
+          "clone_cum_mint": 566.828607465,
+          "clone_rank": 1.1868052434226,
+          "pool": 100.375
+        },
+        {
+          "epoch": 70,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.2875088645,
+          "clone_cum_mint": 686.055411362,
+          "clone_rank": 1.1880127397211842,
+          "pool": 100.375
+        },
+        {
+          "epoch": 75,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.9674238816,
+          "clone_cum_mint": 792.2945525955,
+          "clone_rank": 1.1880759566293544,
+          "pool": 100.375
+        },
+        {
+          "epoch": 80,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.5877035796,
+          "clone_cum_mint": 906.1630056713,
+          "clone_rank": 1.1891671940500483,
+          "pool": 100.375
+        },
+        {
+          "epoch": 85,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 25.0759146168,
+          "clone_cum_mint": 1022.1897277379,
+          "clone_rank": 1.1912065810881576,
+          "pool": 100.375
+        },
+        {
+          "epoch": 90,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.1957623234,
+          "clone_cum_mint": 1134.4098890351,
+          "clone_rank": 1.1928181839210388,
+          "pool": 100.375
+        },
+        {
+          "epoch": 95,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.3015185659,
+          "clone_cum_mint": 1247.5857768530002,
+          "clone_rank": 1.1921818753980287,
+          "pool": 100.375
+        },
+        {
+          "epoch": 100,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.2308481808,
+          "clone_cum_mint": 1361.4890058554001,
+          "clone_rank": 1.1925818923396938,
+          "pool": 100.375
+        },
+        {
+          "epoch": 105,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.8586127352,
+          "clone_cum_mint": 1474.2434910661004,
+          "clone_rank": 1.1935093013125166,
+          "pool": 100.375
+        },
+        {
+          "epoch": 110,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.4685938758,
+          "clone_cum_mint": 1591.5303023052004,
+          "clone_rank": 1.1942434841845355,
+          "pool": 100.375
+        },
+        {
+          "epoch": 115,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.5271977573,
+          "clone_cum_mint": 1706.4632181011004,
+          "clone_rank": 1.194556973361483,
+          "pool": 100.375
+        },
+        {
+          "epoch": 120,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.8135644239,
+          "clone_cum_mint": 1820.2944135173004,
+          "clone_rank": 1.195451783660059,
+          "pool": 100.375
+        },
+        {
+          "epoch": 125,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.366787024,
+          "clone_cum_mint": 1933.3347260439004,
+          "clone_rank": 1.1957705592567924,
+          "pool": 100.375
+        },
+        {
+          "epoch": 130,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.8861031107,
+          "clone_cum_mint": 2047.0169323059006,
+          "clone_rank": 1.196112841551734,
+          "pool": 100.375
+        },
+        {
+          "epoch": 135,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.9633165938,
+          "clone_cum_mint": 2157.419283276,
+          "clone_rank": 1.1960287565155365,
+          "pool": 100.375
+        },
+        {
+          "epoch": 140,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.9140680347,
+          "clone_cum_mint": 2264.9341574504,
+          "clone_rank": 1.1962155768515377,
+          "pool": 100.375
+        },
+        {
+          "epoch": 145,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.5971601971,
+          "clone_cum_mint": 2378.0884117549003,
+          "clone_rank": 1.1966480175704741,
+          "pool": 100.375
+        },
+        {
+          "epoch": 150,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.3992429292,
+          "clone_cum_mint": 2493.1477516625,
+          "clone_rank": 1.1969517906544007,
+          "pool": 100.375
+        },
+        {
+          "epoch": 155,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.707267297,
+          "clone_cum_mint": 2601.5298261379,
+          "clone_rank": 1.1970554223989147,
+          "pool": 100.375
+        },
+        {
+          "epoch": 160,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 18.4513330158,
+          "clone_cum_mint": 2707.7193556216,
+          "clone_rank": 1.19706110760995,
+          "pool": 100.375
+        },
+        {
+          "epoch": 165,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.4388618177,
+          "clone_cum_mint": 2821.6267331838,
+          "clone_rank": 1.1971035746982719,
+          "pool": 100.375
+        },
+        {
+          "epoch": 170,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.5976917391,
+          "clone_cum_mint": 2936.0938491667002,
+          "clone_rank": 1.1973595934468397,
+          "pool": 100.375
+        },
+        {
+          "epoch": 175,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 25.4448476675,
+          "clone_cum_mint": 3051.3477132786,
+          "clone_rank": 1.1973392794755044,
+          "pool": 100.375
+        },
+        {
+          "epoch": 180,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.9639550418,
+          "clone_cum_mint": 3157.8318838214004,
+          "clone_rank": 1.1972554341262476,
+          "pool": 100.375
+        },
+        {
+          "epoch": 185,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.741227668,
+          "clone_cum_mint": 3268.029246456201,
+          "clone_rank": 1.197072733806962,
+          "pool": 100.375
+        },
+        {
+          "epoch": 190,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.1024810038,
+          "clone_cum_mint": 3381.7576342671014,
+          "clone_rank": 1.197191123571374,
+          "pool": 100.375
+        },
+        {
+          "epoch": 195,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.0132241799,
+          "clone_cum_mint": 3501.0550682475014,
+          "clone_rank": 1.1973197402744844,
+          "pool": 100.375
+        },
+        {
+          "epoch": 199,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.6827436449,
+          "clone_cum_mint": 3595.156452920001,
+          "clone_rank": 1.1973729562017474,
+          "pool": 100.375
+        }
+      ],
+      "phi": 0.7,
+      "rediscovery_cost": 0.0
+    },
+    {
+      "clone_cum_mint": 3583.644632545601,
+      "final_service_rev": 30.000000000000004,
+      "payback_epoch": 41,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.5988596887,
+          "clone_cum_mint": 113.4845515707,
+          "clone_rank": 1.1212065266375433,
+          "pool": 100.375
+        },
+        {
+          "epoch": 50,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.204818157,
+          "clone_cum_mint": 222.5099888522,
+          "clone_rank": 1.1518306056443723,
+          "pool": 100.375
+        },
+        {
+          "epoch": 55,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 18.6334840303,
+          "clone_cum_mint": 328.7054946344,
+          "clone_rank": 1.1642227501891655,
+          "pool": 100.375
+        },
+        {
+          "epoch": 60,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.5576599052,
+          "clone_cum_mint": 435.4499587599,
+          "clone_rank": 1.172707670554355,
+          "pool": 100.375
+        },
+        {
+          "epoch": 65,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.3994081175,
+          "clone_cum_mint": 544.1651831939,
+          "clone_rank": 1.176621338807896,
+          "pool": 100.375
+        },
+        {
+          "epoch": 70,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.7061214971,
+          "clone_cum_mint": 658.8639210758001,
+          "clone_rank": 1.1799384366476415,
+          "pool": 100.375
+        },
+        {
+          "epoch": 75,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.0504754215,
+          "clone_cum_mint": 775.3128533950002,
+          "clone_rank": 1.1834350934443951,
+          "pool": 100.375
+        },
+        {
+          "epoch": 80,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.4752507748,
+          "clone_cum_mint": 887.647035046,
+          "clone_rank": 1.184840945986878,
+          "pool": 100.375
+        },
+        {
+          "epoch": 85,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 26.2431195546,
+          "clone_cum_mint": 1001.4518891189999,
+          "clone_rank": 1.1860251356242253,
+          "pool": 100.375
+        },
+        {
+          "epoch": 90,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.8772659769,
+          "clone_cum_mint": 1120.76971613,
+          "clone_rank": 1.1884160263692443,
+          "pool": 100.375
+        },
+        {
+          "epoch": 95,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.5346743044,
+          "clone_cum_mint": 1234.7641146736999,
+          "clone_rank": 1.1887348110240095,
+          "pool": 100.375
+        },
+        {
+          "epoch": 100,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.2860062913,
+          "clone_cum_mint": 1349.8784928872,
+          "clone_rank": 1.1894286211566096,
+          "pool": 100.375
+        },
+        {
+          "epoch": 105,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.3237712181,
+          "clone_cum_mint": 1462.5553819307002,
+          "clone_rank": 1.190855099395504,
+          "pool": 100.375
+        },
+        {
+          "epoch": 110,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.9284663373,
+          "clone_cum_mint": 1569.1939072198002,
+          "clone_rank": 1.1917398510185684,
+          "pool": 100.375
+        },
+        {
+          "epoch": 115,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.3440813778,
+          "clone_cum_mint": 1684.5699951891004,
+          "clone_rank": 1.1920992118762568,
+          "pool": 100.375
+        },
+        {
+          "epoch": 120,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.0885509797,
+          "clone_cum_mint": 1798.8708259414002,
+          "clone_rank": 1.1919336058208765,
+          "pool": 100.375
+        },
+        {
+          "epoch": 125,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.8956876284,
+          "clone_cum_mint": 1905.8945069404,
+          "clone_rank": 1.1921795972098013,
+          "pool": 100.375
+        },
+        {
+          "epoch": 130,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.1700365879,
+          "clone_cum_mint": 2014.3241490236003,
+          "clone_rank": 1.1923162010648638,
+          "pool": 100.375
+        },
+        {
+          "epoch": 135,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.2228418195,
+          "clone_cum_mint": 2125.9128198618,
+          "clone_rank": 1.1926738808414272,
+          "pool": 100.375
+        },
+        {
+          "epoch": 140,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8299603402,
+          "clone_cum_mint": 2237.1528091457003,
+          "clone_rank": 1.192039212030115,
+          "pool": 100.375
+        },
+        {
+          "epoch": 145,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.1957623234,
+          "clone_cum_mint": 2355.1913987917005,
+          "clone_rank": 1.1922613551002401,
+          "pool": 100.375
+        },
+        {
+          "epoch": 150,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.1052799649,
+          "clone_cum_mint": 2472.2112432032004,
+          "clone_rank": 1.1923409623974024,
+          "pool": 100.375
+        },
+        {
+          "epoch": 155,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.0017969474,
+          "clone_cum_mint": 2586.1913257286005,
+          "clone_rank": 1.1921252242626954,
+          "pool": 100.375
+        },
+        {
+          "epoch": 160,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.3040675245,
+          "clone_cum_mint": 2702.682303096301,
+          "clone_rank": 1.1922769673434668,
+          "pool": 100.375
+        },
+        {
+          "epoch": 165,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.4138725083,
+          "clone_cum_mint": 2812.5642967977005,
+          "clone_rank": 1.1928593768447755,
+          "pool": 100.375
+        },
+        {
+          "epoch": 170,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.5568482062,
+          "clone_cum_mint": 2929.3095968025004,
+          "clone_rank": 1.1928835452024442,
+          "pool": 100.375
+        },
+        {
+          "epoch": 175,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.6901528612,
+          "clone_cum_mint": 3042.2555456208006,
+          "clone_rank": 1.1931737389499673,
+          "pool": 100.375
+        },
+        {
+          "epoch": 180,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.732143881,
+          "clone_cum_mint": 3154.4992348218007,
+          "clone_rank": 1.1931398198871894,
+          "pool": 100.375
+        },
+        {
+          "epoch": 185,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.8791198364,
+          "clone_cum_mint": 3268.6358597962003,
+          "clone_rank": 1.1929852062443667,
+          "pool": 100.375
+        },
+        {
+          "epoch": 190,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.4059622365,
+          "clone_cum_mint": 3381.8106854210005,
+          "clone_rank": 1.1929670215640469,
+          "pool": 100.375
+        },
+        {
+          "epoch": 195,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.881154855,
+          "clone_cum_mint": 3495.6904631497005,
+          "clone_rank": 1.1932987023964345,
+          "pool": 100.375
+        },
+        {
+          "epoch": 199,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.006651299,
+          "clone_cum_mint": 3583.644632545601,
+          "clone_rank": 1.1931415733881923,
+          "pool": 100.375
+        }
+      ],
+      "phi": 0.7,
+      "rediscovery_cost": 5.0
+    },
+    {
+      "clone_cum_mint": 3588.3074013239016,
+      "final_service_rev": 30.000000000000004,
+      "payback_epoch": 41,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.4907501784,
+          "clone_cum_mint": 111.58733664989998,
+          "clone_rank": 1.1239776632986374,
+          "pool": 100.375
+        },
+        {
+          "epoch": 50,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 25.752455722,
+          "clone_cum_mint": 226.2481286447,
+          "clone_rank": 1.1565985078691874,
+          "pool": 100.375
+        },
+        {
+          "epoch": 55,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.4394962802,
+          "clone_cum_mint": 341.4105116473,
+          "clone_rank": 1.16501152307299,
+          "pool": 100.375
+        },
+        {
+          "epoch": 60,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.915935042,
+          "clone_cum_mint": 453.6689348298,
+          "clone_rank": 1.1751122329790138,
+          "pool": 100.375
+        },
+        {
+          "epoch": 65,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.8904085254,
+          "clone_cum_mint": 566.3140532310999,
+          "clone_rank": 1.178205789368843,
+          "pool": 100.375
+        },
+        {
+          "epoch": 70,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.0987831907,
+          "clone_cum_mint": 679.7387310516,
+          "clone_rank": 1.1816876364247562,
+          "pool": 100.375
+        },
+        {
+          "epoch": 75,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.5730851042,
+          "clone_cum_mint": 796.5706572461,
+          "clone_rank": 1.1817775350177313,
+          "pool": 100.375
+        },
+        {
+          "epoch": 80,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.4542752097,
+          "clone_cum_mint": 913.0618494937,
+          "clone_rank": 1.183634226966634,
+          "pool": 100.375
+        },
+        {
+          "epoch": 85,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8474345757,
+          "clone_cum_mint": 1027.6370371419,
+          "clone_rank": 1.1842489568489603,
+          "pool": 100.375
+        },
+        {
+          "epoch": 90,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.6143882716,
+          "clone_cum_mint": 1140.5630289868,
+          "clone_rank": 1.1853482816881342,
+          "pool": 100.375
+        },
+        {
+          "epoch": 95,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.4321245043,
+          "clone_cum_mint": 1252.6495822332,
+          "clone_rank": 1.185616414720662,
+          "pool": 100.375
+        },
+        {
+          "epoch": 100,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.4114729133,
+          "clone_cum_mint": 1364.0092203129,
+          "clone_rank": 1.1865446950851155,
+          "pool": 100.375
+        },
+        {
+          "epoch": 105,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.1224395123,
+          "clone_cum_mint": 1480.4713563057,
+          "clone_rank": 1.1860308504096557,
+          "pool": 100.375
+        },
+        {
+          "epoch": 110,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.7989766057,
+          "clone_cum_mint": 1592.8759557225003,
+          "clone_rank": 1.1866097714424828,
+          "pool": 100.375
+        },
+        {
+          "epoch": 115,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.1594899837,
+          "clone_cum_mint": 1703.7548333860002,
+          "clone_rank": 1.1866880774906028,
+          "pool": 100.375
+        },
+        {
+          "epoch": 120,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.1140325367,
+          "clone_cum_mint": 1814.4300600210004,
+          "clone_rank": 1.1873434616562937,
+          "pool": 100.375
+        },
+        {
+          "epoch": 125,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.3861981014,
+          "clone_cum_mint": 1928.5351311922002,
+          "clone_rank": 1.1879543324415671,
+          "pool": 100.375
+        },
+        {
+          "epoch": 130,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.8735352493,
+          "clone_cum_mint": 2038.8685452308,
+          "clone_rank": 1.1887405659010666,
+          "pool": 100.375
+        },
+        {
+          "epoch": 135,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.4037778291,
+          "clone_cum_mint": 2157.5023559745996,
+          "clone_rank": 1.1890720461347692,
+          "pool": 100.375
+        },
+        {
+          "epoch": 140,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.3791836505,
+          "clone_cum_mint": 2268.7233607676,
+          "clone_rank": 1.1897764232546364,
+          "pool": 100.375
+        },
+        {
+          "epoch": 145,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.4229464266,
+          "clone_cum_mint": 2384.8529638462,
+          "clone_rank": 1.1902775164900143,
+          "pool": 100.375
+        },
+        {
+          "epoch": 150,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.2644617042,
+          "clone_cum_mint": 2493.654042151201,
+          "clone_rank": 1.190817114982734,
+          "pool": 100.375
+        },
+        {
+          "epoch": 155,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 25.242534455,
+          "clone_cum_mint": 2607.4992085168014,
+          "clone_rank": 1.1915371689804437,
+          "pool": 100.375
+        },
+        {
+          "epoch": 160,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.7282177611,
+          "clone_cum_mint": 2724.8311327589017,
+          "clone_rank": 1.1917385554394617,
+          "pool": 100.375
+        },
+        {
+          "epoch": 165,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.0629749725,
+          "clone_cum_mint": 2834.0294398828014,
+          "clone_rank": 1.191812111979716,
+          "pool": 100.375
+        },
+        {
+          "epoch": 170,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.2552126464,
+          "clone_cum_mint": 2944.717251704502,
+          "clone_rank": 1.191718911369559,
+          "pool": 100.375
+        },
+        {
+          "epoch": 175,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.7229716456,
+          "clone_cum_mint": 3058.1186081056017,
+          "clone_rank": 1.1921616007468039,
+          "pool": 100.375
+        },
+        {
+          "epoch": 180,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.0757863507,
+          "clone_cum_mint": 3170.0056809580014,
+          "clone_rank": 1.192305366676204,
+          "pool": 100.375
+        },
+        {
+          "epoch": 185,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.0018552448,
+          "clone_cum_mint": 3277.4098520317016,
+          "clone_rank": 1.192604916004235,
+          "pool": 100.375
+        },
+        {
+          "epoch": 190,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.3681680731,
+          "clone_cum_mint": 3388.6102227477018,
+          "clone_rank": 1.1925149333299607,
+          "pool": 100.375
+        },
+        {
+          "epoch": 195,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 19.8031966246,
+          "clone_cum_mint": 3496.7051975156014,
+          "clone_rank": 1.1927205353123727,
+          "pool": 100.375
+        },
+        {
+          "epoch": 199,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.2507590305,
+          "clone_cum_mint": 3588.3074013239016,
+          "clone_rank": 1.1932620762826505,
+          "pool": 100.375
+        }
+      ],
+      "phi": 0.7,
+      "rediscovery_cost": 20.0
+    },
+    {
+      "clone_cum_mint": 3613.1385912814003,
+      "final_service_rev": 30.000000000000004,
+      "payback_epoch": 43,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.6475293877,
+          "clone_cum_mint": 112.5638837785,
+          "clone_rank": 1.1354301109679863,
+          "pool": 100.375
+        },
+        {
+          "epoch": 50,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.4553356051,
+          "clone_cum_mint": 227.2826954379,
+          "clone_rank": 1.1583511628475567,
+          "pool": 100.375
+        },
+        {
+          "epoch": 55,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 19.2482817166,
+          "clone_cum_mint": 339.7944240307,
+          "clone_rank": 1.1720254735741722,
+          "pool": 100.375
+        },
+        {
+          "epoch": 60,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 25.1657194627,
+          "clone_cum_mint": 452.6727249623,
+          "clone_rank": 1.176817182839915,
+          "pool": 100.375
+        },
+        {
+          "epoch": 65,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.5877035802,
+          "clone_cum_mint": 567.0306546705,
+          "clone_rank": 1.180560426545432,
+          "pool": 100.375
+        },
+        {
+          "epoch": 70,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 25.6421924214,
+          "clone_cum_mint": 680.7327144871,
+          "clone_rank": 1.185238975300177,
+          "pool": 100.375
+        },
+        {
+          "epoch": 75,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8508729713,
+          "clone_cum_mint": 791.1299084685,
+          "clone_rank": 1.1859853005516559,
+          "pool": 100.375
+        },
+        {
+          "epoch": 80,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.5004221978,
+          "clone_cum_mint": 901.0647917555001,
+          "clone_rank": 1.1885303220714014,
+          "pool": 100.375
+        },
+        {
+          "epoch": 85,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8026910205,
+          "clone_cum_mint": 1015.1380209548001,
+          "clone_rank": 1.1895274471116042,
+          "pool": 100.375
+        },
+        {
+          "epoch": 90,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 25.3541678638,
+          "clone_cum_mint": 1129.2510269420002,
+          "clone_rank": 1.1903325779888632,
+          "pool": 100.375
+        },
+        {
+          "epoch": 95,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.1259075949,
+          "clone_cum_mint": 1245.4326529823002,
+          "clone_rank": 1.1906531552066246,
+          "pool": 100.375
+        },
+        {
+          "epoch": 100,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.1882561065,
+          "clone_cum_mint": 1359.7272059703,
+          "clone_rank": 1.1907352469854087,
+          "pool": 100.375
+        },
+        {
+          "epoch": 105,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.5817221788,
+          "clone_cum_mint": 1473.6097833891001,
+          "clone_rank": 1.1905123977984764,
+          "pool": 100.375
+        },
+        {
+          "epoch": 110,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.5340204758,
+          "clone_cum_mint": 1586.282534309,
+          "clone_rank": 1.191415440641917,
+          "pool": 100.375
+        },
+        {
+          "epoch": 115,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.7563574086,
+          "clone_cum_mint": 1699.0424638301001,
+          "clone_rank": 1.1919050111417064,
+          "pool": 100.375
+        },
+        {
+          "epoch": 120,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.7061214977,
+          "clone_cum_mint": 1816.1292821092,
+          "clone_rank": 1.192624292607476,
+          "pool": 100.375
+        },
+        {
+          "epoch": 125,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.9591874433,
+          "clone_cum_mint": 1936.0424711720998,
+          "clone_rank": 1.1922179795375012,
+          "pool": 100.375
+        },
+        {
+          "epoch": 130,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.529850122,
+          "clone_cum_mint": 2052.3032246575,
+          "clone_rank": 1.1923834589714206,
+          "pool": 100.375
+        },
+        {
+          "epoch": 135,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.2609238149,
+          "clone_cum_mint": 2168.4597717550996,
+          "clone_rank": 1.192822416935729,
+          "pool": 100.375
+        },
+        {
+          "epoch": 140,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8492224058,
+          "clone_cum_mint": 2279.6444545729996,
+          "clone_rank": 1.1928115471683756,
+          "pool": 100.375
+        },
+        {
+          "epoch": 145,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.1932708363,
+          "clone_cum_mint": 2398.9819272263,
+          "clone_rank": 1.193301955025512,
+          "pool": 100.375
+        },
+        {
+          "epoch": 150,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.8329825621,
+          "clone_cum_mint": 2507.718076514799,
+          "clone_rank": 1.1935305420108224,
+          "pool": 100.375
+        },
+        {
+          "epoch": 155,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.9671520807,
+          "clone_cum_mint": 2617.878503382599,
+          "clone_rank": 1.193561759476685,
+          "pool": 100.375
+        },
+        {
+          "epoch": 160,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.8056049908,
+          "clone_cum_mint": 2733.347843274899,
+          "clone_rank": 1.1933264951893516,
+          "pool": 100.375
+        },
+        {
+          "epoch": 165,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.6719016444,
+          "clone_cum_mint": 2848.651558506199,
+          "clone_rank": 1.1938421836478093,
+          "pool": 100.375
+        },
+        {
+          "epoch": 170,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.0018552448,
+          "clone_cum_mint": 2958.307442821999,
+          "clone_rank": 1.1941982272311462,
+          "pool": 100.375
+        },
+        {
+          "epoch": 175,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.2464066759,
+          "clone_cum_mint": 3074.944689291799,
+          "clone_rank": 1.1941635903744077,
+          "pool": 100.375
+        },
+        {
+          "epoch": 180,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.7227271516,
+          "clone_cum_mint": 3192.2800912018993,
+          "clone_rank": 1.1942629913737102,
+          "pool": 100.375
+        },
+        {
+          "epoch": 185,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.1716096581,
+          "clone_cum_mint": 3307.5672593358995,
+          "clone_rank": 1.1945225893330962,
+          "pool": 100.375
+        },
+        {
+          "epoch": 190,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.7045844256,
+          "clone_cum_mint": 3421.6011269404,
+          "clone_rank": 1.1942916251186986,
+          "pool": 100.375
+        },
+        {
+          "epoch": 195,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.7385019012,
+          "clone_cum_mint": 3528.8415101434,
+          "clone_rank": 1.194204789605954,
+          "pool": 100.375
+        },
+        {
+          "epoch": 199,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.4614413001,
+          "clone_cum_mint": 3613.1385912814003,
+          "clone_rank": 1.1946641627647625,
+          "pool": 100.375
+        }
+      ],
+      "phi": 0.7,
+      "rediscovery_cost": 50.0
+    },
+    {
+      "clone_cum_mint": 4404.7872475405,
+      "final_service_rev": 0.0,
+      "payback_epoch": 40,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 0.0,
+          "clone_mint": 25.4097453102,
+          "clone_cum_mint": 135.4781040688,
+          "clone_rank": 1.1373400018244508,
+          "pool": 100.0
+        },
+        {
+          "epoch": 50,
+          "service_rev": 0.0,
+          "clone_mint": 24.781398963,
+          "clone_cum_mint": 274.4080722145,
+          "clone_rank": 1.1576577296261503,
+          "pool": 100.0
+        },
+        {
+          "epoch": 55,
+          "service_rev": 0.0,
+          "clone_mint": 27.6354142798,
+          "clone_cum_mint": 417.5054185154,
+          "clone_rank": 1.1705925615134902,
+          "pool": 100.0
+        },
+        {
+          "epoch": 60,
+          "service_rev": 0.0,
+          "clone_mint": 25.623202022,
+          "clone_cum_mint": 554.5510430618,
+          "clone_rank": 1.176354215315179,
+          "pool": 100.0
+        },
+        {
+          "epoch": 65,
+          "service_rev": 0.0,
+          "clone_mint": 25.224755586,
+          "clone_cum_mint": 688.2046012602,
+          "clone_rank": 1.1787679440259056,
+          "pool": 100.0
+        },
+        {
+          "epoch": 70,
+          "service_rev": 0.0,
+          "clone_mint": 27.2937719639,
+          "clone_cum_mint": 829.2466323056,
+          "clone_rank": 1.1828123173166416,
+          "pool": 100.0
+        },
+        {
+          "epoch": 75,
+          "service_rev": 0.0,
+          "clone_mint": 29.1557113729,
+          "clone_cum_mint": 967.3956124619,
+          "clone_rank": 1.1844673381177293,
+          "pool": 100.0
+        },
+        {
+          "epoch": 80,
+          "service_rev": 0.0,
+          "clone_mint": 24.8913529307,
+          "clone_cum_mint": 1102.0648705506999,
+          "clone_rank": 1.1854421792475451,
+          "pool": 100.0
+        },
+        {
+          "epoch": 85,
+          "service_rev": 0.0,
+          "clone_mint": 26.259644446,
+          "clone_cum_mint": 1238.3765328235002,
+          "clone_rank": 1.1862068534093884,
+          "pool": 100.0
+        },
+        {
+          "epoch": 90,
+          "service_rev": 0.0,
+          "clone_mint": 25.6232020226,
+          "clone_cum_mint": 1383.0929043201004,
+          "clone_rank": 1.1878394260460232,
+          "pool": 100.0
+        },
+        {
+          "epoch": 95,
+          "service_rev": 0.0,
+          "clone_mint": 23.973771965,
+          "clone_cum_mint": 1517.5206070936003,
+          "clone_rank": 1.1880717180529767,
+          "pool": 100.0
+        },
+        {
+          "epoch": 100,
+          "service_rev": 0.0,
+          "clone_mint": 30.4038555844,
+          "clone_cum_mint": 1660.0353299238004,
+          "clone_rank": 1.1887517875620937,
+          "pool": 100.0
+        },
+        {
+          "epoch": 105,
+          "service_rev": 0.0,
+          "clone_mint": 25.9760870382,
+          "clone_cum_mint": 1801.7757416541006,
+          "clone_rank": 1.1887755910087208,
+          "pool": 100.0
+        },
+        {
+          "epoch": 110,
+          "service_rev": 0.0,
+          "clone_mint": 26.899690682,
+          "clone_cum_mint": 1942.7082602997004,
+          "clone_rank": 1.1891589450111488,
+          "pool": 100.0
+        },
+        {
+          "epoch": 115,
+          "service_rev": 0.0,
+          "clone_mint": 27.5816068691,
+          "clone_cum_mint": 2080.3142203600005,
+          "clone_rank": 1.1897807711912085,
+          "pool": 100.0
+        },
+        {
+          "epoch": 120,
+          "service_rev": 0.0,
+          "clone_mint": 28.4289651124,
+          "clone_cum_mint": 2218.0708735631006,
+          "clone_rank": 1.1906268628645438,
+          "pool": 100.0
+        },
+        {
+          "epoch": 125,
+          "service_rev": 0.0,
+          "clone_mint": 28.5575372962,
+          "clone_cum_mint": 2359.5187398851003,
+          "clone_rank": 1.190455143564118,
+          "pool": 100.0
+        },
+        {
+          "epoch": 130,
+          "service_rev": 0.0,
+          "clone_mint": 25.9787732369,
+          "clone_cum_mint": 2495.4672649961003,
+          "clone_rank": 1.1907635815768787,
+          "pool": 100.0
+        },
+        {
+          "epoch": 135,
+          "service_rev": 0.0,
+          "clone_mint": 26.4875796244,
+          "clone_cum_mint": 2632.0087319425,
+          "clone_rank": 1.19103741838172,
+          "pool": 100.0
+        },
+        {
+          "epoch": 140,
+          "service_rev": 0.0,
+          "clone_mint": 28.4139943445,
+          "clone_cum_mint": 2770.9982656163006,
+          "clone_rank": 1.1913654099482354,
+          "pool": 100.0
+        },
+        {
+          "epoch": 145,
+          "service_rev": 0.0,
+          "clone_mint": 28.7662069935,
+          "clone_cum_mint": 2908.7613228967007,
+          "clone_rank": 1.191633010230129,
+          "pool": 100.0
+        },
+        {
+          "epoch": 150,
+          "service_rev": 0.0,
+          "clone_mint": 27.5252248721,
+          "clone_cum_mint": 3047.9041031395004,
+          "clone_rank": 1.192061293077752,
+          "pool": 100.0
+        },
+        {
+          "epoch": 155,
+          "service_rev": 0.0,
+          "clone_mint": 29.2396381329,
+          "clone_cum_mint": 3187.0164286731006,
+          "clone_rank": 1.1923678644312423,
+          "pool": 100.0
+        },
+        {
+          "epoch": 160,
+          "service_rev": 0.0,
+          "clone_mint": 27.4394451464,
+          "clone_cum_mint": 3326.0797805105003,
+          "clone_rank": 1.192815537928984,
+          "pool": 100.0
+        },
+        {
+          "epoch": 165,
+          "service_rev": 0.0,
+          "clone_mint": 28.7805898742,
+          "clone_cum_mint": 3468.1568045458002,
+          "clone_rank": 1.193281267662774,
+          "pool": 100.0
+        },
+        {
+          "epoch": 170,
+          "service_rev": 0.0,
+          "clone_mint": 28.3442676954,
+          "clone_cum_mint": 3606.3251097314,
+          "clone_rank": 1.193386698803533,
+          "pool": 100.0
+        },
+        {
+          "epoch": 175,
+          "service_rev": 0.0,
+          "clone_mint": 26.3840605409,
+          "clone_cum_mint": 3742.4046169820003,
+          "clone_rank": 1.1935094405601694,
+          "pool": 100.0
+        },
+        {
+          "epoch": 180,
+          "service_rev": 0.0,
+          "clone_mint": 28.8716773384,
+          "clone_cum_mint": 3876.8629522492006,
+          "clone_rank": 1.193557160229408,
+          "pool": 100.0
+        },
+        {
+          "epoch": 185,
+          "service_rev": 0.0,
+          "clone_mint": 27.623951171,
+          "clone_cum_mint": 4017.5428539298005,
+          "clone_rank": 1.1936990397897596,
+          "pool": 100.0
+        },
+        {
+          "epoch": 190,
+          "service_rev": 0.0,
+          "clone_mint": 27.4965956143,
+          "clone_cum_mint": 4155.9191273124,
+          "clone_rank": 1.1937461913236933,
+          "pool": 100.0
+        },
+        {
+          "epoch": 195,
+          "service_rev": 0.0,
+          "clone_mint": 29.2386858998,
+          "clone_cum_mint": 4297.501228485699,
+          "clone_rank": 1.193361714564702,
+          "pool": 100.0
+        },
+        {
+          "epoch": 199,
+          "service_rev": 0.0,
+          "clone_mint": 25.1643805265,
+          "clone_cum_mint": 4404.7872475405,
+          "clone_rank": 1.1934706157133568,
+          "pool": 100.0
+        }
+      ],
+      "phi": 1.0,
+      "rediscovery_cost": 0.0
+    },
+    {
+      "clone_cum_mint": 4346.911049335503,
+      "final_service_rev": 0.0,
+      "payback_epoch": 41,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 0.0,
+          "clone_mint": 22.8636048419,
+          "clone_cum_mint": 131.97664052099998,
+          "clone_rank": 1.141357738007996,
+          "pool": 100.0
+        },
+        {
+          "epoch": 50,
+          "service_rev": 0.0,
+          "clone_mint": 25.9243009467,
+          "clone_cum_mint": 269.9726693664,
+          "clone_rank": 1.1640690380219216,
+          "pool": 100.0
+        },
+        {
+          "epoch": 55,
+          "service_rev": 0.0,
+          "clone_mint": 28.6834319082,
+          "clone_cum_mint": 408.61620379310006,
+          "clone_rank": 1.174201487761107,
+          "pool": 100.0
+        },
+        {
+          "epoch": 60,
+          "service_rev": 0.0,
+          "clone_mint": 27.3389529021,
+          "clone_cum_mint": 545.2601253699,
+          "clone_rank": 1.1816295518826874,
+          "pool": 100.0
+        },
+        {
+          "epoch": 65,
+          "service_rev": 0.0,
+          "clone_mint": 27.2117605467,
+          "clone_cum_mint": 687.531346857,
+          "clone_rank": 1.1830049698419831,
+          "pool": 100.0
+        },
+        {
+          "epoch": 70,
+          "service_rev": 0.0,
+          "clone_mint": 26.4019410005,
+          "clone_cum_mint": 824.6482831487,
+          "clone_rank": 1.1849318020302637,
+          "pool": 100.0
+        },
+        {
+          "epoch": 75,
+          "service_rev": 0.0,
+          "clone_mint": 26.3687648876,
+          "clone_cum_mint": 960.8336812115,
+          "clone_rank": 1.1863351480202708,
+          "pool": 100.0
+        },
+        {
+          "epoch": 80,
+          "service_rev": 0.0,
+          "clone_mint": 27.1289681902,
+          "clone_cum_mint": 1091.6205911516,
+          "clone_rank": 1.1878429612064034,
+          "pool": 100.0
+        },
+        {
+          "epoch": 85,
+          "service_rev": 0.0,
+          "clone_mint": 27.6227580013,
+          "clone_cum_mint": 1225.2560495701,
+          "clone_rank": 1.1884763992982617,
+          "pool": 100.0
+        },
+        {
+          "epoch": 90,
+          "service_rev": 0.0,
+          "clone_mint": 28.5967827297,
+          "clone_cum_mint": 1365.6755877585001,
+          "clone_rank": 1.1903521589293418,
+          "pool": 100.0
+        },
+        {
+          "epoch": 95,
+          "service_rev": 0.0,
+          "clone_mint": 26.2970982058,
+          "clone_cum_mint": 1501.9222825613,
+          "clone_rank": 1.1910857235596752,
+          "pool": 100.0
+        },
+        {
+          "epoch": 100,
+          "service_rev": 0.0,
+          "clone_mint": 26.7361569438,
+          "clone_cum_mint": 1634.9806577355002,
+          "clone_rank": 1.192107019409293,
+          "pool": 100.0
+        },
+        {
+          "epoch": 105,
+          "service_rev": 0.0,
+          "clone_mint": 27.3547928607,
+          "clone_cum_mint": 1772.5107308369004,
+          "clone_rank": 1.1921548423911599,
+          "pool": 100.0
+        },
+        {
+          "epoch": 110,
+          "service_rev": 0.0,
+          "clone_mint": 25.9656681252,
+          "clone_cum_mint": 1911.1223194593006,
+          "clone_rank": 1.1927457381601214,
+          "pool": 100.0
+        },
+        {
+          "epoch": 115,
+          "service_rev": 0.0,
+          "clone_mint": 25.3262505045,
+          "clone_cum_mint": 2048.945155261101,
+          "clone_rank": 1.192975454713772,
+          "pool": 100.0
+        },
+        {
+          "epoch": 120,
+          "service_rev": 0.0,
+          "clone_mint": 28.0740625773,
+          "clone_cum_mint": 2189.909001489201,
+          "clone_rank": 1.1926671472055355,
+          "pool": 100.0
+        },
+        {
+          "epoch": 125,
+          "service_rev": 0.0,
+          "clone_mint": 25.730106737,
+          "clone_cum_mint": 2325.2066426943006,
+          "clone_rank": 1.1930511963968846,
+          "pool": 100.0
+        },
+        {
+          "epoch": 130,
+          "service_rev": 0.0,
+          "clone_mint": 28.0184670619,
+          "clone_cum_mint": 2463.821927869801,
+          "clone_rank": 1.1930998708042027,
+          "pool": 100.0
+        },
+        {
+          "epoch": 135,
+          "service_rev": 0.0,
+          "clone_mint": 28.3458503462,
+          "clone_cum_mint": 2601.2988267737014,
+          "clone_rank": 1.1939824380391477,
+          "pool": 100.0
+        },
+        {
+          "epoch": 140,
+          "service_rev": 0.0,
+          "clone_mint": 27.5320479966,
+          "clone_cum_mint": 2734.5880223776016,
+          "clone_rank": 1.1937901947156453,
+          "pool": 100.0
+        },
+        {
+          "epoch": 145,
+          "service_rev": 0.0,
+          "clone_mint": 26.4460251957,
+          "clone_cum_mint": 2867.5544912134014,
+          "clone_rank": 1.1939417965650658,
+          "pool": 100.0
+        },
+        {
+          "epoch": 150,
+          "service_rev": 0.0,
+          "clone_mint": 24.2949098498,
+          "clone_cum_mint": 3002.8365350318018,
+          "clone_rank": 1.1942634935494059,
+          "pool": 100.0
+        },
+        {
+          "epoch": 155,
+          "service_rev": 0.0,
+          "clone_mint": 29.9106392539,
+          "clone_cum_mint": 3142.3317244030018,
+          "clone_rank": 1.194377382728275,
+          "pool": 100.0
+        },
+        {
+          "epoch": 160,
+          "service_rev": 0.0,
+          "clone_mint": 27.9228673134,
+          "clone_cum_mint": 3282.134537707902,
+          "clone_rank": 1.1943561681700596,
+          "pool": 100.0
+        },
+        {
+          "epoch": 165,
+          "service_rev": 0.0,
+          "clone_mint": 26.26255341,
+          "clone_cum_mint": 3418.498749995402,
+          "clone_rank": 1.1946966382615942,
+          "pool": 100.0
+        },
+        {
+          "epoch": 170,
+          "service_rev": 0.0,
+          "clone_mint": 27.4321761836,
+          "clone_cum_mint": 3557.258201780902,
+          "clone_rank": 1.1945694222630139,
+          "pool": 100.0
+        },
+        {
+          "epoch": 175,
+          "service_rev": 0.0,
+          "clone_mint": 24.2331441692,
+          "clone_cum_mint": 3687.9028155110013,
+          "clone_rank": 1.1948345365451192,
+          "pool": 100.0
+        },
+        {
+          "epoch": 180,
+          "service_rev": 0.0,
+          "clone_mint": 29.3824318656,
+          "clone_cum_mint": 3826.4899333345015,
+          "clone_rank": 1.194995675661539,
+          "pool": 100.0
+        },
+        {
+          "epoch": 185,
+          "service_rev": 0.0,
+          "clone_mint": 25.316410891,
+          "clone_cum_mint": 3963.0806375289017,
+          "clone_rank": 1.1951561655472291,
+          "pool": 100.0
+        },
+        {
+          "epoch": 190,
+          "service_rev": 0.0,
+          "clone_mint": 26.8069319921,
+          "clone_cum_mint": 4100.402831010202,
+          "clone_rank": 1.1949377191812056,
+          "pool": 100.0
+        },
+        {
+          "epoch": 195,
+          "service_rev": 0.0,
+          "clone_mint": 26.9296308011,
+          "clone_cum_mint": 4237.845375193702,
+          "clone_rank": 1.194956351122641,
+          "pool": 100.0
+        },
+        {
+          "epoch": 199,
+          "service_rev": 0.0,
+          "clone_mint": 28.5967827297,
+          "clone_cum_mint": 4346.911049335503,
+          "clone_rank": 1.1948735473228238,
+          "pool": 100.0
+        }
+      ],
+      "phi": 1.0,
+      "rediscovery_cost": 5.0
+    },
+    {
+      "clone_cum_mint": 4350.469490395299,
+      "final_service_rev": 0.0,
+      "payback_epoch": 41,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 0.0,
+          "clone_mint": 25.8141819165,
+          "clone_cum_mint": 135.6188338829,
+          "clone_rank": 1.1412206225427282,
+          "pool": 100.0
+        },
+        {
+          "epoch": 50,
+          "service_rev": 0.0,
+          "clone_mint": 30.0713977866,
+          "clone_cum_mint": 278.0286205486,
+          "clone_rank": 1.1648937936150965,
+          "pool": 100.0
+        },
+        {
+          "epoch": 55,
+          "service_rev": 0.0,
+          "clone_mint": 29.7025318304,
+          "clone_cum_mint": 418.6050275144,
+          "clone_rank": 1.1754596967923594,
+          "pool": 100.0
+        },
+        {
+          "epoch": 60,
+          "service_rev": 0.0,
+          "clone_mint": 28.1335972236,
+          "clone_cum_mint": 556.4340627299,
+          "clone_rank": 1.1810884050666313,
+          "pool": 100.0
+        },
+        {
+          "epoch": 65,
+          "service_rev": 0.0,
+          "clone_mint": 28.4448619769,
+          "clone_cum_mint": 692.9630117930001,
+          "clone_rank": 1.1838476029607607,
+          "pool": 100.0
+        },
+        {
+          "epoch": 70,
+          "service_rev": 0.0,
+          "clone_mint": 25.0561799563,
+          "clone_cum_mint": 828.6013817404001,
+          "clone_rank": 1.18487758075462,
+          "pool": 100.0
+        },
+        {
+          "epoch": 75,
+          "service_rev": 0.0,
+          "clone_mint": 23.2364399302,
+          "clone_cum_mint": 961.6859961220002,
+          "clone_rank": 1.1871621839253577,
+          "pool": 100.0
+        },
+        {
+          "epoch": 80,
+          "service_rev": 0.0,
+          "clone_mint": 27.3078548713,
+          "clone_cum_mint": 1096.3801450218002,
+          "clone_rank": 1.1876987652120006,
+          "pool": 100.0
+        },
+        {
+          "epoch": 85,
+          "service_rev": 0.0,
+          "clone_mint": 25.130536698,
+          "clone_cum_mint": 1228.7071553999003,
+          "clone_rank": 1.1876679789874047,
+          "pool": 100.0
+        },
+        {
+          "epoch": 90,
+          "service_rev": 0.0,
+          "clone_mint": 27.0825526687,
+          "clone_cum_mint": 1365.7911645325003,
+          "clone_rank": 1.1887605036115785,
+          "pool": 100.0
+        },
+        {
+          "epoch": 95,
+          "service_rev": 0.0,
+          "clone_mint": 25.9760870382,
+          "clone_cum_mint": 1501.6873254186003,
+          "clone_rank": 1.1891741105504814,
+          "pool": 100.0
+        },
+        {
+          "epoch": 100,
+          "service_rev": 0.0,
+          "clone_mint": 28.5151948128,
+          "clone_cum_mint": 1641.6637642776002,
+          "clone_rank": 1.1895782163245368,
+          "pool": 100.0
+        },
+        {
+          "epoch": 105,
+          "service_rev": 0.0,
+          "clone_mint": 25.7028885514,
+          "clone_cum_mint": 1777.2209818452002,
+          "clone_rank": 1.1893125110340617,
+          "pool": 100.0
+        },
+        {
+          "epoch": 110,
+          "service_rev": 0.0,
+          "clone_mint": 27.4612838891,
+          "clone_cum_mint": 1912.0415462536005,
+          "clone_rank": 1.1893943214751312,
+          "pool": 100.0
+        },
+        {
+          "epoch": 115,
+          "service_rev": 0.0,
+          "clone_mint": 29.1945242315,
+          "clone_cum_mint": 2054.0640846985,
+          "clone_rank": 1.1901007269536943,
+          "pool": 100.0
+        },
+        {
+          "epoch": 120,
+          "service_rev": 0.0,
+          "clone_mint": 27.0603005112,
+          "clone_cum_mint": 2189.3259789177996,
+          "clone_rank": 1.190654081174138,
+          "pool": 100.0
+        },
+        {
+          "epoch": 125,
+          "service_rev": 0.0,
+          "clone_mint": 28.6663230981,
+          "clone_cum_mint": 2331.408111182899,
+          "clone_rank": 1.1913296599727052,
+          "pool": 100.0
+        },
+        {
+          "epoch": 130,
+          "service_rev": 0.0,
+          "clone_mint": 25.7239580164,
+          "clone_cum_mint": 2464.330179038399,
+          "clone_rank": 1.1922839269643495,
+          "pool": 100.0
+        },
+        {
+          "epoch": 135,
+          "service_rev": 0.0,
+          "clone_mint": 26.2548219521,
+          "clone_cum_mint": 2601.0365537251987,
+          "clone_rank": 1.1928837374162184,
+          "pool": 100.0
+        },
+        {
+          "epoch": 140,
+          "service_rev": 0.0,
+          "clone_mint": 26.6545654284,
+          "clone_cum_mint": 2739.116882041298,
+          "clone_rank": 1.1926064163767527,
+          "pool": 100.0
+        },
+        {
+          "epoch": 145,
+          "service_rev": 0.0,
+          "clone_mint": 29.0611214099,
+          "clone_cum_mint": 2876.5273799901984,
+          "clone_rank": 1.1927413753599891,
+          "pool": 100.0
+        },
+        {
+          "epoch": 150,
+          "service_rev": 0.0,
+          "clone_mint": 27.0534690959,
+          "clone_cum_mint": 3007.1790747160985,
+          "clone_rank": 1.1928001218551754,
+          "pool": 100.0
+        },
+        {
+          "epoch": 155,
+          "service_rev": 0.0,
+          "clone_mint": 26.7714295172,
+          "clone_cum_mint": 3148.2720708162988,
+          "clone_rank": 1.1929104061502733,
+          "pool": 100.0
+        },
+        {
+          "epoch": 160,
+          "service_rev": 0.0,
+          "clone_mint": 25.9092888386,
+          "clone_cum_mint": 3279.0021206410984,
+          "clone_rank": 1.193275508219569,
+          "pool": 100.0
+        },
+        {
+          "epoch": 165,
+          "service_rev": 0.0,
+          "clone_mint": 27.9712098774,
+          "clone_cum_mint": 3420.785720534298,
+          "clone_rank": 1.1935906909841016,
+          "pool": 100.0
+        },
+        {
+          "epoch": 170,
+          "service_rev": 0.0,
+          "clone_mint": 27.9257378568,
+          "clone_cum_mint": 3562.8055555582982,
+          "clone_rank": 1.193776532657219,
+          "pool": 100.0
+        },
+        {
+          "epoch": 175,
+          "service_rev": 0.0,
+          "clone_mint": 25.9610799706,
+          "clone_cum_mint": 3700.1653456802983,
+          "clone_rank": 1.1939123101175273,
+          "pool": 100.0
+        },
+        {
+          "epoch": 180,
+          "service_rev": 0.0,
+          "clone_mint": 27.5608437784,
+          "clone_cum_mint": 3834.4930125381984,
+          "clone_rank": 1.1943003296153538,
+          "pool": 100.0
+        },
+        {
+          "epoch": 185,
+          "service_rev": 0.0,
+          "clone_mint": 26.6082796931,
+          "clone_cum_mint": 3967.0905224677986,
+          "clone_rank": 1.1943590021464519,
+          "pool": 100.0
+        },
+        {
+          "epoch": 190,
+          "service_rev": 0.0,
+          "clone_mint": 29.5608833555,
+          "clone_cum_mint": 4102.588981417399,
+          "clone_rank": 1.1947437902576203,
+          "pool": 100.0
+        },
+        {
+          "epoch": 195,
+          "service_rev": 0.0,
+          "clone_mint": 28.56713045,
+          "clone_cum_mint": 4237.566870197299,
+          "clone_rank": 1.1947562911120093,
+          "pool": 100.0
+        },
+        {
+          "epoch": 199,
+          "service_rev": 0.0,
+          "clone_mint": 27.3250981427,
+          "clone_cum_mint": 4350.469490395299,
+          "clone_rank": 1.194720626102585,
+          "pool": 100.0
+        }
+      ],
+      "phi": 1.0,
+      "rediscovery_cost": 20.0
+    },
+    {
+      "clone_cum_mint": 4337.769487047199,
+      "final_service_rev": 0.0,
+      "payback_epoch": 42,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 0.0,
+          "clone_mint": 28.4554500962,
+          "clone_cum_mint": 143.835479048,
+          "clone_rank": 1.1459970595558182,
+          "pool": 100.0
+        },
+        {
+          "epoch": 50,
+          "service_rev": 0.0,
+          "clone_mint": 25.2368918592,
+          "clone_cum_mint": 280.6680425944,
+          "clone_rank": 1.1718376907083898,
+          "pool": 100.0
+        },
+        {
+          "epoch": 55,
+          "service_rev": 0.0,
+          "clone_mint": 25.2568066084,
+          "clone_cum_mint": 415.8828528087,
+          "clone_rank": 1.1846820603368717,
+          "pool": 100.0
+        },
+        {
+          "epoch": 60,
+          "service_rev": 0.0,
+          "clone_mint": 29.4903324966,
+          "clone_cum_mint": 548.8313149211,
+          "clone_rank": 1.1889494007136794,
+          "pool": 100.0
+        },
+        {
+          "epoch": 65,
+          "service_rev": 0.0,
+          "clone_mint": 25.8092391596,
+          "clone_cum_mint": 684.9600809749,
+          "clone_rank": 1.1903840837467246,
+          "pool": 100.0
+        },
+        {
+          "epoch": 70,
+          "service_rev": 0.0,
+          "clone_mint": 27.716036682,
+          "clone_cum_mint": 821.9428788077,
+          "clone_rank": 1.1914106758394416,
+          "pool": 100.0
+        },
+        {
+          "epoch": 75,
+          "service_rev": 0.0,
+          "clone_mint": 28.0492036505,
+          "clone_cum_mint": 958.2467161766999,
+          "clone_rank": 1.1933023905455005,
+          "pool": 100.0
+        },
+        {
+          "epoch": 80,
+          "service_rev": 0.0,
+          "clone_mint": 28.0595032763,
+          "clone_cum_mint": 1091.7718887944998,
+          "clone_rank": 1.192944074692567,
+          "pool": 100.0
+        },
+        {
+          "epoch": 85,
+          "service_rev": 0.0,
+          "clone_mint": 27.5837320274,
+          "clone_cum_mint": 1230.4103436007,
+          "clone_rank": 1.1930306505292534,
+          "pool": 100.0
+        },
+        {
+          "epoch": 90,
+          "service_rev": 0.0,
+          "clone_mint": 28.3786303527,
+          "clone_cum_mint": 1368.1534491182,
+          "clone_rank": 1.1930078844516343,
+          "pool": 100.0
+        },
+        {
+          "epoch": 95,
+          "service_rev": 0.0,
+          "clone_mint": 26.0014135049,
+          "clone_cum_mint": 1505.8004903757999,
+          "clone_rank": 1.1941162545750919,
+          "pool": 100.0
+        },
+        {
+          "epoch": 100,
+          "service_rev": 0.0,
+          "clone_mint": 27.2510216842,
+          "clone_cum_mint": 1640.8665472226996,
+          "clone_rank": 1.1936349116255942,
+          "pool": 100.0
+        },
+        {
+          "epoch": 105,
+          "service_rev": 0.0,
+          "clone_mint": 28.8427045503,
+          "clone_cum_mint": 1780.5246213985997,
+          "clone_rank": 1.193714939319692,
+          "pool": 100.0
+        },
+        {
+          "epoch": 110,
+          "service_rev": 0.0,
+          "clone_mint": 28.4155214136,
+          "clone_cum_mint": 1913.5078971184994,
+          "clone_rank": 1.1938428739626707,
+          "pool": 100.0
+        },
+        {
+          "epoch": 115,
+          "service_rev": 0.0,
+          "clone_mint": 25.4422850018,
+          "clone_cum_mint": 2047.1510235210994,
+          "clone_rank": 1.1942201841779356,
+          "pool": 100.0
+        },
+        {
+          "epoch": 120,
+          "service_rev": 0.0,
+          "clone_mint": 26.4607086881,
+          "clone_cum_mint": 2180.5374933315993,
+          "clone_rank": 1.193552049352614,
+          "pool": 100.0
+        },
+        {
+          "epoch": 125,
+          "service_rev": 0.0,
+          "clone_mint": 26.8737560243,
+          "clone_cum_mint": 2317.148858173099,
+          "clone_rank": 1.1940467700228357,
+          "pool": 100.0
+        },
+        {
+          "epoch": 130,
+          "service_rev": 0.0,
+          "clone_mint": 26.9020147627,
+          "clone_cum_mint": 2450.9422962151993,
+          "clone_rank": 1.1946788981449616,
+          "pool": 100.0
+        },
+        {
+          "epoch": 135,
+          "service_rev": 0.0,
+          "clone_mint": 29.2385220106,
+          "clone_cum_mint": 2592.3265566659993,
+          "clone_rank": 1.1950445923618611,
+          "pool": 100.0
+        },
+        {
+          "epoch": 140,
+          "service_rev": 0.0,
+          "clone_mint": 27.8685547511,
+          "clone_cum_mint": 2729.051075144899,
+          "clone_rank": 1.1950062388512968,
+          "pool": 100.0
+        },
+        {
+          "epoch": 145,
+          "service_rev": 0.0,
+          "clone_mint": 28.9036457349,
+          "clone_cum_mint": 2867.244059227599,
+          "clone_rank": 1.19503632494189,
+          "pool": 100.0
+        },
+        {
+          "epoch": 150,
+          "service_rev": 0.0,
+          "clone_mint": 26.9285552252,
+          "clone_cum_mint": 3004.3518921873992,
+          "clone_rank": 1.1952016442956968,
+          "pool": 100.0
+        },
+        {
+          "epoch": 155,
+          "service_rev": 0.0,
+          "clone_mint": 27.6507303977,
+          "clone_cum_mint": 3136.6473977885994,
+          "clone_rank": 1.1948253623039222,
+          "pool": 100.0
+        },
+        {
+          "epoch": 160,
+          "service_rev": 0.0,
+          "clone_mint": 25.7876343296,
+          "clone_cum_mint": 3267.6690242135996,
+          "clone_rank": 1.1950833115397326,
+          "pool": 100.0
+        },
+        {
+          "epoch": 165,
+          "service_rev": 0.0,
+          "clone_mint": 26.5279968145,
+          "clone_cum_mint": 3407.4845315582998,
+          "clone_rank": 1.1951152799063869,
+          "pool": 100.0
+        },
+        {
+          "epoch": 170,
+          "service_rev": 0.0,
+          "clone_mint": 29.4575562328,
+          "clone_cum_mint": 3546.2291254650995,
+          "clone_rank": 1.1948805534199034,
+          "pool": 100.0
+        },
+        {
+          "epoch": 175,
+          "service_rev": 0.0,
+          "clone_mint": 29.837396692,
+          "clone_cum_mint": 3685.7337379218993,
+          "clone_rank": 1.1952712877803195,
+          "pool": 100.0
+        },
+        {
+          "epoch": 180,
+          "service_rev": 0.0,
+          "clone_mint": 26.8468340032,
+          "clone_cum_mint": 3820.542939492699,
+          "clone_rank": 1.1952684110541756,
+          "pool": 100.0
+        },
+        {
+          "epoch": 185,
+          "service_rev": 0.0,
+          "clone_mint": 25.0045104549,
+          "clone_cum_mint": 3956.933237571399,
+          "clone_rank": 1.1951110684686648,
+          "pool": 100.0
+        },
+        {
+          "epoch": 190,
+          "service_rev": 0.0,
+          "clone_mint": 26.7314523521,
+          "clone_cum_mint": 4091.219304032399,
+          "clone_rank": 1.1950158672919629,
+          "pool": 100.0
+        },
+        {
+          "epoch": 195,
+          "service_rev": 0.0,
+          "clone_mint": 28.9826404097,
+          "clone_cum_mint": 4224.662042673399,
+          "clone_rank": 1.194858329399937,
+          "pool": 100.0
+        },
+        {
+          "epoch": 199,
+          "service_rev": 0.0,
+          "clone_mint": 29.1776581606,
+          "clone_cum_mint": 4337.769487047199,
+          "clone_rank": 1.1950479995748835,
+          "pool": 100.0
+        }
+      ],
+      "phi": 1.0,
+      "rediscovery_cost": 50.0
+    }
+  ],
+  "coupling": [
+    {
+      "clone_cum_mint": 3621.3993225918,
+      "final_service_rev": 30.000000000000004,
+      "payback_epoch": 58,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 101.25
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 101.25
+        },
+        {
+          "epoch": 45,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.1142140761,
+          "clone_cum_mint": 117.2764088384,
+          "clone_rank": 1.1327088673136765,
+          "pool": 100.375
+        },
+        {
+          "epoch": 50,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.7779843737,
+          "clone_cum_mint": 231.15052394850002,
+          "clone_rank": 1.1638051323206797,
+          "pool": 100.375
+        },
+        {
+          "epoch": 55,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.993783893,
+          "clone_cum_mint": 349.2350061203,
+          "clone_rank": 1.1718658091227703,
+          "pool": 100.375
+        },
+        {
+          "epoch": 60,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.7174133145,
+          "clone_cum_mint": 460.47941357020005,
+          "clone_rank": 1.1775909307978365,
+          "pool": 100.375
+        },
+        {
+          "epoch": 65,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.3471221288,
+          "clone_cum_mint": 571.1572077012002,
+          "clone_rank": 1.1803626143194101,
+          "pool": 100.375
+        },
+        {
+          "epoch": 70,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.6901528612,
+          "clone_cum_mint": 685.4398137251003,
+          "clone_rank": 1.1826231788678592,
+          "pool": 100.375
+        },
+        {
+          "epoch": 75,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.2112738425,
+          "clone_cum_mint": 796.1780583526003,
+          "clone_rank": 1.1826679112487533,
+          "pool": 100.375
+        },
+        {
+          "epoch": 80,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8962776301,
+          "clone_cum_mint": 910.1390698962003,
+          "clone_rank": 1.185441807103055,
+          "pool": 100.375
+        },
+        {
+          "epoch": 85,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.9140680342,
+          "clone_cum_mint": 1024.5293933054004,
+          "clone_rank": 1.186318597165687,
+          "pool": 100.375
+        },
+        {
+          "epoch": 90,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.4257912382,
+          "clone_cum_mint": 1138.5630482242004,
+          "clone_rank": 1.1870052256580208,
+          "pool": 100.375
+        },
+        {
+          "epoch": 95,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.0814514044,
+          "clone_cum_mint": 1252.6465003842002,
+          "clone_rank": 1.1878860051821658,
+          "pool": 100.375
+        },
+        {
+          "epoch": 100,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.143173481,
+          "clone_cum_mint": 1365.5509981962002,
+          "clone_rank": 1.1884494937066714,
+          "pool": 100.375
+        },
+        {
+          "epoch": 105,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.319898951,
+          "clone_cum_mint": 1477.1119530299002,
+          "clone_rank": 1.1877828718275452,
+          "pool": 100.375
+        },
+        {
+          "epoch": 110,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.9299792769,
+          "clone_cum_mint": 1589.9362673766002,
+          "clone_rank": 1.188967854251767,
+          "pool": 100.375
+        },
+        {
+          "epoch": 115,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.5405453231,
+          "clone_cum_mint": 1703.7265498506003,
+          "clone_rank": 1.189160620460096,
+          "pool": 100.375
+        },
+        {
+          "epoch": 120,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.8956876284,
+          "clone_cum_mint": 1818.7715170484005,
+          "clone_rank": 1.189281942046073,
+          "pool": 100.375
+        },
+        {
+          "epoch": 125,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.146062327,
+          "clone_cum_mint": 1937.4871407744001,
+          "clone_rank": 1.1905617797983647,
+          "pool": 100.375
+        },
+        {
+          "epoch": 130,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.9584201447,
+          "clone_cum_mint": 2052.1445271381,
+          "clone_rank": 1.190456831041689,
+          "pool": 100.375
+        },
+        {
+          "epoch": 135,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.368611015,
+          "clone_cum_mint": 2170.5872420457,
+          "clone_rank": 1.1904925251616467,
+          "pool": 100.375
+        },
+        {
+          "epoch": 140,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.1909045691,
+          "clone_cum_mint": 2284.9731139106,
+          "clone_rank": 1.1900613638365023,
+          "pool": 100.375
+        },
+        {
+          "epoch": 145,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.8756970476,
+          "clone_cum_mint": 2398.4064651655003,
+          "clone_rank": 1.1903393089483298,
+          "pool": 100.375
+        },
+        {
+          "epoch": 150,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.4037778297,
+          "clone_cum_mint": 2519.0558092125007,
+          "clone_rank": 1.1908058259321326,
+          "pool": 100.375
+        },
+        {
+          "epoch": 155,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.6841954359,
+          "clone_cum_mint": 2632.6089670382007,
+          "clone_rank": 1.1912705005742468,
+          "pool": 100.375
+        },
+        {
+          "epoch": 160,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.3410153685,
+          "clone_cum_mint": 2743.5719758756004,
+          "clone_rank": 1.1911442764123046,
+          "pool": 100.375
+        },
+        {
+          "epoch": 165,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.3947198666,
+          "clone_cum_mint": 2858.080982088,
+          "clone_rank": 1.1912716051397536,
+          "pool": 100.375
+        },
+        {
+          "epoch": 170,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.2511406941,
+          "clone_cum_mint": 2973.9410280075,
+          "clone_rank": 1.191760452632999,
+          "pool": 100.375
+        },
+        {
+          "epoch": 175,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.3329488709,
+          "clone_cum_mint": 3079.1114465226,
+          "clone_rank": 1.1916410864388378,
+          "pool": 100.375
+        },
+        {
+          "epoch": 180,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8811548544,
+          "clone_cum_mint": 3196.8504771441,
+          "clone_rank": 1.191716502790436,
+          "pool": 100.375
+        },
+        {
+          "epoch": 185,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.369567281,
+          "clone_cum_mint": 3309.8761419841994,
+          "clone_rank": 1.191803219746657,
+          "pool": 100.375
+        },
+        {
+          "epoch": 190,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.97289068,
+          "clone_cum_mint": 3418.5366022047997,
+          "clone_rank": 1.1921495034986462,
+          "pool": 100.375
+        },
+        {
+          "epoch": 195,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.5600441359,
+          "clone_cum_mint": 3533.9883278866996,
+          "clone_rank": 1.19246739976158,
+          "pool": 100.375
+        },
+        {
+          "epoch": 199,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.0987831896,
+          "clone_cum_mint": 3621.3993225918,
+          "clone_rank": 1.1926576151945463,
+          "pool": 100.375
+        }
+      ],
+      "recycle_on": true
+    },
+    {
+      "clone_cum_mint": 3607.8698108017006,
+      "final_service_rev": 30.000000000000004,
+      "payback_epoch": 58,
+      "records": [
+        {
+          "epoch": 0,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 100.0
+        },
+        {
+          "epoch": 5,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 100.0
+        },
+        {
+          "epoch": 10,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 100.0
+        },
+        {
+          "epoch": 15,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 100.0
+        },
+        {
+          "epoch": 20,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 100.0
+        },
+        {
+          "epoch": 25,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 100.0
+        },
+        {
+          "epoch": 30,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 100.0
+        },
+        {
+          "epoch": 35,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.0,
+          "pool": 100.0
+        },
+        {
+          "epoch": 40,
+          "service_rev": 100.0,
+          "clone_mint": 0.0,
+          "clone_cum_mint": 0.0,
+          "clone_rank": 0.75,
+          "pool": 100.0
+        },
+        {
+          "epoch": 45,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.0353315827,
+          "clone_cum_mint": 116.8382653435,
+          "clone_rank": 1.1327088673136765,
+          "pool": 100.0
+        },
+        {
+          "epoch": 50,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.6891500609,
+          "clone_cum_mint": 230.28694789390002,
+          "clone_rank": 1.1638051323206797,
+          "pool": 100.0
+        },
+        {
+          "epoch": 55,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.9116153355,
+          "clone_cum_mint": 347.9302676168,
+          "clone_rank": 1.1718658091227703,
+          "pool": 100.0
+        },
+        {
+          "epoch": 60,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.6362772747,
+          "clone_cum_mint": 458.75906706869995,
+          "clone_rank": 1.1775909307978365,
+          "pool": 100.0
+        },
+        {
+          "epoch": 65,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.256161523,
+          "clone_cum_mint": 569.0233700633999,
+          "clone_rank": 1.1803626143194101,
+          "pool": 100.0
+        },
+        {
+          "epoch": 70,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.6016466862,
+          "clone_cum_mint": 682.8790174097999,
+          "clone_rank": 1.1826231788678592,
+          "pool": 100.0
+        },
+        {
+          "epoch": 75,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.1245567547,
+          "clone_cum_mint": 793.2035450586,
+          "clone_rank": 1.1826679112487533,
+          "pool": 100.0
+        },
+        {
+          "epoch": 80,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8144733551,
+          "clone_cum_mint": 906.7387993985,
+          "clone_rank": 1.185441807103055,
+          "pool": 100.0
+        },
+        {
+          "epoch": 85,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8321972943,
+          "clone_cum_mint": 1020.701761699,
+          "clone_rank": 1.186318597165687,
+          "pool": 100.0
+        },
+        {
+          "epoch": 90,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.3457446955,
+          "clone_cum_mint": 1134.3093880189997,
+          "clone_rank": 1.1870052256580208,
+          "pool": 100.0
+        },
+        {
+          "epoch": 95,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.002691312,
+          "clone_cum_mint": 1247.9666255382997,
+          "clone_rank": 1.1878860051821658,
+          "pool": 100.0
+        },
+        {
+          "epoch": 100,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.0529748254,
+          "clone_cum_mint": 1360.4493132711998,
+          "clone_rank": 1.1884494937066714,
+          "pool": 100.0
+        },
+        {
+          "epoch": 105,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.2365120309,
+          "clone_cum_mint": 1471.5934774891996,
+          "clone_rank": 1.1877828718275452,
+          "pool": 100.0
+        },
+        {
+          "epoch": 110,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8480490928,
+          "clone_cum_mint": 1583.9962813215998,
+          "clone_rank": 1.188967854251767,
+          "pool": 100.0
+        },
+        {
+          "epoch": 115,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.4488620903,
+          "clone_cum_mint": 1697.3614444339998,
+          "clone_rank": 1.189160620460096,
+          "pool": 100.0
+        },
+        {
+          "epoch": 120,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.8176215476,
+          "clone_cum_mint": 1811.9766047804999,
+          "clone_rank": 1.189281942046073,
+          "pool": 100.0
+        },
+        {
+          "epoch": 125,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.0558528787,
+          "clone_cum_mint": 1930.2487081188997,
+          "clone_rank": 1.1905617797983647,
+          "pool": 100.0
+        },
+        {
+          "epoch": 130,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.8763837058,
+          "clone_cum_mint": 2044.4777356294996,
+          "clone_rank": 1.190456831041689,
+          "pool": 100.0
+        },
+        {
+          "epoch": 135,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.277570127,
+          "clone_cum_mint": 2162.4779497342,
+          "clone_rank": 1.1904925251616467,
+          "pool": 100.0
+        },
+        {
+          "epoch": 140,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.1154715508,
+          "clone_cum_mint": 2276.4364771215,
+          "clone_rank": 1.1900613638365023,
+          "pool": 100.0
+        },
+        {
+          "epoch": 145,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.7864976813,
+          "clone_cum_mint": 2389.4460425061993,
+          "clone_rank": 1.1903393089483298,
+          "pool": 100.0
+        },
+        {
+          "epoch": 150,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.3163415489,
+          "clone_cum_mint": 2509.6446418058995,
+          "clone_rank": 1.1908058259321326,
+          "pool": 100.0
+        },
+        {
+          "epoch": 155,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.6031834978,
+          "clone_cum_mint": 2622.773566165299,
+          "clone_rank": 1.1912705005742468,
+          "pool": 100.0
+        },
+        {
+          "epoch": 160,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.2500775776,
+          "clone_cum_mint": 2733.3220183071994,
+          "clone_rank": 1.1911442764123046,
+          "pool": 100.0
+        },
+        {
+          "epoch": 165,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 24.3035814363,
+          "clone_cum_mint": 2847.4032200131996,
+          "clone_rank": 1.1912716051397536,
+          "pool": 100.0
+        },
+        {
+          "epoch": 170,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.1642746642,
+          "clone_cum_mint": 2962.8304139555,
+          "clone_rank": 1.191760452632999,
+          "pool": 100.0
+        },
+        {
+          "epoch": 175,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.2569851765,
+          "clone_cum_mint": 3067.6079168348,
+          "clone_rank": 1.1916410864388378,
+          "pool": 100.0
+        },
+        {
+          "epoch": 180,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 21.7994070779,
+          "clone_cum_mint": 3184.9070756109004,
+          "clone_rank": 1.191716502790436,
+          "pool": 100.0
+        },
+        {
+          "epoch": 185,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 20.2934667806,
+          "clone_cum_mint": 3297.5104776932003,
+          "clone_rank": 1.191803219746657,
+          "pool": 100.0
+        },
+        {
+          "epoch": 190,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.8870641893,
+          "clone_cum_mint": 3405.7649835169004,
+          "clone_rank": 1.1921495034986462,
+          "pool": 100.0
+        },
+        {
+          "epoch": 195,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 23.4720240458,
+          "clone_cum_mint": 3520.7853827020003,
+          "clone_rank": 1.19246739976158,
+          "pool": 100.0
+        },
+        {
+          "epoch": 199,
+          "service_rev": 30.000000000000004,
+          "clone_mint": 22.0162223558,
+          "clone_cum_mint": 3607.8698108017006,
+          "clone_rank": 1.1926576151945463,
+          "pool": 100.0
+        }
+      ],
+      "recycle_on": false
+    }
+  ],
+  "verdict": {
+    "clone_pays_by_phi_rcost": {
+      "phi=0.3,rcost=0.0": true,
+      "phi=0.3,rcost=5.0": true,
+      "phi=0.3,rcost=20.0": true,
+      "phi=0.3,rcost=50.0": true,
+      "phi=0.7,rcost=0.0": true,
+      "phi=0.7,rcost=5.0": true,
+      "phi=0.7,rcost=20.0": true,
+      "phi=0.7,rcost=50.0": true,
+      "phi=1.0,rcost=0.0": true,
+      "phi=1.0,rcost=5.0": true,
+      "phi=1.0,rcost=20.0": true,
+      "phi=1.0,rcost=50.0": true
+    },
+    "surviving_service_rev_frac_by_phi": {
+      "0.3": 0.7,
+      "0.7": 0.3,
+      "1.0": 0.0
+    },
+    "payback_epoch_recycle_on": 58,
+    "payback_epoch_recycle_off": 58,
+    "clone_cum_mint_recycle_on": 3621.399,
+    "clone_cum_mint_recycle_off": 3607.87
+  }
+}

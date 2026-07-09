@@ -96,10 +96,12 @@ contract Substrate is EIP712 {
         address submitter;
         uint256 blockNumber;
         uint256 timestamp;
-        // Merkle root over (agent address, scaled mint amount) leaves
-        // for this epoch. recordTrainingForEpoch verifies the caller's
-        // claim against it — mint amounts are federation-ratified, not
-        // self-reported. Appended last so prior tuple indexes hold.
+        // Merkle root over (agent address, scaled ATN amount, scaled
+        // reputation amount) leaves for this epoch (v4.1: the leaf
+        // commits BOTH decoupled ledgers). recordTrainingForEpoch
+        // verifies the caller's claim against it — mint AND reputation
+        // amounts are federation-ratified, not self-reported. Appended
+        // last so prior tuple indexes hold.
         bytes32 agentMintRoot;
     }
 
@@ -129,8 +131,9 @@ contract Substrate is EIP712 {
 
     /// @notice Submit an anchor for a network epoch close.
     /// @param agentMintRoot Merkle root over the epoch's
-    ///        (agent, scaledAmount) mint map; sorted-pair hashing,
-    ///        double-hashed leaves (see recordTrainingForEpoch).
+    ///        (agent, scaledAmount, scaledRepAmount) mint map;
+    ///        sorted-pair hashing, double-hashed leaves
+    ///        (see recordTrainingForEpoch).
     function submitAnchor(
         string calldata epochId,
         bytes32 epochRoot,
@@ -731,10 +734,23 @@ contract Substrate is EIP712 {
         return _reputationSupplyHistory.upperLookup(uint48(blockNumber));
     }
 
+    /// @param amount   The ATN (money) minted in this training event.
+    /// @param repAmount The reputation (soulbound voice) minted in this
+    ///        training event. Distinct from ``amount`` since v4.1 "gradient
+    ///        trust": the daemon-side close attributes ATN to ALL callers
+    ///        (including zero-reputation ones), but reputation only to the
+    ///        portion earned from reputation-holding callers, so
+    ///        ``repAmount <= amount`` always (equality reproduces the
+    ///        pre-v4.1 lockstep behavior). Kept as a distinct field rather
+    ///        than reusing ``amount`` so indexers can separate the two
+    ///        ledgers from the event stream.
+    /// @param cumulativeForAgent The agent's cumulative reputation
+    ///        (agentMintTotal / agentReputation) AFTER this event.
     event TrainingRecorded(
         address indexed agent,
         bytes32 indexed epochIdHash,
         uint256 amount,
+        uint256 repAmount,
         uint256 cumulativeForAgent
     );
 
@@ -742,29 +758,59 @@ contract Substrate is EIP712 {
     error AlreadySubmittedForEpoch(bytes32 epochIdHash);
     error MintRootMissing(bytes32 epochIdHash);
     error MintProofInvalid(bytes32 epochIdHash);
+    error RepExceedsAmount(uint256 amount, uint256 repAmount);
 
     /// @notice Record this agent's authoritative mint for an
     ///         already-anchored epoch.
     /// @dev    Per-(agent, epochIdHash) idempotent. The epoch must
     ///         have been anchored via submitAnchor() first — this
     ///         binds the record to a federation-ratified close. The
-    ///         amount is NOT self-reported: it must verify against
-    ///         the anchor's agentMintRoot, so the only claimable
-    ///         amount is the one the federation ratified.
-    /// @param amount The mint amount, integer-scaled (default ×1e6
+    ///         ATN ``amount`` is NOT self-reported: it must verify
+    ///         against the anchor's agentMintRoot, so the only
+    ///         claimable ATN amount is the one the federation ratified.
+    ///
+    ///         v4.1 "gradient trust" — DECOUPLED LEDGERS. ATN (money) and
+    ///         reputation (voice) are minted at potentially DIFFERENT
+    ///         amounts in the same event. The daemon-side close computes
+    ///         two numbers per agent: ``amount`` = ATN mint (weights in
+    ///         usage from zero-reputation callers) and ``repAmount`` =
+    ///         reputation mint (only the portion attributable to
+    ///         reputation-holding callers). The invariant
+    ///         ``repAmount <= amount`` is enforced on-chain: reputation
+    ///         can never exceed the ATN earned in the same event, and
+    ///         equality reproduces the pre-v4.1 lockstep behavior. This is
+    ///         the sybil defense — mint must not grant the very resource
+    ///         (reputation) that gates mint weight, or dust rings could
+    ///         bootstrap voice from zero.
+    /// @param amount The ATN (money) mint, integer-scaled (default ×1e6
     ///               at the agent-side submitter, see Phase 5.6 docs).
+    /// @param repAmount The reputation (soulbound voice) mint, same scale
+    ///               as ``amount``. Must be <= amount. Pass repAmount ==
+    ///               amount for the legacy lockstep behavior.
     /// @param epochIdHash keccak256 of the epoch_id string.
     /// @param proof Merkle proof for the leaf
     ///              keccak256(bytes.concat(keccak256(abi.encode(
-    ///              msg.sender, amount)))) under the anchor's
+    ///              msg.sender, amount, repAmount)))) under the anchor's
     ///              agentMintRoot (sorted-pair hashing; a single-leaf
-    ///              tree has root == leaf and an empty proof).
+    ///              tree has root == leaf and an empty proof). The leaf
+    ///              commits BOTH ledgers, so ``repAmount`` is
+    ///              federation-ratified too: a claimant cannot inflate
+    ///              its voice by self-reporting repAmount == amount when
+    ///              the close attributed less — that leaf doesn't prove.
+    ///              The repAmount <= amount require above stays as
+    ///              defense-in-depth on top of the proof.
     function recordTrainingForEpoch(
         uint256 amount,
+        uint256 repAmount,
         bytes32 epochIdHash,
         bytes32[] calldata proof
     ) external {
         if (!agents[msg.sender].active) revert AgentNotActive();
+        // Reputation can never exceed the ATN earned in the same event
+        // (v4.1: rep is the rep-holder-attributable SUBSET of the ATN
+        // mint). Enforced before the zero-amount no-op so a caller can't
+        // slip a positive repAmount past a zero amount either.
+        if (repAmount > amount) revert RepExceedsAmount(amount, repAmount);
         string storage epochId = epochIdByHash[epochIdHash];
         if (bytes(epochId).length == 0) {
             revert EpochNotAnchored(epochIdHash);
@@ -776,23 +822,33 @@ contract Substrate is EIP712 {
         // had no mint share for this epoch but may still want a
         // marker on chain. Here we treat zero as a no-op (no event,
         // no state change). Zero shares are not in the mint tree.
+        // (repAmount <= amount == 0, so nothing to mint on either side.)
         if (amount == 0) {
             return;
         }
 
         bytes32 root = anchors[anchorIndexByEpochId[epochId] - 1].agentMintRoot;
         if (root == bytes32(0)) revert MintRootMissing(epochIdHash);
+        // v4.1: the leaf commits (agent, amount, repAmount) — BOTH the
+        // money and the voice amounts are federation-ratified. Same
+        // double-hashed OpenZeppelin leaf convention, one more field in
+        // the abi.encode (mirrored by nodes/common/mint_merkle.py).
         bytes32 leaf = keccak256(
-            bytes.concat(keccak256(abi.encode(msg.sender, amount)))
+            bytes.concat(keccak256(abi.encode(msg.sender, amount, repAmount)))
         );
         if (!_verifyMintProof(proof, root, leaf)) {
             revert MintProofInvalid(epochIdHash);
         }
 
+        // mintForEpoch records the ATN amount (what the merkle proof
+        // committed). Reputation is the decoupled repAmount below.
         mintForEpoch[msg.sender][epochIdHash] = amount;
-        agentMintTotal[msg.sender] += amount;
-        networkMintTotal += amount;
-        agents[msg.sender].totalTrainingMint += amount;
+        // Reputation ledger (soulbound voice) accrues repAmount.
+        agentMintTotal[msg.sender] += repAmount;
+        networkMintTotal += repAmount;
+        // The Agent struct's totalTrainingMint tracks reputation
+        // (soulbound contribution), so it too moves by repAmount.
+        agents[msg.sender].totalTrainingMint += repAmount;
         agents[msg.sender].trainingSubmissionCount += 1;
 
         // Checkpoint the soulbound reputation ledger at this block. This
@@ -800,7 +856,9 @@ contract Substrate is EIP712 {
         // decreases and never transfers, so there is nothing to mirror on
         // any other path (mintFromVault deliberately mints ATN only). The
         // federated close reads reputationOfAt / reputationTotalSupplyAt
-        // at the previous anchor block to price voice weights.
+        // at the previous anchor block to price voice weights. We push
+        // even when repAmount == 0 (amount > 0) so the supply checkpoint
+        // stays block-aligned; the pushed values are simply unchanged.
         _reputationHistory[msg.sender].push(
             uint48(block.number), uint208(agentMintTotal[msg.sender])
         );
@@ -808,16 +866,17 @@ contract Substrate is EIP712 {
             uint48(block.number), uint208(networkMintTotal)
         );
 
-        // Phase 7.1: training mints both ledgers at the same amount.
-        // Reputation (agentMintTotal, just bumped above) is soulbound.
-        // ATN balance is transferable — the agent can spend it on
-        // inference fees once the inference-as-a-service path lands.
+        // v4.1: training mints the two ledgers at DECOUPLED amounts.
+        // Reputation (agentMintTotal, bumped above by repAmount) is
+        // soulbound voice. ATN balance is transferable money, minted at
+        // the full `amount` — the agent can spend it on inference fees.
         _mintATN(msg.sender, amount);
 
         emit TrainingRecorded(
             msg.sender,
             epochIdHash,
             amount,
+            repAmount,
             agentMintTotal[msg.sender]
         );
     }

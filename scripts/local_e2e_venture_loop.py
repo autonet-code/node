@@ -119,15 +119,18 @@ def _keccak(data: bytes) -> bytes:
     return keccak(data)
 
 
-def _mint_leaf(agent_addr: str, amount: int) -> bytes:
+def _mint_leaf(agent_addr: str, amount: int, rep_amount: int | None = None) -> bytes:
     """The single-leaf merkle root Substrate.recordTrainingForEpoch expects
     (mirrors test/venture_vault.test.js mintLeaf): keccak(keccak(abi.encode(
-    address, uint256)))."""
+    address, uint256 amount, uint256 repAmount))). v4.1 gradient trust: the
+    leaf commits BOTH ledgers; the faucet mints lockstep (rep == amount)."""
     from eth_abi import encode as abi_encode
     from web3 import Web3
+    if rep_amount is None:
+        rep_amount = amount
     inner = _keccak(abi_encode(
-        ["address", "uint256"],
-        [Web3.to_checksum_address(agent_addr), amount]))
+        ["address", "uint256", "uint256"],
+        [Web3.to_checksum_address(agent_addr), amount, rep_amount]))
     return _keccak(inner)
 
 
@@ -176,7 +179,7 @@ class ATNFaucet:
         epoch_id_hash = self._digest(epoch_id)
         faucet = Account.from_key(self.faucet_key)
         rec_call = self.substrate.functions.recordTrainingForEpoch(
-            amount, epoch_id_hash, [])
+            amount, amount, epoch_id_hash, [])
         self._send(rec_call, self.faucet_key, faucet.address, gas=800_000)
 
     def fund(self, to_addr: str, amount: int) -> None:

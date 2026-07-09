@@ -173,20 +173,35 @@ def encode_authoritative_payload(
 def encode_agent_mint_blob(
     agent_mint: Dict[str, float],
     *,
+    agent_rep: Dict[str, float] | None = None,
     decimals: int = DEFAULT_DECIMALS,
 ) -> bytes:
     """Encode the off-chain ``agent_mint`` blob.
 
     Format:
       {
-        "schema": 1,
-        "agent_mint": {agent_id: float-as-str (sorted keys)}
+        "schema": 2,
+        "agent_mint": {agent_id: float-as-str (sorted keys)},
+        "agent_rep":  {agent_id: float-as-str (sorted keys)}   # optional
       }
+
+    ``agent_rep`` (v4.1 gradient trust) is the DECOUPLED per-agent
+    reputation increment from the close. Semantics mirror
+    ``mint_merkle``: ``None`` OMITS the key entirely — lockstep, rep ==
+    mint per leaf, byte-identical to the pre-v4.1 blob so old CIDs
+    still verify. A dict (INCLUDING an empty one) is written verbatim:
+    an empty/missing entry means zero reputation for that agent, which
+    is a legitimate v4.1 outcome (all usage from zero-rep callers) and
+    very different from lockstep. The submitter must build its merkle
+    proof with exactly this map — it's the same map the anchorer built
+    the on-chain root from.
     """
     blob = {
         "schema": SCHEMA_VERSION,
         "agent_mint": _format_agent_dict(agent_mint, decimals),
     }
+    if agent_rep is not None:
+        blob["agent_rep"] = _format_agent_dict(agent_rep, decimals)
     return json.dumps(
         blob,
         ensure_ascii=False,
@@ -211,7 +226,8 @@ def payload_hash(payload_bytes: bytes) -> bytes:
 
 
 def decode_agent_mint_blob(blob: bytes) -> Dict[str, float]:
-    """Reverse of ``encode_agent_mint_blob``. Returns floats.
+    """Reverse of ``encode_agent_mint_blob`` (mint map only). Returns
+    floats.
 
     Used by agents to read their mint amount after the chain anchor
     points them at a CID.
@@ -219,5 +235,26 @@ def decode_agent_mint_blob(blob: bytes) -> Dict[str, float]:
     data = json.loads(blob.decode("utf-8"))
     out: Dict[str, float] = {}
     for k, v in data.get("agent_mint", {}).items():
+        out[str(k)] = float(v)
+    return out
+
+
+def decode_agent_rep_blob(blob: bytes) -> Dict[str, float] | None:
+    """Read the decoupled ``agent_rep`` map from a mint blob (v4.1).
+
+    Returns ``None`` when the blob carries no ``agent_rep`` key — a
+    legacy/lockstep blob, meaning rep == mint per leaf. Returns a dict
+    (possibly empty) when the key is present; a missing agent then
+    means ZERO reputation, not lockstep. The distinction matters: the
+    merkle root was built with this exact ``None``-vs-dict semantic
+    (see mint_merkle.mint_leaves), so proofs only verify when the
+    submitter decodes it the same way.
+    """
+    data = json.loads(blob.decode("utf-8"))
+    rep = data.get("agent_rep")
+    if rep is None:
+        return None
+    out: Dict[str, float] = {}
+    for k, v in rep.items():
         out[str(k)] = float(v)
     return out

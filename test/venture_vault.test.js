@@ -73,11 +73,13 @@ async function registerBound(substrate, agentSigner, ownerWallet, lineage) {
 }
 
 // The single-leaf merkle leaf Substrate.recordTrainingForEpoch expects.
-function mintLeaf(agentAddr, amount) {
+// v4.1 gradient trust: the leaf commits (agent, amount, repAmount) — both
+// ledgers federation-ratified. The faucet mints lockstep (rep == amount).
+function mintLeaf(agentAddr, amount, repAmount = amount) {
   const inner = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256"],
-      [agentAddr, amount]
+      ["address", "uint256", "uint256"],
+      [agentAddr, amount, repAmount]
     )
   );
   return ethers.keccak256(ethers.solidityPacked(["bytes32"], [inner]));
@@ -106,7 +108,7 @@ async function mintATN(substrate, submitterSigner, faucetSigner, amount) {
   const epochIdHash = digest(epochId);
   await substrate
     .connect(faucetSigner)
-    .recordTrainingForEpoch(amount, epochIdHash, []);
+    .recordTrainingForEpoch(amount, amount, epochIdHash, []);
 }
 
 // Fund `to` with `amount` ATN by minting to the faucet and transferring.

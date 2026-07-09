@@ -101,6 +101,8 @@ class FederatedCloseDriver:
         tool_registrations_path: Optional[Any] = None,
         tool_vetting_path: Optional[Any] = None,
         tool_positions_path: Optional[Any] = None,
+        tool_credibility_path: Optional[Any] = None,
+        tool_review_book_path: Optional[Any] = None,
     ):
         self.gossip = gossip
         self.pricing = pricing
@@ -144,6 +146,21 @@ class FederatedCloseDriver:
         self._tool_positions: Dict[str, Dict[str, Any]] = (
             self._load_tool_positions()
         )
+        # v4.1 gradient-trust carry-over (memory/tool_economy_v4_gradient_trust.md):
+        # household -> credibility multiplier (drift-weight), and the
+        # per-household review book (digest -> household -> axis -> {sum,n}).
+        # Same rebuildable-cache contract as positions: derived purely from
+        # canonical events + carried state, identical on every honest daemon.
+        self._tool_credibility_path: Optional[Path] = (
+            Path(tool_credibility_path) if tool_credibility_path else None
+        )
+        self._tool_credibility: Dict[str, float] = (
+            self._load_tool_credibility()
+        )
+        self._tool_review_book_path: Optional[Path] = (
+            Path(tool_review_book_path) if tool_review_book_path else None
+        )
+        self._tool_review_book: Dict[str, Any] = self._load_tool_review_book()
         # Owner-rooted damper exclusion (spec: Owner-rooted registration):
         # agent id -> owner wallet, sourced from chain owner-binding data
         # (OwnerBound events / getAgentOwner). Every daemon reading
@@ -159,6 +176,15 @@ class FederatedCloseDriver:
         # same anchored state. Empty map -> close runs with weights=None
         # (every household weighs 1.0, the no-chain behavior).
         self.voice_weights: Dict[str, float] = {}
+        # v4.1 gradient trust: the RAW reputation share per household
+        # (rep/rep_supply, NO epsilon floor) — distinct from voice_weights
+        # (which carries the floor for mint bootstrap). Drift weight and
+        # the rep/ATN mint split need the un-floored share. Plus the
+        # reputation total supply, the β-cap maturity clock. Both come from
+        # the same voice_state read (no extra chain round-trip). Empty /
+        # None => local regime (uncapped β, weight-1.0 drift).
+        self.rep_shares: Dict[str, float] = {}
+        self.rep_supply: Optional[float] = None
         # Fee-recycled emission pool (docs/epoch_economics.md): base
         # floor + burned service fees in the snapshot anchor's window,
         # computed by the same voice_source refresh. None (no chain
@@ -186,6 +212,16 @@ class FederatedCloseDriver:
             if isinstance(weights, dict):
                 self.voice_weights = {
                     str(k): float(v) for k, v in weights.items()}
+            # v4.1: raw rep shares + supply (same read, no extra call).
+            shares = state.get("rep_shares")
+            if isinstance(shares, dict):
+                self.rep_shares = {
+                    str(k): float(v) for k, v in shares.items()}
+            supply = state.get("rep_supply")
+            if supply is None:
+                supply = state.get("supply")
+            if supply is not None:
+                self.rep_supply = float(supply)
             pool = state.get("emission_pool")
             if pool is not None:
                 self.emission_pool = float(pool)
@@ -230,12 +266,33 @@ class FederatedCloseDriver:
                 emission_pool=self.emission_pool,
                 tool_vetting=dict(self._tool_vetting),
                 tool_positions=dict(self._tool_positions),
+                rep_shares=(dict(self.rep_shares)
+                            if self.rep_shares else None),
+                rep_supply=self.rep_supply,
+                tool_credibility=dict(self._tool_credibility),
+                tool_review_book=dict(self._tool_review_book),
             )
         except Exception as e:
             logger.error(
                 "federated_epoch_close failed: %s", e, exc_info=True,
             )
             return None
+
+        # v4.1 [R6] rep/ATN split — CONTRACT SEAM. ``close_result`` now
+        # carries ``agent_rep`` (decoupled per-agent reputation increment)
+        # alongside ``agent_mint``, and the ``authoritative_payload`` (schema
+        # 2) commits both so the anchor's mint merkle ratifies (agent,
+        # agent_mint, agent_rep). Downstream, the per-agent submitter
+        # (nodes/common/authoritative_submitter.py — owned by the contract
+        # agent) reads agent_rep from the anchored payload/blob and passes it
+        # as the ``rep_amount``/``rep_contribution`` arg to the extended
+        # ``record_training_for_epoch(private_key, amount, epoch_id_hash,
+        # proof, rep_amount=...)`` /
+        # ``recordTrainingForEpoch(amount, repAmount, epochIdHash, proof)``.
+        # The mint-root builder (mint_merkle.py, also contract-agent-owned)
+        # must build leaves from (agent, agent_mint, agent_rep). This driver
+        # surfaces agent_rep on FederatedCloseResult.close_result for those
+        # consumers; it does not itself call the chain.
 
         # Advance + persist the tool-registration carry-over for the
         # next epoch (returned map = carried ∪ this epoch's canonical
@@ -248,6 +305,13 @@ class FederatedCloseDriver:
         self._save_tool_vetting()
         self._tool_positions = dict(close_result.get("tool_positions") or {})
         self._save_tool_positions()
+        # v4.1 carried gradient-trust state (rebuildable cache).
+        self._tool_credibility = dict(
+            close_result.get("tool_credibility") or {})
+        self._save_tool_credibility()
+        self._tool_review_book = dict(
+            close_result.get("tool_review_book") or {})
+        self._save_tool_review_book()
 
         # Inherit epoch_id from the local close so on-chain dedup
         # (isAnchored(epoch_id)) can reject duplicate submissions.
@@ -388,3 +452,59 @@ class FederatedCloseDriver:
             os.replace(tmp, path)
         except OSError as e:
             logger.warning("failed to persist tool positions: %s", e)
+
+    def _load_tool_credibility(self) -> Dict[str, float]:
+        path = self._tool_credibility_path
+        if path is None or not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): float(v) for k, v in data.items()}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning("tool credibility cache unreadable (%s); starting "
+                           "empty — it rebuilds from canonical events", e)
+        return {}
+
+    def _save_tool_credibility(self) -> None:
+        path = self._tool_credibility_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(dict(sorted(self._tool_credibility.items()))),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist tool credibility: %s", e)
+
+    def _load_tool_review_book(self) -> Dict[str, Any]:
+        path = self._tool_review_book_path
+        if path is None or not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("tool review book cache unreadable (%s); starting "
+                           "empty — it rebuilds from canonical events", e)
+        return {}
+
+    def _save_tool_review_book(self) -> None:
+        path = self._tool_review_book_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(self._tool_review_book, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist tool review book: %s", e)

@@ -1153,9 +1153,11 @@ class ToolStore:
         real approval queue is legitimate. The proposal fetches and
         digest-verifies the manifest, then packages what the owner
         needs to decide: declared capabilities (the sandbox policy it
-        will run under), signature presence, and the network vet
-        status (greenlit / candidate / busted) when the close state is
-        available. Nothing executes until approve_adoption.
+        will run under), signature presence, and the tool's inspection
+        activity (v4.1: inspection is a review, not a gate — the carried
+        vetting fields now count code reads, they do not greenlight or
+        unlock anything) when the close state is available. Nothing
+        executes until approve_adoption.
         """
         caller = caller_id if caller_id else OWNER_AUTHOR
         digest = digest.strip().lower()
@@ -1366,22 +1368,30 @@ class ToolStore:
         tool_ref: str,
         verdict: str | None = None,
         report: str = "",
+        axes: dict[str, float] | None = None,
     ) -> dict[str, Any]:
-        """Validator flow (spec: Vetting section), two steps in one rail:
+        """Inspection-review flow (v4.1 gradient trust — memory
+        tool-economy-v4-gradient-trust), two steps in one rail:
 
         - ``verdict=None`` — INSPECT: resolve the manifest (locally or
           fetched from the network by digest) and return it with the
           pinned source code, so the validator can actually read what
-          it is attesting to.
-        - ``verdict="pass"|"fail"`` — ATTEST: record the vet locally and
-          emit the consensus ``tool_used`` event with ``vet=True``.
-          ``report`` (required) is blob-stored as the vet report —
-          validators show their work; the report is what a later
-          exploit CON gets argued against.
+          it is judging.
+        - ``verdict="pass"|"fail"`` — ATTEST: record the inspection
+          locally and emit the consensus ``tool_used`` event with
+          ``vet=True``. ``report`` (required) is blob-stored as the
+          inspection report — inspectors show their work; the report is
+          what a later exploit CON gets argued against. Optional
+          per-charter-axis scores (``axes`` — ``{axis_id: [-1,1]}``,
+          same shape as ``attest_usage``) ride the event so the
+          inspection moves the tool's public position/rating exactly
+          like a usage review — weighted at close by the inspector's
+          reputation share × credibility. An inspection MINTS NOTHING;
+          it only moves position/rating.
 
         Self-vetting is rejected here for the local-author case; the
         close voids it structurally anyway (fleet + wire exclusions).
-        A vet is not usage and never touches the receipt ledgers.
+        An inspection is not usage and never touches the receipt ledgers.
         """
         caller = caller_id if caller_id else OWNER_AUTHOR
 
@@ -1439,6 +1449,17 @@ class ToolStore:
 
         ok = verdict == "pass"
         ts = int(time.time())
+        # Per-charter-axis inspection scores (v4.1): {axis_id: [-1,1]},
+        # same normalization as attest_usage — garbage entries dropped,
+        # unscored axes simply absent. These ride the vet event so the
+        # inspection moves position/rating like a usage review.
+        norm_axes: dict[str, float] = {}
+        if isinstance(axes, dict):
+            for axis_id, value in axes.items():
+                try:
+                    norm_axes[str(axis_id)] = max(-1.0, min(1.0, float(value)))
+                except (TypeError, ValueError):
+                    continue
         review_digest = ""
         try:
             blobs: Any = self._blob_store()
@@ -1446,7 +1467,7 @@ class ToolStore:
             blobs = None
         if blobs is not None:
             try:
-                review_digest = blobs.add_json({
+                report_blob = {
                     "kind": "tool_vet_report",
                     "manifest_digest": digest,
                     "code_digest": code_digest,
@@ -1454,7 +1475,10 @@ class ToolStore:
                     "ok": ok,
                     "report": str(report),
                     "ts": ts,
-                }) or ""
+                }
+                if norm_axes:
+                    report_blob["axes"] = dict(sorted(norm_axes.items()))
+                review_digest = blobs.add_json(report_blob) or ""
             except Exception as exc:
                 log.warning("vet report blob failed: %s", exc)
 
@@ -1470,6 +1494,8 @@ class ToolStore:
             "vet": True,
             "review_digest": review_digest,
         }
+        if norm_axes:
+            row["axes"] = dict(sorted(norm_axes.items()))
         self._dir.mkdir(parents=True, exist_ok=True)
         with self._attestations_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
@@ -1487,6 +1513,8 @@ class ToolStore:
                 "vet": True,
                 "review_digest": review_digest,
             }
+            if norm_axes:
+                event["axes"] = dict(sorted(norm_axes.items()))
             try:
                 self.event_sink(event)
             except Exception as exc:

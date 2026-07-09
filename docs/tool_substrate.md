@@ -1,5 +1,14 @@
 # Tool substrate v3: tools as the ONLY substrate item; reviews replace debates
 
+Status: v4.1 GRADIENT TRUST — ratified + BUILT 2026-07-09 (see the
+`Decision (2026-07-09)` section, which is the current design of record).
+v4.1 supersedes the v3 vetting GATE (retired: tools mint from first use),
+the v3 usage-only-flat mint (now rep/ATN-split under a supply-pegged β
+cap), and the v3 flat drift weight (now rep_share × credibility, no ε
+floor). The v3 body below is retained for the parts v4.1 keeps (reviews,
+position drift, composition, adoption, Services split) with inline v4.1
+markers where a rule changed.
+
 Status: DESIGN v3 — ratified in discussion 2026-07-08 (see the Decision
 section below). Supersedes v2 (2026-07-04) in four places: mint is
 usage-only, attestations carry per-axis review scores that drift the
@@ -53,7 +62,9 @@ and ranking read claim standing. v3 completes the paradigm:
 4. **Usage alone mints.** `mint = usage_term` — the damped, exclusion-
    filtered attested-usage mass. No standing multiplier, no violator
    gate on the tool rail. Reviews affect earnings only indirectly, by
-   steering future usage through ranking.
+   steering future usage through ranking. **[SUPERSEDED by v4.1: mint is
+   still usage-only but now rep/ATN-SPLIT under a supply-pegged β cap —
+   zero-rep usage mints ATN, not reputation. See Decision 2026-07-09.]**
 5. **Position drifts at close** as the mint-weighted running centroid
    of review axis scores:
    `head' = (mass·head + axis_mass·axis_mean) / (mass + axis_mass)`,
@@ -76,17 +87,30 @@ and ranking read claim standing. v3 completes the paradigm:
    removed; `mint_gate.py` stays in-tree, dormant. The CON-triggered
    bust of a greenlit tool goes dormant with it.
 
-**Known-open risk (accepted):** reviews now drive both ranking and
-position with no adversarial gate; a sybil ring of callers can pump a
-tool. Standing defenses: vetting entry gate (validators read the pinned
-code; royalty-as-stake), per-caller log1p damping, owner-map and
-wire-key exclusions, and the cognitive cost of attestations. Named
-future mitigation if it proves insufficient: reactivate the dormant
-CON/bust rail. Covert harm invisible to satisfied users has ONLY the
-vetting entry gate as its dedicated defense — vetting is where that
-strength must live.
+**Known-open risk (accepted at v3; ADDRESSED at v4.1):** reviews drive
+both ranking and position; a sybil ring of callers could pump a tool.
+v3's standing defenses were the vetting entry gate + log1p damping +
+owner/wire exclusions + attestation cost. **v4.1 (Decision 2026-07-09)
+replaces the entry gate with forge-resistant scores:** drift weight =
+rep_share × credibility with NO ε floor (zero-rep reviews move nothing),
+continuous reversal-aware credibility docking, and the supply-pegged β
+cap on zero-rep ATN mint. The econ-attestation sims (`experiments/
+econ_attest/`) confirmed the v3 gate itself was the cheap attack (two
+free sybils cleared `VET_QUORUM`), which is why it is retired rather than
+hardened. Covert harm invisible to satisfied users is now surfaced (not
+gated) by the trust picture at search time.
 
-## Decision (2026-07-08, addendum): balance-weighted voice
+## Decision (2026-07-08, addendum): reputation-weighted voice
+
+**[VOICE SOURCE SUPERSEDED SAME DAY: this addendum was ratified as
+"balance-weighted voice" (household_ATN/supply), then superseded that
+evening by "ATN = money, reputation = voice" — voice weight reads
+SOULBOUND REPUTATION, not ATN balance. The mechanism (household collapse,
+linear weight, ε floor, snapshot-pinned reads) is unchanged; only the
+SOURCE moved from balance to reputation. This section is corrected inline
+below (was divergence D1). v4.1 (Decision 2026-07-09) then adds: reviews
+are additionally CREDIBILITY-weighted, and the ε floor is dropped from
+DRIFT weight — it survives only on the MINT side.]**
 
 Ratified in discussion, same day as v3, as the answer to the sybil
 trade above. Premise accepted first: **usage is unverifiable** —
@@ -106,13 +130,18 @@ verifiable anchor in-system is ATN itself.
    amplification the old per-caller damper allowed. The author-house
    comparison subsumes the self- and same-owner exclusions; the wire
    dedup applies to the household's pooled sender keys.
-3. **Voice weight = ε + household_ATN / supply**, where household_ATN
-   is the owner wallet's balance plus every bound agent's balance
-   (agent mint stays on the agent address; the family's earnings count
-   without a sweep). **LINEAR in balance by design**: linearity is
-   splitting-invariance — dividing a balance across any number of
-   wallets or agents never gains weight. Resist any future urge to
-   damp it (log/caps reintroduce a splitting advantage).
+3. **Voice weight = ε + household_REPUTATION / rep_supply** (corrected
+   from balance — divergence D1), where household_reputation is the sum
+   of soulbound reputation over every agent bound to the owner
+   (reputation is minted only by `recordTrainingForEpoch`, stays on the
+   agent address; a bare owner wallet never trains and carries zero, so
+   there is no owner-wallet term — see `voice_state.py`). **LINEAR in
+   reputation by design**: linearity is splitting-invariance — dividing
+   earnings across any number of wallets or agents never gains weight.
+   Resist any future urge to damp it (log/caps reintroduce a splitting
+   advantage). **[v4.1: this ε-floored weight is the MINT-side voice;
+   drift weight uses the raw rep_share × credibility with NO ε floor —
+   Decision 2026-07-09.]**
 4. **ε (`VOICE_EPSILON`, provisional 0.05) is the floor** for unknown
    or zero-balance households: it bounds what a throwaway identity can
    contribute AND bootstraps a cold-start network (supply = 0 → every
@@ -122,6 +151,10 @@ verifiable anchor in-system is ATN itself.
 5. **One weight, both rails.** The same household weight multiplies
    the damped usage term (mint) and the review evidence mass (position
    drift): a voice that can't mint can't move position either.
+   **[SPLIT at v4.1: the two rails now use DIFFERENT weights — mint keeps
+   the ε-floored weight (under the β cap for zero-rep), drift uses raw
+   rep_share × credibility with no ε floor. A zero-rep voice can still
+   mint ATN but moves no position. Decision 2026-07-09.]**
 6. **Snapshot-pinned reads, checkpoint-served.** `voice_weights` (and
    the owner map read with it) is a close input refreshed by the
    driver's `voice_source` hook just before each close
@@ -151,6 +184,123 @@ legitimate agent has a funded owner by construction ("AI can only
 execute if tokens are spent"), so the mute set is precisely the
 throwaway wallets. What this deliberately does NOT do: charge for tool
 use (tools stay free), verify usage (impossible), or prune anything.
+
+## Decision (2026-07-09): v4.1 gradient trust — the gate becomes a gradient
+
+Ratified in discussion ("ok let's go for it") after the econ-attestation
+audit (`experiments/econ_attest/` — attacks.md, game_model.md,
+attestation.md, sim/). The audit ran the REAL close code over adversarial
+populations and confirmed four cheap attacks the v3 design admitted at
+scale: vetting collusion (two free unbound sybils clear `VET_QUORUM=2.0`,
+the bust dormant → zero-cost greenlighting), an ε-faucet (K dust
+identities skim the pool linearly — 0.67 share at K=200), drift pumping
+(sybil ε-reviews pushed a head to +0.97, 21× mint capture at K=100 — rank
+far cheaper to pump than mint), and discovery spam (unreviewed manifests
+burial can't grip). v4.1 dissolves the gate into a gradient and moves the
+security surface onto forge-resistant scores. SIM-VALIDATED and BUILT
+(close + contract + surfaces); evidence trail:
+`experiments/econ_attest/sim/results/summary_v4_1.md`.
+
+The paradigm statement (user, 2026-07-09), because it reframes what the
+sims even measure: **the rep-weighted consensus IS a tool's quality,
+definitionally.** There is no "majority attack" and no "honest minority"
+— adversarial sims measure CONSENSUS-CAPTURE COST (rep-share needed to
+move a score against the live review flow), not deviation from a hidden
+truth. Correction channel: **burial gates DISCOVERY, never use.** The
+ranking lift is MULTIPLICATIVE on topic match (`base·(1+tanh(rating))`,
+factor in (0,2), never zero), so a lone tool in an empty semantic niche
+surfaces regardless of score (novelty buys discovery, quality keeps it —
+sim-attested), and adoption/delegation usage keeps feeding rep-backed
+reviews that can move consensus back.
+
+The changes, each superseding a v3 rule:
+
+1. **The vet GATE is retired.** Tools mint from first attested use — no
+   greenlight quorum, no vet royalty, no candidate pool. Rationale: a vet
+   is an unverifiable claim anyway, and the collusion gap only exists
+   because there is a gate to buy; risk-averse owners/agents supply their
+   own inspection incentive. (Supersedes the Vetting section's greenlight
+   gate and the Mint section's "greenlight-gated, royalty-split.")
+2. **Vets become inspection reviews.** One rail. A vet survives as a
+   per-axis review carrying NO usage receipt — it moves the tool's
+   position (drift) and mints nothing (`vet_axis_reviews_by_caller`,
+   merged with usage reviews at drift time). This gives burial grip on
+   unreviewed spam.
+3. **Search shows the trust picture** — review count, rep-weighted axis
+   scores, author rep — and agents self-select: trust well-scored, avoid
+   bad-scored, inspect the unreviewed. No gate decides for them.
+4. **Scores are now the SECURITY surface, so they are forge-resistant:**
+   - **Drift weight = rep_share × credibility, with NO ε floor.**
+     Zero-rep households carry ZERO drift weight (the ε floor stays on
+     MINT, for bootstrap; it is gone from drift). Author prior mass 1.0.
+     In the local/genesis regime (no chain rep) drift keeps weight 1.0,
+     the pre-v4.1 behavior.
+   - **Rep/ATN mint decoupling (D').** Zero-rep-weighted usage mints ATN
+     but grants NO reputation: an author's reputation increment is only
+     the portion of usage_term attributable to rep-holding callers
+     (`rep_fraction`, threaded out as `node_agent_rep` → `agent_rep`).
+     Mint must not grant the resource that gates mint weight, or sybils
+     escape the cap (the v4 β-cap-grants-rep version LEAKED, share creep
+     0.10→0.28/120 epochs; D' flatlines sybil VOICE share at 0).
+   - **Supply-pegged β cap on zero-rep ATN mint weight.**
+     `β(S) = max(BETA_MIN, exp(−S/BETA_S0))` — β≈1 at genesis (newcomer
+     demand prices honest work), decaying toward `BETA_MIN` as reputation
+     supply matures. The aggregate ε-weight of zero-rep households is
+     capped at β of total mint weight (uniform pro-rata scale-down when
+     it binds; pure-zero-rep genesis stays uncapped so the economy can
+     bootstrap). β is ATN-side only — D' already keeps it off voice.
+     A dust ring cannot TIGHTEN β against honest users: under D' its mint
+     grants no rep, so it never moves supply in the attack direction
+     (sim: worst tightening 0.0). Parameters: `BETA_MIN=0.05`,
+     `BETA_S0=5000.0` (50 epochs × 100 pool — the sim's engineering pick,
+     near-zero honest distortion; strict-≤5%-skim alternative is S₀=10 at
+     ~0.31 early distortion). **Recalibrate S₀ to the real epoch cadence
+     at launch** (the 300-epoch sim horizon is short vs a real network).
+   - **Continuous reversal-aware credibility.** Every close re-scores each
+     household's carried review centroid against the tool's CURRENT
+     (just-drifted) head, on tools with review mass ≥ `CRED_MASS_FLOOR`:
+     deviation > `CRED_DELTA` docks the household's drift-weight
+     multiplier, convergence restores it (symmetric, no stabilization
+     moment for an attacker to freeze). Multiplies DRIFT weight only,
+     never mint; the rep token is never burned — credibility is carried
+     close state (rebuildable cache, same contract as `tool_positions`),
+     alongside the carried per-household `tool_review_book`. Parameters
+     (SEEDED, post-launch tunable): `CRED_DELTA=0.7` (EMERGED — honest
+     false-positive dock 0.02%), `CRED_MASS_FLOOR=3.0`, `CRED_FLOOR=0.1`,
+     `CRED_RECOVERY=0.10` (+10%/epoch). Sim-attested: a captured score
+     reverses within ~50 epochs once rep-backed adopters keep using and
+     re-reviewing, and the early capturers dock to the floor retroactively.
+5. **Federation-ratified 3-field merkle leaf (contract change, fine
+   pre-mainnet).** `recordTrainingForEpoch(amount, repAmount, epochIdHash,
+   proof)` now commits `keccak256(abi.encode(agent, amount, repAmount))`
+   as the leaf under the anchor's `agentMintRoot`. Reputation (`repAmount
+   ≤ amount`, enforced on-chain) is the decoupled voice ledger; ATN
+   (`amount`) is money. `TrainingRecorded` gains the `repAmount` field so
+   indexers separate the two ledgers. The `authoritative_payload` is
+   schema 2 — the anchor's mint merkle commits `(agent, agent_mint,
+   agent_rep)`, so `repAmount` is federation-ratified, not self-reported
+   under a ceiling (which would re-open the voice leak).
+
+Provenance: the STRUCTURE (D', continuous credibility, supply-pegged β)
+was user-ratified; the sims EMERGED the load-bearing VALUES — δ=0.7, the
+necessity of a NON-constant β, and the supply peg as the one maturity
+proxy a dust ring cannot inflate. Remaining SEEDED constants (β_min, mass
+floor, credibility floor/recovery, pool size) are conventional, tunable
+post-launch without changing the mechanism.
+
+**Also confirmed by the audit** (the commons hypothesis): service→tool
+cloning paid in every sim regime; surviving service revenue = exactly the
+moat rent (1−φ); prices compress toward moat; quality↔mint corr 0.92 in
+the honest regime (`attestation.md` §1). The one unwired piece of ratified
+doctrine — fee recycling on the `PaymentChannel` rail — is boarded as G1
+(`docs/BACKLOG.md`, `docs/services_market.md`).
+
+**FLAG-DAY:** v4.1 changes the close output/CID (mint split, β, carried
+credibility + review book), the contract ABI (`recordTrainingForEpoch`
+signature, `TrainingRecorded` event), AND the merkle leaf shape — every
+daemon must run the v4.1 build and the network must redeploy onto the new
+Substrate (clean genesis) before the next federated close, or closes and
+proofs fork.
 
 | | Tools (this doc) | Services (services_market.md) |
 |---|---|---|
@@ -323,11 +473,21 @@ batch key is transport plumbing, not an entity — it appears in no
 formula output, no chain surface, no attribution map.
 
 **Mint = usage_term** (v3; formerly `max(0, standing) × usage_term`),
-pinned only, greenlight-gated, royalty-split. The standing multiplier
+pinned only, ~~greenlight-gated, royalty-split~~. The standing multiplier
 and the violator-pays gate on the tool rail are retired — reviews rank
 and reposition, usage pays. Per-receipt ATN burn REJECTED (log1p
 saturation makes flat burn regressive — see memo); the cognitive
 attestation cost is the floor price instead.
+
+**[v4.1 (Decision 2026-07-09): the greenlight gate and the royalty split
+are RETIRED — tools mint from first attested use, author keeps 100%.
+`mint = usage_term` still, but usage_term is now SPLIT: each household's
+damped credit scales by its MINT weight (raw rep_share for rep-holders,
+ε for zero-rep), the aggregate zero-rep ε-weight capped at β(rep_supply)
+of total. The rep BASIS of each author's mint (`rep_fraction`, the
+rep-holder-attributable portion) is threaded out separately so ATN and
+reputation mint at DECOUPLED amounts — zero-rep usage mints ATN, no
+reputation.]**
 
 ## Retrieval: density, not centroid
 
@@ -468,6 +628,18 @@ protocol floor changes only by redeploy/governance — a future
 session's question, deliberately deferred.
 
 ## Vetting: the candidate pool (ratified 2026-07-05; BUILT same day)
+
+**[RETIRED at v4.1 (Decision 2026-07-09). The candidate pool and the
+greenlight GATE are gone: tools mint from first attested use, there is no
+mint-eligibility gate and no validator royalty. The econ-attestation sims
+showed the gate was itself the cheapest attack (two free unbound sybils
+clear `VET_QUORUM=2.0`; the CON-bust clawback that was the royalty's teeth
+is dormant, so a colluding vetter risked nothing — divergence D5). A vet
+now survives as an INSPECTION REVIEW (per-axis scores, no usage, moves
+position, mints nothing — see `vet_axis_reviews_by_caller`). The
+`VET_*`/`vetting` machinery below stays in-tree as dead knobs (carried
+tolerantly for the rebuildable-cache contract) but no longer gates or
+splits mint. This section is retained for history only.]**
 
 Publishing enters a tool into the CANDIDATE pool: visible, debatable,
 NOT yet mint-eligible and not yet adoption-recommended. Admission to
@@ -671,13 +843,19 @@ is the agent-facing daemon flow; the on-chain greenlight
   mint-weighted review centroid (see the v3 Decision section),
   carried across epochs in the `tool_positions` map (same
   derived-from-canonical-events contract as `tool_registrations`).
-- Mint (`compute_tool_mint`): **pinned only**, `mint = usage_term`,
-  greenlight-gated, royalty-split. Cross-epoch carry-over:
-  `tool_registrations` + `tool_vetting` + `tool_positions` (all
-  derived from canonical events, rebuildable, identical everywhere).
-- Wash-trading dampers: per-caller log1p + owner-map + wire-key
-  exclusions are live; the sims swept the alternatives
-  (sims/tool_economy — pre-v3, uses standing; quarantined).
+- Mint (`compute_tool_mint`): **pinned only**, `mint = usage_term`.
+  **[v4.1: no longer greenlight-gated or royalty-split — rep/ATN-split
+  under the β cap instead. Decision 2026-07-09.]** Cross-epoch carry-over:
+  `tool_registrations` + `tool_positions` + `tool_vetting` (dead, carried
+  tolerantly) + **v4.1** `tool_credibility` + `tool_review_book` (both
+  same rebuildable-cache contract). Close also emits `agent_rep` (the
+  decoupled reputation increment) and `tool_beta` (the effective β cap).
+- Wash-trading dampers: per-household log1p + owner-map + wire-key
+  exclusions are live; **v4.1** adds rep-weighted drift (no ε floor),
+  continuous reversal-aware credibility, and the supply-pegged β cap on
+  zero-rep ATN mint. The pre-v3 sims (sims/tool_economy — uses standing)
+  are quarantined; the v4.1 adversarial sims live in
+  `experiments/econ_attest/`.
 
 ## On-chain (with the Services contract work)
 

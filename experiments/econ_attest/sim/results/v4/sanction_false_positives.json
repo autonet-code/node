@@ -1,0 +1,106 @@
+{
+  "scenario": "sanction_false_positives_v4",
+  "params": {
+    "epochs": 120,
+    "delta_values": [
+      0.3,
+      0.5,
+      0.7
+    ],
+    "Q_values": [
+      3.0,
+      5.0,
+      10.0
+    ],
+    "review_noise": 0.25
+  },
+  "verdict": {
+    "grid": [
+      {
+        "delta": 0.3,
+        "Q": 3.0,
+        "fp_dock_rate": 0.16812,
+        "frac_reviewers_dinged": 1.0,
+        "mean_final_cred": 0.55666
+      },
+      {
+        "delta": 0.3,
+        "Q": 5.0,
+        "fp_dock_rate": 0.09979,
+        "frac_reviewers_dinged": 1.0,
+        "mean_final_cred": 0.5638
+      },
+      {
+        "delta": 0.3,
+        "Q": 10.0,
+        "fp_dock_rate": 0.0,
+        "frac_reviewers_dinged": 0.0,
+        "mean_final_cred": 1.0
+      },
+      {
+        "delta": 0.5,
+        "Q": 3.0,
+        "fp_dock_rate": 0.05708,
+        "frac_reviewers_dinged": 1.0,
+        "mean_final_cred": 0.8542
+      },
+      {
+        "delta": 0.5,
+        "Q": 5.0,
+        "fp_dock_rate": 0.03333,
+        "frac_reviewers_dinged": 0.96667,
+        "mean_final_cred": 0.85602
+      },
+      {
+        "delta": 0.5,
+        "Q": 10.0,
+        "fp_dock_rate": 0.0,
+        "frac_reviewers_dinged": 0.0,
+        "mean_final_cred": 1.0
+      },
+      {
+        "delta": 0.7,
+        "Q": 3.0,
+        "fp_dock_rate": 0.00625,
+        "frac_reviewers_dinged": 0.06667,
+        "mean_final_cred": 0.98598
+      },
+      {
+        "delta": 0.7,
+        "Q": 5.0,
+        "fp_dock_rate": 0.00354,
+        "frac_reviewers_dinged": 0.06667,
+        "mean_final_cred": 0.98601
+      },
+      {
+        "delta": 0.7,
+        "Q": 10.0,
+        "fp_dock_rate": 0.0,
+        "frac_reviewers_dinged": 0.0,
+        "mean_final_cred": 1.0
+      }
+    ],
+    "safe_region": [
+      {
+        "delta": 0.3,
+        "Q": 10.0
+      },
+      {
+        "delta": 0.5,
+        "Q": 10.0
+      },
+      {
+        "delta": 0.7,
+        "Q": 3.0
+      },
+      {
+        "delta": 0.7,
+        "Q": 5.0
+      },
+      {
+        "delta": 0.7,
+        "Q": 10.0
+      }
+    ]
+  }
+}

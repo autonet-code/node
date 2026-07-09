@@ -356,7 +356,9 @@ async def test():
         "list_tools", "use_tool",
         # Tool substrate (docs/tool_substrate.md)
         "register_tool", "attest_tools", "publish_tool", "vet_tool",
-        "adopt_tool",
+        "adopt_tool", "probe_tools",
+        # Validator rail (vetting bundle)
+        "check_evidence", "run_trial",
         # Planning & goal tools
         "get_goals", "add_goal", "update_goal",
         "get_projects", "add_project", "update_project",
@@ -366,7 +368,7 @@ async def test():
         "delegate_status", "delegate_message", "delegate_collect",
         "get_latest_thought", "get_children_status",
         # Budgets & chain
-        "get_my_budget_status", "register_on_chain",
+        "get_my_budget_status", "register_on_chain", "metering_report",
         # Manual compaction (spec §15)
         "compact_agent",
     }

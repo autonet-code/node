@@ -270,19 +270,6 @@ class TestToolMintClose:
         assert result["tool_registrations"] == {}
 
 
-def _greenlit(digest: str = DIGEST, *, royalty_left: int = 0,
-              validators: List[str] | None = None) -> Dict[str, Any]:
-    """Carried vetting state with ``digest`` already greenlit — for
-    direct compute_tool_mint tests that aren't about the vet flow."""
-    return {"manifests": {digest: {
-        "vets": {v: [] for v in (validators or [])},
-        "greenlit": True,
-        "royalty_left": royalty_left,
-        "validators": sorted(validators or []),
-        "busted": False,
-    }}, "busts": {}}
-
-
 class TestComputeToolMint:
     def _world_with_registration(self):
         world = build_charter_world(embedding_dim=EMBED_DIM)
@@ -292,13 +279,12 @@ class TestComputeToolMint:
     def test_carried_registration_attributes(self):
         """Receipts-only epoch: the carried registration map still
         attributes, provided the claim node exists in the (seeded)
-        world."""
+        world. v4.1: no greenlight needed to mint."""
         world = self._world_with_registration()
         events = [_receipt_event(1, "caller-9")]
         out = compute_tool_mint(
             world, events,
             registrations={DIGEST: {"trust_class": "pinned", "author": AUTHOR}},
-            vetting=_greenlit(),
         )
         assert out["per_digest"][DIGEST]["author"] == AUTHOR
         assert out["per_digest"][DIGEST]["mint"] > 0
@@ -312,7 +298,6 @@ class TestComputeToolMint:
         out = compute_tool_mint(
             world, events,
             registrations={DIGEST: {"trust_class": "pinned", "author": AUTHOR}},
-            vetting=_greenlit(),
         )
         assert out["per_digest"][DIGEST]["author"] == AUTHOR
 
@@ -323,9 +308,19 @@ class TestComputeToolMint:
         assert out["registrations_next"] == {}
 
 
-class TestVetting:
-    """Candidate pool → distinct-fleet greenlight → validator royalty →
-    bust slashing (spec: Vetting section)."""
+def _vet_event_axes(seq: int, vetter: str, axes: Dict[str, float],
+                    *, digest: str = DIGEST) -> Dict[str, Any]:
+    """An INSPECTION REVIEW (v4.1 [R2]): a vet event carrying per-axis
+    scores. Drifts position, mints nothing."""
+    ev = _vet_event(seq, vetter, digest=digest)
+    ev["axes"] = dict(axes)
+    return ev
+
+
+class TestVetGateRemoved:
+    """v4.1 [R1][R2]: the vet GATE is gone — tools mint from first
+    attested use, author keeps 100%, and a vet survives only as an
+    inspection review that drifts position without minting."""
 
     REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
 
@@ -334,156 +329,68 @@ class TestVetting:
         apply_events(world, [_registration_event(1)], equilibrate_after=False)
         return world
 
-    def test_unvetted_candidate_mints_nothing(self):
-        """Publishing puts a manifest in the CANDIDATE pool: visible,
-        debatable, zero emission until greenlit."""
+    def test_unvetted_tool_mints(self):
+        """v4.1 [R1]: no greenlight required — an attested, never-vetted
+        tool mints from first use, author keeps everything."""
         result = federated_epoch_close(
             canonical_order(_standard_batches(vetted=False)))
-        assert result["tool_mint"] == {}
-        # ...but the candidate's vet state is tracked from the moment
-        # the registration lands (it's just not greenlit).
-        assert result["tool_registrations"][DIGEST]["author"] == AUTHOR
-
-    def test_two_fleet_vets_greenlight_and_mint(self):
-        result = federated_epoch_close(canonical_order(_standard_batches()))
         entry = result["tool_mint"][DIGEST]
-        assert entry["greenlit"] is True
-        assert entry["validators"] == 2
-        assert entry["mint"] > 0
-        vet_next = result["tool_vetting"]["manifests"][DIGEST]
-        assert vet_next["greenlit"] is True
-        assert vet_next["validators"] == ["vetter-1", "vetter-2"]
+        assert entry["author"] == AUTHOR
+        assert entry["mint"] == pytest.approx(2 * math.log1p(1))
+        # Author keeps 100% — no validator royalty split.
+        node = result["agent_mint"]
+        assert node.get(AUTHOR, 0) > 0
 
-    def test_vets_are_not_usage(self):
-        """Vet receipts must not inflate the usage term — greenlight
-        eligibility and usage credit are separate signals."""
-        result = federated_epoch_close(canonical_order(_standard_batches()))
-        entry = result["tool_mint"][DIGEST]
-        # Same usage term as the pre-vetting fixture: two attesting
-        # agents, one ok attestation each.
-        assert entry["usage_term"] == pytest.approx(2 * math.log1p(1))
-
-    def test_same_fleet_vets_do_not_greenlight(self):
-        """Owner-map collapse: two vetters registered under one wallet
-        are ONE fleet — a single fleet cannot greenlight (N=2)."""
-        result = federated_epoch_close(
-            canonical_order(_standard_batches()),
-            agent_owner_map={"vetter-1": "0xV", "vetter-2": "0xV"},
-        )
-        assert result["tool_mint"] == {}
-        assert not result["tool_vetting"]["manifests"][DIGEST]["greenlit"]
-
-    def test_author_fleet_vet_excluded(self):
-        """Self-vetting is structurally void: a vet from the author's
-        own fleet never enters the vet set."""
-        result = federated_epoch_close(
-            canonical_order(_standard_batches()),
-            agent_owner_map={AUTHOR: "0xA", "vetter-1": "0xA"},
-        )
-        m = result["tool_vetting"]["manifests"][DIGEST]
-        assert "vetter-1" not in m["vets"]
-        assert result["tool_mint"] == {}      # one honest fleet < quorum
-
-    def test_co_hosted_vet_excluded(self):
-        """Wire dedup: a vet batch signed with the registration batch's
-        key is the author's own daemon talking to itself."""
-        kp = Keypair.generate()
-        batches = _batches([
-            _registration_event(1),
-            _vet_event(2, "sock-puppet"),
-        ], kp) + _batches(
-            [_receipt_event(1, "caller-1")], Keypair.generate(),
-        ) + _vet_batches([DIGEST], vetters=1)   # one honest vet
-        result = federated_epoch_close(canonical_order(batches))
-        m = result["tool_vetting"]["manifests"][DIGEST]
-        assert "sock-puppet" not in m["vets"]
-        assert result["tool_mint"] == {}
-
-    def test_validator_royalty_split_conserved(self):
-        """While the royalty window is open, validators split their
-        share FROM the author's mint — printed on the same claim node,
-        total conserved."""
+    def test_author_keeps_full_mint_no_royalty(self):
+        """Even with vets present (now inspection reviews), the author's
+        mint is not split with validators."""
         world = self._world()
         out = compute_tool_mint(
             world, [_receipt_event(1, "caller-9")],
             registrations=self.REGS,
-            vetting=_greenlit(royalty_left=3,
-                              validators=["vetter-1", "vetter-2"]),
         )
         entry = out["per_digest"][DIGEST]
-        mint = entry["mint"]
         node = out["node_agent"][entry["node_id"]]
-        assert node[AUTHOR] == pytest.approx(mint * 0.9)
-        assert node["vetter-1"] == pytest.approx(mint * 0.05)
-        assert node["vetter-2"] == pytest.approx(mint * 0.05)
-        assert sum(node.values()) == pytest.approx(mint)
-        # Window ticked down once this close.
-        assert out["vetting_next"]["manifests"][DIGEST]["royalty_left"] == 2
+        assert node == {AUTHOR: pytest.approx(entry["mint"])}
+        assert list(node.keys()) == [AUTHOR]
 
-    def test_royalty_window_expires(self):
+    def test_vet_inspection_review_drifts_but_mints_nothing(self):
+        """v4.1 [R2]: a vet carrying axes moves the tool's charter head
+        (position drift) but contributes ZERO usage/mint."""
         world = self._world()
-        vetting = _greenlit(royalty_left=1, validators=["vetter-1"])
-        out1 = compute_tool_mint(
-            world, [_receipt_event(1, "caller-9")],
-            registrations=self.REGS, vetting=vetting)
-        entry = out1["per_digest"][DIGEST]
-        assert "vetter-1" in out1["node_agent"][entry["node_id"]]
-        # Next epoch: window closed, author keeps everything.
-        out2 = compute_tool_mint(
-            world, [_receipt_event(1, "caller-9")],
-            registrations=self.REGS, vetting=out1["vetting_next"])
-        entry2 = out2["per_digest"][DIGEST]
-        node2 = out2["node_agent"][entry2["node_id"]]
-        assert "vetter-1" not in node2
-        assert node2[AUTHOR] == pytest.approx(entry2["mint"])
+        # A vet with a correctness score, from a rep-holding reviewer.
+        vet = _vet_event_axes(1, "reviewer-1", {"correctness": 1.0})
+        vet["sender"] = "aa01"
+        out = compute_tool_mint(
+            world, [vet],
+            registrations=self.REGS,
+            rep_shares={"reviewer-1": 0.5}, rep_supply=100.0,
+        )
+        # No usage -> no mint at all.
+        assert out["per_digest"] == {}
+        # ...but position drifted toward the inspection score.
+        head = out["positions_next"][DIGEST]["head"]
+        assert head[4] > 0.0     # correctness axis moved positive
+        # And the review is recorded in the carried book for later
+        # credibility re-scoring.
+        assert DIGEST in out["tool_review_book_next"]
+        assert "reviewer-1" in out["tool_review_book_next"][DIGEST]
 
-    def test_bust_rail_is_dormant_but_history_honored(self, monkeypatch):
-        """v3 (Decision 2026-07-08): the CON-triggered bust is DORMANT —
-        a charter violation no longer busts a greenlit tool (debate left
-        the live path). Carried historical busts still discount vet
-        weight (see test_busted_validator_weight_decays)."""
-        import nodes.common.federated_reconcile as fr
+    def test_vet_state_carried_tolerantly(self):
+        """v4.1 [R1]: old carried vetting state (greenlit/royalty fields)
+        is read without error and produces no mint effect."""
         world = self._world()
-        # Even a screaming violation signal must not trigger a bust now.
-        monkeypatch.setattr(fr, "charter_violation_score",
-                            lambda *a, **k: 0.9)
+        legacy_vetting = {"manifests": {DIGEST: {
+            "vets": {"v1": []}, "greenlit": True, "royalty_left": 5,
+            "validators": ["v1"], "busted": False,
+        }}, "busts": {}}
         out = compute_tool_mint(
             world, [_receipt_event(1, "caller-9")],
-            registrations=self.REGS,
-            vetting=_greenlit(royalty_left=5,
-                              validators=["vetter-1", "vetter-2"]),
-        )
-        m = out["vetting_next"]["manifests"][DIGEST]
-        assert m["busted"] is False
-        assert m["royalty_left"] == 4            # normal window tick only
-        assert out["vetting_next"]["busts"] == {}
-
-    def test_busted_validator_weight_decays(self):
-        """A vetter with one bust carries weight 1/2: together with one
-        clean fleet that's 1.5 < quorum 2 — it takes a third fleet."""
-        world = build_charter_world(embedding_dim=EMBED_DIM)
-        apply_events(world, [_registration_event(1)], equilibrate_after=False)
-        busted_state = {"manifests": {}, "busts": {"vetter-1": 1}}
-
-        def _vets(n):
-            evs = []
-            for v in range(1, n + 1):
-                ev = _vet_event(v, f"vetter-{v}")
-                ev["sender"] = f"aa{v:02d}"      # distinct wire identities
-                evs.append(ev)
-            return evs
-
-        out2 = compute_tool_mint(
-            world, _vets(2) + [_receipt_event(9, "caller-9")],
-            registrations=self.REGS, vetting=busted_state)
-        assert not out2["vetting_next"]["manifests"][DIGEST]["greenlit"]
-        assert out2["per_digest"] == {}
-
-        out3 = compute_tool_mint(
-            world, _vets(3) + [_receipt_event(9, "caller-9")],
-            registrations=self.REGS, vetting=busted_state)
-        assert out3["vetting_next"]["manifests"][DIGEST]["greenlit"]
-        assert out3["per_digest"][DIGEST]["mint"] > 0
+            registrations=self.REGS, vetting=legacy_vetting)
+        entry = out["per_digest"][DIGEST]
+        # Author still keeps 100% despite the legacy royalty window.
+        node = out["node_agent"][entry["node_id"]]
+        assert node == {AUTHOR: pytest.approx(entry["mint"])}
 
 
 class TestCompositionFanOut:
@@ -679,3 +586,246 @@ class TestDriverCarryOver:
         # Restart: a new driver instance reloads the cache from disk.
         driver2 = self._driver(tmp_path, [[_receipt_event(1, "c3")]])
         assert driver2._tool_registrations[DIGEST]["author"] == AUTHOR
+
+
+# ---------------------------------------------------------------------------
+# v4.1 "gradient trust" (ratified 2026-07-09):
+#   R4 supply-pegged beta cap on zero-rep mint weight
+#   R6 rep/ATN split (agent_rep decoupled from agent_mint)
+#   R5 continuous reversal-aware credibility (drift-weight multiplier)
+# ---------------------------------------------------------------------------
+
+
+def _receipt_axes(seq: int, caller: str, axes: Dict[str, float],
+                  *, digest: str = DIGEST) -> Dict[str, Any]:
+    ev = _receipt_event(seq, caller, digest=digest)
+    ev["axes"] = dict(axes)
+    return ev
+
+
+class TestBetaCap:
+    """R4: zero-rep households' AGGREGATE mint weight is capped at
+    beta(rep_supply) of total weight; rep_supply=None => uncapped."""
+
+    REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
+
+    def _world(self):
+        world = build_charter_world(embedding_dim=EMBED_DIM)
+        apply_events(world, [_registration_event(1)], equilibrate_after=False)
+        return world
+
+    def test_uncapped_when_rep_supply_none(self):
+        """rep_shares=None => local regime, beta=1, no scaling."""
+        world = self._world()
+        out = compute_tool_mint(
+            world, [_receipt_event(1, "zero-1"), _receipt_event(2, "zero-2")],
+            registrations=self.REGS,
+        )
+        assert out["beta"] == pytest.approx(1.0)
+        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
+            2 * math.log1p(1))
+
+    def test_zero_rep_aggregate_scaled_when_cap_binds(self):
+        """With a tiny rep base and many zero-rep callers, the zero-rep
+        aggregate mint weight is scaled down to beta of total."""
+        world = self._world()
+        from nodes.common.federated_reconcile import (
+            BETA_MIN, VOICE_EPSILON, beta_of_supply)
+        rep_supply = 100000.0          # mature: beta floored at BETA_MIN
+        beta = beta_of_supply(rep_supply)
+        assert beta == pytest.approx(BETA_MIN)
+        events = [
+            _receipt_event(1, "rep-holder"),
+            _receipt_event(2, "zero-1"),
+            _receipt_event(3, "zero-2"),
+            _receipt_event(4, "zero-3"),
+        ]
+        rep_shares = {"rep-holder": 0.5}
+        out = compute_tool_mint(
+            world, events, registrations=self.REGS,
+            rep_shares=rep_shares, rep_supply=rep_supply,
+        )
+        assert out["beta"] == pytest.approx(beta)
+        ln = math.log1p(1)
+        rep_w = ln * 0.5
+        zero_w_raw = 3 * ln * VOICE_EPSILON
+        allowed = (beta / (1.0 - beta)) * rep_w
+        assert allowed < zero_w_raw, "cap should bind in this fixture"
+        expected = rep_w + allowed
+        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
+            expected, rel=1e-6)
+
+    def test_zero_rep_below_cap_unchanged(self):
+        """When zero-rep aggregate is under beta, no scaling applies."""
+        world = self._world()
+        from nodes.common.federated_reconcile import VOICE_EPSILON
+        rep_supply = 100.0
+        events = [
+            _receipt_event(1, "rep-holder"),
+            _receipt_event(2, "zero-1"),
+        ]
+        rep_shares = {"rep-holder": 0.9}
+        out = compute_tool_mint(
+            world, events, registrations=self.REGS,
+            rep_shares=rep_shares, rep_supply=rep_supply,
+        )
+        ln = math.log1p(1)
+        expected = ln * 0.9 + ln * VOICE_EPSILON
+        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
+            expected, rel=1e-6)
+
+
+class TestRepSplit:
+    """R6: agent_rep = agent_mint x rep_fraction; zero-rep-only callers
+    grant ATN but ZERO reputation."""
+
+    REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
+
+    def _world(self):
+        world = build_charter_world(embedding_dim=EMBED_DIM)
+        apply_events(world, [_registration_event(1)], equilibrate_after=False)
+        return world
+
+    def test_rep_fraction_mixed_callers(self):
+        world = self._world()
+        from nodes.common.federated_reconcile import VOICE_EPSILON
+        events = [
+            _receipt_event(1, "rep-holder"),
+            _receipt_event(2, "zero-1"),
+        ]
+        rep_shares = {"rep-holder": 0.5}
+        out = compute_tool_mint(
+            world, events, registrations=self.REGS,
+            rep_shares=rep_shares, rep_supply=1.0,   # beta ~= 1, no cap
+        )
+        entry = out["per_digest"][DIGEST]
+        ln = math.log1p(1)
+        rep_part = ln * 0.5
+        total = rep_part + ln * VOICE_EPSILON
+        assert entry["rep_fraction"] == pytest.approx(
+            rep_part / total, rel=1e-6)
+        node = entry["node_id"]
+        assert out["node_agent_rep"][node][AUTHOR] == pytest.approx(rep_part)
+
+    def test_zero_rep_only_grants_no_reputation(self):
+        world = self._world()
+        events = [_receipt_event(1, "zero-1"), _receipt_event(2, "zero-2")]
+        # Low rep_supply => beta ~= 1 (uncapped, genesis regime): zero-rep
+        # usage STILL mints ATN, but rep_shares={} means the rep basis is
+        # zero — ATN minted, reputation not.
+        out = compute_tool_mint(
+            world, events, registrations=self.REGS,
+            rep_shares={}, rep_supply=1.0,
+        )
+        entry = out["per_digest"][DIGEST]
+        assert entry["mint"] > 0
+        assert entry["rep_fraction"] == pytest.approx(0.0)
+        assert out["node_agent_rep"] == {}
+
+    def test_agent_rep_le_agent_mint_through_close(self):
+        """Through the full close, agent_rep <= agent_mint per agent."""
+        kp_author = Keypair.generate()
+        kp_caller = Keypair.generate()
+        batches = _batches([_registration_event(1)], kp_author) + _batches([
+            _receipt_event(1, "rep-caller"),
+            _receipt_event(2, "zero-caller"),
+        ], kp_caller)
+        result = federated_epoch_close(
+            canonical_order(batches),
+            rep_shares={"rep-caller": 0.5},
+            rep_supply=1.0,            # beta ~= 1, isolate the split
+        )
+        am = result["agent_mint"]
+        ar = result.get("agent_rep", {})
+        assert am.get(AUTHOR, 0) > 0
+        for agent, rep in ar.items():
+            assert rep <= am[agent] + 1e-9
+        assert ar.get(AUTHOR, 0) > 0
+
+    def test_zero_rep_only_close_grants_no_agent_rep(self):
+        kp_author = Keypair.generate()
+        kp_caller = Keypair.generate()
+        batches = _batches([_registration_event(1)], kp_author) + _batches([
+            _receipt_event(1, "zero-1"),
+        ], kp_caller)
+        result = federated_epoch_close(
+            canonical_order(batches),
+            rep_shares={}, rep_supply=1.0,
+        )
+        assert result["agent_mint"].get(AUTHOR, 0) > 0
+        assert result.get("agent_rep", {}).get(AUTHOR, 0) == 0
+
+
+class TestCredibility:
+    """R5: continuous reversal-aware credibility carried across closes;
+    a reversal retroactively docks the capturers."""
+
+    REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
+
+    def _world(self):
+        world = build_charter_world(embedding_dim=EMBED_DIM)
+        apply_events(world, [_registration_event(1)], equilibrate_after=False)
+        return world
+
+    def _many(self, caller: str, axis_val: float, n: int, seq0: int):
+        """n attested receipts from one caller, each scoring correctness
+        — high n lifts log1p(n) so review mass clears CRED_MASS_FLOOR and
+        the drift centroid is well-defined."""
+        return [_receipt_axes(seq0 + i, caller, {"correctness": axis_val})
+                for i in range(n)]
+
+    def test_credibility_carries_and_reversal_docks(self):
+        world = self._world()
+        # Heavy honest majority + a lone capturer. rep_supply=1 => beta~=1
+        # (no cap distortion), rep shares near 1 so drift mass is large.
+        rep_shares = {"honest-1": 0.9, "honest-2": 0.9, "capturer": 0.9}
+        # Epoch 1: EVERYONE (incl. capturer) asserts strongly POSITIVE,
+        # many reviews each so total mass >> CRED_MASS_FLOOR.
+        ev1 = (self._many("honest-1", 1.0, 30, 1)
+               + self._many("honest-2", 1.0, 30, 100)
+               + self._many("capturer", 1.0, 30, 200))
+        out1 = compute_tool_mint(
+            world, ev1, registrations=self.REGS,
+            rep_shares=rep_shares, rep_supply=1.0,
+        )
+        cred1 = out1["credibility_next"]
+        book1 = out1["tool_review_book_next"]
+        assert DIGEST in book1
+        # Agreement so far: nobody docked.
+        for h in ("honest-1", "honest-2", "capturer"):
+            assert cred1.get(h, 1.0) >= 0.9
+
+        # Epoch 2: the honest majority REVERSES hard to strongly negative
+        # with overwhelming mass, dragging the head far below the
+        # capturer's stored +1.0 review -> the capturer is retroactively
+        # docked (its carried centroid now deviates > delta from the head).
+        ev2 = (self._many("honest-1", -1.0, 200, 1)
+               + self._many("honest-2", -1.0, 200, 300))
+        out2 = compute_tool_mint(
+            world, ev2,
+            registrations=self.REGS,
+            rep_shares=rep_shares, rep_supply=1.0,
+            positions=out1["positions_next"],
+            credibility=cred1,
+            tool_review_book=book1,
+        )
+        head2 = out2["positions_next"][DIGEST]["head"][4]
+        assert head2 < 0.0, "honest reversal should push head negative"
+        cred2 = out2["credibility_next"]
+        assert cred2.get("capturer", 1.0) < 1.0
+
+    def test_credibility_floor_and_recovery(self):
+        """A docked household recovers toward 1.0 in a later quiet epoch,
+        never below CRED_FLOOR."""
+        from nodes.common.federated_reconcile import CRED_FLOOR
+        world = self._world()
+        cred_in = {"stale": CRED_FLOOR}
+        out = compute_tool_mint(
+            world, [_receipt_event(1, "someone")],
+            registrations=self.REGS,
+            rep_shares={"someone": 0.5}, rep_supply=100000.0,
+            credibility=cred_in,
+        )
+        c = out["credibility_next"].get("stale", CRED_FLOOR)
+        assert CRED_FLOOR <= c <= 1.0
+        assert c > CRED_FLOOR

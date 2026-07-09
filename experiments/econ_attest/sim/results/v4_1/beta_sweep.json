@@ -1,0 +1,623 @@
+{
+  "scenario": "beta_sweep_v4_1",
+  "params": {
+    "seed": 20,
+    "epochs": 60,
+    "beta_values": [
+      0.02,
+      0.05,
+      0.1,
+      0.2,
+      0.3,
+      0.5
+    ],
+    "maturities": {
+      "young": 0.6,
+      "growing": 0.3,
+      "mature": 0.1
+    },
+    "K_values": [
+      0,
+      50,
+      200
+    ],
+    "delta": 0.7
+  },
+  "uncapped_corr": {
+    "young|K0": 0.955,
+    "young|K50": 0.9797,
+    "young|K200": 0.9867,
+    "growing|K0": 0.8896,
+    "growing|K50": 0.8878,
+    "growing|K200": 0.9154,
+    "mature|K0": 0.3912,
+    "mature|K50": 0.4157,
+    "mature|K200": 0.5894
+  },
+  "cells": [
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 0,
+      "beta": 0.02,
+      "corr_demand_mint": 0.6756,
+      "corr_drop_vs_uncapped": 0.2794,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.9736
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 0,
+      "beta": 0.05,
+      "corr_demand_mint": 0.6971,
+      "corr_drop_vs_uncapped": 0.2579,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.9728
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 0,
+      "beta": 0.1,
+      "corr_demand_mint": 0.7334,
+      "corr_drop_vs_uncapped": 0.2216,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.9714
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 0,
+      "beta": 0.2,
+      "corr_demand_mint": 0.8057,
+      "corr_drop_vs_uncapped": 0.1493,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.968
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 0,
+      "beta": 0.3,
+      "corr_demand_mint": 0.8731,
+      "corr_drop_vs_uncapped": 0.0819,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.9638
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 0,
+      "beta": 0.5,
+      "corr_demand_mint": 0.9684,
+      "corr_drop_vs_uncapped": -0.0134,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.9508
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 50,
+      "beta": 0.02,
+      "corr_demand_mint": 0.6276,
+      "corr_drop_vs_uncapped": 0.3521,
+      "sybil_atn_share": 0.0084,
+      "observed_zero_share": 0.9845
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 50,
+      "beta": 0.05,
+      "corr_demand_mint": 0.6431,
+      "corr_drop_vs_uncapped": 0.3366,
+      "sybil_atn_share": 0.021,
+      "observed_zero_share": 0.984
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 50,
+      "beta": 0.1,
+      "corr_demand_mint": 0.6699,
+      "corr_drop_vs_uncapped": 0.3097,
+      "sybil_atn_share": 0.0421,
+      "observed_zero_share": 0.9831
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 50,
+      "beta": 0.2,
+      "corr_demand_mint": 0.7271,
+      "corr_drop_vs_uncapped": 0.2526,
+      "sybil_atn_share": 0.0842,
+      "observed_zero_share": 0.9811
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 50,
+      "beta": 0.3,
+      "corr_demand_mint": 0.7878,
+      "corr_drop_vs_uncapped": 0.1919,
+      "sybil_atn_share": 0.1262,
+      "observed_zero_share": 0.9786
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 50,
+      "beta": 0.5,
+      "corr_demand_mint": 0.9071,
+      "corr_drop_vs_uncapped": 0.0725,
+      "sybil_atn_share": 0.2104,
+      "observed_zero_share": 0.9707
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 200,
+      "beta": 0.02,
+      "corr_demand_mint": 0.7278,
+      "corr_drop_vs_uncapped": 0.2589,
+      "sybil_atn_share": 0.0149,
+      "observed_zero_share": 0.9932
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 200,
+      "beta": 0.05,
+      "corr_demand_mint": 0.7322,
+      "corr_drop_vs_uncapped": 0.2545,
+      "sybil_atn_share": 0.0373,
+      "observed_zero_share": 0.993
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 200,
+      "beta": 0.1,
+      "corr_demand_mint": 0.7401,
+      "corr_drop_vs_uncapped": 0.2466,
+      "sybil_atn_share": 0.0746,
+      "observed_zero_share": 0.9927
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 200,
+      "beta": 0.2,
+      "corr_demand_mint": 0.758,
+      "corr_drop_vs_uncapped": 0.2287,
+      "sybil_atn_share": 0.1491,
+      "observed_zero_share": 0.9918
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 200,
+      "beta": 0.3,
+      "corr_demand_mint": 0.7795,
+      "corr_drop_vs_uncapped": 0.2072,
+      "sybil_atn_share": 0.2237,
+      "observed_zero_share": 0.9907
+    },
+    {
+      "maturity": "young",
+      "zero_share": 0.6,
+      "K": 200,
+      "beta": 0.5,
+      "corr_demand_mint": 0.8374,
+      "corr_drop_vs_uncapped": 0.1493,
+      "sybil_atn_share": 0.3728,
+      "observed_zero_share": 0.9871
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 0,
+      "beta": 0.02,
+      "corr_demand_mint": 0.9017,
+      "corr_drop_vs_uncapped": -0.0121,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.9168
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 0,
+      "beta": 0.05,
+      "corr_demand_mint": 0.9173,
+      "corr_drop_vs_uncapped": -0.0276,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.9145
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 0,
+      "beta": 0.1,
+      "corr_demand_mint": 0.9389,
+      "corr_drop_vs_uncapped": -0.0493,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.9103
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 0,
+      "beta": 0.2,
+      "corr_demand_mint": 0.9664,
+      "corr_drop_vs_uncapped": -0.0768,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.9006
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 0,
+      "beta": 0.3,
+      "corr_demand_mint": 0.9732,
+      "corr_drop_vs_uncapped": -0.0836,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.8887
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 0,
+      "beta": 0.5,
+      "corr_demand_mint": 0.9493,
+      "corr_drop_vs_uncapped": -0.0597,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.8557
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 50,
+      "beta": 0.02,
+      "corr_demand_mint": 0.9063,
+      "corr_drop_vs_uncapped": -0.0185,
+      "sybil_atn_share": 0.0118,
+      "observed_zero_share": 0.9647
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 50,
+      "beta": 0.05,
+      "corr_demand_mint": 0.9131,
+      "corr_drop_vs_uncapped": -0.0253,
+      "sybil_atn_share": 0.0294,
+      "observed_zero_share": 0.9637
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 50,
+      "beta": 0.1,
+      "corr_demand_mint": 0.9244,
+      "corr_drop_vs_uncapped": -0.0366,
+      "sybil_atn_share": 0.0588,
+      "observed_zero_share": 0.9618
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 50,
+      "beta": 0.2,
+      "corr_demand_mint": 0.9464,
+      "corr_drop_vs_uncapped": -0.0587,
+      "sybil_atn_share": 0.1175,
+      "observed_zero_share": 0.9574
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 50,
+      "beta": 0.3,
+      "corr_demand_mint": 0.9662,
+      "corr_drop_vs_uncapped": -0.0785,
+      "sybil_atn_share": 0.1763,
+      "observed_zero_share": 0.9518
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 50,
+      "beta": 0.5,
+      "corr_demand_mint": 0.9865,
+      "corr_drop_vs_uncapped": -0.0988,
+      "sybil_atn_share": 0.2938,
+      "observed_zero_share": 0.9349
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 200,
+      "beta": 0.02,
+      "corr_demand_mint": 0.9312,
+      "corr_drop_vs_uncapped": -0.0159,
+      "sybil_atn_share": 0.017,
+      "observed_zero_share": 0.9871
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 200,
+      "beta": 0.05,
+      "corr_demand_mint": 0.9328,
+      "corr_drop_vs_uncapped": -0.0175,
+      "sybil_atn_share": 0.0426,
+      "observed_zero_share": 0.9867
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 200,
+      "beta": 0.1,
+      "corr_demand_mint": 0.9357,
+      "corr_drop_vs_uncapped": -0.0203,
+      "sybil_atn_share": 0.0852,
+      "observed_zero_share": 0.986
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 200,
+      "beta": 0.2,
+      "corr_demand_mint": 0.9421,
+      "corr_drop_vs_uncapped": -0.0267,
+      "sybil_atn_share": 0.1704,
+      "observed_zero_share": 0.9843
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 200,
+      "beta": 0.3,
+      "corr_demand_mint": 0.9495,
+      "corr_drop_vs_uncapped": -0.0341,
+      "sybil_atn_share": 0.2556,
+      "observed_zero_share": 0.9822
+    },
+    {
+      "maturity": "growing",
+      "zero_share": 0.3,
+      "K": 200,
+      "beta": 0.5,
+      "corr_demand_mint": 0.9679,
+      "corr_drop_vs_uncapped": -0.0525,
+      "sybil_atn_share": 0.426,
+      "observed_zero_share": 0.9755
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 0,
+      "beta": 0.02,
+      "corr_demand_mint": 0.9465,
+      "corr_drop_vs_uncapped": -0.5553,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.7537
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 0,
+      "beta": 0.05,
+      "corr_demand_mint": 0.9717,
+      "corr_drop_vs_uncapped": -0.5805,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.7481
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 0,
+      "beta": 0.1,
+      "corr_demand_mint": 0.9774,
+      "corr_drop_vs_uncapped": -0.5861,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.7385
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 0,
+      "beta": 0.2,
+      "corr_demand_mint": 0.883,
+      "corr_drop_vs_uncapped": -0.4917,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.7175
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 0,
+      "beta": 0.3,
+      "corr_demand_mint": 0.7381,
+      "corr_drop_vs_uncapped": -0.3469,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.6949
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 0,
+      "beta": 0.5,
+      "corr_demand_mint": 0.4689,
+      "corr_drop_vs_uncapped": -0.0777,
+      "sybil_atn_share": 0.0,
+      "observed_zero_share": 0.6499
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 50,
+      "beta": 0.02,
+      "corr_demand_mint": 0.9314,
+      "corr_drop_vs_uncapped": -0.5157,
+      "sybil_atn_share": 0.0162,
+      "observed_zero_share": 0.9413
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 50,
+      "beta": 0.05,
+      "corr_demand_mint": 0.9358,
+      "corr_drop_vs_uncapped": -0.5201,
+      "sybil_atn_share": 0.0404,
+      "observed_zero_share": 0.9396
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 50,
+      "beta": 0.1,
+      "corr_demand_mint": 0.9428,
+      "corr_drop_vs_uncapped": -0.5271,
+      "sybil_atn_share": 0.0808,
+      "observed_zero_share": 0.9366
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 50,
+      "beta": 0.2,
+      "corr_demand_mint": 0.9549,
+      "corr_drop_vs_uncapped": -0.5393,
+      "sybil_atn_share": 0.1615,
+      "observed_zero_share": 0.9294
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 50,
+      "beta": 0.3,
+      "corr_demand_mint": 0.9605,
+      "corr_drop_vs_uncapped": -0.5448,
+      "sybil_atn_share": 0.2423,
+      "observed_zero_share": 0.9206
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 50,
+      "beta": 0.5,
+      "corr_demand_mint": 0.9161,
+      "corr_drop_vs_uncapped": -0.5004,
+      "sybil_atn_share": 0.4038,
+      "observed_zero_share": 0.8949
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 200,
+      "beta": 0.02,
+      "corr_demand_mint": 0.9417,
+      "corr_drop_vs_uncapped": -0.3523,
+      "sybil_atn_share": 0.0189,
+      "observed_zero_share": 0.9823
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 200,
+      "beta": 0.05,
+      "corr_demand_mint": 0.9429,
+      "corr_drop_vs_uncapped": -0.3535,
+      "sybil_atn_share": 0.0472,
+      "observed_zero_share": 0.9818
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 200,
+      "beta": 0.1,
+      "corr_demand_mint": 0.945,
+      "corr_drop_vs_uncapped": -0.3556,
+      "sybil_atn_share": 0.0944,
+      "observed_zero_share": 0.9808
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 200,
+      "beta": 0.2,
+      "corr_demand_mint": 0.9499,
+      "corr_drop_vs_uncapped": -0.3605,
+      "sybil_atn_share": 0.1888,
+      "observed_zero_share": 0.9785
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 200,
+      "beta": 0.3,
+      "corr_demand_mint": 0.9557,
+      "corr_drop_vs_uncapped": -0.3663,
+      "sybil_atn_share": 0.2832,
+      "observed_zero_share": 0.9757
+    },
+    {
+      "maturity": "mature",
+      "zero_share": 0.1,
+      "K": 200,
+      "beta": 0.5,
+      "corr_demand_mint": 0.9706,
+      "corr_drop_vs_uncapped": -0.3813,
+      "sybil_atn_share": 0.472,
+      "observed_zero_share": 0.9667
+    }
+  ],
+  "verdict": {
+    "beta_star_by_maturity": {
+      "young": {
+        "beta_star": null,
+        "sybil_skim_at_beta_star": null,
+        "honest_zero_share": 0.6
+      },
+      "growing": {
+        "beta_star": 0.02,
+        "sybil_skim_at_beta_star": 0.017,
+        "honest_zero_share": 0.3
+      },
+      "mature": {
+        "beta_star": 0.02,
+        "sybil_skim_at_beta_star": 0.0189,
+        "honest_zero_share": 0.1
+      }
+    },
+    "adaptive_rule": {
+      "young": {
+        "corr_demand_mint": 0.7575,
+        "corr_drop_vs_uncapped": 0.2293,
+        "sybil_atn_share": 0.1491,
+        "mean_eff_zero_share": 0.9918
+      },
+      "growing": {
+        "corr_demand_mint": 0.9418,
+        "corr_drop_vs_uncapped": -0.0264,
+        "sybil_atn_share": 0.1704,
+        "mean_eff_zero_share": 0.9844
+      },
+      "mature": {
+        "corr_demand_mint": 0.9467,
+        "corr_drop_vs_uncapped": -0.3573,
+        "sybil_atn_share": 0.1888,
+        "mean_eff_zero_share": 0.9786
+      }
+    },
+    "peg_gaming": {
+      "adaptive_ring_inflates_sybil_share": 0.0858,
+      "adaptive_ring_inflates_observed_share": 0.9951,
+      "fixed_ceiling_0.2_ring_inflates_sybil_share": 0.0858
+    }
+  }
+}

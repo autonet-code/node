@@ -1,9 +1,38 @@
 # Autonet Backlog
 
-Consolidated 2026-07-06; updated 2026-07-08 after substrate v3. This is
+Consolidated 2026-07-06; updated 2026-07-09 after substrate v4.1. This is
 THE board; update in place as items land or get ratified.
 
-State: **substrate v3 shipped and PUBLIC** (master pushed 2026-07-08).
+State: **substrate v4.1 "gradient trust" BUILT 2026-07-09** (close +
+contract + surfaces; UNCOMMITTED, sim-validated in
+`experiments/econ_attest/`, spec = `docs/tool_substrate.md` Decision
+2026-07-09). The vet GATE is retired (tools mint from first attested
+use); mint is rep/ATN-SPLIT under a supply-pegged β cap (zero-rep usage
+mints ATN, not reputation); drift weight = rep_share × credibility with
+NO ε floor + continuous reversal-aware credibility docking; vets survive
+as inspection reviews; `recordTrainingForEpoch(amount, repAmount,
+epochIdHash, proof)` with a 3-field merkle leaf + `TrainingRecorded`
+gains `repAmount`. PENDING (v4.1):
+- **FLAG-DAY redeploy** — v4.1 changes close output/CID + contract ABI +
+  merkle leaf; needs a clean genesis on a fresh Substrate + all daemons
+  on the v4.1 build before the next federated close (supersedes the v3
+  flag-day window below).
+- **G1 — channel fee decision (USER):** the 2.5% burn/recycle fires only
+  on `Substrate.payForService`; `ServiceMarket.PaymentChannel` settles
+  via raw `safeTransfer` (no fee, recycled=0). "Services finance the
+  commons" is unwired on the default rail. Fix: take the fee at channel
+  settlement (or route payouts through payForService); non-ATN channels
+  need a design call (fee is ATN-denominated).
+- **S₀ recalibration at launch (USER):** `BETA_S0=5000` (50 epochs × 100
+  pool) is the sim's engineering pick over a short 300-epoch horizon;
+  retune to the real epoch cadence + pool size before mainnet.
+- **v4.1 params seeded-not-blessed:** `BETA_MIN=0.05`, `CRED_DELTA=0.7`
+  (δ EMERGED, others SEEDED), `CRED_MASS_FLOOR=3.0`, `CRED_FLOOR=0.1`,
+  `CRED_RECOVERY=0.10`, pool 100. δ=0.7 and the necessity of a
+  non-constant supply-pegged β emerged from sims; the rest are
+  conventional, tunable post-launch.
+
+Prior state: **substrate v3 shipped and PUBLIC** (master pushed 2026-07-08).
 Reviews replace debates (`docs/tool_substrate.md`, Decision 2026-07-08):
 mint = usage alone, per-axis reviews drift tool positions, work units
 left consensus, debate rail retired/dormant. Both economy E2Es

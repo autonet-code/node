@@ -1,0 +1,265 @@
+{
+  "scenario": "baseline_honest_v4",
+  "params": {
+    "epochs": 200,
+    "beta": 0.1,
+    "delta": 0.7,
+    "Q": 5.0,
+    "incumbent_rep": 5.0
+  },
+  "epochs": [
+    {
+      "epoch": 0,
+      "total_mint": 100.0,
+      "good_rating": 0.16323377700000002,
+      "quality_vs_rank_corr": 0.38431259273193313
+    },
+    {
+      "epoch": 5,
+      "total_mint": 99.99999999999999,
+      "good_rating": 0.2428623775,
+      "quality_vs_rank_corr": 0.5128305378883734
+    },
+    {
+      "epoch": 10,
+      "total_mint": 100.0,
+      "good_rating": 0.2648637555,
+      "quality_vs_rank_corr": 0.5423622512466373
+    },
+    {
+      "epoch": 15,
+      "total_mint": 99.99999999999999,
+      "good_rating": 0.2766729,
+      "quality_vs_rank_corr": 0.5570906235291928
+    },
+    {
+      "epoch": 20,
+      "total_mint": 100.00000000000001,
+      "good_rating": 0.2837295905,
+      "quality_vs_rank_corr": 0.571742599933334
+    },
+    {
+      "epoch": 25,
+      "total_mint": 100.0,
+      "good_rating": 0.28808200250000005,
+      "quality_vs_rank_corr": 0.5796801635798541
+    },
+    {
+      "epoch": 30,
+      "total_mint": 100.00000000000001,
+      "good_rating": 0.2958164505,
+      "quality_vs_rank_corr": 0.5868446406902738
+    },
+    {
+      "epoch": 35,
+      "total_mint": 100.0,
+      "good_rating": 0.298861829,
+      "quality_vs_rank_corr": 0.5933237935284951
+    },
+    {
+      "epoch": 40,
+      "total_mint": 99.99999999999999,
+      "good_rating": 0.3030985575,
+      "quality_vs_rank_corr": 0.5975226834975741
+    },
+    {
+      "epoch": 45,
+      "total_mint": 100.0,
+      "good_rating": 0.306364303,
+      "quality_vs_rank_corr": 0.6009568127409743
+    },
+    {
+      "epoch": 50,
+      "total_mint": 100.0,
+      "good_rating": 0.3093916285,
+      "quality_vs_rank_corr": 0.6053079906641434
+    },
+    {
+      "epoch": 55,
+      "total_mint": 100.0,
+      "good_rating": 0.313783678,
+      "quality_vs_rank_corr": 0.608334133153757
+    },
+    {
+      "epoch": 60,
+      "total_mint": 100.0,
+      "good_rating": 0.316092211,
+      "quality_vs_rank_corr": 0.6111892479607568
+    },
+    {
+      "epoch": 65,
+      "total_mint": 100.0,
+      "good_rating": 0.3184961715,
+      "quality_vs_rank_corr": 0.6135500296193622
+    },
+    {
+      "epoch": 70,
+      "total_mint": 100.0,
+      "good_rating": 0.320813628,
+      "quality_vs_rank_corr": 0.615823996605216
+    },
+    {
+      "epoch": 75,
+      "total_mint": 100.0,
+      "good_rating": 0.3233535565,
+      "quality_vs_rank_corr": 0.6180513296594562
+    },
+    {
+      "epoch": 80,
+      "total_mint": 99.99999999999999,
+      "good_rating": 0.324959469,
+      "quality_vs_rank_corr": 0.6198230417824848
+    },
+    {
+      "epoch": 85,
+      "total_mint": 100.0,
+      "good_rating": 0.3260195965,
+      "quality_vs_rank_corr": 0.6213252321718609
+    },
+    {
+      "epoch": 90,
+      "total_mint": 99.99999999999999,
+      "good_rating": 0.328148922,
+      "quality_vs_rank_corr": 0.62343608944162
+    },
+    {
+      "epoch": 95,
+      "total_mint": 100.0,
+      "good_rating": 0.3292277875,
+      "quality_vs_rank_corr": 0.625097978695474
+    },
+    {
+      "epoch": 100,
+      "total_mint": 100.0,
+      "good_rating": 0.33107698799999996,
+      "quality_vs_rank_corr": 0.6268127156603409
+    },
+    {
+      "epoch": 105,
+      "total_mint": 100.0,
+      "good_rating": 0.3321865125,
+      "quality_vs_rank_corr": 0.6281376780251751
+    },
+    {
+      "epoch": 110,
+      "total_mint": 100.0,
+      "good_rating": 0.333590068,
+      "quality_vs_rank_corr": 0.6298385259380354
+    },
+    {
+      "epoch": 115,
+      "total_mint": 100.0,
+      "good_rating": 0.334402443,
+      "quality_vs_rank_corr": 0.6309166292497758
+    },
+    {
+      "epoch": 120,
+      "total_mint": 100.0,
+      "good_rating": 0.3357097235,
+      "quality_vs_rank_corr": 0.6324399999782692
+    },
+    {
+      "epoch": 125,
+      "total_mint": 100.0,
+      "good_rating": 0.33675647,
+      "quality_vs_rank_corr": 0.6337793396657337
+    },
+    {
+      "epoch": 130,
+      "total_mint": 100.00000000000001,
+      "good_rating": 0.337744624,
+      "quality_vs_rank_corr": 0.6351837950427314
+    },
+    {
+      "epoch": 135,
+      "total_mint": 100.0,
+      "good_rating": 0.3384808095,
+      "quality_vs_rank_corr": 0.6359559083672128
+    },
+    {
+      "epoch": 140,
+      "total_mint": 100.0,
+      "good_rating": 0.3394709925,
+      "quality_vs_rank_corr": 0.6369468114676149
+    },
+    {
+      "epoch": 145,
+      "total_mint": 100.0,
+      "good_rating": 0.3399576485,
+      "quality_vs_rank_corr": 0.6382736070647064
+    },
+    {
+      "epoch": 150,
+      "total_mint": 100.0,
+      "good_rating": 0.340855727,
+      "quality_vs_rank_corr": 0.6391850195789538
+    },
+    {
+      "epoch": 155,
+      "total_mint": 100.00000000000001,
+      "good_rating": 0.34139867049999995,
+      "quality_vs_rank_corr": 0.6401168870816144
+    },
+    {
+      "epoch": 160,
+      "total_mint": 99.99999999999999,
+      "good_rating": 0.342365907,
+      "quality_vs_rank_corr": 0.6410827077099235
+    },
+    {
+      "epoch": 165,
+      "total_mint": 100.0,
+      "good_rating": 0.3433311095,
+      "quality_vs_rank_corr": 0.6420204160556389
+    },
+    {
+      "epoch": 170,
+      "total_mint": 100.00000000000001,
+      "good_rating": 0.343999339,
+      "quality_vs_rank_corr": 0.6429451588722315
+    },
+    {
+      "epoch": 175,
+      "total_mint": 100.0,
+      "good_rating": 0.34447499000000004,
+      "quality_vs_rank_corr": 0.6434890972485401
+    },
+    {
+      "epoch": 180,
+      "total_mint": 100.00000000000001,
+      "good_rating": 0.34508835699999996,
+      "quality_vs_rank_corr": 0.6443717416729285
+    },
+    {
+      "epoch": 185,
+      "total_mint": 100.0,
+      "good_rating": 0.3458773395,
+      "quality_vs_rank_corr": 0.6451297422519302
+    },
+    {
+      "epoch": 190,
+      "total_mint": 100.0,
+      "good_rating": 0.346545677,
+      "quality_vs_rank_corr": 0.6457056100803812
+    },
+    {
+      "epoch": 195,
+      "total_mint": 100.00000000000001,
+      "good_rating": 0.3472120365,
+      "quality_vs_rank_corr": 0.6463286483585974
+    },
+    {
+      "epoch": 199,
+      "total_mint": 100.0,
+      "good_rating": 0.347603367,
+      "quality_vs_rank_corr": 0.6467635627331396
+    }
+  ],
+  "verdict": {
+    "quality_vs_finalrank_corr": 0.6467635627331396,
+    "top_quality_rank": 1,
+    "worst_quality_rank": 12,
+    "cold_start_epochs_to_positive_rating": 0,
+    "final_good_rating": 0.347603367
+  }
+}

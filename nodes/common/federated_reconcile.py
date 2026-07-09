@@ -90,20 +90,69 @@ VET_ROYALTY_SHARE = 0.1
 VET_ROYALTY_EPOCHS = 8
 VET_BUST_THRESHOLD = 0.5
 
-# Household voice (docs/tool_substrate.md, Decision 2026-07-08 addendum:
-# balance-weighted voice). A "household" is the economic identity behind
-# a caller: its registered owner wallet (proven on-chain by the EIP-712
-# owner binding), falling back to the agent id when unbound. Usage and
-# review mass collapse per household BEFORE damping (log1p once per
-# household — N agents under one owner are one voice, closing the
-# per-agent log1p amplification), then multiply by the household's
-# voice weight: epsilon + household_ATN / total_supply, LINEAR in
-# balance so splitting a balance across wallets never gains weight.
-# VOICE_EPSILON is the floor for households the weight map doesn't
-# know — it bounds what a zero-balance sybil identity can contribute
-# and is what lets a cold-start network (supply = 0) bootstrap.
+# Household voice (docs/tool_substrate.md, Decision 2026-07-08 addendum,
+# voice SOURCE = reputation not balance per the same-day "ATN = money,
+# reputation = voice" decision). A "household" is the economic identity
+# behind a caller: its registered owner wallet (proven on-chain by the
+# EIP-712 owner binding), falling back to the agent id when unbound.
+# Usage and review mass collapse per household BEFORE damping (log1p once
+# per household — N agents under one owner are one voice, closing the
+# per-agent log1p amplification), then multiply by the household's voice
+# weight: epsilon + household_REPUTATION / rep_supply, LINEAR in
+# reputation so splitting earnings across wallets never gains weight
+# (reputation is soulbound, minted only by recordTrainingForEpoch — see
+# voice_state.py). VOICE_EPSILON is the floor for households the weight
+# map doesn't know — it bounds what a zero-reputation sybil identity can
+# contribute on the MINT rail and lets a cold-start network (supply = 0)
+# bootstrap. v4.1 (2026-07-09) drops this ε floor from DRIFT weight (drift
+# = raw rep_share × credibility); it survives only here, on the mint rail.
 # PROVISIONAL VALUE pending user blessing (economics parameter).
 VOICE_EPSILON = 0.05
+
+# ---------------------------------------------------------------------------
+# Tool economy v4.1 "gradient trust" (ratified 2026-07-09,
+# memory/tool_economy_v4_gradient_trust.md; sim reference
+# experiments/econ_attest/sim/v4_1_rules.py + beta_supply_peg.py). The
+# v3 vet GATE is removed (tools mint from first attested use); the
+# surviving trust surface is (a) zero-rep reviews carry ZERO drift
+# weight, (b) zero-rep usage mints ATN but not reputation (rep/ATN
+# split), capped in aggregate by a supply-pegged β, (c) continuous
+# reversal-aware credibility multiplies drift weight.
+# ---------------------------------------------------------------------------
+
+# β(S) = max(BETA_MIN, exp(-S / BETA_S0)) — the supply-pegged aggregate
+# cap on zero-rep households' MINT weight. β≈1 at genesis (newcomer
+# demand prices honest work), decaying toward BETA_MIN as reputation
+# supply matures. S0 default = 50 epochs × 100 pool = 5000 rep units
+# (the sim's engineering pick). LAUNCH-RECALIBRATABLE: retune S0 to the
+# real epoch cadence at deploy (see memory note). rep_supply=None (no
+# chain) => β=1 (uncapped, the local/genesis regime).
+BETA_MIN = 0.05
+BETA_S0 = 5000.0
+
+# Continuous reversal-aware credibility (v4.1 [R5]). A tool's review
+# book is re-scored every close: a household whose recorded review
+# centroid deviates from the tool's CURRENT drifted head by more than
+# CRED_DELTA (on a tool with review mass ≥ CRED_MASS_FLOOR) is docked
+# proportionally; convergence restores. Floor CRED_FLOOR, symmetric
+# passive/active recovery CRED_RECOVERY toward 1.0. Credibility
+# multiplies DRIFT weight only, never mint. SEEDED (post-launch tunable).
+CRED_DELTA = 0.7
+CRED_FLOOR = 0.1
+CRED_RECOVERY = 0.10
+CRED_MASS_FLOOR = 3.0
+
+
+def beta_of_supply(rep_supply: Optional[float]) -> float:
+    """Supply-pegged zero-rep MINT-weight cap (v4.1 [R4]).
+
+    ``rep_supply=None`` (no chain / local regime) => 1.0 (uncapped).
+    Otherwise ``max(BETA_MIN, exp(-S / BETA_S0))``. Pure + deterministic.
+    """
+    if rep_supply is None:
+        return 1.0
+    import math as _math
+    return max(BETA_MIN, _math.exp(-float(rep_supply) / BETA_S0))
 
 # Fee-recycled emission (docs/epoch_economics.md, Decision 2026-07-08):
 #   pool(N) = BASE_EMISSION_PER_EPOCH + recycled(N)
@@ -182,6 +231,66 @@ def _composition_shares(
     return shares
 
 
+def _normalize_credibility(
+    credibility: Optional[Dict[str, Any]],
+) -> Dict[str, float]:
+    """Canonicalize the carried credibility map (sorted, typed, floored).
+
+    Shape: {household: multiplier in [CRED_FLOOR, 1.0]}. Rebuildable
+    cache — same contract as ``tool_positions`` — so a missing/garbled
+    copy just resets everyone to full credibility and rebuilds from
+    canonical events.
+    """
+    out: Dict[str, float] = {}
+    if not credibility:
+        return out
+    for house, c in sorted(credibility.items()):
+        try:
+            v = float(c)
+        except (TypeError, ValueError):
+            continue
+        out[str(house)] = max(CRED_FLOOR, min(1.0, v))
+    return out
+
+
+def _normalize_review_book(
+    review_book: Optional[Dict[str, Any]],
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    """Canonicalize the carried per-household review book (v4.1 [R5]).
+
+    Shape: {digest: {household: {axis_id: {"sum": float, "n": int}}}}.
+    Each household's running review centroid per tool, carried across
+    closes so the continuous reversal-aware sanction can re-score it
+    against the tool's moving head. Rebuildable-cache contract.
+    """
+    out: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
+    if not review_book:
+        return out
+    for digest, houses in sorted(review_book.items()):
+        if not isinstance(houses, dict):
+            continue
+        d_out: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for house, axes in sorted(houses.items()):
+            if not isinstance(axes, dict):
+                continue
+            h_out: Dict[str, Dict[str, float]] = {}
+            for axis_id, cell in sorted(axes.items()):
+                if not isinstance(cell, dict):
+                    continue
+                try:
+                    s = float(cell.get("sum") or 0.0)
+                    n = int(cell.get("n") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if n > 0:
+                    h_out[str(axis_id)] = {"sum": s, "n": n}
+            if h_out:
+                d_out[str(house)] = h_out
+        if d_out:
+            out[str(digest)] = d_out
+    return out
+
+
 def compute_tool_mint(
     world: World,
     events: List[Dict[str, Any]],
@@ -191,6 +300,11 @@ def compute_tool_mint(
     voice_weights: Optional[Dict[str, float]] = None,
     vetting: Optional[Dict[str, Any]] = None,
     positions: Optional[Dict[str, Dict[str, Any]]] = None,
+    # v4.1 gradient trust (ratified 2026-07-09):
+    rep_shares: Optional[Dict[str, float]] = None,
+    rep_supply: Optional[float] = None,
+    credibility: Optional[Dict[str, float]] = None,
+    tool_review_book: Optional[Dict[str, Any]] = None,
     vet_quorum: float = VET_QUORUM,
     vet_royalty_share: float = VET_ROYALTY_SHARE,
     vet_royalty_epochs: int = VET_ROYALTY_EPOCHS,
@@ -209,17 +323,18 @@ def compute_tool_mint(
     (docs/services_market.md).
 
     ``usage_term`` is the combo damper collapsed to HOUSEHOLDS
-    (Decision 2026-07-08 addendum: balance-weighted voice): callers
-    group by their proven owner wallet (``agent_owner_map``; unbound
-    callers are their own household), attested-ok counts sum per
+    (Decision 2026-07-08 addendum, voice = REPUTATION not balance):
+    callers group by their proven owner wallet (``agent_owner_map``;
+    unbound callers are their own household), attested-ok counts sum per
     household, log1p damps ONCE per household, and the damped value
-    multiplies the household's voice weight (``voice_weights``,
-    keyed by household: epsilon + household ATN / supply, linear so
-    balance-splitting is weight-neutral). ``voice_weights=None`` (no
-    chain access) means every household weighs 1.0 — the pre-voice
-    behavior; a non-None map defaults unknown households to
-    ``VOICE_EPSILON``. Only COGNITIVE attestations count; mechanical
-    receipts are exhaust. Two exclusions run first:
+    multiplies the household's MINT weight (v4.1: raw reputation share
+    for rep-holders, ε for zero-rep, aggregate zero-rep ε-weight capped
+    at a supply-pegged β — see ``rep_shares``/``rep_supply`` below;
+    ``voice_weights`` carries the ε floor for the local/no-chain regime).
+    ``voice_weights=None`` (no chain access) means every household weighs
+    1.0 — the pre-voice behavior; a non-None map defaults unknown
+    households to ``VOICE_EPSILON``. Only COGNITIVE attestations count;
+    mechanical receipts are exhaust. Two exclusions run first:
 
       1. Owner-rooted (final form, spec "Owner-rooted registration"):
          the author's own household is excluded — this subsumes the
@@ -247,26 +362,53 @@ def compute_tool_mint(
     fresh-charter close only manifests (re-)sprouted this epoch have
     standing.
 
-    Vetting (spec: Vetting section): ``vetting`` is a second explicit
-    carry-over param (same contract as ``registrations`` — derived from
-    canonical history, rebuildable, identical everywhere). Published
-    manifests are CANDIDATES until greenlit by vets from distinct
-    fleets (Σ fleet weights ≥ ``vet_quorum``; weight = 1/(1+busts));
-    only greenlit manifests mint. While ``royalty_left`` > 0 the
-    validators split ``vet_royalty_share`` of the tool's mint (taken
-    from the author's share, attributed on the same claim node — a won
-    charter CON suppresses both, and a bust zeroes the window and
-    discounts the validators' future vets).
+    Vetting (v4.1 [R1], ratified 2026-07-09): the vet GATE is REMOVED —
+    tools mint from first attested use, author keeps 100% (no greenlight
+    requirement, no validator royalty). ``vetting`` is still accepted and
+    carried forward tolerantly (rebuildable-cache contract), and vets are
+    still aggregated (``vet_quorum``/``vet_royalty_*`` retained as dead
+    knobs), but they no longer skip mint or split it. A vet's surviving
+    value is its per-axis scores, which enter position drift as an
+    INSPECTION REVIEW (v4.1 [R2]) — moving the head, minting nothing.
+
+    v4.1 gradient trust (rep/ATN split + drift credibility):
+
+      - ``rep_shares``: household → raw reputation share (rep/rep_supply),
+        the UN-floored voice weight. Distinct from ``voice_weights``
+        (which carries the ε floor for mint bootstrap). Used for (a) the
+        rep/ATN mint split and (b) drift weight. ``None`` => local regime
+        (every known household treated as rep-holding at its
+        voice_weight; drift stays at weight 1.0 as before).
+      - ``rep_supply``: reputation total supply — the β-cap maturity
+        clock (``beta_of_supply``). ``None`` => β=1 (uncapped).
+      - ``credibility``: carried household → drift-weight multiplier
+        (v4.1 [R5]); recomputed each close against the moving head.
+      - ``tool_review_book``: carried {digest: {household: {axis:
+        {sum,n}}}} — per-household review centroid per tool, re-scored
+        each close so a later reversal retroactively docks capturers.
+
+    MINT weight per household (v4.1 [R4]): rep-holders carry their raw
+    rep share; zero-rep households carry ε (VOICE_EPSILON), but their
+    AGGREGATE ε-weight is capped at β(rep_supply) of total weight
+    (pro-rata scale-down when it binds). The rep/ATN split (v4.1 [R6]):
+    each author's ``agent_rep`` fraction = the portion of their
+    usage_term from rep-holding callers — zero-rep-only mint grants ATN
+    but ZERO reputation.
 
     Returns (all maps key-sorted, pure function of canonical inputs):
       {
         "per_digest": {digest: {node_id, author, trust_class,
                                 ok_count, attesters, usage_term, mint,
-                                greenlit, validators, royalty_left}},
+                                rep_fraction, greenlit, validators,
+                                royalty_left}},
         "node_agent": {node_id: {author: mint}},   # gate-mergeable
+        "node_agent_rep": {node_id: {author: rep_basis}},  # R6 rep split
         "registrations_next": {digest: manifest_meta},
         "vetting_next": {"manifests": {...}, "busts": {agent: n}},
         "positions_next": {digest: {"head": [N_DIMS], "mass": [N_DIMS]}},
+        "credibility_next": {household: multiplier},
+        "tool_review_book_next": {digest: {household: {axis: {sum,n}}}},
+        "beta": float,   # the effective β cap applied this close
       }
     """
     import math
@@ -439,8 +581,88 @@ def compute_tool_mint(
                 bucket[fleet_key] = (bucket.get(fleet_key, 0.0)
                                      + damped * shares[target])
 
+    # ------------------------------------------------------------------
+    # v4.1 [R4] β cap on ZERO-REP mint weight (supply-pegged). Zero-rep
+    # households carry ε on the MINT side, but their AGGREGATE ε-weight
+    # is capped at β(rep_supply) of total weight. First tally the damped
+    # usage weight each household contributes (rep-holders at their raw
+    # rep share, zero-rep at ε) so the cap uses THIS epoch's observed
+    # demand, then derive a uniform pro-rata scale on zero-rep weight.
+    #
+    # Household classification uses ``rep_shares`` (raw rep/supply, no ε
+    # floor). ``rep_shares=None`` => local/genesis regime: no chain rep,
+    # so treat every household as its ε-floored voice weight and β=1
+    # (uncapped) — the pre-v4.1 behavior.
+    # ------------------------------------------------------------------
+    rep_share_map = rep_shares or {}
+    beta = beta_of_supply(rep_supply if rep_shares is not None else None)
+
+    def _rep_share(house: str) -> float:
+        return float(rep_share_map.get(house, 0.0))
+
+    def _is_zero_rep(house: str) -> bool:
+        # In the local regime (no rep_shares) NOBODY is "zero-rep" for
+        # cap purposes — the cap is uncapped and the split degrades to
+        # "all mint is rep-bearing", matching legacy behavior.
+        if rep_shares is None:
+            return False
+        return _rep_share(house) <= 0.0
+
+    def _mint_weight(house: str) -> float:
+        # Rep-holders carry their raw rep share; zero-rep carry ε. In the
+        # local regime (rep_shares is None) fall back to voice_weights
+        # (or 1.0 when there is no chain), exactly as before.
+        if rep_shares is None:
+            if voice_weights is not None:
+                return round(float(voice_weights.get(house, VOICE_EPSILON)), 9)
+            return 1.0
+        if _rep_share(house) > 0.0:
+            return _rep_share(house)
+        return VOICE_EPSILON
+
+    # Tally observed rep vs zero-rep weight across all mint-eligible
+    # (digest, household) pairs to size the β cap. Mirrors the mint loop's
+    # exclusions so the cap is computed over exactly what will mint.
+    rep_weight_total = 0.0
+    zero_weight_total = 0.0
+    for digest in sorted(eff.keys()):
+        meta = known_regs[digest]
+        author = str(meta.get("author") or "")
+        if not author or str(meta.get("trust_class") or "") != TRUST_PINNED:
+            continue
+        reg_sender = str(meta.get("sender") or "")
+        author_house = _household(author)
+        for house in sorted(eff[digest].keys()):
+            if house == author_house:
+                continue
+            if reg_sender and reg_sender in house_senders.get(house, set()):
+                continue
+            contrib = eff[digest][house] * _mint_weight(house)
+            if _is_zero_rep(house):
+                zero_weight_total += contrib
+            else:
+                rep_weight_total += contrib
+    zero_scale = 1.0
+    # The cap is "β of total weight", implemented as allowed/(rep+allowed)
+    # = β => allowed = β/(1-β)·rep_weight. This binds only when there IS
+    # rep-holder demand to measure against. With ZERO rep weight the ratio
+    # is degenerate (any positive zero-rep pool is 100% > β) and throttling
+    # to zero would deadlock the genesis/newcomer economy exactly like a
+    # zero emission floor — so we leave pure-zero-rep uncapped (the sim's
+    # validated regime always seeds founder rep, so it never relies on
+    # this branch either). Once any rep exists the cap engages normally.
+    if beta < 1.0 and zero_weight_total > 0.0 and rep_weight_total > 0.0:
+        allowed = (beta / (1.0 - beta)) * rep_weight_total
+        if allowed < zero_weight_total:
+            zero_scale = allowed / zero_weight_total
+
     per_digest: Dict[str, Dict[str, Any]] = {}
     node_agent: Dict[str, Dict[str, float]] = {}
+    # v4.1 [R6]: the rep-bearing basis of each author's mint, anchored on
+    # the same claim node. Threaded out as ``node_agent_rep`` so the
+    # driver/submitter can record a DECOUPLED reputation amount:
+    # zero-rep-weighted usage mints ATN but grants no reputation.
+    node_agent_rep: Dict[str, Dict[str, float]] = {}
     for digest in sorted(eff.keys()):
         meta = known_regs[digest]
         author = str(meta.get("author") or "")
@@ -450,57 +672,48 @@ def compute_tool_mint(
         # capability it can actually KNOW (hash-locked code).
         if str(meta.get("trust_class") or "") != TRUST_PINNED:
             continue
-        # Vetting gate (spec: Vetting section): a published manifest is
-        # a CANDIDATE — visible, debatable, retrievable — but draws no
-        # emission until greenlit by distinct-fleet vets. Un-greenlit
-        # credit is forfeited, never redistributed (same conservation
-        # rule as dead composition deps).
+        # v4.1 [R1]: the vet GATE is REMOVED — tools mint from first
+        # attested use. The carried vet state is still surfaced (greenlit
+        # flag is informational only) but never skips mint here.
         vm = vet_state["manifests"].get(digest)
         greenlit = bool(vm and vm.get("greenlit"))
-        if vet_quorum > 0 and not greenlit:
-            continue
         nodes = by_digest.get(digest, [])
         # Combo damper over HOUSEHOLDS: counts collapsed + log1p'd at
         # fan-out time, author's household excluded (subsumes self and
         # same-owner), co-hosted households (any attestation batch
         # signed with the registration batch's key) excluded, then each
-        # household's damped credit scales by its voice weight.
+        # household's damped credit scales by its MINT weight (rep share
+        # or β-scaled ε). ``usage_term_rep`` accumulates only the
+        # rep-holder-attributable portion for the R6 split.
         reg_sender = str(meta.get("sender") or "")
         author_house = _household(author)
         attested_by = eff[digest]
         usage_term = 0.0
+        usage_term_rep = 0.0
         attesters = 0
         for house in sorted(attested_by.keys()):
             if house == author_house:
                 continue
             if reg_sender and reg_sender in house_senders.get(house, set()):
                 continue
-            w_voice = 1.0
-            if voice_weights is not None:
-                w_voice = round(
-                    float(voice_weights.get(house, VOICE_EPSILON)), 9)
-            usage_term += attested_by[house] * w_voice
+            if _is_zero_rep(house):
+                w_mint = round(_mint_weight(house) * zero_scale, 12)
+            else:
+                w_mint = round(_mint_weight(house), 12)
+                usage_term_rep += attested_by[house] * w_mint
+            usage_term += attested_by[house] * w_mint
             attesters += 1
-        # v3 (spec Decision 2026-07-08): USAGE ALONE mints. The standing
-        # multiplier is retired — reviews rank discovery and drift
-        # position; they never scale the mint amount.
+        # v3/v4.1: USAGE ALONE mints. No standing multiplier, no vet gate.
         mint = usage_term
         if mint <= 0.0:
             continue
-        # Anchor the mint on the manifest's claim node so the
-        # Deterministic node pick: lexicographically-first id among the
-        # digest's claim nodes (the manifest anchor; also where the v3
-        # position drift writes the reviewed charter head).
+        rep_fraction = (usage_term_rep / usage_term) if usage_term > 0 else 0.0
+        # Anchor the mint on the manifest's claim node: lexicographically-
+        # first id among the digest's claim nodes (the manifest anchor;
+        # also where position drift writes the reviewed charter head).
         node_id = (sorted({n.id for n in nodes})[0] if nodes
                    else f"tool:{digest}")
-        # Validator royalty (spec: Vetting section): while the royalty
-        # window is open, a conserved slice of the tool's mint splits
-        # equally among the validators frozen at greenlight —
-        # composition-style: taken FROM the author's mint, never
-        # printed on top.
         validators = list(vm["validators"]) if vm else []
-        royalty_live = bool(vm and int(vm.get("royalty_left") or 0) > 0
-                            and validators and vet_royalty_share > 0.0)
         per_digest[digest] = {
             "node_id": node_id,
             "author": author,
@@ -509,44 +722,55 @@ def compute_tool_mint(
             "attesters": attesters,
             "usage_term": round(usage_term, 10),
             "mint": mint,
+            "rep_fraction": round(rep_fraction, 10),
             "greenlit": greenlit,
             "validators": len(validators),
             "royalty_left": int(vm.get("royalty_left") or 0) if vm else 0,
         }
+        # v4.1 [R1]: author keeps 100% of the mint (royalty split gone).
         bucket = node_agent.setdefault(node_id, {})
-        if royalty_live:
-            pool = mint * vet_royalty_share
-            per_validator = pool / len(validators)
-            bucket[author] = bucket.get(author, 0.0) + (mint - pool)
-            for validator in validators:   # sorted since greenlight froze them
-                bucket[validator] = bucket.get(validator, 0.0) + per_validator
-        else:
-            bucket[author] = bucket.get(author, 0.0) + mint
+        bucket[author] = bucket.get(author, 0.0) + mint
+        # v4.1 [R6]: rep basis = mint × rep_fraction, on the same node.
+        rep_amt = mint * rep_fraction
+        if rep_amt > 0.0:
+            rbucket = node_agent_rep.setdefault(node_id, {})
+            rbucket[author] = rbucket.get(author, 0.0) + rep_amt
 
-    # Royalty window ticks once per close for every greenlit manifest,
-    # minted or not — "first K epochs" is calendar, not usage-counted,
-    # so validators can't stretch their share by starving usage.
+    # Royalty window ticks once per close for every greenlit manifest
+    # (kept for the carried-state contract; no mint effect under v4.1).
     for digest in sorted(vet_state["manifests"].keys()):
         m = vet_state["manifests"][digest]
         if m["greenlit"] and m["royalty_left"] > 0:
             m["royalty_left"] -= 1
 
     # ------------------------------------------------------------------
-    # v3 position drift (spec Decision 2026-07-08): each tool's charter
-    # head is the per-axis mint-weighted running centroid of review
+    # Position drift (v3 base + v4.1 [R2][R3][R5]): each tool's charter
+    # head is the per-axis reputation-weighted running centroid of review
     # scores. Per-axis mass so a review that scored only `correctness`
-    # never drags the unscored axes; the author prior is a zero head
-    # with 1.0 damped unit of mass per axis ("the author counts as one
-    # damped attestation"). Same exclusions as the usage damper — a
-    # caller whose attestations don't mint can't move position either.
-    # Pure function of (carried positions, canonical events) over sorted
+    # never drags the unscored axes; the author prior is a zero head with
+    # 1.0 unit of mass per axis. Reviews come from BOTH attested-usage
+    # receipts AND vet inspection events (v4.1 [R2] — vets mint nothing
+    # but move position). Drift weight (v4.1 [R3]) is
+    # ``rep_share × credibility`` with NO ε floor: zero-rep households get
+    # ZERO drift weight. In the local regime (rep_shares is None) drift
+    # keeps weight 1.0 (unchanged pre-v4.1 behavior). Pure function of
+    # (carried positions/book/credibility, canonical events) over sorted
     # keys → bit-identical on every daemon.
     # ------------------------------------------------------------------
     from .world_model_substrate.adapter import CHARTER, N_DIMS
     axis_index = {str(e["id"]): int(e["axis_index"]) for e in CHARTER}
 
     carried_pos = positions or {}
+    cred_state = _normalize_credibility(credibility)
+    review_book = _normalize_review_book(tool_review_book)
     positions_next: Dict[str, Dict[str, Any]] = {}
+    # v4.1 [R5]: the per-household review centroids we (re)assert this
+    # close, carried forward so a later reversal retroactively re-scores
+    # them against the moving head. Digest → household → axis → {sum, n}.
+    review_book_next: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
+    # Total review mass per tool this close, for the CRED_MASS_FLOOR gate.
+    tool_review_mass: Dict[str, float] = {}
+
     for digest in sorted(known_regs.keys()):
         prior = carried_pos.get(digest) or {}
         head = [float(x) for x in (prior.get("head") or [])]
@@ -555,31 +779,38 @@ def compute_tool_mint(
             head = [0.0] * N_DIMS
         if len(mass) != N_DIMS:
             mass = [1.0] * N_DIMS
+        # Carry the tool's prior book forward; this epoch's reviews update
+        # each household's running centroid on the axes it scored.
+        book_entry: Dict[str, Dict[str, Dict[str, float]]] = {
+            h: {a: dict(c) for a, c in axes.items()}
+            for h, axes in review_book.get(digest, {}).items()
+        }
         entry = usage.get(digest)
         if entry:
             meta = known_regs[digest]
             author = str(meta.get("author") or "")
             reg_sender = str(meta.get("sender") or "")
             author_house = _household(author)
+            # v4.1 [R2]: merge attested-usage reviews and vet inspection
+            # reviews into one per-household per-axis cell map. Both use
+            # the same [-1,1]-clamped {sum,n} shape; vets add no usage.
             reviews = entry.get("axis_reviews_by_caller") or {}
-            # Household collapse mirrors the mint damper exactly: a
-            # household's review cells pool per axis across its agents,
-            # log1p damps the pooled count once, and the result scales
-            # by the household's voice weight — a voice that can't mint
-            # can't move position either, and never more than its
-            # balance-weighted share.
+            vet_reviews = entry.get("vet_axis_reviews_by_caller") or {}
             house_cells: Dict[str, Dict[str, Dict[str, float]]] = {}
             house_rev_senders: Dict[str, set] = {}
-            for caller in sorted(reviews.keys()):
-                house = _household(caller)
-                house_rev_senders.setdefault(house, set()).update(
-                    entry.get("attester_senders", {}).get(caller, []))
-                for axis_id in sorted(reviews[caller].keys()):
-                    cell = reviews[caller][axis_id]
-                    agg = house_cells.setdefault(house, {}).setdefault(
-                        str(axis_id), {"sum": 0.0, "n": 0})
-                    agg["sum"] += float(cell.get("sum") or 0.0)
-                    agg["n"] += int(cell.get("n") or 0)
+            for src in (reviews, vet_reviews):
+                for caller in sorted(src.keys()):
+                    house = _household(caller)
+                    house_rev_senders.setdefault(house, set()).update(
+                        entry.get("attester_senders", {}).get(caller, []))
+                    house_rev_senders[house].update(
+                        entry.get("vet_senders", {}).get(caller, []))
+                    for axis_id in sorted(src[caller].keys()):
+                        cell = src[caller][axis_id]
+                        agg = house_cells.setdefault(house, {}).setdefault(
+                            str(axis_id), {"sum": 0.0, "n": 0})
+                        agg["sum"] += float(cell.get("sum") or 0.0)
+                        agg["n"] += int(cell.get("n") or 0)
             add_mass = [0.0] * N_DIMS
             add_val = [0.0] * N_DIMS
             for house in sorted(house_cells.keys()):
@@ -588,10 +819,16 @@ def compute_tool_mint(
                 if reg_sender and reg_sender in house_rev_senders.get(
                         house, set()):
                     continue
-                w_voice = 1.0
-                if voice_weights is not None:
-                    w_voice = round(
-                        float(voice_weights.get(house, VOICE_EPSILON)), 9)
+                # v4.1 [R3]: drift weight = rep_share × credibility, no ε
+                # floor. Local regime (rep_shares None) => weight 1.0.
+                if rep_shares is None:
+                    base_w = 1.0
+                else:
+                    rs = _rep_share(house)
+                    if rs <= 0.0:
+                        continue          # zero-rep => zero drift weight
+                    base_w = rs
+                cred = cred_state.get(house, 1.0)
                 for axis_id in sorted(house_cells[house].keys()):
                     idx = axis_index.get(axis_id)
                     if idx is None:
@@ -600,9 +837,18 @@ def compute_tool_mint(
                     n = int(cell["n"])
                     if n <= 0:
                         continue
-                    w = math.log1p(n) * w_voice
+                    mean_score = cell["sum"] / n
+                    w = math.log1p(n) * base_w * cred
                     add_mass[idx] += w
-                    add_val[idx] += w * (cell["sum"] / n)
+                    add_val[idx] += w * mean_score
+                    # Update this household's running review centroid for
+                    # the credibility re-score (carried forward). Store the
+                    # DRIFT-mass-weighted contribution so a heavier voice's
+                    # assertion is what later gets sanctioned.
+                    bcell = book_entry.setdefault(house, {}).setdefault(
+                        str(axis_id), {"sum": 0.0, "n": 0})
+                    bcell["sum"] += mean_score * n
+                    bcell["n"] += n
             for i in range(N_DIMS):
                 if add_mass[i] > 0.0:
                     head[i] = ((mass[i] * head[i] + add_val[i])
@@ -612,13 +858,96 @@ def compute_tool_mint(
             "head": [round(h, 9) for h in head],
             "mass": [round(m_val, 9) for m_val in mass],
         }
+        if book_entry:
+            review_book_next[digest] = book_entry
+        # Review mass = total drifted mass minus the N_DIMS author prior.
+        tool_review_mass[digest] = sum(mass) - float(N_DIMS)
+
+    # ------------------------------------------------------------------
+    # v4.1 [R5] CONTINUOUS reversal-aware credibility. Re-score EVERY
+    # carried household review centroid against the tool's CURRENT
+    # (just-drifted) head, on tools whose review mass ≥ CRED_MASS_FLOOR.
+    #   deviation > δ  -> dock proportional to (dev-δ)/(2-δ) (worst dock)
+    #   deviation ≤ δ  -> restore proportional to (δ-dev)/δ  (best restore)
+    # Symmetric, no stabilization moment: a captured score that later
+    # reverses moves the head away from the capturer's stored centroid,
+    # so they get docked in the epoch the reversal lands. Credibility
+    # multiplies DRIFT weight only (applied next close), never mint.
+    # ------------------------------------------------------------------
+    cred_delta: Dict[str, float] = {}
+    for digest in sorted(review_book_next.keys()):
+        if tool_review_mass.get(digest, 0.0) < CRED_MASS_FLOOR:
+            continue
+        cur_head = positions_next[digest]["head"]
+        houses = review_book_next[digest]
+        for house in sorted(houses.keys()):
+            for axis_id in sorted(houses[house].keys()):
+                idx = axis_index.get(axis_id)
+                if idx is None:
+                    continue
+                cell = houses[house][axis_id]
+                n = int(cell["n"])
+                if n <= 0:
+                    continue
+                asserted = cell["sum"] / n
+                dev = abs(asserted - float(cur_head[idx]))
+                if dev > CRED_DELTA:
+                    penalty = (dev - CRED_DELTA) / (2.0 - CRED_DELTA)
+                    cred_delta[house] = min(
+                        cred_delta.get(house, 0.0), -penalty)
+                else:
+                    restore = (CRED_DELTA - dev) / CRED_DELTA
+                    cred_delta[house] = max(
+                        cred_delta.get(house, 0.0),
+                        CRED_RECOVERY * restore)
+
+    # Apply: passive recovery toward 1.0 for untouched households, then
+    # the signed adjustment, floored at CRED_FLOOR. Deterministic over the
+    # union of all known + adjusted households in sorted order.
+    credibility_next: Dict[str, float] = {}
+    all_houses = sorted(set(cred_state.keys()) | set(cred_delta.keys()))
+    for house in all_houses:
+        c = cred_state.get(house, 1.0)
+        adj = cred_delta.get(house)
+        if adj is None:
+            c = min(1.0, c + CRED_RECOVERY * (1.0 - c))
+        elif adj < 0:
+            c = c * (1.0 + adj)
+        else:
+            c = min(1.0, c + adj * (1.0 - c))
+        c = max(CRED_FLOOR, c)
+        # Don't persist a household pinned at full credibility with no
+        # history — keeps the carried map to actually-touched households.
+        if not (adj is None and c >= 1.0 - 1e-12 and house not in cred_state):
+            credibility_next[house] = round(c, 9)
+
+    # Round the carried review book for cross-daemon byte-stability.
+    review_book_out: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
+    for digest in sorted(review_book_next.keys()):
+        d_out: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for house in sorted(review_book_next[digest].keys()):
+            h_out: Dict[str, Dict[str, float]] = {}
+            for axis_id in sorted(review_book_next[digest][house].keys()):
+                cell = review_book_next[digest][house][axis_id]
+                if int(cell["n"]) > 0:
+                    h_out[axis_id] = {"sum": round(float(cell["sum"]), 10),
+                                      "n": int(cell["n"])}
+            if h_out:
+                d_out[house] = h_out
+        if d_out:
+            review_book_out[digest] = d_out
 
     return {
         "per_digest": dict(sorted(per_digest.items())),
         "node_agent": {k: dict(sorted(v.items()))
                        for k, v in sorted(node_agent.items())},
+        "node_agent_rep": {k: dict(sorted(v.items()))
+                           for k, v in sorted(node_agent_rep.items())},
         "registrations_next": dict(sorted(known_regs.items())),
         "positions_next": positions_next,
+        "credibility_next": dict(sorted(credibility_next.items())),
+        "tool_review_book_next": review_book_out,
+        "beta": round(beta, 12),
         "vetting_next": {
             "manifests": {d: {
                 "vets": {a: sorted(s)
@@ -639,11 +968,15 @@ def federated_reconcile_epoch(
     events: List[Dict[str, Any]],
     *,
     agent_weights: Optional[Dict[str, float]] = None,
-    apply_gate: bool = True,
+    # v4.1 [R7] / divergence D2: default OFF, aligned with the outer
+    # federated_epoch_close (the violator-pays gate is DORMANT). A True
+    # default here silently reactivated the gate for direct callers.
+    apply_gate: bool = False,
     gate_strength: float = 1.0,
     output_decimals: int = OUTPUT_DECIMALS,
     emission_pool: Optional[float] = None,
     extra_node_agent_mint: Optional[Dict[str, Dict[str, float]]] = None,
+    extra_node_agent_rep: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Dict[str, Any]:
     """Run reconcile_epoch deterministically.
 
@@ -721,8 +1054,15 @@ def federated_reconcile_epoch(
     # ``agent_weights`` (stake-style weighting) applies here as it did
     # to the retired score rail. Sorted iteration keeps the float-add
     # order canonical.
+    # v4.1 [R6]: the rep-bearing basis of each author's mint, accumulated
+    # in the SAME (weighted) raw units as agent_mint so it can be scaled
+    # by the identical gate/pool factor at the end. agent_rep decouples
+    # reputation from ATN: zero-rep-weighted usage mints ATN but no rep.
+    agent_mint_raw: Dict[str, float] = {}
+    agent_rep_raw: Dict[str, float] = {}
     for node_id in sorted((extra_node_agent_mint or {}).keys()):
         extra = extra_node_agent_mint[node_id]
+        rep_extra = (extra_node_agent_rep or {}).get(node_id, {})
         per_agent = node_agent_mint.setdefault(node_id, {})
         node_total = 0.0
         for agent in sorted(extra.keys()):
@@ -731,8 +1071,15 @@ def federated_reconcile_epoch(
                 continue
             weighted = amount * agent_weights.get(agent, 1.0)
             agent_mint[agent] = agent_mint.get(agent, 0.0) + weighted
+            agent_mint_raw[agent] = agent_mint_raw.get(agent, 0.0) + weighted
             per_agent[agent] = per_agent.get(agent, 0.0) + weighted
             node_total += weighted
+        for agent in sorted(rep_extra.keys()):
+            rep_amt = float(rep_extra[agent])
+            if rep_amt <= 0.0:
+                continue
+            weighted_rep = rep_amt * agent_weights.get(agent, 1.0)
+            agent_rep_raw[agent] = agent_rep_raw.get(agent, 0.0) + weighted_rep
         if node_total > 0.0:
             node_mint[node_id] = node_mint.get(node_id, 0.0) + node_total
 
@@ -820,6 +1167,25 @@ def federated_reconcile_epoch(
             sum(result["agent_mint"].values()), output_decimals,
         )
 
+    # v4.1 [R6]: derive per-agent reputation in LOCKSTEP with the final
+    # (gated + pool-normalized) agent_mint. The rep basis was accumulated
+    # in the same raw units, so each agent's final rep = final_mint ×
+    # (rep_basis / raw_mint) — i.e. rep tracks the exact same scaling the
+    # ATN mint received, but only the rep-holder-attributable portion.
+    # Zero-rep-only authors get agent_rep == 0 (voice decoupled from ATN).
+    final_mint = result.get("agent_mint", {}) or {}
+    agent_rep: Dict[str, float] = {}
+    for agent in sorted(final_mint.keys()):
+        raw = agent_mint_raw.get(agent, 0.0)
+        rep_basis = agent_rep_raw.get(agent, 0.0)
+        if raw <= 0.0 or rep_basis <= 0.0:
+            continue
+        frac = rep_basis / raw
+        rep_val = round(final_mint[agent] * frac, output_decimals)
+        if rep_val > 0.0:
+            agent_rep[agent] = rep_val
+    result["agent_rep"] = dict(sorted(agent_rep.items()))
+
     logger.info(
         "federated reconciliation: %d nodes, %d agents, "
         "total mint %.6f, total novelty %.6f",
@@ -897,6 +1263,11 @@ def federated_epoch_close(
     voice_weights: Optional[Dict[str, float]] = None,
     tool_vetting: Optional[Dict[str, Any]] = None,
     tool_positions: Optional[Dict[str, Dict[str, Any]]] = None,
+    # v4.1 gradient trust (ratified 2026-07-09) carry-over inputs:
+    rep_shares: Optional[Dict[str, float]] = None,
+    rep_supply: Optional[float] = None,
+    tool_credibility: Optional[Dict[str, float]] = None,
+    tool_review_book: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -1040,6 +1411,10 @@ def federated_epoch_close(
         voice_weights=voice_weights,
         vetting=tool_vetting,
         positions=tool_positions,
+        rep_shares=rep_shares,
+        rep_supply=rep_supply,
+        credibility=tool_credibility,
+        tool_review_book=tool_review_book,
     )
     # v3 position drift: write the reviewed charter heads onto the replay
     # world so the checkpoint (world_cid) and any world reader carry the
@@ -1055,6 +1430,7 @@ def federated_epoch_close(
         output_decimals=output_decimals,
         emission_pool=emission_pool,
         extra_node_agent_mint=tool_result["node_agent"],
+        extra_node_agent_rep=tool_result.get("node_agent_rep"),
     )
     # Keep tool_mint in the SAME UNITS as agent_mint: when the emission
     # pool normalized agent mints, scale the per-digest display values
@@ -1074,6 +1450,16 @@ def federated_epoch_close(
     result["tool_registrations"] = tool_result["registrations_next"]
     result["tool_vetting"] = tool_result["vetting_next"]
     result["tool_positions"] = tool_result["positions_next"]
+    # v4.1 gradient-trust carried state (rebuildable-cache contract, same
+    # as tool_positions): the driver persists these and feeds them into
+    # the next close.
+    result["tool_credibility"] = tool_result["credibility_next"]
+    result["tool_review_book"] = tool_result["tool_review_book_next"]
+    result["tool_beta"] = tool_result["beta"]
+    # ``agent_rep`` is the DECOUPLED per-agent reputation increment (v4.1
+    # [R6]); already present from federated_reconcile_epoch. Ensure it is
+    # always a dict for downstream consumers.
+    result.setdefault("agent_rep", {})
     result["epoch_root"] = canonical.epoch_root().hex()
     result["n_batches"] = len(canonical.ordered_batches)
     result["n_events"] = len(all_events)
@@ -1097,9 +1483,14 @@ def federated_epoch_close(
     from .world_model_substrate.charter_version import charter_hash as _charter_hash
 
     result["authoritative_payload"] = {
-        "schema": 1,
+        # schema 2 (v4.1): adds ``agent_rep`` — the anchor's mint merkle
+        # now commits (agent, agent_mint, agent_rep) so the decoupled
+        # reputation amount is federation-ratified, not self-reported
+        # under a ceiling (which would re-open the voice leak).
+        "schema": 2,
         "epoch_root": result["epoch_root"],
         "agent_mint": result["agent_mint"],
+        "agent_rep": result.get("agent_rep", {}),
         "agent_novelty": result["agent_novelty"],
         "total_mint": result["total_mint"],
         "total_novelty": result["total_novelty"],

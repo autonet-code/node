@@ -107,8 +107,10 @@ def main():
     print("attempting duplicate submission directly via contract...")
     try:
         tx = contract.functions.recordTrainingForEpoch(
-            existing,  # any positive value
+            existing,  # ATN amount (any positive value)
+            existing,  # repAmount (v4.1) — <= amount; equal here
             eid_hash,
+            [],        # empty merkle proof — we expect a revert regardless
         ).build_transaction({
             "from": addr_a,
             "nonce": w3.eth.get_transaction_count(addr_a),

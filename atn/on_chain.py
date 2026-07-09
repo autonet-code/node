@@ -195,6 +195,26 @@ SUBSTRATE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # Per-epoch training record (v4.1 gradient-trust: DECOUPLED ledgers).
+    # ``amount`` = ATN (money) mint and ``repAmount`` = reputation
+    # (soulbound voice) mint. BOTH are merkle-proven: the leaf is
+    # keccak256(bytes.concat(keccak256(abi.encode(agent, amount,
+    # repAmount)))) under the anchor's agentMintRoot (built by
+    # nodes/common/mint_merkle.py), so a claimant cannot inflate its
+    # voice by lying about repAmount. repAmount <= amount is enforced
+    # on-chain as defense-in-depth. repAmount == amount = legacy lockstep.
+    {
+        "inputs": [
+            {"internalType": "uint256",   "name": "amount",      "type": "uint256"},
+            {"internalType": "uint256",   "name": "repAmount",   "type": "uint256"},
+            {"internalType": "bytes32",   "name": "epochIdHash", "type": "bytes32"},
+            {"internalType": "bytes32[]", "name": "proof",       "type": "bytes32[]"},
+        ],
+        "name": "recordTrainingForEpoch",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
     # Anchor reads
     {
         "inputs": [],
@@ -722,6 +742,89 @@ class OnChainService:
                     "tx_hash": tx_hash.hex()}
         except Exception as e:
             log.exception("Failed to update endpoint on chain")
+            return {"success": False, "error": str(e)}
+
+    # ------------------------------------------------------------------
+    # Per-epoch training record (write)
+    # ------------------------------------------------------------------
+
+    async def record_training_for_epoch(
+        self,
+        private_key: str,
+        amount: int,
+        epoch_id_hash: str | bytes,
+        proof: list[str | bytes],
+        rep_amount: int | None = None,
+    ) -> dict[str, Any]:
+        """Sign and submit a ``recordTrainingForEpoch`` transaction.
+
+        v4.1 gradient-trust DECOUPLED ledgers: ``amount`` is the ATN
+        (money) mint and ``rep_amount`` is the reputation (soulbound
+        voice) mint. BOTH are federation-ratified: the merkle leaf under
+        the anchor's agentMintRoot commits (agent, amount, repAmount) —
+        ``proof`` must have been built over the SAME (amount, rep_amount)
+        pair (nodes/common/mint_merkle.py mint_merkle_proof), or the
+        contract reverts MintProofInvalid. The contract also enforces
+        ``rep_amount <= amount`` as defense-in-depth.
+
+        ``rep_amount`` defaults to ``amount`` (legacy lockstep: reputation
+        and ATN mint at the same value, matching mint_merkle's default
+        lockstep leaves) so existing callsites that don't yet split the
+        two behave exactly as before. Pass an explicit smaller
+        ``rep_amount`` to mint less voice than money (the v4.1 case where
+        some of the ATN came from zero-reputation callers).
+
+        Per-(agent, epoch) idempotent on-chain; the epoch must already be
+        anchored via ``submitAnchor``.
+        """
+        if rep_amount is None:
+            rep_amount = amount
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            account = Account.from_key(private_key)
+
+            eid = (epoch_id_hash if isinstance(epoch_id_hash, bytes)
+                   else _to_bytes32(epoch_id_hash))
+            proof_bytes = [
+                (p if isinstance(p, bytes) else _to_bytes32(p)) for p in proof
+            ]
+
+            nonce = w3.eth.get_transaction_count(account.address)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+
+            try:
+                estimated = contract.functions.recordTrainingForEpoch(
+                    int(amount), int(rep_amount), eid, proof_bytes,
+                ).estimate_gas({"from": account.address})
+                gas_limit = max(int(estimated * 12 // 10), 1_500_000)
+            except Exception:
+                gas_limit = 2_000_000
+
+            tx = contract.functions.recordTrainingForEpoch(
+                int(amount), int(rep_amount), eid, proof_bytes,
+            ).build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": gas_limit,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": chain_id,
+            })
+
+            signed = account.sign_transaction(tx)
+            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            tx_hash = w3.eth.send_raw_transaction(raw)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            if receipt.status == 1:
+                return {"success": True, "tx_hash": tx_hash.hex()}
+            return {"success": False, "error": "Transaction reverted",
+                    "tx_hash": tx_hash.hex()}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to record training for epoch on chain")
             return {"success": False, "error": str(e)}
 
     # ------------------------------------------------------------------

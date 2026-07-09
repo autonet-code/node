@@ -162,6 +162,20 @@ replicable; the market prices the scarce. The two grow each other: a
 more capable commons does more work and buys more of the genuinely
 scarce remote things.
 
+**Honest wiring gap (G1, 2026-07-09 econ-attestation audit —
+`experiments/econ_attest/attestation.md`).** The mechanism that makes
+"services finance the commons that replaces them" real is fee recycling:
+2.5% of a service payment burns and re-enters the emission pool (the pool
+that pays tool authors). That fee currently fires ONLY on
+`Substrate.payForService` — the `ServiceMarket.PaymentChannel`
+settlement, which is the ratified DEFAULT rail, pays providers via raw
+`safeTransfer`: no fee, no burn, `recycled = 0`. So on the canonical
+channel path the "two grow each other" doctrine is ASPIRATIONAL until the
+fee is taken at channel settlement (or channel payouts route through
+`payForService`). Boarded as a pending user decision (`docs/BACKLOG.md`);
+the fee/burn mechanic is ATN-denominated, so non-ATN channels need a
+design call too.
+
 ## Open knobs (sims / user)
 
 1. Escrow griefing rules (release timeout, dispute path) — hardhat

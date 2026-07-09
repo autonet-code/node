@@ -6,9 +6,20 @@ with this module and gets bit-identical results (sorted iteration,
 plain integer/float accumulation, rounded fee sums).
 
 This is the consensus input for:
-  - mint: author attribution ∝ standing × usage (reconcile side), and
-  - attested-class standing decay: ``epochs_since_last_receipt`` is
-    derived from which epochs contained receipts for a manifest.
+  - mint (v4.1 gradient trust, ratified 2026-07-09 —
+    memory/tool_economy_v4_gradient_trust.md): author attribution =
+    usage_term ONLY (the v2 standing multiplier and the v3 greenlight
+    gate are both retired). ``compute_tool_mint`` collapses callers to
+    households, damps once per household (log1p), and scales each
+    household's credit by its MINT weight (raw reputation share for
+    rep-holders, ε for zero-rep, the aggregate zero-rep ε-weight capped
+    at a supply-pegged β). ATN and reputation mint at DECOUPLED amounts:
+    zero-rep-weighted usage mints ATN but grants no reputation.
+  - position drift: per-axis review scores (``axis_reviews_by_caller``)
+    PLUS vet inspection reviews (``vet_axis_reviews_by_caller`` — a vet
+    is now a review that moves position and mints nothing) feed the
+    tool's drifted charter head, weighted by rep_share × credibility
+    (no ε floor: zero-rep reviews move nothing).
 """
 
 from __future__ import annotations
@@ -46,13 +57,23 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
           # charter head. Axes an agent never scored are simply absent.
           "axis_reviews_by_caller": {caller_id: {axis_id: {"sum": float,
                                                            "n": int}}},
-          # Vetting tier (spec: Vetting section). Vets are NOT usage —
-          # they are excluded from every count above and only accumulate
-          # toward the manifest's greenlight in compute_tool_mint.
-          # Only ok=True vets are recorded (ok=False is debate material
-          # for the verdict layer, not a greenlight input).
+          # Vets are NOT usage — excluded from every count above. v4.1
+          # (2026-07-09) retired the greenlight GATE, so these no longer
+          # accumulate toward mint eligibility; the carried vetting state
+          # is kept tolerantly (dead knobs) and a vet's surviving value is
+          # its per-axis inspection review below. Only ok=True vets are
+          # recorded (ok=False is verdict-layer material).
           "vets_by_caller": {caller_id: count},
           "vet_senders": {caller_id: [sender_hex, ...]},
+          # v4.1 [R2]: an inspection review — a vet event that carries
+          # per-axis scores. Same [-1,1]-clamped sum/count shape as
+          # ``axis_reviews_by_caller``, but sourced from vet events, so it
+          # moves position (drift) WITHOUT contributing to usage/mint. The
+          # vet gate is gone (v4.1); these scores are the surviving value
+          # of a vet. compute_tool_mint merges this map with
+          # ``axis_reviews_by_caller`` at drift time.
+          "vet_axis_reviews_by_caller": {caller_id: {axis_id: {"sum": float,
+                                                              "n": int}}},
       }}
 
     Deterministic: events are processed in (author_agent, seq,
@@ -81,11 +102,13 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
                 "axis_reviews_by_caller": {},
                 "vets_by_caller": {},
                 "vet_senders": {},
+                "vet_axis_reviews_by_caller": {},
             }
         if ev.get("vet"):
             # Third flavor: a vet is a judgment about the CODE, not a
             # use of it — it must never inflate usage counts. Only
-            # affirmative vets accumulate (greenlight input).
+            # affirmative vets accumulate (greenlight input — DORMANT in
+            # v4.1, kept as a rebuildable-cache field).
             if bool(ev.get("ok", True)):
                 by = entry["vets_by_caller"]
                 caller = str(ev.get("author_agent") or "")
@@ -94,6 +117,23 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
                 senders = entry["vet_senders"].setdefault(caller, [])
                 if sender and sender not in senders:
                     senders.append(sender)
+                # v4.1 [R2]: a vet's per-axis scores are an INSPECTION
+                # REVIEW — they drift position without minting. Same
+                # clamp/accumulate shape as attested-usage reviews, kept
+                # in a parallel map so mint accounting is untouched.
+                raw_axes = ev.get("axes")
+                if isinstance(raw_axes, dict) and raw_axes:
+                    per_caller = entry["vet_axis_reviews_by_caller"].setdefault(
+                        caller, {})
+                    for axis_id in sorted(raw_axes):
+                        try:
+                            value = max(-1.0, min(1.0, float(raw_axes[axis_id])))
+                        except (TypeError, ValueError):
+                            continue
+                        cell = per_caller.setdefault(
+                            str(axis_id), {"sum": 0.0, "n": 0})
+                        cell["sum"] += value
+                        cell["n"] += 1
             continue
         entry["count"] += 1
         ok = bool(ev.get("ok", True))
@@ -144,6 +184,15 @@ def tool_usage_from_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
         entry["vets_by_caller"] = dict(sorted(entry["vets_by_caller"].items()))
         entry["vet_senders"] = {
             k: sorted(v) for k, v in sorted(entry["vet_senders"].items())
+        }
+        entry["vet_axis_reviews_by_caller"] = {
+            caller: {
+                axis: {"sum": round(cell["sum"], _FEE_DECIMALS),
+                       "n": cell["n"]}
+                for axis, cell in sorted(axes.items())
+            }
+            for caller, axes in sorted(
+                entry["vet_axis_reviews_by_caller"].items())
         }
     return dict(sorted(usage.items()))
 

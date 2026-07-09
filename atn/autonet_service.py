@@ -969,9 +969,10 @@ class AutonetBridge:
                     return await asyncio.to_thread(_r.get, digest)
                 tool_store.blob_fetcher = _fetch
 
-            # Vet status for adoption provenance: read the federated
-            # close driver's vetting carry-over (candidate/greenlit/
-            # busted per digest). Best-effort — absent driver = unknown.
+            # Inspection status for adoption provenance: read the
+            # federated close driver's vetting carry-over per digest
+            # (v4.1: these fields track inspection activity, not a gate —
+            # kept for provenance display). Best-effort — absent = unknown.
             def _vet_status(digest: str, _svc=service):
                 drv = getattr(_svc, "_federated_close_driver", None)
                 vetting = getattr(drv, "_tool_vetting", None) if drv else None
