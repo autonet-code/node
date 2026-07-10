@@ -1,5 +1,16 @@
 # Autonet Backlog
 
+> **Status banner (2026-07-10) — HISTORICAL RECORD.** This file was "THE
+> board" through substrate v4.1 (2026-07-09), but its head is now stale: the
+> v4.1 rep/ATN mint split, supply-pegged β, and 3-field merkle leaf
+> described below were **superseded on 2026-07-10** by fees-only emission +
+> money-only close (2-field leaf; REP claimed DAO-side 1:1; β dropped),
+> shipped as v0.7.0. The active board has moved to session/internal
+> tracking; this document is retained as a historical snapshot, not the live
+> work list. For the current system read `docs/tool_substrate.md` (the
+> `Decision (2026-07-10)` section) and `docs/README.md`. The body below is
+> left intact.
+
 Consolidated 2026-07-06; updated 2026-07-09 after substrate v4.1. This is
 THE board; update in place as items land or get ratified.
 

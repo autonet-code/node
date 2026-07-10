@@ -1,16 +1,27 @@
 # Tool substrate v3: tools as the ONLY substrate item; reviews replace debates
 
-Status: v4.1 GRADIENT TRUST — ratified + BUILT 2026-07-09 (see the
-`Decision (2026-07-09)` section, which is the current design of record).
-v4.1 supersedes the v3 vetting GATE (retired: tools mint from first use),
-the v3 usage-only-flat mint (now rep/ATN-split under a supply-pegged β
-cap), and the v3 flat drift weight (now rep_share × credibility, no ε
-floor). The v3 body below is retained for the parts v4.1 keeps (reviews,
-position drift, composition, adoption, Services split) with inline v4.1
-markers where a rule changed.
+Status (current, beta on testnet — live on the Etherlink shadownet as of
+v0.7.0): FEES-ONLY EMISSION + REP-FROM-EARNINGS — ratified + BUILT
+2026-07-10 (see the `Decision (2026-07-10)` section, the current design of
+record). It amends v4.1 in three places: (1) the ATN epoch pool = BURNED
+SERVICE FEES ONLY (no base emission — zero volume mints zero ATN,
+Σ minted == Σ burned); (2) the close computes MONEY ONLY — the v4.1
+supply-pegged β cap and the rep/ATN mint split are DELETED; (3) REP is no
+longer minted on the close path — it is a pure DAO-side pull claim
+(RepToken, 1:1) on ratified ATN earnings, and the review weighting reads
+RepToken checkpoints. Substrate.sol is now a PURE MONEY contract. The
+authoritative payload is schema 3 with a 2-field `(agent, amount)` leaf.
 
-Status: DESIGN v3 — ratified in discussion 2026-07-08 (see the Decision
-section below). Supersedes v2 (2026-07-04) in four places: mint is
+The prior `Decision (2026-07-09)` v4.1 section retired the v3 vetting GATE
+(tools mint from first attested use) and introduced continuous
+reversal-aware credibility + rep-weighted drift (no ε floor) — those
+SURVIVE. Its rep/ATN mint split and β cap do NOT (deleted 2026-07-10). The
+v3 body below is retained for the parts still live (reviews, position
+drift, composition, adoption, Services split) with inline markers where a
+rule later changed.
+
+v3 status note (2026-07-08, historical): ratified in discussion (see the
+Decision section below). Superseded v2 (2026-07-04) in four places: mint is
 usage-only, attestations carry per-axis review scores that drift the
 tool's charter position at close, work units leave consensus, and the
 CON/PRO debate machinery retires from the live path. Everything else
@@ -151,10 +162,11 @@ verifiable anchor in-system is ATN itself.
 5. **One weight, both rails.** The same household weight multiplies
    the damped usage term (mint) and the review evidence mass (position
    drift): a voice that can't mint can't move position either.
-   **[SPLIT at v4.1: the two rails now use DIFFERENT weights — mint keeps
-   the ε-floored weight (under the β cap for zero-rep), drift uses raw
-   rep_share × credibility with no ε floor. A zero-rep voice can still
-   mint ATN but moves no position. Decision 2026-07-09.]**
+   **[SPLIT at v4.1: the two rails use DIFFERENT weights — mint keeps
+   the ε-floored weight, drift uses raw rep_share × credibility with no ε
+   floor. A zero-rep voice can still mint ATN but moves no position.
+   Decision 2026-07-09. The v4.1 β cap on the mint-side weight was DELETED
+   2026-07-10 (fees-only); mint is the plain ε-floored weight now.]**
 6. **Snapshot-pinned reads, checkpoint-served.** `voice_weights` (and
    the owner map read with it) is a close input refreshed by the
    driver's `voice_source` hook just before each close
@@ -165,7 +177,16 @@ verifiable anchor in-system is ATN itself.
    epoch — all daemons derive identical maps no matter when their
    refresh fires, and a wallet funded mid-epoch (after seeing what's
    worth pumping) carries no weight until the next epoch. NO ARCHIVE
-   NODE NEEDED: Substrate.sol's ATN carries IVotes-MECHANISM
+   NODE NEEDED. **[REP SOURCE CORRECTED 2026-07-10: the read moved off
+   Substrate's ATN checkpoints onto RepToken (DAO). RepToken is ERC20Votes
+   in TIMESTAMP mode, so `voice_state.read_voice_state` pins on the
+   anchor's `timestamp` (not block number) and reads
+   `getPastVotes(addr, ts)` / `getPastTotalSupply(ts)` — voice == voting
+   power, the correct governance semantic. Substrate.sol's own reputation
+   surface is DELETED (pure money contract). The original 2026-07-08 text
+   below describing Substrate's `balanceOfAt`/`atnTotalSupplyAt` IVotes
+   checkpoints is the balance-era mechanism, kept as history.]** The
+   original text: Substrate.sol's ATN carries IVotes-MECHANISM
    checkpoints (`Checkpoints.Trace208` history pushed on every
    mint/transfer; `balanceOfAt` / `atnTotalSupplyAt` served from
    current state — deliberately WITHOUT the delegation layer, because
@@ -591,14 +612,15 @@ saturation makes flat burn regressive — see memo); the cognitive
 attestation cost is the floor price instead.
 
 **[v4.1 (Decision 2026-07-09): the greenlight gate and the royalty split
-are RETIRED — tools mint from first attested use, author keeps 100%.
-`mint = usage_term` still, but usage_term is now SPLIT: each household's
-damped credit scales by its MINT weight (raw rep_share for rep-holders,
-ε for zero-rep), the aggregate zero-rep ε-weight capped at β(rep_supply)
-of total. The rep BASIS of each author's mint (`rep_fraction`, the
-rep-holder-attributable portion) is threaded out separately so ATN and
-reputation mint at DECOUPLED amounts — zero-rep usage mints ATN, no
-reputation.]**
+are RETIRED — tools mint from first attested use, author keeps 100%.]**
+
+**[Decision 2026-07-10 (current): mint is MONEY ONLY. `mint = usage_term`
+still; each household's damped credit scales by its ε-floored MINT weight
+(`voice_weights`), then the whole map normalizes to pro-rata shares of the
+burned-fee pool. The v4.1 rep/ATN split, the `rep_fraction` thread-out,
+and the supply-pegged β cap are all DELETED — the close computes ATN only.
+REP is claimed DAO-side (RepToken) on ratified ATN earnings, never minted
+here. `rep_shares` survives only to weight POSITION DRIFT.]**
 
 ## Retrieval: density, not centroid
 
@@ -954,19 +976,27 @@ is the agent-facing daemon flow; the on-chain greenlight
   mint-weighted review centroid (see the v3 Decision section),
   carried across epochs in the `tool_positions` map (same
   derived-from-canonical-events contract as `tool_registrations`).
-- Mint (`compute_tool_mint`): **pinned only**, `mint = usage_term`.
-  **[v4.1: no longer greenlight-gated or royalty-split — rep/ATN-split
-  under the β cap instead. Decision 2026-07-09.]** Cross-epoch carry-over:
+- Mint (`compute_tool_mint`): **pinned only**, `mint = usage_term`,
+  MONEY ONLY (Decision 2026-07-10). No greenlight gate, no royalty split,
+  no rep/ATN split, no β cap — each household's damped usage credit scales
+  by its ε-floored MINT weight (`voice_weights`) and the result normalizes
+  to pro-rata shares of the burned-fee pool. Cross-epoch carry-over:
   `tool_registrations` + `tool_positions` + `tool_vetting` (dead, carried
-  tolerantly) + **v4.1** `tool_credibility` + `tool_review_book` (both
-  same rebuildable-cache contract). Close also emits `agent_rep` (the
-  decoupled reputation increment) and `tool_beta` (the effective β cap).
+  tolerantly) + `tool_credibility` + `tool_review_book` (both same
+  rebuildable-cache contract). The close does NOT emit `agent_rep` or
+  `tool_beta` — those were the v4.1 rep/ATN-split fields, deleted
+  2026-07-10; the authoritative payload is schema 3, 2-field
+  `(agent, amount)` leaf. `rep_shares` (the un-ε-floored raw reputation
+  share, read from RepToken) survives as an input, but drives POSITION
+  DRIFT weight only.
 - Wash-trading dampers: per-household log1p + owner-map + wire-key
-  exclusions are live; **v4.1** adds rep-weighted drift (no ε floor),
-  continuous reversal-aware credibility, and the supply-pegged β cap on
-  zero-rep ATN mint. The pre-v3 sims (sims/tool_economy — uses standing)
-  are quarantined; the v4.1 adversarial sims live in
-  `experiments/econ_attest/`.
+  exclusions are live; rep-weighted drift (no ε floor) and continuous
+  reversal-aware credibility carry over from v4.1. The supply-pegged β cap
+  was DELETED 2026-07-10 (under REP-from-earnings, honest tool usage is
+  all zero-rep by construction, so any β throttle zeroes honest author
+  income). The pre-v3 sims (sims/tool_economy — uses standing) are
+  quarantined; the adversarial sims live in `experiments/econ_attest/`
+  (see `summary_fees_only.md` for the current model).
 
 ## On-chain (with the Services contract work)
 

@@ -1,5 +1,18 @@
 # RPB Deployment Plan -- Jurisdiction + Training
 
+> **Status banner (2026-07-10).** This is the **founding blueprint**,
+> retained as history. The system has since shipped through the substrate /
+> tool-economy paradigm and is now **beta on testnet (v0.7.0)**: the
+> Autonet jurisdiction (a werule-platform DAO, governor `0xD5691B7c…`) plus
+> the substrate core and economy rails are deployed on Etherlink Shadownet;
+> addresses of record live in `registry.json`. The **living paper** is the
+> repo-root `README.md` and the **core spec** is `docs/tool_substrate.md`
+> (read its `Decision (2026-07-10)` section). Note: the on-chain contract is
+> `Substrate.sol` (not `Autonet.sol`/"the RPB contract" as the naming
+> section below still calls it), it mints ATN money only (REP is claimed
+> DAO-side), and the epoch pool is burned service fees only. History below
+> is left intact.
+
 ## Goal
 Deploy the Autonet jurisdiction (DAO on werule + RPB contract) and wire
 the agent framework so users can flip a switch to start training and

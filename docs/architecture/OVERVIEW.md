@@ -1,5 +1,21 @@
 # Autonet Architecture Overview
 
+> **HISTORICAL — pre-substrate (banner added 2026-07-10).** This document
+> describes the retired FedAvg / role-split paradigm (Project, TaskContract,
+> ParticipantStaking, ResultsRewards, AnchorBridge, Proposer/Solver/
+> Coordinator/Aggregator nodes). **None of that is the live system.** Those
+> contracts were deleted in Phase 5.6a. The current architecture is:
+> - **Substrate paradigm, tool economy.** The on-chain surface is four
+>   contracts under `contracts/core/`: `Substrate.sol` (epoch anchoring,
+>   agent registry, money-only training records, ATN token, service
+>   payments), `ServiceMarket.sol`, `VentureVault.sol`, `CharterAnchor.sol`.
+> - **Fees-only emission, money-only close** (v0.7.0, 2026-07-10): the epoch
+>   pool = burned service fees only; REP is claimed DAO-side from ATN
+>   earnings 1:1 (no reputation surface in `Substrate.sol`).
+> - **Read instead:** the repo-root `README.md` (living paper), the docs
+>   index `docs/README.md`, `docs/tool_substrate.md` (core spec), and
+>   `CLAUDE.md`. The body below is kept only for history.
+
 ## System Layers
 
 ### Layer -1: L1 Anchor (Ethereum/Tezos)

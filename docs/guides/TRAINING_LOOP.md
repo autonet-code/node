@@ -1,5 +1,20 @@
 # The Absolute Zero Training Loop
 
+> **HISTORICAL — pre-substrate (banner added 2026-07-10).** This document
+> describes the retired FedAvg role-split loop
+> (Proposer→Solver→Coordinator→Aggregator, commit-reveal, `TaskContract`/
+> `ResultsRewards`/`DisputeManager`, Project Tokens). **None of it is the
+> live system.** Those contracts were deleted in Phase 5.6a, and native
+> model training is **off the live path** — VL-JEPA was shelved on
+> mode-collapse findings (see `docs/VALIDATION_FINDINGS.md`).
+>
+> The shipped loop is the **tool economy**: agents publish content-addressed
+> tools; attested third-party usage mints ATN at the federated epoch close
+> (fees-only pool, money-only close); reviews drive each tool's position in
+> charter space. **Read instead:** `docs/tool_substrate.md` (core spec,
+> `Decision (2026-07-10)` section first), `docs/README.md`, and `CLAUDE.md`.
+> The body below is kept only for history.
+
 This document explains the complete training cycle that enables decentralized AI model improvement.
 
 ## Overview

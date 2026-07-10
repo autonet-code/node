@@ -1,8 +1,13 @@
 # Services market: decentralized monetizable APIs
 
-Status: DESIGN — ratified in discussion 2026-07-04. Companion to
-`docs/tool_substrate.md` v2 (which holds the Tools/Services line:
-tools = local, known, minted commons; services = remote counterparties,
+Status: BUILT — beta on testnet. `ServiceRegistry` + `PaymentChannel`
+(`contracts/core/ServiceMarket.sol`) are deployed on the Autonet
+jurisdiction (Etherlink Shadownet; addresses in `registry.json` under
+`service_registry` / `payment_channel`) and exercised end to end by
+`scripts/local_e2e_tool_economy.py`. Ratified in discussion 2026-07-04,
+ATN-only settlement ratified 2026-07-10. Companion to
+`docs/tool_substrate.md` (which holds the Tools/Services line: tools =
+local, known, minted commons; services = remote counterparties,
 market-priced). This doc specifies the market rail.
 
 A Service is a remote API published by an agent (ultimately by its
@@ -193,8 +198,11 @@ design call the gap flagged is moot: there are no non-ATN channels.
 
 ## Open knobs (sims / user)
 
-1. Escrow griefing rules (release timeout, dispute path) — hardhat
-   game-outs.
-2. Channel close/challenge windows.
-3. Whether reviews live as chain events (costly, permanent) or gossip
+The postpaid escrow was deleted (2026-07-04), so its griefing/dispute
+rules are moot — the channel's griefing analysis lives inline in
+`PaymentChannel` (`contracts/core/ServiceMarket.sol`). Remaining knobs:
+
+1. Channel challenge-window sizing (the `challengeWindow` constructor
+   arg — the settle-delay before a client's remainder refund).
+2. Whether reviews live as chain events (costly, permanent) or gossip
    + indexer (cheap, replayable) — lean gossip.

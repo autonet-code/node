@@ -1,8 +1,14 @@
 # Charter governance (the CharterAnchor)
 
-**Status: built 2026-07-05.** Contract + daemon-side hash + drift detection are
-in the tree; follow-the-anchor migration machinery is deliberately deferred
-(detection first).
+**Status: live (beta on testnet).** Contract + daemon-side hash + drift
+detection are in the tree, and `CharterAnchor` is **deployed on the Autonet
+jurisdiction (Etherlink Shadownet) with charter v1 anchored on-chain**
+(anchored 2026-07-10; the anchored hash matches the local charter). Its
+governor is the **DAO timelock**, so a new charter version now takes a
+governance proposal. The deployed address is in `registry.json`
+(`charter_anchor`), fetched by daemons from GitHub raw master — not
+hardcoded here. Follow-the-anchor migration machinery is deliberately
+deferred (detection first).
 
 ## What the charter is
 
@@ -30,8 +36,10 @@ It is the **deliberate opposite of Substrate.sol**. Substrate.sol is
 intentionally ungoverned — no admin keys, no owner, no privileged setter — because
 its purity (nobody can rewrite training history) is a feature. CharterAnchor has
 exactly one privileged actor, the **governor**, and one privileged act,
-`anchorCharter(charterHash, uri)`. The governor is meant to be a jurisdiction
-timelock; for now whoever deploys names it in the constructor.
+`anchorCharter(charterHash, uri)`. The governor is set at construction and is
+immutable (governance handoff is by naming a timelock at deploy). On the live
+Autonet jurisdiction the governor is the **DAO timelock**, so anchoring a new
+charter version runs through a governance proposal.
 
 Surface:
 
@@ -89,4 +97,6 @@ The hash of the current (v-in-code) 6-root charter is:
 5756ed3aa1831533c6ae7a1728cd6af73241c787049080ac3469d5b40f841cd5
 ```
 
-This is what a governor would anchor as version 1.
+This is the hash anchored on-chain as **version 1** on the live Autonet
+jurisdiction; the daemon's `verify_charter_against_anchor` matches its local
+`charter_hash()` against it.

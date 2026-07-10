@@ -1,22 +1,31 @@
-# Epoch Economics — Fee-Recycled Emission & Candle Close
+# Epoch Economics — Fees-Only Emission & Candle Close
 
-Status: fee-recycled emission IMPLEMENTED end to end (2026-07-08 —
-contract fee rail, close-side pool, driver wiring; see the Decision
-below). The 2026-06-10 fixed-emission normalizer (`apply_emission_pool`)
-is the mechanism it rides on. Candle close IMPLEMENTED for the local
-daemon path (2026-06-11) — federated candle + chain-derived seed still
-pending (see below).
+Status (current, beta on testnet): the ATN epoch pool is BURNED SERVICE
+FEES ONLY — no base emission. Zero service volume in a window mints zero
+ATN that epoch; conservation holds by construction (Σ minted == Σ burned).
+The close computes MONEY ONLY: REP is not minted here, it is claimed
+DAO-side (RepToken) on ratified ATN earnings, 1:1. This is "fees-only
+emission + REP-from-earnings" (`docs/tool_substrate.md` Decision
+2026-07-10, BUILT, sim-validated in
+`experiments/econ_attest/sim/results/summary_fees_only.md`), live on the
+Etherlink shadownet as of v0.7.0. The fee rail and per-window burned-fee
+summing (`read_voice_state` in `nodes/common/voice_state.py`) are the
+mechanism. Candle close is IMPLEMENTED for the local daemon path
+(2026-06-11) with a chain-derived seed; the federated candle cutoff is
+still pending (see below).
 
-> **SUPERSEDED IN PART (2026-07-10, BUILT this working tree):** the base
-> floor goes to ZERO — pool = burned fees only ("fees-only emission",
-> `docs/tool_substrate.md` Decision 2026-07-10, sim-validated in
-> `experiments/econ_attest/sim/results/summary_fees_only.md`). The
-> fee rail and window-summing below carry over unchanged; BASE_EMISSION
-> and the emission-rate decision are deleted. The "zero floor
-> deadlocks at zero supply" argument below no longer binds: ATN now
-> enters by PURCHASE (`mintFromVault`, 2026-07-08) — the vault, not
-> emission, primes the pump. Reputation stops minting with usage
-> entirely and becomes DAO-side pull claims on ATN earnings (1:1).
+> **HISTORICAL NOTE.** The dated `Decision (2026-07-08)` section below
+> describes the earlier "fee-recycled emission" model, where the pool was
+> `BASE_EMISSION_PER_EPOCH + recycled(N)` (a small clock-based floor plus
+> burned fees). That base floor was deleted 2026-07-10: `BASE_EMISSION`
+> and the emission-rate decision are gone, `pool(N) = recycled(N)`. The
+> "zero floor deadlocks at zero supply" argument in that section no longer
+> binds — ATN now enters by PURCHASE (`mintFromVault`, 2026-07-08), so the
+> vault, not emission, primes the pump. The window-summing and the
+> conservation/wash-proof reasoning carry over unchanged. Reputation
+> stopped minting with usage entirely and became a DAO-side pull claim on
+> ATN earnings (1:1). The dated sections are preserved as the decision
+> ledger; the live description above governs.
 
 ## Decision (2026-07-08): fee-recycled emission
 
@@ -78,11 +87,16 @@ consensus-relevant, flag-day to change).
 
 ## Fixed emission — the normalizer (implemented)
 
-(As of 2026-07-08 this section describes the MECHANISM the
-fee-recycled decision above rides on. The `epoch_emission_rate`
-config knob below still exists and still gates the LOCAL close's
-projection; the FEDERATED close's pool now comes from the fee rail
-via the driver's voice-state refresh, not from config.)
+(This section describes the pool-normalizer MECHANISM
+(`apply_emission_pool`) that both the fee-recycled and the current
+fees-only decision ride on. Under fees-only (Decision 2026-07-10) the
+federated close's pool is `recycled(N)` alone — the burned service fees
+in the window, read from the fee rail via the driver's voice-state
+refresh (`read_voice_state`) — with NO base floor: the
+`BASE_EMISSION_PER_EPOCH` term and the `pool = rate × duration` formula
+below are RETIRED for the federated path. The `epoch_emission_rate`
+config knob still exists and still gates the LOCAL close's clock-based
+projection, but the network's authoritative pool is fees-only.)
 
 Problem: `mint(node) = max(0, score_change) × survival` is uncapped —
 every claim prints new tokens, supply scales with activity, and junk
@@ -173,7 +187,7 @@ Implementation state (2026-06-11):
   sequence at T_cut before replay — post-cut batches join the next
   epoch's canonical set).
 
-## Merkle mint proofs (implemented 2026-06-11)
+## Merkle mint proofs (implemented 2026-06-11; 2-field leaf as of 2026-07-10)
 
 Mint amounts are no longer self-reported. `submitAnchor` commits
 `agentMintRoot` — a merkle root over the epoch's `(agent address,
@@ -182,6 +196,13 @@ OZ-compatible) — and `recordTrainingForEpoch(amount, epochIdHash,
 proof)` verifies the caller's leaf against it. Anchors with no
 claimable entries carry the zero root; the contract rejects all
 nonzero claims against those (`MintRootMissing`).
+
+The leaf is MONEY-ONLY: `keccak256(abi.encode(agent, amount))` — 2
+fields. (The v4.1 build briefly used a 3-field `(agent, amount,
+repAmount)` leaf; the fees-only decision 2026-07-10 reverted it, since
+REP is now a DAO-side function of ratified earnings and nothing about
+voice is committed on the close path. See `nodes/common/mint_merkle.py`
+and `Substrate.recordTrainingForEpoch`.)
 
 Python side: `nodes/common/mint_merkle.py` (tree/proof/scaling —
 both the anchorer and the agent submitter MUST route the float→int
@@ -193,10 +214,13 @@ identity resolver wired in `atn/autonet_service.py`), and skips
 agents with no on-chain identity. The non-address filter is defense
 in depth for test fixtures and legacy logs, not a production gap.
 
-NOT yet redeployed to shadownet — redeploy wipes registrations and
-anchors, so it's bundled with the next deliberate reset
-(`scripts/deploy_substrate.js` + publish_network_config.py + indexer
-restart per the shadownet runbook).
+Deployed to the Etherlink shadownet (v0.7.0, 2026-07-10): the merkle
+proofs and the money-only leaf are live on the current Substrate
+(address of record in `registry.json`, `jurisdictions.autonet.contracts.
+substrate`). A consensus-relevant change to the leaf or close output is a
+flag-day redeploy — it wipes registrations and anchors, so it is bundled
+with a deliberate reset (`scripts/deploy_substrate.js` +
+publish_network_config.py + indexer restart per the shadownet runbook).
 
 ## Startup replay cost (known debt, separate from economics)
 

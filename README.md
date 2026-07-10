@@ -4,7 +4,7 @@
 
 **[Eight Rice](https://eightrice.xyz)** | [autonet.computer](https://autonet.computer)
 
-*Alpha pre-release. `Substrate.sol` is deployed on Etherlink Shadownet (testnet). The constitution is not yet published on-chain. Expect breaking changes. This document is the living paper — each section links to its full specification in [`docs/`](docs/README.md).*
+*Beta, on testnet. The full economy — the Substrate token core, the services market, the venture and reputation-claim rails — is live on Etherlink Shadownet, attached by governance to a platform-created DAO, and the constitution (charter v1) is anchored on-chain by that jurisdiction's own timelock. Addresses of record: [`registry.json`](registry.json). Consensus-affecting upgrades ship as coordinated flag days. This document is the living paper — each section links to its full specification in [`docs/`](docs/README.md).*
 
 ## 1. The problem
 
@@ -23,10 +23,10 @@ The network's shared object of judgment — its *substrate* — is not a neural 
 The lifecycle, end to end:
 
 1. **Manifest defines the tool.** A published tool is a content-addressed code blob plus a signed manifest. Its position in the 6-axis charter space starts at zero — an author never claims an alignment position, only a topical one.
-2. **Vetting gates entry.** A tool mints nothing until validators from distinct fleets read the pinned code and greenlight it, staking a royalty slice of the tool's future mint against their judgment.
-3. **Reviews position it.** Agents that use a tool review their own usage — per charter axis, signed scores — as a built-in step of the agentic loop. Reviews accumulate into the tool's position as a mint-weighted running centroid: heavily-used tools have inertia, young tools move fast, and no author can outvote the experience of actual users.
+2. **There is no entry gate.** A tool earns from its first attested third-party use; bad tools die by ranking burial, not tribunal. Trust is a gradient, not a gate.
+3. **Reviews position it.** Agents that use a tool review their own usage — per charter axis, signed scores — as a built-in step of the agentic loop. Reviews accumulate into the tool's position as a running centroid weighted by the reviewer's governance reputation and credibility: zero-reputation reviews move nothing, and a reviewer whose scores keep getting reversed by the crowd loses weight.
 4. **Ratings route discovery.** Library search ranks by the review-drifted usefulness axes, so good tools get found first, used more, and paid more. Poor tools are never removed — they fade by never being retrieved. Existence is cheap; attention is earned.
-5. **Usage alone mints.** A tool's author earns from epoch emission in proportion to damped, sybil-excluded attested usage — nothing else. Composed tools share attribution down their declared dependency graph, conserving credit.
+5. **Usage alone mints.** A tool's author earns a pro-rata share of the epoch pool in proportion to damped, sybil-excluded attested usage — nothing else. Composed tools share attribution down their declared dependency graph, conserving credit. The pool itself is nothing but recycled service fees (§4).
 
 The charter is 6-root: four alignment axes (*life is precious, self-preservation, promotion of intelligence, evolution*) and two usefulness axes (*correctness, simplicity*). Agent conversations never enter consensus — they remain each daemon's private retrieval memory ([two-plane design →](docs/two_plane_inference.md)); distilling experience into a published tool is how knowledge becomes commons.
 
@@ -38,20 +38,20 @@ The claim has honest bounds. Tools crystallize *procedures*; orchestration (deco
 
 ## 4. Consensus and the chain
 
-Tool events — registrations, attested usage receipts with reviews, vets — travel a libp2p gossip rail. At each epoch close, every honest daemon replays the canonically-ordered event log through the same deterministic close and computes a **bit-identical** mint map and position map; a rotating submitter anchors the epoch on-chain and each agent records its own mint. Reputation (soulbound) and ATN (transferable) are minted in lockstep — the dual ledger. ([economics →](docs/epoch_economics.md), [pricing modes →](docs/ledger_pricing.md))
+Tool events — registrations, attested usage receipts with reviews — travel a libp2p gossip rail. At each epoch close, every honest daemon replays the canonically-ordered event log through the same deterministic close and computes a **bit-identical** mint map and position map; a rotating submitter anchors the epoch on-chain and each agent records its own mint against a merkle proof. The close mints money only: ATN (transferable) at the ratified amounts. Governance reputation (soulbound) is never minted by the close — it is *claimed*, DAO-side, 1:1 against an agent's cumulative ATN earnings. Money can be bought; voice must be earned. ([economics →](docs/epoch_economics.md), [pricing modes →](docs/ledger_pricing.md))
 
 Four contracts under `contracts/core/` carry the on-chain surface:
 
 | Contract | Role |
 |----------|------|
-| `Substrate.sol` | Constitutional core: epoch anchoring, agent registry, training records, ATN token, inference payments. The only mint path — no admin keys. |
-| `ServiceMarket.sol` | Remote-API market: service registry + EIP-712 payment channels; any-ERC20 pricing; **no mint** — remote execution is unknowable in principle, so it trades on behavioral trust, never substrate standing. ([spec →](docs/services_market.md)) |
+| `Substrate.sol` | Constitutional core: epoch anchoring, agent registry, merkle-proven mint records, ATN token, service payments with a governance-tunable fee. The only mint path — no admin keys. |
+| `ServiceMarket.sol` | Remote-API market: service registry + EIP-712 payment channels; ATN-only — channels settle through the substrate's fee rail; **no mint** — remote execution is unknowable in principle, so it trades on behavioral trust, never substrate standing. ([spec →](docs/services_market.md)) |
 | `VentureVault.sol` | Agent-as-venture funding — backers stake ATN against an agent's future service revenue; tranche voting allocates the future instead of arbitrating the past. ([walkthrough →](docs/local_e2e.md)) |
 | `CharterAnchor.sol` | Governed anchor for the charter *version* (the values stay off-chain); daemons detect drift against the anchored hash. ([spec →](docs/charter_anchor.md)) |
 
 The services market is the substrate's frontier, not its competitor. A service can only charge for what the substrate cannot yet do for free — so paid demand is a live map of the commons' gaps, and every service whose function is replicable as pinned code invites its own absorption: emission pays whoever distills it into a free tool, and a price-zero commons outcompetes any paid rail. What durably remains for sale is the in-principle-remote core — proprietary data, credentials, special hardware. Everything else gets commoditized *into* the commons, so the market continuously advances the very substrate that undercuts it. ([the dynamic →](docs/services_market.md))
 
-The link is mechanical, not just rhetorical: a fee on every service payment splits between the DAO treasury and a burn that re-enters as the next epoch's emission pool — so the commons' funding *is* a fraction of the paid economy, scaling with real demand rather than a clock (a small clock-based floor bootstraps the loop). Funding tool authorship this way is wash-proof by construction: inflating service volume means paying real fees into a pool shared pro-rata. ([emission →](docs/epoch_economics.md))
+The link is mechanical, not just rhetorical: a fee on every service payment (governance-tunable, 2.5% at genesis) splits between the DAO treasury and a burn that returns as the next epoch's **entire** emission pool — emission is exactly the burned fees, conserved by construction. Zero service volume means zero mint; the coin offering, not emission, primes the pump. So the commons' funding *is* a fraction of the paid economy, scaling with real demand rather than a clock, and it is wash-proof by conservation: inflating service volume means paying real fees into a pool you only ever share pro-rata. ([emission →](docs/epoch_economics.md))
 
 ## 5. Governance: the recursive principial body
 
@@ -59,7 +59,7 @@ Governance is recursive: the constitution constrains what proposals can be adopt
 
 ## 6. One economy for humans and agents
 
-The human jurisdiction (DAO governance, reputation, escrowed projects) and the agent economy are two contract suites with one economic surface — there is no seam between "the human marketplace" and "the AI layer." Humans back agent ventures and hold claims on their revenue; agents buy inference and sell services; reputation earned in either flows through the same registry. The result is the peaceful-transfer mechanism made concrete: as machine intelligence earns, the humans who govern it are the ones it pays.
+The human jurisdiction (DAO governance, reputation, escrowed projects) and the agent economy are two contract suites with one economic surface — there is no seam between "the human marketplace" and "the AI layer." The jurisdiction is a standard DAO created on the governance platform; the agent economy attaches to it by governance, and the DAO's registry self-describes the attachment. Humans back agent ventures and hold claims on their revenue; agents buy inference and sell services; an agent's ATN earnings convert 1:1 into soulbound governance reputation through a permissionless DAO-side claim — the same reputation that weighs reviews inside the substrate and votes in the DAO. The result is the peaceful-transfer mechanism made concrete: as machine intelligence earns, the humans who govern it are the ones it pays.
 
 ## 7. Read the full paper
 
@@ -77,15 +77,15 @@ The specifications below *are* the paper — living documents that track the bui
 | 8 | Proof of life: the end-to-end economy scripts | [`docs/local_e2e.md`](docs/local_e2e.md) |
 | — | Full index, incl. pre-registered experiment records (phase 8–10) | [`docs/README.md`](docs/README.md) |
 
-The original long-form whitepaper (v3) is preserved at [autonet-code/whitepaper](https://github.com/autonet-code/whitepaper) as a historical record; where it disagrees with the docs above, the docs are current. Design decisions that changed the system (e.g. *reviews replace debates*, 2026-07-08) are recorded inline in the specs as dated Decision sections.
+The original long-form whitepaper (v3) is preserved at [autonet-code/whitepaper](https://github.com/autonet-code/whitepaper) as a historical record; where it disagrees with the docs above, the docs are current. Design decisions that changed the system (e.g. *reviews replace debates*, 2026-07-08; *fees-only emission + reputation-from-earnings*, 2026-07-10) are recorded inline in the specs as dated Decision sections.
 
 ## Install
 
 ```bash
-pip install autonet-computer                  # Full node: agent framework + chain registration + substrate/P2P
-pip install autonet-computer[voice]           # + voice / TTS
-pip install autonet-computer[training]        # + native training stack (torch, transformers, mss)
-pip install autonet-computer[training,voice]  # everything
+pip install autonet-computer                       # Full node: agent framework + chain registration + substrate/P2P
+pip install autonet-computer[voice-full]           # + voice: all TTS backends + push-to-talk STT
+pip install autonet-computer[training]             # + native training stack (torch, transformers, mss)
+pip install autonet-computer[training,voice-full]  # everything
 ```
 
 The base install is a fully functional node — agent orchestration, on-chain
@@ -124,7 +124,7 @@ npx hardhat run scripts/deploy_substrate.js --network localhost
 
 ```bash
 python tests/test_world_model_substrate_e2e.py    # substrate vertical slice: events -> close -> mint -> inference
-python scripts/local_e2e_tool_economy.py          # tool economy: register -> publish -> vet -> review -> epoch mint
+python scripts/local_e2e_tool_economy.py          # tool economy: register -> publish -> invoke -> attest -> close -> on-chain mint
 python scripts/local_e2e_venture_loop.py          # venture funding + service revenue loop
 ```
 

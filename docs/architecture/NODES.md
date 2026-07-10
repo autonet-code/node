@@ -1,5 +1,18 @@
 # Node Architecture Reference
 
+> **PARTLY HISTORICAL (banner added 2026-07-10).** What still holds: the
+> four-engine node model (Awareness, Governance, Work, Survival) and the hard
+> safety constraint that **work halts if the governance heartbeat is missed**
+> (`nodes/core/`). What is retired: the role-split specialized nodes
+> (Proposer/Solver/Coordinator/Aggregator) and the FedAvg aggregation flow
+> documented below — those belong to the deleted pre-substrate paradigm.
+> Today an agent is a substrate participant hosted by a daemon (`atn/`);
+> registration on-chain unlocks its economic rights, and work enters
+> consensus by publishing **tools**, not by role-staked task/solve/verify.
+> The `TaskContract`/`ResultsRewards`/`ParticipantStaking` calls referenced
+> below no longer exist. **Read instead:** `docs/README.md`,
+> `docs/tool_substrate.md`, `docs/unified_agent_design.md`, and `CLAUDE.md`.
+
 ## Base Node Structure
 
 All nodes inherit from the `Node` class which implements the constitutional framework.

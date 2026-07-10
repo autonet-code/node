@@ -1,9 +1,38 @@
 # Jurisdiction Wiring Map
 
-**Status: research report, 2026-07-05. Read-only survey — nothing built, nothing
-deployed by this document.** It maps the existing "tokenized project → on-chain
-jurisdiction" attachment across three codebases and the three wiring points the
-user named. Every claim carries a `file:line` citation.
+**Status: research report, 2026-07-05 — since SUPERSEDED IN PART by the live
+attach (2026-07-10). Read the "Live attach" banner below before relying on
+any "design, not built" / "future work" framing in the body.** The original
+survey mapped the "tokenized project → on-chain jurisdiction" attachment across
+three codebases and the three wiring points the user named, with a `file:line`
+citation per claim. Much of it now describes what WAS built.
+
+## Live attach (2026-07-10) — what actually shipped
+
+The canonical Autonet jurisdiction is a **werule-platform-created DAO** (a
+HomebaseDAO governor + timelock + RepToken + Registry suite), with the autonet
+contract stack **attached post-hoc**: the Substrate/vault/rep-claim/charter
+contracts were deployed with the jurisdiction's governor/timelock as their
+constructor params, then wired in by governance proposals —
+`RepToken.setMinter` (grants the `AutonetRepClaim` contract the right to mint
+REP), plus Registry self-description keys (`jurisdiction.parity.*` for the
+vault buy rail, `jurisdiction.autonet.{substrate,vault,rep_claim}` naming the
+attached contracts).
+
+**Addresses of record live in `registry.json`** at the repo root (daemons
+fetch it from GitHub raw master, cached at `~/.atn/registry.json`); do not
+trust any address literal in the body of this doc. Discovery root is the DAO
+governor (`atn/jurisdiction.py: GOVERNOR_ADDRESS`); `autonet.yaml`
+`blockchain.contracts.AutonetDAO` overrides it.
+
+Two claims in the body are now **outdated by the fees-only / REP-from-earnings
+decision (2026-07-10)** and are corrected in section B.3 below: Substrate.sol
+is now a PURE MONEY contract — it has **no `agentReputation` surface** and mints
+**no reputation**. REP is claimed DAO-side (`AutonetRepClaim`, 1:1 on ratified
+ATN earnings — `agentMintTotal` + `serviceEarnings`); the read-only
+"reputation mirror" this report contemplated was **retired** in favor of that
+pull-claim rail. Treat every "mints reputation+ATN in lockstep" /
+"`agentReputation` soulbound" phrasing below as historical.
 
 Codebases surveyed:
 
@@ -144,8 +173,12 @@ revenue share (`demoDividends.js:64,95-102`).
   reward claims. Autonet's `Substrate.sol` replaced all of this from scratch
   (`Substrate.sol:9-13,32-42`): epoch **anchoring only** (the mint math is the
   off-chain deterministic close), agent registry with owner-binding, training
-  records minting reputation+ATN in lockstep (`:710-760`), and a bare
-  `payForService` labeled-transfer (`:886`). Capability scoring, evolution
+  records minting reputation+ATN in lockstep (`:710-760`) — **superseded
+  2026-07-10: Substrate now mints ATN ONLY (money-only 2-field leaf) and
+  accrues the `agentMintTotal` earnings ledger; REP is a DAO-side pull claim,
+  see the banner and B.3** — and a labeled `payForService` transfer that takes
+  the 2.5% service fee and accrues a per-recipient `serviceEarnings` ledger.
+  Capability scoring, evolution
   proposals, sponsorship hierarchies are explicitly called out as
   "pre-substrate concepts" that do **not** live on Substrate.sol (`:40-42`).
 - **Dead bridge script.** `autonet/scripts/e2e_jurisdiction_integration.py`
@@ -163,6 +196,15 @@ revenue share (`demoDividends.js:64,95-102`).
 ## B. The three wiring points
 
 ### B.1 Governance changing CORE VALUES (the 6-root charter)
+
+**BUILT since this survey.** The "design, not built" anchor below shipped as
+`contracts/core/CharterAnchor.sol` — a standalone governed anchor (NOT the
+Registry-key option this report leaned toward, and NOT a governed slot on
+Substrate.sol, which stays ungoverned). It is deployed on the live jurisdiction
+with charter v1 anchored on-chain (governor = the DAO timelock); the daemon
+verifies its local `charter_hash()` against `currentCharter()` and warns on
+drift. See `docs/charter_anchor.md`. The forward-only / migration-deferred
+reasoning below still holds. The rest is the historical design survey.
 
 **Where the charter lives today.** The charter axes are a Python constant in the
 off-chain deterministic close: `CHARTER` in
@@ -221,6 +263,13 @@ note that protocol-floor / charter changes are "redeploy/governance" events
 deliberately deferred (`tool_substrate.md:262-264`).
 
 ### B.2 Attaching the venture vault as a "tokenized project"
+
+**BUILT since this survey.** The venture vault shipped as
+`contracts/core/VentureVault.sol` (deploy-per-venture via `VentureVaultFactory`,
+ATN-only, no arbiter — halt vote instead of appeals), exercised end to end by
+`scripts/local_e2e_venture_loop.py`. The port analysis below is the historical
+design reasoning; the arbiter WAS deleted and tranche-gating WAS adopted as
+described. The following is the survey as written.
 
 The venture vault (`venture_vault_design.md`) is the boats CoinOffering's
 successor instrument. Attaching it under the jurisdiction is mostly a **port from
@@ -290,6 +339,21 @@ commons — `venture_vault_design.md`). Any port must keep revenue custody in th
 vault contract, distinct from the agent's ATN balance on Substrate.sol.
 
 ### B.3 Reputation as governance weight
+
+**RESOLVED 2026-07-10 (this section's question is now answered in code).**
+The decision went further than the "mirror, don't bridge" lean below:
+Substrate.sol's `agentReputation` was **deleted**. Substrate is a pure money
+contract that mints ATN only and accrues two earnings ledgers
+(`agentMintTotal` = cumulative tool-pool mint, `serviceEarnings` = cumulative
+net service revenue). **REP is minted DAO-side by `AutonetRepClaim`** as a pull
+claim on those ledgers at a hardcoded **1:1** (you cannot lie about REP because
+you cannot lie about ATN you provably received). REP is the DAO's `RepToken`
+(IVotes) — so REP is voice/direction weight, held via the claim rail, and the
+federated close weights reviews by REP share read from `RepToken` checkpoints
+pinned to the previous anchor. The read-only "reputation mirror" contemplated
+below was **retired** in favor of this claim rail (`registry.json`
+`reputation_mirror` is empty; `rep_claim` holds the live address). The rest of
+this section is the historical reasoning that led there.
 
 Two reputation ledgers exist, in different repos, with different properties:
 

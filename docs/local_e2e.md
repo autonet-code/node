@@ -47,9 +47,13 @@ Seven stages, each verified:
    calls the registration method from the agent's own key. Verifies
    `getAgentOwner` returns the two distinct owners on chain.
 4. **Tool economy (daemon)** — `author-1` registers a pinned echo tool
-   (`register_tool`, `publish=True`); `caller-1` invokes it via
-   `tool_registry.call_tool` and then runs `attest_tools` (the cognitive
-   attestation — the only mint-counting usage). A `WorldService` is wired
+   (`register_tool`), then `publish_tool`s it (the production two-step
+   publish gate); `caller-1` invokes it via `tool_registry.call_tool` and
+   then runs `attest_tools` (the cognitive attestation — the only
+   mint-counting usage). Two validators then `vet_tool` it: they first
+   read the pinned code back, then attest a pass verdict with a report.
+   Under v4.1 (vet gate retired) a vet is an INSPECTION REVIEW — it drifts
+   position but mints nothing and gates nothing. A `WorldService` is wired
    to the tool_store's `manifest_sink`/`event_sink` exactly like
    `atn/autonet_service.py` does; the tool_used receipts are captured off
    the event sink and the registration sprout is read from the
@@ -60,19 +64,25 @@ Seven stages, each verified:
    mocked gossip (the `tests/test_tool_mint` TestDriverCarryOver pattern).
    The `agent_owner_map` is **read back from chain** (`getAgentOwner` for
    both agents), keyed by the same 0x addresses the events now carry.
-   Verifies the mint credits `author-1`, `attesters == 1`, and a **control
-   case**: setting the caller's owner equal to the author's in the map
-   drops the mint to zero — proving the chain-fed same-owner exclusion.
-6. **Settlement** — the winning submitter anchors the epoch
+   Verifies the mint credits `author-1`, `attesters == 1`, and — under
+   v4.1 — that the **vet gate is removed**: the tool mints from first
+   attested use, the author keeps 100% (no validator royalty), and the
+   inspection-review vets earn nothing. Also a **control case**: setting
+   the caller's owner equal to the author's in the map drops the mint to
+   zero — proving the chain-fed same-owner exclusion.
+6. **Settlement** — the rotating submitter anchors the epoch
    (`submitAnchor` via `EpochAnchorer`), `author-1` records its own mint
    (`recordTrainingForEpoch` via `AuthoritativeChainSubmitter`, mint-merkle
-   proof against the anchored root). Verifies `agentReputation` and the
-   ATN `balanceOf` both moved on chain by the scaled `agent_mint[author]`
-   amount. Then registers one Service on `ServiceRegistry` and runs one
-   `PaymentChannel` round-trip in ATN (client opens a deposit → signs one
-   EIP-712 voucher → provider closes → provider balance +ask NET of the
-   2.5% service fee, routed through `payForService`; remainder refunds
-   fee-free after the challenge window).
+   proof against the anchored root). Money only (Decision 2026-07-10):
+   Substrate has no reputation surface — the mint is a 2-field
+   `(agent, amount)` leaf. Verifies the cumulative tool-pool earnings
+   ledger (`agentMintTotal`) and the ATN `balanceOf` both moved on chain
+   by the scaled `agent_mint[author]` amount (REP is claimed DAO-side,
+   not minted here). Then registers one Service on `ServiceRegistry` and
+   runs one `PaymentChannel` round-trip in ATN (client opens a deposit →
+   signs one EIP-712 voucher → provider closes → provider balance +ask NET
+   of the 2.5% service fee, routed through `payForService`; remainder
+   refunds fee-free after the challenge window).
 7. **Teardown** — kills the Hardhat node, removes tmp dirs, prints the
    scoreboard.
 
@@ -85,14 +95,15 @@ Seven stages, each verified:
   [PASS] Stage 3 — chain identity (owner-bound registration)
            author_owner_onchain=0xf39Fd6e5…  caller_owner_onchain=0x7099797…
            distinct_owners=True
-  [PASS] Stage 4 — tool economy (register + invoke + attest)
-           registration_events=1  attested_receipts=1
+  [PASS] Stage 4 — tool economy (register + invoke + attest + vet)
+           registration_events=1  attested_receipts=1  vets=2
   [PASS] Stage 5 — consensus (federated close + owner-map exclusion)
            tool_mint_raw=4.15888308  agent_mint_raw=8.15888308
+           vet_gate=removed (v4.1); author keeps 100%
            control_same_owner_mint=0 (excluded)
-  [PASS] Stage 6 — settlement (anchor + recordTraining + service)
-           reputation_delta=8158883  atn_delta=8158883
-           service_id=1  escrow_provider_delta=1000
+  [PASS] Stage 6 — settlement (anchor + recordTraining + channel)
+           earnings_delta=8158883  atn_delta=8158883
+           service_id=1  channel_provider_delta=975  channel_client_refund=2000
   [PASS] Stage 7 — teardown
   7 PASS / 0 FAIL / 0 SKIP
 ```
@@ -112,15 +123,16 @@ is a real observation about where the pieces don't yet click cleanly.
    attested pinned tool mints NOTHING. The unit fixture
    (`tests/test_tool_mint._registration_event`) hand-sets
    `author_post=True` to get standing 1, which is why the tests pass while
-   the live daemon path would mint zero until PRO debate accrues standing
-   organically. The script sets `author_post=True` on the buffered
-   registration events (documented inline) to exercise the mint. **Open
-   question for the owner:** should tool registration stamp an author post
-   (giving the manifest immediate unit standing, matching `submit_con`'s
-   `author_post=True` convention), or is a tool author supposed to earn
-   standing only through subsequent debate? This is the single most
-   load-bearing seam — the whole "tools mint to their author" claim hinges
-   on it.
+   the live daemon path would mint zero until standing accrues organically.
+   The script sets `author_post=True` on the buffered registration events
+   (documented inline) to exercise the mint. **Open question for the
+   owner:** should tool registration stamp an author post (giving the
+   manifest immediate unit standing), or is a tool author supposed to earn
+   standing only through subsequent review activity? This is the single
+   most load-bearing seam — the whole "tools mint to their author" claim
+   hinges on it. (v4.1 note: usage mints from first attested use
+   regardless, so this seam is now about ledger-pricing standing math, not
+   the mint gate — the vet gate it once interacted with is retired.)
 
 2. **Tool registration events don't reach the `event_sink`.** Only
    `tool_used` receipts flow through `tool_store.event_sink`; the manifest
@@ -232,10 +244,11 @@ Eight stages (0 bootstrap + A–G), each verified:
   transport, submit `attestTrial` on chain from their own keys;
   greenlight; a verifier claims its fee slice.
 - **E tranches + revenue** — agent claims tranche 1; a customer pays via
-  `payForService(vault, …)`; `claimRevenue` splits 60/40; backers claim
-  pro-rata (360/240, asserted to the wei); a ≥1/3 backer halts the next
-  tranche (asserted unclaimable), un-halts, and the tranche is claimable
-  again.
+  `payForService(vault, …)`, which takes the 2.5% service fee at payment
+  time so the vault receives the net (975 of 1000); `claimRevenue` splits
+  that net 60/40; backers claim pro-rata within the 60% (351/234, asserted
+  to the wei); a ≥1/3 backer halts the next tranche (asserted
+  unclaimable), un-halts, and the tranche is claimable again.
 - **F evidence rail** — the author publishes a deliberately-buggy pinned
   tool; a disputer files an evidence-bearing CON; a third daemon runs
   `check_evidence` → confirms → posts support. Two mini-closes (with vs

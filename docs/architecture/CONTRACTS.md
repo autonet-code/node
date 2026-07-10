@@ -1,5 +1,25 @@
 # Smart Contract Reference
 
+> **HISTORICAL — pre-substrate (banner added 2026-07-10).** Every contract
+> documented below (ATNToken, ParticipantStaking, TaskContract,
+> ResultsRewards, Project, DisputeManager, AnchorBridge, AutonetDAO) was
+> **deleted wholesale in Phase 5.6a**. None of these exist in the repo today.
+> The live on-chain surface is four contracts under `contracts/core/`:
+> - **`Substrate.sol`** — constitutional core: epoch anchoring
+>   (`submitAnchor`), agent registry (`registerAgent`/`updatePeerId`/
+>   `updateEndpoint`), money-only training records
+>   (`recordTrainingForEpoch(amount, epochIdHash, proof)`, 2-field merkle
+>   leaf), ATN token (transferable, only mint path, no admin keys), and
+>   service payments (`payForService`). No reputation surface — REP is
+>   claimed DAO-side (RepToken, 1:1 on ATN earnings).
+> - **`ServiceMarket.sol`** — remote-API market (registry + EIP-712 payment
+>   channels), ATN-only, settling through `Substrate.payForService`.
+> - **`VentureVault.sol`** — agent-as-venture funding.
+> - **`CharterAnchor.sol`** — governed anchor for the charter version.
+> - **Read instead:** `docs/README.md`, `docs/tool_substrate.md`,
+>   `docs/services_market.md`, `docs/charter_anchor.md`, and the contract
+>   NatSpec. The body below is kept only for history.
+
 ## Contract Dependency Graph
 
 ```

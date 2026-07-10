@@ -12,11 +12,20 @@ work units no longer mint at all, and tool mint is not debate-gated.
 Change 1 (ledger replay determinism) and Change 3 (arm-B render) stand.
 
 **v4.1 note (2026-07-09, gradient trust):** `mint = usage_term` still,
-but usage_term is now rep/ATN-SPLIT — zero-rep usage mints ATN under a
-supply-pegged β cap but grants no reputation, and drift weight dropped
-its ε floor for continuous rep-weighted credibility. None of this touches
-the pricing MODE machinery here (ledger vs equilibrated) — Changes 1/3
-stand unchanged. See `docs/tool_substrate.md`, Decision 2026-07-09.
+and drift weight dropped its ε floor for continuous rep-weighted
+credibility. None of this touches the pricing MODE machinery here (ledger
+vs equilibrated) — Changes 1/3 stand unchanged. See
+`docs/tool_substrate.md`, Decision 2026-07-09.
+
+**Fees-only note (2026-07-10, current):** the v4.1 rep/ATN mint split and
+its supply-pegged β cap were both DELETED. The close now computes MONEY
+ONLY — the ATN epoch pool is burned service fees only (no base emission),
+distributed pro-rata over usage shares; REP is claimed DAO-side (RepToken)
+on ratified ATN earnings, never minted by the close. The authoritative
+payload is schema 3 with a 2-field `(agent, amount)` merkle leaf. This
+still does not touch the pricing MODE machinery here — `federated_epoch_close`
+keeps `pricing="ledger" | "equilibrated"`, default `"ledger"`, and Changes
+1/3 stand. See `docs/tool_substrate.md`, Decision 2026-07-10.
 
 ## Change 1 — pricing mode in the epoch close (owner: reconcile agent)
 
