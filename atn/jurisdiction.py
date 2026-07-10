@@ -17,7 +17,7 @@ CHAIN_ID = 127823
 RPC_URL = "https://node.shadownet.etherlink.com"
 
 # DAO Governor — the single entry point for contract discovery
-GOVERNOR_ADDRESS = "0x7c83FF7b0356DbE332BFC527F1Ea73283974aEA2"
+GOVERNOR_ADDRESS = "0xD5691B7c37a472D84D4E3b8d89CEb79a675dd36e"
 
 # Deployer (for reference only — not used at runtime)
 DEPLOYER_ADDRESS = "0x06E5b15Bc39f921e1503073dBb8A5dA2Fc6220E9"

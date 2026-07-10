@@ -11,18 +11,18 @@
         "gas_decimals": 18
       },
       "contracts": {
-        "dao": "0xfE9b50e873088B089042520B218FDd2cDeE72d72",
-        "timelock": "0x07aEbBd3987C5d11D82177CD539EfA2a88f21761",
-        "rep_token": "0x2B6A173D1674bAfbEC28169825A578C3418736E3",
-        "dao_registry": "0x41C3B5210992b2b74370b7e6F64EE8A73f96A7cE",
+        "dao": "0xD5691B7c37a472D84D4E3b8d89CEb79a675dd36e",
+        "timelock": "0xdB2B6098356f80304Ec78D51799d4e5a377e81dA",
+        "rep_token": "0x00A2aF275D1800DAaB115A05d892b888aF73778D",
+        "dao_registry": "0x422f3DC77614004a60F8598E4ADE6e9Ec19F6c56",
         "rpb": "",
-        "substrate": "0xE2665E9224c2AB1cf787306bc71D4D2893371313",
-        "autonet_vault": "0x453Cca9B1335aE2Fd46F1F44676461976E6De2D2",
-        "reputation_mirror": "0x64b5CeB90dF00D5F4F52Af095BE717C15aAF2b09",
-        "rep_claim": "0xD05bAb4A8e98774054F3A1537fEB0E8BBa872fD1",
-        "charter_anchor": "0x5342aA08EaDE0241fADA97938334Aa4b2B7bEC1D",
-        "service_registry": "0x391973b1de88C920CE61b964c3Be586b1d6c59dd",
-        "payment_channel": "0x35e27c2117d9b08597B95318BA92c00DEe3f3a08"
+        "substrate": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25",
+        "autonet_vault": "0xc1F834cf00A60a425F8a7d7ce9A326cB645ad4f6",
+        "reputation_mirror": "",
+        "rep_claim": "0x391Dd10eFa04BEB1638E80fE5F1A3BE96A590401",
+        "charter_anchor": "0x5e18e8ba38aA752121a0DFadCa5E49A7f3237fF0",
+        "service_registry": "0x79CA416252d0f9393c17E8e0f8111097b3a49535",
+        "payment_channel": "0x97956A322dC5585157c91840d39292c396032508"
       }
     }
   }

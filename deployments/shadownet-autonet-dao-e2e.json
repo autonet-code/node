@@ -1,0 +1,112 @@
+{
+  "network": "shadownet",
+  "chainId": 127823,
+  "rpc_url": "https://node.shadownet.etherlink.com",
+  "deployed_at": "2026-07-10",
+  "deployer": "0x0cD22126f4E751fF74D0d6e4225F9dC865F411B4",
+  "dao_anchors": {
+    "governor_dao": "0xD5691B7c37a472D84D4E3b8d89CEb79a675dd36e",
+    "timelock": "0xdB2B6098356f80304Ec78D51799d4e5a377e81dA",
+    "rep_token": "0x00A2aF275D1800DAaB115A05d892b888aF73778D",
+    "registry_treasury": "0x422f3DC77614004a60F8598E4ADE6e9Ec19F6c56"
+  },
+  "contracts": {
+    "substrate": {
+      "address": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25",
+      "deploy_block": 5285579,
+      "deploy_tx": "0xcf914c11111670b034b21621080a62be5fe5939e3c39af31a9770f1997afbec4",
+      "constructor": {
+        "treasury": "0x422f3DC77614004a60F8598E4ADE6e9Ec19F6c56",
+        "vaultMinter": "0xc1F834cf00A60a425F8a7d7ce9A326cB645ad4f6",
+        "governor": "0xdB2B6098356f80304Ec78D51799d4e5a377e81dA"
+      }
+    },
+    "autonet_vault": {
+      "address": "0xc1F834cf00A60a425F8a7d7ce9A326cB645ad4f6",
+      "deploy_block": 5285586,
+      "constructor": {
+        "atnToken": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25",
+        "registryAddress": "0x422f3DC77614004a60F8598E4ADE6e9Ec19F6c56",
+        "admin": "0xdB2B6098356f80304Ec78D51799d4e5a377e81dA"
+      }
+    },
+    "service_registry": {
+      "address": "0x79CA416252d0f9393c17E8e0f8111097b3a49535",
+      "deploy_block": 5285591,
+      "constructor": { "substrate": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25" }
+    },
+    "payment_channel": {
+      "address": "0x97956A322dC5585157c91840d39292c396032508",
+      "deploy_block": 5285592,
+      "constructor": {
+        "substrate": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25",
+        "challengeWindow": 3600
+      }
+    },
+    "autonet_rep_claim": {
+      "address": "0x391Dd10eFa04BEB1638E80fE5F1A3BE96A590401",
+      "deploy_block": 5285595,
+      "constructor": {
+        "substrate": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25",
+        "repToken": "0x00A2aF275D1800DAaB115A05d892b888aF73778D",
+        "genesis": "empty",
+        "mirror": "none"
+      }
+    },
+    "charter_anchor": {
+      "address": "0x5e18e8ba38aA752121a0DFadCa5E49A7f3237fF0",
+      "deploy_block": 5285783,
+      "deploy_tx": "0x01dd4505838c9fd7f412897d158575fba3149e2c050c757a205cb48cf9e3bc9f",
+      "constructor": {
+        "governor": "0xdB2B6098356f80304Ec78D51799d4e5a377e81dA"
+      },
+      "charter_v1": {
+        "hash": "0x5756ed3aa1831533c6ae7a1728cd6af73241c787049080ac3469d5b40f841cd5",
+        "uri": "https://github.com/autonet-code/node/blob/master/nodes/common/world_model_substrate/adapter.py",
+        "version": 1,
+        "anchored_via": "governance-proposal",
+        "proposal_id": "97724478684168087799048374696389755288467356866773496936640500701206460701890",
+        "desc_hash": "0x46612f9a42834451645b18d70bf8369589759a077a647fac168d3c6bd1b5e924",
+        "proposal_txs": {
+          "propose": "0x325e54e04df8728501703eec36040e2903595dc548588b9c5bef66fca19e81b9",
+          "castVote": "0x41cf12edcb4f8875913cff0cb34224c8b516175c4fb9ff7bc2b53416a1863f4e",
+          "queue": "0x2a2eeed7bac0aaf8d35509018f7e96d8ad93b35be8054f161b4777624de5683b",
+          "execute": "0xdfbb66306eb94665b957bc5256a78bf2e9db1b9ab136114e029119ccd13194af"
+        },
+        "execute_block": 5285805
+      }
+    }
+  },
+  "sanity_checks": {
+    "substrate_treasury": "0x422f3DC77614004a60F8598E4ADE6e9Ec19F6c56",
+    "substrate_governor": "0xdB2B6098356f80304Ec78D51799d4e5a377e81dA",
+    "substrate_vaultMinter": "0xc1F834cf00A60a425F8a7d7ce9A326cB645ad4f6",
+    "substrate_serviceFeeBps": 250,
+    "vault_atnToken": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25",
+    "vault_registryAddress": "0x422f3DC77614004a60F8598E4ADE6e9Ec19F6c56",
+    "vault_admin": "0xdB2B6098356f80304Ec78D51799d4e5a377e81dA",
+    "payment_channel_substrate": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25",
+    "payment_channel_challengeWindow": 3600,
+    "service_registry_substrate": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25",
+    "rep_claim_substrate": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25",
+    "rep_claim_repToken": "0x00A2aF275D1800DAaB115A05d892b888aF73778D",
+    "charter_anchor_governor": "0xdB2B6098356f80304Ec78D51799d4e5a377e81dA",
+    "charter_anchor_versionCount": 1,
+    "charter_anchor_currentHash": "0x5756ed3aa1831533c6ae7a1728cd6af73241c787049080ac3469d5b40f841cd5"
+  },
+  "pending_attach_proposal": {
+    "description": "Attach autonet-DAO stack 2026-07-10: grant AutonetRepClaim RepToken minter, whitelist test-USDC parity 1:1 on Registry",
+    "targets": [
+      "0x00A2aF275D1800DAaB115A05d892b888aF73778D",
+      "0x422f3DC77614004a60F8598E4ADE6e9Ec19F6c56"
+    ],
+    "values": [0, 0],
+    "calldatas": [
+      "0xcf456ae7000000000000000000000000391dd10efa04beb1638e80fe5f1a3be96a5904010000000000000000000000000000000000000000000000000000000000000001",
+      "0x2559ddf5000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000003e6a7572697364696374696f6e2e7061726974792e307866613961396432643834343261663963653933313331373730343666356338303034323934366237000000000000000000000000000000000000000000000000000000000000000000133130303030303030303030303030303030303000000000000000000000000000"
+    ],
+    "desc_hash": "0x60eefe3f6de08519b5df98bdbc8b098adde64dd7c1c0c12f67e8b4b8288c1813",
+    "parity_key": "jurisdiction.parity.0xfa9a9d2d8442af9ce9313177046f5c80042946b7",
+    "parity_value": "1000000000000000000"
+  }
+}
