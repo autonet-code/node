@@ -16,11 +16,13 @@
         "rep_token": "0x2B6A173D1674bAfbEC28169825A578C3418736E3",
         "dao_registry": "0x41C3B5210992b2b74370b7e6F64EE8A73f96A7cE",
         "rpb": "",
-        "substrate": "0xDB84ADeBE5b7Ee8Ff7fdb21a5F113B24754D44fC",
-        "autonet_vault": "0xeF91E7aE66FEb92Bb14B72d78Cc308a065308D31",
+        "substrate": "0xE2665E9224c2AB1cf787306bc71D4D2893371313",
+        "autonet_vault": "0x453Cca9B1335aE2Fd46F1F44676461976E6De2D2",
         "reputation_mirror": "0x64b5CeB90dF00D5F4F52Af095BE717C15aAF2b09",
+        "rep_claim": "0xD05bAb4A8e98774054F3A1537fEB0E8BBa872fD1",
         "charter_anchor": "0x5342aA08EaDE0241fADA97938334Aa4b2B7bEC1D",
-        "service_registry": "0x478519126cDaF0d18C07511638C184c45632Acab"
+        "service_registry": "0x391973b1de88C920CE61b964c3Be586b1d6c59dd",
+        "payment_channel": "0x35e27c2117d9b08597B95318BA92c00DEe3f3a08"
       }
     }
   }
