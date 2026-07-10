@@ -1,0 +1,18 @@
+{
+  "scenario": "s4_whale_spender",
+  "params": {
+    "epochs": 120,
+    "delta": 0.7,
+    "whale_calls_per_epoch": 500
+  },
+  "verdict": {
+    "whale_rep": 0.0,
+    "whale_earns_zero_rep": true,
+    "author_rep_with_whale": 892.5,
+    "author_rep_without_whale": 148.75,
+    "author_rep_uplift_from_whale": 743.75,
+    "provider_rep_with_whale": 70200.0,
+    "provider_rep_without_whale": 11700.0,
+    "whale_supply_share": 0.0
+  }
+}

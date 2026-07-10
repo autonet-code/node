@@ -1,0 +1,197 @@
+{
+  "scenario": "s3_wash_trading",
+  "params": {
+    "epochs": 120,
+    "delta": 0.7,
+    "K": 20,
+    "wash_gmv_per_epoch": 200.0
+  },
+  "records": [
+    {
+      "epoch": 0,
+      "pool": 0.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 0.0,
+      "ring_rep": 194.99999999999932
+    },
+    {
+      "epoch": 5,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 0.0005459626986536976,
+      "ring_rep": 1170.8505715115868
+    },
+    {
+      "epoch": 10,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 0.0002638387219161954,
+      "ring_rep": 2145.8524502465034
+    },
+    {
+      "epoch": 15,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 0.00019341848296560804,
+      "ring_rep": 3120.8536233453947
+    },
+    {
+      "epoch": 20,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 0.000133297272808771,
+      "ring_rep": 4095.854413688068
+    },
+    {
+      "epoch": 25,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 0.00011717124558471923,
+      "ring_rep": 5070.855086859349
+    },
+    {
+      "epoch": 30,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 0.00010478221375180758,
+      "ring_rep": 6045.855604485581
+    },
+    {
+      "epoch": 35,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 8.041239150022125e-05,
+      "ring_rep": 7020.856033394749
+    },
+    {
+      "epoch": 40,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 7.118968250627225e-05,
+      "ring_rep": 7995.856407416187
+    },
+    {
+      "epoch": 45,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 6.468498011242519e-05,
+      "ring_rep": 8970.856757427673
+    },
+    {
+      "epoch": 50,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 5.700548671759504e-05,
+      "ring_rep": 9945.857069112302
+    },
+    {
+      "epoch": 55,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 5.113326741470922e-05,
+      "ring_rep": 10920.857339646838
+    },
+    {
+      "epoch": 60,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 4.884225364575006e-05,
+      "ring_rep": 11895.8575892971
+    },
+    {
+      "epoch": 65,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 4.325626130117572e-05,
+      "ring_rep": 12870.857809324212
+    },
+    {
+      "epoch": 70,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 4.567799891614681e-05,
+      "ring_rep": 13845.858035333653
+    },
+    {
+      "epoch": 75,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 3.7497872290340264e-05,
+      "ring_rep": 14820.858232170523
+    },
+    {
+      "epoch": 80,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 3.6296266950365465e-05,
+      "ring_rep": 15795.858423700583
+    },
+    {
+      "epoch": 85,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 3.433156822843399e-05,
+      "ring_rep": 16770.858605840032
+    },
+    {
+      "epoch": 90,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 3.03195133176492e-05,
+      "ring_rep": 17745.85876815968
+    },
+    {
+      "epoch": 95,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 2.9955384252343255e-05,
+      "ring_rep": 18720.858921472216
+    },
+    {
+      "epoch": 100,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 2.9686852238011153e-05,
+      "ring_rep": 19695.859070299688
+    },
+    {
+      "epoch": 105,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 2.5871723416297267e-05,
+      "ring_rep": 20670.859210815517
+    },
+    {
+      "epoch": 110,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 2.8156291338382827e-05,
+      "ring_rep": 21645.859347429407
+    },
+    {
+      "epoch": 115,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 2.4002751575086104e-05,
+      "ring_rep": 22620.859474059922
+    },
+    {
+      "epoch": 119,
+      "pool": 4.0,
+      "wash_gmv": 200.0,
+      "ring_reclaim": 2.5901627280026494e-05,
+      "ring_rep": 23400.859574018265
+    }
+  ],
+  "verdict": {
+    "ring_fee_paid": 600.0,
+    "ring_pool_reclaimed": 0.86,
+    "net_atn_cost_of_wash": 599.14,
+    "strict_loss_holds": true,
+    "reclaim_frac_of_fee": 0.0014,
+    "ring_rep_gained": 23400.86,
+    "wash_voice_per_dollar": 39.0574,
+    "honest_voice_per_dollar": 1.0,
+    "wash_cheaper_than_honest_voice": true
+  }
+}

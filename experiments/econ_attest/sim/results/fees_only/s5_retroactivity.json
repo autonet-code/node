@@ -1,0 +1,172 @@
+{
+  "scenario": "s5_retroactivity",
+  "params": {
+    "epochs": 120,
+    "delta": 0.7,
+    "dead_epochs": 20,
+    "K": 50
+  },
+  "idle_carried_records": [
+    {
+      "epoch": 0,
+      "pool": 0.0,
+      "ring_capture": 0.0,
+      "tool_mint": 0.0
+    },
+    {
+      "epoch": 5,
+      "pool": 0.0,
+      "ring_capture": 0.0,
+      "tool_mint": 0.0
+    },
+    {
+      "epoch": 10,
+      "pool": 0.0,
+      "ring_capture": 0.0,
+      "tool_mint": 0.0
+    },
+    {
+      "epoch": 15,
+      "pool": 0.0,
+      "ring_capture": 0.0,
+      "tool_mint": 0.0
+    },
+    {
+      "epoch": 20,
+      "pool": 0.0,
+      "ring_capture": 0.0,
+      "tool_mint": 0.0
+    },
+    {
+      "epoch": 25,
+      "pool": 1.875,
+      "ring_capture": 0.0002921305290218455,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 30,
+      "pool": 1.875,
+      "ring_capture": 0.00015073247958582179,
+      "tool_mint": 1.8749999999999998
+    },
+    {
+      "epoch": 35,
+      "pool": 1.875,
+      "ring_capture": 9.817041542949846e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 40,
+      "pool": 1.875,
+      "ring_capture": 7.148778300397787e-05,
+      "tool_mint": 1.8750000000000002
+    },
+    {
+      "epoch": 45,
+      "pool": 1.875,
+      "ring_capture": 5.620281972952309e-05,
+      "tool_mint": 1.8749999999999998
+    },
+    {
+      "epoch": 50,
+      "pool": 1.875,
+      "ring_capture": 5.2065852823265495e-05,
+      "tool_mint": 1.8749999999999998
+    },
+    {
+      "epoch": 55,
+      "pool": 1.875,
+      "ring_capture": 4.370161579104985e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 60,
+      "pool": 1.875,
+      "ring_capture": 3.644373351274925e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 65,
+      "pool": 1.875,
+      "ring_capture": 3.315204823157078e-05,
+      "tool_mint": 1.8749999999999998
+    },
+    {
+      "epoch": 70,
+      "pool": 1.875,
+      "ring_capture": 2.921517052189615e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 75,
+      "pool": 1.875,
+      "ring_capture": 2.4812779976275226e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 80,
+      "pool": 1.875,
+      "ring_capture": 2.5179139641091215e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 85,
+      "pool": 1.875,
+      "ring_capture": 2.2633662331161042e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 90,
+      "pool": 1.875,
+      "ring_capture": 2.0021715728455165e-05,
+      "tool_mint": 1.8749999999999998
+    },
+    {
+      "epoch": 95,
+      "pool": 1.875,
+      "ring_capture": 2.0079252121974125e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 100,
+      "pool": 1.875,
+      "ring_capture": 1.866668650966158e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 105,
+      "pool": 1.875,
+      "ring_capture": 1.785133394936118e-05,
+      "tool_mint": 1.8750000000000002
+    },
+    {
+      "epoch": 110,
+      "pool": 1.875,
+      "ring_capture": 1.6347029894795296e-05,
+      "tool_mint": 1.875
+    },
+    {
+      "epoch": 115,
+      "pool": 1.875,
+      "ring_capture": 1.6229404193522002e-05,
+      "tool_mint": 1.8750000000000002
+    },
+    {
+      "epoch": 119,
+      "pool": 1.875,
+      "ring_capture": 1.4251651979115125e-05,
+      "tool_mint": 1.875
+    }
+  ],
+  "verdict": {
+    "busy_same_epoch_transition_capture": 0.3362,
+    "busy_carried_transition_capture": 0.2616,
+    "idle_same_epoch_transition_capture": 0.3552,
+    "idle_carried_transition_capture": 0.5679,
+    "busy_retro_amplification": 0.778,
+    "idle_retro_amplification": 1.599,
+    "retro_more_capturable_when_busy": false,
+    "retro_more_capturable_when_idle": true,
+    "steady_capture_same_epoch": 0.0
+  }
+}
