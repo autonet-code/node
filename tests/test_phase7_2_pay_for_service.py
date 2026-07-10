@@ -53,8 +53,9 @@ def _load_substrate() -> Tuple[list, str]:
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
     contract = w3.eth.contract(abi=abi, bytecode=bytecode)
+    zero = "0x0000000000000000000000000000000000000000"
     tx = contract.constructor(
-        deployer, "0x0000000000000000000000000000000000000000"
+        deployer, zero, zero
     ).transact({"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
@@ -339,7 +340,11 @@ def test_pay_to_zero_address_reverts(chain):
 # ---------------------------------------------------------------------------
 
 
-def test_payment_does_not_change_reputation_on_either_side(chain):
+def test_payment_does_not_change_earnings_counter_on_either_side(chain):
+    """payForService moves ATN and records serviceEarnings on the
+    recipient, but does NOT touch the tool-pool earnings counter
+    (agentMintTotal) on either side. (Substrate has no reputation
+    surface anymore — REP is DAO-side, on ratified earnings.)"""
     w3 = chain["w3"]
     contract = chain["contract"]
     payer_addr = chain["agent_addrs"][0]
@@ -347,25 +352,28 @@ def test_payment_does_not_change_reputation_on_either_side(chain):
 
     _give_agent_some_atn(chain, payer_addr, payer_addr)
 
-    payer_rep_before = contract.functions.agentReputation(payer_addr).call()
-    recip_rep_before = contract.functions.agentReputation(recipient).call()
-    # payer earned reputation from training; recipient hasn't.
-    assert payer_rep_before > 0
-    assert recip_rep_before == 0
+    payer_earn_before = contract.functions.agentMintTotal(payer_addr).call()
+    recip_earn_before = contract.functions.agentMintTotal(recipient).call()
+    recip_service_before = contract.functions.serviceEarnings(recipient).call()
+    # payer earned from the tool pool via training; recipient hasn't.
+    assert payer_earn_before > 0
+    assert recip_earn_before == 0
 
     pay_amount = contract.functions.balanceOf(payer_addr).call() // 2
-    rid = Web3.keccak(text="rep-isolation")
+    rid = Web3.keccak(text="earn-isolation")
     tx = contract.functions.payForService(
         recipient, pay_amount, rid,
     ).transact({"from": payer_addr, "gas": 400_000})
     w3.eth.wait_for_transaction_receipt(tx)
 
-    payer_rep_after = contract.functions.agentReputation(payer_addr).call()
-    recip_rep_after = contract.functions.agentReputation(recipient).call()
-    # Neither side's reputation moved. ATN is the spending tier;
-    # reputation is the contribution tier.
-    assert payer_rep_after == payer_rep_before
-    assert recip_rep_after == recip_rep_before
+    payer_earn_after = contract.functions.agentMintTotal(payer_addr).call()
+    recip_earn_after = contract.functions.agentMintTotal(recipient).call()
+    recip_service_after = contract.functions.serviceEarnings(recipient).call()
+    # Tool-pool earnings counter untouched on both sides.
+    assert payer_earn_after == payer_earn_before
+    assert recip_earn_after == recip_earn_before
+    # ...but the recipient's cumulative net service revenue grew.
+    assert recip_service_after > recip_service_before
 
 
 # ---------------------------------------------------------------------------

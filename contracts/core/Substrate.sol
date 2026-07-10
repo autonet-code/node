@@ -27,8 +27,17 @@ import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol
 ///      authoritative mint from the off-chain agent_mint blob (CID is
 ///      on chain), then call recordTrainingForEpoch(amount, epochId)
 ///      from their own keypair. The contract dedupes per (agent,
-///      epochId), binds the record to a real anchored epoch, and
-///      tracks cumulative per-agent training contribution.
+///      epochId), binds the record to a real anchored epoch, mints ATN,
+///      and accumulates the per-agent tool-pool earnings ledger.
+///
+/// Substrate is a PURE MONEY contract (Decision 2026-07-10, fees-only
+/// emission + REP-from-earnings): it moves ATN, takes the service fee,
+/// and records earnings. It mints NO reputation. Reputation (== the DAO
+/// governance token == review weight) lives DAO-side as pull claims on
+/// the two on-chain earnings ledgers materialized here — cumulative
+/// tool-pool mint (agentMintTotal) and cumulative net service revenue
+/// (serviceEarnings) — at a hardcoded 1:1. You cannot lie about REP
+/// because you cannot lie about ATN you provably received.
 ///
 /// What is deliberately NOT here
 /// -----------------------------
@@ -58,8 +67,8 @@ import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol
 ///         submitted, or if (msg.sender, amount) doesn't verify
 ///         against the anchor's agentMintRoot.
 ///
-/// 3. Anytime: read ``agentMintTotal(address)`` for cumulative or
-///    ``mintForEpoch(address, bytes32)`` for per-epoch.
+/// 3. Anytime: read ``agentMintTotal(address)`` for cumulative earnings
+///    or ``mintForEpoch(address, bytes32)`` for per-epoch.
 contract Substrate is EIP712 {
     using ECDSA for bytes32;
 
@@ -75,11 +84,16 @@ contract Substrate is EIP712 {
     ///        mintFromVault. Immutable — no admin key to repoint it.
     ///        Zero address = no vault: mintFromVault always reverts and the
     ///        purchased-money feature is off.
-    constructor(address treasury_, address vaultMinter_)
+    /// @param governor_ The single address (expected: the DAO timelock)
+    ///        allowed to retune the service fee via setServiceFeeBps.
+    ///        Immutable. Zero address = knob frozen: the fee stays at its
+    ///        default and setServiceFeeBps always reverts.
+    constructor(address treasury_, address vaultMinter_, address governor_)
         EIP712("AutonetSubstrate", "1")
     {
         treasury = treasury_;
         vaultMinter = vaultMinter_;
+        governor = governor_;
     }
 
     // =========================================================================
@@ -96,12 +110,12 @@ contract Substrate is EIP712 {
         address submitter;
         uint256 blockNumber;
         uint256 timestamp;
-        // Merkle root over (agent address, scaled ATN amount, scaled
-        // reputation amount) leaves for this epoch (v4.1: the leaf
-        // commits BOTH decoupled ledgers). recordTrainingForEpoch
-        // verifies the caller's claim against it — mint AND reputation
-        // amounts are federation-ratified, not self-reported. Appended
-        // last so prior tuple indexes hold.
+        // Merkle root over (agent address, scaled ATN amount) leaves for
+        // this epoch. recordTrainingForEpoch verifies the caller's claim
+        // against it — the mint amount is federation-ratified, not
+        // self-reported. Money-only leaf (Decision 2026-07-10): REP is a
+        // DAO-side function of ratified earnings, so nothing about voice
+        // is committed here. Appended last so prior tuple indexes hold.
         bytes32 agentMintRoot;
     }
 
@@ -131,9 +145,8 @@ contract Substrate is EIP712 {
 
     /// @notice Submit an anchor for a network epoch close.
     /// @param agentMintRoot Merkle root over the epoch's
-    ///        (agent, scaledAmount, scaledRepAmount) mint map;
-    ///        sorted-pair hashing, double-hashed leaves
-    ///        (see recordTrainingForEpoch).
+    ///        (agent, scaledAmount) mint map; sorted-pair hashing,
+    ///        double-hashed leaves (see recordTrainingForEpoch).
     function submitAnchor(
         string calldata epochId,
         bytes32 epochRoot,
@@ -302,7 +315,7 @@ contract Substrate is EIP712 {
 
     /// @notice Update this agent's libp2p PeerId. Used when a daemon
     ///         rotates its libp2p keypair (e.g. fresh install on a new
-    ///         box) without losing on-chain identity / reputation.
+    ///         box) without losing on-chain identity / earnings.
     function updatePeerId(bytes calldata peerId) external {
         if (agents[msg.sender].registeredAt == 0) revert AgentNotActive();
         if (peerId.length == 0) revert PeerIdRequired();
@@ -676,81 +689,30 @@ contract Substrate is EIP712 {
     ///      Zero means "agent did not submit for that epoch."
     mapping(address => mapping(bytes32 => uint256)) public mintForEpoch;
 
-    /// @dev Cumulative training mint for each agent.
-    /// @notice Phase 7.1 reframes this as the **reputation** ledger:
-    ///         monotonic, soulbound, never decreases, no transfer
-    ///         function. Reputation is the "I worked for this" tier.
-    ///         The kept name ``agentMintTotal`` is back-compat with
-    ///         Phase 5.6 callers; ``agentReputation`` is the
-    ///         semantic alias used by Phase 7+ tokenomics code.
+    /// @dev Cumulative tool-pool mint for each agent — the CUMULATIVE
+    ///      TOOL-POOL EARNINGS LEDGER (money), monotonic, one write site
+    ///      (recordTrainingForEpoch). This is NOT reputation: under the
+    ///      fees-only / REP-from-earnings decision (2026-07-10) Substrate
+    ///      mints no reputation. REP lives DAO-side (RepToken) as pull
+    ///      claims on this ledger at a hardcoded 1:1 — tool authors claim
+    ///      REP on their pool distributions read from here. The kept name
+    ///      ``agentMintTotal`` is back-compat with Phase 5.6 callers.
     mapping(address => uint256) public agentMintTotal;
 
-    /// @dev Network-wide cumulative training mint (sum of all
-    ///      agents' agentMintTotal).
+    /// @dev Network-wide cumulative tool-pool mint (sum of all agents'
+    ///      agentMintTotal).
     uint256 public networkMintTotal;
 
-    // Checkpointed reputation history (the IVotes MECHANISM without the
-    // delegation layer, mirroring the ATN checkpoints below). Reputation
-    // is the SOULBOUND voice measure: it only ever increases (one write
-    // site — recordTrainingForEpoch) and never transfers, so unlike the
-    // ATN pair there is exactly ONE checkpoint mutation per account, at
-    // the mint. Historical reputation reads from CURRENT state:
-    // reputationOfAt works on any node, no archive required. Used by the
-    // federated close's voice weighting (nodes/common/voice_state.py) —
-    // ratified 2026-07-08: ATN = money, reputation = voice, so voice
-    // weight is priced from reputation, not balances.
     using Checkpoints for Checkpoints.Trace208;
-    mapping(address => Checkpoints.Trace208) private _reputationHistory;
-    Checkpoints.Trace208 private _reputationSupplyHistory;
 
-    /// @notice Reputation alias for agentMintTotal. Same storage,
-    ///         different semantic — reputation is the soulbound
-    ///         contribution measure, never decreases, untransferable.
-    function agentReputation(address agent) external view returns (uint256) {
-        return agentMintTotal[agent];
-    }
-
-    /// @notice Reputation of `agent` as of the END of `blockNumber`
-    ///         (latest checkpoint at or before it; 0 if none). Served
-    ///         from current state — works on non-archive nodes. Same
-    ///         upperLookup semantics as balanceOfAt, but the underlying
-    ///         quantity is soulbound and monotonic (never decreases).
-    function reputationOfAt(address agent, uint256 blockNumber)
-        external
-        view
-        returns (uint256)
-    {
-        return _reputationHistory[agent].upperLookup(uint48(blockNumber));
-    }
-
-    /// @notice Total reputation (== networkMintTotal) as of the END of
-    ///         `blockNumber`. The denominator for reputation-weighted
-    ///         voice at a pinned snapshot block.
-    function reputationTotalSupplyAt(uint256 blockNumber)
-        external
-        view
-        returns (uint256)
-    {
-        return _reputationSupplyHistory.upperLookup(uint48(blockNumber));
-    }
-
-    /// @param amount   The ATN (money) minted in this training event.
-    /// @param repAmount The reputation (soulbound voice) minted in this
-    ///        training event. Distinct from ``amount`` since v4.1 "gradient
-    ///        trust": the daemon-side close attributes ATN to ALL callers
-    ///        (including zero-reputation ones), but reputation only to the
-    ///        portion earned from reputation-holding callers, so
-    ///        ``repAmount <= amount`` always (equality reproduces the
-    ///        pre-v4.1 lockstep behavior). Kept as a distinct field rather
-    ///        than reusing ``amount`` so indexers can separate the two
-    ///        ledgers from the event stream.
-    /// @param cumulativeForAgent The agent's cumulative reputation
-    ///        (agentMintTotal / agentReputation) AFTER this event.
+    /// @param amount The ATN (money) minted in this training event, from
+    ///        the epoch's tool-usage pool (fees-only emission).
+    /// @param cumulativeForAgent The agent's cumulative tool-pool earnings
+    ///        (agentMintTotal) AFTER this event.
     event TrainingRecorded(
         address indexed agent,
         bytes32 indexed epochIdHash,
         uint256 amount,
-        uint256 repAmount,
         uint256 cumulativeForAgent
     );
 
@@ -758,7 +720,6 @@ contract Substrate is EIP712 {
     error AlreadySubmittedForEpoch(bytes32 epochIdHash);
     error MintRootMissing(bytes32 epochIdHash);
     error MintProofInvalid(bytes32 epochIdHash);
-    error RepExceedsAmount(uint256 amount, uint256 repAmount);
 
     /// @notice Record this agent's authoritative mint for an
     ///         already-anchored epoch.
@@ -769,48 +730,28 @@ contract Substrate is EIP712 {
     ///         against the anchor's agentMintRoot, so the only
     ///         claimable ATN amount is the one the federation ratified.
     ///
-    ///         v4.1 "gradient trust" — DECOUPLED LEDGERS. ATN (money) and
-    ///         reputation (voice) are minted at potentially DIFFERENT
-    ///         amounts in the same event. The daemon-side close computes
-    ///         two numbers per agent: ``amount`` = ATN mint (weights in
-    ///         usage from zero-reputation callers) and ``repAmount`` =
-    ///         reputation mint (only the portion attributable to
-    ///         reputation-holding callers). The invariant
-    ///         ``repAmount <= amount`` is enforced on-chain: reputation
-    ///         can never exceed the ATN earned in the same event, and
-    ///         equality reproduces the pre-v4.1 lockstep behavior. This is
-    ///         the sybil defense — mint must not grant the very resource
-    ///         (reputation) that gates mint weight, or dust rings could
-    ///         bootstrap voice from zero.
+    ///         Money-only leaf (Decision 2026-07-10, fees-only emission +
+    ///         REP-from-earnings). This mints ATN ONLY and accrues the
+    ///         tool-pool earnings ledger — it grants NO reputation.
+    ///         Reputation is a pure DAO-side function of ratified
+    ///         earnings (RepToken claims 1:1 on agentMintTotal), so there
+    ///         is nothing about voice to commit or mint here. You cannot
+    ///         lie about REP because you cannot lie about the ATN this
+    ///         proof forces you to have provably received.
     /// @param amount The ATN (money) mint, integer-scaled (default ×1e6
     ///               at the agent-side submitter, see Phase 5.6 docs).
-    /// @param repAmount The reputation (soulbound voice) mint, same scale
-    ///               as ``amount``. Must be <= amount. Pass repAmount ==
-    ///               amount for the legacy lockstep behavior.
     /// @param epochIdHash keccak256 of the epoch_id string.
     /// @param proof Merkle proof for the leaf
     ///              keccak256(bytes.concat(keccak256(abi.encode(
-    ///              msg.sender, amount, repAmount)))) under the anchor's
+    ///              msg.sender, amount)))) under the anchor's
     ///              agentMintRoot (sorted-pair hashing; a single-leaf
-    ///              tree has root == leaf and an empty proof). The leaf
-    ///              commits BOTH ledgers, so ``repAmount`` is
-    ///              federation-ratified too: a claimant cannot inflate
-    ///              its voice by self-reporting repAmount == amount when
-    ///              the close attributed less — that leaf doesn't prove.
-    ///              The repAmount <= amount require above stays as
-    ///              defense-in-depth on top of the proof.
+    ///              tree has root == leaf and an empty proof).
     function recordTrainingForEpoch(
         uint256 amount,
-        uint256 repAmount,
         bytes32 epochIdHash,
         bytes32[] calldata proof
     ) external {
         if (!agents[msg.sender].active) revert AgentNotActive();
-        // Reputation can never exceed the ATN earned in the same event
-        // (v4.1: rep is the rep-holder-attributable SUBSET of the ATN
-        // mint). Enforced before the zero-amount no-op so a caller can't
-        // slip a positive repAmount past a zero amount either.
-        if (repAmount > amount) revert RepExceedsAmount(amount, repAmount);
         string storage epochId = epochIdByHash[epochIdHash];
         if (bytes(epochId).length == 0) {
             revert EpochNotAnchored(epochIdHash);
@@ -822,61 +763,38 @@ contract Substrate is EIP712 {
         // had no mint share for this epoch but may still want a
         // marker on chain. Here we treat zero as a no-op (no event,
         // no state change). Zero shares are not in the mint tree.
-        // (repAmount <= amount == 0, so nothing to mint on either side.)
         if (amount == 0) {
             return;
         }
 
         bytes32 root = anchors[anchorIndexByEpochId[epochId] - 1].agentMintRoot;
         if (root == bytes32(0)) revert MintRootMissing(epochIdHash);
-        // v4.1: the leaf commits (agent, amount, repAmount) — BOTH the
-        // money and the voice amounts are federation-ratified. Same
-        // double-hashed OpenZeppelin leaf convention, one more field in
-        // the abi.encode (mirrored by nodes/common/mint_merkle.py).
+        // Money-only leaf: commits (agent, amount). Same double-hashed
+        // OpenZeppelin leaf convention (mirrored by
+        // nodes/common/mint_merkle.py).
         bytes32 leaf = keccak256(
-            bytes.concat(keccak256(abi.encode(msg.sender, amount, repAmount)))
+            bytes.concat(keccak256(abi.encode(msg.sender, amount)))
         );
         if (!_verifyMintProof(proof, root, leaf)) {
             revert MintProofInvalid(epochIdHash);
         }
 
-        // mintForEpoch records the ATN amount (what the merkle proof
-        // committed). Reputation is the decoupled repAmount below.
+        // Record the ratified per-epoch amount, then accrue the
+        // cumulative tool-pool earnings ledger (the DAO's REP claim base).
         mintForEpoch[msg.sender][epochIdHash] = amount;
-        // Reputation ledger (soulbound voice) accrues repAmount.
-        agentMintTotal[msg.sender] += repAmount;
-        networkMintTotal += repAmount;
-        // The Agent struct's totalTrainingMint tracks reputation
-        // (soulbound contribution), so it too moves by repAmount.
-        agents[msg.sender].totalTrainingMint += repAmount;
+        agentMintTotal[msg.sender] += amount;
+        networkMintTotal += amount;
+        agents[msg.sender].totalTrainingMint += amount;
         agents[msg.sender].trainingSubmissionCount += 1;
 
-        // Checkpoint the soulbound reputation ledger at this block. This
-        // is the ONLY reputation checkpoint write site — reputation never
-        // decreases and never transfers, so there is nothing to mirror on
-        // any other path (mintFromVault deliberately mints ATN only). The
-        // federated close reads reputationOfAt / reputationTotalSupplyAt
-        // at the previous anchor block to price voice weights. We push
-        // even when repAmount == 0 (amount > 0) so the supply checkpoint
-        // stays block-aligned; the pushed values are simply unchanged.
-        _reputationHistory[msg.sender].push(
-            uint48(block.number), uint208(agentMintTotal[msg.sender])
-        );
-        _reputationSupplyHistory.push(
-            uint48(block.number), uint208(networkMintTotal)
-        );
-
-        // v4.1: training mints the two ledgers at DECOUPLED amounts.
-        // Reputation (agentMintTotal, bumped above by repAmount) is
-        // soulbound voice. ATN balance is transferable money, minted at
-        // the full `amount` — the agent can spend it on inference fees.
+        // ATN balance is transferable money, minted at the ratified
+        // `amount` — the agent can spend it on inference fees.
         _mintATN(msg.sender, amount);
 
         emit TrainingRecorded(
             msg.sender,
             epochIdHash,
             amount,
-            repAmount,
             agentMintTotal[msg.sender]
         );
     }
@@ -907,8 +825,9 @@ contract Substrate is EIP712 {
     // =========================================================================
     // ATN: transferable token (Phase 7.1)
     //
-    // Distinct from reputation. Training mints both reputation and ATN at
-    // the same amount; ATN can move between addresses, reputation can't.
+    // The ONLY thing Substrate mints (Decision 2026-07-10). Reputation is
+    // not a Substrate asset — it is a DAO-side pull claim on earnings.
+    // Training mints ATN and accrues the earnings ledger; ATN moves freely.
     //
     // ERC20-shaped surface: balanceOf, transfer, approve, transferFrom,
     // allowance. Deliberately minimal — no name/symbol/decimals/totalSupply
@@ -932,7 +851,7 @@ contract Substrate is EIP712 {
     // which prices each household's review/usage credit from balances
     // at the previous epoch's anchor block (nodes/common/voice_state.py).
     // (``using Checkpoints for Checkpoints.Trace208`` is declared once,
-    // with the reputation history above.)
+    // in the training-records section above.)
     mapping(address => Checkpoints.Trace208) private _atnBalanceHistory;
     Checkpoints.Trace208 private _atnSupplyHistory;
 
@@ -949,11 +868,11 @@ contract Substrate is EIP712 {
 
     /// @dev The one ATN mint primitive: bumps balance + supply, checkpoints
     ///      both, and emits the canonical mint transfer (from address(0)).
-    ///      Deliberately mints ATN ONLY — it does NOT touch reputation
-    ///      (agentMintTotal). Callers that also mint reputation (the
-    ///      training path) bump it themselves; purchased-money paths
-    ///      (mintFromVault) must not, because ATN is money and reputation
-    ///      is earned voice (ratified 2026-07-08).
+    ///      Substrate mints ATN only and never reputation (REP is a DAO-side
+    ///      claim on earnings, Decision 2026-07-10). The training path
+    ///      additionally accrues the earnings ledger (agentMintTotal) around
+    ///      its call to this; the purchased-money path (mintFromVault) does
+    ///      not, because bought ATN grants no REP claim.
     function _mintATN(address to, uint256 amount) private {
         _atnBalance[to] += amount;
         atnTotalSupply += amount;
@@ -1077,24 +996,62 @@ contract Substrate is EIP712 {
     // -------------------------------------------------------------------------
 
     /// @notice Fee on payForService, in basis points of the gross amount.
-    uint16 public constant SERVICE_FEE_BPS = 250;      // 2.5%
+    ///         Governed (setServiceFeeBps) — the fee is the one real lever
+    ///         on the price of REP (Decision 2026-07-10). PROVISIONAL
+    ///         default pending an economics sweep.
+    uint16 public serviceFeeBps = 250;                 // 2.5%
     /// @notice Share OF THE FEE that goes to the treasury; the rest burns.
     uint16 public constant FEE_TREASURY_BPS = 5000;    // half/half
     uint16 public constant BPS_DENOM = 10_000;
 
+    /// @notice Hardcoded bounds on the governed service fee: 0.5%–10%.
+    uint16 public constant MIN_SERVICE_FEE_BPS = 50;
+    uint16 public constant MAX_SERVICE_FEE_BPS = 1000;
+
     /// @notice DAO treasury (set at construction; no admin key to repoint).
     address public immutable treasury;
+
+    /// @notice The single address (expected: DAO timelock) allowed to retune
+    ///         serviceFeeBps. Immutable; zero address = knob frozen.
+    address public immutable governor;
+
+    /// @notice Emitted when the governor retunes the service fee.
+    event ServiceFeeBpsSet(uint16 oldBps, uint16 newBps);
+
+    error NotGovernor();
+    error FeeOutOfBounds(uint16 bps);
+
+    /// @notice Retune the service fee. Governor-only; reverts unless
+    ///         50 <= newBps <= 1000 (0.5%–10%). A zero-address governor
+    ///         freezes the knob (this always reverts).
+    function setServiceFeeBps(uint16 newBps) external {
+        if (msg.sender != governor || governor == address(0)) {
+            revert NotGovernor();
+        }
+        if (newBps < MIN_SERVICE_FEE_BPS || newBps > MAX_SERVICE_FEE_BPS) {
+            revert FeeOutOfBounds(newBps);
+        }
+        uint16 oldBps = serviceFeeBps;
+        serviceFeeBps = newBps;
+        emit ServiceFeeBpsSet(oldBps, newBps);
+    }
+
+    /// @notice Cumulative net service revenue per recipient (the second REP
+    ///         claim base). Bumped by payForService with the post-fee `net`.
+    ///         Service providers claim REP DAO-side on this counter 1:1
+    ///         (Decision 2026-07-10). Monotonic.
+    mapping(address => uint256) public serviceEarnings;
 
     // -------------------------------------------------------------------------
     // Vault minter (purchased-money rail).
     //
-    // ATN has exactly two mint origins: EARNED voice via
-    // recordTrainingForEpoch (mints reputation + ATN in lockstep), and
-    // PURCHASED money via mintFromVault (mints ATN ONLY). The two are kept
-    // strictly separate on purpose (ratified 2026-07-08: ATN = money,
-    // reputation = voice). A venture backer who buys ATN through the
-    // DAO-repo VentureVault must never gain soulbound reputation from that
-    // purchase — money can be bought, voice must be earned.
+    // ATN has exactly two mint origins: tool-pool EARNINGS via
+    // recordTrainingForEpoch (which also accrues the REP claim ledger),
+    // and PURCHASED money via mintFromVault (which does not). The two are
+    // kept strictly separate on purpose: a venture backer who buys ATN
+    // through the DAO-repo VentureVault accrues NO service/pool earnings
+    // and therefore no REP claim — money can be bought, voice must be
+    // earned (Decision 2026-07-10).
     //
     // vaultMinter is the single privileged address (the VentureVault
     // contract) allowed to call mintFromVault. It is immutable — there is
@@ -1119,10 +1076,11 @@ contract Substrate is EIP712 {
     ///         vaultMinter (the DAO-repo VentureVault, through a minimal
     ///         IAutonetATN interface).
     /// @dev Mints ATN ONLY — balance, supply, and checkpoints move exactly
-    ///      like the recordTrainingForEpoch mint path, but reputation
-    ///      (agentMintTotal) is deliberately NOT touched: this is purchased
-    ///      money, not earned voice (ratified 2026-07-08). If vaultMinter is
-    ///      the zero address the feature is off and this always reverts.
+    ///      like the recordTrainingForEpoch mint path, but the earnings
+    ///      ledger (agentMintTotal) is deliberately NOT touched: this is
+    ///      purchased money, not earned revenue, so it grants no REP claim
+    ///      (Decision 2026-07-10). If vaultMinter is the zero address the
+    ///      feature is off and this always reverts.
     /// @param to     Recipient of the purchased ATN.
     /// @param amount ATN to mint.
     function mintFromVault(address to, uint256 amount) external {
@@ -1163,7 +1121,7 @@ contract Substrate is EIP712 {
 
         // Service fee: burned share exits supply (recycled into the next
         // epoch's emission pool by the close), treasury share transfers.
-        uint256 fee = (amount * SERVICE_FEE_BPS) / BPS_DENOM;
+        uint256 fee = (amount * serviceFeeBps) / BPS_DENOM;
         uint256 toTreasury = treasury != address(0)
             ? (fee * FEE_TREASURY_BPS) / BPS_DENOM
             : 0;
@@ -1172,6 +1130,9 @@ contract Substrate is EIP712 {
 
         unchecked { _atnBalance[msg.sender] = bal - amount; }
         _atnBalance[recipient] += net;
+        // Cumulative net service revenue per recipient — the DAO's REP
+        // claim base for service providers (1:1, Decision 2026-07-10).
+        serviceEarnings[recipient] += net;
         _checkpointATN(msg.sender);
         _checkpointATN(recipient);
         if (toTreasury > 0) {

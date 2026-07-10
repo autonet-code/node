@@ -888,16 +888,22 @@ class AutonetService:
             bc = getattr(self.config, "blockchain", None)
             substrate_addr = getattr(bc, "substrate_address", "") or ""
             rpc_url = getattr(bc, "rpc_url", "") or ""
+            # REP (voice) now lives DAO-side in RepToken (Decision
+            # 2026-07-10). Empty => genesis regime: fees-only pool, no rep.
+            rep_token_addr = getattr(bc, "rep_token_address", "") or ""
         except Exception:
-            substrate_addr, rpc_url = "", ""
+            substrate_addr, rpc_url, rep_token_addr = "", "", ""
         if substrate_addr and rpc_url:
             def _voice_source():
                 from .common.voice_state import read_voice_state
-                return read_voice_state(substrate_addr, rpc_url)
+                return read_voice_state(
+                    substrate_addr, rpc_url, rep_token_address=rep_token_addr,
+                )
 
             self._federated_close_driver.voice_source = _voice_source
             logger.info(
-                "Voice/emission source wired (substrate=%s)", substrate_addr,
+                "Voice/emission source wired (substrate=%s, rep_token=%s)",
+                substrate_addr, rep_token_addr or "(none)",
             )
 
         def _on_local_close(local_result):

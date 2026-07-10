@@ -69,7 +69,12 @@ import math
 from typing import Any, Dict, List, Tuple
 
 
-SCHEMA_VERSION = 2
+# Schema 3 (fees-only, Decision 2026-07-10): MONEY ONLY. The authoritative
+# payload was always money-only; the off-chain mint blob drops its optional
+# ``agent_rep`` key (REP is claimed DAO-side now, never anchored). Schema 2
+# was the v4.1 era (3-field merkle leaf + agent_rep blob key); bumped so the
+# blob shape change is explicit, not silently reusing a different-shape number.
+SCHEMA_VERSION = 3
 DEFAULT_DECIMALS = 10
 
 # The fixed top-level field order. Encoding will lay these out in
@@ -173,35 +178,25 @@ def encode_authoritative_payload(
 def encode_agent_mint_blob(
     agent_mint: Dict[str, float],
     *,
-    agent_rep: Dict[str, float] | None = None,
     decimals: int = DEFAULT_DECIMALS,
 ) -> bytes:
-    """Encode the off-chain ``agent_mint`` blob.
+    """Encode the off-chain ``agent_mint`` blob (money only).
 
     Format:
       {
-        "schema": 2,
-        "agent_mint": {agent_id: float-as-str (sorted keys)},
-        "agent_rep":  {agent_id: float-as-str (sorted keys)}   # optional
+        "schema": 3,
+        "agent_mint": {agent_id: float-as-str (sorted keys)}
       }
 
-    ``agent_rep`` (v4.1 gradient trust) is the DECOUPLED per-agent
-    reputation increment from the close. Semantics mirror
-    ``mint_merkle``: ``None`` OMITS the key entirely — lockstep, rep ==
-    mint per leaf, byte-identical to the pre-v4.1 blob so old CIDs
-    still verify. A dict (INCLUDING an empty one) is written verbatim:
-    an empty/missing entry means zero reputation for that agent, which
-    is a legitimate v4.1 outcome (all usage from zero-rep callers) and
-    very different from lockstep. The submitter must build its merkle
-    proof with exactly this map — it's the same map the anchorer built
-    the on-chain root from.
+    Decision 2026-07-10 (money only): the v4.1 decoupled ``agent_rep``
+    key is gone — REP is claimed DAO-side (RepToken) on ratified ATN
+    earnings, never anchored on the close path. The submitter builds its
+    merkle proof from the ``agent_mint`` map alone (2-field leaf).
     """
     blob = {
         "schema": SCHEMA_VERSION,
         "agent_mint": _format_agent_dict(agent_mint, decimals),
     }
-    if agent_rep is not None:
-        blob["agent_rep"] = _format_agent_dict(agent_rep, decimals)
     return json.dumps(
         blob,
         ensure_ascii=False,
@@ -235,26 +230,5 @@ def decode_agent_mint_blob(blob: bytes) -> Dict[str, float]:
     data = json.loads(blob.decode("utf-8"))
     out: Dict[str, float] = {}
     for k, v in data.get("agent_mint", {}).items():
-        out[str(k)] = float(v)
-    return out
-
-
-def decode_agent_rep_blob(blob: bytes) -> Dict[str, float] | None:
-    """Read the decoupled ``agent_rep`` map from a mint blob (v4.1).
-
-    Returns ``None`` when the blob carries no ``agent_rep`` key — a
-    legacy/lockstep blob, meaning rep == mint per leaf. Returns a dict
-    (possibly empty) when the key is present; a missing agent then
-    means ZERO reputation, not lockstep. The distinction matters: the
-    merkle root was built with this exact ``None``-vs-dict semantic
-    (see mint_merkle.mint_leaves), so proofs only verify when the
-    submitter decodes it the same way.
-    """
-    data = json.loads(blob.decode("utf-8"))
-    rep = data.get("agent_rep")
-    if rep is None:
-        return None
-    out: Dict[str, float] = {}
-    for k, v in rep.items():
         out[str(k)] = float(v)
     return out

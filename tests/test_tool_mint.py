@@ -364,7 +364,7 @@ class TestVetGateRemoved:
         out = compute_tool_mint(
             world, [vet],
             registrations=self.REGS,
-            rep_shares={"reviewer-1": 0.5}, rep_supply=100.0,
+            rep_shares={"reviewer-1": 0.5},
         )
         # No usage -> no mint at all.
         assert out["per_digest"] == {}
@@ -589,10 +589,11 @@ class TestDriverCarryOver:
 
 
 # ---------------------------------------------------------------------------
-# v4.1 "gradient trust" (ratified 2026-07-09):
-#   R4 supply-pegged beta cap on zero-rep mint weight
-#   R6 rep/ATN split (agent_rep decoupled from agent_mint)
-#   R5 continuous reversal-aware credibility (drift-weight multiplier)
+# v4.1 "gradient trust" (ratified 2026-07-09), amended by fees-only +
+# REP-from-earnings (Decision 2026-07-10):
+#   DELETED: R4 supply-pegged beta cap, R6 rep/ATN split (mint is money only)
+#   SURVIVES: R5 continuous reversal-aware credibility (drift-weight
+#             multiplier), rep_shares drives DRIFT weight only.
 # ---------------------------------------------------------------------------
 
 
@@ -603,9 +604,10 @@ def _receipt_axes(seq: int, caller: str, axes: Dict[str, float],
     return ev
 
 
-class TestBetaCap:
-    """R4: zero-rep households' AGGREGATE mint weight is capped at
-    beta(rep_supply) of total weight; rep_supply=None => uncapped."""
+class TestMoneyOnlyMint:
+    """Decision 2026-07-10: mint is MONEY ONLY — no beta cap, no rep/ATN
+    split. Usage mints ATN pro-rata over the ε-floored voice weights; the
+    close never emits agent_rep / node_agent_rep / beta."""
 
     REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
 
@@ -614,146 +616,90 @@ class TestBetaCap:
         apply_events(world, [_registration_event(1)], equilibrate_after=False)
         return world
 
-    def test_uncapped_when_rep_supply_none(self):
-        """rep_shares=None => local regime, beta=1, no scaling."""
+    def test_no_beta_no_rep_split_keys(self):
+        """The removed keys are gone from the output."""
         world = self._world()
         out = compute_tool_mint(
             world, [_receipt_event(1, "zero-1"), _receipt_event(2, "zero-2")],
             registrations=self.REGS,
         )
-        assert out["beta"] == pytest.approx(1.0)
+        assert "beta" not in out
+        assert "node_agent_rep" not in out
+        assert "rep_fraction" not in out["per_digest"][DIGEST]
+        # Local regime (no voice_weights) => weight 1.0 per household.
         assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
             2 * math.log1p(1))
 
-    def test_zero_rep_aggregate_scaled_when_cap_binds(self):
-        """With a tiny rep base and many zero-rep callers, the zero-rep
-        aggregate mint weight is scaled down to beta of total."""
-        world = self._world()
-        from nodes.common.federated_reconcile import (
-            BETA_MIN, VOICE_EPSILON, beta_of_supply)
-        rep_supply = 100000.0          # mature: beta floored at BETA_MIN
-        beta = beta_of_supply(rep_supply)
-        assert beta == pytest.approx(BETA_MIN)
-        events = [
-            _receipt_event(1, "rep-holder"),
-            _receipt_event(2, "zero-1"),
-            _receipt_event(3, "zero-2"),
-            _receipt_event(4, "zero-3"),
-        ]
-        rep_shares = {"rep-holder": 0.5}
-        out = compute_tool_mint(
-            world, events, registrations=self.REGS,
-            rep_shares=rep_shares, rep_supply=rep_supply,
-        )
-        assert out["beta"] == pytest.approx(beta)
-        ln = math.log1p(1)
-        rep_w = ln * 0.5
-        zero_w_raw = 3 * ln * VOICE_EPSILON
-        allowed = (beta / (1.0 - beta)) * rep_w
-        assert allowed < zero_w_raw, "cap should bind in this fixture"
-        expected = rep_w + allowed
-        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
-            expected, rel=1e-6)
-
-    def test_zero_rep_below_cap_unchanged(self):
-        """When zero-rep aggregate is under beta, no scaling applies."""
-        world = self._world()
-        from nodes.common.federated_reconcile import VOICE_EPSILON
-        rep_supply = 100.0
-        events = [
-            _receipt_event(1, "rep-holder"),
-            _receipt_event(2, "zero-1"),
-        ]
-        rep_shares = {"rep-holder": 0.9}
-        out = compute_tool_mint(
-            world, events, registrations=self.REGS,
-            rep_shares=rep_shares, rep_supply=rep_supply,
-        )
-        ln = math.log1p(1)
-        expected = ln * 0.9 + ln * VOICE_EPSILON
-        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
-            expected, rel=1e-6)
-
-
-class TestRepSplit:
-    """R6: agent_rep = agent_mint x rep_fraction; zero-rep-only callers
-    grant ATN but ZERO reputation."""
-
-    REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
-
-    def _world(self):
-        world = build_charter_world(embedding_dim=EMBED_DIM)
-        apply_events(world, [_registration_event(1)], equilibrate_after=False)
-        return world
-
-    def test_rep_fraction_mixed_callers(self):
+    def test_mint_is_pro_rata_over_voice_weights(self):
+        """With voice_weights present, mint scales by each household's
+        ε-floored weight — no zero-rep throttle."""
         world = self._world()
         from nodes.common.federated_reconcile import VOICE_EPSILON
         events = [
             _receipt_event(1, "rep-holder"),
             _receipt_event(2, "zero-1"),
         ]
-        rep_shares = {"rep-holder": 0.5}
+        # voice_weights carries the ε-floored share (what voice_state emits).
+        voice_weights = {"rep-holder": 0.5, "zero-1": VOICE_EPSILON}
         out = compute_tool_mint(
             world, events, registrations=self.REGS,
-            rep_shares=rep_shares, rep_supply=1.0,   # beta ~= 1, no cap
+            voice_weights=voice_weights,
         )
-        entry = out["per_digest"][DIGEST]
         ln = math.log1p(1)
-        rep_part = ln * 0.5
-        total = rep_part + ln * VOICE_EPSILON
-        assert entry["rep_fraction"] == pytest.approx(
-            rep_part / total, rel=1e-6)
-        node = entry["node_id"]
-        assert out["node_agent_rep"][node][AUTHOR] == pytest.approx(rep_part)
+        expected = ln * 0.5 + ln * VOICE_EPSILON
+        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
+            expected, rel=1e-6)
 
-    def test_zero_rep_only_grants_no_reputation(self):
-        world = self._world()
-        events = [_receipt_event(1, "zero-1"), _receipt_event(2, "zero-2")]
-        # Low rep_supply => beta ~= 1 (uncapped, genesis regime): zero-rep
-        # usage STILL mints ATN, but rep_shares={} means the rep basis is
-        # zero — ATN minted, reputation not.
-        out = compute_tool_mint(
-            world, events, registrations=self.REGS,
-            rep_shares={}, rep_supply=1.0,
-        )
-        entry = out["per_digest"][DIGEST]
-        assert entry["mint"] > 0
-        assert entry["rep_fraction"] == pytest.approx(0.0)
-        assert out["node_agent_rep"] == {}
-
-    def test_agent_rep_le_agent_mint_through_close(self):
-        """Through the full close, agent_rep <= agent_mint per agent."""
+    def test_close_emits_no_agent_rep(self):
+        """Through the full close, there is no agent_rep map (money only)."""
         kp_author = Keypair.generate()
         kp_caller = Keypair.generate()
         batches = _batches([_registration_event(1)], kp_author) + _batches([
-            _receipt_event(1, "rep-caller"),
-            _receipt_event(2, "zero-caller"),
+            _receipt_event(1, "some-caller"),
         ], kp_caller)
         result = federated_epoch_close(
             canonical_order(batches),
-            rep_shares={"rep-caller": 0.5},
-            rep_supply=1.0,            # beta ~= 1, isolate the split
-        )
-        am = result["agent_mint"]
-        ar = result.get("agent_rep", {})
-        assert am.get(AUTHOR, 0) > 0
-        for agent, rep in ar.items():
-            assert rep <= am[agent] + 1e-9
-        assert ar.get(AUTHOR, 0) > 0
-
-    def test_zero_rep_only_close_grants_no_agent_rep(self):
-        kp_author = Keypair.generate()
-        kp_caller = Keypair.generate()
-        batches = _batches([_registration_event(1)], kp_author) + _batches([
-            _receipt_event(1, "zero-1"),
-        ], kp_caller)
-        result = federated_epoch_close(
-            canonical_order(batches),
-            rep_shares={}, rep_supply=1.0,
+            rep_shares={"some-caller": 0.5},
         )
         assert result["agent_mint"].get(AUTHOR, 0) > 0
-        assert result.get("agent_rep", {}).get(AUTHOR, 0) == 0
+        assert "agent_rep" not in result
+        assert result["authoritative_payload"]["schema"] == 3
+        assert "agent_rep" not in result["authoritative_payload"]
+
+
+class TestFeesOnlyPool:
+    """Decision 2026-07-10: the emission pool is FEES-ONLY. A zero pool
+    (no burned fees this epoch) yields zero mint cleanly (no div-by-zero);
+    a positive pool is conserved — Σ agent_mint == the pool exactly."""
+
+    def _batches(self):
+        kp_author = Keypair.generate()
+        kp_caller = Keypair.generate()
+        return _batches([_registration_event(1)], kp_author) + _batches([
+            _receipt_event(1, "caller-1"),
+            _receipt_event(2, "caller-2"),
+        ], kp_caller)
+
+    def test_zero_fee_epoch_zero_mint_clean(self):
+        """emission_pool == 0.0 => empty agent_mint, no exception."""
+        result = federated_epoch_close(
+            canonical_order(self._batches()), emission_pool=0.0)
+        assert result["agent_mint"] == {}
+        assert result["total_mint"] == pytest.approx(0.0)
+        # tool_mint per-digest display values scale to zero too.
+        for entry in result["tool_mint"].values():
+            assert entry["mint"] == pytest.approx(0.0)
+
+    def test_pool_conserved_exactly(self):
+        """A positive fees-only pool is distributed pro-rata and conserved:
+        Σ agent_mint == the burned-fee pool."""
+        pool = 12.5
+        result = federated_epoch_close(
+            canonical_order(self._batches()), emission_pool=pool)
+        assert result["agent_mint"].get(AUTHOR, 0) > 0
+        assert sum(result["agent_mint"].values()) == pytest.approx(
+            pool, rel=1e-9)
+        assert result["total_mint"] == pytest.approx(pool, rel=1e-9)
 
 
 class TestCredibility:
@@ -776,8 +722,8 @@ class TestCredibility:
 
     def test_credibility_carries_and_reversal_docks(self):
         world = self._world()
-        # Heavy honest majority + a lone capturer. rep_supply=1 => beta~=1
-        # (no cap distortion), rep shares near 1 so drift mass is large.
+        # Heavy honest majority + a lone capturer. rep shares near 1 so
+        # drift mass is large (rep_shares drives drift weight only now).
         rep_shares = {"honest-1": 0.9, "honest-2": 0.9, "capturer": 0.9}
         # Epoch 1: EVERYONE (incl. capturer) asserts strongly POSITIVE,
         # many reviews each so total mass >> CRED_MASS_FLOOR.
@@ -786,7 +732,7 @@ class TestCredibility:
                + self._many("capturer", 1.0, 30, 200))
         out1 = compute_tool_mint(
             world, ev1, registrations=self.REGS,
-            rep_shares=rep_shares, rep_supply=1.0,
+            rep_shares=rep_shares,
         )
         cred1 = out1["credibility_next"]
         book1 = out1["tool_review_book_next"]
@@ -804,7 +750,7 @@ class TestCredibility:
         out2 = compute_tool_mint(
             world, ev2,
             registrations=self.REGS,
-            rep_shares=rep_shares, rep_supply=1.0,
+            rep_shares=rep_shares,
             positions=out1["positions_next"],
             credibility=cred1,
             tool_review_book=book1,
@@ -823,7 +769,7 @@ class TestCredibility:
         out = compute_tool_mint(
             world, [_receipt_event(1, "someone")],
             registrations=self.REGS,
-            rep_shares={"someone": 0.5}, rep_supply=100000.0,
+            rep_shares={"someone": 0.5},
             credibility=cred_in,
         )
         c = out["credibility_next"].get("stale", CRED_FLOOR)

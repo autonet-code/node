@@ -74,13 +74,13 @@ async function signVoucher(channel, signer, channelId, cumulativeAmount) {
 }
 
 // ATN is minted only via Substrate.recordTrainingForEpoch over an anchored
-// epoch (v4.1 leaf commits agent/amount/repAmount). Mint to a faucet agent,
+// epoch (money-only leaf commits agent/amount). Mint to a faucet agent,
 // then transfer.
 function mintLeaf(agentAddr, amount) {
   const inner = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256", "uint256"],
-      [agentAddr, amount, amount]
+      ["address", "uint256"],
+      [agentAddr, amount]
     )
   );
   return ethers.keccak256(ethers.solidityPacked(["bytes32"], [inner]));
@@ -105,7 +105,7 @@ async function mintATN(substrate, faucet, amount) {
     );
   await substrate
     .connect(faucet)
-    .recordTrainingForEpoch(amount, amount, DIGEST(epochId), []);
+    .recordTrainingForEpoch(amount, DIGEST(epochId), []);
 }
 
 async function main() {
@@ -115,6 +115,7 @@ async function main() {
   const Substrate = await ethers.getContractFactory("Substrate");
   const substrate = await Substrate.deploy(
     deployer.address,
+    "0x0000000000000000000000000000000000000000",
     "0x0000000000000000000000000000000000000000"
   );
   await substrate.waitForDeployment();

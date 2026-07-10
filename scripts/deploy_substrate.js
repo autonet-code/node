@@ -42,9 +42,18 @@ async function main() {
     "0x0000000000000000000000000000000000000000";
   console.log(`VaultMinter: ${vaultMinter}`);
 
+  // Governor: the single address allowed to retune the service fee via
+  // setServiceFeeBps (expected: the DAO timelock). Immutable; no admin key.
+  // Defaults to the zero address (knob frozen — fee stays at its default) —
+  // pass GOVERNOR to hand the fee lever to the DAO.
+  const governor =
+    process.env.GOVERNOR ||
+    "0x0000000000000000000000000000000000000000";
+  console.log(`Governor: ${governor}`);
+
   console.log("Deploying Substrate.sol...");
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy(treasury, vaultMinter);
+  const substrate = await Substrate.deploy(treasury, vaultMinter, governor);
   await substrate.waitForDeployment();
   const address = await substrate.getAddress();
   const tx = substrate.deploymentTransaction();
@@ -64,6 +73,7 @@ async function main() {
     substrate_address: address,
     treasury: treasury,
     vault_minter: vaultMinter,
+    governor: governor,
     deployer: deployer.address,
     deployment_tx: tx ? tx.hash : null,
     deployed_at: new Date().toISOString(),

@@ -4,7 +4,11 @@ const digest = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
 
 async function deploySubstrate() {
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy((await ethers.getSigners())[0].address, "0x0000000000000000000000000000000000000000");
+  const substrate = await Substrate.deploy(
+    (await ethers.getSigners())[0].address,
+    "0x0000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000"
+  );
   await substrate.waitForDeployment();
   return substrate;
 }
@@ -24,22 +28,22 @@ async function deployToken(name = "TestUSD", symbol = "TUSD") {
 
 // ---------------------------------------------------------------------------
 // ATN faucet: ATN is minted only via Substrate.recordTrainingForEpoch over an
-// anchored epoch (v4.1 gradient trust — the leaf commits agent/amount/repAmount).
+// anchored epoch (money-only leaf commits agent/amount — Decision 2026-07-10).
 // These mint to a registered faucet agent, which then transfers freely.
 // ---------------------------------------------------------------------------
 
-function mintLeaf(agentAddr, amount, repAmount = amount) {
+function mintLeaf(agentAddr, amount) {
   const inner = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256", "uint256"],
-      [agentAddr, amount, repAmount]
+      ["address", "uint256"],
+      [agentAddr, amount]
     )
   );
   return ethers.keccak256(ethers.solidityPacked(["bytes32"], [inner]));
 }
 
 // Substrate's service fee (fee-recycled emission) is taken from every
-// payForService at SERVICE_FEE_BPS. Callers wanting an exact net at the
+// payForService at serviceFeeBps (default 2.5%). Callers wanting an exact net at the
 // recipient gross-up: smallest g whose net (g - fee(g)) equals `net`.
 function grossFor(net) {
   let g = (net * 10000n) / 9750n;
@@ -67,7 +71,7 @@ async function mintATN(substrate, submitterSigner, faucetSigner, amount) {
     );
   await substrate
     .connect(faucetSigner)
-    .recordTrainingForEpoch(amount, amount, digest(epochId), []);
+    .recordTrainingForEpoch(amount, digest(epochId), []);
 }
 
 // Fund `to` with `amount` ATN by minting to the faucet and transferring.

@@ -61,7 +61,6 @@ from typing import Any, Dict, Optional
 from .authoritative_encoding import (
     cid_for_blob,
     decode_agent_mint_blob,
-    decode_agent_rep_blob,
 )
 from .blob_resolver import BlobIntegrityError, BlobResolver
 from .mint_merkle import mint_merkle_proof, scale_mint, verify_mint_proof
@@ -93,9 +92,6 @@ class AuthoritativeSubmissionResult:
     epoch_id: str = ""
     epoch_id_hash_hex: str = ""
     contribution_scaled: int = 0
-    # v4.1: the DECOUPLED reputation amount actually sent on-chain
-    # (== contribution_scaled for lockstep/legacy blobs).
-    rep_contribution_scaled: int = 0
     raw_mint: float = 0.0
     cid_verified: bool = False
     cid: str = ""
@@ -243,21 +239,6 @@ class AuthoritativeChainSubmitter:
             raw_mint = float(mint_map.get(self.agent_id, 0.0))
             scaled = scale_mint(raw_mint, self.config.mint_scale)
 
-            # 4b. v4.1 gradient trust: decode the DECOUPLED reputation
-            # map from the SAME verified blob. None = legacy/lockstep
-            # blob (rep == mint); a dict (even empty) is the ratified
-            # decoupled map — a missing agent then means ZERO voice.
-            # Root, proof, and the tx's repAmount must all derive from
-            # this one map; using anything else is an unprovable leaf.
-            rep_map = decode_agent_rep_blob(blob)
-            if rep_map is None:
-                scaled_rep = scaled                          # lockstep
-            else:
-                scaled_rep = scale_mint(
-                    float(rep_map.get(self.agent_id, 0.0)),
-                    self.config.mint_scale,
-                )
-
             # 5. Skip zero submissions if configured.
             if scaled == 0 and self.config.skip_zero:
                 self._submitted_epochs.add(epoch_id)
@@ -270,15 +251,12 @@ class AuthoritativeChainSubmitter:
                     raw_mint=raw_mint,
                 )
 
-            # 6. Build the merkle proof from the full mint (+ rep) map
-            # and submit on chain. The proof is keyed by the agent's
-            # ADDRESS (the contract verifies msg.sender). v4.1: the
-            # leaf commits (agent, amount, repAmount) — built with the
-            # SAME rep_map the anchorer committed into the root (both
-            # sides read it off the same content-addressed blob).
+            # 6. Build the merkle proof from the full mint map and submit
+            # on chain. The proof is keyed by the agent's ADDRESS (the
+            # contract verifies msg.sender). Money only (2026-07-10): the
+            # leaf commits (agent, amount).
             proof = mint_merkle_proof(
                 mint_map, self.agent_address, self.config.mint_scale,
-                agent_rep=rep_map,
             )
             if proof is None:
                 return AuthoritativeSubmissionResult(
@@ -295,17 +273,15 @@ class AuthoritativeChainSubmitter:
                 )
             eid_hash = epoch_id_hash(epoch_id)
 
-            # 6b. GUARD (v4.1): pre-flight-verify the exact
-            # (amount, repAmount) pair we are about to send against the
-            # anchor's ON-CHAIN root. Root, proof, and tx all derive
-            # from the same blob's maps, so this only fails if the
-            # anchorer committed a root built from a DIFFERENT rep map
-            # than the blob it published (or the blob decode drifted) —
-            # fail loud here instead of burning gas on MintProofInvalid.
+            # 6b. GUARD: pre-flight-verify the amount we are about to send
+            # against the anchor's ON-CHAIN root. Root, proof, and tx all
+            # derive from the same blob's mint map, so this only fails if
+            # the anchorer committed a root built from a different map than
+            # the blob it published (or the blob decode drifted) — fail
+            # loud here instead of burning gas on MintProofInvalid.
             onchain_root = bytes(anchor[9])
             if not verify_mint_proof(
                 onchain_root, self.agent_address, scaled, proof,
-                rep_amount=scaled_rep,
             ):
                 return AuthoritativeSubmissionResult(
                     success=False,
@@ -314,21 +290,16 @@ class AuthoritativeChainSubmitter:
                     cid_verified=True,
                     raw_mint=raw_mint,
                     contribution_scaled=scaled,
-                    rep_contribution_scaled=scaled_rep,
                     epoch_id_hash_hex=eid_hash.hex(),
                     error=(
                         "pre-flight mint proof failed against the on-chain "
-                        f"agentMintRoot for (amount={scaled}, "
-                        f"repAmount={scaled_rep}) — the anchored root and "
-                        "the published blob disagree (root/blob rep-map "
-                        "mismatch?)"
+                        f"agentMintRoot for amount={scaled} — the anchored "
+                        "root and the published blob disagree"
                     ),
                 )
 
             try:
-                tx_hash = self._send_record(
-                    scaled, eid_hash, proof, rep_contribution=scaled_rep,
-                )
+                tx_hash = self._send_record(scaled, eid_hash, proof)
             except Exception as e:
                 # Contract-side dedupe: if our seen-set was empty after a
                 # process restart and the contract already saw this
@@ -360,9 +331,8 @@ class AuthoritativeChainSubmitter:
             self._submitted_epochs.add(epoch_id)
             logger.info(
                 "Authoritative submission: agent=%s, epoch=%s, "
-                "raw=%.10f, scaled=%d, rep_scaled=%d, tx=%s",
-                self.agent_id, epoch_id, raw_mint, scaled, scaled_rep,
-                tx_hash,
+                "raw=%.10f, scaled=%d, tx=%s",
+                self.agent_id, epoch_id, raw_mint, scaled, tx_hash,
             )
             return AuthoritativeSubmissionResult(
                 success=True,
@@ -370,7 +340,6 @@ class AuthoritativeChainSubmitter:
                 epoch_id=epoch_id,
                 epoch_id_hash_hex=eid_hash.hex(),
                 contribution_scaled=scaled,
-                rep_contribution_scaled=scaled_rep,
                 raw_mint=raw_mint,
                 cid=cid,
                 cid_verified=True,
@@ -378,28 +347,20 @@ class AuthoritativeChainSubmitter:
 
     def _send_record(
         self, contribution: int, eid_hash: bytes, proof: list,
-        rep_contribution: int | None = None,
     ) -> str:
         contract = self._get_contract()
         w3 = self._w3
         if w3 is None:
             raise RuntimeError("submitter has no Web3 instance")
 
-        # v4.1 gradient-trust DECOUPLED ledgers: recordTrainingForEpoch
-        # takes (amount, repAmount, epochIdHash, proof). ``contribution``
-        # is the ATN (money) amount; ``rep_contribution`` is the
-        # reputation (soulbound voice) amount — BOTH are committed in the
-        # merkle leaf, and the contract additionally requires
-        # rep <= amount. submit_for_epoch passes the blob-decoded rep;
-        # the None default (= lockstep, rep == contribution) serves
-        # direct callers/tests working against lockstep roots.
-        if rep_contribution is None:
-            rep_contribution = contribution
+        # Money only (Decision 2026-07-10): recordTrainingForEpoch takes
+        # (amount, epochIdHash, proof). ``contribution`` is the ATN mint;
+        # the leaf commits (agent, amount). REP is claimed DAO-side.
 
         # Test path: account is unlocked in eth_tester.
         if not self.config.private_key:
             tx_hash = contract.functions.recordTrainingForEpoch(
-                contribution, rep_contribution, eid_hash, proof,
+                contribution, eid_hash, proof,
             ).transact({"from": self.agent_address, "gas": 1_500_000})
             receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
             if receipt.status != 1:
@@ -412,13 +373,13 @@ class AuthoritativeChainSubmitter:
         # bites in real-world deployments.
         try:
             estimated = contract.functions.recordTrainingForEpoch(
-                contribution, rep_contribution, eid_hash, proof,
+                contribution, eid_hash, proof,
             ).estimate_gas({"from": self.agent_address})
             gas_limit = max(int(estimated * 12 // 10), 1_500_000)
         except Exception:
             gas_limit = 2_000_000
         tx = contract.functions.recordTrainingForEpoch(
-            contribution, rep_contribution, eid_hash, proof,
+            contribution, eid_hash, proof,
         ).build_transaction({
             "from": self.agent_address,
             "nonce": w3.eth.get_transaction_count(self.agent_address),

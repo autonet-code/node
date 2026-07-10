@@ -77,7 +77,8 @@ def _load_substrate() -> Tuple[list, str]:
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
     contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor(deployer, "0x0000000000000000000000000000000000000000").transact({"from": deployer, "gas": 8_000_000})
+    zero = "0x0000000000000000000000000000000000000000"
+    tx = contract.constructor(deployer, zero, zero).transact({"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
     return receipt.contractAddress
@@ -235,12 +236,11 @@ def test_agent_reads_anchor_and_submits_authoritative_mint(chain):
     agent_ids = list(agent_addrs)
 
     result, epoch_id, resolver = _build_close_and_anchor(chain, agent_ids)
-    # Rebuild the blob exactly as the anchorer does (v4.1: agent_rep is
-    # encoded into the blob alongside agent_mint) so the CID matches.
+    # Rebuild the blob exactly as the anchorer does (money only) so the
+    # CID matches.
     expected_blob_mint = decode_agent_mint_blob(resolver.get(
         result["authoritative_payload"]["agent_mint"]
-        and cid_for_blob(encode_agent_mint_blob(
-            result["agent_mint"], agent_rep=result.get("agent_rep")))
+        and cid_for_blob(encode_agent_mint_blob(result["agent_mint"]))
     ))
 
     # Pick the first agent that actually has mint; submit for it.

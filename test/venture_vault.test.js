@@ -11,7 +11,7 @@ const { time } = require("@nomicfoundation/hardhat-network-helpers");
 const digest = (s) => ethers.keccak256(ethers.toUtf8Bytes(s));
 
 // Substrate's service fee (fee-recycled emission) is taken from every
-// payForService at SERVICE_FEE_BPS. Revenue tests want exact round
+// payForService at serviceFeeBps (default 2.5%). Revenue tests want exact round
 // amounts landing at the vault, so gross-up: smallest g whose net
 // (g - fee(g)) equals the desired amount.
 function grossFor(net) {
@@ -22,7 +22,11 @@ function grossFor(net) {
 
 async function deploySubstrate() {
   const Substrate = await ethers.getContractFactory("Substrate");
-  const s = await Substrate.deploy((await ethers.getSigners())[0].address, "0x0000000000000000000000000000000000000000");
+  const s = await Substrate.deploy(
+    (await ethers.getSigners())[0].address,
+    "0x0000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000"
+  );
   await s.waitForDeployment();
   return s;
 }
@@ -73,13 +77,12 @@ async function registerBound(substrate, agentSigner, ownerWallet, lineage) {
 }
 
 // The single-leaf merkle leaf Substrate.recordTrainingForEpoch expects.
-// v4.1 gradient trust: the leaf commits (agent, amount, repAmount) — both
-// ledgers federation-ratified. The faucet mints lockstep (rep == amount).
-function mintLeaf(agentAddr, amount, repAmount = amount) {
+// Money-only leaf (Decision 2026-07-10): the leaf commits (agent, amount).
+function mintLeaf(agentAddr, amount) {
   const inner = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256", "uint256"],
-      [agentAddr, amount, repAmount]
+      ["address", "uint256"],
+      [agentAddr, amount]
     )
   );
   return ethers.keccak256(ethers.solidityPacked(["bytes32"], [inner]));
@@ -108,7 +111,7 @@ async function mintATN(substrate, submitterSigner, faucetSigner, amount) {
   const epochIdHash = digest(epochId);
   await substrate
     .connect(faucetSigner)
-    .recordTrainingForEpoch(amount, amount, epochIdHash, []);
+    .recordTrainingForEpoch(amount, epochIdHash, []);
 }
 
 // Fund `to` with `amount` ATN by minting to the faucet and transferring.

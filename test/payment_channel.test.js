@@ -13,7 +13,7 @@ const CHALLENGE_WINDOW = 3600;
 
 // Substrate's service fee (fee-recycled emission): 2.5% of the gross payment,
 // half to the treasury, half burned. Vouchers are GROSS-denominated; the
-// provider receives net. These mirror Substrate's SERVICE_FEE_BPS constants.
+// provider receives net. These mirror Substrate's serviceFeeBps (default 2.5%).
 const feeOf = (gross) => (gross * 250n) / 10000n;
 const toTreasury = (gross) => (feeOf(gross) * 5000n) / 10000n;
 const burned = (gross) => feeOf(gross) - toTreasury(gross);

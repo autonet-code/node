@@ -7,7 +7,7 @@ is the mechanism it rides on. Candle close IMPLEMENTED for the local
 daemon path (2026-06-11) — federated candle + chain-derived seed still
 pending (see below).
 
-> **SUPERSEDED IN PART (2026-07-10, ratified NOT built):** the base
+> **SUPERSEDED IN PART (2026-07-10, BUILT this working tree):** the base
 > floor goes to ZERO — pool = burned fees only ("fees-only emission",
 > `docs/tool_substrate.md` Decision 2026-07-10, sim-validated in
 > `experiments/econ_attest/sim/results/summary_fees_only.md`). The

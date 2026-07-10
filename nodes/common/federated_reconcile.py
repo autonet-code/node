@@ -99,36 +99,31 @@ VET_BUST_THRESHOLD = 0.5
 # per household — N agents under one owner are one voice, closing the
 # per-agent log1p amplification), then multiply by the household's voice
 # weight: epsilon + household_REPUTATION / rep_supply, LINEAR in
-# reputation so splitting earnings across wallets never gains weight
-# (reputation is soulbound, minted only by recordTrainingForEpoch — see
-# voice_state.py). VOICE_EPSILON is the floor for households the weight
-# map doesn't know — it bounds what a zero-reputation sybil identity can
-# contribute on the MINT rail and lets a cold-start network (supply = 0)
-# bootstrap. v4.1 (2026-07-09) drops this ε floor from DRIFT weight (drift
-# = raw rep_share × credibility); it survives only here, on the mint rail.
-# PROVISIONAL VALUE pending user blessing (economics parameter).
+# reputation so splitting earnings across wallets never gains weight.
+# VOICE_EPSILON is the floor for households the weight map doesn't know —
+# it bounds what a zero-reputation identity can contribute on the MINT
+# rail and lets a cold-start network (supply = 0) bootstrap.
+#
+# fees-only + REP-from-earnings (Decision 2026-07-10, docs/tool_substrate.md
+# §5): the supply-pegged β cap is DELETED (tool users are spenders, spenders
+# never earn REP, so honest usage is all zero-rep by construction and any β
+# throttle on zero-rep weight zeroes honest author income). The ε MINT-weight
+# floor survives — REP dilution, not β, is the youth defense now, and the sim
+# validated the model with ε present. v4.1 (2026-07-09) drops this ε floor
+# from DRIFT weight (drift = raw rep_share × credibility); it survives only
+# here, on the mint rail. PROVISIONAL VALUE pending user blessing.
 VOICE_EPSILON = 0.05
 
 # ---------------------------------------------------------------------------
-# Tool economy v4.1 "gradient trust" (ratified 2026-07-09,
-# memory/tool_economy_v4_gradient_trust.md; sim reference
-# experiments/econ_attest/sim/v4_1_rules.py + beta_supply_peg.py). The
-# v3 vet GATE is removed (tools mint from first attested use); the
-# surviving trust surface is (a) zero-rep reviews carry ZERO drift
-# weight, (b) zero-rep usage mints ATN but not reputation (rep/ATN
-# split), capped in aggregate by a supply-pegged β, (c) continuous
-# reversal-aware credibility multiplies drift weight.
+# Tool economy v4.1 "gradient trust" (ratified 2026-07-09) as amended by
+# fees-only + REP-from-earnings (Decision 2026-07-10). The v3 vet GATE is
+# removed (tools mint from first attested use); the surviving trust surface
+# is (a) zero-rep reviews carry ZERO drift weight and (b) continuous
+# reversal-aware credibility multiplies drift weight. The supply-pegged β
+# cap and the rep/ATN mint split are DELETED (2026-07-10): the close
+# computes MONEY ONLY — REP is a pure function of ratified earnings,
+# claimed DAO-side (RepToken), never minted on the ATN close path.
 # ---------------------------------------------------------------------------
-
-# β(S) = max(BETA_MIN, exp(-S / BETA_S0)) — the supply-pegged aggregate
-# cap on zero-rep households' MINT weight. β≈1 at genesis (newcomer
-# demand prices honest work), decaying toward BETA_MIN as reputation
-# supply matures. S0 default = 50 epochs × 100 pool = 5000 rep units
-# (the sim's engineering pick). LAUNCH-RECALIBRATABLE: retune S0 to the
-# real epoch cadence at deploy (see memory note). rep_supply=None (no
-# chain) => β=1 (uncapped, the local/genesis regime).
-BETA_MIN = 0.05
-BETA_S0 = 5000.0
 
 # Continuous reversal-aware credibility (v4.1 [R5]). A tool's review
 # book is re-scored every close: a household whose recorded review
@@ -143,32 +138,16 @@ CRED_RECOVERY = 0.10
 CRED_MASS_FLOOR = 3.0
 
 
-def beta_of_supply(rep_supply: Optional[float]) -> float:
-    """Supply-pegged zero-rep MINT-weight cap (v4.1 [R4]).
-
-    ``rep_supply=None`` (no chain / local regime) => 1.0 (uncapped).
-    Otherwise ``max(BETA_MIN, exp(-S / BETA_S0))``. Pure + deterministic.
-    """
-    if rep_supply is None:
-        return 1.0
-    import math as _math
-    return max(BETA_MIN, _math.exp(-float(rep_supply) / BETA_S0))
-
-# Fee-recycled emission (docs/epoch_economics.md, Decision 2026-07-08):
-#   pool(N) = BASE_EMISSION_PER_EPOCH + recycled(N)
-# where recycled(N) = Σ ServiceFee.burned between the previous two
-# anchors (read on-chain by voice_state.read_voice_state, same pinned
-# rail as voice weights). The burned share of every service fee leaves
-# supply at payment time and re-enters here — burn-and-remint is
-# recycling on the existing mint rail, wash-proof by conservation
-# (pumping volume pays real fees into a pool shared pro-rata). The
-# BASE floor is the faucet: mint is ATN's only supply path, so a
-# zero floor would deadlock the economy at zero supply forever. It
-# also pays the same in a slump (counter-cyclical damping).
-# PROVISIONAL VALUE pending user blessing (economics parameter);
-# the fee/treasury split lives on-chain (Substrate.sol
-# SERVICE_FEE_BPS / FEE_TREASURY_BPS).
-BASE_EMISSION_PER_EPOCH = 100.0
+# Fees-only emission (docs/tool_substrate.md, Decision 2026-07-10 §1):
+#   pool(N) = recycled(N)
+# where recycled(N) = Σ ServiceFee.burned between the previous two anchors
+# (read on-chain by voice_state.read_voice_state, same pinned rail as voice
+# weights). No base emission: ATN mints each epoch EXACTLY what fees burned
+# that epoch — money is always demand-backed. Zero service volume => zero
+# pool => zero mint, and that is correct behavior (the economy does not
+# pretend to exist before demand does). Conservation by construction
+# (Σ minted == Σ burned); wash-pumping the pool is a strict ATN loss. The
+# fee/treasury split lives on-chain (Substrate.sol serviceFeeBps).
 
 
 def _normalize_vetting(vetting: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -300,9 +279,9 @@ def compute_tool_mint(
     voice_weights: Optional[Dict[str, float]] = None,
     vetting: Optional[Dict[str, Any]] = None,
     positions: Optional[Dict[str, Dict[str, Any]]] = None,
-    # v4.1 gradient trust (ratified 2026-07-09):
+    # v4.1 gradient trust (ratified 2026-07-09), amended 2026-07-10 (β cap
+    # and rep/ATN split deleted; ``rep_shares`` now drives drift weight only):
     rep_shares: Optional[Dict[str, float]] = None,
-    rep_supply: Optional[float] = None,
     credibility: Optional[Dict[str, float]] = None,
     tool_review_book: Optional[Dict[str, Any]] = None,
     vet_quorum: float = VET_QUORUM,
@@ -327,10 +306,11 @@ def compute_tool_mint(
     callers group by their proven owner wallet (``agent_owner_map``;
     unbound callers are their own household), attested-ok counts sum per
     household, log1p damps ONCE per household, and the damped value
-    multiplies the household's MINT weight (v4.1: raw reputation share
-    for rep-holders, ε for zero-rep, aggregate zero-rep ε-weight capped
-    at a supply-pegged β — see ``rep_shares``/``rep_supply`` below;
-    ``voice_weights`` carries the ε floor for the local/no-chain regime).
+    multiplies the household's MINT weight (``voice_weights``: the
+    ε-floored reputation share; ``voice_weights=None`` in the local/no-
+    chain regime weighs every household 1.0). Decision 2026-07-10 deleted
+    the supply-pegged β cap and the rep/ATN mint split — mint is MONEY
+    ONLY now; ``rep_shares`` survives to drive DRIFT weight (below).
     ``voice_weights=None`` (no chain access) means every household weighs
     1.0 — the pre-voice behavior; a non-None map defaults unknown
     households to ``VOICE_EPSILON``. Only COGNITIVE attestations count;
@@ -371,44 +351,34 @@ def compute_tool_mint(
     value is its per-axis scores, which enter position drift as an
     INSPECTION REVIEW (v4.1 [R2]) — moving the head, minting nothing.
 
-    v4.1 gradient trust (rep/ATN split + drift credibility):
+    v4.1 gradient trust (drift credibility), amended 2026-07-10:
 
       - ``rep_shares``: household → raw reputation share (rep/rep_supply),
-        the UN-floored voice weight. Distinct from ``voice_weights``
-        (which carries the ε floor for mint bootstrap). Used for (a) the
-        rep/ATN mint split and (b) drift weight. ``None`` => local regime
-        (every known household treated as rep-holding at its
-        voice_weight; drift stays at weight 1.0 as before).
-      - ``rep_supply``: reputation total supply — the β-cap maturity
-        clock (``beta_of_supply``). ``None`` => β=1 (uncapped).
+        the UN-floored voice weight. Drift weight ONLY (the rep/ATN mint
+        split and the β cap are deleted). ``None`` => local regime (drift
+        stays at weight 1.0 as before).
       - ``credibility``: carried household → drift-weight multiplier
         (v4.1 [R5]); recomputed each close against the moving head.
       - ``tool_review_book``: carried {digest: {household: {axis:
         {sum,n}}}} — per-household review centroid per tool, re-scored
         each close so a later reversal retroactively docks capturers.
 
-    MINT weight per household (v4.1 [R4]): rep-holders carry their raw
-    rep share; zero-rep households carry ε (VOICE_EPSILON), but their
-    AGGREGATE ε-weight is capped at β(rep_supply) of total weight
-    (pro-rata scale-down when it binds). The rep/ATN split (v4.1 [R6]):
-    each author's ``agent_rep`` fraction = the portion of their
-    usage_term from rep-holding callers — zero-rep-only mint grants ATN
-    but ZERO reputation.
+    MINT weight per household: the ε-floored reputation share
+    (``voice_weights``), no β cap. Mint is MONEY ONLY (Decision
+    2026-07-10): REP is claimed DAO-side on ratified ATN earnings, never
+    minted here.
 
     Returns (all maps key-sorted, pure function of canonical inputs):
       {
         "per_digest": {digest: {node_id, author, trust_class,
                                 ok_count, attesters, usage_term, mint,
-                                rep_fraction, greenlit, validators,
-                                royalty_left}},
+                                greenlit, validators, royalty_left}},
         "node_agent": {node_id: {author: mint}},   # gate-mergeable
-        "node_agent_rep": {node_id: {author: rep_basis}},  # R6 rep split
         "registrations_next": {digest: manifest_meta},
         "vetting_next": {"manifests": {...}, "busts": {agent: n}},
         "positions_next": {digest: {"head": [N_DIMS], "mass": [N_DIMS]}},
         "credibility_next": {household: multiplier},
         "tool_review_book_next": {digest: {household: {axis: {sum,n}}}},
-        "beta": float,   # the effective β cap applied this close
       }
     """
     import math
@@ -582,87 +552,27 @@ def compute_tool_mint(
                                      + damped * shares[target])
 
     # ------------------------------------------------------------------
-    # v4.1 [R4] β cap on ZERO-REP mint weight (supply-pegged). Zero-rep
-    # households carry ε on the MINT side, but their AGGREGATE ε-weight
-    # is capped at β(rep_supply) of total weight. First tally the damped
-    # usage weight each household contributes (rep-holders at their raw
-    # rep share, zero-rep at ε) so the cap uses THIS epoch's observed
-    # demand, then derive a uniform pro-rata scale on zero-rep weight.
-    #
-    # Household classification uses ``rep_shares`` (raw rep/supply, no ε
-    # floor). ``rep_shares=None`` => local/genesis regime: no chain rep,
-    # so treat every household as its ε-floored voice weight and β=1
-    # (uncapped) — the pre-v4.1 behavior.
+    # MINT weight per household (Decision 2026-07-10: the β cap and the
+    # rep/ATN split are DELETED — mint is MONEY ONLY, distributed pro-rata
+    # over the ε-floored reputation-share weights). ``rep_shares`` survives
+    # only for DRIFT weight (position section below). ``voice_weights``
+    # carries the ε-floored share; None => local/no-chain regime, weight
+    # 1.0. ``rep_share_map`` is kept for the drift math.
     # ------------------------------------------------------------------
     rep_share_map = rep_shares or {}
-    beta = beta_of_supply(rep_supply if rep_shares is not None else None)
 
     def _rep_share(house: str) -> float:
         return float(rep_share_map.get(house, 0.0))
 
-    def _is_zero_rep(house: str) -> bool:
-        # In the local regime (no rep_shares) NOBODY is "zero-rep" for
-        # cap purposes — the cap is uncapped and the split degrades to
-        # "all mint is rep-bearing", matching legacy behavior.
-        if rep_shares is None:
-            return False
-        return _rep_share(house) <= 0.0
-
     def _mint_weight(house: str) -> float:
-        # Rep-holders carry their raw rep share; zero-rep carry ε. In the
-        # local regime (rep_shares is None) fall back to voice_weights
-        # (or 1.0 when there is no chain), exactly as before.
-        if rep_shares is None:
-            if voice_weights is not None:
-                return round(float(voice_weights.get(house, VOICE_EPSILON)), 9)
-            return 1.0
-        if _rep_share(house) > 0.0:
-            return _rep_share(house)
-        return VOICE_EPSILON
-
-    # Tally observed rep vs zero-rep weight across all mint-eligible
-    # (digest, household) pairs to size the β cap. Mirrors the mint loop's
-    # exclusions so the cap is computed over exactly what will mint.
-    rep_weight_total = 0.0
-    zero_weight_total = 0.0
-    for digest in sorted(eff.keys()):
-        meta = known_regs[digest]
-        author = str(meta.get("author") or "")
-        if not author or str(meta.get("trust_class") or "") != TRUST_PINNED:
-            continue
-        reg_sender = str(meta.get("sender") or "")
-        author_house = _household(author)
-        for house in sorted(eff[digest].keys()):
-            if house == author_house:
-                continue
-            if reg_sender and reg_sender in house_senders.get(house, set()):
-                continue
-            contrib = eff[digest][house] * _mint_weight(house)
-            if _is_zero_rep(house):
-                zero_weight_total += contrib
-            else:
-                rep_weight_total += contrib
-    zero_scale = 1.0
-    # The cap is "β of total weight", implemented as allowed/(rep+allowed)
-    # = β => allowed = β/(1-β)·rep_weight. This binds only when there IS
-    # rep-holder demand to measure against. With ZERO rep weight the ratio
-    # is degenerate (any positive zero-rep pool is 100% > β) and throttling
-    # to zero would deadlock the genesis/newcomer economy exactly like a
-    # zero emission floor — so we leave pure-zero-rep uncapped (the sim's
-    # validated regime always seeds founder rep, so it never relies on
-    # this branch either). Once any rep exists the cap engages normally.
-    if beta < 1.0 and zero_weight_total > 0.0 and rep_weight_total > 0.0:
-        allowed = (beta / (1.0 - beta)) * rep_weight_total
-        if allowed < zero_weight_total:
-            zero_scale = allowed / zero_weight_total
+        # ε-floored reputation share (voice_weights); local regime weighs
+        # every household 1.0 (the pre-voice behavior).
+        if voice_weights is not None:
+            return round(float(voice_weights.get(house, VOICE_EPSILON)), 9)
+        return 1.0
 
     per_digest: Dict[str, Dict[str, Any]] = {}
     node_agent: Dict[str, Dict[str, float]] = {}
-    # v4.1 [R6]: the rep-bearing basis of each author's mint, anchored on
-    # the same claim node. Threaded out as ``node_agent_rep`` so the
-    # driver/submitter can record a DECOUPLED reputation amount:
-    # zero-rep-weighted usage mints ATN but grants no reputation.
-    node_agent_rep: Dict[str, Dict[str, float]] = {}
     for digest in sorted(eff.keys()):
         meta = known_regs[digest]
         author = str(meta.get("author") or "")
@@ -680,34 +590,25 @@ def compute_tool_mint(
         nodes = by_digest.get(digest, [])
         # Combo damper over HOUSEHOLDS: counts collapsed + log1p'd at
         # fan-out time, author's household excluded (subsumes self and
-        # same-owner), co-hosted households (any attestation batch
-        # signed with the registration batch's key) excluded, then each
-        # household's damped credit scales by its MINT weight (rep share
-        # or β-scaled ε). ``usage_term_rep`` accumulates only the
-        # rep-holder-attributable portion for the R6 split.
+        # same-owner), co-hosted households (any attestation batch signed
+        # with the registration batch's key) excluded, then each
+        # household's damped credit scales by its ε-floored MINT weight.
         reg_sender = str(meta.get("sender") or "")
         author_house = _household(author)
         attested_by = eff[digest]
         usage_term = 0.0
-        usage_term_rep = 0.0
         attesters = 0
         for house in sorted(attested_by.keys()):
             if house == author_house:
                 continue
             if reg_sender and reg_sender in house_senders.get(house, set()):
                 continue
-            if _is_zero_rep(house):
-                w_mint = round(_mint_weight(house) * zero_scale, 12)
-            else:
-                w_mint = round(_mint_weight(house), 12)
-                usage_term_rep += attested_by[house] * w_mint
-            usage_term += attested_by[house] * w_mint
+            usage_term += attested_by[house] * round(_mint_weight(house), 12)
             attesters += 1
         # v3/v4.1: USAGE ALONE mints. No standing multiplier, no vet gate.
         mint = usage_term
         if mint <= 0.0:
             continue
-        rep_fraction = (usage_term_rep / usage_term) if usage_term > 0 else 0.0
         # Anchor the mint on the manifest's claim node: lexicographically-
         # first id among the digest's claim nodes (the manifest anchor;
         # also where position drift writes the reviewed charter head).
@@ -722,7 +623,6 @@ def compute_tool_mint(
             "attesters": attesters,
             "usage_term": round(usage_term, 10),
             "mint": mint,
-            "rep_fraction": round(rep_fraction, 10),
             "greenlit": greenlit,
             "validators": len(validators),
             "royalty_left": int(vm.get("royalty_left") or 0) if vm else 0,
@@ -730,11 +630,6 @@ def compute_tool_mint(
         # v4.1 [R1]: author keeps 100% of the mint (royalty split gone).
         bucket = node_agent.setdefault(node_id, {})
         bucket[author] = bucket.get(author, 0.0) + mint
-        # v4.1 [R6]: rep basis = mint × rep_fraction, on the same node.
-        rep_amt = mint * rep_fraction
-        if rep_amt > 0.0:
-            rbucket = node_agent_rep.setdefault(node_id, {})
-            rbucket[author] = rbucket.get(author, 0.0) + rep_amt
 
     # Royalty window ticks once per close for every greenlit manifest
     # (kept for the carried-state contract; no mint effect under v4.1).
@@ -941,13 +836,10 @@ def compute_tool_mint(
         "per_digest": dict(sorted(per_digest.items())),
         "node_agent": {k: dict(sorted(v.items()))
                        for k, v in sorted(node_agent.items())},
-        "node_agent_rep": {k: dict(sorted(v.items()))
-                           for k, v in sorted(node_agent_rep.items())},
         "registrations_next": dict(sorted(known_regs.items())),
         "positions_next": positions_next,
         "credibility_next": dict(sorted(credibility_next.items())),
         "tool_review_book_next": review_book_out,
-        "beta": round(beta, 12),
         "vetting_next": {
             "manifests": {d: {
                 "vets": {a: sorted(s)
@@ -976,7 +868,6 @@ def federated_reconcile_epoch(
     output_decimals: int = OUTPUT_DECIMALS,
     emission_pool: Optional[float] = None,
     extra_node_agent_mint: Optional[Dict[str, Dict[str, float]]] = None,
-    extra_node_agent_rep: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Dict[str, Any]:
     """Run reconcile_epoch deterministically.
 
@@ -985,10 +876,12 @@ def federated_reconcile_epoch(
     output dicts.
 
     ``emission_pool``: when set, post-gate mints are normalized to
-    shares of this fixed pool (see reconcile.apply_emission_pool).
-    MUST be derived from canonical data (e.g. emission_rate x the
-    epoch duration measured between anchored timestamps), never from
-    a daemon-local clock, or the bit-identical guarantee breaks.
+    shares of this fixed pool (see reconcile.apply_emission_pool). Under
+    fees-only emission (Decision 2026-07-10) this is the burned-fee total
+    for the epoch window (Σ ServiceFee.burned between anchors), read on
+    the same pinned rail as the voice weights; a zero pool yields zero
+    mint. MUST be derived from canonical data (never a daemon-local
+    clock) or the bit-identical guarantee breaks.
 
     Returns the same shape as ``reconcile_epoch`` plus:
       - ``output_decimals``: the rounding precision used.
@@ -1053,16 +946,10 @@ def federated_reconcile_epoch(
     # other mint, and before the pool so pool normalization applies.
     # ``agent_weights`` (stake-style weighting) applies here as it did
     # to the retired score rail. Sorted iteration keeps the float-add
-    # order canonical.
-    # v4.1 [R6]: the rep-bearing basis of each author's mint, accumulated
-    # in the SAME (weighted) raw units as agent_mint so it can be scaled
-    # by the identical gate/pool factor at the end. agent_rep decouples
-    # reputation from ATN: zero-rep-weighted usage mints ATN but no rep.
-    agent_mint_raw: Dict[str, float] = {}
-    agent_rep_raw: Dict[str, float] = {}
+    # order canonical. Money only (Decision 2026-07-10): no rep basis is
+    # accumulated — REP is claimed DAO-side on ratified ATN earnings.
     for node_id in sorted((extra_node_agent_mint or {}).keys()):
         extra = extra_node_agent_mint[node_id]
-        rep_extra = (extra_node_agent_rep or {}).get(node_id, {})
         per_agent = node_agent_mint.setdefault(node_id, {})
         node_total = 0.0
         for agent in sorted(extra.keys()):
@@ -1071,15 +958,8 @@ def federated_reconcile_epoch(
                 continue
             weighted = amount * agent_weights.get(agent, 1.0)
             agent_mint[agent] = agent_mint.get(agent, 0.0) + weighted
-            agent_mint_raw[agent] = agent_mint_raw.get(agent, 0.0) + weighted
             per_agent[agent] = per_agent.get(agent, 0.0) + weighted
             node_total += weighted
-        for agent in sorted(rep_extra.keys()):
-            rep_amt = float(rep_extra[agent])
-            if rep_amt <= 0.0:
-                continue
-            weighted_rep = rep_amt * agent_weights.get(agent, 1.0)
-            agent_rep_raw[agent] = agent_rep_raw.get(agent, 0.0) + weighted_rep
         if node_total > 0.0:
             node_mint[node_id] = node_mint.get(node_id, 0.0) + node_total
 
@@ -1167,25 +1047,6 @@ def federated_reconcile_epoch(
             sum(result["agent_mint"].values()), output_decimals,
         )
 
-    # v4.1 [R6]: derive per-agent reputation in LOCKSTEP with the final
-    # (gated + pool-normalized) agent_mint. The rep basis was accumulated
-    # in the same raw units, so each agent's final rep = final_mint ×
-    # (rep_basis / raw_mint) — i.e. rep tracks the exact same scaling the
-    # ATN mint received, but only the rep-holder-attributable portion.
-    # Zero-rep-only authors get agent_rep == 0 (voice decoupled from ATN).
-    final_mint = result.get("agent_mint", {}) or {}
-    agent_rep: Dict[str, float] = {}
-    for agent in sorted(final_mint.keys()):
-        raw = agent_mint_raw.get(agent, 0.0)
-        rep_basis = agent_rep_raw.get(agent, 0.0)
-        if raw <= 0.0 or rep_basis <= 0.0:
-            continue
-        frac = rep_basis / raw
-        rep_val = round(final_mint[agent] * frac, output_decimals)
-        if rep_val > 0.0:
-            agent_rep[agent] = rep_val
-    result["agent_rep"] = dict(sorted(agent_rep.items()))
-
     logger.info(
         "federated reconciliation: %d nodes, %d agents, "
         "total mint %.6f, total novelty %.6f",
@@ -1263,9 +1124,9 @@ def federated_epoch_close(
     voice_weights: Optional[Dict[str, float]] = None,
     tool_vetting: Optional[Dict[str, Any]] = None,
     tool_positions: Optional[Dict[str, Dict[str, Any]]] = None,
-    # v4.1 gradient trust (ratified 2026-07-09) carry-over inputs:
+    # v4.1 gradient trust (ratified 2026-07-09) carry-over inputs; amended
+    # 2026-07-10 (rep_supply dropped — β cap gone, rep_shares → drift only):
     rep_shares: Optional[Dict[str, float]] = None,
-    rep_supply: Optional[float] = None,
     tool_credibility: Optional[Dict[str, float]] = None,
     tool_review_book: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -1412,7 +1273,6 @@ def federated_epoch_close(
         vetting=tool_vetting,
         positions=tool_positions,
         rep_shares=rep_shares,
-        rep_supply=rep_supply,
         credibility=tool_credibility,
         tool_review_book=tool_review_book,
     )
@@ -1430,7 +1290,6 @@ def federated_epoch_close(
         output_decimals=output_decimals,
         emission_pool=emission_pool,
         extra_node_agent_mint=tool_result["node_agent"],
-        extra_node_agent_rep=tool_result.get("node_agent_rep"),
     )
     # Keep tool_mint in the SAME UNITS as agent_mint: when the emission
     # pool normalized agent mints, scale the per-digest display values
@@ -1455,11 +1314,6 @@ def federated_epoch_close(
     # the next close.
     result["tool_credibility"] = tool_result["credibility_next"]
     result["tool_review_book"] = tool_result["tool_review_book_next"]
-    result["tool_beta"] = tool_result["beta"]
-    # ``agent_rep`` is the DECOUPLED per-agent reputation increment (v4.1
-    # [R6]); already present from federated_reconcile_epoch. Ensure it is
-    # always a dict for downstream consumers.
-    result.setdefault("agent_rep", {})
     result["epoch_root"] = canonical.epoch_root().hex()
     result["n_batches"] = len(canonical.ordered_batches)
     result["n_events"] = len(all_events)
@@ -1483,14 +1337,14 @@ def federated_epoch_close(
     from .world_model_substrate.charter_version import charter_hash as _charter_hash
 
     result["authoritative_payload"] = {
-        # schema 2 (v4.1): adds ``agent_rep`` — the anchor's mint merkle
-        # now commits (agent, agent_mint, agent_rep) so the decoupled
-        # reputation amount is federation-ratified, not self-reported
-        # under a ceiling (which would re-open the voice leak).
-        "schema": 2,
+        # schema 3 (fees-only, Decision 2026-07-10): MONEY ONLY — the
+        # anchor's mint merkle commits (agent, agent_mint) on a 2-field
+        # leaf. ``agent_rep`` is gone: REP is claimed DAO-side on ratified
+        # ATN earnings, not federation-minted here. (Schema 2 was the v4.1
+        # 3-field agent_rep shape; not reused for this different shape.)
+        "schema": 3,
         "epoch_root": result["epoch_root"],
         "agent_mint": result["agent_mint"],
-        "agent_rep": result.get("agent_rep", {}),
         "agent_novelty": result["agent_novelty"],
         "total_mint": result["total_mint"],
         "total_novelty": result["total_novelty"],

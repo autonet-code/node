@@ -235,6 +235,11 @@ class RPBConfig:
     substrate_address: str = ""         # Deployed Substrate.sol address. Read by
                                         # OnChainService; falls back to
                                         # rpb_contract_address if empty.
+    rep_token_address: str = ""         # Deployed RepToken.sol (DAO) address. The
+                                        # federated close reads REP (voice) share
+                                        # from its ERC20Votes checkpoints, pinned to
+                                        # the prev anchor timestamp (Decision
+                                        # 2026-07-10). Empty => genesis regime.
     charter_anchor_address: str = ""    # Optional: deployed CharterAnchor.sol
                                         # address. When set, the daemon can
                                         # compare its local charter_hash against
@@ -458,6 +463,8 @@ def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str
         seed["rpb_contract_address"] = contracts["rpb"]
     if contracts.get("substrate"):
         seed["substrate_address"] = contracts["substrate"]
+    if contracts.get("rep_token"):
+        seed["rep_token_address"] = contracts["rep_token"]
     if contracts.get("charter_anchor"):
         seed["charter_anchor_address"] = contracts["charter_anchor"]
     if contracts.get("service_registry"):
@@ -806,6 +813,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
         jurisdiction_id=resolved.get("jurisdiction_id", "autonet"),
         rpb_contract_address=resolved.get("rpb_contract_address", ""),
         substrate_address=resolved.get("substrate_address", ""),
+        rep_token_address=resolved.get("rep_token_address", ""),
         charter_anchor_address=resolved.get("charter_anchor_address", ""),
         registry_address=resolved.get("registry_address", ""),
         token_address=resolved.get("token_address", ""),

@@ -314,7 +314,7 @@ proofs fork.
 
 ## Decision (2026-07-10): fees-only emission + REP-from-earnings
 
-**RATIFIED, NOT BUILT. Sim-validated first**
+**BUILT 2026-07-10 (this working tree). Sim-validated first**
 (`experiments/econ_attest/sim/results/summary_fees_only.md`; rules module
 `fees_only_rules.py` drives the REAL v4.1 close with only the pool source
 and rep source changed). Supersedes the base+fees emission pool

@@ -54,9 +54,14 @@ from nodes.common.canonical_ordering import canonical_order  # noqa: E402
 from nodes.common.event_gossip import EventBatch, Keypair  # noqa: E402
 from nodes.common.federated_reconcile import (  # noqa: E402
     VOICE_EPSILON,
-    BASE_EMISSION_PER_EPOCH,
     federated_epoch_close,
 )
+
+# BASE_EMISSION_PER_EPOCH was deleted from federated_reconcile (fees-only
+# emission, Decision 2026-07-10). This historical harness kept its own base
+# as an engineering default; preserve it locally so the sim package still
+# imports. The live close no longer uses any base emission.
+BASE_EMISSION_PER_EPOCH = 100.0
 from nodes.common.world_model_substrate.adapter import CHARTER, N_DIMS  # noqa: E402
 
 EMBED_DIM = 32  # tiny embedding tail; mint math is width-indifferent

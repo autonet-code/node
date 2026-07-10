@@ -1,15 +1,17 @@
-"""Checkpointed ATN + reputation + snapshot-pinned voice state.
+"""Checkpointed ATN (money) + RepToken-sourced voice snapshot.
 
-Validates the IVotes-mechanism checkpoints on Substrate.sol for BOTH
-ledgers — ATN (``balanceOfAt`` / ``atnTotalSupplyAt``, money) and
-reputation (``reputationOfAt`` / ``reputationTotalSupplyAt``, voice) —
-Trace208 history, no delegation layer, and ``read_voice_state``'s
-architecture guarantee: voices are priced from REPUTATION AS OF the
-previous epoch's anchor block (ratified 2026-07-08: ATN = money,
-reputation = voice), so activity after the anchor cannot change this
-epoch's weights, and any two daemons reading at different times derive
-the identical maps. The headline money/voice split test: a vault ATN
-mint moves balances but NOT voice weights.
+Money only on Substrate (Decision 2026-07-10): Substrate.sol keeps its
+ATN checkpoints (``balanceOfAt`` / ``atnTotalSupplyAt``) but its
+reputation surface is DELETED. Voice now reads REP share from RepToken
+(DAO) pinned to the previous epoch's anchor TIMESTAMP (ERC20Votes,
+mode=timestamp). ``read_voice_state`` guarantees: voices are priced AS OF
+the previous anchor, so activity after it cannot change this epoch's
+weights, and any two daemons reading at different times derive the
+identical maps. Emission pool is FEES-ONLY (no base floor): zero service
+volume => zero pool.
+
+The headline money/voice split still holds: a vault ATN mint moves
+balances but NOT voice weights (REP, not ATN, is voice).
 """
 
 from __future__ import annotations
@@ -34,7 +36,6 @@ from nodes.common.canonical_ordering import canonical_order
 from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
 from nodes.common.event_gossip import EventBatch, Keypair
 from nodes.common.federated_reconcile import (
-    BASE_EMISSION_PER_EPOCH,
     VOICE_EPSILON,
     federated_epoch_close,
 )
@@ -42,6 +43,10 @@ from nodes.common.voice_state import read_voice_state
 
 SUBSTRATE_JSON = Path(
     "C:/code/autonet/artifacts/contracts/core/Substrate.sol/Substrate.json")
+REP_JSON = Path(
+    "C:/code/autonet/artifacts/contracts/test/MockRepToken.sol/MockRepToken.json")
+
+_ZERO = "0x0000000000000000000000000000000000000000"
 
 
 def _load_substrate() -> Tuple[list, str]:
@@ -51,12 +56,38 @@ def _load_substrate() -> Tuple[list, str]:
     return data["abi"], data["bytecode"]
 
 
-def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
+def _load_rep() -> Tuple[list, str]:
+    if not REP_JSON.exists():
+        pytest.skip(f"missing artifact: {REP_JSON}")
+    data = json.loads(REP_JSON.read_text(encoding="utf-8"))
+    return data["abi"], data["bytecode"]
+
+
+def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str,
+            vault_minter: str = _ZERO) -> str:
     contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor(deployer, "0x0000000000000000000000000000000000000000").transact({"from": deployer, "gas": 8_000_000})
+    # Substrate(treasury, vaultMinter, governor). governor=zero => frozen.
+    tx = contract.constructor(deployer, vault_minter, _ZERO).transact(
+        {"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
     return receipt.contractAddress
+
+
+def _deploy_rep(w3: Web3, deployer: str) -> Tuple[str, list]:
+    abi, bytecode = _load_rep()
+    contract = w3.eth.contract(abi=abi, bytecode=bytecode)
+    tx = contract.constructor().transact({"from": deployer, "gas": 3_000_000})
+    receipt = w3.eth.wait_for_transaction_receipt(tx)
+    assert receipt.status == 1
+    return receipt.contractAddress, abi
+
+
+def _set_votes(w3: Web3, rep_contract, deployer: str, account: str,
+               value: int) -> None:
+    tx = rep_contract.functions.setVotes(account, value).transact(
+        {"from": deployer, "gas": 300_000})
+    assert w3.eth.wait_for_transaction_receipt(tx).status == 1
 
 
 def _register_agent(w3: Web3, contract, agent_addr: str, seed: str) -> None:
@@ -87,9 +118,10 @@ def _one_batch(rpb: str, ev: dict, kp: Keypair, seq: int) -> EventBatch:
 
 def _tool_batches(rpb: str, author_addr: str,
                   digest: str = _DIGEST) -> List[EventBatch]:
-    """v3 mint fixture: mint is TOOL-USAGE only, so the epoch needs a
-    registration (author = the chain agent address), a distinct-fleet
-    greenlight, and attested receipts from third-party callers."""
+    """v3 mint fixture: mint is TOOL-USAGE only — a registration (author =
+    the chain agent address) plus attested receipts from third-party
+    callers. voice_weights=None here (local regime), so mint is per-fleet
+    log1p; the on-chain ATN it settles is what these tests read back."""
     reg = {
         "kind": "sub_claim_sprouted", "seq": 1,
         "author_agent": author_addr, "tendency_id": "correctness",
@@ -100,13 +132,6 @@ def _tool_batches(rpb: str, author_addr: str,
         "artifact_digest": digest,
         "manifest_meta": {"trust_class": "pinned", "author": author_addr},
     }
-    def _vet(vetter, seq):
-        return {
-            "kind": "tool_used", "seq": seq, "author_agent": vetter,
-            "manifest_digest": digest, "tool_author": author_addr,
-            "receipt_digest": f"v{seq:02d}" * 8, "ok": True,
-            "fee_atn": 0.0, "vet": True,
-        }
     def _receipt(caller, seq):
         return {
             "kind": "tool_used", "seq": seq, "author_agent": caller,
@@ -116,8 +141,6 @@ def _tool_batches(rpb: str, author_addr: str,
         }
     return [
         _one_batch(rpb, reg, Keypair.generate(), 1),
-        _one_batch(rpb, _vet("vetter-1", 1), Keypair.generate(), 1),
-        _one_batch(rpb, _vet("vetter-2", 1), Keypair.generate(), 1),
         _one_batch(rpb, _receipt("caller-1", 1), Keypair.generate(), 1),
         _one_batch(rpb, _receipt("caller-2", 2), Keypair.generate(), 1),
     ]
@@ -167,9 +190,12 @@ def fx():
     agent_addrs = accounts[1:4]
     for i, ad in enumerate(agent_addrs):
         _register_agent(w3, contract, ad, f"voice-agent-{i}")
+    rep_addr, rep_abi = _deploy_rep(w3, deployer)
+    rep_contract = w3.eth.contract(address=rep_addr, abi=rep_abi)
     return {
         "w3": w3, "abi": abi, "addr": addr, "contract": contract,
         "deployer": deployer, "agent_addrs": list(agent_addrs),
+        "rep_addr": rep_addr, "rep_contract": rep_contract,
     }
 
 
@@ -205,233 +231,82 @@ class TestCheckpointedATN:
         assert contract.functions.atnTotalSupply().call() == amount
 
 
-class TestCheckpointedReputation:
-    def test_reputation_of_at_tracks_history(self, fx):
-        """Reputation is checkpointed at the training mint. A block
-        BEFORE a later mint still reads the earlier (lower) reputation;
-        the ledger is monotonic and untransferable, so unlike ATN there
-        is exactly one write site."""
-        w3, contract = fx["w3"], fx["contract"]
-        # Epoch 1: anchor + mint to a first agent.
-        r1, res1 = _anchor_epoch(fx, fx["agent_addrs"], "e_r1", "rpb_r1")
-        minter, amount = _mint_for(fx, r1, res1, "e_r1")
-        block_after_first = w3.eth.block_number
-
-        # History at the first mint: minter has `amount`, supply == amount.
-        assert contract.functions.reputationOfAt(
-            minter, block_after_first).call() == amount
-        assert contract.functions.reputationTotalSupplyAt(
-            block_after_first).call() == amount
-        # Before anything minted: zero (no checkpoint <= block).
-        assert contract.functions.reputationOfAt(minter, 0).call() == 0
-        assert contract.functions.reputationTotalSupplyAt(0).call() == 0
-
-        # Epoch 2: anchor + mint AGAIN to the same agent — reputation is
-        # monotonic, so it accumulates.
-        r2, res2 = _anchor_epoch(fx, fx["agent_addrs"], "e_r2", "rpb_r2")
-        minter2, amount2 = _mint_for(fx, r2, res2, "e_r2")
-        assert minter2 == minter          # same agent mints (agent_ids[0])
-        block_after_second = w3.eth.block_number
-
-        # Present reputation reflects both mints; the EARLIER block still
-        # reads only the first mint (checkpoint history, no archive node).
-        assert contract.functions.agentReputation(minter).call() == (
-            amount + amount2)
-        assert contract.functions.reputationOfAt(
-            minter, block_after_first).call() == amount
-        assert contract.functions.reputationOfAt(
-            minter, block_after_second).call() == amount + amount2
-        assert contract.functions.reputationTotalSupplyAt(
-            block_after_second).call() == amount + amount2
-
-    def test_reputation_survives_atn_transfer(self, fx):
-        """Transferring ATN (money) does NOT move reputation (soulbound).
-        The one reputation write site is the mint — nothing else."""
-        w3, contract = fx["w3"], fx["contract"]
-        r1, res1 = _anchor_epoch(fx, fx["agent_addrs"], "e_rt", "rpb_rt")
-        minter, amount = _mint_for(fx, r1, res1, "e_rt")
-        rep_before = contract.functions.agentReputation(minter).call()
-
-        other = next(a for a in fx["agent_addrs"] if a != minter)
-        tx = contract.functions.transfer(other, amount).transact(
-            {"from": minter, "gas": 200_000})
-        assert w3.eth.wait_for_transaction_receipt(tx).status == 1
-
-        # ATN left the minter entirely; reputation is untouched on BOTH.
-        assert contract.functions.balanceOf(minter).call() == 0
-        assert contract.functions.agentReputation(minter).call() == rep_before
-        assert contract.functions.agentReputation(other).call() == 0
-
-
 class TestVoiceStateSnapshot:
     def test_no_anchor_means_no_weights(self, fx):
-        state = read_voice_state(fx["addr"], web3=fx["w3"])
+        state = read_voice_state(
+            fx["addr"], web3=fx["w3"], rep_token_address=fx["rep_addr"])
         assert state["snapshot_block"] is None
         assert state["voice_weights"] == {}
         assert state["owner_map"] == {}
-        # Epoch 1: floor-only pool (the faucet), nothing recycled yet.
-        assert state["emission_pool"] == BASE_EMISSION_PER_EPOCH
+        # Fees-only: empty pool at genesis (no base floor).
+        assert state["emission_pool"] == 0.0
         assert state["recycled"] == 0.0
 
-    def test_weights_pinned_to_anchor_block(self, fx):
-        """The architecture guarantee: activity AFTER the anchor cannot
-        change this epoch's voice weights — two daemons reading at
-        different times see the identical maps. Weights are now priced
-        from REPUTATION (voice), so ``supply`` is the reputation supply
-        (== the training amount, since training mints rep 1:1 with ATN)."""
-        w3, contract = fx["w3"], fx["contract"]
-        # Epoch 1: anchor, then mint (mint lands AFTER anchor #1's
-        # block, so it's invisible to a snapshot at anchor #1).
-        r1, res1 = _anchor_epoch(fx, fx["agent_addrs"], "e_v1", "rpb_v1")
-        minter, amount = _mint_for(fx, r1, res1, "e_v1")
+    def test_no_rep_token_means_genesis_regime(self, fx):
+        """No RepToken configured => empty rep maps (drift weight 1.0),
+        pool still fees-only."""
+        # An anchor exists so we exercise the non-cold-start path.
+        _anchor_epoch(fx, fx["agent_addrs"], "e_g1", "rpb_g1")
+        state = read_voice_state(fx["addr"], web3=fx["w3"])  # no rep token
+        assert state["snapshot_block"] is not None
+        assert state["voice_weights"] == {}
+        assert state["rep_shares"] == {}
+        assert state["rep_supply"] == 0
 
-        state_1 = read_voice_state(fx["addr"], web3=fx["w3"])
+    def test_weights_from_reptoken_pinned_to_anchor(self, fx):
+        """Voice reads REP from RepToken pinned to the anchor timestamp.
+        Set votes BEFORE the anchor so the anchor-ts read sees them; a
+        change AFTER the anchor does not move this epoch's weights."""
+        w3 = fx["w3"]
+        agents = fx["agent_addrs"]
+        holder = agents[0]
+        # Give the holder all the REP, then anchor (anchor ts >= the
+        # setVotes ts, so getPastVotes(holder, anchor_ts) == the value).
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], holder, 1000)
+        _anchor_epoch(fx, agents, "e_v1", "rpb_v1")
+
+        state_1 = read_voice_state(
+            fx["addr"], web3=w3, rep_token_address=fx["rep_addr"])
         assert state_1["snapshot_block"] is not None
         assert state_1["weight_source"] == "reputation"
-        assert state_1["supply"] == 0                      # pre-mint snapshot
-        # All registered agents present, all at the epsilon floor.
-        for a in fx["agent_addrs"]:
-            assert state_1["voice_weights"][a.lower()] == pytest.approx(
-                VOICE_EPSILON)
-
-        # Epoch 2: anchor again — the new snapshot sees the mint.
-        _anchor_epoch(fx, fx["agent_addrs"], "e_v2", "rpb_v2")
-        state_2 = read_voice_state(fx["addr"], web3=fx["w3"])
-        assert state_2["snapshot_block"] > state_1["snapshot_block"]
-        assert state_2["supply"] == amount        # reputation supply
-        assert state_2["voice_weights"][minter.lower()] == pytest.approx(
-            VOICE_EPSILON + 1.0)     # holds the entire reputation supply
-
-        # THE PIN: transfer ATN after anchor #2 — a re-read still returns
-        # the identical maps. Doubly pinned now: reputation is soulbound,
-        # so an ATN transfer cannot move voice weights at ALL (not even
-        # at the next epoch), and even a post-anchor MINT wouldn't count
-        # until the next snapshot.
-        other = next(a for a in fx["agent_addrs"] if a != minter)
-        tx = contract.functions.transfer(other, amount).transact(
-            {"from": minter, "gas": 200_000})
-        assert w3.eth.wait_for_transaction_receipt(tx).status == 1
-        state_2b = read_voice_state(fx["addr"], web3=fx["w3"])
-        assert state_2b["voice_weights"] == state_2["voice_weights"]
-        assert state_2b["snapshot_block"] == state_2["snapshot_block"]
-
-    def test_post_anchor_mint_does_not_change_pinned_weights(self, fx):
-        """Rep-based pin: an agent that TRAINS (mints reputation) after
-        the snapshot anchor carries no extra voice weight at the pinned
-        block — the checkpoint at the anchor block already fixed it."""
-        w3 = fx["w3"]
-        # Epoch 1 + mint, then epoch 2 whose snapshot sees that mint.
-        r1, res1 = _anchor_epoch(fx, fx["agent_addrs"], "e_pm1", "rpb_pm1")
-        minter, amount = _mint_for(fx, r1, res1, "e_pm1")
-        _anchor_epoch(fx, fx["agent_addrs"], "e_pm2", "rpb_pm2")
-        pinned = read_voice_state(fx["addr"], web3=fx["w3"])
-
-        # A NEW mint lands after anchor #2's block (epoch 3 close+mint),
-        # but we re-read without a fresh anchor: still anchor #2's block.
-        r3, res3 = _anchor_epoch(fx, fx["agent_addrs"], "e_pm3", "rpb_pm3")
-        # anchor #3 exists now, so re-reading pins to #3 — instead assert
-        # the earlier snapshot value is unchanged by reading reputationOfAt
-        # directly at the pinned block after the epoch-3 mint.
-        _mint_for(fx, r3, res3, "e_pm3")
-        contract = fx["contract"]
-        pinned_block = pinned["snapshot_block"]
-        # Reputation at the pinned block is still just the first mint.
-        assert contract.functions.reputationOfAt(
-            minter, pinned_block).call() == amount
-        assert contract.functions.reputationTotalSupplyAt(
-            pinned_block).call() == amount
-        assert pinned["voice_weights"][minter.lower()] == pytest.approx(
+        assert state_1["supply"] == 1000
+        # Holder owns the entire REP supply => share 1.0 + epsilon floor.
+        assert state_1["voice_weights"][holder.lower()] == pytest.approx(
             VOICE_EPSILON + 1.0)
+        assert state_1["rep_shares"][holder.lower()] == pytest.approx(1.0)
 
-    def test_vault_mint_moves_money_not_voice(self, fx):
-        """THE HEADLINE money/voice split. A vault ATN mint to a fleet
-        agent (purchased money) after the snapshot changes NEITHER the
-        pinned weights NOR — because reputation is what voice reads — the
-        weights at the NEXT epoch. Reputation supply is untouched by vault
-        mints, so a backer who buys ATN gains money, never voice."""
-        # Deploy WITH a vault minter so mintFromVault is enabled.
-        abi, bytecode = _load_substrate()
-        w3 = Web3(EthereumTesterProvider())
-        accounts = w3.eth.accounts
-        deployer, vault = accounts[0], accounts[5]
-        addr = _deploy_with_vault(w3, deployer, abi, bytecode, vault)
-        contract = w3.eth.contract(address=addr, abi=abi)
-        agent_addrs = list(accounts[1:4])
-        for i, ad in enumerate(agent_addrs):
-            _register_agent(w3, contract, ad, f"vault-voice-{i}")
-        vfx = {
-            "w3": w3, "abi": abi, "addr": addr, "contract": contract,
-            "deployer": deployer, "agent_addrs": agent_addrs,
-        }
-
-        # Epoch 1 + mint, epoch 2 snapshot sees it.
-        r1, res1 = _anchor_epoch(vfx, agent_addrs, "e_vm1", "rpb_vm1")
-        minter, amount = _mint_for(vfx, r1, res1, "e_vm1")
-        _anchor_epoch(vfx, agent_addrs, "e_vm2", "rpb_vm2")
-        before = read_voice_state(addr, web3=w3)
-        assert before["voice_weights"][minter.lower()] == pytest.approx(
-            VOICE_EPSILON + 1.0)
-        rep_supply_before = before["supply"]
-
-        # The vault mints a MASSIVE amount of ATN to another fleet agent —
-        # pure purchased money, no reputation.
-        buyer = next(a for a in agent_addrs if a != minter)
-        big = amount * 1000
-        tx = contract.functions.mintFromVault(buyer, big).transact(
-            {"from": vault, "gas": 300_000})
-        assert w3.eth.wait_for_transaction_receipt(tx).status == 1
-
-        # Anchor a fresh epoch so the NEXT snapshot would see any weight
-        # change — and confirm there is none. The buyer holds 1000x the
-        # ATN but still sits at the epsilon floor; the minter keeps all
-        # the voice. Reputation supply is unchanged.
-        _anchor_epoch(vfx, agent_addrs, "e_vm3", "rpb_vm3")
-        after = read_voice_state(addr, web3=w3)
-        assert after["supply"] == rep_supply_before      # rep supply flat
-        assert after["voice_weights"][buyer.lower()] == pytest.approx(
-            VOICE_EPSILON)                                # money ≠ voice
-        assert after["voice_weights"][minter.lower()] == pytest.approx(
-            VOICE_EPSILON + 1.0)
-        # Sanity: the buyer really did receive the money.
-        assert contract.functions.balanceOf(buyer).call() >= big
+        # THE PIN: change votes AFTER the anchor — a re-read against the
+        # SAME anchor returns the identical maps.
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], agents[1], 9000)
+        state_1b = read_voice_state(
+            fx["addr"], web3=w3, rep_token_address=fx["rep_addr"])
+        assert state_1b["voice_weights"] == state_1["voice_weights"]
+        assert state_1b["snapshot_block"] == state_1["snapshot_block"]
 
     def test_owner_wallet_not_agent_has_no_rep_term(self, fx):
-        """Owner wallets never earn reputation (only agents mint it), so a
-        bare owner wallet contributes NO reputation term to its household
-        — the household weight is exactly the sum of its bound agents'
-        reputation. Verified against a hand-built owner_map + a direct
-        reputation read (no owner-wallet seed, unlike the money view)."""
-        w3, contract = fx["w3"], fx["contract"]
-        # Bind two agents to one owner wallet (a non-agent EOA), then mint
-        # reputation to one of them.
+        """Only registered agents contribute REP to a household; a bare
+        owner wallet (not an agent, no OwnerBound) appears in no
+        household."""
+        w3 = fx["w3"]
+        agents = fx["agent_addrs"]
         owner_wallet = w3.eth.accounts[6]     # NOT a registered agent
-        a0, a1 = fx["agent_addrs"][0], fx["agent_addrs"][1]
-        # The federated mint lands on agent_ids[0]; check both agents'
-        # reputation and confirm the owner wallet has none.
-        r1, res1 = _anchor_epoch(fx, fx["agent_addrs"], "e_ow1", "rpb_ow1")
-        minter, amount = _mint_for(fx, r1, res1, "e_ow1")
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], agents[0], 500)
+        # Even if the owner wallet somehow held votes, it's not an agent.
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], owner_wallet, 500)
+        _anchor_epoch(fx, agents, "e_ow1", "rpb_ow1")
 
-        # Owner wallet has zero reputation at any block — it never trained.
-        assert contract.functions.agentReputation(owner_wallet).call() == 0
-        blk = w3.eth.block_number
-        assert contract.functions.reputationOfAt(owner_wallet, blk).call() == 0
-
-        # read_voice_state builds households ONLY from agent reputation.
-        # With no OwnerBound events here, each agent is its own household;
-        # the minter carries the full weight, the owner wallet appears in
-        # no household at all (it's neither an agent nor a bound owner).
-        _anchor_epoch(fx, fx["agent_addrs"], "e_ow2", "rpb_ow2")
-        state = read_voice_state(fx["addr"], web3=fx["w3"])
+        state = read_voice_state(
+            fx["addr"], web3=w3, rep_token_address=fx["rep_addr"])
         assert owner_wallet.lower() not in state["voice_weights"]
-        assert state["voice_weights"][minter.lower()] == pytest.approx(
-            VOICE_EPSILON + 1.0)
+        # agents[0] holds 500 of the 1000 supply => share 0.5.
+        assert state["rep_shares"][agents[0].lower()] == pytest.approx(0.5)
 
 
 class TestFeeRecycledEmission:
     def test_burned_fees_enter_exactly_one_window(self, fx):
-        """A service payment's burned fee share raises the pool for the
-        FIRST close whose snapshot window contains it, then leaves —
-        recycling conserves; nothing is counted twice."""
+        """A service payment's burned fee share raises the fees-only pool
+        for the FIRST close whose snapshot window contains it, then leaves.
+        No base floor — the pool is exactly the recycled burn."""
         w3, contract = fx["w3"], fx["contract"]
         # Epoch 1: anchor + mint so a payer has ATN.
         r1, res1 = _anchor_epoch(fx, fx["agent_addrs"], "e_f1", "rpb_f1")
@@ -451,51 +326,37 @@ class TestFeeRecycledEmission:
         assert (contract.functions.atnTotalSupply().call()
                 == supply_before - burned)
 
-        # Anchor epoch 2 — its window contains the payment.
+        # Anchor epoch 2 — its window contains the payment. Pool == burn.
         _anchor_epoch(fx, fx["agent_addrs"], "e_f2", "rpb_f2")
-        state = read_voice_state(fx["addr"], web3=fx["w3"])
+        state = read_voice_state(
+            fx["addr"], web3=fx["w3"], rep_token_address=fx["rep_addr"])
         assert state["recycled"] == pytest.approx(burned / 1_000_000.0)
-        assert state["emission_pool"] == pytest.approx(
-            BASE_EMISSION_PER_EPOCH + burned / 1_000_000.0)
+        assert state["emission_pool"] == pytest.approx(burned / 1_000_000.0)
 
-        # Anchor epoch 3 with no payments — the fee has left the
-        # window; pool falls back to the floor.
+        # Anchor epoch 3 with no payments — the fee has left the window;
+        # fees-only pool falls to zero (no base floor).
         _anchor_epoch(fx, fx["agent_addrs"], "e_f3", "rpb_f3")
-        state_3 = read_voice_state(fx["addr"], web3=fx["w3"])
+        state_3 = read_voice_state(
+            fx["addr"], web3=fx["w3"], rep_token_address=fx["rep_addr"])
         assert state_3["recycled"] == 0.0
-        assert state_3["emission_pool"] == BASE_EMISSION_PER_EPOCH
-
-
-_ZERO = "0x0000000000000000000000000000000000000000"
-
-
-def _deploy_with_vault(w3: Web3, deployer: str, abi: list, bytecode: str,
-                       vault_minter: str) -> str:
-    """Deploy Substrate with an explicit vaultMinter (treasury = deployer)."""
-    contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor(deployer, vault_minter).transact(
-        {"from": deployer, "gas": 8_000_000})
-    receipt = w3.eth.wait_for_transaction_receipt(tx)
-    assert receipt.status == 1
-    return receipt.contractAddress
+        assert state_3["emission_pool"] == 0.0
 
 
 class TestVaultMint:
     """mintFromVault: purchased ATN. Mints balance/supply/checkpoint like
-    the training path, but reputation is NEVER touched (money, not voice),
-    only vaultMinter may call, and a zero-vault deploy always reverts."""
+    the training path (money), only vaultMinter may call, and a zero-vault
+    deploy always reverts. Voice (REP) is a separate DAO ledger, untouched."""
 
-    def test_vault_minter_mints_atn_without_reputation(self):
+    def test_vault_minter_mints_atn(self):
         abi, bytecode = _load_substrate()
         w3 = Web3(EthereumTesterProvider())
         accounts = w3.eth.accounts
         deployer, vault, buyer = accounts[0], accounts[1], accounts[2]
-        addr = _deploy_with_vault(w3, deployer, abi, bytecode, vault)
+        addr = _deploy(w3, deployer, abi, bytecode, vault_minter=vault)
         contract = w3.eth.contract(address=addr, abi=abi)
 
         assert contract.functions.vaultMinter().call() == vault
         supply_before = contract.functions.atnTotalSupply().call()
-        rep_before = contract.functions.agentReputation(buyer).call()
         bal_before = contract.functions.balanceOf(buyer).call()
 
         amount = 7_000
@@ -513,16 +374,8 @@ class TestVaultMint:
                 == bal_before + amount)
         assert (contract.functions.atnTotalSupplyAt(mint_block).call()
                 == supply_before + amount)
-
-        # Voice did NOT: reputation is unchanged. Purchased money is not
-        # earned voice (ratified 2026-07-08). Neither the live ledger nor
-        # the CHECKPOINT moved — a vault mint writes no reputation history.
-        assert contract.functions.agentReputation(buyer).call() == rep_before
-        assert contract.functions.agentMintTotal(buyer).call() == rep_before
-        assert (contract.functions.reputationOfAt(buyer, mint_block).call()
-                == rep_before)
-        assert (contract.functions.reputationTotalSupplyAt(mint_block).call()
-                == contract.functions.networkMintTotal().call())
+        # agentMintTotal (tool-pool earnings) is NOT bumped by a vault mint.
+        assert contract.functions.agentMintTotal(buyer).call() == 0
 
         # A distinct VaultMint event fired.
         mints = contract.events.VaultMint().process_receipt(receipt)
@@ -532,9 +385,6 @@ class TestVaultMint:
 
     def _mint_rejected(self, w3, contract, caller: str, to: str,
                        amount: int) -> bool:
-        """True if mintFromVault(caller→to) does not succeed (raises at
-        submit or lands a status!=1 receipt). Explicit gas skips estimation,
-        so a revert surfaces as a failed receipt rather than an exception."""
         try:
             tx = contract.functions.mintFromVault(to, amount).transact(
                 {"from": caller, "gas": 300_000})
@@ -547,17 +397,14 @@ class TestVaultMint:
         w3 = Web3(EthereumTesterProvider())
         accounts = w3.eth.accounts
         deployer, vault, intruder, buyer = accounts[:4]
-        addr = _deploy_with_vault(w3, deployer, abi, bytecode, vault)
+        addr = _deploy(w3, deployer, abi, bytecode, vault_minter=vault)
         contract = w3.eth.contract(address=addr, abi=abi)
 
         supply_before = contract.functions.atnTotalSupply().call()
-        # An intruder cannot mint; neither can the deployer (treasury).
         assert self._mint_rejected(w3, contract, intruder, buyer, 1_000)
         assert self._mint_rejected(w3, contract, deployer, buyer, 1_000)
-        # No supply moved.
         assert contract.functions.atnTotalSupply().call() == supply_before
         assert contract.functions.balanceOf(buyer).call() == 0
-        # The real vault minter still works.
         assert not self._mint_rejected(w3, contract, vault, buyer, 1_000)
 
     def test_zero_vault_deploy_always_reverts(self):
@@ -565,11 +412,10 @@ class TestVaultMint:
         w3 = Web3(EthereumTesterProvider())
         accounts = w3.eth.accounts
         deployer, buyer = accounts[0], accounts[1]
-        addr = _deploy_with_vault(w3, deployer, abi, bytecode, _ZERO)
+        addr = _deploy(w3, deployer, abi, bytecode, vault_minter=_ZERO)
         contract = w3.eth.contract(address=addr, abi=abi)
 
         assert contract.functions.vaultMinter().call() == _ZERO
-        # Feature off: no caller can mint.
         for caller in (deployer, buyer):
             assert self._mint_rejected(w3, contract, caller, buyer, 1_000)
         assert contract.functions.atnTotalSupply().call() == 0

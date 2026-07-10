@@ -1,19 +1,18 @@
-"""Phase 7.1: Substrate.sol dual ledger.
+"""Phase 7.1: Substrate.sol money ledger.
 
-Validates the dual-token semantics:
+Money only (Decision 2026-07-10): Substrate.sol is a PURE MONEY contract.
+Its reputation surface (agentReputation / reputationOfAt /
+reputationTotalSupplyAt) is DELETED — REP lives DAO-side (RepToken),
+claimed on ratified ATN earnings. ``agentMintTotal`` remains as the
+cumulative tool-pool earnings counter (money). This file validates:
 
-  1. Reputation (agentReputation / agentMintTotal — same storage, two
-     names) is monotonic and soulbound: only ``recordTrainingForEpoch``
-     can increase it; no transfer function exists for it.
+  1. agentMintTotal is monotonic: only ``recordTrainingForEpoch`` can
+     increase it, and it tracks the ATN minted.
   2. ATN balance is transferable via ``transfer``, ``approve`` /
      ``transferFrom``, and shaped like a minimal ERC20.
-  3. Training mints both ledgers at the same amount in lockstep.
-  4. Transferring ATN does not affect reputation.
-  5. atnTotalSupply tracks total ATN minted (== sum of all training
+  3. Transferring ATN does not affect the cumulative earnings counter.
+  4. atnTotalSupply tracks total ATN minted (== sum of all training
      records' amounts).
-  6. Idempotency / EpochNotAnchored / AlreadySubmittedForEpoch
-     reverts (carried over from 5.6) still hold and don't credit
-     ledgers.
 """
 
 from __future__ import annotations
@@ -53,7 +52,8 @@ def _load_substrate() -> Tuple[list, str]:
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
     contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor(deployer, "0x0000000000000000000000000000000000000000").transact({"from": deployer, "gas": 8_000_000})
+    zero = "0x0000000000000000000000000000000000000000"
+    tx = contract.constructor(deployer, zero, zero).transact({"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1
     return receipt.contractAddress
@@ -146,22 +146,25 @@ def _build_close_and_anchor(chain_fixture, agent_ids, *, epoch_id: str = "e_71",
 
 
 # ---------------------------------------------------------------------------
-# Reputation: monotonic & soulbound
+# Earnings counter: monotonic, money-only
 # ---------------------------------------------------------------------------
 
 
-def test_reputation_alias_matches_agent_mint_total(chain):
-    """agentReputation(agent) returns the same value as agentMintTotal —
-    they're aliases on the same storage."""
-    contract = chain["contract"]
-    addr = chain["agent_addrs"][0]
-    a = contract.functions.agentMintTotal(addr).call()
-    b = contract.functions.agentReputation(addr).call()
-    assert a == b == 0  # nothing minted yet
+def test_reputation_surface_deleted_from_substrate(chain):
+    """Substrate.sol is a pure money contract: the reputation view surface
+    (agentReputation / reputationOfAt / reputationTotalSupplyAt) is GONE.
+    agentMintTotal (money) remains."""
+    abi = chain["abi"]
+    fn_names = {f.get("name") for f in abi if f.get("type") == "function"}
+    for gone in ("agentReputation", "reputationOfAt",
+                 "reputationTotalSupplyAt"):
+        assert gone not in fn_names, f"{gone} should be deleted"
+    assert "agentMintTotal" in fn_names
 
 
-def test_training_mints_reputation_and_atn_at_same_amount(chain):
-    """The signature property: reputation == ATN balance increment."""
+def test_training_mints_atn_and_bumps_earnings(chain):
+    """recordTrainingForEpoch mints ATN and increments agentMintTotal by
+    the same amount; atnTotalSupply tracks it."""
     w3 = chain["w3"]
     contract = chain["contract"]
     addr = chain["agent_addrs"][0]
@@ -169,16 +172,14 @@ def test_training_mints_reputation_and_atn_at_same_amount(chain):
     # msg.sender, so claimable mint-map entries must be address-keyed.
     agent_ids = list(chain["agent_addrs"])
 
-    rep_before = contract.functions.agentReputation(addr).call()
+    earn_before = contract.functions.agentMintTotal(addr).call()
     bal_before = contract.functions.balanceOf(addr).call()
     supply_before = contract.functions.atnTotalSupply().call()
-    assert rep_before == 0 and bal_before == 0 and supply_before == 0
+    assert earn_before == 0 and bal_before == 0 and supply_before == 0
 
-    # Run a federated close + anchor + submit for agent 0.
     result, epoch_id, resolver = _build_close_and_anchor(
-        chain, agent_ids, epoch_id="e_71_lockstep",
+        chain, agent_ids, epoch_id="e_71_money",
     )
-    # Find an agent that actually minted in this run.
     minting_aid = next(
         (aid for aid in agent_ids if result["agent_mint"].get(aid, 0) > 0),
         None,
@@ -197,29 +198,13 @@ def test_training_mints_reputation_and_atn_at_same_amount(chain):
     assert s.success
     expected = s.contribution_scaled
 
-    rep_after = contract.functions.agentReputation(minting_addr).call()
+    earn_after = contract.functions.agentMintTotal(minting_addr).call()
     bal_after = contract.functions.balanceOf(minting_addr).call()
     supply_after = contract.functions.atnTotalSupply().call()
 
-    assert rep_after == expected
+    assert earn_after == expected
     assert bal_after == expected
     assert supply_after == expected
-    # Lockstep — they incremented by the same amount.
-    assert rep_after == bal_after
-
-
-def test_reputation_has_no_transfer_function(chain):
-    """Reputation is soulbound. There must be NO function that
-    decreases agentReputation or moves it between addresses."""
-    abi = chain["abi"]
-    fn_names = {f.get("name") for f in abi if f.get("type") == "function"}
-    # Anti-list: any name that hints at moving reputation.
-    forbidden = {
-        "transferReputation", "moveReputation", "burnReputation",
-        "decreaseReputation", "setReputation",
-    }
-    overlap = fn_names & forbidden
-    assert not overlap, f"reputation transfer surface leaked: {overlap}"
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +212,9 @@ def test_reputation_has_no_transfer_function(chain):
 # ---------------------------------------------------------------------------
 
 
-def test_atn_transfer_moves_balance_does_not_affect_reputation(chain):
-    """An agent transfers ATN to a peer. ATN balance moves; reputation
-    on both sides unchanged."""
+def test_atn_transfer_moves_balance_does_not_affect_earnings(chain):
+    """An agent transfers ATN to a peer. ATN balance moves; the
+    cumulative earnings counter (agentMintTotal) on both sides unchanged."""
     w3 = chain["w3"]
     contract = chain["contract"]
     # Agent ids ARE addresses: merkle mint proofs are keyed by
@@ -257,9 +242,9 @@ def test_atn_transfer_moves_balance_does_not_affect_reputation(chain):
     s = submitter.submit_for_epoch(epoch_id)
     assert s.success and s.contribution_scaled > 0
 
-    src_rep_before = contract.functions.agentReputation(src_addr).call()
+    src_rep_before = contract.functions.agentMintTotal(src_addr).call()
     src_bal_before = contract.functions.balanceOf(src_addr).call()
-    dst_rep_before = contract.functions.agentReputation(dst_addr).call()
+    dst_rep_before = contract.functions.agentMintTotal(dst_addr).call()
     dst_bal_before = contract.functions.balanceOf(dst_addr).call()
 
     transfer_amount = src_bal_before // 2
@@ -270,15 +255,15 @@ def test_atn_transfer_moves_balance_does_not_affect_reputation(chain):
     rcpt = w3.eth.wait_for_transaction_receipt(tx)
     assert rcpt.status == 1
 
-    src_rep_after = contract.functions.agentReputation(src_addr).call()
+    src_rep_after = contract.functions.agentMintTotal(src_addr).call()
     src_bal_after = contract.functions.balanceOf(src_addr).call()
-    dst_rep_after = contract.functions.agentReputation(dst_addr).call()
+    dst_rep_after = contract.functions.agentMintTotal(dst_addr).call()
     dst_bal_after = contract.functions.balanceOf(dst_addr).call()
 
     # Balances moved.
     assert src_bal_after == src_bal_before - transfer_amount
     assert dst_bal_after == dst_bal_before + transfer_amount
-    # Reputations unchanged on both sides.
+    # Cumulative earnings unchanged on both sides.
     assert src_rep_after == src_rep_before
     assert dst_rep_after == dst_rep_before
 

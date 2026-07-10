@@ -170,10 +170,12 @@ SUBSTRATE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
-    # Per-agent balances
+    # Per-agent balances. Money only (2026-07-10): agentMintTotal is the
+    # cumulative tool-pool earnings counter (the agentReputation view is
+    # deleted from Substrate — REP is DAO-side on ratified earnings).
     {
         "inputs": [{"internalType": "address", "name": "agent", "type": "address"}],
-        "name": "agentReputation",
+        "name": "agentMintTotal",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function",
@@ -195,18 +197,15 @@ SUBSTRATE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
-    # Per-epoch training record (v4.1 gradient-trust: DECOUPLED ledgers).
-    # ``amount`` = ATN (money) mint and ``repAmount`` = reputation
-    # (soulbound voice) mint. BOTH are merkle-proven: the leaf is
-    # keccak256(bytes.concat(keccak256(abi.encode(agent, amount,
-    # repAmount)))) under the anchor's agentMintRoot (built by
-    # nodes/common/mint_merkle.py), so a claimant cannot inflate its
-    # voice by lying about repAmount. repAmount <= amount is enforced
-    # on-chain as defense-in-depth. repAmount == amount = legacy lockstep.
+    # Per-epoch training record (money only, Decision 2026-07-10).
+    # ``amount`` = ATN mint, merkle-proven: the leaf is
+    # keccak256(bytes.concat(keccak256(abi.encode(agent, amount)))) under
+    # the anchor's agentMintRoot (built by nodes/common/mint_merkle.py).
+    # REP is no longer minted here — it is claimed DAO-side (RepToken) on
+    # ratified ATN earnings, so the leaf reverts to 2-field (agent, amount).
     {
         "inputs": [
             {"internalType": "uint256",   "name": "amount",      "type": "uint256"},
-            {"internalType": "uint256",   "name": "repAmount",   "type": "uint256"},
             {"internalType": "bytes32",   "name": "epochIdHash", "type": "bytes32"},
             {"internalType": "bytes32[]", "name": "proof",       "type": "bytes32[]"},
         ],
@@ -754,31 +753,20 @@ class OnChainService:
         amount: int,
         epoch_id_hash: str | bytes,
         proof: list[str | bytes],
-        rep_amount: int | None = None,
     ) -> dict[str, Any]:
         """Sign and submit a ``recordTrainingForEpoch`` transaction.
 
-        v4.1 gradient-trust DECOUPLED ledgers: ``amount`` is the ATN
-        (money) mint and ``rep_amount`` is the reputation (soulbound
-        voice) mint. BOTH are federation-ratified: the merkle leaf under
-        the anchor's agentMintRoot commits (agent, amount, repAmount) —
-        ``proof`` must have been built over the SAME (amount, rep_amount)
-        pair (nodes/common/mint_merkle.py mint_merkle_proof), or the
-        contract reverts MintProofInvalid. The contract also enforces
-        ``rep_amount <= amount`` as defense-in-depth.
-
-        ``rep_amount`` defaults to ``amount`` (legacy lockstep: reputation
-        and ATN mint at the same value, matching mint_merkle's default
-        lockstep leaves) so existing callsites that don't yet split the
-        two behave exactly as before. Pass an explicit smaller
-        ``rep_amount`` to mint less voice than money (the v4.1 case where
-        some of the ATN came from zero-reputation callers).
+        Money only (Decision 2026-07-10): ``amount`` is the ATN mint,
+        federation-ratified — the merkle leaf under the anchor's
+        agentMintRoot commits (agent, amount), so ``proof`` must have been
+        built over the SAME amount (nodes/common/mint_merkle.py
+        mint_merkle_proof) or the contract reverts MintProofInvalid. REP
+        is no longer minted here; it is claimed DAO-side (RepToken) on
+        ratified ATN earnings.
 
         Per-(agent, epoch) idempotent on-chain; the epoch must already be
         anchored via ``submitAnchor``.
         """
-        if rep_amount is None:
-            rep_amount = amount
         try:
             from eth_account import Account
 
@@ -797,14 +785,14 @@ class OnChainService:
 
             try:
                 estimated = contract.functions.recordTrainingForEpoch(
-                    int(amount), int(rep_amount), eid, proof_bytes,
+                    int(amount), eid, proof_bytes,
                 ).estimate_gas({"from": account.address})
                 gas_limit = max(int(estimated * 12 // 10), 1_500_000)
             except Exception:
                 gas_limit = 2_000_000
 
             tx = contract.functions.recordTrainingForEpoch(
-                int(amount), int(rep_amount), eid, proof_bytes,
+                int(amount), eid, proof_bytes,
             ).build_transaction({
                 "from": account.address,
                 "nonce": nonce,
@@ -876,18 +864,19 @@ class OnChainService:
             return None
 
     async def get_agent_balances(self, address: str) -> dict[str, Any] | None:
-        """Read reputation + ATN balance + native gas balance for an agent.
+        """Read cumulative earnings + ATN balance + native gas balance.
 
-        Reputation is the soulbound ``agentMintTotal`` (renamed
-        semantically). ATN is the transferable ERC20-shaped balance
-        on the same contract. Native gas balance comes from the chain
-        directly — agents need it to pay for their own consensus txs.
+        Money only (Decision 2026-07-10): Substrate has no reputation
+        surface. The ``reputation`` field reports ``agentMintTotal`` —
+        cumulative tool-pool earnings (money). True REP/voice is claimed
+        DAO-side (RepToken) on these ratified earnings. ATN is the
+        transferable ERC20-shaped balance; native gas comes from the chain.
         """
         try:
             w3 = self._get_web3()
             contract = self._get_contract(w3)
             addr = w3.to_checksum_address(address)
-            reputation = contract.functions.agentReputation(addr).call()
+            reputation = contract.functions.agentMintTotal(addr).call()
             atn = contract.functions.balanceOf(addr).call()
             gas_balance = w3.eth.get_balance(addr)
             return {
@@ -934,7 +923,10 @@ class OnChainService:
                     if str(bound).lower() != str(owner_addr).lower():
                         continue
                     bal = int(contract.functions.balanceOf(addr).call())
-                    rep = int(contract.functions.agentReputation(addr).call())
+                    # Money only: agentMintTotal (cumulative pool earnings)
+                    # stands in for the deleted agentReputation surface. True
+                    # REP/voice is DAO-side (RepToken) on ratified earnings.
+                    rep = int(contract.functions.agentMintTotal(addr).call())
                     agents.append({
                         "agent_id": str(addr),
                         "balance_raw": bal,

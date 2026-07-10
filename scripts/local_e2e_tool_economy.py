@@ -205,7 +205,9 @@ const fs = require("fs");
 async function main() {
   const [deployer] = await ethers.getSigners();
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy((await ethers.getSigners())[0].address, "0x0000000000000000000000000000000000000000");
+  const zero = "0x0000000000000000000000000000000000000000";
+  // Substrate(treasury, vaultMinter, governor). governor=zero => fee frozen.
+  const substrate = await Substrate.deploy((await ethers.getSigners())[0].address, zero, zero);
   await substrate.waitForDeployment();
   const substrateAddr = await substrate.getAddress();
 
@@ -888,7 +890,7 @@ async def amain() -> int:
         # The anchor payload needs epoch_id; the driver already set it.
         close_result["epoch_id"] = epoch_id
 
-        rep_before = substrate.functions.agentReputation(author_addr).call()
+        earn_before = substrate.functions.agentMintTotal(author_addr).call()
         atn_before = substrate.functions.balanceOf(author_addr).call()
 
         # Anchor as OWNER A (the deployer/human wallet acting as the
@@ -921,19 +923,23 @@ async def amain() -> int:
         s6.note("record_tx", (sub_res.tx_hash or "(noop)")[:14] + "…")
         s6.note("scaled_mint", sub_res.contribution_scaled)
 
-        rep_after = substrate.functions.agentReputation(author_addr).call()
+        # Money only (Decision 2026-07-10): Substrate has no reputation
+        # surface. recordTrainingForEpoch mints ATN and bumps the
+        # cumulative tool-pool earnings counter (agentMintTotal) by the
+        # same amount; REP is claimed DAO-side (RepToken) on these ratified
+        # earnings, not minted here.
+        earn_after = substrate.functions.agentMintTotal(author_addr).call()
         atn_after = substrate.functions.balanceOf(author_addr).call()
-        rep_delta = rep_after - rep_before
+        earn_delta = earn_after - earn_before
         atn_delta = atn_after - atn_before
-        s6.note("reputation_delta", rep_delta)
+        s6.note("earnings_delta", earn_delta)
         s6.note("atn_delta", atn_delta)
         # The on-chain amount is the FULL agent_mint share (tool-author
-        # mint merged with any work/standing mint through the gate), not
-        # just the tool_mint entry. Verify against agent_mint[author].
+        # mint through the gate). Verify against agent_mint[author].
         expected = scale_mint(author_agent_mint_raw, MINT_SCALE)
-        assert rep_delta == expected, (rep_delta, expected)
+        assert earn_delta == expected, (earn_delta, expected)
         assert atn_delta == expected, (atn_delta, expected)
-        assert rep_delta > 0
+        assert earn_delta > 0
 
         # --- Service leg: register one Service + one payment-channel
         # round-trip. The channel is the ONLY settlement rail (the postpaid

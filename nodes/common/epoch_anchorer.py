@@ -229,25 +229,16 @@ class EpochAnchorer:
 
             ph = payload_hash(payload_bytes)
 
-            # Encode + CID the off-chain agent_mint blob.
+            # Encode + CID the off-chain agent_mint blob (money only,
+            # Decision 2026-07-10 — no agent_rep map; REP is DAO-claimed).
             agent_mint = close_result.get("agent_mint") or payload.get("agent_mint", {})
-            # v4.1 gradient trust: the close (schema 2) also carries the
-            # DECOUPLED per-agent reputation map. None (schema-1 / legacy
-            # close) = lockstep leaves (rep == mint); an EMPTY dict is
-            # meaningful (all authors earned zero voice this epoch), so
-            # never collapse {} to None with an ``or`` chain.
-            agent_rep = close_result.get("agent_rep")
-            if agent_rep is None:
-                agent_rep = payload.get("agent_rep")
-            mint_blob = encode_agent_mint_blob(agent_mint, agent_rep=agent_rep)
+            mint_blob = encode_agent_mint_blob(agent_mint)
             cid = cid_for_blob(mint_blob)
 
-            # Merkle root over the mint (+ rep) map: agents prove their
-            # share against this when claiming (recordTrainingForEpoch).
-            # Root and blob are built from the SAME agent_rep map — the
-            # submitter decodes the blob and rebuilds proofs against
-            # exactly what this root committed.
-            mint_root = mint_merkle_root(agent_mint, agent_rep=agent_rep)
+            # Merkle root over the mint map: agents prove their share
+            # against this when claiming (recordTrainingForEpoch), a
+            # 2-field (agent, amount) leaf.
+            mint_root = mint_merkle_root(agent_mint)
 
             try:
                 tx_hash = self._submit(
