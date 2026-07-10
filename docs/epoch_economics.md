@@ -7,6 +7,17 @@ is the mechanism it rides on. Candle close IMPLEMENTED for the local
 daemon path (2026-06-11) — federated candle + chain-derived seed still
 pending (see below).
 
+> **SUPERSEDED IN PART (2026-07-10, ratified NOT built):** the base
+> floor goes to ZERO — pool = burned fees only ("fees-only emission",
+> `docs/tool_substrate.md` Decision 2026-07-10, sim-validated in
+> `experiments/econ_attest/sim/results/summary_fees_only.md`). The
+> fee rail and window-summing below carry over unchanged; BASE_EMISSION
+> and the emission-rate decision are deleted. The "zero floor
+> deadlocks at zero supply" argument below no longer binds: ATN now
+> enters by PURCHASE (`mintFromVault`, 2026-07-08) — the vault, not
+> emission, primes the pump. Reputation stops minting with usage
+> entirely and becomes DAO-side pull claims on ATN earnings (1:1).
+
 ## Decision (2026-07-08): fee-recycled emission
 
 Ratified in discussion; replaces "pick an ATN-per-time-unit constant"

@@ -312,6 +312,115 @@ proofs fork.
 | Monetization | epoch mint (emission pays for commons) | per-work-item fees in ATN (2.5% recycled at settlement) |
 | Boundary case | connector-backed tools: run locally with the user's own credentials → tools (evidence-grade marker `attested`, no mint) | anything with an ask price and a counterparty |
 
+## Decision (2026-07-10): fees-only emission + REP-from-earnings
+
+**RATIFIED, NOT BUILT. Sim-validated first**
+(`experiments/econ_attest/sim/results/summary_fees_only.md`; rules module
+`fees_only_rules.py` drives the REAL v4.1 close with only the pool source
+and rep source changed). Supersedes the base+fees emission pool
+(`docs/epoch_economics.md` Decision 2026-07-08) and parts of the v4.1
+ruleset above, as marked. Ratified in discussion 2026-07-10.
+
+**The model, in two lines: ATN mints each epoch exactly what fees burned
+that epoch — money is always demand-backed. REP is claimed on ATN
+earnings only — voice is always work-backed.**
+
+1. **ATN epoch pool = burned fees, period.** No base emission. Pool =
+   the burned half of the 2.5% service fee accumulated since the last
+   anchor (the close already reads `ServiceFee` logs), distributed
+   pro-rata over tool-usage shares (v4.1 usage math). Zero service
+   volume → zero mint that epoch, and that is correct behavior: the
+   economy does not pretend to exist before demand does. Conservation
+   by construction (Σ minted == Σ burned); wash-pumping the pool is a
+   strict ATN loss (pay 100% of the fee, reclaim at most a pro-rata
+   slice of the burned half — sim: 0.14% reclaimed). This DELETES two
+   open economics decisions: emission rate and pool size.
+2. **REP = pull claims on ATN EARNINGS, 1:1, hardcoded.** The DAO suite
+   is the home: the trustless-economy claim pattern (epoch-based,
+   watermarked, pull) applied to two on-chain earnings ledgers read from
+   Substrate — `agentMintTotal` (tool-pool distributions, already
+   merkle-ratified) and a new cumulative per-recipient service-earnings
+   counter bumped by `payForService`. Service providers claim on net
+   revenue; tool authors claim on pool distributions; pure
+   spenders/buyers claim NOTHING ("money can be bought, voice must be
+   earned" — the earnings-only variant was chosen explicitly over
+   spendings+earnings, which would let whales buy voice). 1:1 is
+   hardcoded, no parity key: REP is only ever used as a SHARE, so a
+   constant rate cancels; a governable rate is a voice-repricing lever
+   with no named use case. If a need ever appears, governance ships a
+   change forward-only.
+3. **Terminology collapse (settled).** REP = Substrate reputation = the
+   DAO governance token = review weight — ONE asset, and under this
+   decision it lives in ONE place (RepToken). "Voice" was never a token,
+   just normalized REP share at close; the term retires. ATN = the
+   utility token. Payment ERC20s with vault parity sit outside.
+4. **Architecture inversion (the simplification that falls out):**
+   - Substrate.sol becomes a PURE MONEY contract: moves ATN, takes the
+     fee, records earnings. It stops minting reputation entirely.
+   - `recordTrainingForEpoch` returns to a money-only leaf (the v4.1
+     3-field `(agent, amount, repAmount)` leaf and `repAmount` plumbing
+     become unnecessary — REP is a pure function of ratified earnings,
+     computed DAO-side; you cannot lie about REP because you cannot lie
+     about ATN you provably received).
+   - ReputationMirror RETIRES (nothing to mirror; RepToken is the
+     source).
+   - The close weights reviews by REP share reading RepToken
+     checkpoints (pinned to prev anchor block) instead of Substrate rep.
+5. **v4.1 rules that survive vs die:**
+   - SURVIVE: one review rail (usage + inspection), drift weight =
+     rep_share × credibility with no ε floor on drift, continuous
+     reversal-aware credibility, burial-not-pruning, multiplicative
+     rank lift, household log1p damping, composition fan-out.
+   - DIES: **the supply-pegged β cap** (explicit user sign-off
+     2026-07-10). Under REP-from-earnings, tool USERS are spenders and
+     spenders never earn REP — honest tool usage is all zero-rep by
+     construction, so any β throttle on zero-rep weight zeroes honest
+     author income with it (sim: quality↔mint corr 0.90→0.00 under any
+     β schedule; no S₀ works). The job β did is done by REP dilution:
+     service revenue is ~98.75% of all ATN earned vs the 1.25% tool
+     pool, so honest providers out-mint any usage-flood ring ~80× in
+     REP — ring REP share flatlined ≈0 (5.1e-05) over 160 epochs in all
+     18 attack cells. D' (mint grants no rep) survives trivially — no
+     mint path grants REP at all now.
+   - DIES with it: the ε-floor-on-mint bootstrap question, BETA_MIN/
+     BETA_S0, and the S₀-recalibration launch chore.
+6. **Usage counts SAME-EPOCH-ONLY.** No retroactive credit from the
+   pre-demand dead period into the first funded epochs (sim: retroactive
+   counting is ×1.6 more capturable — rings pre-farm free usage while
+   honest users are idle).
+7. **Genesis REP seeding (new launch parameter, replaces β as the
+   youth defense).** The first funded epoch is an ε-vs-ε headcount
+   contest (nobody has earned REP yet) — a K=100 ring skims up to ~0.63
+   of that ONE pool (bounded, voiceless, tiny in absolute terms).
+   Seeding genesis REP to named founders/partner orgs removes the
+   symmetric moment entirely: rep-weighted mint dominates from epoch
+   one, and the seed DILUTES automatically as real earnings mint new
+   REP — the sunset is built in, no handoff ceremony. Allocation
+   (who/how much) is a user/launch decision.
+8. **Known residual exposure (accepted, priced): wash-trading buys REP
+   at ~the fee rate.** Self-dealing across two unlinked wallets is
+   undetectable in principle (household collapse does not hold — wallets
+   are free), so a washer pays the 2.5% fee per cycle and claims REP on
+   the 97.5% "revenue": voice at ~2.5 cents/REP, ~39× cheaper per
+   net-dollar than honest service. This is the consensus-capture COST
+   under the 2026-07-09 paradigm (majority IS truth; sims price capture,
+   not prevent it). The FEE is the only real lever (price of voice
+   scales linearly with it; claim-base tweaks cancel for honest and
+   washer alike); genesis REP multiplies the attacker's bill while the
+   network is young; every washed cent funds the treasury and the honest
+   pool. Fee value: OPEN — sweep wash-cost vs honest-volume elasticity
+   before blessing a number.
+
+Caveat pinned by the sims: the no-compounding verdict RESTS on providers
+claiming REP on ~full net revenue (98.75% of GMV). If the claim base is
+ever shrunk/capped/decayed, re-run S2 before shipping.
+
+**FLAG-DAY (when built):** close output/CID changes again (pool source,
+rep removal, β removal), `recordTrainingForEpoch` ABI changes back to a
+money-only leaf, Substrate gains the earnings counter, and the DAO gains
+the claim rail — fresh Substrate + daemons on the new build before the
+next close, same drill as v4.1.
+
 ## Doctrine (2026-07-08): the capability ratchet and the absorption frontier
 
 Two dynamics, ratified in discussion, that together carry the
