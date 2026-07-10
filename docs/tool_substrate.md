@@ -292,8 +292,10 @@ post-launch without changing the mechanism.
 cloning paid in every sim regime; surviving service revenue = exactly the
 moat rent (1−φ); prices compress toward moat; quality↔mint corr 0.92 in
 the honest regime (`attestation.md` §1). The one unwired piece of ratified
-doctrine — fee recycling on the `PaymentChannel` rail — is boarded as G1
-(`docs/BACKLOG.md`, `docs/services_market.md`).
+doctrine — fee recycling on the `PaymentChannel` rail (G1) — was closed
+2026-07-10: service commerce is ATN-only and `closeChannel` routes the
+payout through `payForService`, so the fee is taken at settlement
+(`docs/services_market.md`).
 
 **FLAG-DAY:** v4.1 changes the close output/CID (mint split, β, carried
 credibility + review book), the contract ABI (`recordTrainingForEpoch`
@@ -307,7 +309,7 @@ proofs fork.
 | Execution | local — your daemon, your data | remote — provider's machine |
 | Trust basis | code digest; the network KNOWS it | receipts + reviews; the network TRADES with it |
 | Verdicts | permanent claims in the substrate | none — market history only |
-| Monetization | epoch mint (emission pays for commons) | per-work-item fees, any ERC20 |
+| Monetization | epoch mint (emission pays for commons) | per-work-item fees in ATN (2.5% recycled at settlement) |
 | Boundary case | connector-backed tools: run locally with the user's own credentials → tools (evidence-grade marker `attested`, no mint) | anything with an ask price and a counterparty |
 
 ## Doctrine (2026-07-08): the capability ratchet and the absorption frontier

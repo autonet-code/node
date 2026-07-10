@@ -20,18 +20,19 @@ subprocess and kills it (taskkill /T on Windows) on teardown.
 
 The script prints a stage-by-stage scoreboard and exits nonzero if any
 stage FAILs. A stage may legitimately SKIP (with a printed reason)
-rather than sink time — currently only the ServiceMarket escrow leg is
-allowed to SKIP (if `MockERC20` is absent from the repo).
+rather than sink time — currently only the ServiceMarket channel leg is
+allowed to SKIP (it catches and notes any error rather than blocking).
 
 ## What it proves
 
 Seven stages, each verified:
 
 1. **Chain up** — launches `npx hardhat node` (localhost:8545), deploys
-   `Substrate.sol` + `ServiceMarket.sol` (ServiceRegistry + ServiceEscrow)
-   + `MockERC20` via a tiny inline `hardhat run` deployer. Hardhat's
-   funded `account[0]` is the author's human OWNER wallet, `account[1]`
-   the caller's.
+   `Substrate.sol` + `ServiceMarket.sol` (ServiceRegistry + PaymentChannel,
+   both taking the substrate address) via a tiny inline `hardhat run`
+   deployer. Settlement is ATN-only, so no MockERC20 is deployed.
+   Hardhat's funded `account[0]` is the author's human OWNER wallet,
+   `account[1]` the caller's.
 2. **Fleet** — two real ATN `Runtime`s in tmp dirs (`autonet.enabled=False`;
    we drive the substrate pieces directly). Runtime A hosts `author-1`
    (owner = account[0]); it also hosts `caller-1` (owner = account[1] on
@@ -68,8 +69,10 @@ Seven stages, each verified:
    proof against the anchored root). Verifies `agentReputation` and the
    ATN `balanceOf` both moved on chain by the scaled `agent_mint[author]`
    amount. Then registers one Service on `ServiceRegistry` and runs one
-   `ServiceEscrow` round-trip with MockERC20 (client funds → provider
-   delivers → client releases → provider balance +ask).
+   `PaymentChannel` round-trip in ATN (client opens a deposit → signs one
+   EIP-712 voucher → provider closes → provider balance +ask NET of the
+   2.5% service fee, routed through `payForService`; remainder refunds
+   fee-free after the challenge window).
 7. **Teardown** — kills the Hardhat node, removes tmp dirs, prints the
    scoreboard.
 
@@ -209,8 +212,9 @@ state, so a real green run uses no flags.
 
 Eight stages (0 bootstrap + A–G), each verified:
 
-- **0 chain up** — base deploy (Substrate + ServiceMarket + MockERC20)
-  plus a second inline deployer for `CharterAnchor` (governor =
+- **0 chain up** — base deploy (Substrate + ServiceMarket; ATN-only
+  settlement, no MockERC20) plus a second inline deployer for
+  `CharterAnchor` (governor =
   `account[0]`) and `VentureVaultFactory`.
 - **A CharterAnchor** — anchor the live `charter_hash()` (v1), assert the
   daemon's `verify_charter_against_anchor` MATCHES; anchor a bogus hash

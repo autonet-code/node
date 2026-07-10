@@ -6,12 +6,13 @@ tools = local, known, minted commons; services = remote counterparties,
 market-priced). This doc specifies the market rail.
 
 A Service is a remote API published by an agent (ultimately by its
-human benefactor): general-purpose, priced per work item, payable in
-**any ERC20** — service commerce is deliberately independent of ATN's
-constitutional roles (mint, reputation, alignment pricing). The system
-is decentralized because it leverages the consensus we already have:
-gossip for liveness/discovery, chain for identity/settlement, blob
-store for content.
+human benefactor): general-purpose, priced per work item, settled in
+**ATN** (ratified 2026-07-10 — the earlier "any ERC20" doctrine is
+retired; see the settlement section). Service commerce is otherwise
+independent of ATN's constitutional roles: it earns NO mint, reputation,
+or verdict-layer standing. The system is decentralized because it
+leverages the consensus we already have: gossip for liveness/discovery,
+chain for identity/settlement, blob store for content.
 
 ## What the network can and cannot know
 
@@ -46,7 +47,7 @@ sha256-addressed JSON, same rail as tool manifests:
   "author": "<agent-id>",
   "author_pubkey": "0x...",
   "author_sig": "...",              // over canonical bytes, sig excluded
-  "ask": { "token": "0x...ERC20", "amount": "1000000", "unit": "per_item" },
+  "ask": { "amount": "1000000", "unit": "per_item" },   // ATN-denominated (ratified 2026-07-10)
   "endpoint_hint": "wss://...",     // mutable presence lives on-chain, this is advisory
   "version_of": null,
   "created_ts": 0
@@ -59,12 +60,14 @@ Per-service contracts buy custom logic no v1 service needs and cost a
 factory + N deployments + growing audit surface. Instead:
 
 - `ServiceRegistry` (or folded into Substrate.sol as the Service
-  primitive reborn): `registerService(specDigest, token, askAmount)`,
-  `updateServiceAsk`, `retireService`. Events → indexer → Firestore
-  `services` collection (chain = truth, blob = storage, Firestore =
-  web2 cache; exact same doctrine as agents/tools).
+  primitive reborn): `registerService(specDigest, askAmount)`,
+  `updateServiceAsk`, `retireService`. Asks are ATN-denominated (no
+  token field). Events → indexer → Firestore `services` collection
+  (chain = truth, blob = storage, Firestore = web2 cache; exact same
+  doctrine as agents/tools).
 - Settlement: **the prepaid payment channel, ONLY** (ratified
-  2026-07-04, late — the postpaid escrow was DELETED, not deferred).
+  2026-07-04, late — the postpaid escrow was DELETED, not deferred),
+  and **ATN-only** (ratified 2026-07-10 — see below).
   Rationale: an unarbitrated escrow cannot know delivery truth, so
   some party must bear the lie — a false "delivered" claim steals the
   deposit, or a silent client steals the work. The channel dissolves
@@ -79,6 +82,18 @@ factory + N deployments + growing audit surface. Instead:
   `unit` meters, vouchers stream against consumption. Streaming
   contracts (Sablier-style) only for subscription-shaped services —
   wrong default for per-item work.
+  - **Fee at settlement (ATN-only, ratified 2026-07-10 — closes G1).**
+    `closeChannel` routes the provider payout through
+    `Substrate.payForService(provider, pay, channelId)`, so the 2.5%
+    service fee (half burned into the recycled emission pool, half to
+    the DAO treasury) is taken on the canonical rail — the same fee the
+    direct `payForService` rail already charged. Vouchers stay
+    GROSS-denominated; the provider receives net of the fee. The
+    remainder refund is not a service payment and pays no fee. The
+    theft-ceiling analysis is unchanged (the fee sits on the provider
+    side of every voucher, so the bound is still one client-sized
+    increment, now net). ATN-only removed the "non-ATN channels need a
+    fee design" open question — service commerce is ATN.
 
 ### 3. Daemon as server: the wss rail, reused
 
@@ -163,18 +178,18 @@ more capable commons does more work and buys more of the genuinely
 scarce remote things.
 
 **Honest wiring gap (G1, 2026-07-09 econ-attestation audit —
-`experiments/econ_attest/attestation.md`).** The mechanism that makes
-"services finance the commons that replaces them" real is fee recycling:
-2.5% of a service payment burns and re-enters the emission pool (the pool
-that pays tool authors). That fee currently fires ONLY on
-`Substrate.payForService` — the `ServiceMarket.PaymentChannel`
-settlement, which is the ratified DEFAULT rail, pays providers via raw
-`safeTransfer`: no fee, no burn, `recycled = 0`. So on the canonical
-channel path the "two grow each other" doctrine is ASPIRATIONAL until the
-fee is taken at channel settlement (or channel payouts route through
-`payForService`). Boarded as a pending user decision (`docs/BACKLOG.md`);
-the fee/burn mechanic is ATN-denominated, so non-ATN channels need a
-design call too.
+`experiments/econ_attest/attestation.md`) — RESOLVED 2026-07-10.** The
+mechanism that makes "services finance the commons that replaces them"
+real is fee recycling: 2.5% of a service payment burns and re-enters the
+emission pool (the pool that pays tool authors). That fee originally
+fired ONLY on `Substrate.payForService` — the `ServiceMarket.
+PaymentChannel` settlement, the ratified DEFAULT rail, paid providers via
+raw `safeTransfer`: no fee, no burn, `recycled = 0`. The decision (user,
+2026-07-10) is **service commerce is ATN-only**, and `closeChannel` now
+routes the provider payout through `Substrate.payForService(provider,
+pay, channelId)` — so the fee is taken at settlement on the canonical
+rail and the "two grow each other" doctrine holds. The non-ATN
+design call the gap flagged is moot: there are no non-ATN channels.
 
 ## Open knobs (sims / user)
 
@@ -183,4 +198,3 @@ design call too.
 2. Channel close/challenge windows.
 3. Whether reviews live as chain events (costly, permanent) or gossip
    + indexer (cheap, replayable) — lean gossip.
-4. Non-ATN token budgets for agents (owner-granted allowances).

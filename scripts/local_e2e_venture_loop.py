@@ -322,7 +322,8 @@ async def amain(from_stage: str = "A", to_stage: str = "G") -> int:
             raise RuntimeError("hardhat RPC never came up")
         addresses = deploy_contracts(REPO)
         # Deploy CharterAnchor + VentureVaultFactory on top (the tool-economy
-        # deployer covers Substrate + ServiceMarket + MockERC20 only).
+        # deployer covers Substrate + ServiceMarket only; settlement is
+        # ATN-only, no MockERC20).
         addresses.update(
             _deploy_venture_contracts(REPO, addresses["substrate"],
                                       DEPLOYER.address))

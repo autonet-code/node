@@ -17,12 +17,14 @@ gains `repAmount`. PENDING (v4.1):
   merkle leaf; needs a clean genesis on a fresh Substrate + all daemons
   on the v4.1 build before the next federated close (supersedes the v3
   flag-day window below).
-- **G1 — channel fee decision (USER):** the 2.5% burn/recycle fires only
-  on `Substrate.payForService`; `ServiceMarket.PaymentChannel` settles
-  via raw `safeTransfer` (no fee, recycled=0). "Services finance the
-  commons" is unwired on the default rail. Fix: take the fee at channel
-  settlement (or route payouts through payForService); non-ATN channels
-  need a design call (fee is ATN-denominated).
+- **G1 — channel fee — RESOLVED 2026-07-10 (ATN-only + fee at
+  settlement).** Decision (user): service commerce is ATN-only;
+  `ServiceMarket.PaymentChannel.closeChannel` now routes the provider
+  payout through `Substrate.payForService`, so the 2.5% burn/recycle
+  fires on the canonical rail (provider receives net; refund is
+  fee-free). The `token` field is gone from the registry + channel. The
+  non-ATN design call is moot. Built, not deployed (needs the v4.1
+  flag-day redeploy).
 - **S₀ recalibration at launch (USER):** `BETA_S0=5000` (50 epochs × 100
   pool) is the sim's engineering pick over a short 300-epoch horizon;
   retune to the real epoch cadence + pool size before mainnet.

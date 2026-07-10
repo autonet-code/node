@@ -22,6 +22,60 @@ async function deployToken(name = "TestUSD", symbol = "TUSD") {
   return t;
 }
 
+// ---------------------------------------------------------------------------
+// ATN faucet: ATN is minted only via Substrate.recordTrainingForEpoch over an
+// anchored epoch (v4.1 gradient trust — the leaf commits agent/amount/repAmount).
+// These mint to a registered faucet agent, which then transfers freely.
+// ---------------------------------------------------------------------------
+
+function mintLeaf(agentAddr, amount, repAmount = amount) {
+  const inner = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["address", "uint256", "uint256"],
+      [agentAddr, amount, repAmount]
+    )
+  );
+  return ethers.keccak256(ethers.solidityPacked(["bytes32"], [inner]));
+}
+
+// Substrate's service fee (fee-recycled emission) is taken from every
+// payForService at SERVICE_FEE_BPS. Callers wanting an exact net at the
+// recipient gross-up: smallest g whose net (g - fee(g)) equals `net`.
+function grossFor(net) {
+  let g = (net * 10000n) / 9750n;
+  while (g - (g * 250n) / 10000n < net) g += 1n;
+  return g;
+}
+
+let _epochCounter = 0;
+async function mintATN(substrate, submitterSigner, faucetSigner, amount) {
+  _epochCounter += 1;
+  const epochId = "epoch-" + _epochCounter;
+  const root = mintLeaf(faucetSigner.address, amount);
+  const prevEpochRoot = await substrate.latestEpochRoot();
+  const prevAnchorHash = await substrate.latestAnchorHash();
+  await substrate
+    .connect(submitterSigner)
+    .submitAnchor(
+      epochId,
+      digest("root-" + epochId),
+      prevEpochRoot,
+      prevAnchorHash,
+      "cid-" + epochId,
+      digest("payload-" + epochId),
+      root
+    );
+  await substrate
+    .connect(faucetSigner)
+    .recordTrainingForEpoch(amount, amount, digest(epochId), []);
+}
+
+// Fund `to` with `amount` ATN by minting to the faucet and transferring.
+async function fundATN(substrate, submitter, faucet, to, amount) {
+  await mintATN(substrate, submitter, faucet, amount);
+  await substrate.connect(faucet).transfer(to, amount);
+}
+
 // Sign an EIP-712 voucher (channelId, cumulativeAmount) for a PaymentChannel.
 async function signVoucher(channel, signer, channelId, cumulativeAmount) {
   const net = await ethers.provider.getNetwork();
@@ -49,4 +103,8 @@ module.exports = {
   registerAgent,
   deployToken,
   signVoucher,
+  mintLeaf,
+  grossFor,
+  mintATN,
+  fundATN,
 };

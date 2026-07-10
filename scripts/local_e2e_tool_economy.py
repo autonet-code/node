@@ -210,32 +210,24 @@ async function main() {
   const substrateAddr = await substrate.getAddress();
 
   // ServiceMarket.sol declares two contracts. Deploy the registry
-  // (constructor takes the substrate address); the payment channel takes a
-  // single challenge-window arg — it is the ONLY settlement rail (the
-  // postpaid escrow was deleted). MockERC20 for the channel round-trip.
+  // (constructor takes the substrate address); the payment channel takes the
+  // substrate address + a challenge-window arg — it is the ONLY settlement
+  // rail (the postpaid escrow was deleted) and settles in ATN through
+  // Substrate.payForService (ATN-only, ratified 2026-07-10).
   const Registry = await ethers.getContractFactory("ServiceRegistry");
   const registry = await Registry.deploy(substrateAddr);
   await registry.waitForDeployment();
   const registryAddr = await registry.getAddress();
 
   const Channel = await ethers.getContractFactory("PaymentChannel");
-  const channel = await Channel.deploy(3600);
+  const channel = await Channel.deploy(substrateAddr, 3600);
   await channel.waitForDeployment();
   const channelAddr = await channel.getAddress();
-
-  let mockErc20 = null;
-  try {
-    const Mock = await ethers.getContractFactory("MockERC20");
-    const mock = await Mock.deploy("MockUSD", "mUSD");
-    await mock.waitForDeployment();
-    mockErc20 = await mock.getAddress();
-  } catch (e) { mockErc20 = null; }
 
   const out = {
     substrate: substrateAddr,
     serviceRegistry: registryAddr,
     paymentChannel: channelAddr,
-    mockErc20: mockErc20,
   };
   fs.writeFileSync(process.env.DEPLOY_OUT, JSON.stringify(out, null, 2));
   console.log("DEPLOYED " + JSON.stringify(out));
@@ -945,127 +937,119 @@ async def amain() -> int:
 
         # --- Service leg: register one Service + one payment-channel
         # round-trip. The channel is the ONLY settlement rail (the postpaid
-        # escrow was deleted): client=OWNER B opens a channel to the provider
-        # (author) funded with MockERC20, signs ONE off-chain EIP-712 voucher
-        # covering a single item's ask, the provider closes to collect it, and
-        # the unused remainder refunds to the client after the challenge
-        # window. We verify provider delta == voucher amount and the client
-        # refund == deposit - voucher. ---
+        # escrow was deleted) and settlement is ATN-ONLY (ratified 2026-07-10):
+        # client=OWNER B opens a channel to the provider (author) funded with
+        # ATN, signs ONE off-chain EIP-712 voucher covering a single item's
+        # ask, the provider closes to collect it, and the unused remainder
+        # refunds to the client after the challenge window. closeChannel routes
+        # the payout through Substrate.payForService, so the provider receives
+        # NET of the 2.5% service fee (fee-recycled emission, closes G1). We
+        # verify provider delta == net-of-fee and the client refund ==
+        # deposit - GROSS voucher. ---
         try:
             reg_abi = load_abi("ServiceRegistry")
             registry = w3.eth.contract(
                 address=Web3.to_checksum_address(addresses["serviceRegistry"]),
                 abi=reg_abi)
             spec_digest = bytes.fromhex("cd" * 32)
-            token = addresses.get("mockErc20")
-            if not token:
-                s6.note("channel_leg", "SKIP (no MockERC20 in repo)")
-            else:
-                token = Web3.to_checksum_address(token)
-                ITEM_ASK = 1000       # one item's ask (the voucher amount)
-                CHANNEL_DEPOSIT = 3000  # client escrows more than one item
-                send_agent_tx(
-                    w3,
-                    registry.functions.registerService(spec_digest, token, ITEM_ASK),
-                    author_key, author_addr)
-                service_id = registry.functions.serviceCount().call()
-                s6.note("service_id", service_id)
+            ITEM_ASK = 1000       # one item's ask (the GROSS voucher amount)
+            CHANNEL_DEPOSIT = 3000  # client escrows more than one item
+            # Service fee mirrors Substrate.SERVICE_FEE_BPS (2.5%); the provider
+            # receives net-of-fee because closeChannel routes via payForService.
+            fee = (ITEM_ASK * 250) // 10000
+            net_item = ITEM_ASK - fee
 
-                mock_abi = load_abi("MockERC20")
-                mock = w3.eth.contract(address=token, abi=mock_abi)
-                channel_addr = Web3.to_checksum_address(
-                    addresses["paymentChannel"])
-                channel_abi = load_abi("PaymentChannel")
-                channel = w3.eth.contract(
-                    address=channel_addr, abi=channel_abi)
+            send_agent_tx(
+                w3,
+                registry.functions.registerService(spec_digest, ITEM_ASK),
+                author_key, author_addr)
+            service_id = registry.functions.serviceCount().call()
+            s6.note("service_id", service_id)
 
-                # Mint/allocate mUSD to owner B (the client). MockERC20 likely
-                # has mint(to, amount) — try it, else assume constructor funded.
-                try:
-                    tx = mock.functions.mint(owner_b.address, 100000)\
-                        .build_transaction({
-                            "from": owner_b.address,
-                            "nonce": w3.eth.get_transaction_count(owner_b.address),
-                            "gas": 200000, "gasPrice": w3.eth.gas_price,
-                            "chainId": CHAIN_ID})
-                    signed = w3.eth.account.sign_transaction(
-                        tx, owner_b._private_key.hex())
-                    raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
-                    w3.eth.wait_for_transaction_receipt(
-                        w3.eth.send_raw_transaction(raw), timeout=60)
-                except Exception:
-                    pass
+            channel_addr = Web3.to_checksum_address(
+                addresses["paymentChannel"])
+            channel_abi = load_abi("PaymentChannel")
+            channel = w3.eth.contract(
+                address=channel_addr, abi=channel_abi)
 
-                def _owner_tx(call, owner, gas=300000):
-                    tx = call.build_transaction({
-                        "from": owner.address,
-                        "nonce": w3.eth.get_transaction_count(owner.address),
-                        "gas": gas, "gasPrice": w3.eth.gas_price,
-                        "chainId": CHAIN_ID})
-                    signed = w3.eth.account.sign_transaction(
-                        tx, owner._private_key.hex())
-                    raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
-                    r = w3.eth.wait_for_transaction_receipt(
-                        w3.eth.send_raw_transaction(raw), timeout=60)
-                    if r.status != 1:
-                        raise RuntimeError("owner tx reverted")
+            def _owner_tx(call, owner, gas=300000):
+                tx = call.build_transaction({
+                    "from": owner.address,
+                    "nonce": w3.eth.get_transaction_count(owner.address),
+                    "gas": gas, "gasPrice": w3.eth.gas_price,
+                    "chainId": CHAIN_ID})
+                signed = w3.eth.account.sign_transaction(
+                    tx, owner._private_key.hex())
+                raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+                r = w3.eth.wait_for_transaction_receipt(
+                    w3.eth.send_raw_transaction(raw), timeout=60)
+                if r.status != 1:
+                    raise RuntimeError("owner tx reverted")
 
-                # Client opens the channel (deposit) to the provider.
-                client_mUSD_before = mock.functions.balanceOf(owner_b.address).call()
-                prov_before = mock.functions.balanceOf(author_addr).call()
-                _owner_tx(mock.functions.approve(channel_addr, CHANNEL_DEPOSIT),
-                          owner_b)
-                _owner_tx(
-                    channel.functions.openChannel(
-                        author_addr, token, CHANNEL_DEPOSIT),
-                    owner_b)
-                channel_id = channel.functions.channelCount().call()
+            # Fund the client (owner B) with ATN from the provider (author),
+            # who was just minted ATN by the settlement leg above. ATN is the
+            # only currency — no MockERC20.
+            send_agent_tx(
+                w3,
+                substrate.functions.transfer(owner_b.address, CHANNEL_DEPOSIT),
+                author_key, author_addr)
 
-                # Client signs ONE off-chain EIP-712 voucher for a single
-                # item's ask. Sign the raw typed-data digest the contract
-                # exposes via voucherHash() — same robustness trick as the
-                # owner-binding signer: whatever the contract hashes is what
-                # we sign.
-                from eth_account import Account
-                voucher_digest = channel.functions.voucherHash(
-                    channel_id, ITEM_ASK).call()
-                voucher_digest = bytes(voucher_digest)
-                client_acct = Account.from_key(owner_b._private_key.hex())
-                v_signed = (
-                    Account._sign_hash(voucher_digest, client_acct._private_key)
-                    if hasattr(Account, "_sign_hash")
-                    else client_acct.unsafe_sign_hash(voucher_digest))
-                voucher_sig = bytes(v_signed.signature)
+            # Client opens the channel (ATN deposit) to the provider.
+            client_atn_before = substrate.functions.balanceOf(owner_b.address).call()
+            prov_before = substrate.functions.balanceOf(author_addr).call()
+            _owner_tx(substrate.functions.approve(channel_addr, CHANNEL_DEPOSIT),
+                      owner_b)
+            _owner_tx(
+                channel.functions.openChannel(author_addr, CHANNEL_DEPOSIT),
+                owner_b)
+            channel_id = channel.functions.channelCount().call()
 
-                # Provider (author) closes the channel with the voucher.
-                send_agent_tx(
-                    w3,
-                    channel.functions.closeChannel(
-                        channel_id, ITEM_ASK, voucher_sig),
-                    author_key, author_addr)
-                prov_after = mock.functions.balanceOf(author_addr).call()
-                channel_provider_delta = prov_after - prov_before
-                s6.note("channel_provider_delta", channel_provider_delta)
-                assert channel_provider_delta == ITEM_ASK, (
-                    channel_provider_delta, ITEM_ASK)
+            # Client signs ONE off-chain EIP-712 voucher for a single item's
+            # ask. Sign the raw typed-data digest the contract exposes via
+            # voucherHash() — same robustness trick as the owner-binding
+            # signer: whatever the contract hashes is what we sign.
+            from eth_account import Account
+            voucher_digest = channel.functions.voucherHash(
+                channel_id, ITEM_ASK).call()
+            voucher_digest = bytes(voucher_digest)
+            client_acct = Account.from_key(owner_b._private_key.hex())
+            v_signed = (
+                Account._sign_hash(voucher_digest, client_acct._private_key)
+                if hasattr(Account, "_sign_hash")
+                else client_acct.unsafe_sign_hash(voucher_digest))
+            voucher_sig = bytes(v_signed.signature)
 
-                # Advance past the challenge window on the running hardhat
-                # node, then withdraw the client's remainder (permissionless).
-                w3.provider.make_request("evm_increaseTime", [3601])
-                w3.provider.make_request("evm_mine", [])
-                send_agent_tx(
-                    w3,
-                    channel.functions.withdrawRemainder(channel_id),
-                    author_key, author_addr)  # anyone can trigger the refund
-                client_mUSD_after = mock.functions.balanceOf(owner_b.address).call()
-                channel_client_refund = (
-                    client_mUSD_after - (client_mUSD_before - CHANNEL_DEPOSIT))
-                s6.note("channel_client_refund", channel_client_refund)
-                # Client got back deposit - voucher; net spend == one voucher.
-                assert channel_client_refund == CHANNEL_DEPOSIT - ITEM_ASK, (
-                    channel_client_refund, CHANNEL_DEPOSIT - ITEM_ASK)
-                net_client_spend = client_mUSD_before - client_mUSD_after
-                assert net_client_spend == ITEM_ASK, (net_client_spend, ITEM_ASK)
+            # Provider (author) closes the channel with the voucher.
+            send_agent_tx(
+                w3,
+                channel.functions.closeChannel(
+                    channel_id, ITEM_ASK, voucher_sig),
+                author_key, author_addr)
+            prov_after = substrate.functions.balanceOf(author_addr).call()
+            channel_provider_delta = prov_after - prov_before
+            s6.note("channel_provider_delta", channel_provider_delta)
+            # Provider received the voucher amount NET of the service fee.
+            assert channel_provider_delta == net_item, (
+                channel_provider_delta, net_item)
+
+            # Advance past the challenge window on the running hardhat
+            # node, then withdraw the client's remainder (permissionless).
+            w3.provider.make_request("evm_increaseTime", [3601])
+            w3.provider.make_request("evm_mine", [])
+            send_agent_tx(
+                w3,
+                channel.functions.withdrawRemainder(channel_id),
+                author_key, author_addr)  # anyone can trigger the refund
+            client_atn_after = substrate.functions.balanceOf(owner_b.address).call()
+            channel_client_refund = (
+                client_atn_after - (client_atn_before - CHANNEL_DEPOSIT))
+            s6.note("channel_client_refund", channel_client_refund)
+            # Refund is fee-free: client got back deposit - GROSS voucher; the
+            # fee came out of the provider's claimed amount, not the refund.
+            assert channel_client_refund == CHANNEL_DEPOSIT - ITEM_ASK, (
+                channel_client_refund, CHANNEL_DEPOSIT - ITEM_ASK)
+            net_client_spend = client_atn_before - client_atn_after
+            assert net_client_spend == ITEM_ASK, (net_client_spend, ITEM_ASK)
         except Exception as se:
             # Channel leg is explicitly allowed to SKIP rather than sink time.
             s6.note("channel_leg", f"SKIP ({se!r})")

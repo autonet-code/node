@@ -17,7 +17,7 @@ Status conventions used below:
 | Doc | What it covers |
 |-----|----------------|
 | `tool_substrate.md` | v2 canonical: tools as the primary substrate item — three tiers, manifest, mint formula, combo damper, vetting greenlight, adoption rail. Phase-10 amendment inline. |
-| `services_market.md` | The remote-API market rail (`ServiceMarket.sol`): registry + EIP-712 payment channels, behavioral trust, any-ERC20 pricing, no substrate standing. |
+| `services_market.md` | The remote-API market rail (`ServiceMarket.sol`): registry + EIP-712 payment channels, behavioral trust, ATN-only pricing (2.5% fee recycled at settlement), no substrate standing. |
 | `charter_anchor.md` | `CharterAnchor.sol` — governed anchor for the charter *version* (values stay off-chain); drift detection built, migration deferred. |
 | `local_e2e.md` | The two economy proof-of-life scripts (`scripts/local_e2e_tool_economy.py`, `local_e2e_venture_loop.py`); also the reference walk-through of the venture loop. |
 | `ledger_pricing.md` | Post-phase8 default: ledger (net_score tree recursion) replaces geometric equilibration for mint pricing; the arm-B context-render rule. |
