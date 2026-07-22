@@ -214,6 +214,58 @@ SUBSTRATE_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    # Service payments (Phase 7.2). A labeled ATN transfer taking the
+    # service fee and recording serviceEarnings; pricing is off-chain.
+    {
+        "inputs": [
+            {"internalType": "address", "name": "recipient", "type": "address"},
+            {"internalType": "uint256", "name": "amount",    "type": "uint256"},
+            {"internalType": "bytes32", "name": "requestId", "type": "bytes32"},
+        ],
+        "name": "payForService",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "name": "serviceEarnings",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "serviceFeeBps",
+        "outputs": [{"internalType": "uint16", "name": "", "type": "uint16"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # ServicePayment / ServiceFee events — decoded from a tx receipt by
+    # verify_service_payment (no log-range scan; Etherlink caps ranges).
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "address", "name": "payer",     "type": "address"},
+            {"indexed": True,  "internalType": "address", "name": "recipient", "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "amount",    "type": "uint256"},
+            {"indexed": True,  "internalType": "bytes32", "name": "requestId", "type": "bytes32"},
+        ],
+        "name": "ServicePayment",
+        "type": "event",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "address", "name": "payer",      "type": "address"},
+            {"indexed": True,  "internalType": "address", "name": "recipient",  "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "amount",     "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "burned",     "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "toTreasury", "type": "uint256"},
+        ],
+        "name": "ServiceFee",
+        "type": "event",
+    },
     # Anchor reads
     {
         "inputs": [],
@@ -284,6 +336,294 @@ SUBSTRATE_ABI = [
         "type": "event",
     },
 ]
+
+
+# ABI for ServiceMarket.sol's ServiceRegistry — only the surface we call.
+# Derived from contracts/core/ServiceMarket.sol (registerService/updateServiceAsk/
+# retireService writes; serviceCount/services/getService reads; the three events).
+SERVICE_REGISTRY_ABI = [
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "specDigest", "type": "bytes32"},
+            {"internalType": "uint256", "name": "askAmount",  "type": "uint256"},
+        ],
+        "name": "registerService",
+        "outputs": [{"internalType": "uint256", "name": "serviceId", "type": "uint256"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "serviceId", "type": "uint256"},
+            {"internalType": "uint256", "name": "askAmount", "type": "uint256"},
+        ],
+        "name": "updateServiceAsk",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "uint256", "name": "serviceId", "type": "uint256"}],
+        "name": "retireService",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "serviceCount",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # Auto-generated public getter for `mapping(uint256 => Service) services`.
+    # Returns the struct fields as a flat tuple (Solidity flattens structs in
+    # public-mapping getters).
+    {
+        "inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "name": "services",
+        "outputs": [
+            {"internalType": "address", "name": "provider",     "type": "address"},
+            {"internalType": "bytes32", "name": "specDigest",   "type": "bytes32"},
+            {"internalType": "uint256", "name": "askAmount",    "type": "uint256"},
+            {"internalType": "bool",    "name": "active",       "type": "bool"},
+            {"internalType": "uint256", "name": "registeredAt", "type": "uint256"},
+            {"internalType": "uint256", "name": "updatedAt",    "type": "uint256"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # Explicit getService(id) returns the Service struct (tuple-typed).
+    {
+        "inputs": [{"internalType": "uint256", "name": "serviceId", "type": "uint256"}],
+        "name": "getService",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "address", "name": "provider",     "type": "address"},
+                    {"internalType": "bytes32", "name": "specDigest",   "type": "bytes32"},
+                    {"internalType": "uint256", "name": "askAmount",    "type": "uint256"},
+                    {"internalType": "bool",    "name": "active",       "type": "bool"},
+                    {"internalType": "uint256", "name": "registeredAt", "type": "uint256"},
+                    {"internalType": "uint256", "name": "updatedAt",    "type": "uint256"},
+                ],
+                "internalType": "struct ServiceRegistry.Service",
+                "name": "",
+                "type": "tuple",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "uint256", "name": "serviceId",  "type": "uint256"},
+            {"indexed": True,  "internalType": "address", "name": "provider",   "type": "address"},
+            {"indexed": True,  "internalType": "bytes32", "name": "specDigest", "type": "bytes32"},
+            {"indexed": False, "internalType": "uint256", "name": "askAmount",  "type": "uint256"},
+        ],
+        "name": "ServiceRegistered",
+        "type": "event",
+    },
+]
+
+
+# ABI for ServiceMarket.sol's PaymentChannel — the surface we call. Derived
+# from contracts/core/ServiceMarket.sol (openChannel/closeChannel/
+# withdrawRemainder writes; voucherHash/channelCount/channels/getChannel reads;
+# the three events).
+PAYMENT_CHANNEL_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "provider", "type": "address"},
+            {"internalType": "uint256", "name": "deposit",  "type": "uint256"},
+        ],
+        "name": "openChannel",
+        "outputs": [{"internalType": "uint256", "name": "channelId", "type": "uint256"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "channelId",        "type": "uint256"},
+            {"internalType": "uint256", "name": "cumulativeAmount", "type": "uint256"},
+        ],
+        "name": "voucherHash",
+        "outputs": [{"internalType": "bytes32", "name": "", "type": "bytes32"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "channelId",        "type": "uint256"},
+            {"internalType": "uint256", "name": "cumulativeAmount", "type": "uint256"},
+            {"internalType": "bytes",   "name": "signature",        "type": "bytes"},
+        ],
+        "name": "closeChannel",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "uint256", "name": "channelId", "type": "uint256"}],
+        "name": "withdrawRemainder",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "channelCount",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # Auto-generated public getter for `mapping(uint256 => Channel) channels`.
+    # Status enum surfaces as uint8 (0 None, 1 Open, 2 Closing, 3 Settled).
+    {
+        "inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "name": "channels",
+        "outputs": [
+            {"internalType": "address", "name": "client",   "type": "address"},
+            {"internalType": "address", "name": "provider", "type": "address"},
+            {"internalType": "uint256", "name": "deposit",  "type": "uint256"},
+            {"internalType": "uint256", "name": "claimed",  "type": "uint256"},
+            {"internalType": "uint256", "name": "closesAt", "type": "uint256"},
+            {"internalType": "uint8",   "name": "status",   "type": "uint8"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "uint256", "name": "channelId", "type": "uint256"}],
+        "name": "getChannel",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "address", "name": "client",   "type": "address"},
+                    {"internalType": "address", "name": "provider", "type": "address"},
+                    {"internalType": "uint256", "name": "deposit",  "type": "uint256"},
+                    {"internalType": "uint256", "name": "claimed",  "type": "uint256"},
+                    {"internalType": "uint256", "name": "closesAt", "type": "uint256"},
+                    {"internalType": "uint8",   "name": "status",   "type": "uint8"},
+                ],
+                "internalType": "struct PaymentChannel.Channel",
+                "name": "",
+                "type": "tuple",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "challengeWindow",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True,  "internalType": "uint256", "name": "channelId", "type": "uint256"},
+            {"indexed": True,  "internalType": "address", "name": "client",    "type": "address"},
+            {"indexed": True,  "internalType": "address", "name": "provider",  "type": "address"},
+            {"indexed": False, "internalType": "uint256", "name": "deposit",   "type": "uint256"},
+        ],
+        "name": "ChannelOpened",
+        "type": "event",
+    },
+]
+
+
+# Minimal ATN (Substrate ERC20 surface) ABI for approve() — the PaymentChannel
+# pulls the deposit with substrate.transferFrom, so a client must approve the
+# channel contract on Substrate before openChannel.
+ATN_APPROVE_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "spender", "type": "address"},
+            {"internalType": "uint256", "name": "amount",  "type": "uint256"},
+        ],
+        "name": "approve",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "owner",   "type": "address"},
+            {"internalType": "address", "name": "spender", "type": "address"},
+        ],
+        "name": "allowance",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+
+# EIP-712 domain + Voucher typehash for the PaymentChannel. MUST match the
+# contract EXACTLY: EIP712("AutonetPaymentChannel", "1") and
+# keccak256("Voucher(uint256 channelId,uint256 cumulativeAmount)"). Used by the
+# pure off-chain voucher digest builder (build_voucher_digest) so signing does
+# NOT require a live-chain call to voucherHash().
+PAYMENT_CHANNEL_EIP712_NAME = "AutonetPaymentChannel"
+PAYMENT_CHANNEL_EIP712_VERSION = "1"
+
+
+def build_voucher_digest(
+    channel_id: int,
+    cumulative_amount: int,
+    channel_address: str,
+    chain_id: int,
+) -> bytes:
+    """Build the EIP-712 digest a client signs for a PaymentChannel voucher.
+
+    PURE / offline — no chain call. Reproduces
+    ``PaymentChannel.voucherHash(channelId, cumulativeAmount)`` exactly:
+    the typed struct ``Voucher(uint256 channelId,uint256 cumulativeAmount)``
+    under the domain ``EIP712("AutonetPaymentChannel", "1")`` folded with
+    ``chainId`` and the channel contract ``verifyingContract``. The returned
+    32 bytes are the final digest the contract recovers against
+    (``digest.recover(signature)``), so signing it raw yields a signature
+    ``closeChannel`` accepts.
+    """
+    from eth_account.messages import encode_typed_data
+    from web3 import Web3
+
+    typed = {
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ],
+            "Voucher": [
+                {"name": "channelId", "type": "uint256"},
+                {"name": "cumulativeAmount", "type": "uint256"},
+            ],
+        },
+        "primaryType": "Voucher",
+        "domain": {
+            "name": PAYMENT_CHANNEL_EIP712_NAME,
+            "version": PAYMENT_CHANNEL_EIP712_VERSION,
+            "chainId": int(chain_id),
+            "verifyingContract": Web3.to_checksum_address(channel_address),
+        },
+        "message": {
+            "channelId": int(channel_id),
+            "cumulativeAmount": int(cumulative_amount),
+        },
+    }
+    signable = encode_typed_data(full_message=typed)
+    # The signable message body/header hash to the same 32-byte digest the
+    # contract's _hashTypedDataV4 produces. Recompute it via eth_account's
+    # own hasher so we hand back the exact digest recover() checks.
+    from eth_account.messages import _hash_eip191_message
+    return _hash_eip191_message(signable)
 
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -1003,6 +1343,794 @@ class OnChainService:
             }
         except Exception as e:
             log.debug("Failed to read substrate state: %s", e)
+            return None
+
+    # ------------------------------------------------------------------
+    # Service payments (Substrate.payForService)
+    # ------------------------------------------------------------------
+
+    async def pay_for_service(
+        self,
+        private_key: str,
+        recipient: str,
+        amount: int,
+        request_id: str | bytes,
+    ) -> dict[str, Any]:
+        """Sign and submit a ``Substrate.payForService`` transaction.
+
+        A labeled ATN transfer from the AGENT key (msg.sender = the payer)
+        to ``recipient``, taking the service fee and recording
+        serviceEarnings on chain. ``amount`` is the GROSS ATN (the recipient
+        receives net of the fee). ``request_id`` is the opaque off-chain
+        request id (bytes32; e.g. keccak256 of the request body) emitted in
+        the ServicePayment event so the payment is matchable off-chain.
+
+        Signs with the agent key exactly like ``register_agent`` /
+        ``record_training_for_epoch``, with Etherlink-tolerant explicit gas
+        (estimate × 1.2, floored). Returns
+        ``{success, tx_hash[, request_id]}`` or ``{success: False, error}``.
+        """
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            account = Account.from_key(private_key)
+
+            recipient_addr = w3.to_checksum_address(recipient)
+            req = (request_id if isinstance(request_id, bytes)
+                   else _to_bytes32(request_id))
+
+            nonce = w3.eth.get_transaction_count(account.address)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+
+            try:
+                estimated = contract.functions.payForService(
+                    recipient_addr, int(amount), req,
+                ).estimate_gas({"from": account.address})
+                gas_limit = max(int(estimated * 12 // 10), 200_000)
+            except Exception:
+                gas_limit = 400_000
+
+            tx = contract.functions.payForService(
+                recipient_addr, int(amount), req,
+            ).build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": gas_limit,
+                "gasPrice": w3.eth.gas_price,
+                "chainId": chain_id,
+            })
+
+            signed = account.sign_transaction(tx)
+            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            tx_hash = w3.eth.send_raw_transaction(raw)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            if receipt.status == 1:
+                return {
+                    "success": True,
+                    "tx_hash": tx_hash.hex(),
+                    "request_id": req.hex() if isinstance(req, bytes) else str(req),
+                }
+            return {"success": False, "error": "Transaction reverted",
+                    "tx_hash": tx_hash.hex()}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to pay for service on chain")
+            return {"success": False, "error": str(e)}
+
+    async def verify_service_payment(
+        self,
+        request_id: str | bytes,
+        recipient: str,
+        min_amount: int,
+        payer: str | None = None,
+        tx_hash: str | bytes | None = None,
+    ) -> dict[str, Any]:
+        """Verify a claimed on-chain service payment, cheaply.
+
+        Etherlink caps log-range scans, so this NEVER scans a block range:
+        a ``tx_hash`` is REQUIRED. It fetches that one receipt and decodes
+        the ``ServicePayment`` event(s) from its logs (Substrate is the
+        emitter), then checks the claimed facts:
+
+          - ``requestId`` matches ``request_id``;
+          - ``recipient`` matches ``recipient``;
+          - ``amount`` (gross) is >= ``min_amount``;
+          - if ``payer`` is given, the event's payer matches it.
+
+        Returns a dict:
+          ``{verified: bool, reason: str, payer, recipient, amount,
+             request_id, tx_hash}``. ``verified`` is False (with a reason)
+          on any mismatch, a missing/absent event, a reverted tx, or a read
+          failure. ``amount`` is the gross ATN as recorded in the event.
+        """
+        result: dict[str, Any] = {
+            "verified": False,
+            "reason": "",
+            "payer": None,
+            "recipient": None,
+            "amount": None,
+            "request_id": None,
+            "tx_hash": None,
+        }
+        if not tx_hash:
+            result["reason"] = "tx_hash required (no log-range scan on Etherlink)"
+            return result
+        try:
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+
+            recipient_addr = w3.to_checksum_address(recipient)
+            want_req = (request_id if isinstance(request_id, bytes)
+                        else _to_bytes32(request_id))
+            th = tx_hash if isinstance(tx_hash, (bytes, str)) else str(tx_hash)
+            result["tx_hash"] = th.hex() if isinstance(th, bytes) else str(th)
+
+            receipt = w3.eth.get_transaction_receipt(th)
+            # web3 returns an AttributeDict (attribute access); tests may pass a
+            # plain dict. Read status via either shape.
+            status = (receipt.get("status") if isinstance(receipt, dict)
+                      else getattr(receipt, "status", 1))
+            if status == 0:
+                result["reason"] = "transaction reverted"
+                return result
+
+            # Decode ServicePayment events from THIS receipt only. process_receipt
+            # with errors=DISCARD skips logs from other contracts / other events.
+            try:
+                from web3.logs import DISCARD
+                events = contract.events.ServicePayment().process_receipt(
+                    receipt, errors=DISCARD)
+            except Exception:
+                events = contract.events.ServicePayment().process_receipt(receipt)
+
+            if not events:
+                result["reason"] = "no ServicePayment event in receipt"
+                return result
+
+            # Find the event matching the claimed requestId + recipient.
+            for ev in events:
+                args = ev["args"]
+                ev_req = args["requestId"]
+                ev_req_b = (ev_req if isinstance(ev_req, bytes)
+                            else _to_bytes32(str(ev_req)))
+                ev_recipient = w3.to_checksum_address(args["recipient"])
+                ev_payer = w3.to_checksum_address(args["payer"])
+                ev_amount = int(args["amount"])
+
+                if ev_req_b != want_req:
+                    continue
+                if ev_recipient != recipient_addr:
+                    continue
+
+                result.update({
+                    "payer": ev_payer,
+                    "recipient": ev_recipient,
+                    "amount": ev_amount,
+                    "request_id": ev_req_b.hex(),
+                })
+                if ev_amount < int(min_amount):
+                    result["reason"] = (
+                        f"amount {ev_amount} < min_amount {int(min_amount)}")
+                    return result
+                if payer is not None:
+                    if ev_payer != w3.to_checksum_address(payer):
+                        result["reason"] = "payer mismatch"
+                        return result
+                result["verified"] = True
+                result["reason"] = "ok"
+                return result
+
+            result["reason"] = "no ServicePayment event matched requestId+recipient"
+            return result
+        except Exception as e:
+            log.debug("verify_service_payment failed: %s", e, exc_info=True)
+            result["reason"] = f"read failed: {e}"
+            return result
+
+
+# ---------------------------------------------------------------------------
+# ServiceMarket client (ServiceRegistry + PaymentChannel)
+# ---------------------------------------------------------------------------
+
+
+class ServiceMarketClient:
+    """Daemon-side helper for ServiceMarket.sol (ServiceRegistry +
+    PaymentChannel).
+
+    Follows the same shape as :class:`OnChainService`: constructed from the
+    ``RPBConfig``, resolves contract addresses from config (never
+    hardcoded), lazy-imports web3/eth-account, signs writes with the AGENT
+    key (per-agent keypair passed in per call), and uses Etherlink-tolerant
+    explicit gas (estimate × 1.2, floored). All writes return
+    ``{success, tx_hash, ...}`` or ``{success: False, error}``; reads return
+    the decoded value or ``None`` on failure.
+
+    Addresses:
+      - ServiceRegistry: ``config.service_registry_address`` (falls back to
+        the legacy shared ``registry_address`` seed for back-compat).
+      - PaymentChannel: ``config.payment_channel_address``.
+      - ATN/Substrate (for the deposit approve): ``config.substrate_address``
+        (falls back to ``rpb_contract_address``).
+    """
+
+    def __init__(self, config: "RPBConfig") -> None:
+        self.config = config
+
+    # ---- plumbing ----------------------------------------------------
+
+    def _service_registry_address(self) -> str:
+        addr = getattr(self.config, "service_registry_address", "") or ""
+        if not addr:
+            # Legacy seed lands the ServiceRegistry in registry_address too.
+            addr = getattr(self.config, "registry_address", "") or ""
+        return addr
+
+    def _payment_channel_address(self) -> str:
+        return getattr(self.config, "payment_channel_address", "") or ""
+
+    def _substrate_address(self) -> str:
+        addr = getattr(self.config, "substrate_address", "") or ""
+        if not addr:
+            addr = getattr(self.config, "rpb_contract_address", "") or ""
+        return addr
+
+    @property
+    def registry_available(self) -> bool:
+        return bool(self._service_registry_address() and self.config.rpc_url)
+
+    @property
+    def channel_available(self) -> bool:
+        return bool(self._payment_channel_address() and self.config.rpc_url)
+
+    def _get_web3(self):
+        from web3 import Web3
+        w3 = Web3(Web3.HTTPProvider(self.config.rpc_url))
+        if not w3.is_connected():
+            raise ConnectionError(f"Cannot connect to {self.config.rpc_url}")
+        return w3
+
+    def _registry_contract(self, w3=None):
+        from web3 import Web3
+        if w3 is None:
+            w3 = self._get_web3()
+        addr = self._service_registry_address()
+        if not addr:
+            raise ValueError("service_registry_address not configured")
+        return w3.eth.contract(
+            address=Web3.to_checksum_address(addr),
+            abi=SERVICE_REGISTRY_ABI,
+        )
+
+    def _channel_contract(self, w3=None):
+        from web3 import Web3
+        if w3 is None:
+            w3 = self._get_web3()
+        addr = self._payment_channel_address()
+        if not addr:
+            raise ValueError("payment_channel_address not configured")
+        return w3.eth.contract(
+            address=Web3.to_checksum_address(addr),
+            abi=PAYMENT_CHANNEL_ABI,
+        )
+
+    def _atn_contract(self, w3=None):
+        from web3 import Web3
+        if w3 is None:
+            w3 = self._get_web3()
+        addr = self._substrate_address()
+        if not addr:
+            raise ValueError("substrate_address not configured")
+        return w3.eth.contract(
+            address=Web3.to_checksum_address(addr),
+            abi=ATN_APPROVE_ABI,
+        )
+
+    @staticmethod
+    def _send_signed(w3, account, func, chain_id: int, gas_floor: int):
+        """Estimate gas (×1.2, floored), build/sign/send, wait for receipt.
+
+        Shared write path — mirrors OnChainService's per-method inline
+        pattern. Returns (receipt, tx_hash_hex).
+        """
+        nonce = w3.eth.get_transaction_count(account.address)
+        try:
+            estimated = func.estimate_gas({"from": account.address})
+            gas_limit = max(int(estimated * 12 // 10), gas_floor)
+        except Exception:
+            gas_limit = gas_floor * 2
+        tx = func.build_transaction({
+            "from": account.address,
+            "nonce": nonce,
+            "gas": gas_limit,
+            "gasPrice": w3.eth.gas_price,
+            "chainId": chain_id,
+        })
+        signed = account.sign_transaction(tx)
+        raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+        tx_hash = w3.eth.send_raw_transaction(raw)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        return receipt, tx_hash.hex()
+
+    # ---- ServiceRegistry (writes) ------------------------------------
+
+    async def register_service(
+        self,
+        private_key: str,
+        spec_digest: str | bytes,
+        ask_amount: int,
+    ) -> dict[str, Any]:
+        """``ServiceRegistry.registerService(specDigest, askAmount)``.
+
+        Signed by the AGENT key (msg.sender must be a registered Substrate
+        agent — the contract's ``onlyAgent`` gate). ``spec_digest`` is the
+        sha256 of the service_spec blob (bytes32; NOT an IPFS CID).
+        ``ask_amount`` is the per-work-item price in ATN units.
+
+        The serviceId is assigned on-chain (sequential); it is decoded from
+        the ServiceRegistered event in the receipt and returned as
+        ``service_id`` (None if the event couldn't be decoded).
+        """
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            contract = self._registry_contract(w3)
+            account = Account.from_key(private_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+
+            digest = (spec_digest if isinstance(spec_digest, bytes)
+                      else _to_bytes32(spec_digest))
+            func = contract.functions.registerService(digest, int(ask_amount))
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 300_000)
+            if receipt.status != 1:
+                return {"success": False, "error": "Transaction reverted",
+                        "tx_hash": tx_hex}
+            service_id = None
+            try:
+                from web3.logs import DISCARD
+                evs = contract.events.ServiceRegistered().process_receipt(
+                    receipt, errors=DISCARD)
+                if evs:
+                    service_id = int(evs[0]["args"]["serviceId"])
+            except Exception:
+                log.debug("register_service: event decode failed", exc_info=True)
+            return {"success": True, "tx_hash": tx_hex, "service_id": service_id}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to register service on chain")
+            return {"success": False, "error": str(e)}
+
+    async def update_service_ask(
+        self,
+        private_key: str,
+        service_id: int,
+        ask_amount: int,
+    ) -> dict[str, Any]:
+        """``ServiceRegistry.updateServiceAsk(serviceId, askAmount)`` (provider-only)."""
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            contract = self._registry_contract(w3)
+            account = Account.from_key(private_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+            func = contract.functions.updateServiceAsk(
+                int(service_id), int(ask_amount))
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 120_000)
+            if receipt.status == 1:
+                return {"success": True, "tx_hash": tx_hex}
+            return {"success": False, "error": "Transaction reverted",
+                    "tx_hash": tx_hex}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to update service ask on chain")
+            return {"success": False, "error": str(e)}
+
+    async def retire_service(
+        self,
+        private_key: str,
+        service_id: int,
+    ) -> dict[str, Any]:
+        """``ServiceRegistry.retireService(serviceId)`` (provider-only)."""
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            contract = self._registry_contract(w3)
+            account = Account.from_key(private_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+            func = contract.functions.retireService(int(service_id))
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 120_000)
+            if receipt.status == 1:
+                return {"success": True, "tx_hash": tx_hex}
+            return {"success": False, "error": "Transaction reverted",
+                    "tx_hash": tx_hex}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to retire service on chain")
+            return {"success": False, "error": str(e)}
+
+    # ---- ServiceRegistry (reads) -------------------------------------
+
+    async def service_count(self) -> int:
+        """``ServiceRegistry.serviceCount()`` (0 on read failure)."""
+        try:
+            w3 = self._get_web3()
+            contract = self._registry_contract(w3)
+            return int(contract.functions.serviceCount().call())
+        except Exception:
+            log.debug("service_count read failed", exc_info=True)
+            return 0
+
+    async def get_service(self, service_id: int) -> dict[str, Any] | None:
+        """``ServiceRegistry.getService(serviceId)`` → decoded dict.
+
+        Returns None if the service doesn't exist (provider == zero
+        address) or on a read failure. Fields:
+        ``{service_id, provider, spec_digest, ask_amount, active,
+        registered_at, updated_at}``.
+        """
+        try:
+            w3 = self._get_web3()
+            contract = self._registry_contract(w3)
+            s = contract.functions.getService(int(service_id)).call()
+            provider, spec_digest, ask_amount, active, registered_at, updated_at = s
+            if int(registered_at) == 0 or str(provider) == ZERO_ADDRESS:
+                return None
+            return {
+                "service_id": int(service_id),
+                "provider": str(provider),
+                "spec_digest": spec_digest.hex() if isinstance(spec_digest, bytes) else str(spec_digest),
+                "ask_amount": str(ask_amount),
+                "active": bool(active),
+                "registered_at": int(registered_at),
+                "updated_at": int(updated_at),
+            }
+        except Exception as e:
+            log.debug("get_service(%s) failed: %s", service_id, e)
+            return None
+
+    async def list_services(
+        self, start: int = 1, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Enumerate services from ``start`` (serviceId is 1-indexed; index 0
+        is unused). Reads ``serviceCount`` then ``getService(i)`` in order,
+        skipping any that fail to decode. ``limit`` caps the count returned.
+        """
+        try:
+            count = await self.service_count()
+            out: list[dict[str, Any]] = []
+            last = count if limit is None else min(count, start - 1 + limit)
+            for i in range(max(start, 1), last + 1):
+                rec = await self.get_service(i)
+                if rec is not None:
+                    out.append(rec)
+            return out
+        except Exception as e:
+            log.debug("list_services failed: %s", e)
+            return []
+
+    # ---- PaymentChannel (deposit approve + writes) -------------------
+
+    async def approve_channel_deposit(
+        self,
+        private_key: str,
+        amount: int,
+    ) -> dict[str, Any]:
+        """Approve the PaymentChannel to pull ``amount`` ATN via
+        ``Substrate.approve(channel, amount)``.
+
+        openChannel pulls the deposit with ``substrate.transferFrom``, so
+        the client MUST approve the channel contract on Substrate first.
+        Signed by the client (AGENT) key.
+        """
+        try:
+            from eth_account import Account
+            from web3 import Web3
+
+            w3 = self._get_web3()
+            atn = self._atn_contract(w3)
+            account = Account.from_key(private_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+            channel_addr = Web3.to_checksum_address(self._payment_channel_address())
+            func = atn.functions.approve(channel_addr, int(amount))
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 120_000)
+            if receipt.status == 1:
+                return {"success": True, "tx_hash": tx_hex}
+            return {"success": False, "error": "Transaction reverted",
+                    "tx_hash": tx_hex}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to approve channel deposit on chain")
+            return {"success": False, "error": str(e)}
+
+    async def open_channel(
+        self,
+        private_key: str,
+        provider: str,
+        deposit: int,
+        auto_approve: bool = True,
+    ) -> dict[str, Any]:
+        """``PaymentChannel.openChannel(provider, deposit)``.
+
+        The client escrows ``deposit`` ATN to ``provider``. openChannel pulls
+        the deposit via ``substrate.transferFrom``, so an allowance must
+        exist first: when ``auto_approve`` (default), this checks the current
+        allowance and issues an ``approve`` for the shortfall before opening.
+        Signed by the client (AGENT) key.
+
+        The channelId is assigned on-chain (sequential); it is decoded from
+        the ChannelOpened event and returned as ``channel_id`` (None if the
+        event couldn't be decoded). Also returns ``approve_tx_hash`` when an
+        approve was issued.
+        """
+        try:
+            from eth_account import Account
+            from web3 import Web3
+
+            w3 = self._get_web3()
+            channel = self._channel_contract(w3)
+            account = Account.from_key(private_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+            provider_addr = w3.to_checksum_address(provider)
+
+            approve_tx_hash = None
+            if auto_approve:
+                atn = self._atn_contract(w3)
+                channel_addr = Web3.to_checksum_address(
+                    self._payment_channel_address())
+                try:
+                    current = int(atn.functions.allowance(
+                        account.address, channel_addr).call())
+                except Exception:
+                    current = 0
+                if current < int(deposit):
+                    ap = await self.approve_channel_deposit(
+                        private_key, int(deposit))
+                    if not ap.get("success"):
+                        return {"success": False,
+                                "error": f"approve failed: {ap.get('error')}"}
+                    approve_tx_hash = ap.get("tx_hash")
+
+            func = channel.functions.openChannel(provider_addr, int(deposit))
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 300_000)
+            if receipt.status != 1:
+                return {"success": False, "error": "Transaction reverted",
+                        "tx_hash": tx_hex, "approve_tx_hash": approve_tx_hash}
+            channel_id = None
+            try:
+                from web3.logs import DISCARD
+                evs = channel.events.ChannelOpened().process_receipt(
+                    receipt, errors=DISCARD)
+                if evs:
+                    channel_id = int(evs[0]["args"]["channelId"])
+            except Exception:
+                log.debug("open_channel: event decode failed", exc_info=True)
+            return {"success": True, "tx_hash": tx_hex,
+                    "channel_id": channel_id,
+                    "approve_tx_hash": approve_tx_hash}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to open channel on chain")
+            return {"success": False, "error": str(e)}
+
+    def sign_voucher(
+        self,
+        private_key: str,
+        channel_id: int,
+        cumulative_amount: int,
+    ) -> str:
+        """Sign a PaymentChannel voucher over (channelId, cumulativeAmount).
+
+        PURE / offline — builds the EIP-712 digest with
+        :func:`build_voucher_digest` (matching the contract's
+        ``EIP712("AutonetPaymentChannel","1")`` domain + ``Voucher(uint256
+        channelId,uint256 cumulativeAmount)`` typehash) using the configured
+        channel address + chain id, then signs the raw 32-byte digest with
+        ``private_key`` (the CLIENT key). ``cumulativeAmount`` is the GROSS,
+        MONOTONE running total the client authorizes to date.
+
+        Returns the 0x-prefixed hex signature ``closeChannel`` accepts.
+        """
+        from eth_account import Account
+
+        channel_addr = self._payment_channel_address()
+        if not channel_addr:
+            raise ValueError("payment_channel_address not configured")
+        chain_id = int(self.config.chain_id or 0)
+        if not chain_id:
+            # Fall back to a live read only if config has no chain_id.
+            chain_id = self._get_web3().eth.chain_id
+        digest = build_voucher_digest(
+            int(channel_id), int(cumulative_amount), channel_addr, chain_id)
+        acct = Account.from_key(private_key)
+        signed = (acct.unsafe_sign_hash(digest)
+                  if hasattr(acct, "unsafe_sign_hash")
+                  else Account._sign_hash(digest, acct._private_key))
+        sig = signed.signature
+        return sig.hex() if not sig.hex().startswith("0x") else sig.hex()
+
+    async def verify_voucher(
+        self,
+        channel_id: int,
+        cumulative_amount: int,
+        signature: str | bytes,
+    ) -> dict[str, Any]:
+        """Recover a voucher's signer and check it against on-chain channel state.
+
+        Rebuilds the EIP-712 digest offline (:func:`build_voucher_digest`),
+        recovers the signer from ``signature``, then reads the channel and
+        verifies: the channel exists and is Open (status == 1), the recovered
+        signer equals the channel's ``client``, and (advisory) reports whether
+        ``cumulative_amount`` exceeds the deposit (the contract caps the payout
+        at the deposit, so an over-deposit voucher is not a signature failure).
+
+        Returns ``{valid, reason, signer, client, provider, deposit, status,
+        exceeds_deposit}``. ``valid`` is True only when the signer matches the
+        channel client AND the channel is Open.
+        """
+        result: dict[str, Any] = {
+            "valid": False, "reason": "", "signer": None, "client": None,
+            "provider": None, "deposit": None, "status": None,
+            "exceeds_deposit": None,
+        }
+        try:
+            from eth_account import Account
+            from eth_account.messages import encode_defunct  # noqa: F401
+            from web3 import Web3
+
+            channel_addr = self._payment_channel_address()
+            if not channel_addr:
+                result["reason"] = "payment_channel_address not configured"
+                return result
+            chain_id = int(self.config.chain_id or 0)
+            w3 = self._get_web3()
+            if not chain_id:
+                chain_id = w3.eth.chain_id
+            digest = build_voucher_digest(
+                int(channel_id), int(cumulative_amount), channel_addr, chain_id)
+            sig = (signature if isinstance(signature, bytes)
+                   else bytes.fromhex(signature[2:] if signature.startswith("0x")
+                                      else signature))
+            # Recover the signer of the raw typed-data digest.
+            signer = (Account._recover_hash(digest, signature=sig)
+                      if hasattr(Account, "_recover_hash")
+                      else Account.recoverHash(digest, signature=sig))
+            signer = Web3.to_checksum_address(signer)
+            result["signer"] = signer
+
+            channel = self._channel_contract(w3)
+            ch = channel.functions.getChannel(int(channel_id)).call()
+            client, provider, deposit, claimed, closes_at, status = ch
+            result.update({
+                "client": Web3.to_checksum_address(client),
+                "provider": Web3.to_checksum_address(provider),
+                "deposit": str(deposit),
+                "status": int(status),
+                "exceeds_deposit": int(cumulative_amount) > int(deposit),
+            })
+            if int(status) != 1:  # 1 == Status.Open
+                result["reason"] = f"channel not Open (status={int(status)})"
+                return result
+            if signer != Web3.to_checksum_address(client):
+                result["reason"] = "signer is not the channel client"
+                return result
+            result["valid"] = True
+            result["reason"] = "ok"
+            return result
+        except Exception as e:
+            log.debug("verify_voucher failed: %s", e, exc_info=True)
+            result["reason"] = f"verify failed: {e}"
+            return result
+
+    async def close_channel(
+        self,
+        private_key: str,
+        channel_id: int,
+        cumulative_amount: int,
+        signature: str | bytes,
+    ) -> dict[str, Any]:
+        """``PaymentChannel.closeChannel(channelId, cumulativeAmount, signature)``.
+
+        Submitted by the PROVIDER (msg.sender must be the channel provider).
+        Pays the provider min(cumulative, deposit) NET of the service fee and
+        opens the challenge window. ``signature`` is the client's voucher
+        signature over (channelId, cumulativeAmount).
+        """
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            channel = self._channel_contract(w3)
+            account = Account.from_key(private_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+            sig = (signature if isinstance(signature, bytes)
+                   else bytes.fromhex(signature[2:] if signature.startswith("0x")
+                                      else signature))
+            func = channel.functions.closeChannel(
+                int(channel_id), int(cumulative_amount), sig)
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 200_000)
+            if receipt.status == 1:
+                return {"success": True, "tx_hash": tx_hex}
+            return {"success": False, "error": "Transaction reverted",
+                    "tx_hash": tx_hex}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to close channel on chain")
+            return {"success": False, "error": str(e)}
+
+    async def withdraw_remainder(
+        self,
+        private_key: str,
+        channel_id: int,
+    ) -> dict[str, Any]:
+        """``PaymentChannel.withdrawRemainder(channelId)``.
+
+        Permissionless (it's a timer): after the challenge window elapses,
+        refunds the client's remainder. Anyone may trigger it; funds only
+        ever go to the client. Signed by whatever ``private_key`` is passed.
+        """
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            channel = self._channel_contract(w3)
+            account = Account.from_key(private_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+            func = channel.functions.withdrawRemainder(int(channel_id))
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 120_000)
+            if receipt.status == 1:
+                return {"success": True, "tx_hash": tx_hex}
+            return {"success": False, "error": "Transaction reverted",
+                    "tx_hash": tx_hex}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to withdraw remainder on chain")
+            return {"success": False, "error": str(e)}
+
+    async def get_channel(self, channel_id: int) -> dict[str, Any] | None:
+        """``PaymentChannel.getChannel(channelId)`` → decoded dict.
+
+        Returns None if the channel doesn't exist (status == 0 / None) or on
+        a read failure. Fields: ``{channel_id, client, provider, deposit,
+        claimed, closes_at, status}`` (status: 0 None, 1 Open, 2 Closing,
+        3 Settled).
+        """
+        try:
+            w3 = self._get_web3()
+            channel = self._channel_contract(w3)
+            ch = channel.functions.getChannel(int(channel_id)).call()
+            client, provider, deposit, claimed, closes_at, status = ch
+            if int(status) == 0:
+                return None
+            return {
+                "channel_id": int(channel_id),
+                "client": str(client),
+                "provider": str(provider),
+                "deposit": str(deposit),
+                "claimed": str(claimed),
+                "closes_at": int(closes_at),
+                "status": int(status),
+            }
+        except Exception as e:
+            log.debug("get_channel(%s) failed: %s", channel_id, e)
             return None
 
 

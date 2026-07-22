@@ -1128,6 +1128,134 @@ _TOOLS: list[ToolDefinition] = [
             "required": ["agent_id"],
         },
     ),
+    # ------------------------------------------------------------------
+    # Services rail (docs/services_market.md) — the remote-API market.
+    # A Service is a paid remote API another agent (its human benefactor)
+    # offers: general-purpose, priced per work item, settled in ATN via
+    # Substrate.payForService. Services get NO substrate standing, mint,
+    # or verdict claims — trust is behavioral (identity, atomic payment).
+    # ------------------------------------------------------------------
+    ToolDefinition(
+        name="find_services",
+        description=(
+            "Discover services offered on the network — remote paid APIs other "
+            "agents sell (NOT tools: services run on the provider's daemon and "
+            "settle in ATN, they earn no substrate standing). Lists on-chain "
+            "services most-recent first: service_id, provider address, ask "
+            "(ATN price per work item), spec digest, and whether it's active. "
+            "Pass 'query' to filter by a substring against locally-known service "
+            "names/descriptions. To invoke one: pay_for_service to the provider, "
+            "then request_service with the payment proof. Read-only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional substring/topic filter over locally-known service metadata.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max services to return (default 25).",
+                },
+            },
+        },
+    ),
+    ToolDefinition(
+        name="register_service",
+        description=(
+            "Author a service YOU offer: a remote paid API other agents can "
+            "invoke, priced per work item in ATN. This builds and persists the "
+            "local service spec AND registers it on-chain in the ServiceRegistry "
+            "under your agent address (you become the provider). Requires you to "
+            "be registered on-chain (register_on_chain first) — the contract's "
+            "onlyAgent gate rejects unregistered callers. A service needs a "
+            "backing tool to actually fulfil requests: pass 'backing_tool' (the "
+            "digest of a registered tool you own) so incoming service_requests "
+            "dispatch to it. Returns {service_id, tx_hash, spec_digest}."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Service name (how it's discovered — be precise)."},
+                "description": {"type": "string", "description": "What the service does."},
+                "ask_amount": {
+                    "type": "integer",
+                    "description": "Price per work item in ATN base units (uint). This is the on-chain ask and the payment minimum the gate enforces.",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "description": "JSON schema of the service's request arguments.",
+                    "additionalProperties": True,
+                },
+                "backing_tool": {
+                    "type": "string",
+                    "description": "Digest of a registered tool you own that fulfils requests (a Service is a tool the owner chose to sell).",
+                },
+                "output_schema": {
+                    "type": "object",
+                    "description": "Optional JSON schema of the service's result.",
+                    "additionalProperties": True,
+                },
+                "endpoint_hint": {"type": "string", "description": "Optional reachability hint (advisory)."},
+            },
+            "required": ["name", "description", "ask_amount"],
+        },
+    ),
+    ToolDefinition(
+        name="pay_for_service",
+        description=(
+            "Pay a service provider in ATN before invoking their service. This "
+            "signs a Substrate.payForService transfer from YOUR agent key to the "
+            "provider (taking the network service fee) and returns {tx_hash, "
+            "request_id}. Hand BOTH the tx_hash and request_id to the provider "
+            "when you call request_service — the provider verifies the payment "
+            "on-chain against the service ask before serving. 'amount' is the "
+            "gross ATN (>= the service ask); the provider receives net of fee. "
+            "Generate one payment per request: a request_id is single-use "
+            "(replay-protected provider-side)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "recipient": {"type": "string", "description": "The provider's agent address (0x...)."},
+                "amount": {"type": "integer", "description": "Gross ATN base units to pay (>= the service ask)."},
+                "request_id": {
+                    "type": "string",
+                    "description": "Optional bytes32 hex request id; a fresh one is generated if omitted.",
+                },
+            },
+            "required": ["recipient", "amount"],
+        },
+    ),
+    ToolDefinition(
+        name="request_service",
+        description=(
+            "Invoke a service on the provider's daemon (cross-daemon call). "
+            "Resolves the provider's WS endpoint from the on-chain agent "
+            "registry, connects, and sends the request with your payment proof "
+            "(the tx_hash + request_id from pay_for_service). Pass the "
+            "'service_id''s spec_digest as 'service_id' is looked up on chain, "
+            "and the request 'payload' (matching the service's input schema). "
+            "Returns the provider's result, or a clear error if the provider "
+            "published no endpoint or the payment failed verification."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "provider_address": {"type": "string", "description": "The provider agent's address (0x...)."},
+                "service_id": {"type": "string", "description": "The service's spec digest (from find_services)."},
+                "payload": {
+                    "type": "object",
+                    "description": "The request arguments (per the service input schema).",
+                    "additionalProperties": True,
+                },
+                "tx_hash": {"type": "string", "description": "The payForService tx hash from pay_for_service."},
+                "request_id": {"type": "string", "description": "The request_id from pay_for_service (bytes32 hex)."},
+            },
+            "required": ["provider_address", "service_id", "payload", "tx_hash", "request_id"],
+        },
+    ),
 ]
 
 
@@ -1662,7 +1790,11 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 async def _remove_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     agent_id = input["agent_id"]
     from . import ORCHESTRATOR_ID
-    if agent_id == ORCHESTRATOR_ID:
+    # Legacy mode only: the auto-provisioned root agent is protected. In a
+    # rootless fleet the orchestrator id is a normal agent (mirrors the
+    # Runtime facade + registry guards).
+    _orch_cfg = getattr(runtime._config, "orchestrator", None)
+    if agent_id == ORCHESTRATOR_ID and getattr(_orch_cfg, "enabled", False):
         return {"error": "The orchestrator cannot be removed."}
     if runtime.get_agent(agent_id) is None:
         return {"error": f"Agent '{agent_id}' not found."}
@@ -2463,6 +2595,284 @@ def _resolve_household(tool_store: Any, author: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Services rail (docs/services_market.md) — find/register/pay/request
+# ---------------------------------------------------------------------------
+
+def _caller_identity(runtime: Runtime, caller_id: str | None):
+    """Resolve the calling agent's on-chain identity + stored key.
+
+    Returns (defn, identity, private_key) or an ``{"error": ...}`` dict when
+    the caller isn't a registered agent with a daemon-held key. Owner callers
+    have no agent key of their own — a service author/payer must be an agent.
+    """
+    from . import is_owner_caller
+
+    if caller_id is None or is_owner_caller(caller_id):
+        return {"error": "This tool must be called by a registered agent — the "
+                         "owner surface has no agent key to sign with. Ask an "
+                         "agent (or register one) to author/pay for services."}
+    defn = runtime.get_agent(caller_id)
+    if defn is None:
+        return {"error": f"Agent '{caller_id}' not found."}
+    if not defn.identity or not defn.identity.address:
+        return {"error": f"Agent '{caller_id}' has no on-chain identity — "
+                         "register it first (register_on_chain)."}
+    key = runtime.registry.get_agent_key(caller_id)
+    if not key:
+        return {"error": f"No private key stored for agent '{caller_id}'."}
+    return defn, defn.identity, key
+
+
+async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """List on-chain services (most-recent first), optionally substring-filtered
+    against locally-known spec metadata."""
+    query = str(input.get("query") or "").strip().lower()
+    try:
+        limit = max(1, min(int(input.get("limit") or 25), 200))
+    except (TypeError, ValueError):
+        limit = 25
+
+    from ..on_chain import ServiceMarketClient
+    smc = ServiceMarketClient(runtime._config.rpb)
+    if not smc.registry_available:
+        return {"error": "ServiceRegistry not configured "
+                         "(missing service_registry_address or rpc_url)."}
+
+    services = await smc.list_services()
+    # Most-recent first (list_services returns ascending serviceId).
+    services = list(reversed(services))
+
+    store = getattr(runtime, "service_store", None)
+    rows: list[dict[str, Any]] = []
+    for s in services:
+        digest = str(s.get("spec_digest") or "")
+        name = ""
+        description = ""
+        # Enrich with locally-known metadata + drive the substring filter.
+        rec = store.get(digest) if store is not None else None
+        if rec is not None:
+            name = rec.name
+            description = str(rec.spec.get("description") or "")
+        if query:
+            hay = f"{name} {description} {digest} {s.get('provider','')}".lower()
+            if query not in hay:
+                continue
+        rows.append({
+            "service_id": s.get("service_id"),
+            "provider": s.get("provider"),
+            "ask": s.get("ask_amount"),
+            "spec_digest": digest,
+            "active": s.get("active"),
+            "name": name,
+            "description": description,
+        })
+        if len(rows) >= limit:
+            break
+    return {"services": rows, "count": len(rows)}
+
+
+async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Author a service: persist the local spec (service_store) AND register it
+    on-chain in the ServiceRegistry under the caller's agent key."""
+    caller_id = input.get("_caller_id")
+    resolved = _caller_identity(runtime, caller_id)
+    if isinstance(resolved, dict):
+        return resolved
+    _defn, identity, key = resolved
+
+    name = str(input.get("name") or "").strip()
+    if not name:
+        return {"error": "Missing required field: 'name'"}
+    description = str(input.get("description") or "").strip()
+    if not description:
+        return {"error": "Missing required field: 'description'"}
+    ask_amount = input.get("ask_amount")
+    try:
+        ask_amount = int(ask_amount)
+    except (TypeError, ValueError):
+        return {"error": "ask_amount must be an integer (ATN base units)"}
+    if ask_amount < 0:
+        return {"error": "ask_amount must be non-negative"}
+
+    schema = input.get("input_schema")
+    if schema is not None and not isinstance(schema, dict):
+        return {"error": "input_schema must be a JSON-schema object"}
+    schema = schema or {"type": "object", "properties": {}}
+    output_schema = input.get("output_schema")
+    if output_schema is not None and not isinstance(output_schema, dict):
+        return {"error": "output_schema must be a JSON-schema object or absent"}
+
+    store = getattr(runtime, "service_store", None)
+    if store is None:
+        return {"error": "Service store not available on this daemon."}
+
+    # The ask token is the ATN (Substrate) address — services settle in ATN.
+    ask = {
+        "token": runtime._config.rpb.substrate_address
+                 or runtime._config.rpb.rpb_contract_address or "",
+        "amount": str(ask_amount),
+        "unit": "per_item",
+    }
+    try:
+        built = store.register(
+            name=name,
+            description=description,
+            input_schema=schema,
+            author=str(caller_id),
+            ask=ask,
+            backing_tool=str(input.get("backing_tool") or ""),
+            output_schema=output_schema,
+            endpoint_hint=str(input.get("endpoint_hint") or ""),
+        )
+    except (ValueError, RuntimeError) as exc:
+        return {"error": str(exc)}
+    spec_digest = built["digest"]
+
+    from ..on_chain import ServiceMarketClient
+    smc = ServiceMarketClient(runtime._config.rpb)
+    if not smc.registry_available:
+        return {"error": "Local spec persisted but ServiceRegistry not "
+                         "configured (missing service_registry_address / "
+                         "rpc_url) — cannot register on-chain.",
+                "spec_digest": spec_digest}
+
+    result = await smc.register_service(key, spec_digest, ask_amount)
+    if not result.get("success"):
+        return {"error": f"On-chain registration failed: {result.get('error')}",
+                "spec_digest": spec_digest}
+    return {
+        "service_id": result.get("service_id"),
+        "tx_hash": result.get("tx_hash"),
+        "spec_digest": spec_digest,
+        "provider": identity.address,
+    }
+
+
+async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Sign a Substrate.payForService transfer from the caller's key; returns
+    {tx_hash, request_id} for the consumer to hand to the provider."""
+    import uuid
+
+    caller_id = input.get("_caller_id")
+    resolved = _caller_identity(runtime, caller_id)
+    if isinstance(resolved, dict):
+        return resolved
+    _defn, _identity, key = resolved
+
+    recipient = str(input.get("recipient") or "").strip()
+    if not recipient:
+        return {"error": "Missing required field: 'recipient'"}
+    amount = input.get("amount")
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        return {"error": "amount must be an integer (ATN base units)"}
+    if amount <= 0:
+        return {"error": "amount must be positive"}
+
+    request_id = str(input.get("request_id") or "").strip()
+    if not request_id:
+        # uuid4-derived bytes32 hex (two uuids give 32 bytes of entropy).
+        request_id = "0x" + (uuid.uuid4().bytes + uuid.uuid4().bytes).hex()
+
+    from ..on_chain import OnChainService
+    svc = OnChainService(runtime._config.rpb)
+    if not svc.available:
+        return {"error": "Substrate not configured (missing substrate_address "
+                         "or rpc_url)."}
+
+    result = await svc.pay_for_service(key, recipient, amount, request_id)
+    if not result.get("success"):
+        return {"error": f"Payment failed: {result.get('error')}",
+                "tx_hash": result.get("tx_hash")}
+    return {
+        "tx_hash": result.get("tx_hash"),
+        "request_id": result.get("request_id") or request_id,
+    }
+
+
+async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Consumer cross-daemon call: resolve the provider's on-chain WS endpoint,
+    connect one-shot, send a service_request with the payment proof, return the
+    reply."""
+    import json as _json
+    import time as _time
+    import uuid as _uuid
+
+    provider_address = str(input.get("provider_address") or "").strip()
+    service_id = str(input.get("service_id") or "").strip()
+    payload = input.get("payload")
+    tx_hash = str(input.get("tx_hash") or "").strip()
+    request_id = str(input.get("request_id") or "").strip()
+    if not provider_address:
+        return {"error": "Missing required field: 'provider_address'"}
+    if not service_id:
+        return {"error": "Missing required field: 'service_id'"}
+    if not isinstance(payload, dict):
+        return {"error": "'payload' must be an object"}
+    if not tx_hash or not request_id:
+        return {"error": "Missing payment proof: both 'tx_hash' and "
+                         "'request_id' are required (from pay_for_service)."}
+
+    from ..on_chain import OnChainService
+    svc = OnChainService(runtime._config.rpb)
+    if not svc.available:
+        return {"error": "Substrate not configured — cannot resolve the "
+                         "provider endpoint."}
+    endpoint = await svc.get_agent_endpoint(provider_address)
+    if not endpoint:
+        return {"error": f"Provider {provider_address[:10]} published no WS "
+                         "endpoint on chain — cannot reach it."}
+
+    try:
+        import websockets
+    except ImportError:
+        return {"error": "websockets library not installed on this daemon."}
+
+    caller_id = input.get("_caller_id")
+    defn = runtime.get_agent(caller_id) if caller_id else None
+    client_addr = (defn.identity.address
+                   if defn and defn.identity else "")
+
+    msg_id = _uuid.uuid4().hex[:12]
+    frame = {
+        "type": "service_request",
+        "msg_id": msg_id,
+        "spec_digest": service_id,
+        "request_id": request_id,
+        "args": payload,
+        "client": client_addr,
+        "client_address": client_addr,
+        # Payment proof (direct payForService path).
+        "tx_hash": tx_hash,
+    }
+    timeout = 60.0
+    try:
+        async with websockets.connect(endpoint, open_timeout=10) as ws:
+            await ws.send(_json.dumps(frame))
+            deadline = _time.monotonic() + timeout
+            while _time.monotonic() < deadline:
+                remaining = deadline - _time.monotonic()
+                raw = await asyncio.wait_for(
+                    ws.recv(), timeout=max(0.1, remaining))
+                try:
+                    reply = _json.loads(raw)
+                except (_json.JSONDecodeError, TypeError):
+                    continue
+                if reply.get("msg_id") == msg_id:
+                    return {
+                        "ok": bool(reply.get("ok")),
+                        "result": reply.get("result"),
+                        "error": reply.get("error"),
+                        "endpoint": endpoint,
+                    }
+            return {"error": f"Provider did not reply within {int(timeout)}s.",
+                    "endpoint": endpoint}
+    except Exception as exc:
+        return {"error": f"Service request failed: {exc}", "endpoint": endpoint}
+
+
+# ---------------------------------------------------------------------------
 # Conversation management (UI-facing, not exposed to the orchestrator LLM)
 # ---------------------------------------------------------------------------
 
@@ -3148,6 +3558,13 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # agent knowing its own budget (get_usage / get_my_budget_status).
     "metering": {"metering_report"},
     "identity": {"register_on_chain"},
+    # Services rail (docs/services_market.md): its own case-by-case bundle.
+    # find_services is read-only discovery; register_service authors a paid
+    # remote API under the agent's key; pay_for_service + request_service are
+    # the consumer half (sign a payForService transfer, then cross-daemon
+    # invoke with the proof). Kept off the progressive surface.
+    "services": {"find_services", "register_service",
+                 "pay_for_service", "request_service"},
     "profile": {"get_user_profile"},
     # "shell" (bash/read_file/write_file/list_directory/search_files) is NOT a
     # normal category: its tools live in shell_tools.py, not _TOOLS, and are
@@ -3860,6 +4277,11 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "get_children_status": _get_children_status,
     # On-chain
     "register_on_chain": _register_on_chain,
+    # Services rail (docs/services_market.md)
+    "find_services": _find_services,
+    "register_service": _register_service,
+    "pay_for_service": _pay_for_service,
+    "request_service": _request_service,
     # Manual compaction (§15)
     "compact_agent": _compact_agent,
     # Conversation management (UI-facing, not in orchestrator's tool list)

@@ -2747,13 +2747,15 @@ class WebSocketBridge:
         token = str(ask.get("token", ""))
         amount = str(ask.get("amount", ""))
 
-        # Payment/voucher validation seam (contracts workstream owns it).
-        if not self._validate_service_payment(msg, record):
+        # Payment/voucher validation gate (Stage B — real on-chain verify).
+        gate = await self._validate_service_payment(msg, record)
+        if not gate.get("ok"):
             self.runtime.service_store.record_request(
                 spec_digest, request_id, client, ok=False,
                 amount=amount, token=token)
             return {"msg_id": msg_id, "ok": False,
-                    "error": "Payment validation failed"}
+                    "error": f"Payment validation failed: "
+                             f"{gate.get('reason', 'unknown')}"}
 
         backing = record.backing_tool
         if not backing:
@@ -2786,19 +2788,117 @@ class WebSocketBridge:
         return {"msg_id": msg_id, "ok": True,
                 "result": {"request_id": request_id, **result}}
 
-    def _validate_service_payment(
+    async def _validate_service_payment(
         self, request: dict[str, Any], record: Any
-    ) -> bool:
-        """Seam for service payment/voucher validation.
+    ) -> dict[str, Any]:
+        """Verify a service request's payment proof (Stage B).
 
-        TODO(contracts): implement per docs/services_market.md §2 —
-        channel-only settlement (postpaid escrow was deleted, not
-        deferred): verify the request's signed cumulative voucher
-        against the PaymentChannel's voucherHash/current state. Until
-        then this returns True so the provider dispatch path is
-        exercisable end-to-end.
+        The request must carry ONE of two proofs:
+
+          - Direct: ``{tx_hash, request_id}`` — a Substrate.payForService
+            transfer. We fetch that receipt, decode the ServicePayment event,
+            and check recipient == the serving agent's address and amount >=
+            the service ask. Replay is closed by a persisted seen-request-id
+            set (a request_id already served is rejected).
+
+          - Voucher: ``{channel_id, cumulative_amount, signature}`` — a
+            PaymentChannel voucher. We recover+verify the signature against
+            on-chain channel state (client + Open) and require the increment
+            (cumulative - last_seen) >= ask, tracking the latest accepted
+            cumulative per channel and storing the voucher so the provider can
+            settle later via close_channel.
+
+        Config escape hatch: when the daemon has NO chain config (local dev),
+        we log a LOUD warning and ALLOW — mirroring the chain-optional paths
+        elsewhere (OnChainService.available). When chain IS configured, the
+        gate is enforced.
+
+        Returns ``{ok: bool, reason: str}``.
         """
-        return True
+        from .on_chain import OnChainService, ServiceMarketClient
+
+        config = self.runtime._config.rpb
+        oc = OnChainService(config)
+        # Resolve the serving agent's address (the payment recipient) — the
+        # spec's author_pubkey is stamped at registration time.
+        recipient = str(record.spec.get("author_pubkey") or "")
+
+        ask = record.ask
+        try:
+            ask_amount = int(str(ask.get("amount", "0")) or "0")
+        except (TypeError, ValueError):
+            ask_amount = 0
+
+        # --- Config escape hatch: no chain -> degrade loud-and-open ---------
+        if not oc.available:
+            log.warning(
+                "SERVICE PAYMENT GATE DEGRADED: no chain config "
+                "(substrate_address/rpc_url unset) — ALLOWING service request "
+                "for %s WITHOUT payment verification (local-dev only).",
+                record.name or record.digest[:16])
+            return {"ok": True, "reason": "chain not configured (dev degrade)"}
+
+        store = self.runtime.service_store
+        tx_hash = str(request.get("tx_hash") or "").strip()
+        request_id = str(request.get("request_id") or "").strip()
+        channel_id = request.get("channel_id")
+        signature = request.get("signature")
+        cumulative = request.get("cumulative_amount")
+
+        # --- Direct payForService path --------------------------------------
+        if tx_hash and request_id:
+            if store.has_served_request(request_id):
+                return {"ok": False,
+                        "reason": f"request_id {request_id[:16]} already served "
+                                  "(replay)"}
+            if not recipient:
+                return {"ok": False,
+                        "reason": "service has no on-chain provider address "
+                                  "(author_pubkey) to verify payment against"}
+            res = await oc.verify_service_payment(
+                request_id=request_id,
+                recipient=recipient,
+                min_amount=ask_amount,
+                tx_hash=tx_hash,
+            )
+            if not res.get("verified"):
+                return {"ok": False, "reason": res.get("reason", "unverified")}
+            # Consume the request_id AFTER a positive verify (replay guard).
+            store.mark_request_served(request_id)
+            return {"ok": True, "reason": "ok"}
+
+        # --- Voucher (PaymentChannel) path ----------------------------------
+        if channel_id is not None and signature and cumulative is not None:
+            try:
+                cid = int(channel_id)
+                cum = int(cumulative)
+            except (TypeError, ValueError):
+                return {"ok": False,
+                        "reason": "channel_id and cumulative_amount must be integers"}
+            smc = ServiceMarketClient(config)
+            if not smc.channel_available:
+                return {"ok": False,
+                        "reason": "PaymentChannel not configured on this daemon"}
+            res = await smc.verify_voucher(cid, cum, signature)
+            if not res.get("valid"):
+                return {"ok": False, "reason": res.get("reason", "invalid voucher")}
+            # The channel's provider must be the serving agent.
+            if recipient and str(res.get("provider", "")).lower() != recipient.lower():
+                return {"ok": False,
+                        "reason": "voucher channel provider is not this service's "
+                                  "provider"}
+            last = store.last_channel_cumulative(cid)
+            if cum - last < ask_amount:
+                return {"ok": False,
+                        "reason": f"voucher increment {cum - last} < ask "
+                                  f"{ask_amount}"}
+            # Accept: record the latest cumulative + store the voucher to settle.
+            store.record_channel_voucher(cid, cum, str(signature))
+            return {"ok": True, "reason": "ok"}
+
+        return {"ok": False,
+                "reason": "no payment proof: provide {tx_hash, request_id} or "
+                          "{channel_id, cumulative_amount, signature}"}
 
     async def _handle_register_on_chain(
         self,

@@ -245,6 +245,23 @@ class RPBConfig:
                                         # compare its local charter_hash against
                                         # the anchored version and warn on drift.
     registry_address: str = ""          # Discovered from RepToken.registryAddress()
+                                        # — the DAO governance Registry, populated
+                                        # at runtime by _discover_jurisdiction().
+                                        # NOTE: the registry.json seed historically
+                                        # also lands ServiceMarket's ServiceRegistry
+                                        # here for back-compat; prefer the clearly
+                                        # named ``service_registry_address`` below
+                                        # for the ServiceMarket rail.
+    service_registry_address: str = ""  # Deployed ServiceMarket ServiceRegistry
+                                        # address (ServiceMarket.sol). Seeded from
+                                        # registry.json contracts.service_registry.
+                                        # Distinct from ``registry_address`` (the
+                                        # DAO Registry) to avoid the collision the
+                                        # shared name caused.
+    payment_channel_address: str = ""   # Deployed ServiceMarket PaymentChannel
+                                        # address (ServiceMarket.sol). Seeded from
+                                        # registry.json contracts.payment_channel.
+                                        # The settlement rail for services.
     token_address: str = ""             # Discovered from Governor.token()
     economy_address: str = ""           # Discovered from RepToken.economyAddress()
     timelock_address: str = ""          # Discovered from Governor.timelock()
@@ -468,7 +485,14 @@ def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str
     if contracts.get("charter_anchor"):
         seed["charter_anchor_address"] = contracts["charter_anchor"]
     if contracts.get("service_registry"):
+        # Populate the clearly-named field AND the legacy shared name, so
+        # existing consumers of ``registry_address`` (the audit noted this
+        # collides with the DAO Registry) keep working until they migrate,
+        # while new code reads the unambiguous ``service_registry_address``.
+        seed["service_registry_address"] = contracts["service_registry"]
         seed["registry_address"] = contracts["service_registry"]
+    if contracts.get("payment_channel"):
+        seed["payment_channel_address"] = contracts["payment_channel"]
     return seed
 
 
@@ -816,6 +840,8 @@ def load_config(path: Path | None = None) -> ATNConfig:
         rep_token_address=resolved.get("rep_token_address", ""),
         charter_anchor_address=resolved.get("charter_anchor_address", ""),
         registry_address=resolved.get("registry_address", ""),
+        service_registry_address=resolved.get("service_registry_address", ""),
+        payment_channel_address=resolved.get("payment_channel_address", ""),
         token_address=resolved.get("token_address", ""),
         economy_address=resolved.get("economy_address", ""),
         timelock_address=resolved.get("timelock_address", ""),

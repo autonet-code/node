@@ -86,10 +86,19 @@ class ServiceStore:
         self._dir = Path(services_dir)
         self._registry_path = self._dir / "registry.jsonl"
         self._requests_path = self._dir / "requests.jsonl"
+        # Payment-gate sidecars (Stage B). The seen-request-id set is the
+        # direct-payment replay guard; the voucher ledger tracks the latest
+        # accepted cumulative per channel (so the increment must exceed the
+        # ask) plus the latest voucher signature the provider settles with.
+        self._seen_path = self._dir / "served_requests.json"
+        self._voucher_path = self._dir / "channel_vouchers.json"
         self._records: dict[str, ServiceRecord] = {}
         self._blobs: Any = None  # lazy; None until substrate package needed
         self._request_seq = 0
+        self._seen_requests: set[str] = set()
+        self._channel_vouchers: dict[str, dict[str, Any]] = {}
         self._load()
+        self._load_payment_state()
         self._request_seq = self._count_requests()
 
     # ------------------------------------------------------------------
@@ -302,6 +311,88 @@ class ServiceStore:
 
     def _count_requests(self) -> int:
         return sum(1 for _ in self._iter_requests())
+
+    # ------------------------------------------------------------------
+    # Payment gate state (Stage B) — replay guard + voucher ledger
+    # ------------------------------------------------------------------
+
+    def has_served_request(self, request_id: str) -> bool:
+        """True if this direct-payment request_id was already served (replay)."""
+        return str(request_id) in self._seen_requests
+
+    def mark_request_served(self, request_id: str) -> None:
+        """Record a direct-payment request_id as served (persisted). Idempotent."""
+        rid = str(request_id)
+        if rid in self._seen_requests:
+            return
+        self._seen_requests.add(rid)
+        self._persist_seen()
+
+    def last_channel_cumulative(self, channel_id: str | int) -> int:
+        """Latest accepted cumulative for a channel (0 if never seen)."""
+        entry = self._channel_vouchers.get(str(channel_id))
+        if not entry:
+            return 0
+        try:
+            return int(entry.get("cumulative", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def record_channel_voucher(
+        self,
+        channel_id: str | int,
+        cumulative: int,
+        signature: str,
+    ) -> None:
+        """Store the latest accepted voucher for a channel so the provider can
+        settle later via close_channel. Monotone: a lower cumulative than the
+        stored one is ignored (never regress the settlement position)."""
+        cid = str(channel_id)
+        prev = self.last_channel_cumulative(cid)
+        if int(cumulative) < prev:
+            return
+        self._channel_vouchers[cid] = {
+            "cumulative": int(cumulative),
+            "signature": str(signature),
+            "ts": int(time.time()),
+        }
+        self._persist_vouchers()
+
+    def get_channel_voucher(self, channel_id: str | int) -> dict[str, Any] | None:
+        """Return the latest stored voucher for a channel, or None."""
+        return self._channel_vouchers.get(str(channel_id))
+
+    def _load_payment_state(self) -> None:
+        if self._seen_path.exists():
+            try:
+                data = json.loads(self._seen_path.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    self._seen_requests = {str(x) for x in data}
+            except (OSError, json.JSONDecodeError) as exc:
+                log.warning("ServiceStore could not read served requests: %s", exc)
+        if self._voucher_path.exists():
+            try:
+                data = json.loads(self._voucher_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._channel_vouchers = {
+                        str(k): v for k, v in data.items() if isinstance(v, dict)
+                    }
+            except (OSError, json.JSONDecodeError) as exc:
+                log.warning("ServiceStore could not read channel vouchers: %s", exc)
+
+    def _persist_seen(self) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        tmp = self._seen_path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(sorted(self._seen_requests), fh)
+        os.replace(tmp, self._seen_path)
+
+    def _persist_vouchers(self) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        tmp = self._voucher_path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(self._channel_vouchers, fh)
+        os.replace(tmp, self._voucher_path)
 
     # ------------------------------------------------------------------
     # Internals
