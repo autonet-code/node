@@ -1,2 +1,4 @@
 """ATN — Agent orchestration framework."""
-__version__ = "0.3.1"
+# Fallback only: installed daemons report importlib.metadata's version
+# (see runtime/snapshot.py _daemon_version). Keep in sync with pyproject.
+__version__ = "0.7.1"
