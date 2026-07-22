@@ -48,17 +48,41 @@ def _voice_available() -> bool:
 
 
 def _daemon_version() -> str:
-    """The ATN daemon's version. Prefers installed package metadata (accurate
-    for pip installs); falls back to the in-tree __version__."""
+    """The ATN daemon's version.
+
+    Installed metadata is only authoritative when the RUNNING code is the
+    pip install. A source-checkout run (dev machine) imports the tree, not
+    site-packages — a stale pip install of autonet-computer must not win
+    (observed live: daemon on 0.7.x source reported 0.3.0 from a fossil
+    install). Source runs read pyproject.toml and are tagged "+src".
+    """
+    from pathlib import Path
     try:
-        from importlib.metadata import version
-        return version("autonet-computer")
+        import atn as _atn
+        pkg_dir = Path(_atn.__file__).resolve().parent
     except Exception:
+        pkg_dir = Path(__file__).resolve().parent.parent
+    in_site = any(p in ("site-packages", "dist-packages") for p in pkg_dir.parts)
+    if in_site:
         try:
-            from .. import __version__
-            return __version__
+            from importlib.metadata import version
+            return version("autonet-computer")
         except Exception:
-            return "unknown"
+            pass
+    else:
+        try:
+            import tomllib
+            pyproject = pkg_dir.parent / "pyproject.toml"
+            if pyproject.exists():
+                with open(pyproject, "rb") as f:
+                    return str(tomllib.load(f)["project"]["version"]) + "+src"
+        except Exception:
+            pass
+    try:
+        from .. import __version__
+        return __version__
+    except Exception:
+        return "unknown"
 
 
 class SnapshotBuilder:
