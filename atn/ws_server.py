@@ -2129,18 +2129,32 @@ class WebSocketBridge:
                 chain_id = getattr(self.runtime._config.rpb, "chain_id", 0)
                 sub_addr = svc._substrate_address()
                 _zero = "0x0000000000000000000000000000000000000000"
-                agents_out = []
                 owner_filter = (msg.get("owner", "") or "").lower()
-                for agent_id, name, addr in local:
-                    try:
-                        bound = await svc.get_agent_owner(addr)
-                        nonce = await svc.binding_nonce(addr)
-                        registered = await svc.is_registered(addr)
-                    except Exception as e:
-                        # Chain read failed mid-batch — surface the failure
-                        # rather than reporting misleading "unbound" states.
-                        return {"msg_id": msg_id, "ok": False,
-                                "error": f"Chain read failed for {addr}: {e}"}
+
+                # Chain reads run in worker threads (they're synchronous
+                # web3 HTTP calls — on the event loop a 15-agent fleet
+                # starves the websocket keepalive and the client sees a
+                # 1011 disconnect). Bounded concurrency keeps the RPC
+                # polite; a failure anywhere surfaces as an error rather
+                # than a misleading "unbound" state.
+                _sem = asyncio.Semaphore(5)
+
+                async def _read(agent_id: str, name: str, addr: str):
+                    async with _sem:
+                        status = await asyncio.to_thread(
+                            svc.read_binding_status, addr)
+                    return agent_id, name, addr, status
+
+                try:
+                    rows = await asyncio.gather(
+                        *(_read(a, n, ad) for a, n, ad in local))
+                except Exception as e:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": f"Chain read failed: {e}"}
+
+                agents_out = []
+                for agent_id, name, addr, status in rows:
+                    bound = status.get("owner", "")
                     owner_str = ("" if not bound or str(bound).lower() == _zero
                                  else str(bound))
                     if owner_filter and owner_str.lower() != owner_filter:
@@ -2149,9 +2163,9 @@ class WebSocketBridge:
                         "agent_id": agent_id,
                         "name": name,
                         "address": addr,
-                        "registered": bool(registered),
+                        "registered": bool(status.get("registered")),
                         "owner": owner_str,
-                        "binding_nonce": int(nonce),
+                        "binding_nonce": int(status.get("nonce", 0)),
                     })
                 return {"msg_id": msg_id, "ok": True, "result": {
                     "substrate_address": sub_addr,

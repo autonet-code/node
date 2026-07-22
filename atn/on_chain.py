@@ -972,6 +972,28 @@ class OnChainService:
             log.exception("Failed to rotate owner on chain")
             return {"success": False, "error": str(e)}
 
+    def read_binding_status(self, address: str) -> dict[str, Any]:
+        """Synchronous batched read of one agent's binding state.
+
+        Three RPC round-trips (one when unregistered — the owner/nonce reads
+        are skipped, an unregistered agent is unbound at nonce 0 by
+        definition). Runs in a worker thread from the WS handler — NEVER on
+        the event loop: a fleet of N agents would otherwise block the loop
+        for N×RPC-latency and starve the websocket keepalive (observed live
+        as 1011 disconnects with 15 agents). Raises on chain-read failure so
+        the caller can surface it instead of reporting a misleading
+        "unbound" state.
+        """
+        w3 = self._get_web3()
+        contract = self._get_contract(w3)
+        checksum = w3.to_checksum_address(address)
+        registered = bool(contract.functions.isRegistered(checksum).call())
+        if not registered:
+            return {"registered": False, "owner": ZERO_ADDRESS, "nonce": 0}
+        owner = contract.functions.agentOwner(checksum).call()
+        nonce = int(contract.functions.bindingNonce(checksum).call())
+        return {"registered": True, "owner": str(owner), "nonce": nonce}
+
     async def binding_nonce(self, address: str) -> int:
         """Read an agent's current owner-binding nonce (0 if never bound).
 
