@@ -1003,7 +1003,13 @@ class Runtime:
 
     async def unregister_agent(self, agent_id: str, *, _force: bool = False) -> None:
         from ..orchestrator import ORCHESTRATOR_ID
-        if agent_id == ORCHESTRATOR_ID and not _force:
+        # The root agent is only protected in legacy mode (orchestrator
+        # auto-provisioning enabled). In a rootless fleet it is a normal
+        # agent and the owner may remove it like any other — mirrors the
+        # registry-level guard in agent_registry.unregister_agent.
+        _orch_cfg = getattr(self._config, "orchestrator", None)
+        if agent_id == ORCHESTRATOR_ID and not _force \
+                and getattr(_orch_cfg, "enabled", False):
             raise ValueError("The orchestrator cannot be unregistered")
         await self.control.kill_agent(agent_id)
         # Clean up the persisted provider (closes session / subprocess)
@@ -1022,9 +1028,16 @@ class Runtime:
         delegate_log = self._config.data_dir / "delegates" / f"{agent_id}.log"
         if delegate_log.exists():
             delegate_log.unlink(missing_ok=True)
-        agent_yaml = self._config.agents_dir / f"{agent_id}.yaml"
-        if agent_yaml.exists():
-            agent_yaml.unlink(missing_ok=True)
+        # Remove the persisted definition. Agents are stored as directories
+        # (agents/<id>/agent.yaml); delete_agent_dir also covers the legacy
+        # flat <id>.yaml layout. Without this a removed agent resurrects at
+        # the next boot.
+        from ..loader import delete_agent_dir
+        try:
+            delete_agent_dir(agent_id, self._config.agents_dir)
+        except Exception:
+            log.warning("Agent %s unregistered but persisted definition "
+                        "could not be deleted", agent_id, exc_info=True)
         await self.registry.unregister_agent(agent_id, _force=_force)
 
     async def activate_agent(self, agent_id: str) -> None:
