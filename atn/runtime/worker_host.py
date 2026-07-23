@@ -77,12 +77,24 @@ try:  # pragma: no cover - import guard exercised only when the keystore is abse
     # `pip install autonet-computer` brings the vault); fall back to a dev
     # checkout of kevin on the path, then to a fail-closed deny-all shim.
     try:
-        from atn._vendor.kevin.keystore import resolve_spec as _resolve_spec  # type: ignore
+        from atn._vendor.kevin.keystore import resolve_spec as _raw_resolve_spec  # type: ignore
     except Exception:
-        from kevin.keystore import resolve_spec as _resolve_spec  # type: ignore
+        from kevin.keystore import resolve_spec as _raw_resolve_spec  # type: ignore
 except Exception:  # ANY import failure => deny-all
-    def _resolve_spec(spec: Any) -> list:  # type: ignore
+    def _raw_resolve_spec(spec: Any) -> list:  # type: ignore
         """FAIL-CLOSED shim: keystore unavailable => grant nothing."""
+        return []
+
+
+def _resolve_spec(spec: Any) -> list:
+    """``resolve_spec`` with daemon-plane names EXCLUDED. Any vault name
+    containing a dot (CredentialStore ``app.*`` payloads, ``agent-key.*`` wallet
+    keys) is daemon-internal and MUST NEVER resolve into an agent allowance —
+    not via "all", not by being named literally, not through a bundle. This is
+    the worker-side choke point mirroring ws ``_resolve_wish``."""
+    try:
+        return [s for s in _raw_resolve_spec(spec) if "." not in s]
+    except Exception:  # noqa: BLE001 — fail closed
         return []
 
 

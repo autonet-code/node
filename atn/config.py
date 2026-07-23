@@ -1042,6 +1042,51 @@ def remove_provider_from_config(
     return True
 
 
+def save_secrets_config_to_yaml(
+    *,
+    worker_isolation: bool | None = None,
+    default_root_allowance: str | None = None,
+    config_path: Path | None = None,
+) -> None:
+    """Persist security settings (worker isolation + root allowance) to config.yaml.
+
+    Reads the existing YAML, updates ``worker_isolation.enabled`` and/or
+    ``secrets.default_root_allowance`` (only the keys explicitly passed), writes
+    back. Creates the file / sections if they don't exist. Mirrors the
+    read-update-dump pattern of ``save_provider_to_config``.
+    """
+    config_path = config_path or (_DEFAULT_DIR / "config.yaml")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            log.warning("Failed to read config for secrets-config save: %s", config_path)
+            raw = {}
+
+    if worker_isolation is not None:
+        wi = raw.get("worker_isolation")
+        if not isinstance(wi, dict):
+            wi = {}
+            raw["worker_isolation"] = wi
+        wi["enabled"] = bool(worker_isolation)
+
+    if default_root_allowance is not None:
+        sec = raw.get("secrets")
+        if not isinstance(sec, dict):
+            sec = {}
+            raw["secrets"] = sec
+        sec["default_root_allowance"] = default_root_allowance
+
+    config_path.write_text(
+        yaml.dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    log.info("Security settings saved to %s", config_path)
+
+
 def save_orchestrator_model_to_config(
     model: str,
     config_path: Path | None = None,

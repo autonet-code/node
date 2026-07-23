@@ -163,16 +163,45 @@ class AgentRegistry:
         """Path to the persisted identity file for an agent."""
         return self._config.agents_dir / agent_id / "identity.json"
 
+    @staticmethod
+    def _keystore():
+        """Import the vendored age keystore (authoritative in the wheel),
+        falling back to a dev checkout of kevin on the path — same import
+        discipline as ``vault_setup._keystore``. Returns None if the vault is
+        entirely unavailable so callers can degrade rather than crash."""
+        try:
+            from atn._vendor.kevin import keystore  # type: ignore
+            return keystore
+        except Exception:
+            try:
+                import keystore  # type: ignore
+                return keystore
+            except Exception:
+                return None
+
+    @staticmethod
+    def _key_secret_name(agent_id: str) -> str:
+        """Reserved daemon-plane vault name for an agent's wallet key. Dotted
+        prefix => NEVER agent-grantable (see credentials.PREFIX / vault_setup)."""
+        return "agent-key." + agent_id
+
     def _save_identity(self, agent_id: str, identity: "AgentIdentity", private_key: str) -> None:
-        """Persist agent identity and private key to disk."""
+        """Persist agent identity to disk (WITHOUT the private key) and store
+        the private key in the age-encrypted vault under ``agent-key.<id>``."""
         from ..models import AgentIdentity  # noqa: F811
         path = self._identity_path(agent_id)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Private key goes to the vault, never to identity.json.
+        if private_key:
+            ks = self._keystore()
+            if ks is None:
+                raise RuntimeError(
+                    "agent-key vault unavailable; cannot persist wallet key")
+            ks.put_secret(self._key_secret_name(agent_id), private_key)
         data = {
             "public_key": identity.public_key,
             "address": identity.address,
             "lineage_hash": identity.lineage_hash,
-            "private_key": private_key,
             "registered_on_chain": identity.registered_on_chain,
             "registration_tx": identity.registration_tx,
         }
@@ -201,9 +230,49 @@ class AgentRegistry:
                 registered_on_chain=data.get("registered_on_chain", False),
                 registration_tx=data.get("registration_tx"),
             )
-            private_key = data.get("private_key", "")
+            # Key source of truth is the vault. LEGACY MIGRATION: if the file
+            # still carries a non-empty "private_key" field, honor it, push it
+            # into the vault, and rewrite the file without the field.
+            ks = self._keystore()
+            legacy_key = data.get("private_key", "") or ""
+            private_key = ""
+            if legacy_key:
+                private_key = legacy_key
+                if ks is not None:
+                    try:
+                        ks.put_secret(self._key_secret_name(agent_id), legacy_key)
+                    except Exception:
+                        log.warning("Failed to migrate wallet key for %s into "
+                                    "the vault; keeping file field", agent_id,
+                                    exc_info=True)
+                    else:
+                        # Rewrite the file without the private_key field
+                        # (write-then-replace for atomicity).
+                        stripped = {k: v for k, v in data.items()
+                                    if k != "private_key"}
+                        try:
+                            tmp = path.with_suffix(".json.tmp")
+                            tmp.write_text(json.dumps(stripped, indent=2),
+                                           encoding="utf-8")
+                            os.replace(tmp, path)
+                        except OSError:
+                            log.warning("Migrated wallet key for %s but could "
+                                        "not strip it from identity.json",
+                                        agent_id, exc_info=True)
+            else:
+                # Normal path: read the key from the vault.
+                if ks is not None:
+                    try:
+                        private_key = ks.get_secret(self._key_secret_name(agent_id))
+                    except KeyError:
+                        private_key = ""
+                    except Exception:
+                        log.warning("Failed to read wallet key for %s from the "
+                                    "vault", agent_id, exc_info=True)
+                        private_key = ""
             if not private_key or not identity.address:
-                log.warning("Identity file for %s is incomplete, regenerating", agent_id)
+                log.warning("Identity for %s is incomplete (missing key or "
+                            "address), regenerating", agent_id)
                 return None
 
             # Phase 12 sanity check: identity.address MUST be the
@@ -675,6 +744,15 @@ class AgentRegistry:
         self._heartbeat_table.pop(agent_id, None)
         self._last_idle.pop(agent_id, None)
         self._agent_keys.pop(agent_id, None)
+        # Remove the agent's wallet key from the vault (best-effort; swallow
+        # errors — the in-memory drop above is the authoritative removal).
+        ks = self._keystore()
+        if ks is not None:
+            try:
+                ks.delete_secret(self._key_secret_name(agent_id))
+            except Exception:
+                log.debug("Could not delete vault wallet key for %s", agent_id,
+                          exc_info=True)
         if self._budget_used.pop(agent_id, None) is not None or \
            self._budget_period_start.pop(agent_id, None) is not None:
             self._save_budget_state()

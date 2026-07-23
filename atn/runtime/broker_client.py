@@ -85,7 +85,9 @@ def _short_unix_sock_path(name: str):
 # hardcoded dev path. We READ it (no drift, no re-derivation); an unmapped
 # service is DROPPED (fail-closed). Absent file => empty map => the daemon can
 # mint nothing, which is the correct fail-closed posture.
-_KEYSTORE_DIR = os.environ.get("KEYSTORE_DIR", r"C:\code\secrets\keystore")
+_KEYSTORE_DIR = os.environ.get(
+    "KEYSTORE_DIR",
+    os.path.join(os.path.expanduser("~"), ".atn", "keystore"))
 _SERVICE_POLICY_MAP = Path(os.environ.get(
     "ATN_VAULT_POLICY_MAP",
     os.path.join(_KEYSTORE_DIR, "service_policy_map.json")))

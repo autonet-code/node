@@ -42,8 +42,14 @@ def generate_policy_map(ks) -> dict:
 
     The self-contained age backend has no HashiCorp policy layer, so the broker's
     policy indirection collapses to a pass-through: each service maps to a policy
-    of the same name. Regenerate after adding secrets."""
-    return {svc: svc for svc in ks.list_services()}
+    of the same name. Regenerate after adding secrets.
+
+    SECURITY: any vault name containing a dot is DAEMON-PLANE (CredentialStore
+    ``app.*`` payloads, ``agent-key.*`` wallet keys) and is EXCLUDED here. The
+    broker fail-closes on unmapped services (``_services_to_policies`` drops
+    them), so excluding dotted names makes daemon-plane credentials structurally
+    un-grantable to any agent — this exclusion is the security anchor."""
+    return {svc: svc for svc in ks.list_services() if "." not in svc}
 
 
 def write_policy_map(ks) -> str:

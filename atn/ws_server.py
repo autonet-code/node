@@ -71,10 +71,17 @@ KEY_LOCAL_ONLY_MESSAGES = frozenset({
     "register_agent_on_chain",
     # Vault mutations carry a raw secret VALUE in the payload; over a
     # proxied/remote link the WS hop is plain ws://, so it would cross the
-    # wire in plaintext. Reads (secrets_status/usage/alarms) are names-only
-    # and stay owner-gated but remotely reachable.
+    # wire in plaintext. Reads (secrets_status/usage/alarms/probe) are
+    # names-only and stay owner-gated but remotely reachable.
     "secrets_put",
     "secrets_delete",
+    # secrets_import reads a raw VALUE out of the host environment and writes
+    # it into the vault — same custody profile as secrets_put (the value never
+    # leaves the daemon, but the mutation must be owner+local).
+    "secrets_import",
+    # secrets_config MUTATES daemon config (worker isolation, root allowance).
+    # Same custody tier as the vault mutations: owner + local listener only.
+    "secrets_config",
 })
 
 # The secrets vault surface (owner-only, HUMAN-ONLY by construction: these
@@ -86,6 +93,16 @@ _SECRETS_MESSAGES = frozenset({
     "secrets_delete",
     "secrets_usage_log",
     "secrets_alarms",
+    # Host-discovery surface: secrets_probe reads names-only host-scan results
+    # (read-gated, same tier as secrets_status); secrets_import imports named
+    # host env vars into the vault (mutating, forced onto the local listener
+    # via KEY_LOCAL_ONLY_MESSAGES).
+    "secrets_probe",
+    "secrets_import",
+    # secrets_config: owner-gated GET/SET of daemon security settings (worker
+    # isolation, default root allowance). Empty payload = read-only GET;
+    # mutations are forced onto the local listener via KEY_LOCAL_ONLY_MESSAGES.
+    "secrets_config",
 })
 
 # Tools an authed-but-SCOPED (non-full-fleet) session may NOT call: they read
@@ -169,6 +186,17 @@ class WebSocketBridge:
         # (a gate ABOVE this policy), not here — this stays the per-surface seam.
         from .surface import AllowAll, InputPolicy  # local import avoids cycle
         self.policy: InputPolicy = AllowAll()
+        # Host-discovery runner (OS probe). Lazily built on first secrets_probe
+        # so a daemon that never opens the Secrets tab pays no boot cost. Loads
+        # the cached host_scan.json at construction.
+        self._host_discovery: Any = None
+
+    def _get_host_discovery(self) -> Any:
+        """Lazily construct the HostDiscovery runner (cache-backed)."""
+        if self._host_discovery is None:
+            from .runtime.host_discovery import HostDiscovery
+            self._host_discovery = HostDiscovery(self.runtime._config.data_dir)
+        return self._host_discovery
 
     @property
     def _clients(self):
@@ -2560,6 +2588,30 @@ class WebSocketBridge:
                 log.debug("secrets_alarms: store unreadable", exc_info=True)
             return {"msg_id": msg_id, "ok": True, "result": {"alarms": alarms}}
 
+        if msg_type == "secrets_probe":
+            # Host-discovery (OS probe). Read-only, names-only. refresh falsy =>
+            # return cached results (loaded from host_scan.json at construction);
+            # refresh true => run a fresh concurrent scan (awaitable, capped).
+            hd = self._get_host_discovery()
+            if msg.get("refresh"):
+                try:
+                    await hd.scan()
+                except Exception as exc:  # noqa: BLE001 — a scan failure is not fatal
+                    log.debug("secrets_probe: scan failed", exc_info=True)
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": f"host scan failed: {exc}"}
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "last_scan": hd.last_scan or None,
+                "scanning": hd.scanning,
+                "results": hd.to_list(),
+            }}
+
+        if msg_type == "secrets_config":
+            # Config surface (worker isolation + root allowance). Needs no vault
+            # keystore — handle before the keystore acquisition so a read-only
+            # GET works even when the vault is unprovisioned.
+            return await self._handle_secrets_config(msg, msg_id)
+
         from .vault_setup import _keystore, write_policy_map
         try:
             ks = _keystore()
@@ -2569,7 +2621,13 @@ class WebSocketBridge:
 
         if msg_type == "secrets_status":
             try:
-                services = ks.list_services()
+                # Only FLAT names are agent-grantable / user-managed. Dotted
+                # names are daemon-plane (CredentialStore app.*, agent-key.*):
+                # excluded from ``services`` (the grantable plane) but listed
+                # names-only in ``daemon_services`` for display.
+                all_names = ks.list_services()
+                services = [s for s in all_names if "." not in s]
+                daemon_services = [s for s in all_names if "." in s]
             except Exception as exc:  # noqa: BLE001
                 return {"msg_id": msg_id, "ok": False,
                         "error": f"vault unreadable: {exc}"}
@@ -2590,9 +2648,13 @@ class WebSocketBridge:
                 if not tokens or any(t == "none" for t in tokens):
                     return []
                 if any(t == "all" for t in tokens):
+                    # ``services`` is already dot-filtered above.
                     return list(services)
                 try:
-                    return list(ks.resolve_spec(wish))
+                    # Filter dotted (daemon-plane) names from any resolved
+                    # allowance: a spec that literally names a dotted service or
+                    # a bundle containing one must NOT resolve it.
+                    return [s for s in ks.resolve_spec(wish) if "." not in s]
                 except Exception:  # noqa: BLE001 — fail closed
                     return []
 
@@ -2643,6 +2705,7 @@ class WebSocketBridge:
                 "assignments": assignments,
                 "connectors": connectors,
                 "providers": providers,
+                "daemon_services": daemon_services,
             }}
 
         if msg_type == "secrets_put":
@@ -2654,6 +2717,10 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False,
                         "error": "Service names must not contain commas or "
                                  "whitespace (they double as allowance-spec tokens)"}
+            if "." in service:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "dotted names are reserved for daemon-internal "
+                                 "credentials"}
             if service.lower() in ("none", "all"):
                 return {"msg_id": msg_id, "ok": False,
                         "error": f"'{service}' is a reserved allowance-spec keyword"}
@@ -2688,6 +2755,10 @@ class WebSocketBridge:
             service = str(msg.get("service", "")).strip()
             if not service:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'service' field"}
+            if "." in service:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "dotted names are reserved for daemon-internal "
+                                 "credentials"}
             try:
                 removed = ks.delete_secret(service)
                 write_policy_map(ks)
@@ -2707,8 +2778,191 @@ class WebSocketBridge:
                 "live_holders": live_holders,
             }}
 
+        if msg_type == "secrets_import":
+            # Import named host env vars into the vault. The raw VALUE is read
+            # from os.environ and handed straight to ks.put_secret — it NEVER
+            # appears in any response, log line, or error message. Same name
+            # validation as secrets_put.
+            names = msg.get("names") or []
+            if not isinstance(names, list):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "'names' must be a list of env var names"}
+            from .runtime.host_discovery import validate_secret_name
+            existing = set(ks.list_services())
+            imported: list[str] = []
+            rotated: list[str] = []
+            missing: list[str] = []
+            invalid: list[dict[str, str]] = []
+            new_service = False
+            audit = getattr(self.runtime, "secret_audit", None)
+            for raw in names:
+                name = str(raw).strip()
+                # Name doubles as an allowance-spec token + vault service key:
+                # apply the identical validation secrets_put enforces.
+                reason = validate_secret_name(name)
+                if reason is not None:
+                    invalid.append({"name": name or str(raw), "reason": reason})
+                    continue
+                value = os.environ.get(name)
+                if not isinstance(value, str) or not value:
+                    missing.append(name)
+                    continue
+                try:
+                    existed = name in existing
+                    ks.put_secret(name, value)
+                except Exception:  # noqa: BLE001 — never leak the value in the error
+                    log.debug("secrets_import: put_secret failed for a name",
+                              exc_info=True)
+                    invalid.append({"name": name, "reason": "vault write failed"})
+                    continue
+                finally:
+                    value = None  # drop our reference to the raw value promptly
+                if existed:
+                    rotated.append(name)
+                else:
+                    imported.append(name)
+                    existing.add(name)
+                    new_service = True
+                if audit is not None:
+                    audit.record("rotated" if existed else "added",
+                                 agent_id="owner", services=[name])
+            # Regenerate the service->policy map once, after all writes.
+            if imported or rotated:
+                try:
+                    write_policy_map(ks)
+                except Exception as exc:  # noqa: BLE001
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": f"vault policy map refresh failed: {exc}"}
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "imported": imported,
+                "rotated": rotated,
+                "missing": missing,
+                "invalid": invalid,
+                # The broker caches the policy map at import; a NEW service
+                # needs a broker restart before it is grantable.
+                "broker_restart_required": new_service,
+            }}
+
         return {"msg_id": msg_id, "ok": False,
                 "error": f"Unknown secrets message: {msg_type}"}
+
+    async def _handle_secrets_config(self, msg: dict[str, Any],
+                                     msg_id: Any) -> dict[str, Any]:
+        """GET/SET daemon security settings: worker isolation + default root
+        allowance. Owner-only + local-listener (enforced by the caller via
+        _SECRETS_MESSAGES scope check + KEY_LOCAL_ONLY_MESSAGES custody gate).
+
+        Empty payload (neither ``worker_isolation`` nor ``default_root_allowance``)
+        => read-only GET of the current values.
+
+        Applies changes BOTH in-memory (``runtime._config``, live for NEW runs)
+        and persisted (config.yaml). See the response ``restart_required`` /
+        ``isolation_live`` fields for what a live in-memory flip does and does
+        not activate.
+        """
+        cfg = self.runtime._config
+        has_iso = "worker_isolation" in msg
+        has_allow = "default_root_allowance" in msg
+
+        # --- validation -----------------------------------------------------
+        new_iso: bool | None = None
+        if has_iso:
+            new_iso = bool(msg.get("worker_isolation"))
+
+        new_allow: str | None = None
+        if has_allow:
+            raw_allow = msg.get("default_root_allowance")
+            if not isinstance(raw_allow, str):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "'default_root_allowance' must be a string spec "
+                                 "('none', 'all', or a comma-separated list)"}
+            spec = raw_allow.strip()
+            if not spec:
+                spec = "none"
+            tokens = [t.strip() for t in spec.split(",") if t.strip()]
+            if not tokens:
+                spec = "none"
+                tokens = ["none"]
+            # Reject dotted names anywhere in the spec — dotted names are
+            # daemon-plane (CredentialStore app.*, agent-key.*) and are never
+            # grantable. Mirrors the secrets_put / validate_secret_name idiom.
+            for t in tokens:
+                if "." in t:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": "dotted names are reserved for daemon-internal "
+                                     "credentials and are not allowance-spec tokens"}
+            new_allow = spec
+
+        # --- read-only GET (empty payload) ----------------------------------
+        write = has_iso or has_allow
+
+        # --- apply in-memory ------------------------------------------------
+        if new_iso is not None:
+            cfg.worker_isolation.enabled = new_iso
+        if new_allow is not None:
+            cfg.secrets.default_root_allowance = new_allow
+
+        # --- persist --------------------------------------------------------
+        if write:
+            try:
+                from .config import save_secrets_config_to_yaml
+                save_secrets_config_to_yaml(
+                    worker_isolation=new_iso,
+                    default_root_allowance=new_allow,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"failed to persist security settings: {exc}"}
+
+        # --- effective-state + warnings -------------------------------------
+        iso_now = bool(cfg.worker_isolation.enabled)
+        allow_now = cfg.secrets.default_root_allowance
+
+        # Isolation is read live from runtime._config on every spawn/execution
+        # (_worker_isolation_enabled / _worker_eligible / worker_host.spawn_child),
+        # so the in-memory flip is effective for NEW runs immediately. The one
+        # boot-time consumer is the orphan-reaper monitor loop, started once at
+        # runtime start under the flag; enabling isolation live does not start
+        # that monitor until a daemon restart.
+        isolation_live = True
+        restart_required = False
+        warnings: list[str] = []
+
+        if new_iso is True:
+            restart_required = True  # orphan-monitor loop only starts at boot
+            warnings.append(
+                "Worker isolation is live for new runs, but the orphan-reaper "
+                "monitor loop only starts on daemon restart.")
+            # Warn if the broker value-push is not armed: with isolation ON,
+            # secret grants stage through the broker; a down broker fails closed.
+            try:
+                push_armed = bool(self.runtime._broker_client.value_push_armed)
+            except Exception:  # noqa: BLE001
+                push_armed = False
+            if not push_armed:
+                warnings.append(
+                    "The secret broker value-push is not armed: grants will fail "
+                    "closed until the broker is provisioned and running "
+                    "(run `atn-vault-setup`).")
+
+        # Env-var precedence: ATN_WORKER_ISOLATION overrides config at boot. If
+        # it is set, a config change to isolation won't stick past what the env
+        # dictates on the next restart.
+        env_iso = os.environ.get("ATN_WORKER_ISOLATION")
+        if has_iso and env_iso is not None:
+            warnings.append(
+                f"ATN_WORKER_ISOLATION={env_iso!r} is set in the environment and "
+                "overrides config at boot: this change will not survive a daemon "
+                "restart unless the env var is changed too.")
+
+        warning = " ".join(warnings) if warnings else None
+        return {"msg_id": msg_id, "ok": True, "result": {
+            "worker_isolation": iso_now,
+            "default_root_allowance": allow_now,
+            "isolation_live": isolation_live,
+            "restart_required": restart_required,
+            "warning": warning,
+        }}
 
     # ------------------------------------------------------------------
     # On-chain registration helpers

@@ -506,9 +506,13 @@ class AutonetBridge:
 
         # Fallback: direct creation from credentials
         try:
+            from pathlib import Path
             from .providers.anthropic import AnthropicProvider
             from .credentials import CredentialStore
-            creds = CredentialStore()
+            if self._runtime is not None and hasattr(self._runtime, "credential_store"):
+                creds = self._runtime.credential_store
+            else:
+                creds = CredentialStore(Path.home() / ".atn")
             api_key = creds.load(f"provider_{provider_name}").get("api_key", "")
             if api_key and provider_name == "anthropic":
                 return AnthropicProvider(api_key=api_key, default_model=model)
