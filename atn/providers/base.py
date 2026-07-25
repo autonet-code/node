@@ -758,9 +758,14 @@ class Provider(ABC):
                 # budget — never extends it. One-shot: if the agent still
                 # doesn't attest on the extra turn, the next natural end
                 # finalizes normally.
+                # Import the canonical trigger set rather than repeating it:
+                # this condition and needs_review_reinvoke (the bridge path)
+                # must agree, and a duplicated literal here silently drifted
+                # from the real set once already.
+                from ..delegate_prompts import _REVIEW_TRIGGER_TOOLS
                 if (review_tools and not review_injected
                         and tool_executor is not None
-                        and ({"use_tool", "register_tool"} & called_tool_names)
+                        and (_REVIEW_TRIGGER_TOOLS & called_tool_names)
                         and "attest_tools" not in called_tool_names):
                     review_injected = True
                     log.info(

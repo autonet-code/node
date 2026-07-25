@@ -107,15 +107,36 @@ class TestReviewInjection:
         assert resp.text == "reviewed and done"
 
     @pytest.mark.asyncio
-    async def test_register_tool_also_triggers(self):
+    async def test_register_tool_does_not_trigger(self):
+        """Authoring a tool must NOT prompt a review of it.
+
+        Registration never invokes the tool, so any review it produced
+        would be ungrounded — and the close discards it regardless,
+        because the author's own household is excluded from position
+        drift. The trigger was spending model tokens on rows consensus
+        throws away. (This test previously asserted the opposite.)
+        """
         p = ScriptedProvider([
             _tool_turn("register_tool", {"name": "new_tool", "code": "..."}),
             _resp(text="registered", stop_reason="end_turn"),
+        ])
+        await p.send_orchestrate(
+            message="go", tools=[], tool_executor=_noop_executor)
+        assert p.stream_calls == 2
+        assert not _injected_review(p.seen_messages)
+
+    @pytest.mark.asyncio
+    async def test_register_then_use_still_triggers(self):
+        """Registering AND using in one run still earns a review — the
+        trigger is the use, not the registration."""
+        p = ScriptedProvider([
+            _tool_turn("register_tool", {"name": "new_tool", "code": "..."}),
+            _tool_turn("use_tool", {"tool": "new_tool"}),
+            _resp(text="used it", stop_reason="end_turn"),
             _resp(text="ok", stop_reason="end_turn"),
         ])
         await p.send_orchestrate(
             message="go", tools=[], tool_executor=_noop_executor)
-        assert p.stream_calls == 3
         assert _injected_review(p.seen_messages)
 
 
@@ -203,10 +224,17 @@ class TestReinvokePredicate:
             assert not needs_review_reinvoke(
                 self._BridgeLike(), self._calls("use_tool"), reason), reason
 
-    def test_register_tool_triggers_and_missing_provider_attr_defaults_safe(self):
+    def test_register_tool_does_not_trigger_and_missing_attr_defaults_safe(self):
         from atn.delegate_prompts import needs_review_reinvoke
-        assert needs_review_reinvoke(
+        # Authoring a tool is not using it: registration never invokes the
+        # tool, and the close discards an author's review of their own work
+        # anyway (author household excluded from drift). Previously this
+        # asserted the opposite.
+        assert not needs_review_reinvoke(
             self._BridgeLike(), self._calls("register_tool"), "end_turn")
+        # Using one still does.
+        assert needs_review_reinvoke(
+            self._BridgeLike(), self._calls("use_tool"), "end_turn")
         # An object without the attribute is treated as self-handling
         # (never double-prompt by default).
         assert not needs_review_reinvoke(

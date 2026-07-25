@@ -102,7 +102,14 @@ REVIEW_STEP_PROMPT = (
 
 # Tool names whose presence in a run marks it as REGISTERED-TOOL usage
 # (the review step's trigger set) — and the review call that satisfies it.
-_REVIEW_TRIGGER_TOOLS = frozenset({"use_tool", "register_tool"})
+#
+# `register_tool` is deliberately NOT here. Registration never calls
+# ToolStore.call, so triggering on it prompts the agent to review a tool it
+# authored and never ran: ungrounded by construction, and discarded anyway —
+# the close excludes the author's own household from drift
+# (federated_reconcile.py, `if house == author_house: continue`). It spent
+# model tokens producing rows consensus throws away.
+_REVIEW_TRIGGER_TOOLS = frozenset({"use_tool"})
 _REVIEW_TOOL = "attest_tools"
 
 # stop_reasons after which a review re-invoke would be wrong (aborted or
