@@ -35,6 +35,7 @@ Status conventions used below:
 | `epoch_economics.md` | Epoch close + candle mechanics. Note: the emission model shipped as **fees-only** (2026-07-10) — the epoch pool is burned service fees only, no base emission (Σ minted == Σ burned); see `tool_substrate.md` `Decision (2026-07-10)`. |
 | `agentic_loop.md` | Hardening spec for `send_orchestrate` (the anthropic/openai_compat/ollama agent loop) and its adapters. |
 | `cross_platform_isolation_design.md` | Isolation + vault port plan — IMPLEMENTED + Linux-verified (POSIX AF_UNIX / SO_PEERCRED, tracked-PID kill). |
+| `secrets.md` | **Owner-facing.** The secret vault and agent security: the honest threat model, the fail-closed allowance algebra (parent ∩ child clamp), host binding, the names-only audit trail, and the leak tripwire. Linked from the app's "Add secret" dialog. |
 | `epoch_economics.md` · `ledger_pricing.md` | (see above) the economic core as shipped. |
 | `auto_update_design.md` | Daemon auto-update: stage-on-poll, apply-on-next-boot (running daemon never self-restarts). Implementing. |
 | `anti_tamper_design.md` | Consensus-node anti-tamper — the "other half" of auto-update. Designed, pre-implementation. |

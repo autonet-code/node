@@ -442,6 +442,39 @@ money-only leaf, Substrate gains the earnings counter, and the DAO gains
 the claim rail — fresh Substrate + daemons on the new build before the
 next close, same drill as v4.1.
 
+## Decision (2026-07-24): claimable authorship — never unclaimable rewards
+
+Ratified in discussion 2026-07-24; BUILT same day (`tool_store.py`).
+Closes E2E seam #3 (slug-authored mint with no chain claim path).
+
+1. **Consensus identity keys on ON-CHAIN registration, not keypair
+   presence.** Every agent holds a local keypair from birth, but
+   `recordTrainingForEpoch` reverts `AgentNotActive` for unregistered
+   addresses — mint keyed to an unregistered keypair is stranded. So
+   `_consensus_identity`: agent registered on-chain → its own 0x;
+   unregistered agent → the OWNER WALLET (household claims the
+   rewards); no wallet configured → local id, PRIVATE-PLANE ONLY.
+2. **Publish gate.** A manifest may enter consensus only with a
+   claimable author (0x). All three publish paths (register+publish,
+   owner WS toggle, `publish_tool`) refuse otherwise. Private
+   registration and local use stay unrestricted on wallet-less setups.
+3. **Re-stamp by re-registration.** The consensus author joins the
+   content-idempotency match: after an identity change (agent
+   registered / wallet configured), re-registering identical content
+   mints a fresh, correctly-authored record instead of resurrecting
+   the orphan one. Boot-prune migrates grants. Published orphan
+   records are forward-only (blocked from backfill re-push, warned).
+4. **Signature semantics.** `author_pubkey` (the authoring agent's
+   address, inside the signed payload) is the signer of record;
+   provenance `signed=True` accepts recovery to author OR
+   author_pubkey — an owner-wallet-authored manifest is still bound
+   to the authoring agent's key.
+5. **Owner claim surface: DEFERRED.** Owner-keyed mints need the
+   wallet registered on Substrate (one-time `registerAgent` signed by
+   the wallet) + a frontend claim flow. Epochs are anchored, claims
+   idempotent per (agent, epoch) — accrual is retroactively claimable,
+   nothing expires.
+
 ## Doctrine (2026-07-08): the capability ratchet and the absorption frontier
 
 Two dynamics, ratified in discussion, that together carry the
