@@ -1,0 +1,101 @@
+[
+  {
+    "fee_bps": 50,
+    "wash_voice_per_dollar": 199.2836,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 199.28,
+    "reclaim_frac_of_fee": 0.0014,
+    "net_atn_cost_of_wash": 119.83,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 100,
+    "wash_voice_per_dollar": 99.1422,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 99.14,
+    "reclaim_frac_of_fee": 0.0014,
+    "net_atn_cost_of_wash": 239.659,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 150,
+    "wash_voice_per_dollar": 65.7617,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 65.76,
+    "reclaim_frac_of_fee": 0.0014,
+    "net_atn_cost_of_wash": 359.487,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 200,
+    "wash_voice_per_dollar": 49.0715,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 49.07,
+    "reclaim_frac_of_fee": 0.0014,
+    "net_atn_cost_of_wash": 479.314,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 250,
+    "wash_voice_per_dollar": 39.0574,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 39.06,
+    "reclaim_frac_of_fee": 0.0014,
+    "net_atn_cost_of_wash": 599.14,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 300,
+    "wash_voice_per_dollar": 32.3813,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 32.38,
+    "reclaim_frac_of_fee": 0.0014,
+    "net_atn_cost_of_wash": 718.965,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 400,
+    "wash_voice_per_dollar": 24.0362,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 24.04,
+    "reclaim_frac_of_fee": 0.0014,
+    "net_atn_cost_of_wash": 958.612,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 500,
+    "wash_voice_per_dollar": 19.0291,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 19.03,
+    "reclaim_frac_of_fee": 0.0015,
+    "net_atn_cost_of_wash": 1198.255,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 650,
+    "wash_voice_per_dollar": 14.4072,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 14.41,
+    "reclaim_frac_of_fee": 0.0015,
+    "net_atn_cost_of_wash": 1557.71,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 800,
+    "wash_voice_per_dollar": 11.5186,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 11.52,
+    "reclaim_frac_of_fee": 0.0015,
+    "net_atn_cost_of_wash": 1917.154,
+    "strict_loss_holds": true
+  },
+  {
+    "fee_bps": 1000,
+    "wash_voice_per_dollar": 9.015,
+    "honest_voice_per_dollar": 1.0,
+    "wash_advantage_x": 9.02,
+    "reclaim_frac_of_fee": 0.0015,
+    "net_atn_cost_of_wash": 2396.396,
+    "strict_loss_holds": true
+  }
+]
