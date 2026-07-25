@@ -1251,6 +1251,59 @@ class OnChainService:
             log.debug("Failed to read balances for %s: %s", address, e)
             return None
 
+    async def get_provider_record(self, address: str) -> dict[str, Any] | None:
+        """Read a service provider's VERIFIABLE track record.
+
+        Services carry no reputation, no mint and no substrate standing —
+        remote execution is unknowable in principle, so there is no honest
+        quality score to show (docs/services_market.md). What IS honest is
+        what the chain already proves about a counterparty:
+
+          ``service_earnings``  cumulative NET ATN this address has been
+                                paid for services (``serviceEarnings``,
+                                bumped by ``payForService``; channel
+                                settlements route through it too, so it
+                                includes closed channels).
+          ``agent_mint_total``  cumulative tool-pool earnings — the same
+                                address authoring tools the network uses.
+          ``registered_at``     identity tenure. An address that has been
+                                serving for a year is a different
+                                counterparty from one minted this morning.
+
+        None of these can be self-reported: they are consequences of other
+        people's payments. That is the whole point — this is a track
+        record, not a rating.
+        """
+        try:
+            w3 = self._get_web3()
+            contract = self._get_contract(w3)
+            addr = w3.to_checksum_address(address)
+            earnings = contract.functions.serviceEarnings(addr).call()
+            try:
+                mint_total = contract.functions.agentMintTotal(addr).call()
+            except Exception:                              # noqa: BLE001
+                mint_total = 0
+            registered_at = 0
+            submissions = 0
+            try:
+                # (lineageHash, registeredAt, active, totalTrainingMint,
+                #  trainingSubmissionCount) — see the `agents` ABI entry.
+                agent = contract.functions.agents(addr).call()
+                registered_at = int(agent[1])
+                submissions = int(agent[4])
+            except Exception:                              # noqa: BLE001
+                pass
+            return {
+                "address": addr,
+                "service_earnings": str(earnings),
+                "agent_mint_total": str(mint_total),
+                "registered_at": registered_at,
+                "training_submissions": submissions,
+            }
+        except Exception as e:                             # noqa: BLE001
+            log.debug("Failed to read provider record for %s: %s", address, e)
+            return None
+
     async def get_fleet_voice(self, owner: str) -> dict[str, Any] | None:
         """Read an owner's fleet: their wallet ATN plus every bound
         agent's ATN + reputation, the network ATN supply (money) AND the

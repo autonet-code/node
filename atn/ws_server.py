@@ -1372,6 +1372,139 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": {"services": rows, "count": len(rows)}}
 
+        # Semantic search + clustering over service specs.
+        #
+        # `service_embedding_text` (service_spec.py) has been written and
+        # unused since the rail landed: name + description + interface
+        # vocabulary. The tools rail gets semantic discovery through the
+        # ArtifactIndex, but that only ingests blob-store artifacts and
+        # requires a running WorldService, while service specs live in the
+        # daemon-local store. So embed here with the same underlying
+        # embedder — services stay searchable whether or not autonet is on.
+        #
+        # Categories are NOT declared: the Service struct has no such
+        # field, and asking authors to self-classify invites the same
+        # keyword-stuffing the topic embedding already resists. Clusters
+        # are DERIVED, and named after the fact from their members.
+        if msg_type == "service_topics":
+            try:
+                from nodes.common.world_model_substrate.usefulness_coords import (
+                    coords_for_query, default_usefulness_embedder,
+                )
+                import numpy as _np
+            except Exception as exc:                       # noqa: BLE001
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
+            from .service_spec import service_embedding_text
+            store = self.runtime.service_store
+            records = list(store.list(include_retired=False))
+            if not records:
+                return {"msg_id": msg_id, "ok": True,
+                        "result": {"hits": [], "clusters": []}}
+
+            embedder = default_usefulness_embedder()
+            # Cache per spec digest. Specs are content-addressed, so a
+            # digest's embedding never changes and the cache needs no
+            # invalidation — only growth. Without this every call re-embeds
+            # the whole catalogue (~4.5s for six services, and it scales
+            # with the catalogue, not the query).
+            cache = getattr(self, "_service_vec_cache", None)
+            if cache is None:
+                cache = {}
+                self._service_vec_cache = cache
+            vecs: list[Any] = []
+            digests: list[str] = []
+            for rec in records:
+                vec = cache.get(rec.digest)
+                if vec is None:
+                    text = service_embedding_text(rec.spec)
+                    if not text.strip():
+                        continue
+                    vec = _np.asarray(coords_for_query(text, embedder),
+                                      dtype=_np.float64)
+                    cache[rec.digest] = vec
+                vecs.append(vec)
+                digests.append(rec.digest)
+            if not vecs:
+                return {"msg_id": msg_id, "ok": True,
+                        "result": {"hits": [], "clusters": []}}
+            matrix = _np.vstack(vecs)
+            norms = _np.linalg.norm(matrix, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            unit = matrix / norms
+
+            hits: list[dict[str, Any]] = []
+            query = str(msg.get("query") or "").strip()
+            if query:
+                q = _np.asarray(coords_for_query(query, embedder),
+                                dtype=_np.float64)
+                qn = _np.linalg.norm(q) or 1.0
+                sims = unit @ (q / qn)
+                order = _np.argsort(-sims)
+                for i in order[:int(msg.get("k") or 25)]:
+                    hits.append({"digest": digests[int(i)],
+                                 "score": round(float(sims[int(i)]), 6)})
+
+            # Derived clusters: greedy cosine agglomeration. Deliberately
+            # simple — this is a browsing aid, not consensus, so it does
+            # not need to be stable across daemons or reproducible.
+            try:
+                threshold = float(msg.get("threshold") or 0.30)
+            except (TypeError, ValueError):
+                threshold = 0.30
+            unassigned = set(range(len(digests)))
+            clusters: list[dict[str, Any]] = []
+            while unassigned:
+                seed = min(unassigned)
+                unassigned.discard(seed)
+                members = [seed]
+                for j in sorted(unassigned):
+                    if float(unit[seed] @ unit[j]) >= threshold:
+                        members.append(j)
+                for j in members[1:]:
+                    unassigned.discard(j)
+                clusters.append({
+                    "members": [digests[m] for m in members],
+                    "size": len(members),
+                })
+            clusters.sort(key=lambda c: -c["size"])
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"hits": hits, "clusters": clusters,
+                               "indexed": len(digests)}}
+
+        # A service provider's VERIFIABLE track record. Services have no
+        # reputation and no quality score by design (remote execution is
+        # unknowable), so the honest thing to show a buyer is what the
+        # chain already proves about the counterparty: what they have been
+        # PAID, what they have authored, and how long they have existed.
+        # None of it is self-reported.
+        if msg_type == "provider_record":
+            addresses = msg.get("addresses")
+            if isinstance(addresses, str):
+                addresses = [addresses]
+            if not isinstance(addresses, list) or not addresses:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Missing 'addresses' (list of 0x)"}
+            try:
+                from .on_chain import OnChainService
+                svc = OnChainService(self.runtime._config.rpb)
+            except Exception as exc:                       # noqa: BLE001
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            records: dict[str, Any] = {}
+            for raw in addresses[:50]:
+                addr = str(raw or "").strip()
+                if not addr.startswith("0x") or len(addr) != 42:
+                    continue
+                try:
+                    rec = await svc.get_provider_record(addr)
+                except Exception as exc:                   # noqa: BLE001
+                    log.debug("provider_record %s failed: %s", addr, exc)
+                    rec = None
+                if rec is not None:
+                    records[addr.lower()] = rec
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"records": records}}
+
         if msg_type == "retire_service":
             digest = msg.get("digest", "")
             if not digest:
