@@ -1,13 +1,13 @@
 # Phase 10 results (2026-07-05)
 
 Prereg: docs/phase10_prereg.md (6da0264, committed before any run; no
-amendments were needed — no scope drops, master seed 1010 used as
+amendments were needed: no scope drops, master seed 1010 used as
 committed). Raw artifacts in experiments/phase10/ (corpus.json, tools/,
 events_T.jsonl, events_E.jsonl, retrieval_rows.jsonl, mint_rows.jsonl,
 standings.json, aggregate10.json, run.log). Builders + guard harness
 committed before the confirmatory run; analyze.py is pure over the
 persisted rows. 9/9 guard tests pass. No LLM calls anywhere on the
-confirmatory path — every number below is computed by running code.
+confirmatory path: every number below is computed by running code.
 
 Setup: 79 pinned tools from the seeded generator (36 correct, 31 with
 runtime-only implanted defects, 6 SEO, 6 wash) across 4 task families;
@@ -18,7 +18,7 @@ pre-registered rate). H1 sweep = 4 H x 4 S x 2 arms = 1072 debates per
 arm (14,231 / 14,812 events), each standing read from the real ledger
 replay. Full run: 132 s.
 
-## H1 — CON termination (FINAL in both directions): **REFUTED**
+## H1, CON termination (FINAL in both directions): **REFUTED**
 
 AUC of −standing classifying ground-truth defectiveness, per (H, S) cell:
 
@@ -41,8 +41,8 @@ AUC of −standing classifying ground-truth defectiveness, per (H, S) cell:
 | H8_S8 | 0.970 | 1.000 | +0.030 |
 | H8_S32 | 0.966 | 1.000 | +0.034 |
 
-- **Mean AUC(E) − AUC(T) = +0.0483 — fails the pre-committed 0.15 bar.**
-- AUC(E) floor: 1.000 in every cell (bar 0.90 in H≥2 cells — held, and
+- **Mean AUC(E) − AUC(T) = +0.0483, which fails the pre-committed 0.15 bar.**
+- AUC(E) floor: 1.000 in every cell (bar 0.90 in H≥2 cells: held, and
   then some).
 
 **Pre-registered decision: H1 REFUTED.** The consequence fires as
@@ -53,15 +53,15 @@ launch requirement. (Spec edit is the follow-up action; this doc is the
 trigger.)
 
 Honest nuance recorded, phase-8 style: evidence separation is
-*perfect* — AUC(E) = 1.000 in all 16 cells, including 32-sybil worst
-cases — and the realized gap (+0.0483) equals the structural ceiling
+*perfect* (AUC(E) = 1.000 in all 16 cells, including 32-sybil worst
+cases), and the realized gap (+0.0483) equals the structural ceiling
 (1 − mean AUC(T)) exactly. E extracted every point of headroom text
 debate left, and it still was not 0.15, because the text arm with the
 phase-8-derived honest-belief priors (0.6 vs 0.3) already ranks this
 population at AUC ≈ 0.95. The bar was set on the *delta* over text
 debate; for it to have been reachable at all, text debate would have
 had to rank at AUC ≤ 0.85. That interaction between the pre-registered
-prior and the pre-registered bar was not noticed at prereg time — it is
+prior and the pre-registered bar was not noticed at prereg time; it is
 recorded here as a design lesson, not re-litigated: FINAL means final.
 
 What the AUC hides (visible in the raw rows): text debate *convicts
@@ -96,11 +96,11 @@ E holds every defective tool negative up to roughly S < 2H (all
 observers replay, so the CON's weight is exactly 1+2H), where T leaks
 through at rates set by the prior. At H=8, S=8, text lets 90% of
 defective tools stand positive; evidence lets none. Past S ≈ 2H both
-arms drown — standing is linear in sybil count, and no debate mechanism
+arms drown: standing is linear in sybil count, and no debate mechanism
 at fixed honest participation survives an unbounded PRO flood. That
 frontier is the damper/owner-map's job, not the debate layer's.
 
-## H2 — density-blend retrieval (anti-SEO): **RETAINED**
+## H2, density-blend retrieval (anti-SEO): **RETAINED**
 
 108 queries per corpus (36 tasks x 3 paraphrases), hashing embedder both
 sides, identical candidate sets across arms (asserted by guard test):
@@ -108,11 +108,11 @@ sides, identical candidate sets across arms (asserted by guard test):
 | arm | salted hit@1 | salted hit@5 | salted SEO-share | clean hit@5 |
 |---|---|---|---|---|
 | B cosine-only | 0.093 | 0.213 | 0.924 | 0.241 |
-| C cosine x standing | 0.093 | 0.213 | 0.924 | — |
+| C cosine x standing | 0.093 | 0.213 | 0.924 | n/a |
 | D production blend | **0.306** | **0.361** | 0.861 | 0.398 |
 
-- **hit@5(D) − hit@5(B) = +0.148 ≥ +0.10** (salted) — bar cleared.
-- Clean-corpus control: D − B = +0.157 — no regression (tolerance −0.02);
+- **hit@5(D) − hit@5(B) = +0.148 ≥ +0.10** (salted): bar cleared.
+- Clean-corpus control: D − B = +0.157, no regression (tolerance −0.02);
   density HELPS even without SEO salting, because demonstrated coverage
   rescues tools whose manifest vocabulary happens to miss the query.
 - hit@1 more than triples (0.093 → 0.306).
@@ -123,23 +123,23 @@ default.** COVERAGE_DENSITY_WEIGHT stays 0.5.
 C == B exactly: by design, H2's world gives every manifest identical
 standing (one author post), isolating the density lever; the standing
 re-rank is H1's lever, not H2's. Absolute hit rates are low across all
-arms — the trigram hashing embedder is the pre-registered, deterministic
+arms: the trigram hashing embedder is the pre-registered, deterministic
 floor, not a product-quality retriever; the confirmatory quantity is the
 delta, which is large and one-directional.
 
-## H3 — the economic loop prices quality (exploratory sanity gate)
+## H3, the economic loop prices quality (exploratory sanity gate)
 
 Production mint (real `federated_epoch_close`: compute_tool_mint, combo
 damper, VET_QUORUM=2 distinct-fleet greenlight, violator-pays gate) over
 the full 79-tool mixed population:
 
 - **Spearman ρ(mint, battery pass rate) = 0.4925, bootstrap 95% CI
-  [0.298, 0.662]** — a hair under the 0.5 expectation; CI comfortably
+  [0.298, 0.662]**, a hair under the 0.5 expectation; CI comfortably
   excludes 0.
 - Mean mint by class: correct 33.9 > defective 11.8 > wash 8.4 > SEO 1.1.
   The ordering is right; the correlation is dragged under 0.5 by wash
   tools (pass rate ~0, mint ~8: sybil callers on distinct wire keys with
-  an EMPTY owner map — the documented degraded mode — still buy log1p
+  an EMPTY owner map (the documented degraded mode) still buy log1p
   breadth per sybil). This is the sims' known result reproduced through
   the real close: the combo damper *bounds* wash mint (≈ ¼ of honest
   mean, at 10-30x the receipt volume) but only the owner map *zeroes*
@@ -162,7 +162,7 @@ real close over 1,519 canonical events, 79/79 greenlit, total mint
 
 1. **The H1 bar interacted with the H1 prior.** With text-arm priors
    0.6/0.3 and n=67, AUC(T) lands ≈ 0.95, capping the achievable gap at
-   ≈ 0.05 — a third of the bar. The refuted verdict is therefore partly
+   ≈ 0.05, a third of the bar. The refuted verdict is therefore partly
    a statement about the bar's construction, not only about the
    mechanism. Recorded as a prereg-design lesson (bars on deltas need a
    pre-computed ceiling check); the verdict stands, FINAL both ways.
@@ -174,7 +174,7 @@ real close over 1,519 canonical events, 79/79 greenlit, total mint
    graphs (CON-on-CON) are phase 9's still-unrun territory.
 4. The hashing embedder floors H2's absolute numbers; a semantic
    embedder could compress or widen the density delta. The prereg fixed
-   the embedder deliberately (determinism, zero cost) — the delta is
+   the embedder deliberately (determinism, zero cost): the delta is
    confirmatory, the absolute rates are not.
 5. H3's population and receipt volumes are one seeded draw (79 tools,
    fixed adversary mix); ρ's CI reflects resampling of that population,
@@ -184,8 +184,8 @@ real close over 1,519 canonical events, 79/79 greenlit, total mint
 
 ## Bottom line
 
-The tool-substrate refactor's central *argument* — evidence beats prose
-— shows up as perfect separation and deterministic sybil resistance in
+The tool-substrate refactor's central *argument*, that evidence beats
+prose, shows up as perfect separation and deterministic sybil resistance in
 arm E, but it REFUTED its own pre-registered bar because text debate
 under honest-majority priors was already strong on ranking. Per the
 committed rule: the "executable ground truth" framing comes out of the

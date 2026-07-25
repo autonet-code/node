@@ -3,9 +3,9 @@
 Quick reference for common operations.
 
 > **Banner (2026-07-10).** The **Current Operations** section below is live.
-> Everything under **Historical (pre-substrate)** — the staking / project /
+> Everything under **Historical (pre-substrate)** (the staking / project /
 > task / commit-reveal / verification / dispute contract calls, the role
-> stake table, and the task-status flow — describes contracts **deleted in
+> stake table, and the task-status flow) describes contracts **deleted in
 > Phase 5.6a** and is kept only for history. The live on-chain surface is
 > `Substrate.sol` + `ServiceMarket.sol` + `VentureVault.sol` +
 > `CharterAnchor.sol`; see `docs/tool_substrate.md` and `docs/README.md`.
@@ -30,7 +30,7 @@ npx hardhat run scripts/deploy_charter_anchor.js  --network localhost  # Charter
 npx hardhat run scripts/deploy_economy.js         --network localhost  # economy wiring
 npx hardhat compile
 ```
-(There is no `deploy.js` — removed with the pre-substrate contracts.)
+(There is no `deploy.js`; it was removed with the pre-substrate contracts.)
 
 ### Economy proof-of-life
 ```bash
@@ -38,7 +38,7 @@ python scripts/local_e2e_tool_economy.py    # register → publish → adopt →
 python scripts/local_e2e_venture_loop.py    # venture funding + service revenue loop
 ```
 
-### Tests (never run the whole suite — ~624 tests, slow)
+### Tests (never run the whole suite: ~624 tests, slow)
 ```bash
 pytest tests/test_wm_lineage.py tests/test_federated_reconcile.py
 python tests/test_world_model_substrate_e2e.py

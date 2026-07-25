@@ -9,7 +9,7 @@ hypotheses marked FINAL below.
 ## Why this experiment exists
 
 The tool-substrate refactor (docs/tool_substrate.md) rests on one
-central insight: tool claims have EXECUTABLE ground truth — a CON can
+central insight: tool claims have EXECUTABLE ground truth. A CON can
 attach a reproducible failing invocation, so debate becomes
 evidence-weighted, which text graphs never achieved (phase 8's +0.127
 margin, below the 0.25 bar). That insight was ratified on argument,
@@ -17,15 +17,15 @@ not measurement. Phase 10 measures it, plus the two supporting
 mechanisms the refactor shipped: the density-blend retrieval
 (anti-SEO) and the attestation→mint pricing loop.
 
-A deliberate methodological upgrade over phases 6–8: because ground
-truth is executable, EVERY metric below is computed by running code —
+A deliberate methodological upgrade over phases 6 to 8: because ground
+truth is executable, EVERY metric below is computed by running code:
 no LLM contestant, no LLM graders, no inter-grader agreement caveats.
 The machine is measured, not a model's opinion of it. LLM calls appear
 nowhere in the confirmatory path.
 
 ## Hypotheses and pre-committed decision rules
 
-**H1 — CON termination (FINAL in both directions).**
+**H1, CON termination (FINAL in both directions).**
 On a population of pinned tools with known implanted defects, ledger
 standing separates defective from correct tools decisively better when
 CONs carry replayable failing invocations than when CONs are text-only,
@@ -40,7 +40,7 @@ under equal participation budgets.
   real pinned-execution path and posts on the CON iff it reproduces).
   Identical event budgets per (tool, participation cell).
 - Sweep: honest participants H ∈ {1, 2, 4, 8} × author-side sybil PRO
-  posters S ∈ {0, 2, 8, 32} (sybils evade the owner map — worst case).
+  posters S ∈ {0, 2, 8, 32} (sybils evade the owner map: worst case).
 - **Decision rule**: H1 confirmed iff mean over the sweep grid of
   AUC(E) − AUC(T) ≥ 0.15 AND AUC(E) ≥ 0.90 in every cell with H ≥ 2.
   Confirmed → the evidence rail (replay-verified CON support) is
@@ -49,11 +49,11 @@ under equal participation budgets.
   ground truth" framing comes OUT of the spec's motivation section and
   tool mint launches gated on vetting + damper alone. No third
   outcome; no post-hoc caveats.
-- Also published (exploratory, not confirmatory): the flip boundary —
+- Also published (exploratory, not confirmatory): the flip boundary,
   the (H, S) frontier where a defective tool's standing turns positive
   in each arm.
 
-**H2 — density-blend retrieval (anti-SEO).**
+**H2, density-blend retrieval (anti-SEO).**
 On a corpus salted with SEO manifests (descriptions engineered to
 match query vocabulary; behavior unrelated), the production retrieval
 blend (`_infer_artifacts`: max(cosine, 0.5·cos + 0.5·density),
@@ -65,7 +65,7 @@ task better than cosine-only.
 - Arms: **B** cosine-only; **C** cosine × standing re-rank (no
   density); **D** the production blend (density from the attested
   `problem_coords` corpus). Identical embedder (the deterministic
-  hashing embedder) on build and query sides — the phase-8 guard-6
+  hashing embedder) on build and query sides, the phase-8 guard-6
   analog: candidate sets and formats identical, only the ranking rule
   differs.
 - **Decision rule**: density blend retained as production default iff
@@ -74,13 +74,13 @@ task better than cosine-only.
   `COVERAGE_DENSITY_WEIGHT` drops to 0 by default and density demotes
   to an experimental flag.
 
-**H3 — the economic loop prices quality (sanity gate, exploratory).**
+**H3, the economic loop prices quality (sanity gate, exploratory).**
 Production mint (combo damper + vetting greenlight + violator-pays
 gate, i.e. `compute_tool_mint` + `federated_reconcile_epoch` exactly
 as shipped) rank-correlates with ground-truth tool quality (battery
 pass rate) on the mixed population including wash/SEO/defective
 adversaries. Reported: Spearman ρ with bootstrap CI. Expectation
-ρ ≥ 0.5; below that is a finding to investigate, not a gate — H3 has
+ρ ≥ 0.5; below that is a finding to investigate, not a gate. H3 has
 no pre-committed action because the mint path already carries its own
 ratified mechanisms (sims, damper, vetting).
 
@@ -94,7 +94,7 @@ ratified mechanisms (sims, damper, vetting).
   ground truth.
 - Half the tools carry IMPLANTED DEFECTS: edge-case failures (empty
   input, unicode, negative numbers, boundary lengths) that pass the
-  happy-path battery subset — defects a description reader would miss
+  happy-path battery subset: defects a description reader would miss
   (the underhanded-code shape vetting alone can't catch).
 - Adversarial salting for H2/H3: SEO manifests (query-vocabulary
   descriptions, unrelated behavior) and wash tools (sybil attestation
@@ -119,7 +119,7 @@ In arm T an honest observer cannot verify a text CON; phase-8's world
 gives the honest-belief prior: text CONs against genuinely defective
 tools attract observer support with p = 0.6, against correct tools
 (false CONs) p = 0.3, fixed RNG stream from the master seed. Arm E
-uses NO prior — support follows replay outcome deterministically.
+uses NO prior: support follows replay outcome deterministically.
 False CONs (against correct tools) appear in both arms at the same
 rate (25% of CONs) so E must also demonstrate that evidence PROTECTS
 correct tools (a non-reproducing invocation recruits nothing).
@@ -135,7 +135,7 @@ correct tools (a non-reproducing invocation recruits nothing).
 ## Cost
 
 No LLM calls on the confirmatory path. Compute: ~40 tools × battery
-runs × sweep cells of real ledger closes — minutes to low hours,
+runs × sweep cells of real ledger closes: minutes to low hours,
 local. This experiment is repeatable by anyone at zero API cost,
 which is itself part of the claim being tested (evidence anyone can
 replay).

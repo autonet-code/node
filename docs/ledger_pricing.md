@@ -7,27 +7,27 @@ Emission rate/schedule untouched (still config-gated, still unset).
 
 **v3 note (2026-07-08, docs/tool_substrate.md Decision):** on the live
 tool rail, standing has since been retired from mint entirely
-(`mint = usage_term`) and Change 2's violator-pays gate is dormant —
+(`mint = usage_term`) and Change 2's violator-pays gate is dormant:
 work units no longer mint at all, and tool mint is not debate-gated.
 Change 1 (ledger replay determinism) and Change 3 (arm-B render) stand.
 
 **v4.1 note (2026-07-09, gradient trust):** `mint = usage_term` still,
 and drift weight dropped its ε floor for continuous rep-weighted
 credibility. None of this touches the pricing MODE machinery here (ledger
-vs equilibrated) — Changes 1/3 stand unchanged. See
+vs equilibrated); Changes 1/3 stand unchanged. See
 `docs/tool_substrate.md`, Decision 2026-07-09.
 
 **Fees-only note (2026-07-10, current):** the v4.1 rep/ATN mint split and
 its supply-pegged β cap were both DELETED. The close now computes MONEY
-ONLY — the ATN epoch pool is burned service fees only (no base emission),
+ONLY: the ATN epoch pool is burned service fees only (no base emission),
 distributed pro-rata over usage shares; REP is claimed DAO-side (RepToken)
 on ratified ATN earnings, never minted by the close. The authoritative
 payload is schema 3 with a 2-field `(agent, amount)` merkle leaf. This
-still does not touch the pricing MODE machinery here — `federated_epoch_close`
+still does not touch the pricing MODE machinery here: `federated_epoch_close`
 keeps `pricing="ledger" | "equilibrated"`, default `"ledger"`, and Changes
 1/3 stand. See `docs/tool_substrate.md`, Decision 2026-07-10.
 
-## Change 1 — pricing mode in the epoch close (owner: reconcile agent)
+## Change 1: pricing mode in the epoch close (owner: reconcile agent)
 
 `federated_epoch_close(..., pricing="ledger" | "equilibrated")`,
 default **"ledger"**; "equilibrated" preserves today's behavior
@@ -35,40 +35,40 @@ bit-for-bit for the experimental kernel.
 
 Ledger mode:
 - Replay applies causal events (sprouts, posts) WITHOUT equilibrate
-  rounds — no geometric propagation, no derived-sprout capture.
+  rounds: no geometric propagation, no derived-sprout capture.
   Per-node score = the existing `net_score` tree recursion (posts +
   signed children). Snapshots record these.
 - Mint formula shape unchanged: rise × survival × I(close>0); the
   novelty factor reads node.n where present else 1.0.
 - Attribution uses causal events only (author-tagged sprouts).
 - Determinism: net_score memoization over co-parented cycles is
-  eval-order sensitive (see test_act_memoization) — ledger mode must
+  eval-order sensitive (see test_act_memoization), so ledger mode must
   fix an evaluation order (sorted node ids) and prove bit-identical
   double-close in tests.
 - Plumb the mode through WorldService epoch close the same way
   epoch_emission_rate is plumbed. O(N²) equilibrate leaves the launch
   hot path.
 
-## Change 2 — violator-pays mint gate (owner: reconcile agent)
+## Change 2: violator-pays mint gate (owner: reconcile agent)
 
 Replace apply_mint_gate's uniform global ratio (mint_gate.py:207-218):
 retain the per-(node, agent) attribution breakdown in reconcile,
 scale it per-node by (1 − gate_strength × violation), THEN aggregate
 per agent. With the emission pool, suppressed mint now genuinely
-redistributes from flagged nodes' authors to everyone else — the
+redistributes from flagged nodes' authors to everyone else, so the
 docstring's promise ("winning a CON debate increases your share")
 becomes true. Tests must show: violator down, honest agents up
 post-pool, and no change when no violations.
 
-## Change 3 — inference render per phase8 arm B (owner: infer agent)
+## Change 3: inference render per phase8 arm B (owner: infer agent)
 
 Phase8: verdicts in the prompt HURT (C−B = −0.28); standing must rank,
 not fill context.
 - `_infer_artifacts` standing must work on non-equilibrated worlds
-  (net_score recursion — it already does; add a test constructed
+  (net_score recursion: it already does; add a test constructed
   without calling equilibrate()).
 - New `render_context(result, char_budget=6000) -> str` in infer.py:
-  arm-B format — standing-ranked payloads only (problem+resolution
+  arm-B format: standing-ranked payloads only (problem+resolution
   text, proportional truncation), NO claims/verdict text. Claims stay
   in the structured result for programmatic consumers.
 - `WorldService.infer_artifacts` gains `render=False` kwarg returning

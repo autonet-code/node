@@ -1,8 +1,8 @@
 # Local end-to-end: tool economy composes
 
 `scripts/local_e2e_tool_economy.py` is the tool-substrate session's
-capstone. It proves the whole tool-economy architecture — daemon,
-substrate consensus, and chain — composes on a single local deployment,
+capstone. It proves the whole tool-economy architecture (daemon,
+substrate consensus, and chain) composes on a single local deployment,
 with each hop verified against the next.
 
 ## Run
@@ -20,20 +20,20 @@ subprocess and kills it (taskkill /T on Windows) on teardown.
 
 The script prints a stage-by-stage scoreboard and exits nonzero if any
 stage FAILs. A stage may legitimately SKIP (with a printed reason)
-rather than sink time — currently only the ServiceMarket channel leg is
+rather than sink time: currently only the ServiceMarket channel leg is
 allowed to SKIP (it catches and notes any error rather than blocking).
 
 ## What it proves
 
 Seven stages, each verified:
 
-1. **Chain up** — launches `npx hardhat node` (localhost:8545), deploys
+1. **Chain up**: launches `npx hardhat node` (localhost:8545), deploys
    `Substrate.sol` + `ServiceMarket.sol` (ServiceRegistry + PaymentChannel,
    both taking the substrate address) via a tiny inline `hardhat run`
    deployer. Settlement is ATN-only, so no MockERC20 is deployed.
    Hardhat's funded `account[0]` is the author's human OWNER wallet,
    `account[1]` the caller's.
-2. **Fleet** — two real ATN `Runtime`s in tmp dirs (`autonet.enabled=False`;
+2. **Fleet**: two real ATN `Runtime`s in tmp dirs (`autonet.enabled=False`;
    we drive the substrate pieces directly). Runtime A hosts `author-1`
    (owner = account[0]); it also hosts `caller-1` (owner = account[1] on
    chain) so tool invocation stays in one daemon (tools are daemon-local)
@@ -41,40 +41,40 @@ Seven stages, each verified:
    Runtime B stands up its own agent to prove the two-runtime fleet.
    Verifies `author-1`'s parentless lineage is **owner-rooted** (hashes
    from the owner wallet).
-3. **Chain identity** — owner-bound registration on chain. Reads each
+3. **Chain identity**: owner-bound registration on chain. Reads each
    agent's key from `runtime.registry.get_agent_key`, funds the agent
    address with gas from its owner, signs the owner-binding EIP-712, and
    calls the registration method from the agent's own key. Verifies
    `getAgentOwner` returns the two distinct owners on chain.
-4. **Tool economy (daemon)** — `author-1` registers a pinned echo tool
+4. **Tool economy (daemon)**: `author-1` registers a pinned echo tool
    (`register_tool`), then `publish_tool`s it (the production two-step
    publish gate); `caller-1` invokes it via `tool_registry.call_tool` and
-   then runs `attest_tools` (the cognitive attestation — the only
+   then runs `attest_tools` (the cognitive attestation, the only
    mint-counting usage). Two validators then `vet_tool` it: they first
    read the pinned code back, then attest a pass verdict with a report.
-   Under v4.1 (vet gate retired) a vet is an INSPECTION REVIEW — it drifts
+   Under v4.1 (vet gate retired) a vet is an INSPECTION REVIEW: it drifts
    position but mints nothing and gates nothing. A `WorldService` is wired
    to the tool_store's `manifest_sink`/`event_sink` exactly like
    `atn/autonet_service.py` does; the tool_used receipts are captured off
    the event sink and the registration sprout is read from the
    WorldService epoch buffer.
-5. **Consensus** — the REAL federated close. Registration sprouts (author
+5. **Consensus**: the REAL federated close. Registration sprouts (author
    signing key) and receipts (caller signing key) become canonical
    `EventBatch` chains, driven through `FederatedCloseDriver.run()` with a
    mocked gossip (the `tests/test_tool_mint` TestDriverCarryOver pattern).
    The `agent_owner_map` is **read back from chain** (`getAgentOwner` for
    both agents), keyed by the same 0x addresses the events now carry.
-   Verifies the mint credits `author-1`, `attesters == 1`, and — under
-   v4.1 — that the **vet gate is removed**: the tool mints from first
+   Verifies the mint credits `author-1`, `attesters == 1`, and, under
+   v4.1, that the **vet gate is removed**: the tool mints from first
    attested use, the author keeps 100% (no validator royalty), and the
    inspection-review vets earn nothing. Also a **control case**: setting
    the caller's owner equal to the author's in the map drops the mint to
-   zero — proving the chain-fed same-owner exclusion.
-6. **Settlement** — the rotating submitter anchors the epoch
+   zero, proving the chain-fed same-owner exclusion.
+6. **Settlement**: the rotating submitter anchors the epoch
    (`submitAnchor` via `EpochAnchorer`), `author-1` records its own mint
    (`recordTrainingForEpoch` via `AuthoritativeChainSubmitter`, mint-merkle
    proof against the anchored root). Money only (Decision 2026-07-10):
-   Substrate has no reputation surface — the mint is a 2-field
+   Substrate has no reputation surface: the mint is a 2-field
    `(agent, amount)` leaf. Verifies the cumulative tool-pool earnings
    ledger (`agentMintTotal`) and the ATN `balanceOf` both moved on chain
    by the scaled `agent_mint[author]` amount (REP is claimed DAO-side,
@@ -83,7 +83,7 @@ Seven stages, each verified:
    signs one EIP-712 voucher → provider closes → provider balance +ask NET
    of the 2.5% service fee, routed through `payForService`; remainder
    refunds fee-free after the challenge window).
-7. **Teardown** — kills the Hardhat node, removes tmp dirs, prints the
+7. **Teardown**: kills the Hardhat node, removes tmp dirs, prints the
    scoreboard.
 
 ## Expected output (sketch)
@@ -119,7 +119,7 @@ is a real observation about where the pieces don't yet click cleanly.
    `SubClaimSprouted` with `author_post=False`. In the default
    **ledger-pricing** federated close (no equilibration), the manifest
    claim node then has zero `net_score` standing, so
-   `mint = standing × usage_term = 0` — a freshly-registered, genuinely-
+   `mint = standing × usage_term = 0`: a freshly-registered, genuinely-
    attested pinned tool mints NOTHING. The unit fixture
    (`tests/test_tool_mint._registration_event`) hand-sets
    `author_post=True` to get standing 1, which is why the tests pass while
@@ -129,10 +129,10 @@ is a real observation about where the pieces don't yet click cleanly.
    owner:** should tool registration stamp an author post (giving the
    manifest immediate unit standing), or is a tool author supposed to earn
    standing only through subsequent review activity? This is the single
-   most load-bearing seam — the whole "tools mint to their author" claim
+   most load-bearing seam: the whole "tools mint to their author" claim
    hinges on it. (v4.1 note: usage mints from first attested use
    regardless, so this seam is now about ledger-pricing standing math, not
-   the mint gate — the vet gate it once interacted with is retired.)
+   the mint gate. The vet gate it once interacted with is retired.)
 
 2. **Tool registration events don't reach the `event_sink`.** Only
    `tool_used` receipts flow through `tool_store.event_sink`; the manifest
@@ -149,7 +149,7 @@ is a real observation about where the pieces don't yet click cleanly.
    `author`/`tool_author`/`author_agent`. `federated_epoch_close` keys
    `agent_mint` by that string. But `mint_merkle` only admits keys that
    parse as 0x addresses (the contract can only verify `msg.sender`), so a
-   string-keyed mint has **no on-chain claim path** — it silently drops at
+   string-keyed mint has **no on-chain claim path**: it silently drops at
    the merkle-leaf stage. Production bridges this with
    `world_substrate_feed.ResolvedAgentIdentity` (local id → 0x). The script
    replicates that remap explicitly before building the canonical batches.
@@ -187,8 +187,8 @@ is a real observation about where the pieces don't yet click cleanly.
    `bindingHash`, `sponsorshipNonce` → `bindingNonce`, event
    `AgentSponsored` → `OwnerBound`) and gained a mandatory `nonce` in the
    typed struct. The script is written to survive either shape: it
-   discovers the method/view/event names by ABI introspection and — rather
-   than reconstruct the typed-data struct itself — asks the **contract's
+   discovers the method/view/event names by ABI introspection and, rather
+   than reconstruct the typed-data struct itself, asks the **contract's
    own `bindingHash`/`sponsorshipHash` view** for the exact digest and
    signs that raw 32-byte digest with the owner key. This sidesteps all
    struct-field/typehash drift: whatever the contract hashes is what gets
@@ -217,46 +217,46 @@ python scripts/local_e2e_venture_loop.py
 
 Same prerequisites as the tool-economy e2e (`npm install`,
 `npx hardhat compile`, Python deps). `--from-stage` / `--to-stage`
-letter flags exist for iteration, but stages A–F share on-chain + daemon
+letter flags exist for iteration, but stages A-F share on-chain + daemon
 state, so a real green run uses no flags.
 
 ## What it proves
 
-Eight stages (0 bootstrap + A–G), each verified:
+Eight stages (0 bootstrap + A-G), each verified:
 
-- **0 chain up** — base deploy (Substrate + ServiceMarket; ATN-only
+- **0 chain up**: base deploy (Substrate + ServiceMarket; ATN-only
   settlement, no MockERC20) plus a second inline deployer for
   `CharterAnchor` (governor =
   `account[0]`) and `VentureVaultFactory`.
-- **A CharterAnchor** — anchor the live `charter_hash()` (v1), assert the
+- **A CharterAnchor**: anchor the live `charter_hash()` (v1), assert the
   daemon's `verify_charter_against_anchor` MATCHES; anchor a bogus hash
   (v2, append-only) and assert the drift-warning path fires
   (`match=False`); re-anchor the real hash (v3) and assert current
   matches again.
-- **B venture** — the venture agent publishes a `venture_prospectus` blob
+- **B venture**: the venture agent publishes a `venture_prospectus` blob
   (echo battery, `pass_threshold=1.0`); a VentureVault is deployed via the
   factory bound to that agent (`termsBps=6000`, the 60% backer split).
-- **C backers** — two funded accounts mint ATN via the substrate's only
+- **C backers**: two funded accounts mint ATN via the substrate's only
   mint path (single-leaf `recordTrainingForEpoch`), approve + contribute
   to `raiseMin`, `openTrials`.
-- **D trials** — two verifier agents (distinct owners) run
+- **D trials**: two verifier agents (distinct owners) run
   `TrialRunner.run_trial` against the prospectus through a local echo
   transport, submit `attestTrial` on chain from their own keys;
   greenlight; a verifier claims its fee slice.
-- **E tranches + revenue** — agent claims tranche 1; a customer pays via
+- **E tranches + revenue**: agent claims tranche 1; a customer pays via
   `payForService(vault, …)`, which takes the 2.5% service fee at payment
   time so the vault receives the net (975 of 1000); `claimRevenue` splits
   that net 60/40; backers claim pro-rata within the 60% (351/234, asserted
   to the wei); a ≥1/3 backer halts the next tranche (asserted
   unclaimable), un-halts, and the tranche is claimable again.
-- **F evidence rail** — the author publishes a deliberately-buggy pinned
+- **F evidence rail**: the author publishes a deliberately-buggy pinned
   tool; a disputer files an evidence-bearing CON; a third daemon runs
   `check_evidence` → confirms → posts support. Two mini-closes (with vs
   without recruited support) show the supported CON's standing is double
   the naked CON's (52 vs 26) and drags the disputed tool's net_score
-  strictly further negative (+2 → −24) — the close prices the CON above
+  strictly further negative (+2 → −24): the close prices the CON above
   the naked equivalent.
-- **G** — totals + teardown (Hardhat killed, tmp + deploy records removed).
+- **G**: totals + teardown (Hardhat killed, tmp + deploy records removed).
 
 ## Seams this e2e revealed
 
@@ -266,7 +266,7 @@ Additional to the tool-economy seams above:
    single-epoch evidence comparison.** The reliable pricing signal for
    "did the recruited support move standing" is the LIVE `net_score` read
    via `WorldService.read_node_scores()` (equilibrated state), not the
-   close record's `node_mint` diagnostic — which stays 0.0 for a graph
+   close record's `node_mint` diagnostic, which stays 0.0 for a graph
    that has not accumulated an emission-priced usage term. The script
    asserts on `read_node_scores()` (CON node standing and the disputed
    tool's net_score) and keeps the mini-close `node_mint` figures as
@@ -283,15 +283,15 @@ Additional to the tool-economy seams above:
 10. **`submit_tool_manifest` fails SILENTLY (`{"error": …}`, no
     `manifest_digest`) on an incomplete manifest.** Seeding a fresh
     WorldService with the disputed tool's claim node needs a FULLY valid
-    manifest — `kind: "tool_manifest"` and (for pinned) a non-empty
-    `code_digest` — or `validate_manifest` rejects it and the receipt has
+    manifest (`kind: "tool_manifest"` and, for pinned, a non-empty
+    `code_digest`) or `validate_manifest` rejects it and the receipt has
     no `manifest_digest` key. Easy to miss because the daemon path builds
     the manifest for you; hand-building one for a direct
     `submit_tool_manifest` call must satisfy `_REQUIRED_FIELDS`.
 
 11. **CharterAnchor is append-only, so "fix the drift" is a NEW version.**
     Re-anchoring the correct charter hash after a bogus anchor does not
-    edit v2 — it appends v3. `currentCharter()` then tracks v3, and
+    edit v2: it appends v3. `currentCharter()` then tracks v3, and
     `versionCount` is 3. The forward-only doctrine (no rollback) is
     load-bearing: the test asserts `chain_version == 3` after the
     realignment, not a return to v1.

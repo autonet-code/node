@@ -1,8 +1,8 @@
-# Unified Agent Architecture — Definitive Design
+# Unified Agent Architecture: Definitive Design
 
 **Author:** Architecture review delegate (Opus 4.6)
 **Date:** 2026-03-24
-**Status:** Design proposal — ready for implementation planning
+**Status:** Design proposal, ready for implementation planning
 
 ---
 
@@ -46,18 +46,18 @@ Two requirements are **hard constraints** on the design. Everything else is nego
 
 ### Requirement 1: Fractality
 
-Every agent — root orchestrator, sub-agent, sub-sub-agent — has the **exact same interface**. Same definition schema, same tool surface (scoped by role, not by level), same ability to spawn children, same lifecycle.
+Every agent (root orchestrator, sub-agent, sub-sub-agent) has the **exact same interface**. Same definition schema, same tool surface (scoped by role, not by level), same ability to spawn children, same lifecycle.
 
-**Reference implementation:** The Chevin framework (`c:\code\chevin`) achieves this cleanly. Every agent at every level gets the same MCP tool setup — including `delegate` to spawn further children. The hierarchy is just IDs (`root.1`, `root.1.1`, `root.1.1.1`). A sub-sub-agent at depth 4 works identically to the root orchestrator. The only thing that varies is the system prompt (which describes the agent's specific role).
+**Reference implementation:** The Chevin framework (`c:\code\chevin`) achieves this cleanly. Every agent at every level gets the same MCP tool setup, including `delegate` to spawn further children. The hierarchy is just IDs (`root.1`, `root.1.1`, `root.1.1.1`). A sub-sub-agent at depth 4 works identically to the root orchestrator. The only thing that varies is the system prompt (which describes the agent's specific role).
 
 **What this means concretely:**
 - A cognitive sub-agent spawned by the orchestrator can itself spawn sub-sub-agents using the same `delegate`/`create_agent` tool
 - Those sub-sub-agents can spawn further children, to arbitrary depth
-- The tool surface at each level includes agent management tools — not just the "core 3" (delegate, post_message, get_snapshot), but the full set appropriate to the agent's role
-- The `parent_id` chain is the only thing that distinguishes levels — not different agent types, registries, or execution models
+- The tool surface at each level includes agent management tools, not just the "core 3" (delegate, post_message, get_snapshot), but the full set appropriate to the agent's role
+- The `parent_id` chain is the only thing that distinguishes levels, not different agent types, registries, or execution models
 - Registration, lifecycle, persistence, communication all work identically at every level
 
-**Chevin's limitation we must surpass:** In Chevin, delegation is **synchronous** — the parent blocks waiting for the child to finish. This is the part that needed refactoring. Our design must support async delegation where the parent continues working while children execute in parallel.
+**Chevin's limitation we must surpass:** In Chevin, delegation is **synchronous**: the parent blocks waiting for the child to finish. This is the part that needed refactoring. Our design must support async delegation where the parent continues working while children execute in parallel.
 
 ### Requirement 2: Innate Wake-Up on Completion
 
@@ -80,15 +80,15 @@ When a child agent finishes its work, it **automatically wakes its parent**. No 
        }
    )
    ```
-3. Parent's inbox watcher triggers a new turn — the parent wakes up and processes the result
-4. If the parent is mid-session (running a cognitive turn), the message is **injected** into the active session via `send_user_message()` — so the parent sees it immediately without waiting for its current turn to end
+3. Parent's inbox watcher triggers a new turn: the parent wakes up and processes the result
+4. If the parent is mid-session (running a cognitive turn), the message is **injected** into the active session via `send_user_message()`, so the parent sees it immediately without waiting for its current turn to end
 
 **This replaces:**
 - Manual `delegate_collect()` (blocking poll)
 - Manual `delegate_status()` checks on heartbeat ticks
 - The heartbeat pattern for monitoring child completion
 
-**The heartbeat remains useful for:** periodic liveness signals to the parent while long-running work is in progress (not for completion notification — that's automatic).
+**The heartbeat remains useful for:** periodic liveness signals to the parent while long-running work is in progress (not for completion notification, which is automatic).
 
 **The cascade:** This composes fractally. When `orch.1.2.3` completes, it wakes `orch.1.2`. When `orch.1.2` finishes processing that result and completes its own work, it wakes `orch.1`. When `orch.1` completes, it wakes `orch` (the orchestrator). The orchestrator processes the result and may report to the user. Completion signals ripple up the tree automatically.
 
@@ -104,7 +104,7 @@ The Sidekick-Web app (`c:\code\chevin`) implemented proven UX patterns for fract
 
 **Delegation Items in Chat Feed** (`chevin/chevin_chat.dart`):
 - When an agent delegates, a 🚀 item appears inline in the activity feed
-- Items carry `linkedAgentId` — clicking navigates into that sub-agent's thread
+- Items carry `linkedAgentId`: clicking navigates into that sub-agent's thread
 - Rendered as `InkWell` with ↗ icon, underlined in primary color
 
 **Depth Navigation with Zoom Transitions**:
@@ -116,7 +116,7 @@ The Sidekick-Web app (`c:\code\chevin`) implemented proven UX patterns for fract
 
 **Pop-Out Windows** (`screens/sub_agent_popup_screen.dart`):
 - Sub-agents can open in separate browser windows via `window.open()`
-- **BroadcastChannel sync** between windows — completion events propagate to main window
+- **BroadcastChannel sync** between windows: completion events propagate to main window
 - Docking button returns agent to main window
 
 **Layout modes**: Docked sidebar → Maximized (tree sidebar + chat area, max-width 860px) → Popped out window
@@ -131,24 +131,24 @@ Previous analyses identified the obvious structural duplication. Here are the **
 
 ### 2.1 The Bridge Subprocess Model vs Step Pipeline Execution
 
-The step pipeline executes steps sequentially within the Runtime's event loop (`runtime._execute_pipeline`). The bridge provider runs a **separate OS process** (`bun run claude-bridge.ts`) that hosts the Claude Agent SDK — the SDK itself manages the multi-turn loop, spawns Claude Code subprocesses for file/bash/web tools, and communicates via NDJSON pipes.
+The step pipeline executes steps sequentially within the Runtime's event loop (`runtime._execute_pipeline`). The bridge provider runs a **separate OS process** (`bun run claude-bridge.ts`) that hosts the Claude Agent SDK: the SDK itself manages the multi-turn loop, spawns Claude Code subprocesses for file/bash/web tools, and communicates via NDJSON pipes.
 
-This is not "just another provider." The bridge subprocess is the *reason* delegates have file I/O, bash, web search. These tools don't come from ATN — they come from the Claude Code subprocess that the SDK spawns internally. ATN's `_sub_tool_executor` only handles ATN-specific tools (delegate, post_message, get_snapshot) and connector tools. The SDK's built-in tools (Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch) are handled *inside* the bridge process, invisible to ATN.
+This is not "just another provider." The bridge subprocess is the *reason* delegates have file I/O, bash, web search. These tools don't come from ATN; they come from the Claude Code subprocess that the SDK spawns internally. ATN's `_sub_tool_executor` only handles ATN-specific tools (delegate, post_message, get_snapshot) and connector tools. The SDK's built-in tools (Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch) are handled *inside* the bridge process, invisible to ATN.
 
-**Implication:** You cannot give a persistent pipeline agent "delegate-style tools" by simply adding tool definitions. The tools require the Claude Agent SDK subprocess infrastructure. A cognitive step using `send_orchestrate()` via `BridgeProvider` already gets them — but only during that step's execution, not across the full agent lifecycle.
+**Implication:** You cannot give a persistent pipeline agent "delegate-style tools" by simply adding tool definitions. The tools require the Claude Agent SDK subprocess infrastructure. A cognitive step using `send_orchestrate()` via `BridgeProvider` already gets them, but only during that step's execution, not across the full agent lifecycle.
 
 ### 2.2 Session Continuity vs Step Boundaries
 
-A delegate runs as a single continuous session — one `send_orchestrate()` call that may take 50 turns. The session has memory (the SDK manages conversation history). A pipeline agent runs discrete steps; each cognitive step is a fresh LLM call (or a fresh `send_orchestrate` invocation). There is no cross-step session state beyond what's explicitly piped via `previous_outputs`.
+A delegate runs as a single continuous session: one `send_orchestrate()` call that may take 50 turns. The session has memory (the SDK manages conversation history). A pipeline agent runs discrete steps; each cognitive step is a fresh LLM call (or a fresh `send_orchestrate` invocation). There is no cross-step session state beyond what's explicitly piped via `previous_outputs`.
 
 Unifying these means deciding: does a "cognitive mode" agent run as one long session (like a delegate) or as repeated wake-execute-sleep cycles (like a pipeline agent)? The answer must be **both**, depending on the task.
 
-### 2.3 The Orchestrator is Special — And It Can't Not Be
+### 2.3 The Orchestrator is Special, And It Can't Not Be
 
 The orchestrator (`orchestrator/__init__.py:444-508`) is created as an `AgentDefinition` with a single cognitive step, `tool_executors: "orchestrator"`, and concurrency 1. It *looks* like a normal agent. But:
 
 - It cannot be unregistered (`runtime.py:296-299`)
-- It has the full tool surface (40+ tools) — no other agent does
+- It has the full tool surface (40+ tools), which no other agent does
 - It shares a single BridgeProvider instance with all cognitive steps using `claude_max`
 - Its session persists across triggers (via `_session_id` on BridgeProvider)
 - It receives user input via inbox messages, not step config
@@ -157,7 +157,7 @@ In the unified model, the orchestrator becomes the *root agent* in the hierarchy
 
 ### 2.4 Heartbeat as Intrinsic vs Heartbeat as Pattern
 
-Currently, the orchestrator's system prompt teaches an LLM *pattern*: "create a separate heartbeat agent that messages yourself." This is fragile — the LLM might forget, create it wrong, or create redundant ones. The user wants heartbeat to be intrinsic: every agent automatically pings its supervisor when work is done, and optionally sends periodic liveness signals.
+Currently, the orchestrator's system prompt teaches an LLM *pattern*: "create a separate heartbeat agent that messages yourself." This is fragile: the LLM might forget, create it wrong, or create redundant ones. The user wants heartbeat to be intrinsic: every agent automatically pings its supervisor when work is done, and optionally sends periodic liveness signals.
 
 This is a supervision protocol, not a scheduling feature. It requires the agent to be aware of its own completion state.
 
@@ -174,7 +174,7 @@ The unified model needs budget enforcement that works for both bounded steps and
 ```python
 @dataclass
 class AgentDefinition:
-    """Blueprint for any agent — pipeline or cognitive."""
+    """Blueprint for any agent, pipeline or cognitive."""
     id: str
     name: str
     description: str = ""
@@ -208,7 +208,7 @@ class AgentDefinition:
 
     # --- Hierarchy ---
     parent_id: str | None = None            # None = root (orchestrator)
-    # Children cannot remove themselves — they signal completion to parent.
+    # Children cannot remove themselves; they signal completion to parent.
 
     # --- Heartbeat ---
     heartbeat: HeartbeatConfig | None = None
@@ -237,9 +237,9 @@ class HeartbeatConfig:
 
 1. **`mode` field, not a separate class.** A pipeline agent and a cognitive agent are the same entity with different execution strategies. This keeps the registry, loader, store, and all tooling working with one type.
 
-2. **`steps` remains for pipeline mode.** No changes to how deterministic agents work. A pipeline agent with only script steps is still just a "glorified script" — and that's fine.
+2. **`steps` remains for pipeline mode.** No changes to how deterministic agents work. A pipeline agent with only script steps is still just a "glorified script", and that's fine.
 
-3. **`parent_id` is first-class.** Every agent knows who created it and who supervises it. The orchestrator has `parent_id=None` (or `parent_id="human"`). Currently this is implicit — delegates get hierarchical IDs (`orch.1.2`) but pipeline agents have no parent concept.
+3. **`parent_id` is first-class.** Every agent knows who created it and who supervises it. The orchestrator has `parent_id=None` (or `parent_id="human"`). Currently this is implicit: delegates get hierarchical IDs (`orch.1.2`) but pipeline agents have no parent concept.
 
 4. **Cognitive mode fields replace delegate config.** Instead of building a BridgeProvider ad-hoc in `_delegate()`, the AgentDefinition carries the provider, model, system prompt, and tool surface.
 
@@ -268,11 +268,11 @@ trigger → drain inbox → spawn bridge session → autonomous work → result 
 A cognitive-mode agent is essentially what a delegate is today, but:
 
 - **Registered in the main agent registry** (`runtime._agents`), not `delegate_registry`
-- **Has an inbox** — can receive messages mid-session
-- **Has an output store** — result persists across restarts
-- **Has execution history** — recorded in ExecutionLog like any pipeline agent
-- **Has a lifecycle** — registered, active, running, stopped, error
-- **Respects budgets** — token limits enforced during the session
+- **Has an inbox**: can receive messages mid-session
+- **Has an output store**: result persists across restarts
+- **Has execution history**: recorded in ExecutionLog like any pipeline agent
+- **Has a lifecycle**: registered, active, running, stopped, error
+- **Respects budgets**: token limits enforced during the session
 
 #### Execution flow for cognitive mode:
 
@@ -361,7 +361,7 @@ class AgentStatus(Enum):
 create + activate + trigger → RUNNING → COMPLETED
 ```
 
-The parent (orchestrator) creates, activates, and triggers in one operation — equivalent to today's `delegate()`. The agent runs autonomously and transitions to COMPLETED. The parent inspects the result via `get_output(agent_id)` and can `remove_agent` when done.
+The parent (orchestrator) creates, activates, and triggers in one operation, equivalent to today's `delegate()`. The agent runs autonomously and transitions to COMPLETED. The parent inspects the result via `get_output(agent_id)` and can `remove_agent` when done.
 
 ---
 
@@ -369,14 +369,14 @@ The parent (orchestrator) creates, activates, and triggers in one operation — 
 
 ### Problem with current approach
 
-Today, the orchestrator's system prompt tells it to manually create a heartbeat agent — a separate pipeline agent with a MESSAGE step that pings the orchestrator on a schedule. This is:
+Today, the orchestrator's system prompt tells it to manually create a heartbeat agent: a separate pipeline agent with a MESSAGE step that pings the orchestrator on a schedule. This is:
 - **Fragile:** LLM might forget or misconfigure it
 - **Wasteful:** Creates a real agent just to send a timer message
 - **Not universal:** Only the orchestrator knows this pattern
 
 ### How it relates to the innate wake-up
 
-The completion callback (Section 8) handles the **event-driven** case — "child finished, wake parent." The heartbeat handles the **periodic** case — "I'm still alive, here's my status." Together they cover all supervision needs:
+The completion callback (Section 8) handles the **event-driven** case: "child finished, wake parent." The heartbeat handles the **periodic** case: "I'm still alive, here's my status." Together they cover all supervision needs:
 
 - **Child completes** → completion callback injects result into parent's turn (immediate)
 - **Child is still running** → heartbeat pings parent with status (periodic)
@@ -429,7 +429,7 @@ The orchestrator gets `heartbeat.interval = "5m"` by default when it has active 
 
 #### For deterministic pipeline agents:
 
-A pipeline agent with a heartbeat simply has the Runtime send periodic status pings to its parent. This is useful for long-running scheduled agents — the parent gets notified that the child is still alive and producing results.
+A pipeline agent with a heartbeat simply has the Runtime send periodic status pings to its parent. This is useful for long-running scheduled agents: the parent gets notified that the child is still alive and producing results.
 
 #### Key invariant: agents cannot remove themselves
 
@@ -476,13 +476,13 @@ human
 
 2. **Agents can create children** (via `delegate` or `create_agent` with `parent_id` set).
 
-3. **Kill cascades down.** Killing a parent kills all descendants (current `kill_agent` + `DelegateRegistry.get_descendants` — unified into the main registry).
+3. **Kill cascades down.** Killing a parent kills all descendants (current `kill_agent` + `DelegateRegistry.get_descendants`, unified into the main registry).
 
 4. **Completion signals go up.** When a child completes, it notifies its parent. The parent decides next steps.
 
 5. **No orphans.** If a parent is removed, its children are either:
    - Re-parented to the grandparent (promotion)
-   - Removed (cascade delete — current behavior for delegates)
+   - Removed (cascade delete: current behavior for delegates)
 
    Decision: **cascade delete**, matching current delegate behavior. Pipeline agents created by the orchestrator are typically meant to persist, so `remove_agent` on the orchestrator requires `_force=True` (already the case).
 
@@ -499,7 +499,7 @@ def generate_child_id(self, parent_id: str) -> str:
     return f"{parent_id}.{count}"
 ```
 
-This already exists in `DelegateRegistry.generate_child_id` — it moves to Runtime.
+This already exists in `DelegateRegistry.generate_child_id`; it moves to Runtime.
 
 ---
 
@@ -524,7 +524,7 @@ async def _spawn_cognitive_child(self, parent_id: str, defn: AgentDefinition):
     agent_id = defn.id
     self._completion_callbacks[agent_id] = parent_id
 
-    # Register, activate, trigger — the child starts working
+    # Register, activate, trigger: the child starts working
     await self.register_agent(defn)
     await self.activate_agent(agent_id)
     await self.trigger_run(agent_id, source=f"agent:{parent_id}")
@@ -548,7 +548,7 @@ async def _on_agent_completed(self, agent_id: str, result: str):
         )
         return
 
-    # Option B: Parent is not currently running — post to inbox
+    # Option B: Parent is not currently running, so post to inbox
     # The next time the parent wakes (heartbeat, schedule, user message),
     # it will see this in its inbox
     self.inbox.post(InboxMessage(
@@ -565,10 +565,10 @@ async def _on_agent_completed(self, agent_id: str, result: str):
 ```
 
 **Two paths, one outcome:**
-- **Parent is running** → result injected into the parent's active LLM turn. The parent sees it as a message in its conversation: "Child agent 'research-auth' completed" with the result. The parent can immediately act on it — no polling, no blocking.
+- **Parent is running** → result injected into the parent's active LLM turn. The parent sees it as a message in its conversation: "Child agent 'research-auth' completed" with the result. The parent can immediately act on it: no polling, no blocking.
 - **Parent is not running** → result posted to parent's inbox as a HIGH priority WORK message. The heartbeat (or any other trigger) wakes the parent, which sees the completion in its inbox on the next turn.
 
-This means: **agents wake each other up innately**. No separate heartbeat agent needed just for collection. The heartbeat's job is only to keep the parent alive for periodic check-ins — the actual work notifications come through completion callbacks.
+This means: **agents wake each other up innately**. No separate heartbeat agent needed just for collection. The heartbeat's job is only to keep the parent alive for periodic check-ins; the actual work notifications come through completion callbacks.
 
 ### Fractal Context Propagation
 
@@ -591,18 +591,18 @@ def _resolve_tools_for_agent(self, defn: AgentDefinition) -> list[dict]:
 def _get_scoped_tools(self, agent_id: str) -> list[dict]:
     """Tools scoped to this agent's position in the hierarchy."""
     return [
-        # create_agent — but children get parent_id=agent_id automatically
+        # create_agent, but children get parent_id=agent_id automatically
         {
             "name": "create_agent",
             "description": "Create a child agent to work on a subtask.",
-            # Parent ID is injected by the Runtime — the agent can't
+            # Parent ID is injected by the Runtime, so the agent can't
             # create siblings or agents above itself
         },
-        # post_message — can message any agent (parent, siblings, children)
+        # post_message: can message any agent (parent, siblings, children)
         {"name": "post_message", ...},
-        # get_snapshot — see the full system state
+        # get_snapshot: see the full system state
         {"name": "get_snapshot", ...},
-        # get_output — read any agent's last result
+        # get_output: read any agent's last result
         {"name": "get_output", ...},
     ]
 ```
@@ -611,14 +611,14 @@ The key: when agent `orch.1` calls `create_agent`, the Runtime automatically set
 
 ### Unified inbox
 
-Every agent has an inbox via `InboxManager`. Pipeline agents use it. The orchestrator uses it. The only agents that *don't* use it are delegates — because they're not in the inbox system at all.
+Every agent has an inbox via `InboxManager`. Pipeline agents use it. The orchestrator uses it. The only agents that *don't* use it are delegates, because they're not in the inbox system at all.
 
 In the unified model, cognitive-mode agents get inboxes. Messages delivered while a cognitive session is running are:
 
 1. **Injected into the active session** via `BridgeProvider.send_user_message()` (real-time delivery)
 2. **Queued in the inbox** (if the session has ended, picked up on next wake-up)
 
-This is already implemented for delegates via `delegate_message` → `runtime.send_delegate_message`. In the unified model, `post_message` just works for any agent — the Runtime checks if there's an active bridge session and injects the message if so.
+This is already implemented for delegates via `delegate_message` → `runtime.send_delegate_message`. In the unified model, `post_message` just works for any agent: the Runtime checks if there's an active bridge session and injects the message if so.
 
 ### Output store (no change needed)
 
@@ -642,9 +642,9 @@ async def post_message(target_id, content, priority="normal"):
 
 ### The working thread IS the record
 
-The user wants: "no separate summary needed — the working thread is the record."
+The user wants: "no separate summary needed, the working thread is the record."
 
-For cognitive agents, this means the bridge session transcript (all turns, tool calls, results) is the execution record. Currently, delegates only save a text stream to a `.log` file and a `result_preview` (500 chars). The full transcript lives in the Claude SDK session — accessible via `BridgeProvider.get_session_context()` but lost on restart.
+For cognitive agents, this means the bridge session transcript (all turns, tool calls, results) is the execution record. Currently, delegates only save a text stream to a `.log` file and a `result_preview` (500 chars). The full transcript lives in the Claude SDK session, accessible via `BridgeProvider.get_session_context()` but lost on restart.
 
 **Design:** The cognitive agent's execution record stores:
 - `output.text`: Final response text (already done)
@@ -675,12 +675,12 @@ Tools are declared on the AgentDefinition:
 
 | `tools` value | What the agent gets |
 |---|---|
-| `["sdk_builtin"]` | Only Claude SDK tools (Read, Write, Bash, etc.) — the default |
+| `["sdk_builtin"]` | Only Claude SDK tools (Read, Write, Bash, etc.): the default |
 | `["sdk_builtin", "atn_core"]` | SDK + delegate, post_message, get_snapshot |
 | `["sdk_builtin", "atn_full"]` | SDK + all orchestrator tools (only for orchestrator) |
 | `["sdk_builtin", "atn_core", "connectors"]` | SDK + ATN core + all assigned connectors |
 
-The `atn_core` set replaces the current `_DELEGATE_TOOL_NAMES`. The `atn_full` set is what the orchestrator gets. The `sdk_builtin` tools (file I/O, bash, web) always come from the bridge subprocess — ATN doesn't define them, the SDK does.
+The `atn_core` set replaces the current `_DELEGATE_TOOL_NAMES`. The `atn_full` set is what the orchestrator gets. The `sdk_builtin` tools (file I/O, bash, web) always come from the bridge subprocess: ATN doesn't define them, the SDK does.
 
 **Resolution at execution time:**
 
@@ -694,7 +694,7 @@ def _resolve_tools(self, tool_names: list[str], connector_ids: list[str]) -> lis
             tools.extend(get_tool_definitions_for_bridge())  # existing function
         elif name == "connectors":
             tools.extend(self.connectors.get_all_tools(connector_ids))
-        # "sdk_builtin" is implicit — handled by the bridge subprocess
+        # "sdk_builtin" is implicit: handled by the bridge subprocess
     return tools
 ```
 
@@ -711,7 +711,7 @@ def _resolve_tools(self, tool_names: list[str], connector_ids: list[str]) -> lis
 | Execution history | Yes (JSONL) | Yes (JSONL) |
 | Output store | Yes (last result in memory, hydrated from JSONL) | Yes (same) |
 | Inbox messages | No (in-memory, lost on restart) | No (same) |
-| Active session state | N/A | **No** — session is lost |
+| Active session state | N/A | **No**: session is lost |
 | Session transcript | N/A | Yes (persisted to .transcript.json on completion) |
 
 ### Cognitive agents after restart
@@ -748,11 +748,11 @@ heartbeat:
   interval: 5m
 ```
 
-The loader (`loader.py`) needs to handle the `mode` field and the cognitive-specific config. This is straightforward — just additional fields in `_validate_agent`.
+The loader (`loader.py`) needs to handle the `mode` field and the cognitive-specific config. This is straightforward: just additional fields in `_validate_agent`.
 
 ### One-shot vs persistent cognitive agents
 
-One-shot agents (replacing delegates) are created, activated, triggered, and complete. They don't need a YAML file on disk — they live in memory during execution and in the execution log afterward. The parent inspects the output store and removes the agent.
+One-shot agents (replacing delegates) are created, activated, triggered, and complete. They don't need a YAML file on disk: they live in memory during execution and in the execution log afterward. The parent inspects the output store and removes the agent.
 
 Persistent cognitive agents (e.g., the orchestrator) have YAML files and survive restarts. They re-register, re-activate, and resume responding to inbox/schedule triggers.
 
@@ -761,7 +761,7 @@ Persistent cognitive agents (e.g., the orchestrator) have YAML files and survive
 ```python
 # In create_agent:
 if defn.mode == AgentMode.COGNITIVE and is_one_shot:
-    # Register in memory only — don't save YAML
+    # Register in memory only, don't save YAML
     await runtime.register_agent(defn)
     await runtime.activate_agent(defn.id)
     await runtime.trigger_run(defn.id, source=f"agent:{requester}")
@@ -816,10 +816,10 @@ def create_orchestrator_agent(config):
 
 | Old tool | New equivalent |
 |---|---|
-| `delegate(prompt, type, title)` | `create_agent(mode="cognitive", ...)` — returns agent_id |
-| `delegate_status(id)` | `get_agent(id)` — shows status, output preview |
-| `delegate_message(id, content)` | `post_message(target=id, content)` — auto-injects into active session |
-| `delegate_collect(id)` | `await_agent(id)` — new tool, blocks until COMPLETED |
+| `delegate(prompt, type, title)` | `create_agent(mode="cognitive", ...)`, returns agent_id |
+| `delegate_status(id)` | `get_agent(id)`, shows status, output preview |
+| `delegate_message(id, content)` | `post_message(target=id, content)`, auto-injects into active session |
+| `delegate_collect(id)` | `await_agent(id)`, a new tool, blocks until COMPLETED |
 
 We keep `delegate()` as a convenience alias during migration (Phase 2 below).
 
@@ -874,7 +874,7 @@ A parent's budget covers its children's usage. When a child completes, its token
 - `models.py`: Add fields with backward-compatible defaults (`mode=PIPELINE`, `parent_id=None`, `heartbeat=None`)
 - `loader.py`: Accept new fields in YAML, ignore unknown fields for backward compat
 - `agent_registry.py`: Merge `DelegateRegistry` child-counter logic into Runtime (it's 50 lines)
-- All existing agents continue to work — new fields are optional
+- All existing agents continue to work: new fields are optional
 
 **Risk:** Zero. All additions are backward-compatible.
 
@@ -885,7 +885,7 @@ A parent's budget covers its children's usage. When a child completes, its token
 **Changes:**
 - `runtime.py`: Add `_execute_cognitive_agent` method. `trigger_run` checks `defn.mode` and dispatches to either `_execute_pipeline` or `_execute_cognitive_agent`.
 - `runtime.py`: Move delegate provider tracking (`_delegate_providers`, `_delegate_tasks`, etc.) into the unified execution tracking (`_executions`, `_tasks`, `_cancels`).
-- `orchestrator/tools.py`: Add `create_agent` support for `mode: "cognitive"` — internally creates a cognitive-mode AgentDefinition, registers it, and triggers it.
+- `orchestrator/tools.py`: Add `create_agent` support for `mode: "cognitive"`, which internally creates a cognitive-mode AgentDefinition, registers it, and triggers it.
 - Keep `delegate()` as an alias for `create_agent(mode="cognitive", ...)` so existing orchestrator prompts work.
 
 **Risk:** Medium. The cognitive execution path is new code, but it's largely extracted from `_run_delegate_session` (which is known-working).
@@ -897,7 +897,7 @@ A parent's budget covers its children's usage. When a child completes, its token
 **Changes:**
 - `orchestrator/__init__.py`: `create_orchestrator_agent` returns a `mode=COGNITIVE` definition.
 - Remove the orchestrator's step pipeline wrapper. It's now directly a cognitive agent.
-- The BridgeProvider instance management simplifies — each cognitive agent gets its own (or shares one for the orchestrator's session continuity).
+- The BridgeProvider instance management simplifies: each cognitive agent gets its own (or shares one for the orchestrator's session continuity).
 
 **Risk:** Medium-high. The orchestrator is the core interaction loop. Test thoroughly in parallel with the old code path before cutting over.
 
@@ -941,7 +941,7 @@ We are NOT replacing the BridgeProvider + claude-bridge.ts subprocess model. The
 
 ### Provider abstraction
 
-The `Provider` base class, `send()`, `send_stream()`, `send_orchestrate()` — all stay. Cognitive-mode agents use `send_orchestrate()` just like the current orchestrator cognitive step does. Non-bridge providers (Anthropic direct, Ollama, OpenAI) use the base class's generic multi-turn loop.
+The `Provider` base class, `send()`, `send_stream()`, and `send_orchestrate()` all stay. Cognitive-mode agents use `send_orchestrate()` just like the current orchestrator cognitive step does. Non-bridge providers (Anthropic direct, Ollama, OpenAI) use the base class's generic multi-turn loop.
 
 ### MCP connectors
 
@@ -965,17 +965,17 @@ Existing `agents/<id>/agent.yaml` files continue to work. The `mode` field defau
 
 ### Q1: Should cognitive-mode agents be resumable across triggers?
 
-Currently, the orchestrator maintains session continuity via `BridgeProvider._session_id` — each trigger resumes the same SDK session. Should other cognitive agents have this too?
+Currently, the orchestrator maintains session continuity via `BridgeProvider._session_id`: each trigger resumes the same SDK session. Should other cognitive agents have this too?
 
-**Tentative answer:** Yes, for *persistent* cognitive agents (those with a schedule). One-shot cognitive agents don't need it — they run once and complete. The BridgeProvider already handles session resumption; we just need to keep the provider instance alive between triggers for persistent cognitive agents (same as the orchestrator does today).
+**Tentative answer:** Yes, for *persistent* cognitive agents (those with a schedule). One-shot cognitive agents don't need it: they run once and complete. The BridgeProvider already handles session resumption; we just need to keep the provider instance alive between triggers for persistent cognitive agents (same as the orchestrator does today).
 
 ### Q2: How do we handle the orchestrator's tool surface in the unified model?
 
 The orchestrator has ~40 tools. Sub-agents get ~3. The tool surface is currently controlled by the `tool_executors` config in the cognitive step. In the unified model, it's the `tools` field on the AgentDefinition.
 
-But: `create_agent` and `remove_agent` are tools in the orchestrator's surface. If a cognitive sub-agent has `tools: ["atn_core"]`, it gets `delegate` (which is now `create_agent`). Does that mean it also gets `remove_agent`? It shouldn't — only the parent should remove children.
+But: `create_agent` and `remove_agent` are tools in the orchestrator's surface. If a cognitive sub-agent has `tools: ["atn_core"]`, it gets `delegate` (which is now `create_agent`). Does that mean it also gets `remove_agent`? It shouldn't: only the parent should remove children.
 
-**Resolution:** The `atn_core` tool set includes: `create_agent` (creates children under self), `post_message`, `get_snapshot`, `get_output`. It does NOT include `remove_agent`, `activate_agent`, `deactivate_agent` — those require parent privilege and are in `atn_full`.
+**Resolution:** The `atn_core` tool set includes: `create_agent` (creates children under self), `post_message`, `get_snapshot`, `get_output`. It does NOT include `remove_agent`, `activate_agent`, or `deactivate_agent`: those require parent privilege and are in `atn_full`.
 
 ### Q3: What happens to the delegate output directory?
 
@@ -1058,6 +1058,6 @@ An alternative approach: instead of unifying the models, just add persistence an
 
 4. **No unified tooling.** The orchestrator would still need separate tools for delegates vs agents.
 
-5. **The bridge becomes a sidecar.** If delegates are persistent, their BridgeProvider needs to survive restarts and reconnect — much harder than the clean "session per execution" model.
+5. **The bridge becomes a sidecar.** If delegates are persistent, their BridgeProvider needs to survive restarts and reconnect: much harder than the clean "session per execution" model.
 
 The unified model is more work upfront but eliminates an entire category of "which system do I interact with?" questions.

@@ -1,8 +1,8 @@
-# ATN Architecture Audit — Fractal Agent Unification
+# ATN Architecture Audit: Fractal Agent Unification
 
 **Date:** 2026-03-25
 **Scope:** Full codebase audit of `atn/` runtime, focusing on orchestrator vs. child agent divergences
-**Goal:** Produce a refactoring plan to make every agent — from root orchestrator to deepest sub-agent — behave identically
+**Goal:** Produce a refactoring plan to make every agent, from root orchestrator to deepest sub-agent, behave identically
 
 ---
 
@@ -29,7 +29,7 @@
 - Provider stored in `defn.provider` (string or list), resolved at execution time.
 
 #### **Divergence: Mode mismatch**
-The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitive agents are `AgentMode.COGNITIVE`. This is the **root structural divergence** — it causes two completely different execution paths (`_execute_pipeline` vs `_execute_cognitive_agent`).
+The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitive agents are `AgentMode.COGNITIVE`. This is the **root structural divergence**: it causes two completely different execution paths (`_execute_pipeline` vs `_execute_cognitive_agent`).
 
 ---
 
@@ -51,11 +51,11 @@ The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitiv
 2. This is a **completely separate 320-line method** that duplicates much of the pipeline logic.
 3. Resolves provider via `_resolve_provider_for_model()` (`runtime.py:1487`).
 4. Creates a **new** BridgeProvider instance per execution (not shared).
-5. Builds system prompt, drains inbox, builds user message — all inline.
+5. Builds system prompt, drains inbox, builds user message, all inline.
 6. Creates its own `_tool_executor` closure (`runtime.py:979`) that routes through `execute_tool`.
 7. Creates its own `_on_chunk` callback for output streaming (`runtime.py:994`).
 8. Calls `sub_provider.send_orchestrate()` directly (bypassing CognitiveStepExecutor entirely).
-9. Handles result, token usage, delegate registry sync, parent notification — all inline.
+9. Handles result, token usage, delegate registry sync, parent notification, all inline.
 10. Conversation history managed via per-agent `ConversationStore` (`runtime.get_agent_conversation_store()`).
 11. History injected into system prompt as text (no SDK session resume for children).
 
@@ -80,7 +80,7 @@ The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitiv
 #### (a) Orchestrator
 1. LLM emits tool call → bridge relays to `_tool_executor` in `_orchestrate()` (`cognitive.py:302`).
 2. `_route_tool_call()` checks connector prefix first, then calls `execute_tool()` (`cognitive.py:582-603`).
-3. `caller_id=context.agent_id` is passed — this was recently fixed at line 601.
+3. `caller_id=context.agent_id` is passed; this was recently fixed at line 601.
 4. `execute_tool()` injects `_caller_id` into tool input dict (`tools.py:2176`).
 5. Full orchestrator tool surface: 40+ tools (`_TOOLS` in `tools.py:52-697`).
 
@@ -112,7 +112,7 @@ The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitiv
   - `gemini-*` → new `OpenAICompatibleProvider`
   - `gpt-*` / `o1-*` / `o3-*` → new `OpenAICompatibleProvider`
   - Default → new `BridgeProvider(model=model_name)`
-- **No fallback chain** — if the selected provider fails, the agent fails.
+- **No fallback chain**: if the selected provider fails, the agent fails.
 - Provider stored in `_active_providers[agent_id]` during execution, cleaned up after.
 
 #### **Divergence: Fallback and lifecycle**
@@ -153,7 +153,7 @@ The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitiv
 - Same `_notify_parent_of_failure()` mechanism works identically.
 - Provider lookup checks both `resolved_parent` and raw `parent_id` (handles "orch" alias).
 
-#### **Divergence: Minimal** — Notification flow is one of the best-unified areas. The "orch" vs "orchestrator" alias handling (`_resolve_parent_agent_id`) is a wart but functional.
+#### **Divergence: Minimal.** Notification flow is one of the best-unified areas. The "orch" vs "orchestrator" alias handling (`_resolve_parent_agent_id`) is a wart but functional.
 
 ---
 
@@ -169,14 +169,14 @@ The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitiv
 - `_scheduler_loop()` handles heartbeat identically for all agents.
 - Heartbeat posts WORK message to agent's own inbox, triggering a new execution.
 
-#### **Divergence: Minimal** — Scheduling is well-unified. Planning review is orchestrator-specific by design.
+#### **Divergence: Minimal.** Scheduling is well-unified. Planning review is orchestrator-specific by design.
 
 ---
 
 ### 8. Conversation Persistence
 
 #### (a) Orchestrator
-- Uses `runtime.conversation` — a global `ConversationStore` at `data_dir/conversations/`.
+- Uses `runtime.conversation`, a global `ConversationStore` at `data_dir/conversations/`.
 - History recorded by `_orchestrate()`: `runtime.conversation.add_assistant_turn()` (`cognitive.py:367`).
 - User messages recorded externally (by CLI/WebSocket handler posting to inbox).
 - Supports session archival and reset via `new_conversation()`.
@@ -188,7 +188,7 @@ The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitiv
 - Assistant turn recorded in `_execute_cognitive_agent()` after execution.
 - No session archival/reset mechanism.
 
-#### **Divergence: Separate persistence paths** — Same `ConversationStore` class, but different locations, different recording points, and different lifecycle management.
+#### **Divergence: Separate persistence paths.** Same `ConversationStore` class, but different locations, different recording points, and different lifecycle management.
 
 ---
 
@@ -196,7 +196,7 @@ The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitiv
 
 #### (a) Orchestrator
 - Uses the **shared** `BridgeProvider` instance from `cognitive._providers["claude_max"]`.
-- Bridge subprocess is long-lived — spawned lazily on first request, kept alive.
+- Bridge subprocess is long-lived: spawned lazily on first request, kept alive.
 - Session ID persists across orchestration turns (SDK resume).
 - `_clear_bridge_session()` resets session stats on conversation reset.
 - Interrupt via `interrupt_orchestrator()` → `cognitive._providers["claude_max"].interrupt()`.
@@ -204,7 +204,7 @@ The orchestrator is `AgentMode.PIPELINE` with a cognitive step. Regular cognitiv
 #### (b) Regular Cognitive Agents
 - Each execution creates a **new** `BridgeProvider` instance (`runtime.py:872`).
 - Bridge subprocess spawned per execution, closed in `finally` block (`runtime.py:1141-1144`).
-- No session resume — each execution is a fresh SDK session.
+- No session resume: each execution is a fresh SDK session.
 - Interrupt via `interrupt_delegate()` → `_active_providers[agent_id].interrupt()`.
 
 #### **Divergence: Lifecycle model**
@@ -246,27 +246,27 @@ When `mode=COGNITIVE` was added for child agents, `_execute_cognitive_agent()` w
 
 | # | Divergence | Location | Impact |
 |---|-----------|----------|--------|
-| A1 | **Two execution paths** — pipeline+cognitive-step vs monolithic `_execute_cognitive_agent` | `runtime.py:598-601` (dispatch), `runtime.py:838-1177` (cognitive path) | Root cause of most other divergences. ~320 lines of duplicated logic. |
-| A2 | **Provider lifecycle** — shared singleton vs ephemeral per-execution | `runtime.py:872` (creates new), `runtime.py:1141` (closes after) | Children pay cold-start cost every execution. No session resume. |
-| A3 | **Tool routing** — `_route_tool_call()` vs inline closure with shell-tool mixin | `cognitive.py:582` vs `runtime.py:979` | Two code paths doing the same thing. Shell tools only available in one. |
-| A4 | **Conversation history injection** — user message vs system prompt | `cognitive.py:513-518` vs `runtime.py:937-974` | Different approaches to the same problem. System prompt approach bloats over time. |
-| A5 | **Streaming callback** — `_make_event_emitters()` vs inline `_on_chunk` | `cognitive.py:394` vs `runtime.py:994` | Children's output goes to delegate log; orchestrator's goes to step events. |
-| A6 | **Token tracking** — `_accumulate_usage()` from step output vs inline | `runtime.py:3078` vs `runtime.py:1044-1051` | Different accumulation paths for the same data. |
-| A7 | **DelegateRegistry sync** — orchestrator not registered, children are | `tools.py:948-956` | UI sees children in delegate tree but not orchestrator. |
-| A8 | **Provider fallback** — orchestrator has chain, children don't | `orchestrator/__init__.py:400` vs `runtime.py:872` | Children are fragile — single provider failure = agent failure. |
-| A9 | **Mode flag mismatch** — orchestrator is PIPELINE, functionally acts as COGNITIVE | `orchestrator/__init__.py:419` | Confusing — snapshot shows `mode: pipeline` for the orchestrator. |
-| A10 | **Completion events** — pipeline emits after finally, cognitive emits in finally | `runtime.py:810-828` vs `runtime.py:1159-1177` | Different ordering of cleanup and event emission. |
+| A1 | **Two execution paths**: pipeline+cognitive-step vs monolithic `_execute_cognitive_agent` | `runtime.py:598-601` (dispatch), `runtime.py:838-1177` (cognitive path) | Root cause of most other divergences. ~320 lines of duplicated logic. |
+| A2 | **Provider lifecycle**: shared singleton vs ephemeral per-execution | `runtime.py:872` (creates new), `runtime.py:1141` (closes after) | Children pay cold-start cost every execution. No session resume. |
+| A3 | **Tool routing**: `_route_tool_call()` vs inline closure with shell-tool mixin | `cognitive.py:582` vs `runtime.py:979` | Two code paths doing the same thing. Shell tools only available in one. |
+| A4 | **Conversation history injection**: user message vs system prompt | `cognitive.py:513-518` vs `runtime.py:937-974` | Different approaches to the same problem. System prompt approach bloats over time. |
+| A5 | **Streaming callback**: `_make_event_emitters()` vs inline `_on_chunk` | `cognitive.py:394` vs `runtime.py:994` | Children's output goes to delegate log; orchestrator's goes to step events. |
+| A6 | **Token tracking**: `_accumulate_usage()` from step output vs inline | `runtime.py:3078` vs `runtime.py:1044-1051` | Different accumulation paths for the same data. |
+| A7 | **DelegateRegistry sync**: orchestrator not registered, children are | `tools.py:948-956` | UI sees children in delegate tree but not orchestrator. |
+| A8 | **Provider fallback**: orchestrator has chain, children don't | `orchestrator/__init__.py:400` vs `runtime.py:872` | Children are fragile: single provider failure = agent failure. |
+| A9 | **Mode flag mismatch**: orchestrator is PIPELINE, functionally acts as COGNITIVE | `orchestrator/__init__.py:419` | Confusing: snapshot shows `mode: pipeline` for the orchestrator. |
+| A10 | **Completion events**: pipeline emits after finally, cognitive emits in finally | `runtime.py:810-828` vs `runtime.py:1159-1177` | Different ordering of cleanup and event emission. |
 
 ### Necessary Divergences (orchestrator is genuinely special)
 
 | # | Divergence | Justification |
 |---|-----------|---------------|
 | N1 | **Orchestrator cannot be unregistered** (`runtime.py:503`) | Root agent must always exist. |
-| N2 | **Full tool surface** — orchestrator gets 40+ tools, children get 9 | Children shouldn't be able to manage connectors, providers, planning, etc. |
-| N3 | **Global conversation store** — orchestrator conversation is the "chat" UI | User interacts with orchestrator via the main chat; agent conversations are separate windows. |
+| N2 | **Full tool surface**: orchestrator gets 40+ tools, children get 9 | Children shouldn't be able to manage connectors, providers, planning, etc. |
+| N3 | **Global conversation store**: orchestrator conversation is the "chat" UI | User interacts with orchestrator via the main chat; agent conversations are separate windows. |
 | N4 | **Status briefing injection** (`runtime.py:2930`) | Only orchestrator needs initial fleet status. |
 | N5 | **Planning review messages** (`runtime.py:1672`) | Only orchestrator handles planning. |
-| N6 | **Model selector in UI** — `set_orchestrator_model()` | Orchestrator model is a global setting. Children have their own model config. |
+| N6 | **Model selector in UI**: `set_orchestrator_model()` | Orchestrator model is a global setting. Children have their own model config. |
 
 ### Missing Capabilities (children should have but don't)
 
@@ -340,7 +340,7 @@ The refactoring has one central move: **make the orchestrator a cognitive-mode a
 - Provider fallback chain → `defn.provider` (already supports `str | list[str]`).
 - `tool_executors: "orchestrator"` → `defn.tools = ["atn_full"]` (or similar flag).
 
-**Risk:** Low — the change is in definition construction. The execution path change is the critical part (Step 2).
+**Risk:** Low. The change is in definition construction. The execution path change is the critical part (Step 2).
 
 **Dependencies:** None (can be done first).
 
@@ -366,7 +366,7 @@ The refactoring has one central move: **make the orchestrator a cognitive-mode a
 3. **Provider lifecycle**: If `defn.id == ORCHESTRATOR_ID` (or a new `persistent_session: bool` flag), reuse provider from `_active_providers` instead of creating a new one.
 4. **Conversation**: Record to both per-agent store AND `runtime.conversation` when `defn.id == ORCHESTRATOR_ID`.
 
-**Risk:** Medium — this is the core change. Must preserve orchestrator's session resume, conversation continuity, and interrupt behavior. Integration test coverage needed.
+**Risk:** Medium. This is the core change. Must preserve orchestrator's session resume, conversation continuity, and interrupt behavior. Integration test coverage needed.
 
 **Dependencies:** Step 1 (orchestrator must be cognitive-mode).
 
@@ -380,7 +380,7 @@ The refactoring has one central move: **make the orchestrator a cognitive-mode a
 - `runtime.py:613-833`: Remove the `if defn.mode == AgentMode.COGNITIVE` branch from `trigger_run()` (it's now the only path for cognitive agents). Pipeline execution remains for actual pipeline agents.
 - `steps/cognitive.py`: `_orchestrate()` is still used by pipeline agents with cognitive steps, but no longer by the orchestrator.
 
-**Risk:** Low — pipeline agents with cognitive steps still work via `CognitiveStepExecutor`. The orchestrator just doesn't go through this path anymore.
+**Risk:** Low. Pipeline agents with cognitive steps still work via `CognitiveStepExecutor`. The orchestrator just doesn't go through this path anymore.
 
 **Dependencies:** Steps 1 and 2 (orchestrator must be fully migrated).
 
@@ -392,7 +392,7 @@ The refactoring has one central move: **make the orchestrator a cognitive-mode a
 
 **Files:**
 - `runtime.py:979-991`: Extract `_tool_executor` closure into a proper method.
-- `steps/cognitive.py:302-306`: `_route_tool_call` already does this — unify with the runtime closure.
+- `steps/cognitive.py:302-306`: `_route_tool_call` already does this; unify with the runtime closure.
 
 **Proposed function:**
 ```python
@@ -415,7 +415,7 @@ async def route_tool_call(
 
 Move to `runtime.py` as a method on `Runtime`. Both execution paths call it.
 
-**Risk:** Low — pure refactor, same logic.
+**Risk:** Low. Pure refactor, same logic.
 
 **Dependencies:** Step 2 (but can be done in parallel).
 
@@ -429,7 +429,7 @@ Move to `runtime.py` as a method on `Runtime`. Both execution paths call it.
 - `runtime.py:866-872`: Enhance `_resolve_provider_for_model()` to accept a list and try each.
 - `orchestrator/tools.py:924`: When creating cognitive agents, optionally build a fallback chain.
 
-**Risk:** Low — additive feature, no breaking changes.
+**Risk:** Low. Additive feature, no breaking changes.
 
 **Dependencies:** Step 2.
 
@@ -448,7 +448,7 @@ Move to `runtime.py` as a method on `Runtime`. Both execution paths call it.
 | `orchestrator/tools.py` | 939 | `print(f"[DEBUG] create_agent: ...")` |
 | `orchestrator/tools.py` | 2177 | `print(f"[DEBUG] execute_tool: ...")` |
 
-**Risk:** None — these are development artifacts.
+**Risk:** None. These are development artifacts.
 
 **Dependencies:** None (do anytime).
 
@@ -459,14 +459,14 @@ Move to `runtime.py` as a method on `Runtime`. Both execution paths call it.
 **What:** Remove or clean up code that becomes unnecessary after unification.
 
 **Candidates:**
-1. **`_execute_cognitive_agent()` duplication** — after Step 2, the old pipeline-as-orchestrator path is dead.
-2. **`interrupt_orchestrator()`** (`runtime.py:1466-1481`) — special method to find orchestrator's provider. After unification, `interrupt_delegate()` works for all agents including orchestrator.
-3. **`_get_bridge_provider()`** (`runtime.py:1528-1545`) — special method with orchestrator vs delegate branching. After unification, just check `_active_providers`.
-4. **`_clear_bridge_session()`** (`runtime.py:2915-2929`) — reaches into `cognitive._providers["claude_max"]`. After unification, operates on `_active_providers[ORCHESTRATOR_ID]`.
-5. **`_resolve_parent_agent_id()` "orch" alias** (`runtime.py:1183-1194`) — the "orch" shorthand predates the unified agent registry. After cleanup, all agents use full IDs.
-6. **`DelegateRegistry.generate_child_id()` duplication** — both `DelegateRegistry` and `Runtime` have `generate_child_id()` with identical logic (`agent_registry.py:98` and `runtime.py:1385`). Consolidate to one.
+1. **`_execute_cognitive_agent()` duplication**: after Step 2, the old pipeline-as-orchestrator path is dead.
+2. **`interrupt_orchestrator()`** (`runtime.py:1466-1481`): special method to find orchestrator's provider. After unification, `interrupt_delegate()` works for all agents including orchestrator.
+3. **`_get_bridge_provider()`** (`runtime.py:1528-1545`): special method with orchestrator vs delegate branching. After unification, just check `_active_providers`.
+4. **`_clear_bridge_session()`** (`runtime.py:2915-2929`): reaches into `cognitive._providers["claude_max"]`. After unification, operates on `_active_providers[ORCHESTRATOR_ID]`.
+5. **`_resolve_parent_agent_id()` "orch" alias** (`runtime.py:1183-1194`): the "orch" shorthand predates the unified agent registry. After cleanup, all agents use full IDs.
+6. **`DelegateRegistry.generate_child_id()` duplication**: both `DelegateRegistry` and `Runtime` have `generate_child_id()` with identical logic (`agent_registry.py:98` and `runtime.py:1385`). Consolidate to one.
 
-**Risk:** Low — each removal is small and testable.
+**Risk:** Low. Each removal is small and testable.
 
 **Dependencies:** Steps 1-4 (most dead code is created by the unification).
 
@@ -475,7 +475,7 @@ Move to `runtime.py` as a method on `Runtime`. Both execution paths call it.
 ### Suggested Execution Order
 
 ```
-Phase A (Preparation — can be done immediately):
+Phase A (Preparation, can be done immediately):
   Step 6: Remove debug prints
   Step 7 (partial): Remove generate_child_id duplication
 
@@ -503,8 +503,8 @@ Phase D (Enhancement):
 | 2 | **MEDIUM** | Orchestrator or all cognitive agents break | Feature-flag: keep both paths, switch via config |
 | 3 | LOW | Pipeline agents with cognitive steps break | Only touch dispatch, not pipeline logic |
 | 4 | LOW | Tool calls fail | Keep old closures as fallback during transition |
-| 5 | LOW | No downside — additive | — |
-| 6 | NONE | — | — |
+| 5 | LOW | No downside; additive | n/a |
+| 6 | NONE | n/a | n/a |
 | 7 | LOW | Reference errors | Run full test suite after each removal |
 
 ---
@@ -513,16 +513,16 @@ Phase D (Enhancement):
 
 | File | Lines | Role |
 |------|-------|------|
-| `runtime.py` | 3125 | Central runtime — execution, scheduling, providers, lifecycle |
+| `runtime.py` | 3125 | Central runtime: execution, scheduling, providers, lifecycle |
 | `orchestrator/tools.py` | 2183 | Tool definitions + executors for LLM tool calls |
 | `orchestrator/__init__.py` | 433 | Orchestrator agent definition + system prompt |
-| `steps/cognitive.py` | 649 | CognitiveStepExecutor — LLM call abstraction |
+| `steps/cognitive.py` | 649 | CognitiveStepExecutor: LLM call abstraction |
 | `providers/bridge.py` | 842 | Claude Max bridge subprocess provider |
 | `providers/base.py` | 292 | Abstract provider interface |
 | `models.py` | 331 | Core data models (AgentDefinition, ExecutionRecord, etc.) |
-| `agent_registry.py` | 278 | DelegateRegistry — hierarchy tracking |
-| `inbox.py` | 87 | InboxManager — message queues |
-| `conversation.py` | 287 | ConversationStore — persistent conversation history |
+| `agent_registry.py` | 278 | DelegateRegistry: hierarchy tracking |
+| `inbox.py` | 87 | InboxManager: message queues |
+| `conversation.py` | 287 | ConversationStore: persistent conversation history |
 | `delegate_prompts.py` | 262 | System prompt builder for delegate sub-agents |
 | `tool_registry.py` | 389 | Unified tool registry (connectors + pipeline tools) |
 | `steps/base.py` | 50 | StepContext and StepExecutor base class |

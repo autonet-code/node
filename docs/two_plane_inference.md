@@ -13,7 +13,7 @@ locate→render path returned labels, not payloads (phase6 artifact,
 May 2026). The substrate's differentiator is the trust picture it
 attaches to a tool, not retrieval mechanics. (This was written as
 "debate-priced verdicts"; the debate rail retired at v3 and the vetting
-gate at v4.1 — the live differentiator is now the rep-weighted review
+gate at v4.1: the live differentiator is now the rep-weighted review
 scores that drift a tool's position and rank discovery. See
 `docs/tool_substrate.md`, Decision 2026-07-09.)
 
@@ -40,7 +40,7 @@ class ArtifactIndex:
   for generic payloads, the `text` field.
 - Embedder default: `default_usefulness_embedder(dim=dim)` from
   `usefulness_coords`.
-- The index is **derived, daemon-local state** — NOT consensus state.
+- The index is **derived, daemon-local state**, NOT consensus state.
   It must be rebuildable from blobs. Never gossiped, never anchored.
 - Persistence: jsonl at `index_path`; loaded eagerly on construction;
   in-memory numpy matrix for search.
@@ -50,11 +50,11 @@ class ArtifactIndex:
 - New optional field `artifact_digest: str = ""` on `SubClaimSprouted`
   in `events.py`. Serialized in `to_dict()` only when non-empty;
   `event_from_dict` tolerates absence (back-compat with recorded WALs
-  and gossiped events from older daemons — replay of old logs MUST
+  and gossiped events from older daemons: replay of old logs MUST
   produce identical worlds).
 - Federated replay: the digest rides the event; peers fetch the blob
   lazily via the existing p2p blob protocol when rendering. The digest
-  does not participate in node ids, coords, or equilibration —
+  does not participate in node ids, coords, or equilibration, so
   bit-identical epoch close is unaffected.
 
 ### 3. Ingestion (`world_service.submit_work_units`, `usefulness_training`)
@@ -65,7 +65,7 @@ class ArtifactIndex:
 - The per-work-unit claim node keeps its claim-text content and gains
   `artifact_digest` (stored on the node as attribute and on the
   emitted SubClaimSprouted event).
-  **[SUPERSEDED by v3 — see Addendum 2026-07-08: work units no longer
+  **[SUPERSEDED by v3; see Addendum 2026-07-08: work units no longer
   sprout claim nodes at all; ingestion stops at `add_artifact`.]**
 - `submit_con` unchanged (disputes target claim nodes, which now
   transitively price artifacts). **[STALE as of v3: `submit_con` /
@@ -90,7 +90,7 @@ def _infer_artifacts(input_data, world, artifact_index, blob_store,
   `{"mode": "artifacts", "artifacts": [{digest, cosine, standing,
     final, payload, claims: [{content, position, net_score}]}, ...]}`
   where `payload = blob_store.get_json(digest)` (None tolerated if the
-  blob hasn't replicated yet — include the digest anyway).
+  blob hasn't replicated yet; include the digest anyway).
 - `infer_with_world_model` gains optional `artifact_index=`,
   `blob_store=` kwargs and dispatches `mode="artifacts"` when both are
   provided and the input isn't turn-shaped. Existing alignment/general
@@ -107,17 +107,17 @@ def _infer_artifacts(input_data, world, artifact_index, blob_store,
 
 ## Constraints (all agents)
 
-- Digests are sha256 hex from `blob_store.py` — NOT IPFS CIDs.
+- Digests are sha256 hex from `blob_store.py`, NOT IPFS CIDs.
 - Determinism of federated epoch close is sacred: nothing in this
   refactor may alter node ids, coords, equilibration inputs, or event
   ordering for existing event kinds.
 - Never run the full pytest suite. Targeted files only.
 - The scoring/re-rank formula is advisory (daemon-local inference),
-  not consensus — exact constants may be iterated freely.
+  not consensus, so exact constants may be iterated freely.
 
 ## Out of scope for this pass
 
-- Scoped/per-tendency equilibration (the O(N²) wall) — separate work.
+- Scoped/per-tendency equilibration (the O(N²) wall): separate work.
 - Any change to mint, reconcile, or the gate.
 - P2P blob replication improvements.
 
@@ -127,7 +127,7 @@ Phase 8 (`docs/phase8_prereg.md`, `docs/phase8_results.md`) contested this
 design end-to-end. Two findings feed back into this document:
 
 - **Retrieval validated.** Plain artifact retrieval (payloads only, no
-  verdict text) beat no-context by +0.367 (Holm p=0.012) — the two-plane
+  verdict text) beat no-context by +0.367 (Holm p=0.012): the two-plane
   data path (artifacts in blob store + `ArtifactIndex`) is the product
   surface, confirmed on a real, unsaturated domain.
 - **Verdicts-in-context hurt.** Injecting claim/verdict text into the
@@ -145,7 +145,7 @@ design end-to-end. Two findings feed back into this document:
   (`net_score` tree recursion) described in `docs/ledger_pricing.md`;
   equilibration is an opt-in experimental kernel pending
   `docs/phase9_depth_experiment.md`. This does not change the artifact
-  plane / verdict plane split above — it changes how standing on the
+  plane / verdict plane split above; it changes how standing on the
   verdict plane is computed by default.
 
 ## Addendum: substrate v3 (2026-07-08)
@@ -155,7 +155,7 @@ the verdict plane narrows to TOOL MANIFESTS only:
 
 - **Work units leave consensus.** `submit_work_units` stops sprouting
   claim nodes; ingestion is `add_artifact` only (the ArtifactIndex was
-  always daemon-local and never gossiped — §1 stands unchanged).
+  always daemon-local and never gossiped, so §1 stands unchanged).
   Retrieval over work-unit artifacts becomes pure embedding ranking,
   which is exactly the arm phase8 validated (+0.367, payloads-only).
 - **Re-rank formula (§4) changes for tool manifests**: standing is

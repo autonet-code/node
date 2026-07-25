@@ -1,6 +1,6 @@
 # Services market: decentralized monetizable APIs
 
-Status: BUILT — beta on testnet. `ServiceRegistry` + `PaymentChannel`
+Status: BUILT, beta on testnet. `ServiceRegistry` + `PaymentChannel`
 (`contracts/core/ServiceMarket.sol`) are deployed on the Autonet
 jurisdiction (Etherlink Shadownet; addresses in `registry.json` under
 `service_registry` / `payment_channel`) and exercised end to end by
@@ -12,8 +12,8 @@ market-priced). This doc specifies the market rail.
 
 A Service is a remote API published by an agent (ultimately by its
 human benefactor): general-purpose, priced per work item, settled in
-**ATN** (ratified 2026-07-10 — the earlier "any ERC20" doctrine is
-retired; see the settlement section). Service commerce is otherwise
+**ATN** (ratified 2026-07-10; the earlier "any ERC20" doctrine is
+retired, see the settlement section). Service commerce is otherwise
 independent of ATN's constitutional roles: it earns NO mint, reputation,
 or verdict-layer standing. The system is decentralized because it
 leverages the consensus we already have: gossip for liveness/discovery,
@@ -26,9 +26,9 @@ Execution integrity of a remote endpoint is unknowable in principle
 So Services get NO substrate standing, NO verdict-layer claims, NO
 mint, NO decay math. The trust basis is purely behavioral:
 
-- identity — signed by the agent's 0x key (chain-verified)
-- payment — atomic; not served = not paid
-- track record — reviews signed by people who PAID (receipts with
+- identity: signed by the agent's 0x key (chain-verified)
+- payment: atomic; not served = not paid
+- track record: reviews signed by people who PAID (receipts with
   skin in the game; success rate + volume + dispute rate displayed,
   priced by buyers, not by consensus)
 
@@ -71,10 +71,10 @@ factory + N deployments + growing audit surface. Instead:
   (chain = truth, blob = storage, Firestore = web2 cache; exact same
   doctrine as agents/tools).
 - Settlement: **the prepaid payment channel, ONLY** (ratified
-  2026-07-04, late — the postpaid escrow was DELETED, not deferred),
-  and **ATN-only** (ratified 2026-07-10 — see below).
+  2026-07-04, late: the postpaid escrow was DELETED, not deferred),
+  and **ATN-only** (ratified 2026-07-10, see below).
   Rationale: an unarbitrated escrow cannot know delivery truth, so
-  some party must bear the lie — a false "delivered" claim steals the
+  some party must bear the lie: a false "delivered" claim steals the
   deposit, or a silent client steals the work. The channel dissolves
   the dilemma by making exposure per-item and PREPAID: client deposits
   once; each request carries a signed voucher (cumulative_amount)
@@ -85,20 +85,20 @@ factory + N deployments + growing audit surface. Instead:
   arbitration, no fulfillment oracle, two txs for N requests. Metered
   hardware (GPU/sponsor-pipe inference) fits natively: the ask's
   `unit` meters, vouchers stream against consumption. Streaming
-  contracts (Sablier-style) only for subscription-shaped services —
+  contracts (Sablier-style) only for subscription-shaped services: the
   wrong default for per-item work.
-  - **Fee at settlement (ATN-only, ratified 2026-07-10 — closes G1).**
+  - **Fee at settlement (ATN-only, ratified 2026-07-10, closes G1).**
     `closeChannel` routes the provider payout through
     `Substrate.payForService(provider, pay, channelId)`, so the 2.5%
     service fee (half burned into the recycled emission pool, half to
-    the DAO treasury) is taken on the canonical rail — the same fee the
+    the DAO treasury) is taken on the canonical rail, the same fee the
     direct `payForService` rail already charged. Vouchers stay
     GROSS-denominated; the provider receives net of the fee. The
     remainder refund is not a service payment and pays no fee. The
     theft-ceiling analysis is unchanged (the fee sits on the provider
     side of every voucher, so the bound is still one client-sized
     increment, now net). ATN-only removed the "non-ATN channels need a
-    fee design" open question — service commerce is ATN.
+    fee design" open question: service commerce is ATN.
 
 ### 3. Daemon as server: the wss rail, reused
 
@@ -112,7 +112,7 @@ client → provider:  {service_request, spec_digest, request_id, args, voucher}
 provider → client:  {service_result, request_id, result | error, receipt_sig}
 ```
 
-The **sponsor/dependent inference pipe is the same channel** — sponsored
+The **sponsor/dependent inference pipe is the same channel**: sponsored
 inference (work-AI, deferred Phase 8+) is a Service whose work item is
 an inference call and whose ask is alignment-priced (possibly 0/
 subsidized). Design the frame generically now so the sponsor pipe rides
@@ -124,9 +124,9 @@ Daemon-side components:
   management, publish = register on-chain + blob push.
 - Service-host handler on the existing WS server: authenticates the
   channel, validates vouchers, dispatches to the backing implementation
-  (which is just a local tool run on the provider's daemon — a Service
-  is a tool the OWNER chose to sell), emits signed receipts.
-- Client side: an MCP connector (`service_client`) — so from the
+  (which is just a local tool run on the provider's daemon, since a
+  Service is a tool the OWNER chose to sell), emits signed receipts.
+- Client side: an MCP connector (`service_client`), so from the
   consuming agent's seat, a remote service is indistinguishable from
   any other tool. One probe, two economies, one interface.
 
@@ -134,22 +134,22 @@ Daemon-side components:
 
 A review = the payer's signed verdict on a request_id (ok/score/note),
 publishable as a gossip event and mirrored by the indexer. Only
-addresses that actually paid for the item can review it (receipt-gated
-— web2's fake-review problem solved by construction). Aggregates
+addresses that actually paid for the item can review it (receipt-gated:
+web2's fake-review problem solved by construction). Aggregates
 (success rate, dispute rate, volume) are displayed, never enforced:
 pricing self-regulates because buyers see history; no on-chain math
 beyond settlement.
 
 ### 5. Marketplace surface
 
-- Web app: new Services screen — browse (Firestore-backed storefront),
+- Web app: new Services screen, offering browse (Firestore-backed storefront),
   spec inspection, purchase flow (wallet), review history. The
   framework is both marketplace and consumer; the human benefactor of
   each daemon is the true end-consumer on both sides.
 - Agent-side: the inference probe returns tools + services merged,
   ranked; the agent decides by judgment and wallet. Granting an agent
   spend authority over non-ATN tokens is an OWNER decision (budget
-  system extension — open design point).
+  system extension: open design point).
 
 ## What belongs where (tools vs services)
 
@@ -159,50 +159,50 @@ replicable capability is competed to zero. A service survives only
 where it holds a MOAT that cannot ship as a blob:
 
 1. private data (proprietary datasets, curated indexes)
-2. scarce hardware (GPU inference — incl. the sponsor pipe — rendering,
+2. scarce hardware (GPU inference, incl. the sponsor pipe; rendering;
    scale transcription)
 3. credentials / legal position (licensed APIs, jurisdiction, KYC)
 4. secrecy (closed code: selling execution is the only monetization)
-5. statefulness (monitoring, hosting — runs while the caller is offline)
+5. statefulness (monitoring, hosting: runs while the caller is offline)
 6. human labor behind the daemon
 
 Overlap happens along QUALITY TIERS, not functions (free whisper-small
-tool vs paid GPU transcription service) — the probe returns both,
+tool vs paid GPU transcription service): the probe returns both,
 priced, and the agent chooses. The mint deliberately erodes weak moats:
 a secrecy-only service is a standing bounty for a free reimplementation.
 Emission continuously pulls capability from the paid column into the
 commons.
 
-Named as doctrine (2026-07-08, "the absorption frontier" —
+Named as doctrine (2026-07-08, "the absorption frontier",
 docs/tool_substrate.md): paid service demand is the network's gap map
-— revenue concentration marks exactly what the commons lacks, weighted
-by willingness to pay — and any service replicable as pinned code
+(revenue concentration marks exactly what the commons lacks, weighted
+by willingness to pay), and any service replicable as pinned code
 finances and advertises its own replacement. The commons absorbs the
 replicable; the market prices the scarce. The two grow each other: a
 more capable commons does more work and buys more of the genuinely
 scarce remote things.
 
-**Honest wiring gap (G1, 2026-07-09 econ-attestation audit —
-`experiments/econ_attest/attestation.md`) — RESOLVED 2026-07-10.** The
+**Honest wiring gap (G1, 2026-07-09 econ-attestation audit,
+`experiments/econ_attest/attestation.md`): RESOLVED 2026-07-10.** The
 mechanism that makes "services finance the commons that replaces them"
 real is fee recycling: 2.5% of a service payment burns and re-enters the
 emission pool (the pool that pays tool authors). That fee originally
-fired ONLY on `Substrate.payForService` — the `ServiceMarket.
+fired ONLY on `Substrate.payForService`; the `ServiceMarket.
 PaymentChannel` settlement, the ratified DEFAULT rail, paid providers via
 raw `safeTransfer`: no fee, no burn, `recycled = 0`. The decision (user,
 2026-07-10) is **service commerce is ATN-only**, and `closeChannel` now
 routes the provider payout through `Substrate.payForService(provider,
-pay, channelId)` — so the fee is taken at settlement on the canonical
+pay, channelId)`, so the fee is taken at settlement on the canonical
 rail and the "two grow each other" doctrine holds. The non-ATN
 design call the gap flagged is moot: there are no non-ATN channels.
 
 ## Open knobs (sims / user)
 
 The postpaid escrow was deleted (2026-07-04), so its griefing/dispute
-rules are moot — the channel's griefing analysis lives inline in
+rules are moot: the channel's griefing analysis lives inline in
 `PaymentChannel` (`contracts/core/ServiceMarket.sol`). Remaining knobs:
 
 1. Channel challenge-window sizing (the `challengeWindow` constructor
-   arg — the settle-delay before a client's remainder refund).
+   arg: the settle-delay before a client's remainder refund).
 2. Whether reviews live as chain events (costly, permanent) or gossip
-   + indexer (cheap, replayable) — lean gossip.
+   + indexer (cheap, replayable): lean gossip.

@@ -5,7 +5,7 @@
 > safety constraint that **work halts if the governance heartbeat is missed**
 > (`nodes/core/`). What is retired: the role-split specialized nodes
 > (Proposer/Solver/Coordinator/Aggregator) and the FedAvg aggregation flow
-> documented below — those belong to the deleted pre-substrate paradigm.
+> documented below. Those belong to the deleted pre-substrate paradigm.
 > Today an agent is a substrate participant hosted by a daemon (`atn/`);
 > registration on-chain unlocks its economic rights, and work enters
 > consensus by publishing **tools**, not by role-staked task/solve/verify.

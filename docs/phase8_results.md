@@ -1,7 +1,7 @@
 # Phase 8 results (2026-07-03)
 
 Prereg: docs/phase8_prereg.md (d0f3f82 + amendments 191d804, aff6c42,
-77486af — all committed before any contest call). Raw artifacts in
+77486af, all committed before any contest call). Raw artifacts in
 substrate_experiment/phase8/ (contest_rows.jsonl, grades_contest.jsonl,
 aggregate8.json, label_map.jsonl, llm_cache/).
 
@@ -23,15 +23,15 @@ aborts; context parity held.
 
 ## Contrasts (Holm-corrected)
 
-- **B−A = +0.367, p=0.012** — retrieval genuinely helps on an unknown
+- **B−A = +0.367, p=0.012**: retrieval genuinely helps on an unknown
   domain. First positive evidence for the substrate value prop's
   retrieval leg (phase 7's negative was a saturated-domain artifact).
-- **C−B = −0.280, p=0.012** — injecting verdict claims INTO the context
+- **C−B = −0.280, p=0.012**: injecting verdict claims INTO the context
   hurts. Verdicts belong in ranking, not in the prompt.
-- **Primary: D256−C = +0.127, Holm p=0.054, CI [+0.03, +0.24]** —
+- **Primary: D256−C = +0.127, Holm p=0.054, CI [+0.03, +0.24]**:
   equilibrated standing beats vote-count standing by a small, probably
   real, margin that fails the pre-registered bar (p<0.05 AND diff≥0.25).
-- D64−D256 = −0.05, n.s. — embedding dim 64 vs 256 doesn't matter here.
+- D64−D256 = −0.05, n.s.: embedding dim 64 vs 256 doesn't matter here.
 
 ## Pre-registered decision
 
@@ -41,14 +41,14 @@ Per the gate: mint pricing moves toward explicit debate standing
 experimental kernel; quantum-inference path parked.
 
 Honest nuance recorded: the primary effect is positive with a CI
-excluding zero — equilibration is not worthless, it is small. It failed
+excluding zero: equilibration is not worthless, it is small. It failed
 the magnitude bar that was set, before data, as "earns its complexity."
 
 ## Design implications beyond the gate
 
-1. Retrieval arm (payloads only) was the best overall — the two-plane
+1. Retrieval arm (payloads only) was the best overall: the two-plane
    data path is validated as the product surface.
 2. Standing should re-rank and price, never fill context (C−B).
-3. All context arms remain far from a knowledgeable ceiling (~1.6/5) —
+3. All context arms remain far from a knowledgeable ceiling (~1.6/5):
    retrieval quality / corpus depth, not standing math, is the
    binding constraint on answer quality.

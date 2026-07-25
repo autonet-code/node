@@ -11,7 +11,7 @@ the substrate's equilibration-based standing improve a small model's
 answers over (a) plain retrieval and (b) the same retrieval re-ranked
 by explicit vote-count standing WITHOUT equilibration?
 
-Primary contrast: **arm D256 vs arm C** — identical retrieval, identical
+Primary contrast: **arm D256 vs arm C**, identical retrieval, identical
 context format, differing only in how standing is computed (equilibrated
 net_score vs raw vote counting). This isolates the geometry.
 
@@ -21,13 +21,13 @@ net_score vs raw vote counting). This isolates the geometry.
 |---|-----------|------------------|
 | 1 | Phase 6: substrate arm silently received empty context (world never wired) | Per-row invariant: arms B/C/D must have ≥3 artifacts with non-None payloads; any violation ABORTS the run. Probe metadata persisted per row. |
 | 2 | v3: locate→render returned labels, not knowledge | Context = full payload text. Assert mean context length in [3000, cap]; persist every prompt verbatim; sample contexts logged. |
-| 3 | Phase 7: saturated domain (bare model already knew toolz) — no headroom | Calibration gate: contest proceeds only if bare-model mean < 2.5/5 on the selected question set. Otherwise STOP and report. |
+| 3 | Phase 7: saturated domain (bare model already knew toolz), so no headroom | Calibration gate: contest proceeds only if bare-model mean < 2.5/5 on the selected question set. Otherwise STOP and report. |
 | 4 | v3: oracle = same model as a contestant (self-preference bias) | Two graders (Opus 4.8, Sonnet 5), both ≠ contestant (Haiku). Blind, randomized answer labels, grade against a code-grounded key the grader writes first. Report inter-grader agreement. |
 | 5 | Selection/regression bias risk when picking "hard" questions | Questions selected on a CALIBRATION run of bare Haiku; the contest re-runs the bare arm FRESH on the selected set. |
 | 6 | Context-length confound between arms | Same char budget (6000), same k=5, same prompt template for B/C/D; assert per-row context lengths within 10% band across arms. |
 
 **Amendment 2 (2026-07-03, before any calibration/contest call):** guard #6's
-10% band applies strictly within {C, D256, D64} — the arms of the primary
+10% band applies strictly within {C, D256, D64}, the arms of the primary
 contrast, which share an identical format. Arm B intentionally omits the
 claims section (that omission IS the B-vs-C treatment), so a cross-arm char
 band including B either aborts spuriously or forces truncating C/D payloads
@@ -42,7 +42,7 @@ B−C remains a secondary contrast and its content asymmetry is by design.
   (`work_units_autonet.jsonl` in the substrate_experiment dir), the
   real session-trace corpus.
 - **Amendment 1 (2026-07-03, before any calibration/contest call):**
-  `work_units_autonet.jsonl` turned out to hold only 17 units — too few
+  `work_units_autonet.jsonl` turned out to hold only 17 units, too few
   for meaningful retrieval (k=5 of 17). Corpus source amended to: fresh
   extraction (same `extract_sessions.py` pipeline) from the
   `C--code-autonet` and `C--code-world-model` session transcripts as of
@@ -55,7 +55,7 @@ B−C remains a secondary contrast and its content asymmetry is by design.
   autonet extraction is small). Corpus source amended to additionally
   include (a) subagent-session work units (pipeline default excludes
   them as "operational helpers", but they carry real implementation
-  knowledge and the legacy world-model extraction included them —
+  knowledge and the legacy world-model extraction included them;
   yields ~194 autonet units), and (b) the surviving May 2026
   world-model extraction (13 units; source transcripts no longer
   exist). Merge, dedupe by uid, same deterministic 200-cap sampling.
@@ -64,7 +64,7 @@ B−C remains a secondary contrast and its content asymmetry is by design.
 - Sample: 200 units, deterministic (sort by sha256 of the unit's JSON,
   take first 200). Cap chosen for substrate build tractability
   (~15 s/unit); reported as a limitation.
-- Judge claims: one Sonnet 5 call per unit produces 2–3 structured
+- Judge claims: one Sonnet 5 call per unit produces 2 to 3 structured
   sub-claims (axes: correctness, simplicity, robustness), each PRO or
   CON with honest CONs required. Cached; the SAME cache feeds arms C
   and D so verdict content is identical across them.
@@ -82,7 +82,7 @@ B−C remains a secondary contrast and its content asymmetry is by design.
 
 ## Arms (contestant: Haiku via bridge, one completion per question per arm)
 
-- **A bare**: no context. (Fresh run on the selected set — guard #5.)
+- **A bare**: no context. (Fresh run on the selected set; guard #5.)
 - **B rag**: top-5 artifacts by cosine (dim 256), payload text as context.
 - **C ledger**: same top-15 candidates as B, re-ranked by
   `cosine × (1 + tanh(vote_standing))`, top-5 kept. `vote_standing` =
@@ -100,7 +100,7 @@ B−C remains a secondary contrast and its content asymmetry is by design.
 
 Per question: grader receives the question + relevant code files,
 writes a reference key, then scores the five blinded, order-randomized
-answers 1–5 on correctness / completeness / reference-accuracy
+answers 1 to 5 on correctness / completeness / reference-accuracy
 (overall = mean). Both graders grade everything. Metric = mean of the
 two graders. Report Pearson r and mean absolute disagreement between
 graders; if r < 0.4 the run is declared ungradeable (stop, revise

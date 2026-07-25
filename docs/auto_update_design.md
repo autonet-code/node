@@ -1,4 +1,4 @@
-# Daemon Auto-Update — Design
+# Daemon Auto-Update: Design
 
 Status: implementing 2026-06-17. Mode chosen by user: **stage on poll, apply on next boot**
 (the running daemon never self-restarts).
@@ -6,10 +6,10 @@ Status: implementing 2026-06-17. Mode chosen by user: **stage on poll, apply on 
 ## Why this exists / trust model
 
 The daemon ships via PyPI (`autonet-computer`); the user pushes frequent bugfix
-releases and there's no way to "force a deployment" the way a web app can —
+releases and there's no way to "force a deployment" the way a web app can:
 every node runs its own process. Auto-update closes that gap.
 
-This is justified — not sneaky — *only* because control of the official codebase
+This is justified, not sneaky, *only* because control of the official codebase
 is meant to be decentralized via reputation/governance. Today that governance is
 **aspirational, not wired** (reputation is on-chain but gates nothing; the
 `node.code.hash.<version>` Registry key is read by `atn/_cache.py` but no contract
@@ -21,7 +21,7 @@ writes it yet). So the V1 trust anchor is:
 
 The code is structured so the **version pointer can later move** from PyPI to a
 governance-approved on-chain release pointer without touching the stage/apply
-machinery — that's the seam where decentralization lands.
+machinery: that's the seam where decentralization lands.
 
 ## Flow
 
@@ -64,8 +64,8 @@ next daemon boot (atn/cli.py:main(), BEFORE asyncio.run / heavy imports)
     source: str = "pypi"          # pypi | git | http | blob_store
     pypi_index_url: str = ""      # "" → pypi.org default
     package_name: str = "autonet-computer"
-- `atn/update_boot.py` (NEW, deliberately import-light — only os/sys/json/subprocess/pathlib):
-  `apply_staged_update_if_any()` — the boot-time pre-init step. No atn.* imports.
+- `atn/update_boot.py` (NEW, deliberately import-light: only os/sys/json/subprocess/pathlib):
+  `apply_staged_update_if_any()`, the boot-time pre-init step. No atn.* imports.
   Returns None; re-execs on success.
 - `atn/cli.py`:
   - `main()`: call `apply_staged_update_if_any()` as the first line.
@@ -80,12 +80,12 @@ next daemon boot (atn/cli.py:main(), BEFORE asyncio.run / heavy imports)
 `ATN_UPDATE_APPLIED=1` env var, set right before the boot-time re-exec. If already
 set on entry to `apply_staged_update_if_any()`, skip (we've applied once this
 process lineage). Also: the boot step clears `pending.json` whether install
-succeeds OR fails — a wheel that won't install must not be retried every boot.
+succeeds OR fails: a wheel that won't install must not be retried every boot.
 
 ## Verification (advisory today, blocking-ready)
 
 `stage_update` calls `atn/_cache.py:validate(rpc_url, registry_addr, version)`:
-- returns True (proceed) when the key is absent / chain unreachable — matches
+- returns True (proceed) when the key is absent / chain unreachable, matching
   existing fail-open semantics, BUT we log it at WARNING so "unverified" is visible.
 - returns False only on a confirmed mismatch → refuse to stage (do not download-and-run
   code that fails its on-chain fingerprint).

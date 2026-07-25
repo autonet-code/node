@@ -33,7 +33,7 @@ bottleneck transmit enough image-specific information for useful text generation
 **Goal**: Verify the architecture can learn *anything* through the K-vector bottleneck.
 
 **Setup**: 18-class colored shapes dataset (6 colors x 3 shapes). Captions like
-"a red circle". Trivially structured — tests pure information flow, not capacity.
+"a red circle". Trivially structured: tests pure information flow, not capacity.
 
 **Result: PASS**
 - 100% accuracy on 18-class classification
@@ -45,7 +45,7 @@ capacity/conditioning, not fundamental design flaws.
 
 ---
 
-## Test 1: Real Image Captioning — Run 1 (Baseline)
+## Test 1: Real Image Captioning, Run 1 (Baseline)
 
 **Goal**: Test on real COCO images with natural language captions.
 
@@ -53,16 +53,16 @@ capacity/conditioning, not fundamental design flaws.
 
 **Training**: 30 epochs, 4,000 samples, batch_size=32
 
-**Result: FAIL — Mode Collapse**
+**Result: FAIL, Mode Collapse**
 - Greedy: 1 unique caption out of all test images (100% collapse)
 - Generated the same sentence regardless of input image
-- Sampled (t=0.7): Diverse but random — no correlation with input images
+- Sampled (t=0.7): Diverse but random, with no correlation with input images
 
 **Diagnosis**: Too few samples and epochs. Scaled up for Run 2.
 
 ---
 
-## Test 2: Real Image Captioning — Run 2 (Scaled Up)
+## Test 2: Real Image Captioning, Run 2 (Scaled Up)
 
 **Goal**: Same architecture, more data and training.
 
@@ -71,7 +71,7 @@ capacity/conditioning, not fundamental design flaws.
 **Training**: 100 epochs, 20,000 samples, batch_size=32, lr=3e-4, cosine annealing.
 Label smoothing=0.1, diversity_weight=0.5, warmup=10 epochs.
 
-**Result: FAIL — Same Mode Collapse**
+**Result: FAIL, Same Mode Collapse**
 - Final CE: 1.0619
 - Greedy: 1/2000 unique captions (0%)
   - All: "A man is standing on a snowboard in a snowy mou..."
@@ -80,7 +80,7 @@ Label smoothing=0.1, diversity_weight=0.5, warmup=10 epochs.
 
 **Diagnosis**: The autoregressive decoder learns a strong LM prior P(text) and
 completely ignores the latent plan conditioning. More data doesn't help because
-the decoder has no incentive to attend to the plan — it can minimize CE loss by
+the decoder has no incentive to attend to the plan: it can minimize CE loss by
 memorizing the most common COCO caption pattern.
 
 ---
@@ -103,7 +103,7 @@ cow, bear, surfboard, sports, furniture, outdoor).
 - Some categories well-classified (e.g., person, vehicle)
 - Others confused (e.g., outdoor <-> furniture)
 
-**Conclusion**: The latent plan *does* carry image-specific information — significantly
+**Conclusion**: The latent plan *does* carry image-specific information, significantly
 above chance. The captioning failure is primarily a **decoder conditioning problem**,
 not a bottleneck information flow problem. However, 32.1% is not high enough to
 claim the bottleneck is fully sufficient; both issues likely contribute.
@@ -112,7 +112,7 @@ claim the bottleneck is fully sufficient; both issues likely contribute.
 
 ---
 
-## Test 4: Real Image Captioning — Run 3 (Stronger Conditioning)
+## Test 4: Real Image Captioning, Run 3 (Stronger Conditioning)
 
 **Goal**: Fix decoder conditioning by making it harder to ignore the latent plan.
 
@@ -125,7 +125,7 @@ claim the bottleneck is fully sufficient; both issues likely contribute.
 
 **Training**: Same hyperparameters as Run 2 (100 epochs, 20K samples).
 
-**Result: FAIL — No Improvement**
+**Result: FAIL, No Improvement**
 - Final CE: 1.0637 (vs 1.0619 in Run 2)
 - Greedy: 1/2000 unique captions (0%)
   - All: "A man is sitting on a bench next a statue of ma..."
@@ -144,7 +144,7 @@ claim the bottleneck is fully sufficient; both issues likely contribute.
 | Params | 16.9M | 17.0M | +65K |
 
 **Root cause analysis**: All three changes (plan_bias, cross_gate, plan_dropout) are
-**additive/residual** — the decoder can learn near-zero weights on these pathways and
+**additive/residual**: the decoder can learn near-zero weights on these pathways and
 continue ignoring the plan. The fundamental problem is the decoder has two information
 sources (self-attention = LM prior, cross-attention = plan) and it learns to rely
 entirely on the LM prior because that's sufficient to minimize CE loss on COCO.
@@ -153,7 +153,7 @@ entirely on the LM prior because that's sufficient to minimize CE loss on COCO.
 
 ---
 
-## Test 5: Real Image Captioning — Run 4 (Architectural Refactoring)
+## Test 5: Real Image Captioning, Run 4 (Architectural Refactoring)
 
 **Goal**: Make it architecturally impossible for the decoder to ignore the latent plan.
 
@@ -165,7 +165,7 @@ self-attention. The causal mask is modified so all positions can attend to the K
 prefix positions. This is the mechanism used by Flamingo, BLIP-2, and PaLM-E.
 
 Unlike cross-attention (which the decoder can learn to ignore), prefix tokens are
-**in the self-attention stream** — every subsequent token's self-attention computation
+**in the self-attention stream**: every subsequent token's self-attention computation
 is conditioned on them. The decoder would have to learn to actively suppress
 16 prefix positions in every layer to ignore them.
 
@@ -174,7 +174,7 @@ Each decoder block applies scale (gamma) and shift (beta) derived from the mean-
 latent plan to the layer norm outputs. Two FiLM layers per block: one before
 self-attention, one before MLP.
 
-This is **multiplicative** — the decoder literally cannot produce features without
+This is **multiplicative**: the decoder literally cannot produce features without
 the plan's involvement. Initialized to identity (scale=1, shift=0) for training
 stability.
 
@@ -195,8 +195,8 @@ missing token information.
 
 **Training**: Same hyperparameters as Runs 2-3 (100 epochs, 20K samples, lr=3e-4).
 
-**Result: FAIL — Same mode collapse as Runs 2-3**
-- Final CE: 1.0899 (higher than Run 2's 1.0619 — word dropout makes the task harder)
+**Result: FAIL, Same mode collapse as Runs 2-3**
+- Final CE: 1.0899 (higher than Run 2's 1.0619; word dropout makes the task harder)
 - Greedy: 1/2000 unique captions (0%)
   - All: "A man is standing in the water next to a boat."
   - (Yet another collapsed caption, different from Runs 2-3)
@@ -219,11 +219,11 @@ the decoder still collapses to a single greedy output. The slightly higher CE co
 word dropout is making the task harder, but the decoder still finds a single-caption
 optimum. The sampled metrics are statistically identical across all runs.
 
-**Conclusion**: The problem is **not decoder conditioning** — it's the K-vector
+**Conclusion**: The problem is **not decoder conditioning**: it's the K-vector
 bottleneck itself. At this model scale (embed_dim=256, K=16, 64x64 images, ~18M params),
 the latent plan does not carry enough image-specific information for the decoder to
 produce varied, image-appropriate captions. The classification test showed 32.1%
-accuracy on 20 categories (6.4x above chance) — enough to know the bottleneck carries
+accuracy on 20 categories (6.4x above chance), enough to know the bottleneck carries
 *some* signal, but not enough to differentiate individual images.
 
 ---
@@ -282,7 +282,7 @@ Start
    K=16, D=256). This is orders of magnitude smaller than transmitting raw activations.
    But it must actually carry enough information to generate useful text.
 
-6. **The architecture works in principle** (synthetic shapes = 100%) — the failure
+6. **The architecture works in principle** (synthetic shapes = 100%); the failure
    is about capacity vs. complexity. Real COCO images have far more visual detail
    than colored shapes, requiring more representational capacity.
 

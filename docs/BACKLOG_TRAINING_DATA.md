@@ -24,17 +24,17 @@ User activity produces three streams of data:
 
 | Stream | Source | Format | Volume |
 |--------|--------|--------|--------|
-| **Text** | Agent conversations, tool calls, execution records | JSONL (role, content, timestamp) | High — every interaction |
-| **Visual** | Screen capture, browser frames | PNG/JPEG → [B,3,H,W] float32 | Medium — opt-in, 2-5 fps |
-| **Audio** | Voice input (STT), ambient (future) | int16 numpy @ 16kHz | Low — opt-in, push-to-talk |
+| **Text** | Agent conversations, tool calls, execution records | JSONL (role, content, timestamp) | High: every interaction |
+| **Visual** | Screen capture, browser frames | PNG/JPEG → [B,3,H,W] float32 | Medium: opt-in, 2-5 fps |
+| **Audio** | Voice input (STT), ambient (future) | int16 numpy @ 16kHz | Low: opt-in, push-to-talk |
 
 These map to VL-JEPA's architecture, which already has:
 
-- `VisionTransformerEncoder` — processes image patches (2D positional embeddings)
-- `TextEncoder` — processes token sequences (1D positional embeddings)
-- `CrossModalFusion` — cross-attention between visual and text
-- `SemanticPredictor` — produces K-vectors from fused representation
-- `TextDecoder` — local autoregressive generation from K-vectors
+- `VisionTransformerEncoder`: processes image patches (2D positional embeddings)
+- `TextEncoder`: processes token sequences (1D positional embeddings)
+- `CrossModalFusion`: cross-attention between visual and text
+- `SemanticPredictor`: produces K-vectors from fused representation
+- `TextDecoder`: local autoregressive generation from K-vectors
 
 **The question is whether these need separate training loops or one unified loop.**
 
@@ -60,7 +60,7 @@ where only one modality is available in a given batch:
 - `images` → concurrent screen capture
 - `token_ids` → concurrent conversation text
 - Loss: predict masked patches AND masked tokens from cross-modal context
-- This is the richest signal — model learns to relate visual context to actions
+- This is the richest signal: the model learns to relate visual context to actions
 
 This is elegant because:
 1. The solver doesn't need different code paths per modality
@@ -93,17 +93,17 @@ across users.
 Visual JEPA masks rectangular blocks of patches (spatial locality). Text needs an
 analogous strategy that respects conversational structure:
 
-**Option A — Span masking (like SpanBERT)**:
+**Option A, span masking (like SpanBERT)**:
 - Mask contiguous spans of 3-15 tokens
 - Preserves local context, tests global understanding
 - Simple, well-studied
 
-**Option B — Turn masking (conversation-aware)**:
+**Option B, turn masking (conversation-aware)**:
 - Mask entire conversation turns (user or assistant)
 - Forces cross-turn prediction (given user question, predict assistant action)
 - More aligned with behavioral learning
 
-**Option C — Role masking (structural)**:
+**Option C, role masking (structural)**:
 - Mask all tool calls, or all results, or all assistant text
 - Forces the model to predict actions from intent (or intent from actions)
 - Most aligned with the training goal
@@ -117,16 +117,16 @@ Audio from voice interactions is already converted to text via STT (faster-whisp
 before it enters the agent framework. The transcript is tagged `"🎤 [Voice Input]"`
 and injected as a regular conversation turn. So:
 
-- Voice text already flows through the text pipeline — no separate audio training
-  needed initially
+- Voice text already flows through the text pipeline, so no separate audio training
+  is needed initially
 - Raw audio (waveform) could eventually feed a future audio encoder, but this is
-  Phase 2 at earliest — the text transcription captures the semantic content
+  Phase 2 at earliest: the text transcription captures the semantic content
 
 ### Visual: Parallel Stream, Same Loop
 
 Screen capture and browser frames are already preprocessed by `FramePreprocessor`
 into `[B,3,224,224]` tensors normalized with ImageNet stats. The existing I-JEPA
-training path in `train_jepa_on_task()` handles this — it just needs a data source
+training path in `train_jepa_on_task()` handles this: it just needs a data source
 swap from CIFAR/FakeData to the actual capture buffer.
 
 When both text and visual data are available simultaneously (user working with agent
@@ -401,7 +401,7 @@ Add jurisdiction discovery and joining:
 **Goal**: Inference pricing is driven by demonstrated behavioral alignment over
 time, not point-in-time configuration. Nodes that consistently do aligned work
 get cheaper (potentially free) inference. Misaligned work pays a premium that
-funds the aligned subsidy. Pricing can't exist until inference exists — during
+funds the aligned subsidy. Pricing can't exist until inference exists: during
 bootstrap, nodes accumulate behavioral profiles that will determine their
 pricing tier when inference activates.
 
@@ -415,10 +415,10 @@ Build the alignment track record during training, before inference exists:
   profile_t = decay * profile_{t-1} + (1 - decay) * current_embeddings
   ```
   With `decay = 0.998` and daily updates, it takes ~500 days for old behavior
-  to decay to 1/e. This prevents gaming — you can't flip your agent prompts
+  to decay to 1/e. This prevents gaming: you can't flip your agent prompts
   today and get cheap inference tomorrow.
 - Persist profile locally (it's a single `[K, D]` tensor, ~50KB)
-- Publish **profile hash** on-chain per epoch (not the profile itself — privacy)
+- Publish **profile hash** on-chain per epoch (not the profile itself, for privacy)
 - The profile hash links to the training attestation, creating a verifiable
   chain: "this node trained on data that produced this behavioral signature"
 
@@ -436,7 +436,7 @@ Build the alignment track record during training, before inference exists:
 **Anti-gaming properties**:
 - EMA with slow decay means months of consistent behavior required
 - Profile is derived from actual training data (weight deltas), not agent config
-- You can't fake training data — coordinators verify weight delta quality
+- You can't fake training data: coordinators verify weight delta quality
 - Switching agent system prompts changes future behavior but doesn't erase history
 
 **Acceptance criteria**:
@@ -477,7 +477,7 @@ When a node requests inference, compute dynamic pricing:
 - Compute alignment as **k-NN distance** in embedding space between:
   1. Node's behavioral profile ↔ jurisdiction standards (long-term alignment)
   2. Request semantics ↔ jurisdiction standards (task-level alignment)
-  3. Node's behavioral profile ↔ request semantics (consistency check —
+  3. Node's behavioral profile ↔ request semantics (consistency check:
      is this node doing what it usually does, or something unusual?)
 - Final alignment score = geometric mean of all three distances
   (matches existing `AlignmentPricing` formula structure)
@@ -547,7 +547,7 @@ Show users their alignment status and pricing implications:
 - Comparison: "If you maintain current behavior, your inference cost in 30/90/180
   days will be approximately X ATN per request"
 
-This replaces the simpler "earnings display" — the dashboard now shows not just
+This replaces the simpler "earnings display": the dashboard now shows not just
 what you've earned but what your behavioral track record means for future costs.
 
 **Acceptance criteria**:
@@ -621,14 +621,14 @@ Epic 4 (Economic Gating)
   └── Story 4.3: Jurisdiction join (depends on 4.1)
        │
 Epic 5 (Alignment-Based Inference Pricing)
-  ├── Story 5.1: Behavioral profile accumulation (depends on 3.4 — needs training
+  ├── Story 5.1: Behavioral profile accumulation (depends on 3.4: needs training
   │              cycles to accumulate from; CAN START as soon as solver trains on
   │              real agent data)
-  ├── Story 5.2: Inference-ready governance (depends on 4.3 — needs jurisdictions)
-  ├── Story 5.3: K-NN alignment scoring (depends on 5.1, 5.2 — needs profiles +
+  ├── Story 5.2: Inference-ready governance (depends on 4.3: needs jurisdictions)
+  ├── Story 5.3: K-NN alignment scoring (depends on 5.1, 5.2: needs profiles +
   │              active inference)
-  ├── Story 5.4: Subsidy/premium treasury (depends on 5.3 — needs pricing tiers)
-  └── Story 5.5: Alignment dashboard (depends on 5.1 — can show profile before
+  ├── Story 5.4: Subsidy/premium treasury (depends on 5.3: needs pricing tiers)
+  └── Story 5.5: Alignment dashboard (depends on 5.1: can show profile before
                  inference is active)
 
 Epic 6 (Tokenizer Scaling)  ← can run in parallel with Epics 1-3
@@ -662,7 +662,7 @@ As soon as Path A reaches 3.4 (solver trains on real agent data), start:
 
 Behavioral profile accumulation → alignment dashboard. Nodes begin building
 their behavioral track records immediately. By the time inference is ready,
-early adopters have months/years of demonstrated alignment — their pricing
+early adopters have months/years of demonstrated alignment, so their pricing
 tier is already established.
 
 ### Path C: Inference activation (when model is ready)

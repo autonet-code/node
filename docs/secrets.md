@@ -1,12 +1,12 @@
 # Secrets and agent security
 
-Status: BUILT — beta. The vault (`atn/_vendor/kevin/keystore.py`), the
+Status: BUILT, beta. The vault (`atn/_vendor/kevin/keystore.py`), the
 allowance algebra (`atn/runtime/worker_host.py`), the names-only audit
 trail (`atn/runtime/secret_audit.py`), and the leak tripwire
 (`atn/_vendor/kevin/secret_alarm.py`) all ship in the daemon. The Secrets
 tab in the app is the owner-facing surface over them.
 
-This is the doc for the **owner** — the human who holds the wallet and
+This is the doc for the **owner**: the human who holds the wallet and
 decides what their agents may reach.
 
 ## The honest threat model
@@ -26,7 +26,7 @@ What the vault **does** guarantee:
 
 1. **Encrypted at rest.** Secrets live in an age-encrypted `vault.age`. A
    casual `cat` reveals ciphertext. Only the broker's identity key decrypts
-   it — protect that key file and you protect the vault.
+   it: protect that key file and you protect the vault.
 2. **Bounded blast radius.** An agent may only request services on its own
    allowlist. It cannot reach a secret belonging to another service, and a
    child agent can never hold more than its parent.
@@ -48,29 +48,29 @@ misuse.
 
 The "Add secret" dialog takes three things.
 
-**Service name** — the identifier, e.g. `GITHUB_TOKEN`. It doubles as a token
+**Service name**: the identifier, e.g. `GITHUB_TOKEN`. It doubles as a token
 in allowance specs, so it may not contain spaces or commas, and `all` /
 `none` are reserved keywords. Flat names are the grantable plane; dotted
 names (`app.*`, `agent-key.*`) are daemon-internal and are never grantable to
 an agent.
 
-**Value** — write-only. Once stored, the app never displays it again. To
+**Value**: write-only. Once stored, the app never displays it again. To
 change it, rotate it; there is no "reveal".
 
-**Authorized hosts** *(optional)* — the egress hostnames this secret is
+**Authorized hosts** *(optional)*: the egress hostnames this secret is
 allowed to travel to, e.g. `api.github.com`. Stored in a plaintext sidecar
 (`secret_meta.json`) because hostnames are not secret and the daemon and UI
 need them without decrypting the vault. Leave the field empty and the daemon
 auto-prefills a suggestion.
 
-An empty host list means *not host-bound* — value-in-hand mode. Host binding
+An empty host list means *not host-bound*: value-in-hand mode. Host binding
 is what lets the daemon confine a secret to the destination it was issued
 for, rather than trusting that whatever holds it only talks to the right
 place.
 
 ## The allowance: who gets what
 
-Each agent carries a `secrets_allowance` spec — a comma-separated list of
+Each agent carries a `secrets_allowance` spec: a comma-separated list of
 service names, or the keywords `all` or `none`. Everything is **fail-closed**:
 an unset, blank, or unparseable allowance resolves to deny-all, as does an
 unknown agent or an unavailable keystore. The daemon-wide default root
@@ -86,7 +86,7 @@ The rule that makes nesting safe:
 The parent never holds its own allowance as a token, never mints the child's
 grant, and never sees the result. So a compromised or simply buggy parent can
 only ever request something **narrower than or equal to** what it already
-has — never widen it, never escalate sideways into a sibling's secrets. This
+has. It can never widen it, never escalate sideways into a sibling's secrets. This
 monotone clamp is the entire reason the fractal agent hierarchy can be
 trusted with credentials at all, and it is why the computation must live in
 the daemon rather than in the worker.
@@ -101,7 +101,7 @@ and is emitted live as a `SECRET_ACCESS` event the app displays:
 
 | Action | Meaning |
 |--------|---------|
-| `granted` | a broker session was minted for a worker — the agent *can* now request these services |
+| `granted` | a broker session was minted for a worker: the agent *can* now request these services |
 | `staged` | the broker actually decrypted and staged one secret for the worker |
 | `revoked` | the worker was reaped and its session torn down |
 | `added` / `rotated` / `deleted` | owner mutations from the Secrets tab |
@@ -110,7 +110,7 @@ and is emitted live as a `SECRET_ACCESS` event the app displays:
 are reading the log after an incident: an agent may hold a grant it never
 exercised.
 
-**Rows carry secret NAMES only — never a value, and never a staged path.**
+**Rows carry secret NAMES only: never a value, and never a staged path.**
 The path is omitted deliberately: it is a live scan token, and writing it
 down would hand any reader of the log the tripwire's needle.
 
@@ -120,7 +120,7 @@ The security monitor scans agent output for the literal text of known secret
 values. A hit records a names-only alarm and raises it in the app. Values
 shorter than 6 characters are skipped as a false-positive guard.
 
-This is a **backstop, not a barrier** — it tells you a value has already
+This is a **backstop, not a barrier**: it tells you a value has already
 leaked into a transcript, after the fact. Treat an alarm as a rotation
 trigger: rotate the secret, then find out which agent surfaced it and why.
 
@@ -144,7 +144,7 @@ repository:
 
 | Path | Contents |
 |------|----------|
-| `identity.age-key` | the broker's age private key — decrypts the vault |
+| `identity.age-key` | the broker's age private key, which decrypts the vault |
 | `vault.age` | age-encrypted `{ "SERVICE": "value" }` |
 | `secret_meta.json` | plaintext sidecar: authorized egress hosts |
 | `bundles.json` | named service bundles usable in allowance specs |
@@ -153,8 +153,8 @@ repository:
 
 ## See also
 
-- `docs/unified_agent_design.md` — the agent model the allowance hangs off
-- `docs/cross_platform_isolation_design.md` — worker process isolation, the
+- `docs/unified_agent_design.md`: the agent model the allowance hangs off
+- `docs/cross_platform_isolation_design.md`: worker process isolation, the
   mechanism that makes a per-process grant meaningful
-- `docs/agentic_loop.md` — how a worker actually requests and uses a staged
+- `docs/agentic_loop.md`: how a worker actually requests and uses a staged
   secret

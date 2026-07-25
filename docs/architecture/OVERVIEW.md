@@ -1,6 +1,6 @@
 # Autonet Architecture Overview
 
-> **HISTORICAL — pre-substrate (banner added 2026-07-10).** This document
+> **HISTORICAL, pre-substrate (banner added 2026-07-10).** This document
 > describes the retired FedAvg / role-split paradigm (Project, TaskContract,
 > ParticipantStaking, ResultsRewards, AnchorBridge, Proposer/Solver/
 > Coordinator/Aggregator nodes). **None of that is the live system.** Those

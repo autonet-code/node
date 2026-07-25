@@ -1,11 +1,11 @@
 # The Absolute Zero Training Loop
 
-> **HISTORICAL — pre-substrate (banner added 2026-07-10).** This document
+> **HISTORICAL, pre-substrate (banner added 2026-07-10).** This document
 > describes the retired FedAvg role-split loop
 > (Proposer→Solver→Coordinator→Aggregator, commit-reveal, `TaskContract`/
 > `ResultsRewards`/`DisputeManager`, Project Tokens). **None of it is the
 > live system.** Those contracts were deleted in Phase 5.6a, and native
-> model training is **off the live path** — VL-JEPA was shelved on
+> model training is **off the live path**: VL-JEPA was shelved on
 > mode-collapse findings (see `docs/VALIDATION_FINDINGS.md`).
 >
 > The shipped loop is the **tool economy**: agents publish content-addressed

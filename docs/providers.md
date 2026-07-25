@@ -1,6 +1,6 @@
 # Inference providers
 
-Status: BUILT — beta. Provider registration, credential storage, and model
+Status: BUILT (beta). Provider registration, credential storage, and model
 routing live in `atn/runtime/provider_manager.py`; the adapters are in
 `atn/providers/`. The **AI Input** tab in the app is the owner-facing surface
 over them.
@@ -22,7 +22,7 @@ There are three authentication shapes:
 |-------|---------------------|----------|
 | **bridge** | drives a CLI you are already logged into, using your existing subscription | Claude Max, Codex |
 | **api_key** | a key you paste, stored in the daemon's credential store | Anthropic, OpenAI, Gemini, DeepSeek |
-| **local** | nothing to authenticate — it runs on your machine | Ollama |
+| **local** | nothing to authenticate; it runs on your machine | Ollama |
 
 Bridges are the cheapest path if you already pay for a subscription: they
 spend your existing plan rather than metered API credit. API-key providers
@@ -30,43 +30,41 @@ bill per token. Local providers cost nothing but your own hardware.
 
 ## Built-in providers
 
-| Provider | Auth | Loop-capable |
-|----------|------|--------------|
-| Claude Max | bridge | yes |
-| Codex (OpenAI) | bridge | yes |
-| Anthropic API | api key | yes |
-| OpenAI | api key | yes |
-| Google Gemini | api key | yes |
-| DeepSeek | api key | yes |
-| Ollama (local) | local | model-dependent |
-| RPB Network | peer-to-peer | not yet |
-| World-Model Substrate | local | no |
+| Provider | Auth |
+|----------|------|
+| Claude Max | bridge |
+| Codex (OpenAI) | bridge |
+| Anthropic API | api key |
+| OpenAI | api key |
+| Google Gemini | api key |
+| DeepSeek | api key |
+| Ollama (local) | local |
+| RPB Network | peer-to-peer |
+| World-Model Substrate | local |
 
-**Loop-capable** means the model can sustain the multi-turn tool-calling
-loop every agent runs. It is a reliability floor, not a rank: *every* agent
-needs it, not just one at the top of a hierarchy.
+## Loop capability is a property of the MODEL
 
-The flag exists because small/fast models fail this in an expensive way. A
-haiku-class model on the Claude Code bridge does not error — it hot-spins at
-100% CPU producing nothing, for as long as you let it. The daemon therefore
-refuses to start the loop on a model below the bar, with a clear error,
-rather than letting it wedge.
+Every agent runs the same multi-turn tool-calling loop, and small/fast models
+fail at it in an expensive way: a haiku-class model on the Claude Code bridge
+does not error, it hot-spins at 100% CPU producing nothing for as long as you
+let it run. So the daemon refuses to *start* the loop on a model below the
+bar, with a clear error, rather than letting it wedge.
 
-The check is derived from the model's tier, so it follows the *model* you
-pick more than the provider. Ollama is the case to watch: whether a local
-model holds up in a tool-calling loop varies a lot by model, so test before
-handing it real work.
+This is a reliability floor every agent needs, not a rank, and not a
+privilege one agent holds. It is checked per model, so it follows the model
+you pick, not the provider you picked it from. A capable provider serving a
+haiku-class model is still refused.
 
-> **Naming note.** In the code this flag is `orchestrator_capable`, and older
-> comments describe it as "may serve as the root/orchestrator agent." That
-> wording predates the current architecture — there is no single stable
-> top-level agent any more, and the flag never gated tool grants. What it
-> gates, and all it has ever gated at runtime, is whether the agentic loop is
-> allowed to start on that model.
+For that reason the provider cards carry **no capability badge**. Nearly
+every provider offers both low-tier and frontier models, so any
+provider-level summary either says the same thing about every card or
+implies a floor the provider does not actually hold. Ollama is the case to
+watch: whether a given local model holds up in a tool-calling loop varies a
+lot by model, so test before handing it real work.
 
 ## Adding a custom provider
 
-"Add Provider" registers any **OpenAI-compatible** endpoint — vLLM, LM
+"Add Provider" registers any **OpenAI-compatible** endpoint: vLLM, LM
 Studio, OpenRouter, a self-hosted gateway, or any service exposing
 `/v1/chat/completions`.
 
@@ -75,18 +73,18 @@ Studio, OpenRouter, a self-hosted gateway, or any service exposing
 | **Provider ID** | short slug, e.g. `my-llm`. Cannot collide with a built-in id. |
 | **Display Name** | what you see in the picker. |
 | **Base URL** | e.g. `https://api.example.com/v1`. |
-| **API Key** | optional — omit for an unauthenticated local endpoint. |
+| **API Key** | optional; omit for an unauthenticated local endpoint. |
 | **Default Model** | optional; the model used when an agent does not name one. |
 
 **The daemon validates before saving.** It derives a `/models` URL from your
 base URL and probes it. You get a specific failure rather than a provider
 that silently never works:
 
-- unreachable host → *"Cannot connect to … — check the URL"*
+- unreachable host → *"Cannot connect to …, check the URL"*
 - slow endpoint → *"Timeout connecting to …"*
 - key rejected (401/403) → *"API key rejected by … "*
 
-A probe that fails for any *other* reason is tolerated — some
+A probe that fails for any *other* reason is tolerated: some
 OpenAI-compatible servers do not implement `/models` at all, and refusing
 those would be wrong.
 
@@ -108,7 +106,7 @@ typing one.
 
 **The model picker lists only providers the daemon has actually
 registered.** If a provider you configured is missing from the list, the
-daemon did not manage to register it at boot — check the daemon log rather
+daemon did not manage to register it at boot: check the daemon log rather
 than re-adding it.
 
 Ollama needs one extra consideration: its context window defaults low, and a
@@ -120,14 +118,14 @@ deliberately too.
 ## Cost control
 
 Provider choice is the largest lever on what a fleet costs to run. Budgets
-are enforced per agent — see the credit budget controls on the agent itself.
+are enforced per agent; see the credit budget controls on the agent itself.
 Bridges spend subscription capacity, so a runaway loop there costs you rate
 limits rather than money; API-key providers spend real credit, so set a
 budget before letting an agent run unattended.
 
 ## See also
 
-- `docs/agentic_loop.md` — the internals: the loop behind
+- `docs/agentic_loop.md`: the internals, the loop behind
   anthropic/openai_compat/ollama agents and its hardening spec
-- `docs/unified_agent_design.md` — how an agent picks and inherits a provider
-- `docs/two_plane_inference.md` — substrate retrieval paired with an LLM
+- `docs/unified_agent_design.md`: how an agent picks and inherits a provider
+- `docs/two_plane_inference.md`: substrate retrieval paired with an LLM

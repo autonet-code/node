@@ -4,12 +4,12 @@ Binding spec for upgrading `atn/providers/base.py:send_orchestrate` (the
 loop behind anthropic / openai_compat / ollama agents) and its adapters
 to parity with current harnesses (Claude Code / Agent SDK, opencode,
 Codex CLI). Grounded in: the 2026-07-04 live daemon session (findings
-1–7 below), the loop audit, and the SOTA survey. The bridge (Claude
-Agent SDK) keeps its own loop; only §10–11 touch it.
+1-7 below), the loop audit, and the SOTA survey. The bridge (Claude
+Agent SDK) keeps its own loop; only §10-11 touch it.
 
 Live findings this spec answers:
 1. Unknown model strings silently route to BridgeProvider
-   (`provider_manager.py:483`) — a `qwen3.5:4b` agent burned 45k
+   (`provider_manager.py:483`): a `qwen3.5:4b` agent burned 45k
    subscription tokens on the bridge.
 2. `create_agent` has no `provider` field; `update_agent` provider
    changes are inert (cached instance never evicted,
@@ -22,7 +22,7 @@ Live findings this spec answers:
    from hallucination. Non-bridge agents also get the full
    `_SHELL_TOOLS` schema block unconditionally (`execution_engine.py:909`).
 5. Ollama multi-turn tool history is flattened to text
-   (`_normalize_content`) — the structured `tool_calls` / `role:"tool"`
+   (`_normalize_content`): the structured `tool_calls` / `role:"tool"`
    linkage is lost after turn 1.
 6. A transient stream drop mid-loop aborts the whole orchestration
    (no loop-level retry); compaction failure silently no-ops into a
@@ -32,7 +32,7 @@ Live findings this spec answers:
    but left the spinning bun subprocess alive.
 8. `delegate_message` mid-turn injection races turn completion: a
    message written to bridge stdin as the orchestration ends is
-   accepted ("User message injected") and silently dropped — the
+   accepted ("User message injected") and silently dropped: the
    daemon reports `injected` with no consumption ack and no inbox
    fallback. (Observed live: injection at 01:32:45.685, execution
    completed 01:32:45.)
@@ -74,17 +74,17 @@ calibrated by the last turn's actual `input_tokens` when available) >
 `ctx_window − max_tokens − 8k buffer`. `ctx_window` from
 `model_specs.get_context_window` (see §7).
 
-Tier 1 — prune (no LLM call): replace `tool_result` bodies older than
+Tier 1, prune (no LLM call): replace `tool_result` bodies older than
 the last 2 assistant turns with `[pruned: <n> chars, tool=<name>]`,
 protecting the most recent 40k chars of tool output. Only prune when
 it saves ≥ 20k estimated chars.
 
-Tier 2 — compact (only if still over): summarize everything except
+Tier 2, compact (only if still over): summarize everything except
 (a) the original task message, (b) the last 2 turns, (c) the last
 ~20k chars of user messages, using the structured template: Goal /
 Progress / Key decisions / Critical context / Next steps.
-- On summarizer failure: **fallback hard truncation** — drop oldest
-  turns (keeping (a)–(c)), never no-op.
+- On summarizer failure: **fallback hard truncation**, dropping oldest
+  turns (keeping (a) through (c)), never no-op.
 - **Spiral guard**: max 2 compactions per run; if a compaction reduces
   the estimate by <20%, abort `context_overflow` instead of looping.
   (Codex v0.112 / opencode #27924 class of bug.)
@@ -119,7 +119,7 @@ Anthropic-shape APIs.
   (after tool results are appended, before the next send) and appends
   each item as a `user` message.
 - `execution_control.send_delegate_message` already prefers
-  `provider.send_user_message` — with this, API-provider agents get
+  `provider.send_user_message`; with this, API-provider agents get
   live injection instead of the inbox fallback.
 - **Delivery ack (finding 8, applies to bridge too):** injection is
   only "delivered" when consumed. Bridge: `claude-bridge.ts` emits
@@ -127,7 +127,7 @@ Anthropic-shape APIs.
   the injected message; `bridge.py` tracks pending injections and, on
   orchestration end with unconsumed injections, re-posts them to the
   agent's inbox (HIGH WORK) so the next run picks them up. Generic
-  loop: same contract — steering-queue items not drained by run end
+  loop: same contract, where steering-queue items not drained by run end
   are re-posted to the inbox. `delegate_message` result distinguishes
   `injected` (consumed or pending with fallback guarantee) so callers
   are never lied to.
@@ -152,7 +152,7 @@ the command echo and the error tail (Codex shape). Cap unchanged.
 
 When an adapter degrades unparseable tool-call args to `{"raw": ...}`,
 the loop must NOT execute the tool. Return a synthetic error
-`tool_result` ("arguments were not valid JSON — re-emit the call")
+`tool_result` ("arguments were not valid JSON; re-emit the call")
 and continue the loop. Applies to all three adapters' parse paths.
 
 ## §9 Ollama adapter: structured history + num_ctx
@@ -192,7 +192,7 @@ and continue the loop. Applies to all three adapters' parse paths.
   request failure, never a bare loop continue.
 - First-event watchdog: if a sent orchestrate request produces zero
   bridge events within 120s (configurable `ATN_BRIDGE_FIRST_EVENT_TIMEOUT`),
-  kill the subprocess and fail the request — don't wait for the 1800s
+  kill the subprocess and fail the request; don't wait for the 1800s
   idle ceiling.
 - Kill ladder: `kill_agent` → provider interrupt must escalate to
   subprocess termination (bun PID) within a 5s grace window, verified
@@ -205,7 +205,7 @@ and continue the loop. Applies to all three adapters' parse paths.
 ## §12 InputArbiter liveness
 
 - Ghost holder fix: `WebSocketBridge` validates the holder on every
-  gate denial — if the holder token is a `ws:` surface with no live
+  gate denial: if the holder token is a `ws:` surface with no live
   session, call `release_for(holder)` and re-run the gate. Cheap,
   contained, no arbiter API change.
 - Hand-off successor selection skips `ws:` tokens with no live
@@ -217,7 +217,7 @@ and continue the loop. Applies to all three adapters' parse paths.
 ## §13 Usage self-awareness for agents (owner request 2026-07-04)
 
 - New tool `get_usage` (category `budget`): returns the caller's
-  provider usage — for bridge agents, the cached
+  provider usage: for bridge agents, the cached
   `refresh_usage` payload (5h/7d utilization + reset times) plus the
   agent's own budget consumption (`registry` budget counters); for API
   providers, cumulative session tokens vs configured budget. Cached
@@ -256,7 +256,7 @@ Semantics by target state:
   running `_reduce_context(force=True)`. Result `{"status": "queued"}`.
 - **Running, bridge:** if the Claude Agent SDK input protocol supports
   a compact control message, inject it; otherwise return
-  `{"status": "unsupported_while_running"}` — do NOT pretend.
+  `{"status": "unsupported_while_running"}`. Do NOT pretend.
 - **Idle (any provider):** compact the persisted conversation store:
   summarize all but the last 2 turns via the agent's own provider into
   one summary turn (same Goal/Progress/Decisions/Critical
@@ -270,14 +270,14 @@ Events: every manual compaction emits the existing CONTEXT_COMPACTION
 event with `"manual": true` and `"requested_by": <caller_id>` in data,
 statuses in_progress / completed / hard_truncated as today.
 
-Frontend contract (atn_web): subscribe to `context.compaction` events —
+Frontend contract (atn_web): subscribe to `context.compaction` events:
 live "Compacting…" indicator while in_progress, updated compaction chip
 on completed, visually distinct warning on hard_truncated; a "Compact"
 action (owner UI) sends `{"type": "compact_agent", "agent_id": ...}`.
 
-## Testing (targeted only — never the full suite)
+## Testing (targeted only, never the full suite)
 
-New/updated files: `tests/atn/test_loop_hardening.py` (§1–§6, §8:
+New/updated files: `tests/atn/test_loop_hardening.py` (§1-§6, §8:
 mock provider raising transient/overflow/fatal; compaction fallback;
 orphan repair; oscillation; steering queue), extend
 `tests/atn/test_provider_base.py` (head+tail truncation, max_tokens
