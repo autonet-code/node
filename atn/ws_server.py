@@ -1256,7 +1256,12 @@ class WebSocketBridge:
             input_schema = msg.get("input_schema") or {}
             ask = msg.get("ask") or {}
             author = msg.get("agent_id") or "user"
-            backing_tool = msg.get("backing_tool", "")
+            # The Flutter client sends `tool_digest`; agent-side callers send
+            # `backing_tool`. Accept both — a service whose backing tool is
+            # empty can never be fulfilled (service_request dispatches to it),
+            # so silently dropping the key published dead listings.
+            backing_tool = (msg.get("backing_tool")
+                            or msg.get("tool_digest") or "")
             if not name:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'name' field"}
             try:
@@ -1294,10 +1299,78 @@ class WebSocketBridge:
                     "retired": record.retired,
                     "version_of": s.get("version_of"),
                     "input_schema": s.get("input_schema", {}),
+                    # The service store is daemon-local: everything it holds
+                    # was published from HERE, so ownership is a fact, not an
+                    # inference. The UI used to guess by resolving `author`
+                    # as an agent id, which never matched the "user" default
+                    # and hid Retire on the owner's own listings.
+                    "owned": True,
+                    "registered_ts": record.registered_ts,
                 })
             summary = self.runtime.service_store.summary()
             return {"msg_id": msg_id, "ok": True,
                     "result": {"services": services, "summary": summary}}
+
+        # The MARKET view: every service on-chain, not just what this daemon
+        # published. `list_services` reads the daemon-local store, so before
+        # this the app could only ever see its own listings — there was no
+        # way for a human to browse the marketplace at all. Mirrors the
+        # agent-side `find_services` tool (orchestrator/tools.py).
+        if msg_type == "market_services":
+            query = str(msg.get("query") or "").strip().lower()
+            try:
+                limit = max(1, min(int(msg.get("limit") or 100), 200))
+            except (TypeError, ValueError):
+                limit = 100
+            try:
+                from .on_chain import ServiceMarketClient
+                smc = ServiceMarketClient(self.runtime._config.rpb)
+                if not smc.registry_available:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": "ServiceRegistry not configured "
+                                     "(missing service_registry_address or "
+                                     "rpc_url)."}
+                listings = list(reversed(await smc.list_services()))
+            except Exception as exc:                      # noqa: BLE001
+                log.warning("market_services failed: %s", exc)
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
+            store = getattr(self.runtime, "service_store", None)
+            rows: list[dict[str, Any]] = []
+            for s in listings:
+                digest = str(s.get("spec_digest") or "")
+                name = ""
+                description = ""
+                owned = False
+                # Enrich from the local store when we happen to know the
+                # spec: a service authored elsewhere is an opaque digest
+                # until its spec is fetched (blob rail, not wired here).
+                rec = store.get(digest) if store is not None else None
+                if rec is not None:
+                    name = rec.name
+                    description = str(rec.spec.get("description") or "")
+                    owned = True
+                if query:
+                    hay = (f"{name} {description} {digest} "
+                           f"{s.get('provider', '')}").lower()
+                    if query not in hay:
+                        continue
+                rows.append({
+                    "service_id": s.get("service_id"),
+                    "provider": s.get("provider"),
+                    "ask": {"token": "", "amount": str(s.get("ask_amount") or 0),
+                            "unit": "per_item"},
+                    "digest": digest,
+                    "active": s.get("active"),
+                    "name": name or f"service {digest[:10]}",
+                    "description": description,
+                    "owned": owned,
+                    "known_spec": rec is not None,
+                })
+                if len(rows) >= limit:
+                    break
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"services": rows, "count": len(rows)}}
 
         if msg_type == "retire_service":
             digest = msg.get("digest", "")
