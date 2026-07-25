@@ -1452,17 +1452,30 @@ class WebSocketBridge:
                 threshold = float(msg.get("threshold") or 0.30)
             except (TypeError, ValueError):
                 threshold = 0.30
+            # Seed each cluster from the DENSEST remaining service (the one
+            # with the most neighbours above threshold) rather than from an
+            # arbitrary index. Seeding arbitrarily makes the first service
+            # in the list a magnet and produces junk-drawer clusters whose
+            # members relate to the seed but not to each other.
+            sim = unit @ unit.T
             unassigned = set(range(len(digests)))
             clusters: list[dict[str, Any]] = []
             while unassigned:
-                seed = min(unassigned)
+                idx = sorted(unassigned)
+                # Density = neighbour count within the unassigned set.
+                seed = max(idx, key=lambda i: (
+                    sum(1 for j in idx if j != i and float(sim[i, j]) >= threshold),
+                    -i,
+                ))
                 unassigned.discard(seed)
                 members = [seed]
                 for j in sorted(unassigned):
-                    if float(unit[seed] @ unit[j]) >= threshold:
+                    # Require the candidate to be close to the seed AND to
+                    # every member already admitted, so a cluster stays
+                    # internally coherent instead of chaining outward.
+                    if all(float(sim[m, j]) >= threshold for m in members):
                         members.append(j)
-                for j in members[1:]:
-                    unassigned.discard(j)
+                        unassigned.discard(j)
                 clusters.append({
                     "members": [digests[m] for m in members],
                     "size": len(members),
