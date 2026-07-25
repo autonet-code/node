@@ -1103,6 +1103,72 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": self.runtime.tool_store.balances()}
 
+        # Owner claim status (docs/tool_substrate.md, Decision 2026-07-24
+        # item 5, "Owner claim surface: DEFERRED").
+        #
+        # Mint keyed to the owner wallet is EARNED but not RECEIVABLE until
+        # that wallet is registered on Substrate: recordTrainingForEpoch
+        # reverts AgentNotActive for an unregistered address. Nothing
+        # expires — epochs are anchored and claims are idempotent per
+        # (agent, epoch), so accrual is retroactively claimable — but until
+        # now there was no way to SEE that you had unclaimable earnings
+        # sitting there, which is the failure this answers.
+        if msg_type == "owner_claim_status":
+            rpb_cfg = self.runtime._config.autonet
+            wallet = (getattr(rpb_cfg, "owner_wallet", "") or "").strip()
+            store = self.runtime.tool_store
+
+            # Tools whose CONSENSUS author is the owner wallet (or which
+            # would be, once a wallet exists). These are the ones whose
+            # mint accrues to the owner rather than to an agent.
+            from .tool_store import _is_claimable_identity
+            owner_tools: list[dict[str, Any]] = []
+            orphan_tools: list[dict[str, Any]] = []
+            for rec in list(store._records.values()):
+                consensus = rec.author
+                if wallet and consensus.lower() == wallet.lower():
+                    owner_tools.append({
+                        "digest": rec.digest,
+                        "name": rec.name,
+                        "published": bool(getattr(rec, "published", False)),
+                    })
+                elif not _is_claimable_identity(consensus):
+                    # Authored under a local id with no wallet configured:
+                    # private-plane only, cannot enter consensus at all.
+                    orphan_tools.append({
+                        "digest": rec.digest,
+                        "name": rec.name,
+                        "author": consensus,
+                    })
+
+            registered = False
+            mint_total = "0"
+            if wallet:
+                try:
+                    from .on_chain import OnChainService
+                    svc = OnChainService(rpb_cfg)
+                    registered = bool(await svc.is_registered(wallet))
+                    rec = await svc.get_agent_record(wallet)
+                    if rec:
+                        mint_total = str(rec.get("total_training_mint")
+                                         or rec.get("totalTrainingMint") or 0)
+                except Exception as exc:                   # noqa: BLE001
+                    log.debug("owner_claim_status chain read failed: %s", exc)
+
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "owner_wallet": wallet,
+                # Registered => owner-keyed mint is receivable. Not
+                # registered => it accrues and waits.
+                "wallet_registered": registered,
+                "owner_authored_count": len(owner_tools),
+                "owner_authored": owner_tools[:50],
+                # Tools that cannot enter consensus at all for want of a
+                # wallet. Distinct from "earned but unclaimable".
+                "orphan_count": len(orphan_tools),
+                "orphans": orphan_tools[:50],
+                "claimed_mint_total": mint_total,
+            }}
+
         if msg_type == "set_tool_published":
             # Owner surface: flip publish state directly (agents use the
             # separately-granted publish_tool capability).
