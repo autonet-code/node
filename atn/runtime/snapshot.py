@@ -273,7 +273,6 @@ class SnapshotBuilder:
                 "auth_type": info["auth_type"],
                 "configured": configured,
                 "active": is_active,
-                "orchestrator_capable": info.get("orchestrator_capable", False),
             }
             if pid == "claude_max" and claude_max_rate_limits:
                 entry["rate_limits"] = claude_max_rate_limits
@@ -285,7 +284,6 @@ class SnapshotBuilder:
                 "auth_type": "api_key",
                 "configured": True,
                 "active": is_active,
-                "orchestrator_capable": True,
                 "custom": True,
             }
 
@@ -309,6 +307,11 @@ class SnapshotBuilder:
             },
             "update": self._update_snapshot(),
             "orchestrator": orch_info,
+            # Rootless fleets have no orchestrator block, but model pickers
+            # still need the catalog — emit it unconditionally. Active-only:
+            # a model the daemon has no registered provider for is not
+            # pickable, so unconfigured providers stay out of the list.
+            "available_models": self.provider_manager.get_available_models(require_active=True),
             "providers": providers_summary,
             "agents": agents,
             "executions": executions,

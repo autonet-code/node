@@ -39,6 +39,20 @@ log = logging.getLogger(__name__)
 # Author id recorded for owner-registered tools (WS surface, caller "").
 OWNER_AUTHOR = "user"
 
+# Publish gate (ruling 2026-07-24): rewards must never be unclaimable, so a
+# manifest may only enter consensus with an author that has an on-chain
+# claim path — an agent's 0x identity or the owner wallet. Address-less
+# setups keep full PRIVATE tool capability; publishing is what's gated.
+_ORPHAN_PUBLISH_ERROR = (
+    "publishing requires a claimable author identity (agent 0x address or "
+    "owner wallet) — register the agent on-chain or configure the owner "
+    "wallet, then re-register the tool")
+
+
+def _is_claimable_identity(author: str) -> bool:
+    """True when ``author`` can claim epoch mint on-chain (0x address)."""
+    return len(author) == 42 and author.startswith("0x")
+
 _PINNED_EXEC_TIMEOUT_S = 120
 _MAX_CODE_BYTES = 512 * 1024
 # Composition (docs/tool_substrate.md — Composition, COMPOSITE_MAX_DEPTH):
@@ -235,6 +249,19 @@ class ToolStore:
                 raise ValueError(
                     f"declared dependency {dep_digest[:16]}... is disabled")
 
+        # Consensus author = the 0x address (chain-claimable, globally
+        # unique — mint keyed by a local id has no on-chain claim path).
+        # The local id stays on the record for daemon-side scoping.
+        # Resolved BEFORE the idempotency match: if the author's identity
+        # changed since an old record was baked (agent registered, owner
+        # wallet configured), same-content re-registration must mint a
+        # FRESH record with the claimable author, not resurrect the
+        # orphan-authored one.
+        consensus_author = self._consensus_identity(author)
+
+        if publish and not _is_claimable_identity(consensus_author):
+            raise ValueError(_ORPHAN_PUBLISH_ERROR)
+
         # Idempotency — content-addressed in SPIRIT, not just bytes: the
         # manifest bakes ``created_ts``, so re-registering byte-identical
         # content would mint a fresh digest every time (observed live: the
@@ -244,6 +271,7 @@ class ToolStore:
         for existing in self._records.values():
             m = existing.manifest
             if (existing.local_author == author
+                    and (m.get("author") or "") == consensus_author
                     and existing.origin == "authored"
                     and m.get("name") == name
                     and m.get("trust_class") == trust_class
@@ -266,10 +294,6 @@ class ToolStore:
                         "existing": True}
 
         author_pubkey = self._author_address(author)
-        # Consensus author = the 0x address (chain-claimable, globally
-        # unique — mint keyed by a local id has no on-chain claim path).
-        # The local id stays on the record for daemon-side scoping.
-        consensus_author = self._consensus_identity(author)
 
         manifest = build_tool_manifest(
             name=name,
@@ -359,6 +383,11 @@ class ToolStore:
             return False
         if record.origin == "adopted":
             return False
+        if published and not _is_claimable_identity(
+                str(record.manifest.get("author") or "")):
+            # Baked orphan author (pre-identity registration). Blocked —
+            # re-registering the tool re-stamps it once an identity exists.
+            raise ValueError(_ORPHAN_PUBLISH_ERROR)
         record.published = bool(published)
         self._persist()
         if record.published and self.manifest_sink is not None:
@@ -381,6 +410,15 @@ class ToolStore:
         pushed = 0
         for record in self._records.values():
             if not record.published:
+                continue
+            author = str(record.manifest.get("author") or "")
+            if not _is_claimable_identity(author):
+                # Legacy orphan-authored publication (pre-gate). Its
+                # substrate claims are forward-only where they already
+                # landed, but don't re-seed fresh worlds with rewards
+                # nobody can claim.
+                log.warning("skipping backfill of orphan-authored tool %r "
+                            "(author=%r)", record.name, author)
                 continue
             try:
                 self.manifest_sink(record.manifest, record.author)
@@ -1280,10 +1318,15 @@ class ToolStore:
         return {"digest": digest, "status": "rejected"}
 
     def _verify_manifest_sig(self, manifest: dict[str, Any]) -> bool | None:
-        """True = signature recovers to the manifest author; False =
-        present but WRONG (red flag: re-attribution attempt); None = no
-        signature / verification unavailable. Content addressing already
-        guarantees integrity — this proves the AUTHORSHIP claim."""
+        """True = signature recovers to the manifest author OR its
+        author_pubkey; False = present but WRONG (red flag:
+        re-attribution attempt); None = no signature / verification
+        unavailable. Content addressing already guarantees integrity —
+        this proves the AUTHORSHIP claim. author_pubkey matters when
+        the author is the owner WALLET (unregistered agent's tool,
+        household-claimed rewards): the authoring agent's key signs,
+        its address is stamped as author_pubkey inside the signed
+        payload, so recovery to it still binds code to signer."""
         sig = manifest.get("author_sig")
         if not sig:
             return None
@@ -1296,9 +1339,11 @@ class ToolStore:
             recovered = Account.recover_message(
                 encode_defunct(canonical_manifest_bytes(manifest)),
                 signature=bytes.fromhex(str(sig).removeprefix("0x")),
+            ).lower()
+            return recovered in (
+                str(manifest.get("author") or "").lower(),
+                str(manifest.get("author_pubkey") or "").lower(),
             )
-            return recovered.lower() == str(
-                manifest.get("author") or "").lower()
         except Exception as exc:
             log.debug("manifest sig verification unavailable: %s", exc)
             return None
@@ -1809,21 +1854,36 @@ class ToolStore:
         identity = getattr(defn, "identity", None) if defn else None
         return str(getattr(identity, "address", "") or "")
 
+    def _owner_wallet(self) -> str:
+        return str(getattr(
+            getattr(getattr(self._runtime, "_config", None),
+                    "autonet", None), "owner_wallet", "") or "")
+
     def _consensus_identity(self, local_id: str | None) -> str:
         """Map a local id to its consensus identity (0x address).
 
-        Agents → their identity address; the owner ("user") → the
-        owner wallet when configured. Falls back to the local id so
-        nothing breaks on address-less setups — those mints simply
-        have no chain claim path (documented E2E seam #3)."""
+        Ruling 2026-07-24 (never unclaimable rewards): an agent's own
+        address counts only once the agent is REGISTERED ON-CHAIN —
+        every agent has a local keypair from birth, but Substrate's
+        recordTrainingForEpoch reverts AgentNotActive for addresses it
+        doesn't know, so mint keyed to an unregistered keypair is
+        stranded until (if ever) the agent registers. Unregistered
+        agents' tools are authored by the owner wallet instead — the
+        household is the claimant. The owner ("user") → the owner
+        wallet when configured. The local-id fallback only remains
+        for wallet-less setups, and those manifests are PRIVATE-ONLY:
+        publishing is gated on a claimable identity (see register /
+        set_published)."""
         if not local_id:
             return OWNER_AUTHOR
         if local_id == OWNER_AUTHOR:
-            owner = getattr(
-                getattr(getattr(self._runtime, "_config", None),
-                        "autonet", None), "owner_wallet", "") or ""
-            return owner or OWNER_AUTHOR
-        return self._author_address(local_id) or local_id
+            return self._owner_wallet() or OWNER_AUTHOR
+        defn = self._runtime.get_agent(local_id)
+        identity = getattr(defn, "identity", None) if defn else None
+        addr = str(getattr(identity, "address", "") or "")
+        if addr and bool(getattr(identity, "registered_on_chain", False)):
+            return addr
+        return self._owner_wallet() or local_id
 
     def _sign(self, author: str, manifest: dict[str, Any]) -> None:
         """Sign the canonical manifest bytes with the author agent's key.

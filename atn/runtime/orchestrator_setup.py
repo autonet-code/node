@@ -163,8 +163,32 @@ class OrchestratorSetup:
             except Exception:
                 pass
 
+        self._stamp_active_model(agent_id, model)
+
         log.info("Agent '%s' model changed to '%s'", agent_id, model)
         return agent_id
+
+    def _stamp_active_model(self, agent_id: str, model: str) -> None:
+        """Sync the stats surfaces to a just-changed model.
+
+        session_stats' ``active_model`` reports the model that LAST RAN
+        (live provider, cached, or persisted stats). The UI treats it as
+        backend truth and snaps its picker back to it — so a model change
+        with no run in between would visually revert until the next
+        execution. Stamp the new model forward; the next real run
+        overwrites it with whatever actually executed.
+        """
+        cached = self.provider_manager._cached_session_stats.get(agent_id)
+        if cached and cached.get("active_model"):
+            cached["active_model"] = model
+        try:
+            convo = self.session_manager.get_agent_conversation_store(agent_id)
+            stats = convo.get_session_stats()
+            if stats.get("active_model"):
+                stats["active_model"] = model
+                convo.save_session_stats(stats)
+        except Exception:
+            log.debug("Could not stamp active_model for '%s'", agent_id, exc_info=True)
 
     async def _set_orchestrator_model_impl(
         self, model: str, old_defn: Any, *, provider: str | None = None,
@@ -195,6 +219,7 @@ class OrchestratorSetup:
         await self.registry.activate_agent(defn.id)
 
         self.session_manager.clear_bridge_session()
+        self._stamp_active_model(ORCHESTRATOR_ID, model)
 
         log.info("Orchestrator model changed to '%s'", model)
         return defn.id

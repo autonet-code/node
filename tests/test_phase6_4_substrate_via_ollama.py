@@ -63,8 +63,10 @@ def test_substrate_is_known_provider():
     assert "substrate" in ProviderManager._KNOWN_PROVIDERS
     info = ProviderManager._KNOWN_PROVIDERS["substrate"]
     assert info["auth_type"] == "local"
-    # Substrate isn't yet orchestrator-capable (Phase 7+).
-    assert info["orchestrator_capable"] is False
+    # The per-provider orchestrator_capable flag was removed: loop capability
+    # is a per-MODEL property (model_specs / bridge guard), not a provider-wide
+    # claim. Providers now report max_capability_tier instead.
+    assert "orchestrator_capable" not in info
 
 
 def test_provider_manager_builds_substrate_provider(tmp_path: Path):

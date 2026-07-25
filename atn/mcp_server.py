@@ -1,13 +1,14 @@
-"""MCP server exposing ATN orchestrator tools.
+"""MCP server exposing ATN orchestrator tools — thin daemon client.
 
-Starts a full ATN Runtime, loads agents from config, and serves the
-orchestrator tools over the MCP stdio transport.  Any MCP client
-(Claude Code, Claude Desktop, etc.) can connect and manage agents.
+Connects to a RUNNING ATN daemon over its local WebSocket (:7700) and
+proxies tool calls.  It never boots a Runtime of its own: no agent
+loading, no schedules, no port grabbing, no state writes.  If the daemon
+isn't running, tools return an error telling the user to start it.
 
 Usage:
     python -m atn.mcp_server
 
-Claude Code config (~/.claude/claude_code_config.json):
+Claude Code config (.mcp.json):
     {
       "mcpServers": {
         "atn": {
@@ -23,65 +24,91 @@ import asyncio
 import json
 import logging
 import sys
+import uuid
 from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
 
-from .config import load_config
-from .events import EventBus
-from .loader import load_agents_dir
-from .orchestrator.tools import execute_tool, get_tool_definitions
-from .runtime import Runtime
-from .ws_server import WebSocketBridge, DEFAULT_PORT
+from .orchestrator.tools import get_tool_definitions
+from .ws_server import DEFAULT_PORT
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# MCP Server
-# ---------------------------------------------------------------------------
+DAEMON_URL = f"ws://localhost:{DEFAULT_PORT}"
+_CALL_TIMEOUT = 300.0  # seconds; some tools (trigger_run, delegate) run long
 
-def create_server() -> tuple[Server, dict[str, Any]]:
-    """Create the MCP server and return (server, state_dict).
+_NOT_RUNNING = (
+    f"ATN daemon is not running ({DAEMON_URL}). "
+    "Start it with `python -m atn` and retry."
+)
 
-    The state dict holds the Runtime reference, populated after async startup.
+
+async def _call_daemon(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Send one tool call to the daemon's local WS listener and await the reply.
+
+    One connection per call — stateless and immune to stale sockets. Frames
+    that aren't the reply (event broadcasts) are skipped by msg_id match.
     """
+    import websockets
+
+    mid = uuid.uuid4().hex
+    payload = dict(arguments)
+    payload["type"] = name
+    payload["msg_id"] = mid
+
+    try:
+        async with websockets.connect(DAEMON_URL, max_size=None, open_timeout=5) as ws:
+            await ws.send(json.dumps(payload))
+            async with asyncio.timeout(_CALL_TIMEOUT):
+                async for frame in ws:
+                    try:
+                        msg = json.loads(frame)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if isinstance(msg, dict) and msg.get("msg_id") == mid:
+                        if msg.get("ok"):
+                            result = msg.get("result")
+                            return result if isinstance(result, dict) else {"result": result}
+                        return {"error": msg.get("error") or "daemon returned an error"}
+        return {"error": "daemon closed the connection before replying"}
+    except (ConnectionRefusedError, OSError):
+        return {"error": _NOT_RUNNING}
+    except asyncio.TimeoutError:
+        return {"error": f"daemon did not reply within {_CALL_TIMEOUT:.0f}s"}
+    except Exception as exc:  # ConnectionClosed et al.
+        return {"error": f"daemon connection failed: {exc}"}
+
+
+def create_server() -> Server:
+    """Create the MCP server (pure proxy — no runtime state)."""
     server = Server("atn")
-    state: dict[str, Any] = {"runtime": None}
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        tools = get_tool_definitions()
         return [
             types.Tool(
                 name=t.name,
                 description=t.description,
                 inputSchema=t.input_schema,
             )
-            for t in tools
+            for t in get_tool_definitions()
         ]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-        rt = state["runtime"]
-        if rt is None:
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({"error": "Runtime not started"}),
-            )]
-
-        result = await execute_tool(name, arguments, rt, caller_id="orchestrator")
+        result = await _call_daemon(name, arguments or {})
         return [types.TextContent(
             type="text",
             text=json.dumps(result, indent=2, default=str),
         )]
 
-    return server, state
+    return server
 
 
 async def run_server() -> None:
-    """Start the Runtime and run the MCP server."""
+    """Run the MCP stdio server (daemon is contacted per tool call)."""
     # Configure logging to stderr (stdout is for MCP protocol)
     logging.basicConfig(
         level=logging.INFO,
@@ -89,71 +116,18 @@ async def run_server() -> None:
         stream=sys.stderr,
     )
 
-    log.info("Starting ATN MCP server...")
+    log.info(
+        "ATN MCP proxy ready — %d tools, forwarding to %s (daemon not started here)",
+        len(get_tool_definitions()), DAEMON_URL,
+    )
 
-    # Load config and start Runtime
-    config = load_config()
-    bus = EventBus()
-    rt = Runtime(bus, data_dir=config.data_dir, config=config)
-    await rt.start()
-
-    # Load existing agent definitions
-    if config.agents_dir.exists():
-        agents, errors = load_agents_dir(config.agents_dir)
-        for defn in agents:
-            await rt.register_agent(defn)
-            if defn.schedule or defn.heartbeat:
-                await rt.activate_agent(defn.id)
-        # Note: execution history is hydrated automatically in register_agent()
-        if agents:
-            log.info("Loaded %d agent(s) from %s", len(agents), config.agents_dir)
-        if errors:
-            log.warning("Agent load errors: %d", len(errors))
-    else:
-        log.info("No agents directory at %s", config.agents_dir)
-
-    # Register the orchestrator meta-agent (always present, on-demand only)
-    try:
-        await rt.setup_orchestrator()
-        log.info("Orchestrator registered")
-    except Exception as exc:
-        log.warning("Failed to register orchestrator: %s", exc)
-
-    # Start WebSocket server only if no CLI daemon holds the lock (it owns the port).
-    ws_bridge = None
-    from .lock_manager import LockManager
-    _lm = LockManager()
-    _lm.set_data_dir(config.data_dir)
-    if _lm.is_daemon_running():
-        log.info("CLI daemon running (lock held) — skipping WebSocket bridge (daemon owns port %d)", DEFAULT_PORT)
-    else:
-        ws_bridge = WebSocketBridge(rt, host="localhost", port=DEFAULT_PORT)
-        try:
-            await ws_bridge.start()
-            log.info("WebSocket bridge started on ws://localhost:%d", DEFAULT_PORT)
-        except OSError as exc:
-            log.warning("WebSocket bridge failed to start (port %d in use?): %s", DEFAULT_PORT, exc)
-            ws_bridge = None
-
-    # Create MCP server and inject Runtime
-    server, state = create_server()
-    state["runtime"] = rt
-
-    log.info("ATN MCP server ready — %d tools available", len(get_tool_definitions()))
-
-    # Run MCP server over stdio
-    try:
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(),
-            )
-    finally:
-        if ws_bridge:
-            await ws_bridge.stop()
-        log.info("Shutting down Runtime...")
-        await rt.stop()
+    server = create_server()
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options(),
+        )
 
 
 def main() -> None:

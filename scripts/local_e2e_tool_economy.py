@@ -579,6 +579,14 @@ async def amain() -> int:
         got_owner_b = substrate.functions.getAgentOwner(caller_addr).call()
         assert got_owner_a == owner_a.address, (got_owner_a, owner_a.address)
         assert got_owner_b == owner_b.address, (got_owner_b, owner_b.address)
+
+        # Stamp the runtime flag the production register flow sets
+        # (ws_server verifies the tx and flips identity.registered_on_chain).
+        # The consensus identity mapping keys on it: only a REGISTERED
+        # agent authors/acts as its own 0x; unregistered agents map to
+        # their owner wallet (ruling 2026-07-24, never-unclaimable rewards).
+        rt_a.get_agent("author-1").identity.registered_on_chain = True
+        rt_a.get_agent("caller-1").identity.registered_on_chain = True
         s3.note("author_owner_onchain", got_owner_a)
         s3.note("caller_owner_onchain", got_owner_b)
         s3.note("distinct_owners", got_owner_a != got_owner_b)

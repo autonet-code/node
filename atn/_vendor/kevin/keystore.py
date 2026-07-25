@@ -46,6 +46,10 @@ KEYSTORE_DIR = os.environ.get(
 KEY_PATH = os.path.join(KEYSTORE_DIR, "identity.age-key")
 VAULT_PATH = os.path.join(KEYSTORE_DIR, "vault.age")
 BUNDLES_PATH = os.path.join(KEYSTORE_DIR, "bundles.json")
+# Plaintext sidecar of per-secret metadata (authorized egress hosts, etc.).
+# Hostnames are NOT secret, and the daemon/UI need them WITHOUT decrypting the
+# vault (only the broker holds the age identity). Same pattern as bundles.json.
+SECRET_META_PATH = os.path.join(KEYSTORE_DIR, "secret_meta.json")
 EXPORT_DIR = os.path.join(KEYSTORE_DIR, "exports")
 # Session registry: one file per running MCP session, recording what it staged
 # and where, so we can clean up on session end AND sweep dead sessions.
@@ -135,6 +139,78 @@ def get_secret(service):
     if service not in d:
         raise KeyError(service)
     return d[service]
+
+
+# ── Secret metadata (plaintext sidecar: authorized egress hosts, etc.) ────────
+def _read_secret_meta():
+    """Parse the plaintext metadata sidecar. Returns {} if absent/corrupt.
+
+    Shape: { "<service>": {"authorized_hosts": ["api.openai.com", ...]}, ... }
+    """
+    if not os.path.exists(SECRET_META_PATH):
+        return {}
+    try:
+        with open(SECRET_META_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for svc, meta in data.items():
+        if not isinstance(svc, str) or not isinstance(meta, dict):
+            continue
+        hosts = meta.get("authorized_hosts")
+        clean = {}
+        if isinstance(hosts, list):
+            clean["authorized_hosts"] = [h for h in hosts if isinstance(h, str)]
+        out[svc] = clean
+    return out
+
+
+def _write_secret_meta(data):
+    os.makedirs(KEYSTORE_DIR, exist_ok=True)
+    with open(SECRET_META_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def get_authorized_hosts(service):
+    """Egress hostnames a secret is authorized to travel to. [] if unset.
+
+    An empty list means "not host-bound" — today that is value-in-hand mode;
+    the forwarding proxy will require a non-empty list before it stamps
+    requests for this service.
+    """
+    return list(_read_secret_meta().get(service, {}).get("authorized_hosts", []))
+
+
+def set_authorized_hosts(service, hosts):
+    """Set (replace) the authorized egress hosts for a secret. Plaintext.
+
+    Pass [] to clear. Does not touch the encrypted vault. The service need not
+    exist in the vault yet (metadata may be authored alongside a put_secret).
+    """
+    clean = sorted({h.strip().lower() for h in (hosts or []) if isinstance(h, str) and h.strip()})
+    data = _read_secret_meta()
+    entry = data.get(service, {})
+    if clean:
+        entry["authorized_hosts"] = clean
+    else:
+        entry.pop("authorized_hosts", None)
+    if entry:
+        data[service] = entry
+    else:
+        data.pop(service, None)
+    _write_secret_meta(data)
+    return clean
+
+
+def delete_secret_meta(service):
+    """Drop all metadata for a service (called when the secret is deleted)."""
+    data = _read_secret_meta()
+    if service in data:
+        del data[service]
+        _write_secret_meta(data)
 
 
 # ── Bundles (named groups of services, for `cc --secrets crypto`) ─────────────

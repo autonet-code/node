@@ -119,6 +119,11 @@ class TestRegistration:
         """Three tiers (spec v2): private is the default — no substrate
         push; publish=true (or set_published) fires the manifest sink."""
         rt = _make_runtime(tmp_path)
+        # Publishing requires a claimable author (orphan-publish gate);
+        # child is not registered on-chain, so its tools are authored by
+        # the household wallet.
+        wallet = "0x" + "44" * 20
+        rt._config.autonet.owner_wallet = wallet
         await _family(rt)
         pushed: list[tuple] = []
         rt.tool_store.manifest_sink = lambda m, a: pushed.append((m["name"], a))
@@ -138,12 +143,12 @@ class TestRegistration:
         assert "publish_tool" in res_rej["error"]
 
         # The author publishes its own tool via publish_tool; the sink
-        # receives the CONSENSUS author (0x address), not the local id.
-        child_addr = rt.get_agent("child").identity.address
+        # receives the CONSENSUS author (the claimable household wallet
+        # — child holds a keypair but is not registered on-chain).
         pub = await execute_tool(
             "publish_tool", {"digest": res["digest"]}, rt, caller_id="child")
         assert pub["published"] is True
-        assert pushed == [("echo_tool", child_addr)]
+        assert pushed == [("echo_tool", wallet)]
 
         # A non-author agent cannot publish someone else's tool.
         res2 = await execute_tool(
@@ -326,12 +331,15 @@ class TestResolutionAndExecution:
         await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="parent")
         await rt.tool_registry.call_tool("echo_tool", {"x": "2"}, caller_id="child")
 
-        # Consensus events emitted, caller attested — the rail carries
-        # 0x identities (chain-claimable); local ids stay in the jsonl.
+        # Consensus events emitted, caller attested. Identity mapping
+        # (ruling 2026-07-24): an agent's own 0x counts only once it is
+        # REGISTERED on-chain; unregistered agents map to the owner
+        # wallet, and this wallet-less env falls back to local ids
+        # (private plane only — publishing is gated on claimability).
         assert len(sunk) == 2
         assert sunk[0]["kind"] == "tool_used"
-        assert sunk[0]["author_agent"] == rt.get_agent("parent").identity.address
-        assert sunk[0]["tool_author"] == rt.get_agent("child").identity.address
+        assert sunk[0]["author_agent"] == "parent"
+        assert sunk[0]["tool_author"] == "child"
         assert sunk[0]["manifest_digest"] == res["digest"]
         assert sunk[0]["ok"] is True
 
@@ -413,11 +421,12 @@ class TestAttestation:
         assert out == {"attested": 1, "skipped": []}
         assert len(sunk) == 1
         ev = sunk[0]
-        child_addr = rt.get_agent("child").identity.address
         assert ev["kind"] == "tool_used"
         assert ev["attested"] is True
-        assert ev["author_agent"] == child_addr
-        assert ev["tool_author"] == child_addr
+        # child holds a keypair but is not registered on-chain; wallet-less
+        # env → local-id fallback (ruling 2026-07-24).
+        assert ev["author_agent"] == "child"
+        assert ev["tool_author"] == "child"
         assert ev["manifest_digest"] == res["digest"]
         assert ev["score"] == 0.9
         assert ev["fee_atn"] == 0.0
@@ -831,15 +840,16 @@ class TestVetting:
         assert out["verdict"] == "pass"
         assert len(sunk) == 1
         ev = sunk[0]
-        sibling_addr = rt.get_agent("sibling").identity.address
         assert ev["kind"] == "tool_used"
         assert ev["vet"] is True
         assert ev["ok"] is True
-        assert ev["author_agent"] == sibling_addr
+        # sibling is not registered on-chain; wallet-less env → local-id
+        # fallback (ruling 2026-07-24).
+        assert ev["author_agent"] == "sibling"
         assert ev.get("attested") is None       # a vet is NOT usage
         report = store._blob_store().get_json(ev["review_digest"])
         assert report["kind"] == "tool_vet_report"
-        assert report["validator"] == sibling_addr
+        assert report["validator"] == "sibling"
         # Local ledgers: vet_summary sees it, attestation_summary must not.
         assert store.vet_summary()[res["digest"]]["pass_count"] == 1
         assert res["digest"] not in store.attestation_summary()
@@ -1262,6 +1272,9 @@ class TestIdempotencyAndPrune:
     def test_prune_superseded_migrates_grants_and_keeps_published(
             self, tmp_path):
         rt = _make_runtime(tmp_path)
+        # Publishing requires a claimable author identity (orphan-publish
+        # gate) — give the owner a wallet so set_published is legitimate.
+        rt._config.autonet.owner_wallet = "0x" + "11" * 20
         store = rt.tool_store
         base = dict(
             name="idem_probe_tool",
@@ -1295,6 +1308,53 @@ class TestIdempotencyAndPrune:
         count2 = len(rt.tool_store._records)
         assert d1 == d2
         assert count1 == count2                  # no growth across boots
+
+
+class TestOrphanPublishGate:
+    """Ruling 2026-07-24: rewards must never be unclaimable. Publishing
+    requires a claimable author — the agent's 0x identity, else the owner
+    wallet. No identity at all → private registration only."""
+
+    @pytest.mark.asyncio
+    async def test_publish_blocked_without_any_identity(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        res = await _register_echo(rt)           # private is still fine
+        assert "error" not in res
+        with pytest.raises(ValueError, match="claimable author"):
+            rt.tool_store.set_published(res["digest"], True)
+
+    def test_register_with_publish_blocked_without_identity(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        with pytest.raises(ValueError, match="claimable author"):
+            rt.tool_store.register(
+                name="orphan_pub", description="d",
+                input_schema={"type": "object"}, author="user",
+                code="print(1)", publish=True)
+
+    @pytest.mark.asyncio
+    async def test_unregistered_agent_author_falls_back_to_owner_wallet(
+            self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        wallet = "0x" + "22" * 20
+        rt._config.autonet.owner_wallet = wallet
+        await _family(rt)
+        res = await _register_echo(rt)
+        record = rt.tool_store.get(res["digest"])
+        assert record.manifest["author"] == wallet   # household, not slug
+        assert rt.tool_store.set_published(res["digest"], True)
+
+    @pytest.mark.asyncio
+    async def test_identity_change_re_stamps_on_reregister(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        old = await _register_echo(rt)           # slug-authored orphan
+        rt._config.autonet.owner_wallet = "0x" + "33" * 20
+        new = await _register_echo(rt)           # same content, new identity
+        assert new["digest"] != old["digest"]    # fresh record, not reuse
+        with pytest.raises(ValueError):
+            rt.tool_store.set_published(old["digest"], True)
+        assert rt.tool_store.set_published(new["digest"], True)
 
 
 class TestProbeTrustPicture:
