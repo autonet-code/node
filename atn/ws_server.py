@@ -1449,9 +1449,13 @@ class WebSocketBridge:
             # simple — this is a browsing aid, not consensus, so it does
             # not need to be stable across daemons or reproducible.
             try:
-                threshold = float(msg.get("threshold") or 0.30)
+                # 0.18 tuned against a 27-service catalogue: it yields ~9
+                # rails topping out at 4-6 members with few strays. Higher
+                # thresholds fragment into pairs, and a rail of two is not
+                # worth scrolling.
+                threshold = float(msg.get("threshold") or 0.18)
             except (TypeError, ValueError):
-                threshold = 0.30
+                threshold = 0.18
             # Seed each cluster from the DENSEST remaining service (the one
             # with the most neighbours above threshold) rather than from an
             # arbitrary index. Seeding arbitrarily makes the first service
