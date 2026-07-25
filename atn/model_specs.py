@@ -37,7 +37,10 @@ class ModelSpec:
     relative_cost: float = 1.0          # multiplier vs. Sonnet for subscription burn
     default_channel: str = ""           # provider name typically used (hint only)
     aliases: tuple[str, ...] = ()       # alternate IDs that resolve here
-    orchestrator_capable: bool = False  # may serve as the root/orchestrator agent (§14)
+    # Can sustain the multi-turn agentic loop. Historical name: it does NOT
+    # mean "root agent" (no such fixed role) and grants no tools. See the
+    # orchestrator_capable() docstring below.
+    orchestrator_capable: bool = False
 
 
 _DEFAULT_SPEC = ModelSpec(
@@ -346,10 +349,18 @@ def context_window(model_id: str) -> int:
 
 
 def orchestrator_capable(model_id: str) -> bool:
-    """Whether a model may serve as the root/orchestrator agent (§14).
+    """Whether a model can sustain the multi-turn agentic loop.
 
-    Derived per-model from the spec flag. Local models stay False until their
-    §14 prerequisites are proven; unknown models are not orchestrator-capable."""
+    NAME IS HISTORICAL: this never gated "the root agent" (there is no single
+    stable top-level agent) nor any tool grant. What it gates at runtime is
+    whether ``send_orchestrate`` may start on this model at all — see
+    ``providers/bridge.py:_model_is_orchestrator_capable``, the one enforcement
+    site. Sub-tier models are refused because they wedge rather than fail: a
+    haiku-class model hot-spun the bridge at 100% CPU with zero output for 20+
+    minutes (agentic_loop.md finding 7).
+
+    Derived per-model from the spec flag; unknown models are treated as not
+    capable."""
     return resolve(model_id).orchestrator_capable
 
 

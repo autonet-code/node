@@ -30,23 +30,39 @@ bill per token. Local providers cost nothing but your own hardware.
 
 ## Built-in providers
 
-| Provider | Auth | Can orchestrate? |
-|----------|------|------------------|
+| Provider | Auth | Loop-capable |
+|----------|------|--------------|
 | Claude Max | bridge | yes |
 | Codex (OpenAI) | bridge | yes |
 | Anthropic API | api key | yes |
 | OpenAI | api key | yes |
 | Google Gemini | api key | yes |
 | DeepSeek | api key | yes |
-| Ollama (local) | local | no |
+| Ollama (local) | local | model-dependent |
 | RPB Network | peer-to-peer | not yet |
 | World-Model Substrate | local | no |
 
-**Orchestrator-capable** means the provider can run the *orchestrator* — the
-agent that plans and delegates to other agents, which needs reliable
-multi-turn tool calling. Providers marked "no" are fine as worker agents;
-they just cannot sit at the top of the fleet. Ollama's limitation here is
-about tool-calling fidelity in local models, not about Ollama itself.
+**Loop-capable** means the model can sustain the multi-turn tool-calling
+loop every agent runs. It is a reliability floor, not a rank: *every* agent
+needs it, not just one at the top of a hierarchy.
+
+The flag exists because small/fast models fail this in an expensive way. A
+haiku-class model on the Claude Code bridge does not error — it hot-spins at
+100% CPU producing nothing, for as long as you let it. The daemon therefore
+refuses to start the loop on a model below the bar, with a clear error,
+rather than letting it wedge.
+
+The check is derived from the model's tier, so it follows the *model* you
+pick more than the provider. Ollama is the case to watch: whether a local
+model holds up in a tool-calling loop varies a lot by model, so test before
+handing it real work.
+
+> **Naming note.** In the code this flag is `orchestrator_capable`, and older
+> comments describe it as "may serve as the root/orchestrator agent." That
+> wording predates the current architecture — there is no single stable
+> top-level agent any more, and the flag never gated tool grants. What it
+> gates, and all it has ever gated at runtime, is whether the agentic loop is
+> allowed to start on that model.
 
 ## Adding a custom provider
 
