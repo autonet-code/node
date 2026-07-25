@@ -23,6 +23,25 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+# Last sponsor-reported grant balance, daemon-wide.
+#
+# Provider instances are constructed per resolve (provider_manager builds a
+# fresh RPBNetworkProvider each time), so an instance attribute cannot
+# answer "how much of my grant is left" between calls. A daemon has at most
+# one sponsor by ratified design (2026-07-25: one dependent identity, the
+# owner wallet), so a module-level cell is the honest shape here rather
+# than a per-instance one.
+#
+# -1 means unlimited or not yet known: no request has been answered, so
+# nothing about the grant has been observed.
+_last_remaining_budget_tokens: int = -1
+
+
+def last_remaining_budget_tokens() -> int:
+    """Tokens left in the sponsor's grant as of the last answered request,
+    or -1 when unlimited / not yet observed."""
+    return _last_remaining_budget_tokens
+
 
 class RPBNetworkProvider(Provider):
     """Provider that routes inference requests through the RPB P2P network.
@@ -52,6 +71,12 @@ class RPBNetworkProvider(Provider):
         self._sponsor_address = (sponsor_address or "").strip().lower()
         self._discovered_providers: list[dict] = []
         self._remaining_budget_tokens: int = -1
+
+    @property
+    def remaining_budget_tokens(self) -> int:
+        """Tokens left in the sponsor's grant, as of this instance's last
+        answered request. -1 means unlimited or not yet known."""
+        return self._remaining_budget_tokens
 
     async def discover_providers(self, model: str = "") -> list[dict]:
         """Discover sponsor nodes offering the requested model via gossip.
@@ -185,6 +210,8 @@ class RPBNetworkProvider(Provider):
 
         # Track how much of the sponsor's grant remains (-1 = unlimited).
         self._remaining_budget_tokens = response.get("remaining_budget_tokens", -1)
+        global _last_remaining_budget_tokens
+        _last_remaining_budget_tokens = self._remaining_budget_tokens
         if 0 <= self._remaining_budget_tokens < 10_000:
             logger.warning(
                 "RPB: sponsor grant low — %d tokens remaining",

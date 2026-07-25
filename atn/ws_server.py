@@ -1855,6 +1855,12 @@ class WebSocketBridge:
         # owner wallet — there is no per-agent sponsor setting
         # (docs/sponsored_inference.md).
         if msg_type == "get_my_sponsor":
+            def _rpb_last_budget() -> int:
+                try:
+                    from .providers.rpb import last_remaining_budget_tokens
+                    return int(last_remaining_budget_tokens())
+                except Exception:                          # noqa: BLE001
+                    return -1
             rpb_cfg = self.runtime._config.autonet
             return {"msg_id": msg_id, "ok": True, "result": {
                 "sponsor_address": getattr(rpb_cfg, "sponsor_address", "") or "",
@@ -1862,6 +1868,12 @@ class WebSocketBridge:
                 # means this daemon cannot be sponsored at all: no wallet, no
                 # address to bind.
                 "dependent_address": getattr(rpb_cfg, "owner_wallet", "") or "",
+                # How much of the sponsor's grant is left, as of the last
+                # answered request. The sponsor reports this on every
+                # response; it used to be captured only to log a warning,
+                # so a dependent could not see its own remaining budget.
+                # -1 = unlimited, or nothing observed yet.
+                "remaining_budget_tokens": _rpb_last_budget(),
             }}
 
         if msg_type == "set_my_sponsor":
