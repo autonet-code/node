@@ -36,7 +36,8 @@ Status conventions used below:
 | `agentic_loop.md` | Hardening spec for `send_orchestrate` (the anthropic/openai_compat/ollama agent loop) and its adapters. |
 | `cross_platform_isolation_design.md` | Isolation + vault port plan — IMPLEMENTED + Linux-verified (POSIX AF_UNIX / SO_PEERCRED, tracked-PID kill). |
 | `secrets.md` | **Owner-facing.** The secret vault and agent security: the honest threat model, the fail-closed allowance algebra (parent ∩ child clamp), host binding, the names-only audit trail, and the leak tripwire. Linked from the app's "Add secret" dialog. |
-| `providers.md` | **Owner-facing.** Inference providers: the three auth shapes (bridge / api key / local), which are orchestrator-capable, adding an OpenAI-compatible endpoint (validation, credential storage), and the model-routing gotchas. Linked from the app's "Add Provider" dialog. |
+| `providers.md` | **Owner-facing.** Inference providers: the three auth shapes (bridge / api key / local), adding an OpenAI-compatible endpoint (validation, credential storage), loop capability as a per-model property, and the model-routing gotchas. Linked from the app's "Add Provider" dialog. |
+| `sponsored_inference.md` | **Owner-facing.** Work-AI: a sponsor daemon paying for a dependent's inference. The dependent is the OWNER WALLET (one 0x per daemon, ratified 2026-07-25), at most one sponsor, sponsor-held authorization and token budgets. Linked from the app's RPB Network card. |
 | `epoch_economics.md` · `ledger_pricing.md` | (see above) the economic core as shipped. |
 | `auto_update_design.md` | Daemon auto-update: stage-on-poll, apply-on-next-boot (running daemon never self-restarts). Implementing. |
 | `anti_tamper_design.md` | Consensus-node anti-tamper — the "other half" of auto-update. Designed, pre-implementation. |
