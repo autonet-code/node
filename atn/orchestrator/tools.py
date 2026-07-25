@@ -1430,11 +1430,11 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         defn.provider = input["provider"]
         changed.append("provider")
         provider_or_model_changed = True
-    if "sponsor_address" in input:
-        # The on-chain address of the sponsor agent this dependent routes to.
-        # Empty string clears it (falls back to any is_sponsor peer).
-        defn.sponsor_address = input["sponsor_address"] or ""
-        changed.append("sponsor_address")
+    # NOTE: no per-agent "sponsor_address" here. Sponsored inference is a
+    # DAEMON-level setting keyed on the owner wallet (ratified 2026-07-25,
+    # docs/sponsored_inference.md) — configured once in the RPB Network
+    # provider, not per agent. AgentDefinition.sponsor_address survives as a
+    # dead field so old agent.yaml files still load; nothing reads it.
     if "notify_parent" in input:
         defn.notify_parent = input["notify_parent"]
         changed.append("notify_parent")
@@ -2324,7 +2324,10 @@ async def _publish_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     if record.published:
         return {"digest": record.digest, "name": record.name,
                 "published": True, "note": "already published"}
-    runtime.tool_store.set_published(record.digest, True)
+    try:
+        runtime.tool_store.set_published(record.digest, True)
+    except ValueError as exc:  # orphan-author publish gate
+        return {"error": str(exc)}
     return {"digest": record.digest, "name": record.name, "published": True}
 
 

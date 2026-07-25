@@ -183,3 +183,69 @@ class TestCreateAgentProviderSchema:
         assert "provider" in props
         assert "ollama" in props["provider"]["enum"]
         assert "rpb" in props["provider"]["enum"]
+
+
+# ---------------------------------------------------------------------------
+# Sponsored inference: the dependent identity is the OWNER WALLET
+# (ratified 2026-07-25, docs/sponsored_inference.md)
+# ---------------------------------------------------------------------------
+
+def _rpb_manager(*, owner_wallet: str, sponsor_address: str) -> ProviderManager:
+    """A manager whose daemon config carries the sponsorship settings."""
+    config = MagicMock()
+    config.providers = {}
+    config.autonet.owner_wallet = owner_wallet
+    config.autonet.sponsor_address = sponsor_address
+    mgr = ProviderManager(
+        config=config,
+        credential_store=MagicMock(),
+        executors={},
+        events=MagicMock(),
+    )
+    mgr._resolve_api_key = MagicMock(return_value="")
+    return mgr
+
+
+def _rpb_defn(agent_address: str = ""):
+    """An agent definition pinned to the rpb provider.
+
+    ``identity.address`` is set deliberately: it must be IGNORED for
+    sponsorship, which keys on the daemon's owner wallet instead.
+    """
+    defn = MagicMock()
+    defn.provider = "rpb"
+    defn.cognitive_model = "some-model"
+    defn.id = "dependent-agent"
+    defn.identity.address = agent_address
+    return defn
+
+
+def test_dependent_presents_owner_wallet_not_agent_address():
+    wallet = "0x" + "11" * 20
+    sponsor = "0x" + "22" * 20
+    mgr = _rpb_manager(owner_wallet=wallet, sponsor_address=sponsor)
+    # The agent has its own keypair address; sponsorship must not use it.
+    provider = mgr.resolve_provider_with_fallback(_rpb_defn("0x" + "99" * 20))
+
+    assert provider._agent_address == wallet
+    assert provider._sponsor_address == sponsor
+
+
+def test_unregistered_agent_still_sponsorable_via_wallet():
+    """An agent with no on-chain identity is sponsorable: the daemon's wallet
+    is the dependent, so per-agent registration is irrelevant."""
+    wallet = "0x" + "33" * 20
+    mgr = _rpb_manager(owner_wallet=wallet, sponsor_address="")
+    provider = mgr.resolve_provider_with_fallback(_rpb_defn(""))
+
+    assert provider._agent_address == wallet
+
+
+def test_no_owner_wallet_means_no_dependent_identity():
+    """No wallet => nothing for a sponsor to bind. The provider still builds
+    (open discovery is legal); it simply presents no identity, and any real
+    sponsor refuses it with 'Missing agent_address'."""
+    mgr = _rpb_manager(owner_wallet="", sponsor_address="")
+    provider = mgr.resolve_provider_with_fallback(_rpb_defn("0x" + "44" * 20))
+
+    assert provider._agent_address == ""

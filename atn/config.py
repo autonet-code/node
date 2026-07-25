@@ -273,6 +273,12 @@ class RPBConfig:
     # Empty = use same provider resolution as local agents.
     sponsor_provider: str = ""
     sponsor_model: str = ""  # Model to serve (empty = accept any model request)
+    # Dependent mode — the 0x address of the sponsor THIS daemon routes its
+    # rpb inference through. Daemon-level, not per agent: the dependent
+    # identity is the owner wallet, and a daemon has at most one sponsor
+    # (ratified 2026-07-25, docs/sponsored_inference.md). Empty = not bound to
+    # a sponsor; the rpb provider falls back to open discovery.
+    sponsor_address: str = ""
     # Input-seam gating policy for the WebSocket surface: "allow" (AllowAll,
     # today's default — every connected client may drive its scoped agents) or
     # "single_writer" (only the arbiter-elected active input surface may send).
@@ -847,6 +853,13 @@ def load_config(path: Path | None = None) -> ATNConfig:
         timelock_address=resolved.get("timelock_address", ""),
         min_alignment_threshold=resolved.get("min_alignment_threshold", 0.5),
         generate_keypairs=resolved.get("generate_keypairs", True),
+        # Sponsored inference (docs/sponsored_inference.md). These were
+        # dataclass-only until now — never read from config.yaml, so sponsor
+        # mode could not actually be configured on disk.
+        sponsor_inference=bool(resolved.get("sponsor_inference", False)),
+        sponsor_provider=resolved.get("sponsor_provider", ""),
+        sponsor_model=resolved.get("sponsor_model", ""),
+        sponsor_address=resolved.get("sponsor_address", ""),
         # Remote-frontend auth + reachability (this session's work).
         owner_wallet=resolved.get("owner_wallet", ""),
         remote_ws_host=resolved.get("remote_ws_host", ""),
@@ -1085,6 +1098,41 @@ def save_secrets_config_to_yaml(
         encoding="utf-8",
     )
     log.info("Security settings saved to %s", config_path)
+
+
+def save_sponsor_address_to_config(
+    sponsor_address: str,
+    config_path: Path | None = None,
+) -> None:
+    """Persist this daemon's sponsor (dependent-side) to config.yaml.
+
+    Sponsored inference is daemon-level: the dependent identity is the owner
+    wallet and a daemon has at most one sponsor (ratified 2026-07-25,
+    docs/sponsored_inference.md). An empty string clears the binding, which
+    returns the rpb provider to open discovery.
+    """
+    config_path = config_path or (_DEFAULT_DIR / "config.yaml")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            log.warning("Failed to read config for sponsor save: %s", config_path)
+            raw = {}
+
+    autonet = raw.get("autonet")
+    if not isinstance(autonet, dict):
+        autonet = {}
+        raw["autonet"] = autonet
+    autonet["sponsor_address"] = (sponsor_address or "").strip()
+
+    config_path.write_text(
+        yaml.dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    log.info("Sponsor address saved to %s", config_path)
 
 
 def save_orchestrator_model_to_config(

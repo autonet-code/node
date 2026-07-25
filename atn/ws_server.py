@@ -103,6 +103,11 @@ _SECRETS_MESSAGES = frozenset({
     # isolation, default root allowance). Empty payload = read-only GET;
     # mutations are forced onto the local listener via KEY_LOCAL_ONLY_MESSAGES.
     "secrets_config",
+    # Authorized-egress-host binding (plaintext metadata; hostnames are NOT
+    # secret). secrets_set_hosts mutates the sidecar; secrets_suggest_hosts is
+    # a read-only curated lookup.
+    "secrets_set_hosts",
+    "secrets_suggest_hosts",
 })
 
 # Tools an authed-but-SCOPED (non-full-fleet) session may NOT call: they read
@@ -817,6 +822,13 @@ class WebSocketBridge:
                     prov = candidate
                     break
             if prov is None:
+                # Rootless fleet / no run yet: no per-agent instance exists.
+                # Fall back to the boot-time executor registry (refresh_usage
+                # reads the OAuth credentials itself, no live session needed).
+                registered = self.runtime.providers.get_registered_provider(provider_id)
+                if registered is not None and hasattr(registered, "refresh_usage"):
+                    prov = registered
+            if prov is None:
                 return {"msg_id": msg_id, "ok": False,
                         "error": f"Provider '{provider_id}' is not active or does not support usage refresh"}
             try:
@@ -1098,7 +1110,11 @@ class WebSocketBridge:
             if not digest:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'digest' field"}
             published = bool(msg.get("published", True))
-            if not self.runtime.tool_store.set_published(digest, published):
+            try:
+                ok = self.runtime.tool_store.set_published(digest, published)
+            except ValueError as exc:  # orphan-author publish gate
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            if not ok:
                 return {"msg_id": msg_id, "ok": False,
                         "error": f"Unknown tool digest: {digest[:16]}"}
             return {"msg_id": msg_id, "ok": True,
@@ -1611,6 +1627,43 @@ class WebSocketBridge:
                 }}
             except ValueError as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
+        # Dependent side: THIS daemon's sponsor. Daemon-level, keyed on the
+        # owner wallet — there is no per-agent sponsor setting
+        # (docs/sponsored_inference.md).
+        if msg_type == "get_my_sponsor":
+            rpb_cfg = self.runtime._config.autonet
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "sponsor_address": getattr(rpb_cfg, "sponsor_address", "") or "",
+                # The dependent identity we present to a sponsor. Empty here
+                # means this daemon cannot be sponsored at all: no wallet, no
+                # address to bind.
+                "dependent_address": getattr(rpb_cfg, "owner_wallet", "") or "",
+            }}
+
+        if msg_type == "set_my_sponsor":
+            sponsor_address = (msg.get("sponsor_address") or "").strip()
+            if sponsor_address and not (
+                    sponsor_address.startswith("0x") and len(sponsor_address) == 42):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "sponsor_address must be a 0x address (42 chars)"}
+            rpb_cfg = self.runtime._config.autonet
+            if sponsor_address and not (getattr(rpb_cfg, "owner_wallet", "") or ""):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "configure an owner wallet first — it is the "
+                                 "identity a sponsor binds"}
+            try:
+                from .config import save_sponsor_address_to_config
+                save_sponsor_address_to_config(sponsor_address)
+            except Exception as exc:  # noqa: BLE001
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            # Mirror onto the live config so the next run picks it up without a
+            # restart: resolve_provider_with_fallback reads the config each
+            # time it builds an rpb provider.
+            rpb_cfg.sponsor_address = sponsor_address
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "sponsor_address": sponsor_address,
+            }}
 
         if msg_type == "list_sponsor_bindings":
             return {"msg_id": msg_id, "ok": True, "result": {
@@ -2628,6 +2681,12 @@ class WebSocketBridge:
                 all_names = ks.list_services()
                 services = [s for s in all_names if "." not in s]
                 daemon_services = [s for s in all_names if "." in s]
+                # Per-secret authorized egress hosts (plaintext sidecar). Empty
+                # list = not host-bound (value-in-hand mode until the owner sets
+                # hosts to enable the forwarding proxy).
+                secret_hosts = {
+                    s: ks.get_authorized_hosts(s) for s in services
+                }
             except Exception as exc:  # noqa: BLE001
                 return {"msg_id": msg_id, "ok": False,
                         "error": f"vault unreadable: {exc}"}
@@ -2706,6 +2765,7 @@ class WebSocketBridge:
                 "connectors": connectors,
                 "providers": providers,
                 "daemon_services": daemon_services,
+                "secret_hosts": secret_hosts,
             }}
 
         if msg_type == "secrets_put":
@@ -2726,9 +2786,24 @@ class WebSocketBridge:
                         "error": f"'{service}' is a reserved allowance-spec keyword"}
             if not isinstance(value, str) or not value:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'value' field"}
+            # Authorized egress hosts (plaintext metadata, never secret). If the
+            # client omits the field on a NEW secret, prefill from the curated
+            # name→host table so common providers get bound automatically; the
+            # owner can edit later. An explicit [] clears binding (value-in-hand).
+            raw_hosts = msg.get("authorized_hosts")
+            hosts: list[str] | None = None
+            if isinstance(raw_hosts, list):
+                hosts = [str(h) for h in raw_hosts if isinstance(h, str)]
             try:
                 existed = service in ks.list_services()
                 ks.put_secret(service, value)
+                if hosts is not None:
+                    ks.set_authorized_hosts(service, hosts)
+                elif not existed:
+                    from .runtime.host_discovery.host_hints import suggest_hosts
+                    suggested = suggest_hosts(service)
+                    if suggested:
+                        ks.set_authorized_hosts(service, suggested)
                 write_policy_map(ks)
             except Exception as exc:  # noqa: BLE001
                 return {"msg_id": msg_id, "ok": False,
@@ -2749,6 +2824,44 @@ class WebSocketBridge:
                 # Rotation does NOT re-stage: these agents may keep the old
                 # value until their session ends.
                 "live_holders": live_holders,
+                "authorized_hosts": ks.get_authorized_hosts(service),
+            }}
+
+        if msg_type == "secrets_set_hosts":
+            # Edit a secret's authorized egress hosts WITHOUT re-entering the
+            # value. Plaintext metadata; no vault decryption involved.
+            service = str(msg.get("service", "")).strip()
+            if not service:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'service' field"}
+            if "." in service:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "dotted names are reserved for daemon-internal "
+                                 "credentials"}
+            if service not in ks.list_services():
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Unknown service: '{service}'"}
+            raw_hosts = msg.get("authorized_hosts")
+            if not isinstance(raw_hosts, list):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "'authorized_hosts' must be a list of hostnames"}
+            hosts = [str(h) for h in raw_hosts if isinstance(h, str)]
+            try:
+                applied = ks.set_authorized_hosts(service, hosts)
+            except Exception as exc:  # noqa: BLE001
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"host update failed: {exc}"}
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "service": service,
+                "authorized_hosts": applied,
+            }}
+
+        if msg_type == "secrets_suggest_hosts":
+            # Read-only: curated host suggestion for a prospective secret name.
+            from .runtime.host_discovery.host_hints import suggest_hosts
+            name = str(msg.get("service", "")).strip()
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "service": name,
+                "suggested_hosts": suggest_hosts(name),
             }}
 
         if msg_type == "secrets_delete":
@@ -2761,6 +2874,7 @@ class WebSocketBridge:
                                  "credentials"}
             try:
                 removed = ks.delete_secret(service)
+                ks.delete_secret_meta(service)
                 write_policy_map(ks)
             except Exception as exc:  # noqa: BLE001
                 return {"msg_id": msg_id, "ok": False,
@@ -3478,12 +3592,14 @@ async def _init_and_serve(
         if agents:
             log.info("Loaded %d agent(s)", len(agents))
 
-    # Register the orchestrator meta-agent
-    try:
-        await rt.setup_orchestrator()
-        log.info("Orchestrator registered")
-    except Exception as exc:
-        log.warning("Failed to register orchestrator: %s", exc)
+    # Legacy root agent — DEPRECATED (rootless fleet is the default).
+    # Only auto-provisioned when explicitly re-enabled in config.
+    if getattr(config.orchestrator, "enabled", False):
+        try:
+            await rt.setup_orchestrator()
+            log.info("Orchestrator registered (legacy mode)")
+        except Exception as exc:
+            log.warning("Failed to register orchestrator: %s", exc)
 
     # Phase 12: auto-start autonet for already-registered agents.
     try:

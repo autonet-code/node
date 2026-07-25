@@ -40,13 +40,17 @@ def _sdk_platform_tag() -> str:
 # ---------------------------------------------------------------------------
 # Model capability tiers
 # ---------------------------------------------------------------------------
-# Tier 4: orchestrator — multi-agent coordination, complex planning, 20+ tools
-# Tier 3: autonomous   — independent multi-step execution, 10+ tools, self-correction
-# Tier 2: tool-use     — reliable tool calling, structured instructions, single-task
+# Tier 4: coordinating  — multi-agent coordination, complex planning, 20+ tools
+# Tier 3: autonomous    — independent multi-step execution, 10+ tools, self-correction
+# Tier 2: tool-use      — reliable tool calling, structured instructions, single-task
 # Tier 1: conversational — text in/out, unreliable with tools
+#
+# Tier 4 was labelled "orchestrator" — named after a fixed root-agent role
+# that no longer exists. The tier describes what a MODEL can sustain, not a
+# position in the fleet, so the label now names the capability.
 
 TIER_LABELS: dict[int, str] = {
-    4: "orchestrator",
+    4: "coordinating",
     3: "autonomous",
     2: "tool-use",
     1: "conversational",
@@ -182,56 +186,47 @@ class ProviderManager:
             "name": "Claude Max",
             "description": "Claude via Claude Code bridge (requires Claude Max subscription)",
             "auth_type": "bridge",
-            "orchestrator_capable": True,
         },
         "codex_max": {
             "name": "Codex (OpenAI)",
             "description": "OpenAI Codex via Codex CLI bridge (requires Codex/OpenAI subscription)",
             "auth_type": "bridge",
-            "orchestrator_capable": True,
         },
         "anthropic": {
             "name": "Anthropic API",
             "description": "Claude models via Anthropic API (requires API key)",
             "auth_type": "api_key",
-            "orchestrator_capable": True,
         },
         "gemini": {
             "name": "Google Gemini",
             "description": "Gemini models via Google AI API (requires API key)",
             "auth_type": "api_key",
-            "orchestrator_capable": True,
         },
         "openai": {
             "name": "OpenAI",
             "description": "GPT models via OpenAI API (requires API key)",
             "auth_type": "api_key",
-            "orchestrator_capable": True,
         },
         "deepseek": {
             "name": "DeepSeek",
             "description": "DeepSeek V4 models via DeepSeek API (requires API key)",
             "auth_type": "api_key",
-            "orchestrator_capable": True,
         },
         "ollama": {
             "name": "Ollama (Local)",
             "description": "Local models via Ollama — no API key needed",
             "auth_type": "local",
-            "orchestrator_capable": False,
         },
         "rpb": {
             "name": "RPB Network",
             "description": "Decentralized inference via RPB peer-to-peer network",
             "auth_type": "rpb",
-            "orchestrator_capable": False,  # Not yet — will be True when mature
             "models": [],  # Dynamically discovered
         },
         "substrate": {
             "name": "World-Model Substrate",
             "description": "Substrate retrieval + local LLM render. Phase 6 of native integration.",
             "auth_type": "local",
-            "orchestrator_capable": False,
             "models": [],
         },
     }
@@ -319,13 +314,16 @@ class ProviderManager:
         model = defn.cognitive_model or self._config.orchestrator.model or "claude-sonnet-4-6"
 
         # For the rpb (dependent) provider, the agent routes inference to a
-        # sponsor on another daemon. The sponsor authorizes on the dependent's
-        # own on-chain address and (optionally) the dependent targets a named
-        # sponsor address. Pull both from the definition.
-        agent_address = ""
-        if defn.identity and getattr(defn.identity, "address", ""):
-            agent_address = defn.identity.address
-        sponsor_address = getattr(defn, "sponsor_address", "") or ""
+        # sponsor on another daemon.
+        #
+        # The dependent is the OWNER WALLET — one 0x per daemon, not per agent
+        # (ratified 2026-07-25, docs/sponsored_inference.md). The sponsor binds
+        # that one address and does not care how many agents sit behind it, or
+        # whether any of them is registered on-chain. Both values are daemon
+        # config, not agent state: there is no per-agent sponsor setting.
+        agent_address = (getattr(self._config.autonet, "owner_wallet", "") or "").strip()
+        sponsor_address = (
+            getattr(self._config.autonet, "sponsor_address", "") or "").strip()
 
         if isinstance(providers, list):
             for provider_name in providers:
@@ -586,6 +584,18 @@ class ProviderManager:
         provider = self._active_providers.get(target)
         return provider if isinstance(provider, BridgeProvider) else None
 
+    def get_registered_provider(self, provider_id: str) -> Any:
+        """The executor-registered provider instance for ``provider_id``.
+
+        Unlike ``_active_providers`` (keyed by agent_id, populated only while
+        an agent is executing), this is the boot-time registry — present on a
+        rootless fleet with no runs yet. None if not registered.
+        """
+        cognitive = self._executors.get(StepType.COGNITIVE)
+        if isinstance(cognitive, CognitiveStepExecutor):
+            return cognitive._providers.get(provider_id)
+        return None
+
     # ------------------------------------------------------------------
     # Setup and auto-detect
     # ------------------------------------------------------------------
@@ -813,10 +823,13 @@ class ProviderManager:
                 setup_hint = None
 
             models = self.get_available_models(pid)
-            # Derive orchestrator_capable from model tiers (backward compat)
+            # Loop capability is a per-MODEL property (model_specs), so the
+            # provider only reports the best tier it can reach. The old
+            # per-provider orchestrator_capable boolean was dropped: it
+            # squashed a per-model fact into a provider-wide claim that was
+            # wrong in both directions (a capable provider serving a haiku
+            # model, or ollama flagged incapable regardless of model).
             max_tier = max((m.get("capability_tier", _DEFAULT_TIER) for m in models), default=_DEFAULT_TIER) if models else _DEFAULT_TIER
-            # Fall back to the static flag for providers with no model list
-            orch_capable = max_tier >= 4 if models else info.get("orchestrator_capable", False)
 
             entry: dict[str, Any] = {
                 "id": pid,
@@ -825,7 +838,6 @@ class ProviderManager:
                 "auth_type": info["auth_type"],
                 "configured": configured,
                 "active": is_active,
-                "orchestrator_capable": orch_capable,
                 "max_capability_tier": max_tier,
                 "max_tier_label": get_tier_label(max_tier),
                 "models": models,
@@ -862,7 +874,6 @@ class ProviderManager:
                 "auth_type": "api_key",
                 "configured": True,
                 "active": is_active,
-                "orchestrator_capable": custom_tier >= 4,
                 "max_capability_tier": custom_tier,
                 "max_tier_label": get_tier_label(custom_tier),
                 "custom": True,
