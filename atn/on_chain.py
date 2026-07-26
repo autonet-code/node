@@ -1463,9 +1463,17 @@ class OnChainService:
                 estimated = contract.functions.payForService(
                     recipient_addr, int(amount), req,
                 ).estimate_gas({"from": account.address})
-                gas_limit = max(int(estimated * 12 // 10), 200_000)
+                # ×1.6, floor 400k. NOT ×1.2: payForService writes up to three
+                # ERC20Votes-style checkpoint pushes (payer, recipient,
+                # treasury) plus a supply-history push, and on a FIRST payment
+                # from a fresh wallet those are zero->nonzero SSTOREs the
+                # estimator systematically undercounts. Measured on a local
+                # hardhat node: estimate 217_524, actual 262_974 — a ×1.2
+                # buffer lands just BELOW the true cost and the first payment
+                # from every new agent wallet fails with "out of gas".
+                gas_limit = max(int(estimated * 16 // 10), 400_000)
             except Exception:
-                gas_limit = 400_000
+                gas_limit = 600_000
 
             tx = contract.functions.payForService(
                 recipient_addr, int(amount), req,
