@@ -206,10 +206,17 @@ class RPBConfig:
     # trust-on-first-use on a network-reachable socket (it would let the first
     # wallet to find the port claim ownership of the fleet).
     owner_wallet: str = ""
+    # Port for the privileged LOCAL WS listener (bound to localhost). 0 => the
+    # 7700 default. Configurable so a SECOND daemon can coexist on one machine
+    # (a cross-daemon E2E, a staging instance beside a live one): the CLI used
+    # to pass the 7700 literal and, on collision, kill whatever held the port,
+    # so a second instance murdered the first. The remote listener still
+    # defaults to local_ws_port + 1 when remote_ws_port is unset.
+    local_ws_port: int = 0
     # Bind/port for the REMOTE (auth-required) WS listener. The privileged
-    # local listener is always 127.0.0.1:DEFAULT_PORT; this is the separate
-    # socket remote/proxied clients reach. Empty host => remote listener
-    # disabled (local-only daemon, today's default). A reverse proxy
+    # local listener is 127.0.0.1:local_ws_port (7700 by default); this is the
+    # separate socket remote/proxied clients reach. Empty host => remote
+    # listener disabled (local-only daemon, today's default). A reverse proxy
     # (wss://autonet.computer -> proxy) points at this.
     remote_ws_host: str = ""        # e.g. "0.0.0.0"; empty = remote disabled
     remote_ws_port: int = 7701
@@ -862,6 +869,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
         sponsor_address=resolved.get("sponsor_address", ""),
         # Remote-frontend auth + reachability (this session's work).
         owner_wallet=resolved.get("owner_wallet", ""),
+        local_ws_port=int(resolved.get("local_ws_port", 0) or 0),
         remote_ws_host=resolved.get("remote_ws_host", ""),
         remote_ws_port=int(resolved.get("remote_ws_port", 7701)),
         public_ws_endpoint=resolved.get("public_ws_endpoint", ""),

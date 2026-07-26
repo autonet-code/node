@@ -613,9 +613,19 @@ async def run_cli() -> None:
     _remote_host = getattr(_an, "remote_ws_host", "") if _an else ""
     _remote_port = getattr(_an, "remote_ws_port", 0) if _an else 0
     _owner_wallet = getattr(_an, "owner_wallet", "") if _an else ""
-    for _attempt in range(2):
+    # The privileged local listener's port. Configurable (autonet.local_ws_port)
+    # so a second daemon can coexist on one machine; 0/unset keeps 7700.
+    _local_port = int(getattr(_an, "local_ws_port", 0) or 0) if _an else 0
+    _port_configured = _local_port > 0
+    if not _port_configured:
+        _local_port = DEFAULT_PORT
+    # When the port was chosen EXPLICITLY, never reclaim it. Reclaiming means
+    # killing whatever holds the port, and a configured collision is operator
+    # error (or a live sibling daemon), not the stale-MCP-server case the
+    # reclaim exists for. Killing a healthy sibling is the worse outcome.
+    for _attempt in range(1 if _port_configured else 2):
         ws_bridge = WebSocketBridge(
-            runtime, host="localhost", port=DEFAULT_PORT,
+            runtime, host="localhost", port=_local_port,
             remote_host=_remote_host, remote_port=_remote_port,
             owner_wallet=_owner_wallet,
         )
@@ -626,7 +636,7 @@ async def run_cli() -> None:
             # policy, and includes it in active_surfaces(). Listeners + the
             # port-retry loop stay CLI-owned.
             runtime.register_surface(ws_bridge)
-            console.print(f"  [green]WebSocket server listening on ws://localhost:{DEFAULT_PORT}[/]")
+            console.print(f"  [green]WebSocket server listening on ws://localhost:{_local_port}[/]")
             if _remote_host:
                 _modes = ("owner+agent-self" if _owner_wallet else "agent-self")
                 console.print(
@@ -635,17 +645,17 @@ async def run_cli() -> None:
             break
         except OSError as exc:
             ws_bridge = None
-            if _attempt == 0:
+            if _attempt == 0 and not _port_configured:
                 # Try to find and kill the process holding the port
-                killed = _try_reclaim_port(DEFAULT_PORT)
+                killed = _try_reclaim_port(_local_port)
                 if killed:
-                    console.print(f"  [yellow]Reclaimed port {DEFAULT_PORT} from stale process (PID {killed})[/]")
+                    console.print(f"  [yellow]Reclaimed port {_local_port} from stale process (PID {killed})[/]")
                     await asyncio.sleep(0.5)
                     continue
             console.print(
                 f"  [red]WebSocket server failed to start: {exc}[/]\n"
-                f"  [dim]Port {DEFAULT_PORT} is in use. Find the process: "
-                f"netstat -ano | findstr {DEFAULT_PORT}[/]"
+                f"  [dim]Port {_local_port} is in use. Find the process: "
+                f"netstat -ano | findstr {_local_port}[/]"
             )
             break
 
