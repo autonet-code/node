@@ -84,6 +84,23 @@ KEY_LOCAL_ONLY_MESSAGES = frozenset({
     "secrets_config",
 })
 
+# Messages a STRANGER may send on the remote (auth-required) listener without
+# completing the owner/agent-self handshake, because they carry their OWN
+# authorization and are useless without it.
+#
+# ``service_request`` is the only one: a paying counterparty on another machine
+# is by construction not the daemon's owner and holds no agent key in this
+# daemon's fleet, so there is no handshake it could ever pass. What authorizes
+# it is the PAYMENT — ``_validate_service_payment`` fetches the on-chain
+# ServicePayment receipt, checks recipient == the serving agent and amount >=
+# the ask, and consumes the request_id against a persisted replay set. That is a
+# strictly stronger credential than a session login: it costs ATN per call.
+# See docs/services_market.md §3 ("authenticates the channel, validates
+# vouchers"). Nothing else is reachable from such a session.
+PAYMENT_AUTHORIZED_MESSAGES = frozenset({
+    "service_request",
+})
+
 # The secrets vault surface (owner-only, HUMAN-ONLY by construction: these
 # exist solely as WS handlers and are never registered in any agent tool
 # surface). Values are WRITE-ONLY — no handler ever returns one.
@@ -674,6 +691,14 @@ class WebSocketBridge:
                 "root": session.root_agent_id,
                 "requires_auth": not session.local,
             }}
+
+        # --- Payment-authorized stranger surface ---------------------------
+        # A cross-machine buyer cannot complete the handshake (not the owner,
+        # holds no agent key here) — its credential is the on-chain payment the
+        # gate verifies. Dispatch it before gate 2. See
+        # PAYMENT_AUTHORIZED_MESSAGES.
+        if msg_type in PAYMENT_AUTHORIZED_MESSAGES and not session.authed:
+            return await self._handle_service_request(msg, msg_id)
 
         # --- Gate 2: everything else requires an authed session ------------
         if not session.authed:
@@ -1328,6 +1353,12 @@ class WebSocketBridge:
             # so silently dropping the key published dead listings.
             backing_tool = (msg.get("backing_tool")
                             or msg.get("tool_digest") or "")
+            # The other backing kind (decision 2026-07-26): sell cognition
+            # off this daemon's own provider stack. {model, max_tokens_cap};
+            # the store refuses it alongside a backing_tool.
+            inference = msg.get("inference")
+            if not isinstance(inference, dict):
+                inference = None
             if not name:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'name' field"}
             try:
@@ -1340,6 +1371,12 @@ class WebSocketBridge:
                     backing_tool=backing_tool,
                     output_schema=msg.get("output_schema"),
                     endpoint_hint=msg.get("endpoint_hint", ""),
+                    # Display-plane only: a listing-card banner. Advisory
+                    # like endpoint_hint, so no validation beyond str
+                    # coercion — an unreachable URL degrades to the UI's
+                    # default colour banner.
+                    image_uri=str(msg.get("image_uri") or "").strip(),
+                    inference=inference,
                     version_of=msg.get("version_of"),
                 )
             except (ValueError, RuntimeError) as exc:
@@ -1361,7 +1398,11 @@ class WebSocketBridge:
                     "author": record.author,
                     "ask": record.ask,
                     "endpoint_hint": s.get("endpoint_hint", ""),
+                    "image_uri": s.get("image_uri", ""),
                     "backing_tool": record.backing_tool,
+                    # {} for a tool-backed service; {model, max_tokens_cap}
+                    # when the daemon sells its own inference.
+                    "inference": record.inference,
                     "retired": record.retired,
                     "version_of": s.get("version_of"),
                     "input_schema": s.get("input_schema", {}),
@@ -1407,14 +1448,20 @@ class WebSocketBridge:
                 digest = str(s.get("spec_digest") or "")
                 name = ""
                 description = ""
+                image_uri = ""
+                inference: dict[str, Any] = {}
                 owned = False
                 # Enrich from the local store when we happen to know the
                 # spec: a service authored elsewhere is an opaque digest
-                # until its spec is fetched (blob rail, not wired here).
+                # until its spec is fetched (blob rail, not wired here) —
+                # so its banner image stays empty and the UI falls back to
+                # the default colour banner.
                 rec = store.get(digest) if store is not None else None
                 if rec is not None:
                     name = rec.name
                     description = str(rec.spec.get("description") or "")
+                    image_uri = rec.image_uri
+                    inference = rec.inference
                     owned = True
                 if query:
                     hay = (f"{name} {description} {digest} "
@@ -1430,6 +1477,11 @@ class WebSocketBridge:
                     "active": s.get("active"),
                     "name": name or f"service {digest[:10]}",
                     "description": description,
+                    "image_uri": image_uri,
+                    # Only knowable for specs this daemon happens to hold —
+                    # a foreign digest stays an opaque listing until its
+                    # spec blob is fetched.
+                    "inference": inference,
                     "owned": owned,
                     "known_spec": rec is not None,
                 })
@@ -1600,6 +1652,13 @@ class WebSocketBridge:
 
         if msg_type == "service_request":
             return await self._handle_service_request(msg, msg_id)
+
+        # The CONSUMER side of the rail, for a human: buy ONE work item.
+        # `service_request` is what a paying counterparty sends US;
+        # `invoke_service` is what the owner's app sends to buy something —
+        # pay, dispatch, hand back the result plus a receipt.
+        if msg_type == "invoke_service":
+            return await self._handle_invoke_service(msg, msg_id)
 
         # Voice service control
         if msg_type == "voice_start":
@@ -3410,6 +3469,11 @@ class WebSocketBridge:
         the OWNER chose to sell, so dispatch goes through
         ``runtime.tool_store.call`` with ``caller_id=None`` — the sale is
         the owner's sanction, not a lineage-scoped agent call.
+
+        A service whose spec declares an ``inference`` block is served
+        instead by this daemon's OWN provider stack (decision 2026-07-26)
+        — no backing tool required or consulted. See
+        ``_serve_inference_request``.
         """
         spec_digest = msg.get("spec_digest", "")
         request_id = msg.get("request_id", "")
@@ -3439,6 +3503,18 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": False,
                     "error": f"Payment validation failed: "
                              f"{gate.get('reason', 'unknown')}"}
+
+        # Inference-backed: the work item is a chat completion served off
+        # this daemon's provider stack. Payment already cleared above —
+        # the gate is backing-agnostic on purpose.
+        if record.inference:
+            result = await self._serve_inference_request(record, args)
+            ok = "error" not in result
+            self.runtime.service_store.record_request(
+                spec_digest, request_id, client, ok=ok,
+                amount=amount, token=token)
+            return {"msg_id": msg_id, "ok": ok,
+                    "result": {"request_id": request_id, **result}}
 
         backing = record.backing_tool
         if not backing:
@@ -3470,6 +3546,404 @@ class WebSocketBridge:
                     "result": {"request_id": request_id, **result}}
         return {"msg_id": msg_id, "ok": True,
                 "result": {"request_id": request_id, **result}}
+
+    # ------------------------------------------------------------------
+    # Consumer side: the owner buys one work item (invoke_service)
+    # ------------------------------------------------------------------
+
+    async def _handle_invoke_service(
+        self, msg: dict[str, Any], msg_id: Any
+    ) -> dict[str, Any]:
+        """OWNER surface: purchase ONE work item from a service.
+
+        Wire contract (the app is built against exactly this):
+
+            request  {type: "invoke_service", digest, args}
+            success  {ok: true, result: {request_id, receipt, output}}
+            failure  {ok: false, error: "<human-readable>"}
+
+        ``receipt`` is ``{paid, degraded, tx_hash, amount, token,
+        recipient}`` — the buyer's proof of what was spent, and honest
+        about the local-dev case where nothing was (``paid=false,
+        degraded=true``).
+
+        Two resolution paths:
+
+          - **Local digest** (in ``service_store``): pay, then dispatch
+            through the SAME ``_handle_service_request`` a remote buyer
+            would hit, carrying the real payment proof. The gate then
+            verifies the payment we just made, so the owner buying from
+            their own daemon exercises the production path rather than a
+            private shortcut. Works for tool- and inference-backed alike.
+          - **Foreign digest**: scan the on-chain registry for the
+            digest's provider + ask, resolve their endpoint, pay, and
+            call ``service_client.request_service`` cross-daemon. With no
+            chain configured a foreign digest is unresolvable — there is
+            nowhere to look up who serves it — so that fails loudly.
+
+        Spend signs with the daemon OWNER key (``autonet.private_key``),
+        the same doctrine as the ``service`` provider type: buying work
+        for the fleet is an owner act.
+        """
+        digest = str(msg.get("digest") or "").strip()
+        args = msg.get("args")
+        if args is None:
+            args = {}
+        if not digest:
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "Missing 'digest' field"}
+        if not isinstance(args, dict):
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "'args' must be an object"}
+
+        record = self.runtime.service_store.get(digest)
+        if record is not None and record.retired:
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"Service {record.name or digest[:16]} is retired "
+                             "and no longer offered."}
+        if record is None:
+            return await self._invoke_foreign_service(digest, args, msg_id)
+        return await self._invoke_local_service(record, args, msg_id)
+
+    @staticmethod
+    async def _offload(factory: Any) -> Any:
+        """Run a chain coroutine on a worker thread.
+
+        ``on_chain.py``'s methods are ``async def`` but synchronous inside
+        — web3 HTTP, ``estimate_gas``, and a
+        ``wait_for_transaction_receipt(timeout=120)``. Awaited directly
+        they occupy the event loop for the whole tx and the websocket
+        keepalive starves (the same failure mode the
+        ``owner_binding_status`` chain reads were moved off the loop to
+        fix). ``factory`` is a zero-arg callable returning the coroutine,
+        called INSIDE the thread so the coroutine is never bound to the
+        wrong loop.
+        """
+        def _run() -> Any:
+            return asyncio.run(factory())
+        return await asyncio.to_thread(_run)
+
+    def _owner_signing_key(self) -> str:
+        autonet_cfg = getattr(self.runtime._config, "rpb", None)
+        return str(getattr(autonet_cfg, "private_key", "") or "").strip()
+
+    def _owner_client_address(self) -> str:
+        autonet_cfg = getattr(self.runtime._config, "rpb", None)
+        return str(getattr(autonet_cfg, "owner_wallet", "") or "").strip()
+
+    @staticmethod
+    def _receipt(
+        *, paid: bool, degraded: bool, tx_hash: str | None,
+        amount: Any, token: str, recipient: str,
+    ) -> dict[str, Any]:
+        """The buyer's receipt, in the exact shape the app parses."""
+        return {
+            "paid": bool(paid),
+            "degraded": bool(degraded),
+            "tx_hash": tx_hash or None,
+            "amount": str(amount if amount is not None else ""),
+            "token": str(token or ""),
+            "recipient": str(recipient or ""),
+        }
+
+    async def _pay_for_invoke(
+        self, *, recipient: str, amount: int, request_id: str,
+    ) -> dict[str, Any]:
+        """Pay one work item's ask with the owner key.
+
+        Three outcomes, all of which the receipt distinguishes:
+
+          - ``{"degraded": True}`` — no chain configured, so nothing was
+            paid (LOUD warning; the provider-side gate degrades open in
+            exactly the same condition, which is what makes a local demo
+            possible).
+          - ``{"free": True}`` — chain is up and the ask is zero, so
+            nothing was OWED. Not a degrade: the price was zero.
+          - ``{"tx_hash": ..., "request_id": ...}`` — really paid.
+
+        Or ``{"error": ...}``, which the caller turns into an abort.
+        """
+        from . import service_client
+        from .on_chain import OnChainService
+
+        config = self.runtime._config.rpb
+        try:
+            chain_up = bool(OnChainService(config).available)
+        except Exception:                                   # noqa: BLE001
+            chain_up = False
+        if not chain_up:
+            log.warning(
+                "INVOKE_SERVICE PAYMENT SKIPPED: no chain config "
+                "(substrate_address/rpc_url unset) — buying a work item from "
+                "%s WITHOUT paying. The provider gate degrades open in the "
+                "same condition; local-dev only, never against a real "
+                "counterparty.", (recipient or "(unknown)")[:10])
+            return {"degraded": True}
+
+        if amount <= 0:
+            # A zero ask is a giveaway; payForService rejects zero anyway.
+            log.info("invoke_service: ask is 0 — no payment needed")
+            return {"free": True}
+
+        key = self._owner_signing_key()
+        if not key:
+            return {"error": "Payment failed: chain is configured but this "
+                             "daemon holds no owner signing key "
+                             "(autonet.private_key) — buying a service is an "
+                             "owner-level act."}
+        if not recipient:
+            return {"error": "Payment failed: could not resolve the service "
+                             "provider's payment address."}
+        paid = await self._offload(lambda: service_client.pay_for_service(
+            config, key, recipient, amount, request_id=request_id))
+        if paid.get("error"):
+            return {"error": f"Payment failed: {paid['error']}"}
+        return {"tx_hash": str(paid.get("tx_hash") or ""),
+                "request_id": str(paid.get("request_id") or request_id)}
+
+    async def _invoke_local_service(
+        self, record: Any, args: dict[str, Any], msg_id: Any
+    ) -> dict[str, Any]:
+        """Buy from a service this daemon publishes.
+
+        Pay first, then re-enter ``_handle_service_request`` with a real
+        ``service_request`` frame. Nothing about the dispatch is special-
+        cased for the owner: the payment gate runs, the request lands on
+        the provider log, and a tool- or inference-backing is chosen by
+        the same code a remote buyer drives.
+        """
+        from . import service_client
+
+        ask = record.ask
+        token = str(ask.get("token") or "")
+        amount_raw = ask.get("amount", "")
+        try:
+            amount = int(str(amount_raw or "0") or "0")
+        except (TypeError, ValueError):
+            amount = 0
+        # Same recipient resolution the gate verifies against: the spec's
+        # author_pubkey, stamped at registration. Fall back to this
+        # daemon's own owner wallet — for a locally published service
+        # that IS the seller.
+        recipient = (str(record.spec.get("author_pubkey") or "")
+                     or self._owner_client_address())
+
+        if not record.inference and not record.backing_tool:
+            # Answer before spending: an unfulfillable listing must not
+            # take the buyer's money and then fail at dispatch.
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"Service {record.name or record.digest[:16]} has "
+                             "no backing implementation — nothing to buy."}
+
+        request_id = service_client.new_request_id()
+        payment = await self._pay_for_invoke(
+            recipient=recipient, amount=amount, request_id=request_id)
+        if payment.get("error"):
+            return {"msg_id": msg_id, "ok": False, "error": payment["error"]}
+        tx_hash = str(payment.get("tx_hash") or "")
+        request_id = str(payment.get("request_id") or request_id)
+        receipt = self._receipt(
+            paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
+            tx_hash=tx_hash, amount=amount_raw, token=token,
+            recipient=recipient)
+
+        frame: dict[str, Any] = {
+            "spec_digest": record.digest,
+            "request_id": request_id,
+            "args": args,
+            "client": self._owner_client_address() or "owner",
+        }
+        if tx_hash:
+            frame["tx_hash"] = tx_hash
+        reply = await self._handle_service_request(frame, msg_id)
+        return self._invoke_result(reply, request_id, receipt, msg_id)
+
+    async def _invoke_foreign_service(
+        self, digest: str, args: dict[str, Any], msg_id: Any
+    ) -> dict[str, Any]:
+        """Buy from a service published by ANOTHER daemon.
+
+        The digest alone does not say who serves it, so the provider is
+        found by scanning the on-chain registry. Without chain config
+        there is no registry to scan and no endpoint to dial, which is a
+        hard failure rather than a degrade — unlike the local path there
+        is no counterparty to reach at all.
+        """
+        from . import service_client
+        from .on_chain import ServiceMarketClient
+
+        config = self.runtime._config.rpb
+        smc = ServiceMarketClient(config)
+        if not smc.registry_available:
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"Unknown service digest: {digest[:16]} — it is "
+                             "not published by this daemon, and the "
+                             "ServiceRegistry is not configured here, so a "
+                             "foreign provider cannot be resolved."}
+        try:
+            listings = await self._offload(smc.list_services)
+        except Exception as exc:                            # noqa: BLE001
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"ServiceRegistry read failed: {exc}"}
+
+        target = service_client.normalize_digest(digest)
+        match = None
+        for s in listings:
+            if service_client.normalize_digest(
+                    str(s.get("spec_digest") or "")) == target:
+                match = s
+                break
+        if match is None:
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"Unknown service digest: {digest[:16]} — not in "
+                             "this daemon's store and not registered on chain."}
+        if not match.get("active"):
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"Service {digest[:16]} is retired on chain — "
+                             "nothing to buy."}
+
+        provider_address = str(match.get("provider") or "")
+        try:
+            amount = int(str(match.get("ask_amount") or "0") or "0")
+        except (TypeError, ValueError):
+            amount = 0
+
+        request_id = service_client.new_request_id()
+        payment = await self._pay_for_invoke(
+            recipient=provider_address, amount=amount, request_id=request_id)
+        if payment.get("error"):
+            return {"msg_id": msg_id, "ok": False, "error": payment["error"]}
+        tx_hash = str(payment.get("tx_hash") or "")
+        request_id = str(payment.get("request_id") or request_id)
+        receipt = self._receipt(
+            paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
+            tx_hash=tx_hash, amount=amount, token="ATN",
+            recipient=provider_address)
+
+        # Resolve the endpoint off the loop (blocking web3 read) and hand it
+        # to request_service so it doesn't read the chain itself; the dial
+        # and the wait are genuine async I/O and stay on the loop.
+        from .on_chain import OnChainService
+        try:
+            endpoint = await self._offload(
+                lambda: OnChainService(config).get_agent_endpoint(
+                    provider_address))
+        except Exception as exc:                            # noqa: BLE001
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"Could not resolve the provider's endpoint: {exc}",
+                    "result": {"request_id": request_id, "receipt": receipt}}
+
+        reply = await service_client.request_service(
+            config, provider_address, digest, args,
+            tx_hash=tx_hash, request_id=request_id,
+            client_address=self._owner_client_address(),
+            endpoint=str(endpoint or ""),
+        )
+        return self._invoke_result(
+            {"ok": bool(reply.get("ok")), "result": reply.get("result"),
+             "error": reply.get("error")},
+            request_id, receipt, msg_id)
+
+    def _invoke_result(
+        self, reply: dict[str, Any], request_id: str,
+        receipt: dict[str, Any], msg_id: Any,
+    ) -> dict[str, Any]:
+        """Fold a dispatch reply into the invoke_service envelope.
+
+        The receipt travels on the FAILURE path too: money may already
+        have moved, and hiding that from the buyer would be the one
+        genuinely dishonest thing this handler could do.
+        """
+        inner = reply.get("result")
+        inner = inner if isinstance(inner, dict) else {}
+        if not reply.get("ok"):
+            detail = (reply.get("error")
+                      or inner.get("error")
+                      or "the provider returned not-ok")
+            return {"msg_id": msg_id, "ok": False,
+                    "error": str(detail),
+                    "result": {"request_id": request_id, "receipt": receipt}}
+        # Strip the transport's echoed request_id out of the payload so
+        # `output` is just the service's own result object.
+        output = {k: v for k, v in inner.items() if k != "request_id"}
+        return {"msg_id": msg_id, "ok": True, "result": {
+            "request_id": request_id,
+            "receipt": receipt,
+            "output": output,
+        }}
+
+    async def _serve_inference_request(
+        self, record: Any, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Serve a paid work item off this daemon's own provider stack.
+
+        Decision 2026-07-26 (docs/services_market.md): a service may
+        declare an inference backing instead of a backing tool. The work
+        item is ``{messages, max_tokens?}``; the reply is
+        ``{content, model, usage}``.
+
+        This is the SAME fulfillment machinery the sponsor rail uses to
+        serve a dependent's inference over p2p — ``AutonetBridge.
+        _resolve_sponsor_provider`` picks the provider (runtime provider
+        manager first, direct-from-credentials fallback) and we call
+        ``provider.send`` with the same frame ``providers/rpb.py`` puts
+        on the wire. The difference is only the authorization basis:
+        the sponsor rail asks "is this a bound dependent with grant
+        left?", this rail asks "did they pay?" — and the payment gate
+        already answered that before we got here. No budget metering:
+        the ask is the price and the token cap is the ceiling.
+        """
+        messages = args.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return {"error": "inference service requires a non-empty "
+                             "'messages' list in args"}
+
+        cap = record.max_tokens_cap
+        requested = args.get("max_tokens")
+        try:
+            max_tokens = int(requested) if requested not in (None, "") else cap
+        except (TypeError, ValueError):
+            max_tokens = cap
+        # Clamp: the cap is what the ask was priced against, and a buyer
+        # asking for more than they paid for doesn't get it.
+        max_tokens = max(1, min(max_tokens, cap))
+
+        model = str(record.inference.get("model") or "")
+        autonet = getattr(self.runtime, "autonet", None)
+        if autonet is None:
+            return {"error": "daemon has no provider stack wired"}
+        try:
+            provider = autonet._resolve_sponsor_provider(autonet.config, model)
+        except Exception as exc:                            # noqa: BLE001
+            log.warning("inference service provider resolution failed: %s", exc)
+            return {"error": f"provider resolution failed: {exc}"}
+        if provider is None:
+            return {"error": f"no provider configured for model {model or 'default'}"}
+
+        try:
+            resp = await provider.send(
+                messages=messages,
+                system=str(args.get("system") or ""),
+                # Empty model => the provider's own default resolution.
+                model=model,
+                max_tokens=max_tokens,
+                temperature=float(args.get("temperature") or 0.0),
+            )
+        except Exception as exc:                            # noqa: BLE001
+            log.warning("inference service dispatch failed: %s", exc)
+            return {"error": f"inference failed: {exc}"}
+
+        usage = getattr(resp, "usage", None)
+        return {
+            "content": getattr(resp, "text", "") or "",
+            "model": getattr(resp, "model", "") or model,
+            "usage": {
+                "input_tokens": getattr(usage, "input_tokens", 0) if usage else 0,
+                "output_tokens": getattr(usage, "output_tokens", 0) if usage else 0,
+            },
+            "stop_reason": getattr(resp, "stop_reason", "") or "end_turn",
+            "max_tokens": max_tokens,
+        }
 
     async def _validate_service_payment(
         self, request: dict[str, Any], record: Any
@@ -3538,12 +4012,18 @@ class WebSocketBridge:
                 return {"ok": False,
                         "reason": "service has no on-chain provider address "
                                   "(author_pubkey) to verify payment against"}
-            res = await oc.verify_service_payment(
+            # Off-loop: verify_service_payment is `async def` but synchronous
+            # inside (web3 HTTP receipt fetch + log decode). Awaited directly it
+            # occupies the event loop for the whole read, and a buyer's
+            # connection — plus every other client of this daemon — starves on
+            # the websocket keepalive and gets dropped mid-request. Same fix
+            # `invoke_service` and `owner_binding_status` already carry.
+            res = await self._offload(lambda: oc.verify_service_payment(
                 request_id=request_id,
                 recipient=recipient,
                 min_amount=ask_amount,
                 tx_hash=tx_hash,
-            )
+            ))
             if not res.get("verified"):
                 return {"ok": False, "reason": res.get("reason", "unverified")}
             # Consume the request_id AFTER a positive verify (replay guard).
@@ -3562,7 +4042,10 @@ class WebSocketBridge:
             if not smc.channel_available:
                 return {"ok": False,
                         "reason": "PaymentChannel not configured on this daemon"}
-            res = await smc.verify_voucher(cid, cum, signature)
+            # Off-loop for the same reason as the direct path above: the
+            # voucher check reads on-chain channel state synchronously.
+            res = await self._offload(
+                lambda: smc.verify_voucher(cid, cum, signature))
             if not res.get("valid"):
                 return {"ok": False, "reason": res.get("reason", "invalid voucher")}
             # The channel's provider must be the serving agent.

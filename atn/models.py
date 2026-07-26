@@ -261,6 +261,19 @@ class AgentDefinition:
                                               # provider="rpb" inference to. Empty =
                                               # any is_sponsor peer offering the model.
 
+    # --- Marketplace inference binding (docs/services_market.md,
+    #     ratified 2026-07-26: employer-chooses-the-tool) ---
+    service_provider: dict[str, Any] | None = None
+    # ``{"provider_address": "0x...", "spec_digest": "<sha256 hex>"}`` — the
+    # marketplace inference service that backs THIS agent's provider. Set ONLY
+    # by the agent's PARENT (create_agent / update_agent): an agent must never
+    # switch its own substrate, so there is no self-set surface at all. When
+    # present, provider resolution builds a ServiceProvider from these two
+    # facts instead of reading the daemon-level ``providers.service`` config,
+    # and each call is paid from THIS agent's OWN wallet key (spend authority
+    # is literal token custody — the parent funds the child's wallet on-chain
+    # and scrutinizes its output from outside the purchased substrate).
+
     @property
     def model(self) -> str | None:
         """Derive the model name for display purposes.
@@ -291,6 +304,43 @@ class AgentDefinition:
     @staticmethod
     def generate_id() -> str:
         return uuid4().hex[:8]
+
+
+def normalize_service_binding(raw: Any) -> dict[str, str]:
+    """Validate + canonicalize a per-agent service-provider binding.
+
+    Accepts the ``{provider_address, spec_digest}`` mapping an agent's PARENT
+    supplies (docs/services_market.md, ratified 2026-07-26) and returns it with
+    exactly those two keys, lowercased digest and checksum-agnostic address.
+
+    Raises ``ValueError`` with a caller-facing message on anything malformed —
+    a half-specified binding is worse than none: it would silently fall back to
+    the daemon-level purchase and spend the OWNER's money instead of the
+    child's.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "service_provider must be an object with 'provider_address' and "
+            "'spec_digest'")
+    provider_address = str(
+        raw.get("provider_address") or raw.get("provider") or "").strip()
+    spec_digest = str(
+        raw.get("spec_digest") or raw.get("service_digest") or "").strip().lower()
+    if not provider_address or not spec_digest:
+        raise ValueError(
+            "service_provider needs BOTH 'provider_address' (the serving "
+            "agent's 0x) and 'spec_digest' (the service spec bought) — a "
+            "partial binding would silently spend the daemon owner's wallet "
+            "instead of this agent's.")
+    if not (provider_address.startswith("0x") and len(provider_address) == 42):
+        raise ValueError(
+            f"service_provider.provider_address must be a 0x address "
+            f"(42 chars), got {provider_address!r}")
+    bare = spec_digest[2:] if spec_digest.startswith("0x") else spec_digest
+    if len(bare) != 64 or any(c not in "0123456789abcdef" for c in bare):
+        raise ValueError(
+            "service_provider.spec_digest must be a 64-char sha256 hex digest")
+    return {"provider_address": provider_address, "spec_digest": bare}
 
 
 # ---------------------------------------------------------------------------

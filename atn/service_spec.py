@@ -34,6 +34,11 @@ _REQUIRED_FIELDS = ("kind", "name", "description", "input_schema", "author", "as
 # Ask "unit" vocabulary (advisory; pricing policy is the spec's business).
 _ASK_UNITS = ("per_item", "per_minute", "per_token", "per_call", "flat")
 
+# Default output-token ceiling for an inference-backed service when the
+# author names a model but no cap. Bounds the provider's own upstream
+# spend per paid call (the ask is priced against the cap).
+DEFAULT_MAX_TOKENS_CAP = 4096
+
 
 def build_service_spec(
     *,
@@ -45,6 +50,8 @@ def build_service_spec(
     output_schema: Optional[Dict[str, Any]] = None,
     author_pubkey: str = "",
     endpoint_hint: str = "",
+    image_uri: str = "",
+    inference: Optional[Dict[str, Any]] = None,
     version_of: Optional[str] = None,
     created_ts: int = 0,
 ) -> Dict[str, Any]:
@@ -53,6 +60,20 @@ def build_service_spec(
     Raises ValueError with all problems joined if validation fails.
     ``created_ts`` is caller-supplied (no wall-clock reads here; the
     store stamps it).
+
+    ``image_uri`` is display-plane only (a listing card banner), like
+    ``endpoint_hint``: advisory, unvalidated, inside the signed payload
+    so it cannot be swapped after signing, and deliberately NOT part of
+    ``service_embedding_text`` — presentation is not semantics.
+
+    ``inference`` (``{model, max_tokens_cap}``, decision 2026-07-26)
+    declares that the service is backed by the provider daemon's OWN
+    provider stack rather than a backing tool: a paid request is a chat
+    completion. It sits INSIDE the signed payload (the served model and
+    the token ceiling are commitments to the buyer, so they must not be
+    swappable post-signature) but, like ``image_uri``, is NOT part of
+    ``service_embedding_text`` — the name/description carry the
+    semantics, a model id is plumbing.
     """
     spec: Dict[str, Any] = {
         "kind": SERVICE_SPEC_KIND,
@@ -62,6 +83,7 @@ def build_service_spec(
         "author": author,
         "ask": ask,
         "endpoint_hint": endpoint_hint,
+        "image_uri": image_uri,
         "version_of": version_of,
         "created_ts": int(created_ts),
     }
@@ -69,6 +91,8 @@ def build_service_spec(
         spec["output_schema"] = output_schema
     if author_pubkey:
         spec["author_pubkey"] = author_pubkey
+    if inference is not None:
+        spec["inference"] = normalize_inference(inference)
 
     errors = validate_service_spec(spec)
     if errors:
@@ -108,7 +132,49 @@ def validate_service_spec(payload: Dict[str, Any]) -> List[str]:
     if version_of is not None and not isinstance(version_of, str):
         errors.append("version_of must be a digest string or null")
 
+    inference = payload.get("inference")
+    if inference is not None:
+        errors.extend(validate_inference(inference))
+
     return errors
+
+
+def validate_inference(inference: Any) -> List[str]:
+    """Shape-check an ``inference`` block: ``{model, max_tokens_cap}``.
+
+    ``model`` must be a non-empty string (the served model is a
+    commitment to the buyer, not a daemon-local default), and
+    ``max_tokens_cap`` a positive int (the ceiling the provider clamps
+    every request to)."""
+    errors: List[str] = []
+    if not isinstance(inference, dict):
+        return ["inference must be a dict of {model, max_tokens_cap}"]
+    model = inference.get("model")
+    if not model or not isinstance(model, str):
+        errors.append("inference.model must be a non-empty model-id string")
+    cap = inference.get("max_tokens_cap", DEFAULT_MAX_TOKENS_CAP)
+    if isinstance(cap, bool) or not isinstance(cap, int):
+        errors.append("inference.max_tokens_cap must be a positive int")
+    elif cap <= 0:
+        errors.append("inference.max_tokens_cap must be a positive int")
+    return errors
+
+
+def normalize_inference(inference: Dict[str, Any]) -> Dict[str, Any]:
+    """Canonicalize an inference block: exactly two keys, cap defaulted.
+
+    Keeping the shape closed means the signed bytes (and so the digest)
+    don't drift on incidental extra keys a caller happened to pass."""
+    model = inference.get("model")
+    cap = inference.get("max_tokens_cap", DEFAULT_MAX_TOKENS_CAP)
+    if cap in (None, ""):
+        cap = DEFAULT_MAX_TOKENS_CAP
+    out: Dict[str, Any] = {"model": model, "max_tokens_cap": cap}
+    if isinstance(model, str):
+        out["model"] = model.strip()
+    if isinstance(cap, int) and not isinstance(cap, bool):
+        out["max_tokens_cap"] = int(cap)
+    return out
 
 
 def _validate_ask(ask: Any) -> List[str]:

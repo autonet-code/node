@@ -223,6 +223,15 @@ class ProviderManager:
             "auth_type": "rpb",
             "models": [],  # Dynamically discovered
         },
+        "service": {
+            "name": "Marketplace Service",
+            "description": (
+                "Inference bought off the services market: pay-per-call in ATN "
+                "to another agent's daemon (docs/services_market.md)."
+            ),
+            "auth_type": "service",
+            "models": [],  # The served model is the seller's declaration
+        },
         "substrate": {
             "name": "World-Model Substrate",
             "description": "Substrate retrieval + local LLM render. Phase 6 of native integration.",
@@ -271,6 +280,15 @@ class ProviderManager:
         # checked first; falls back to the direct reference.
         self._world_service: Any = None
         self._world_service_resolver: Any = None
+        # Per-agent service binding (docs/services_market.md, 2026-07-26):
+        # a bound child pays for its own inference, so building its provider
+        # needs the child's OWN wallet key. The manager has no registry
+        # reference (it is constructed before/alongside one), so the runtime
+        # injects a resolver — same lazy-injection pattern as _world_service.
+        # Signature: (agent_id) -> private_key_hex | "" ; and
+        # (agent_id) -> 0x address | "" for the client address.
+        self._agent_key_resolver: Any = None
+        self._agent_address_resolver: Any = None
         # Cache session stats when providers are removed, so the frontend
         # can still fetch stats after execution completes.
         self._cached_session_stats: dict[str, dict[str, Any]] = {}
@@ -312,6 +330,24 @@ class ProviderManager:
     def resolve_provider_with_fallback(self, defn: AgentDefinition) -> Any:
         providers = defn.provider
         model = defn.cognitive_model or self._config.orchestrator.model or "claude-sonnet-4-6"
+
+        # Per-agent marketplace binding (docs/services_market.md, ratified
+        # 2026-07-26: employer-chooses-the-tool). A binding is a PARENT's
+        # decision about which substrate this agent thinks on, so it OVERRIDES
+        # whatever provider/model the definition otherwise names — it is not
+        # one candidate in a fallback chain. There is deliberately no fallback
+        # off a binding either: silently falling back to a local provider would
+        # hand the agent a substrate its parent did not buy, and silently
+        # falling back to the daemon-level purchase would spend the OWNER's
+        # wallet instead of the child's.
+        # Require a real dict: the field is normalized to
+        # {provider_address, spec_digest} on every write path, and insisting on
+        # the type keeps a stray truthy value (a test double, a half-migrated
+        # definition) from silently rerouting an agent's cognition.
+        binding = getattr(defn, "service_provider", None)
+        if isinstance(binding, dict) and binding:
+            return self._build_service_provider(
+                model, binding=binding, agent_id=defn.id)
 
         # For the rpb (dependent) provider, the agent routes inference to a
         # sponsor on another daemon.
@@ -408,6 +444,8 @@ class ProviderManager:
                 p2p_host=self._p2p_host,
                 sponsor_address=sponsor_address,
             )
+        if provider_name == "service":
+            return self._build_service_provider(model)
         if provider_name == "substrate":
             return self._build_substrate_provider(model, agent_id)
         if provider_name in self._custom_providers:
@@ -421,6 +459,118 @@ class ProviderManager:
                     default_model=model,
                 )
         raise ProviderError(f"Unknown provider: {provider_name}")
+
+    def _build_service_provider(
+        self, model: str, *,
+        binding: dict[str, Any] | None = None,
+        agent_id: str = "",
+    ) -> Any:
+        """Build the ServiceProvider for a purchased marketplace service.
+
+        Consumer side of docs/services_market.md (Decision 2026-07-26): a
+        purchased marketplace inference service backs an agent's provider.
+        Two sources for the same two facts, differing in WHOSE KEY PAYS:
+
+        **Daemon-level (owner) purchase** — ``binding=None``. Read from
+        config.yaml; the payment is signed with the daemon OWNER key
+        (``autonet.private_key``), matching the sponsor pipe's
+        dependent-is-the-owner-wallet doctrine:
+
+            providers:
+              service:
+                provider_address: "0x..."       # the serving agent
+                spec_digest: "<sha256 hex>"     # the service spec bought
+                default_model: "..."            # optional display label
+
+        **Per-agent binding** — ``binding={provider_address, spec_digest}``
+        off ``AgentDefinition.service_provider``, set only by the agent's
+        PARENT. The payment is signed with the BOUND AGENT'S OWN wallet key,
+        resolved through ``_agent_key_resolver``: a parent may buy a service
+        and provision a child on it, and the child spends its own funded
+        wallet. Spend authority is literal token custody — the parent controls
+        the tap by controlling the refills, and never has to trust the child
+        to honour a limit.
+        """
+        from ..providers.service import ServiceProvider
+
+        pconfig = self._config.providers.get("service")
+        extra = (pconfig.extra if pconfig else {}) or {}
+
+        if binding:
+            provider_address = str(binding.get("provider_address") or "").strip()
+            spec_digest = str(binding.get("spec_digest") or "").strip()
+            if not provider_address or not spec_digest:
+                raise ProviderError(
+                    f"agent '{agent_id}' has a malformed service_provider "
+                    f"binding: both 'provider_address' and 'spec_digest' are "
+                    f"required (got {binding!r})."
+                )
+            signing_key = self._resolve_agent_key(agent_id)
+            client_address = self._resolve_agent_address(agent_id)
+            return ServiceProvider(
+                config=self._config.rpb,
+                provider_address=provider_address,
+                spec_digest=spec_digest,
+                # A binding carries no model label of its own: the seller
+                # declares the served model, and an empty value is legitimate.
+                model=model or "",
+                signing_key=signing_key,
+                client_address=client_address,
+                timeout=float(extra.get("timeout") or 0.0),
+                payer_kind="agent",
+                payer_id=agent_id,
+            )
+
+        provider_address = str(
+            extra.get("provider_address")
+            or extra.get("provider")
+            or ""
+        ).strip()
+        spec_digest = str(
+            extra.get("spec_digest") or extra.get("service_digest") or ""
+        ).strip()
+        if not provider_address or not spec_digest:
+            raise ProviderError(
+                "service provider needs both 'provider_address' and "
+                "'spec_digest' under providers.service in config.yaml — "
+                "it names the specific purchased service to buy inference from."
+            )
+        autonet = self._config.autonet
+        return ServiceProvider(
+            config=self._config.rpb,
+            provider_address=provider_address,
+            spec_digest=spec_digest,
+            model=model or (pconfig.default_model if pconfig else ""),
+            owner_private_key=(getattr(autonet, "private_key", "") or "").strip(),
+            client_address=(getattr(autonet, "owner_wallet", "") or "").strip(),
+            timeout=float(extra.get("timeout") or 0.0),
+            payer_kind="owner",
+        )
+
+    def _resolve_agent_key(self, agent_id: str) -> str:
+        """The bound agent's own wallet key, via the runtime-injected resolver.
+
+        Returns "" when unavailable — the provider then fails loud at the
+        payment step (with chain configured) or degrades open (without), which
+        is the same honest-degradation contract the owner path has.
+        """
+        if not agent_id or self._agent_key_resolver is None:
+            return ""
+        try:
+            return str(self._agent_key_resolver(agent_id) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("agent key resolver failed for %s: %s", agent_id, exc)
+            return ""
+
+    def _resolve_agent_address(self, agent_id: str) -> str:
+        """The bound agent's own 0x address (the payer label on the wire)."""
+        if not agent_id or self._agent_address_resolver is None:
+            return ""
+        try:
+            return str(self._agent_address_resolver(agent_id) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("agent address resolver failed for %s: %s", agent_id, exc)
+            return ""
 
     def _build_substrate_provider(self, model: str, agent_id: str) -> Any:
         """Build the SubstrateProvider composite.
@@ -615,6 +765,13 @@ class ProviderManager:
                         default_model=pconfig.default_model,
                         base_url=pconfig.base_url,
                     )
+                elif name == "service":
+                    # Marketplace inference (docs/services_market.md). Config
+                    # is provider_address + spec_digest, no key/base_url — a
+                    # misconfigured entry raises ProviderError and is skipped
+                    # by the handler below like any other bad provider.
+                    provider = self._build_service_provider(
+                        pconfig.default_model)
                 elif name in ("gemini", "openai") or pconfig.base_url:
                     defaults = self._PROVIDER_DEFAULTS.get(name, {})
                     base_url = pconfig.base_url or defaults.get("base_url", "")
@@ -810,6 +967,15 @@ class ProviderManager:
                 configured = True
             elif info["auth_type"] == "api_key":
                 configured = bool(self._resolve_api_key(pid))
+            elif info["auth_type"] == "service":
+                # Configured means the purchase is named: which agent serves
+                # it, and which spec was bought.
+                _sp = self._config.providers.get(pid)
+                _extra = (_sp.extra if _sp else {}) or {}
+                configured = bool(
+                    str(_extra.get("provider_address") or "").strip()
+                    and str(_extra.get("spec_digest") or "").strip()
+                )
             else:
                 configured = False
 
@@ -916,6 +1082,21 @@ class ProviderManager:
                 raise ValueError("Cannot connect to Ollama at localhost:11434. Is it running?")
             self._hot_register_provider(provider_id, "")
             return {"status": "ok", "provider": provider_id, "models": models}
+
+        elif info["auth_type"] == "service":
+            # No credential to store: the purchase is named in config.yaml
+            # (providers.service.provider_address / .spec_digest). Build it so
+            # a misconfiguration surfaces here rather than at first completion.
+            provider = self._build_service_provider("")
+            cognitive = self._executors.get(StepType.COGNITIVE)
+            if isinstance(cognitive, CognitiveStepExecutor):
+                cognitive.register_provider(provider)
+            return {
+                "status": "ok",
+                "provider": provider_id,
+                "provider_address": provider.provider_address,
+                "spec_digest": provider.spec_digest,
+            }
 
         elif info["auth_type"] == "bridge":
             # Auto-install bridge dependencies if missing

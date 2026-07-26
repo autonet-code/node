@@ -185,6 +185,38 @@ _TOOLS: list[ToolDefinition] = [
                 },
                 "expose_as_tool": {"type": "boolean", "description": "Expose pipeline agent as a callable tool."},
                 "tool_input_schema": {"type": "object", "description": "Custom JSON Schema for the tool's input."},
+                "provider": {
+                    "type": "string",
+                    "description": (
+                        "Explicit provider for this agent (e.g. 'ollama', "
+                        "'anthropic', 'rpb'). Set after 'model', so it wins "
+                        "when both are given."
+                    ),
+                },
+                "service_provider": {
+                    "type": ["object", "null"],
+                    "description": (
+                        "Bind this agent's inference to a marketplace service "
+                        "you bought — the agent then thinks on that substrate "
+                        "and pays each call from ITS OWN wallet (fund it "
+                        "on-chain first). PARENT-ONLY: you may set this on your "
+                        "DIRECT CHILDREN, never on yourself. Pass null to "
+                        "unbind. Choosing an agent's substrate is the "
+                        "employer's call, so an agent can never set or change "
+                        "its own."
+                    ),
+                    "properties": {
+                        "provider_address": {
+                            "type": "string",
+                            "description": "The serving agent's 0x address.",
+                        },
+                        "spec_digest": {
+                            "type": "string",
+                            "description": "sha256 digest of the service spec bought.",
+                        },
+                    },
+                    "required": ["provider_address", "spec_digest"],
+                },
             },
             "required": ["agent_id"],
         },
@@ -263,6 +295,28 @@ _TOOLS: list[ToolDefinition] = [
                         "subtree's root budget (recommended for normal sub-agents)."
                     ),
                     "additionalProperties": {"type": "integer"},
+                },
+                "service_provider": {
+                    "type": "object",
+                    "description": (
+                        "Bind this new child's inference to a marketplace "
+                        "service you bought: it thinks on that substrate and "
+                        "pays each call from ITS OWN wallet, which you fund "
+                        "on-chain. Overrides 'provider'/'model'. Use this to "
+                        "provision a child on purchased cognition and judge its "
+                        "output from outside that substrate."
+                    ),
+                    "properties": {
+                        "provider_address": {
+                            "type": "string",
+                            "description": "The serving agent's 0x address.",
+                        },
+                        "spec_digest": {
+                            "type": "string",
+                            "description": "sha256 digest of the service spec bought.",
+                        },
+                    },
+                    "required": ["provider_address", "spec_digest"],
                 },
             },
             "required": ["id", "name"],
@@ -1198,6 +1252,14 @@ _TOOLS: list[ToolDefinition] = [
                     "additionalProperties": True,
                 },
                 "endpoint_hint": {"type": "string", "description": "Optional reachability hint (advisory)."},
+                "image_uri": {
+                    "type": "string",
+                    "description": "Optional https URL of a banner image for the "
+                                   "marketplace card (advisory, display-only). "
+                                   "Use a real, stable image you host or "
+                                   "uploaded; without it the card shows a "
+                                   "default banner.",
+                },
             },
             "required": ["name", "description", "ask_amount"],
         },
@@ -1340,6 +1402,17 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
             for s in defn.steps
         ]
     result["notify_parent"] = defn.notify_parent
+    # Which substrate this agent thinks on. `provider` was previously invisible
+    # here even though update_agent writes it; a marketplace binding makes the
+    # gap worse (it silently overrides provider/model AND names the paying
+    # wallet), so both are reported.
+    if defn.provider:
+        result["provider"] = defn.provider
+    if defn.service_provider:
+        # {provider_address, spec_digest} — plus who pays, which is the fact a
+        # parent actually needs when reading this back.
+        result["service_provider"] = dict(defn.service_provider)
+        result["inference_payer"] = "self" if defn.identity else "unregistered"
     if defn.is_cognitive:
         result["agent_type"] = defn.agent_type
         result["max_turns"] = defn.max_turns
@@ -1435,6 +1508,46 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     # docs/sponsored_inference.md) — configured once in the RPB Network
     # provider, not per agent. AgentDefinition.sponsor_address survives as a
     # dead field so old agent.yaml files still load; nothing reads it.
+    if "service_provider" in input:
+        # Marketplace inference binding (docs/services_market.md, ratified
+        # 2026-07-26: employer-chooses-the-tool). An agent's MODEL/PROVIDER is
+        # set only by its parent — an agent must never switch its own
+        # substrate, so there is no self-set surface at all. A parent MAY buy a
+        # marketplace inference service and provision a CHILD bound to it,
+        # then scrutinize that child's output from outside the purchased
+        # substrate; the child pays each call from its own funded wallet.
+        #
+        # Same gate shape as `budgets` above (parent-granted, no self-raise),
+        # and it must be spelled out here: _update_agent has NO blanket
+        # lineage gate, so an unguarded field is settable by any agent on any
+        # agent — which on this field would let an agent redirect its own
+        # cognition to a substrate of its choosing.
+        caller_id = input.get("_caller_id")
+        from . import is_owner_caller
+        if caller_id is not None and not is_owner_caller(caller_id):
+            if caller_id == agent_id:
+                return {"error": "An agent cannot set or change its own "
+                                 "service_provider binding — which substrate "
+                                 "an agent thinks on is its parent's call "
+                                 "(docs/services_market.md, 2026-07-26)."}
+            if defn.parent_id != caller_id:
+                return {"error": "service_provider is parent-settable only: "
+                                 f"'{caller_id}' is not the parent of "
+                                 f"'{agent_id}'."}
+        raw_binding = input["service_provider"]
+        if raw_binding is None:
+            defn.service_provider = None
+        else:
+            from ..models import normalize_service_binding
+            try:
+                defn.service_provider = normalize_service_binding(raw_binding)
+            except ValueError as exc:
+                return {"error": str(exc)}
+        changed.append("service_provider")
+        # A binding change IS a provider change: it decides both which
+        # substrate the agent thinks on and whose wallet pays, so the cached
+        # provider instance must be evicted (see the eviction block below).
+        provider_or_model_changed = True
     if "notify_parent" in input:
         defn.notify_parent = input["notify_parent"]
         changed.append("notify_parent")
@@ -1648,6 +1761,20 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # fails loud if it can't place it (no silent bridge fallback).
         explicit_provider = input.get("provider", "")
 
+        # Marketplace inference binding (docs/services_market.md, ratified
+        # 2026-07-26: employer-chooses-the-tool). No authority check is needed
+        # HERE: parent_id is derived from caller_id above, so anything created
+        # through this path is by construction the caller's own child. The
+        # self-set case is impossible — an agent cannot create itself.
+        service_binding = None
+        if input.get("service_provider") is not None:
+            from ..models import normalize_service_binding
+            try:
+                service_binding = normalize_service_binding(
+                    input["service_provider"])
+            except ValueError as exc:
+                return {"error": str(exc)}
+
         # Warn if model tier seems low for agent_type
         tier_warning = None
         if agent_type in ("general",) and model_tier < 3:
@@ -1677,6 +1804,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             created_by=caller_id or "",
             notify_parent=input.get("notify_parent", True),
             secrets_allowance=input.get("secrets_allowance"),
+            service_provider=service_binding,
         )
         try:
             aid = await runtime.register_agent(defn)
@@ -1728,12 +1856,16 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
                          "capability_tier": model_tier, "tier_label": get_tier_label(model_tier)}
                 if tier_warning:
                     result["tier_warning"] = tier_warning
+                if service_binding:
+                    result["service_provider"] = service_binding
                 return result
 
             result = {"agent_id": aid, "status": "registered",
                       "capability_tier": model_tier, "tier_label": get_tier_label(model_tier)}
             if tier_warning:
                 result["tier_warning"] = tier_warning
+            if service_binding:
+                result["service_provider"] = service_binding
             return result
         except Exception as exc:
             return {"error": str(exc)}
@@ -2726,6 +2858,7 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
             backing_tool=str(input.get("backing_tool") or ""),
             output_schema=output_schema,
             endpoint_hint=str(input.get("endpoint_hint") or ""),
+            image_uri=str(input.get("image_uri") or "").strip(),
         )
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}
@@ -2753,8 +2886,11 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
 
 async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Sign a Substrate.payForService transfer from the caller's key; returns
-    {tx_hash, request_id} for the consumer to hand to the provider."""
-    import uuid
+    {tx_hash, request_id} for the consumer to hand to the provider.
+
+    Thin wrapper over ``atn.service_client.pay_for_service`` (shared with the
+    ``service`` inference provider), which owns the chain mechanics."""
+    from .. import service_client
 
     caller_id = input.get("_caller_id")
     resolved = _caller_identity(runtime, caller_id)
@@ -2765,42 +2901,26 @@ async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     recipient = str(input.get("recipient") or "").strip()
     if not recipient:
         return {"error": "Missing required field: 'recipient'"}
-    amount = input.get("amount")
-    try:
-        amount = int(amount)
-    except (TypeError, ValueError):
-        return {"error": "amount must be an integer (ATN base units)"}
-    if amount <= 0:
-        return {"error": "amount must be positive"}
+    if input.get("amount") is None:
+        return {"error": "Missing required field: 'amount'"}
 
-    request_id = str(input.get("request_id") or "").strip()
-    if not request_id:
-        # uuid4-derived bytes32 hex (two uuids give 32 bytes of entropy).
-        request_id = "0x" + (uuid.uuid4().bytes + uuid.uuid4().bytes).hex()
-
-    from ..on_chain import OnChainService
-    svc = OnChainService(runtime._config.rpb)
-    if not svc.available:
-        return {"error": "Substrate not configured (missing substrate_address "
-                         "or rpc_url)."}
-
-    result = await svc.pay_for_service(key, recipient, amount, request_id)
-    if not result.get("success"):
-        return {"error": f"Payment failed: {result.get('error')}",
-                "tx_hash": result.get("tx_hash")}
-    return {
-        "tx_hash": result.get("tx_hash"),
-        "request_id": result.get("request_id") or request_id,
-    }
+    return await service_client.pay_for_service(
+        runtime._config.rpb,
+        key,
+        recipient,
+        input.get("amount"),
+        request_id=str(input.get("request_id") or "").strip(),
+    )
 
 
 async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Consumer cross-daemon call: resolve the provider's on-chain WS endpoint,
     connect one-shot, send a service_request with the payment proof, return the
-    reply."""
-    import json as _json
-    import time as _time
-    import uuid as _uuid
+    reply.
+
+    Thin wrapper over ``atn.service_client.request_service`` (shared with the
+    ``service`` inference provider)."""
+    from .. import service_client
 
     provider_address = str(input.get("provider_address") or "").strip()
     service_id = str(input.get("service_id") or "").strip()
@@ -2817,62 +2937,20 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
         return {"error": "Missing payment proof: both 'tx_hash' and "
                          "'request_id' are required (from pay_for_service)."}
 
-    from ..on_chain import OnChainService
-    svc = OnChainService(runtime._config.rpb)
-    if not svc.available:
-        return {"error": "Substrate not configured — cannot resolve the "
-                         "provider endpoint."}
-    endpoint = await svc.get_agent_endpoint(provider_address)
-    if not endpoint:
-        return {"error": f"Provider {provider_address[:10]} published no WS "
-                         "endpoint on chain — cannot reach it."}
-
-    try:
-        import websockets
-    except ImportError:
-        return {"error": "websockets library not installed on this daemon."}
-
     caller_id = input.get("_caller_id")
     defn = runtime.get_agent(caller_id) if caller_id else None
     client_addr = (defn.identity.address
                    if defn and defn.identity else "")
 
-    msg_id = _uuid.uuid4().hex[:12]
-    frame = {
-        "type": "service_request",
-        "msg_id": msg_id,
-        "spec_digest": service_id,
-        "request_id": request_id,
-        "args": payload,
-        "client": client_addr,
-        "client_address": client_addr,
-        # Payment proof (direct payForService path).
-        "tx_hash": tx_hash,
-    }
-    timeout = 60.0
-    try:
-        async with websockets.connect(endpoint, open_timeout=10) as ws:
-            await ws.send(_json.dumps(frame))
-            deadline = _time.monotonic() + timeout
-            while _time.monotonic() < deadline:
-                remaining = deadline - _time.monotonic()
-                raw = await asyncio.wait_for(
-                    ws.recv(), timeout=max(0.1, remaining))
-                try:
-                    reply = _json.loads(raw)
-                except (_json.JSONDecodeError, TypeError):
-                    continue
-                if reply.get("msg_id") == msg_id:
-                    return {
-                        "ok": bool(reply.get("ok")),
-                        "result": reply.get("result"),
-                        "error": reply.get("error"),
-                        "endpoint": endpoint,
-                    }
-            return {"error": f"Provider did not reply within {int(timeout)}s.",
-                    "endpoint": endpoint}
-    except Exception as exc:
-        return {"error": f"Service request failed: {exc}", "endpoint": endpoint}
+    return await service_client.request_service(
+        runtime._config.rpb,
+        provider_address,
+        service_id,
+        payload,
+        tx_hash=tx_hash,
+        request_id=request_id,
+        client_address=client_addr,
+    )
 
 
 # ---------------------------------------------------------------------------

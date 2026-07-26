@@ -208,3 +208,199 @@ class TestGetSnapshotTool:
         result = await _get_snapshot(rt, {})
         assert isinstance(result, dict)
         assert "agents" in result
+
+
+# ---------------------------------------------------------------------------
+# Marketplace inference binding — PARENT-ONLY authority
+# (docs/services_market.md, ratified 2026-07-26: employer-chooses-the-tool)
+# ---------------------------------------------------------------------------
+
+_SVC_PROVIDER_ADDR = "0x1111111111111111111111111111111111111111"
+_SVC_DIGEST = "ab" * 32
+_SVC_BINDING = {"provider_address": _SVC_PROVIDER_ADDR,
+                "spec_digest": _SVC_DIGEST}
+
+
+class TestServiceProviderBindingAuthority:
+    """An agent's substrate is its PARENT's choice. A parent may bind a child
+    to a marketplace inference service it bought; an agent may never set or
+    change its own binding, and never a stranger's.
+
+    _update_agent has no blanket lineage gate, so this field carries its own
+    (same shape as `budgets`). These tests are the guard on that gate.
+    """
+
+    async def _fleet(self, tmp_path):
+        """parent-1 with child-1; sibling-1 under a different parent."""
+        from atn.orchestrator.tools import execute_tool
+
+        rt = _make_runtime(EventBus(), tmp_path)
+        for aid, parent in (("parent-1", None), ("child-1", "parent-1"),
+                            ("other-1", None), ("sibling-1", "other-1")):
+            await rt.register_agent(AgentDefinition(
+                id=aid, name=aid, mode=AgentMode.COGNITIVE,
+                cognitive_model="sonnet", parent_id=parent,
+                budgets={"claude_max": 100000},
+            ))
+        return rt, execute_tool
+
+    @pytest.mark.asyncio
+    async def test_parent_can_bind_its_child(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool(
+            "update_agent",
+            {"agent_id": "child-1", "service_provider": dict(_SVC_BINDING)},
+            rt, caller_id="parent-1")
+        assert "error" not in res, res
+        assert "service_provider" in res["changed"]
+        assert rt.get_agent("child-1").service_provider == _SVC_BINDING
+
+    @pytest.mark.asyncio
+    async def test_agent_cannot_bind_itself(self, tmp_path):
+        """The core rule: no self-switching surface at all."""
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool(
+            "update_agent",
+            {"agent_id": "child-1", "service_provider": dict(_SVC_BINDING)},
+            rt, caller_id="child-1")
+        assert "error" in res
+        assert "its own" in res["error"]
+        assert rt.get_agent("child-1").service_provider is None
+
+    @pytest.mark.asyncio
+    async def test_agent_cannot_unbind_itself(self, tmp_path):
+        """Clearing is a change too — a bound child must not escape upward."""
+        rt, execute_tool = await self._fleet(tmp_path)
+        rt.get_agent("child-1").service_provider = dict(_SVC_BINDING)
+        res = await execute_tool(
+            "update_agent", {"agent_id": "child-1", "service_provider": None},
+            rt, caller_id="child-1")
+        assert "error" in res
+        assert rt.get_agent("child-1").service_provider == _SVC_BINDING
+
+    @pytest.mark.asyncio
+    async def test_non_parent_agent_cannot_bind(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool(
+            "update_agent",
+            {"agent_id": "child-1", "service_provider": dict(_SVC_BINDING)},
+            rt, caller_id="sibling-1")
+        assert "error" in res
+        assert "not the parent" in res["error"]
+        assert rt.get_agent("child-1").service_provider is None
+
+    @pytest.mark.asyncio
+    async def test_child_cannot_bind_its_parent(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool(
+            "update_agent",
+            {"agent_id": "parent-1", "service_provider": dict(_SVC_BINDING)},
+            rt, caller_id="child-1")
+        assert "error" in res
+        assert rt.get_agent("parent-1").service_provider is None
+
+    @pytest.mark.asyncio
+    async def test_owner_may_bind_anyone(self, tmp_path):
+        """caller_id None = the human owner surface, unconstrained."""
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool(
+            "update_agent",
+            {"agent_id": "sibling-1", "service_provider": dict(_SVC_BINDING)},
+            rt, caller_id=None)
+        assert "error" not in res, res
+        assert rt.get_agent("sibling-1").service_provider == _SVC_BINDING
+
+    @pytest.mark.asyncio
+    async def test_parent_can_unbind_its_child(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        rt.get_agent("child-1").service_provider = dict(_SVC_BINDING)
+        res = await execute_tool(
+            "update_agent", {"agent_id": "child-1", "service_provider": None},
+            rt, caller_id="parent-1")
+        assert "error" not in res, res
+        assert rt.get_agent("child-1").service_provider is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_binding_refused_with_a_clear_error(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool(
+            "update_agent",
+            {"agent_id": "child-1",
+             "service_provider": {"provider_address": _SVC_PROVIDER_ADDR}},
+            rt, caller_id="parent-1")
+        assert "error" in res
+        assert "spec_digest" in res["error"]
+        assert rt.get_agent("child-1").service_provider is None
+
+    @pytest.mark.asyncio
+    async def test_binding_change_evicts_the_cached_provider(self, tmp_path):
+        """The substrate AND the paying wallet change, so a cached instance
+        would keep buying from the old seller on the old key."""
+        rt, execute_tool = await self._fleet(tmp_path)
+        stale = AsyncMock()
+        stale.close = AsyncMock()
+        rt.providers._active_providers["child-1"] = stale
+        await execute_tool(
+            "update_agent",
+            {"agent_id": "child-1", "service_provider": dict(_SVC_BINDING)},
+            rt, caller_id="parent-1")
+        assert "child-1" not in rt.providers._active_providers
+        stale.close.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_binding_persists_to_yaml(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        await execute_tool(
+            "update_agent",
+            {"agent_id": "child-1", "service_provider": dict(_SVC_BINDING)},
+            rt, caller_id="parent-1")
+        import yaml
+        raw = yaml.safe_load(
+            (tmp_path / "agents" / "child-1" / "agent.yaml").read_text(
+                encoding="utf-8"))
+        assert raw["service_provider"] == _SVC_BINDING
+
+    @pytest.mark.asyncio
+    async def test_create_agent_binds_the_new_child(self, tmp_path):
+        """create_agent needs no authority check: parent_id is derived from the
+        caller, so the created agent is the caller's child by construction."""
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool(
+            "create_agent",
+            {"id": "bought-1", "name": "bought-1",
+             "budgets": {"claude_max": 10000},
+             "service_provider": dict(_SVC_BINDING)},
+            rt, caller_id="parent-1")
+        assert "error" not in res, res
+        defn = rt.get_agent(res["agent_id"])
+        assert defn.service_provider == _SVC_BINDING
+        assert defn.parent_id == "parent-1"
+        assert res["service_provider"] == _SVC_BINDING
+
+    @pytest.mark.asyncio
+    async def test_create_agent_refuses_a_malformed_binding(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool(
+            "create_agent",
+            {"id": "bad-1", "name": "bad-1",
+             "budgets": {"claude_max": 10000},
+             "service_provider": {"spec_digest": _SVC_DIGEST}},
+            rt, caller_id="parent-1")
+        assert "error" in res
+        assert rt.get_agent("bad-1") is None
+
+    @pytest.mark.asyncio
+    async def test_get_agent_surfaces_the_binding(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        rt.get_agent("child-1").service_provider = dict(_SVC_BINDING)
+        res = await execute_tool("get_agent", {"agent_id": "child-1"},
+                                 rt, caller_id="parent-1")
+        assert res["service_provider"] == _SVC_BINDING
+
+    @pytest.mark.asyncio
+    async def test_snapshot_surfaces_the_binding(self, tmp_path):
+        rt, _ = await self._fleet(tmp_path)
+        rt.get_agent("child-1").service_provider = dict(_SVC_BINDING)
+        snap = rt.snapshot()
+        assert snap["agents"]["child-1"]["service_provider"] == _SVC_BINDING
+        assert "service_provider" not in snap["agents"]["parent-1"]

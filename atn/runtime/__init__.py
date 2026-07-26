@@ -152,6 +152,12 @@ class Runtime:
         )
         # Provide execution_log reference for usage aggregation
         self.providers._execution_log = self.execution_log
+        # Per-agent marketplace inference binding (docs/services_market.md,
+        # 2026-07-26): a bound child pays for its own inference, so the
+        # provider manager needs the child's OWN wallet key and address. It
+        # holds no registry reference, so inject lazy resolvers.
+        self.providers._agent_key_resolver = self.registry.get_agent_key
+        self.providers._agent_address_resolver = self._agent_wallet_address
 
         # Setup providers from config (sync, before event loop)
         self.providers.setup_providers(cognitive)
@@ -1048,6 +1054,16 @@ class Runtime:
 
     def get_agent(self, agent_id: str) -> AgentDefinition | None:
         return self.registry.get_agent(agent_id)
+
+    def _agent_wallet_address(self, agent_id: str) -> str:
+        """An agent's own on-chain 0x address, or "" if it has no identity.
+
+        Injected into the provider manager as the payer label for a per-agent
+        marketplace service binding (docs/services_market.md, 2026-07-26).
+        """
+        defn = self.registry.get_agent(agent_id)
+        identity = getattr(defn, "identity", None) if defn else None
+        return str(getattr(identity, "address", "") or "")
 
     def get_status(self, agent_id: str) -> AgentStatus | None:
         return self.registry.get_status(agent_id)

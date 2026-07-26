@@ -17,6 +17,12 @@ the provider's daemon — "a Service is a tool the OWNER chose to sell"
 (spec §3). ``ServiceRecord.backing_tool`` names that tool by digest;
 dispatch goes through ``runtime.tool_store``.
 
+The second backing kind (decision 2026-07-26) is INFERENCE: the spec
+carries ``{"inference": {"model", "max_tokens_cap"}}`` and requests are
+served by the provider daemon's OWN provider stack (their GPU, their
+key). The two are mutually exclusive — a service has exactly one
+backing.
+
 The substrate package (``nodes.*``) is imported lazily; on a standalone
 atn install registration fails loudly instead of degrading silently —
 mirroring ToolStore.
@@ -33,8 +39,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .service_spec import (
+    DEFAULT_MAX_TOKENS_CAP,
     build_service_spec,
     canonical_service_bytes,
+    validate_inference,
     validate_service_spec,
 )
 
@@ -68,6 +76,32 @@ class ServiceRecord:
     def ask(self) -> dict[str, Any]:
         ask = self.spec.get("ask")
         return ask if isinstance(ask, dict) else {}
+
+    @property
+    def image_uri(self) -> str:
+        """Display-plane banner image (advisory; may be absent)."""
+        return str(self.spec.get("image_uri") or "")
+
+    @property
+    def inference(self) -> dict[str, Any]:
+        """The declared inference backing (``{model, max_tokens_cap}``),
+        or ``{}`` when this service is tool-backed. Lives in the signed
+        spec, so it survives a store reload for free."""
+        block = self.spec.get("inference")
+        return block if isinstance(block, dict) else {}
+
+    @property
+    def max_tokens_cap(self) -> int:
+        """Output-token ceiling for an inference-backed service (0 when
+        not inference-backed)."""
+        block = self.inference
+        if not block:
+            return 0
+        try:
+            cap = int(block.get("max_tokens_cap") or 0)
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_TOKENS_CAP
+        return cap if cap > 0 else DEFAULT_MAX_TOKENS_CAP
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -116,12 +150,31 @@ class ServiceStore:
         backing_tool: str = "",
         output_schema: dict[str, Any] | None = None,
         endpoint_hint: str = "",
+        image_uri: str = "",
+        inference: dict[str, Any] | None = None,
         version_of: str | None = None,
     ) -> dict[str, Any]:
         """Build, sign, blob-store, and persist a service spec. Returns
-        ``{"digest", "spec"}`` or raises ValueError on bad input."""
+        ``{"digest", "spec"}`` or raises ValueError on bad input.
+
+        ``inference`` declares an LLM backing instead of a backing tool
+        (decision 2026-07-26): a paid request is served by this daemon's
+        own provider stack. Exactly one backing kind per service — a
+        spec naming both is a contradiction about what the buyer gets,
+        so it's refused at registration rather than resolved at dispatch.
+        """
         blobs = self._blob_store()
         author_pubkey = self._author_address(author)
+
+        if inference is not None:
+            if backing_tool:
+                raise ValueError(
+                    "invalid service spec: a service has ONE backing — "
+                    "'inference' and 'backing_tool' are mutually exclusive"
+                )
+            problems = validate_inference(inference)
+            if problems:
+                raise ValueError("invalid service spec: " + "; ".join(problems))
 
         spec = build_service_spec(
             name=name,
@@ -132,6 +185,8 @@ class ServiceStore:
             output_schema=output_schema,
             author_pubkey=author_pubkey,
             endpoint_hint=endpoint_hint,
+            image_uri=image_uri,
+            inference=inference,
             version_of=version_of,
             created_ts=int(time.time()),
         )
@@ -179,6 +234,9 @@ class ServiceStore:
             output_schema=(dict(spec["output_schema"])
                            if isinstance(spec.get("output_schema"), dict) else None),
             endpoint_hint=str(spec.get("endpoint_hint") or ""),
+            image_uri=str(spec.get("image_uri") or ""),
+            inference=(dict(spec["inference"])
+                       if isinstance(spec.get("inference"), dict) else None),
             version_of=digest,
         )
         record.retired = True
@@ -316,14 +374,31 @@ class ServiceStore:
     # Payment gate state (Stage B) — replay guard + voucher ledger
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def normalize_request_id(request_id: Any) -> str:
+        """Canonical form of a bytes32 request id: lowercase hex, no ``0x``.
+
+        The replay guard keyed on the RAW string until 2026-07-26, which made it
+        prefix- and case-sensitive — and the two sides of the wire genuinely
+        spell the same id differently: ``service_client.new_request_id()`` emits
+        ``0x<64 hex>``, while the on-chain ``ServicePayment.requestId`` decodes
+        to bare hex (case varying by web3 version). A replayer only had to flip
+        the ``0x`` or the case to have ONE payment serve a second work item; the
+        cross-machine E2E caught exactly that (two served rows, one payment).
+        Normalizing here closes it for every caller at once, including the
+        persisted set (see ``_load_payment_state``).
+        """
+        rid = str(request_id or "").strip().lower()
+        return rid[2:] if rid.startswith("0x") else rid
+
     def has_served_request(self, request_id: str) -> bool:
         """True if this direct-payment request_id was already served (replay)."""
-        return str(request_id) in self._seen_requests
+        return self.normalize_request_id(request_id) in self._seen_requests
 
     def mark_request_served(self, request_id: str) -> None:
         """Record a direct-payment request_id as served (persisted). Idempotent."""
-        rid = str(request_id)
-        if rid in self._seen_requests:
+        rid = self.normalize_request_id(request_id)
+        if not rid or rid in self._seen_requests:
             return
         self._seen_requests.add(rid)
         self._persist_seen()
@@ -367,7 +442,13 @@ class ServiceStore:
             try:
                 data = json.loads(self._seen_path.read_text(encoding="utf-8"))
                 if isinstance(data, list):
-                    self._seen_requests = {str(x) for x in data}
+                    # Normalize on load: a set persisted by a pre-2026-07-26
+                    # daemon may hold both spellings of one id, and must still
+                    # refuse both after the upgrade.
+                    self._seen_requests = {
+                        r for r in (self.normalize_request_id(x) for x in data)
+                        if r
+                    }
             except (OSError, json.JSONDecodeError) as exc:
                 log.warning("ServiceStore could not read served requests: %s", exc)
         if self._voucher_path.exists():

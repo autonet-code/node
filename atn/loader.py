@@ -255,6 +255,19 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         errors.append(LoadError(file, "'secrets_allowance' must be a string spec (e.g. 'none', 'all', 'bundle:x,svc')"))
         return None, errors
 
+    # --- Marketplace inference binding (parent-set; 2026-07-26) ---
+    # {provider_address, spec_digest}. A malformed binding is a LOAD ERROR
+    # rather than a silent drop: dropping it would fall the agent back to the
+    # daemon-level purchase, spending the owner's wallet instead of its own.
+    service_provider = raw.get("service_provider")
+    if service_provider is not None:
+        from .models import normalize_service_binding
+        try:
+            service_provider = normalize_service_binding(service_provider)
+        except ValueError as exc:
+            errors.append(LoadError(file, f"'service_provider': {exc}"))
+            return None, errors
+
     return AgentDefinition(
         id=agent_id,
         name=name,
@@ -282,6 +295,7 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         expose_as_tool=expose_as_tool,
         tool_input_schema=tool_input_schema,
         secrets_allowance=secrets_allowance,
+        service_provider=service_provider,
     ), errors
 
 
@@ -399,6 +413,13 @@ def save_agent(defn: AgentDefinition, directory: Path) -> Path:
         data["wake_parent_on_child"] = True
     if defn.cloned_from:
         data["cloned_from"] = defn.cloned_from
+
+    # Marketplace inference binding (parent-set; docs/services_market.md).
+    # Saved OUTSIDE the `is_cognitive` guard below: the binding decides whose
+    # wallet pays for inference, and silently dropping it on save would
+    # re-route the spend to the daemon owner after a restart.
+    if defn.service_provider:
+        data["service_provider"] = dict(defn.service_provider)
 
     # Heartbeat
     if defn.heartbeat:

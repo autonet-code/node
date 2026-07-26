@@ -158,6 +158,13 @@ class SnapshotBuilder:
                 agent_info["agent_address"] = defn.identity.address
             if defn.identity and defn.identity.registered_on_chain:
                 agent_info["registered_on_chain"] = True
+            # Marketplace inference binding (docs/services_market.md,
+            # 2026-07-26): the substrate this agent thinks on, bought by its
+            # parent and paid for out of the agent's OWN wallet. Surfaced next
+            # to `model` because it OVERRIDES it — a bound agent's real
+            # substrate is the seller's declaration, not this label.
+            if getattr(defn, "service_provider", None):
+                agent_info["service_provider"] = dict(defn.service_provider)
             if defn.expose_as_tool:
                 agent_info["expose_as_tool"] = True
                 agent_info["tool_name"] = f"pipeline_{aid}"

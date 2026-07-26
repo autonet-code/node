@@ -114,6 +114,14 @@ async def clone_agent(runtime: Any, agent_id: str) -> dict[str, Any]:
         sponsor_agent_id=defn.sponsor_agent_id,
         sponsor_address=defn.sponsor_address,
         training_charter=defn.training_charter,
+        # Marketplace inference binding carries over: a clone must think on the
+        # same substrate as the original or it isn't a clone. It pays from its
+        # OWN fresh wallet though (identity is not copied, see above), so the
+        # human doing the cloning must fund it before it can buy a completion —
+        # the provider fails loud on an unfunded call rather than quietly
+        # billing the original.
+        service_provider=(dict(defn.service_provider)
+                          if defn.service_provider else None),
     )
 
     # legacy=True: a clone preserves the original's budget posture even if
