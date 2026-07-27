@@ -1242,12 +1242,9 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                 "input_schema": {"type": "object",
                                  "properties": {"messages": {"type": "array"}}},
                 "agent_id": prov_agent,
-                # `ask.token` is still REQUIRED by validate_ask even though
-                # settlement is ATN-only (ratified 2026-07-10) — the spec
-                # validator predates that and the sibling script feeds it the
-                # Substrate address too. Not this script's rail to change.
-                "ask": {"token": addresses["substrate"],
-                        "amount": str(SERVICE_ASK), "unit": "per_item"},
+                # ATN-denominated by construction (ratified 2026-07-10;
+                # the vestigial `ask.token` was dropped 2026-07-26).
+                "ask": {"amount": str(SERVICE_ASK), "unit": "per_item"},
                 "inference": {"model": model,
                               "max_tokens_cap": MAX_TOKENS_CAP},
             })

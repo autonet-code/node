@@ -32,7 +32,9 @@ SUBSTRATE_ADDR = "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af25"
 CHANNEL_ADDR = "0x97956A322dC5585157c91840d39292c396032508"
 ASK_AMOUNT = 1000
 
-ASK = {"token": SUBSTRATE_ADDR, "amount": str(ASK_AMOUNT), "unit": "per_item"}
+# ATN-denominated by construction (the vestigial `ask.token` was dropped
+# 2026-07-26); SUBSTRATE_ADDR is still the payment target the gate verifies.
+ASK = {"amount": str(ASK_AMOUNT), "unit": "per_item"}
 SCHEMA = {"type": "object", "properties": {"x": {"type": "string"}}}
 
 

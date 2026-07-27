@@ -36,6 +36,17 @@ Master-disable / fingerprinting is fleet hygiene for honest daemons,
 not a defense against dishonest ones. The defense is that lying has a
 wallet attached and receipts are forever.
 
+## Decision (2026-07-26): the vestigial `ask.token` field is dropped
+
+ATN-only settlement was ratified 2026-07-10, but `ask.token` survived as
+required dead weight — `validate_ask` demanded a non-empty ERC20 address
+that nothing read. The ask is now `{amount, unit}`: specs are
+ATN-denominated by construction. Removal is TOLERANT — `normalize_ask`
+strips a `token` a caller still passes rather than rejecting it, and
+persisted specs carrying one load unchanged (the store reads blobs, it
+does not re-validate). The `receipt.token` wire key is KEPT and pinned to
+the constant `"ATN"` so the Flutter Services page parses unchanged.
+
 ## Decision (2026-07-26): LLM inference as a marketplace service
 
 Ratified in discussion 2026-07-26. Inference joins the marketplace as an

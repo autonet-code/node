@@ -1491,6 +1491,22 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         defn.max_turns = input["max_turns"]
         changed.append("max_turns")
     provider_or_model_changed = False
+    if "model" in input or "provider" in input:
+        # Same doctrine as service_provider below (2026-07-26,
+        # employer-chooses-the-tool): which substrate an agent thinks on
+        # is its PARENT's call. These two fields predate the gate and
+        # were settable by any agent on any agent — including itself.
+        caller_id = input.get("_caller_id")
+        from . import is_owner_caller
+        if caller_id is not None and not is_owner_caller(caller_id):
+            if caller_id == agent_id:
+                return {"error": "An agent cannot change its own model or "
+                                 "provider — its substrate is its parent's "
+                                 "call (docs/services_market.md, 2026-07-26)."}
+            if defn.parent_id != caller_id:
+                return {"error": "model/provider are parent-settable only: "
+                                 f"'{caller_id}' is not the parent of "
+                                 f"'{agent_id}'."}
     if "model" in input:
         defn.cognitive_model = input["model"]
         defn.provider = input["model"]
@@ -2841,13 +2857,9 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
     if store is None:
         return {"error": "Service store not available on this daemon."}
 
-    # The ask token is the ATN (Substrate) address — services settle in ATN.
-    ask = {
-        "token": runtime._config.rpb.substrate_address
-                 or runtime._config.rpb.rpb_contract_address or "",
-        "amount": str(ask_amount),
-        "unit": "per_item",
-    }
+    # Asks are ATN-denominated by construction (ratified 2026-07-10) —
+    # no token field.
+    ask = {"amount": str(ask_amount), "unit": "per_item"}
     try:
         built = store.register(
             name=name,

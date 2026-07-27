@@ -409,11 +409,9 @@ def _spec(name: str, description: str, params: list[str], ask: str,
             "properties": {p: {"type": "string"} for p in params},
             "required": params[:1],
         },
-        "ask": {
-            "token": "0x4C4dAEd19B98ddaEc6cC421b6a781Bd3fBB7af00",
-            "amount": ask,
-            "unit": "per_item",
-        },
+        # ATN-denominated by construction (ratified 2026-07-10) — no
+        # token field.
+        "ask": {"amount": ask, "unit": "per_item"},
     }
     # Omitted rather than sent empty for the imageless entries: the field
     # is optional on the wire, and an absent key is the honest signal.

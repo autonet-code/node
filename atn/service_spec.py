@@ -2,7 +2,8 @@
 
 Design: ``docs/services_market.md``. A Service is a remote API published
 by an agent (ultimately by its human benefactor): general-purpose,
-priced per work item, payable in any ERC20. Unlike a tool manifest, a
+priced per work item, ATN-denominated (ratified 2026-07-10 — the ask is
+``{amount, unit}``, no token field). Unlike a tool manifest, a
 service spec carries NO substrate standing, NO verdict-layer claims, NO
 mint — the trust basis is purely behavioral (signed identity, atomic
 payment, receipt-gated reviews). It rides the same sha256-addressed blob
@@ -61,6 +62,11 @@ def build_service_spec(
     ``created_ts`` is caller-supplied (no wall-clock reads here; the
     store stamps it).
 
+    ``ask`` is normalized to ``{amount, unit}`` — a legacy ``token``
+    field is stripped rather than rejected (settlement is ATN-only,
+    ratified 2026-07-10), so old callers keep working and the signed
+    bytes stay canonical.
+
     ``image_uri`` is display-plane only (a listing card banner), like
     ``endpoint_hint``: advisory, unvalidated, inside the signed payload
     so it cannot be swapped after signing, and deliberately NOT part of
@@ -81,7 +87,7 @@ def build_service_spec(
         "description": description,
         "input_schema": input_schema,
         "author": author,
-        "ask": ask,
+        "ask": normalize_ask(ask),
         "endpoint_hint": endpoint_hint,
         "image_uri": image_uri,
         "version_of": version_of,
@@ -178,18 +184,20 @@ def normalize_inference(inference: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _validate_ask(ask: Any) -> List[str]:
-    """The ask names the price: {token, amount, unit}. Payment/voucher
+    """The ask names the price: {amount, unit}. Payment/voucher
     validation is the contracts workstream's job — here we only check the
-    shape so a well-formed ask reaches the payment-channel seam."""
+    shape so a well-formed ask reaches the payment-channel seam.
+
+    Settlement is ATN-only (ratified 2026-07-10), so the ask carries NO
+    ``token`` field — a spec is ATN-denominated by construction. Old
+    callers and old persisted specs may still carry one; it is ignored
+    here and stripped by ``normalize_ask``."""
     errors: List[str] = []
     if not isinstance(ask, dict):
-        return ["ask must be a dict of {token, amount, unit}"]
-    token = ask.get("token")
-    if not token or not isinstance(token, str):
-        errors.append("ask.token must be a non-empty ERC20 address string")
+        return ["ask must be a dict of {amount, unit}"]
     amount = ask.get("amount")
     # amount is a decimal string (base units) to avoid float rounding on
-    # token quantities — mirror the on-chain uint representation.
+    # ATN quantities — mirror the on-chain uint representation.
     if amount in (None, ""):
         errors.append("ask.amount is required (decimal string, base units)")
     elif not isinstance(amount, (str, int)):
@@ -204,6 +212,22 @@ def _validate_ask(ask: Any) -> List[str]:
     if unit is not None and unit not in _ASK_UNITS:
         errors.append(f"ask.unit must be one of {_ASK_UNITS}, got {unit!r}")
     return errors
+
+
+def normalize_ask(ask: Any) -> Dict[str, Any]:
+    """Canonicalize an ask to ``{amount, unit}``.
+
+    Drops the vestigial ``token`` field (settlement is ATN-only, ratified
+    2026-07-10) and any other stray key, so a caller that still passes an
+    ERC20 address doesn't break AND doesn't poison the signed bytes. Not
+    a dict? Returned untouched — validation reports that."""
+    if not isinstance(ask, dict):
+        return ask
+    out: Dict[str, Any] = {"amount": ask.get("amount")}
+    unit = ask.get("unit")
+    if unit is not None:
+        out["unit"] = unit
+    return out
 
 
 def is_service_spec(payload: Any) -> bool:

@@ -2,7 +2,8 @@
 
 Design: ``docs/services_market.md``. A Service is a remote API an agent
 (ultimately its human benefactor) offers to the market: general-purpose,
-priced per work item, payable in any ERC20. It rides the same
+priced per work item, ATN-denominated (ratified 2026-07-10 — the ask is
+``{amount, unit}``, no token field). It rides the same
 content-addressed blob rail as tool manifests, but — unlike a tool — a
 service gets NO substrate standing, NO verdict claims, NO mint. Trust is
 behavioral: signed identity, atomic payment, receipt-gated reviews.
@@ -201,8 +202,8 @@ class ServiceStore:
         )
         self._records[digest] = record
         self._persist()
-        log.info("registered service %r by %s (ask %s) -> %s",
-                 name, author, ask.get("token", "?"), digest[:16])
+        log.info("registered service %r by %s (ask %s ATN) -> %s",
+                 name, author, spec["ask"].get("amount", "?"), digest[:16])
         return {"digest": digest, "spec": spec}
 
     def update_ask(
@@ -291,10 +292,14 @@ class ServiceStore:
         client: str,
         ok: bool,
         amount: str = "",
-        token: str = "",
+        token: str = "ATN",
     ) -> None:
         """Append a provider-side request-log row. Local ledger first —
-        never lost to a substrate outage."""
+        never lost to a substrate outage.
+
+        ``token`` is a fixed "ATN" label kept on the row for shape
+        compatibility with historical logs — settlement is ATN-only
+        (ratified 2026-07-10), so the ask no longer names a token."""
         record = self._records.get(spec_digest)
         self._request_seq += 1
         row = {

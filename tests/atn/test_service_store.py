@@ -58,7 +58,7 @@ ECHO_CODE = (
 
 SCHEMA = {"type": "object", "properties": {"x": {"type": "string"}}}
 
-ASK = {"token": "0xToKeN", "amount": "1000000", "unit": "per_item"}
+ASK = {"amount": "1000000", "unit": "per_item"}
 
 
 async def _register_echo_tool(rt, caller_id="child", name="echo_tool"):
@@ -98,13 +98,36 @@ class TestServiceSpec:
         with pytest.raises(ValueError):
             build_service_spec(
                 name="s", description="d", input_schema=SCHEMA,
-                author="a", ask={"amount": "x"})  # no token, non-int amount
+                author="a", ask={"amount": "x"})  # non-int amount
         errors = validate_service_spec({
             "kind": "service_spec", "name": "s", "description": "d",
             "input_schema": SCHEMA, "author": "a",
-            "ask": {"token": "0x1", "amount": "-5", "unit": "weird"}})
+            "ask": {"amount": "-5", "unit": "weird"}})
         assert any("non-negative" in e for e in errors)
         assert any("unit" in e for e in errors)
+
+    def test_legacy_ask_token_stripped_not_rejected(self):
+        """The vestigial `ask.token` was dropped 2026-07-26 (settlement is
+        ATN-only). Removal is TOLERANT: an old caller still passing an
+        ERC20 address is neither rejected nor allowed to poison the
+        signed bytes — the field is stripped."""
+        legacy = {"token": "0xC0ffee", "amount": "1000000", "unit": "per_item"}
+        assert validate_service_spec({
+            "kind": "service_spec", "name": "s", "description": "d",
+            "input_schema": SCHEMA, "author": "a", "ask": legacy}) == []
+
+        spec = build_service_spec(
+            name="s", description="d", input_schema=SCHEMA,
+            author="a", ask=legacy, created_ts=1)
+        assert spec["ask"] == {"amount": "1000000", "unit": "per_item"}
+        assert "token" not in spec["ask"]
+
+    def test_ask_without_token_is_valid(self):
+        """An ask is {amount, unit} — no token field required."""
+        assert validate_service_spec({
+            "kind": "service_spec", "name": "s", "description": "d",
+            "input_schema": SCHEMA, "author": "a",
+            "ask": {"amount": "5", "unit": "per_call"}}) == []
 
     def test_image_uri_optional_and_signed_not_embedded(self):
         """image_uri is display-plane: covered by the signature (so it
@@ -245,7 +268,7 @@ class TestServiceStore:
         v1 = rt.service_store.register(
             name="svc", description="d", input_schema=SCHEMA,
             author="user", ask=ASK, backing_tool="tool-a")
-        new_ask = {"token": "0xToKeN", "amount": "2000000", "unit": "per_item"}
+        new_ask = {"amount": "2000000", "unit": "per_item"}
         v2 = rt.service_store.update_ask(v1["digest"], new_ask)
 
         assert v2["digest"] != v1["digest"]              # changed ask = new digest
@@ -256,6 +279,34 @@ class TestServiceStore:
         # predecessor soft-retired; live list resolves to current
         assert rt.service_store.get(v1["digest"]).retired
         assert rt.service_store.resolve("svc").digest == v2["digest"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_persisted_spec_with_ask_token_loads(self, tmp_path):
+        """Specs written before the 2026-07-26 field removal carry
+        `ask.token`. They must LOAD unchanged — the store reads blobs,
+        it does not re-validate, so an old listing never disappears."""
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        res = rt.service_store.register(
+            name="legacy_svc", description="Old.", input_schema=SCHEMA,
+            author="child", ask=ASK, backing_tool="deadbeef")
+
+        # Rewrite the persisted blob with the legacy ask shape, keeping
+        # the registry row's digest (content-addressing is not the point
+        # here — surviving the read is).
+        blobs = rt.service_store._blob_store()
+        spec = dict(blobs.get_json(res["digest"]))
+        spec["ask"] = {"token": "0xC0ffee", **spec["ask"]}
+        blob_path = blobs.data_dir / res["digest"]
+        assert blob_path.exists()
+        blob_path.write_text(json.dumps(spec), encoding="utf-8")
+
+        reloaded = ServiceStore(rt, rt._config.data_dir / "services")
+        record = reloaded.get(res["digest"])
+        assert record is not None
+        assert record.name == "legacy_svc"
+        assert record.ask["amount"] == ASK["amount"]
+        assert record.ask["token"] == "0xC0ffee"   # carried, not fatal
 
     @pytest.mark.asyncio
     async def test_image_uri_round_trips_through_list(self, tmp_path):
@@ -295,7 +346,7 @@ class TestServiceStore:
             author="user", ask=ASK, image_uri=url)
         v2 = rt.service_store.update_ask(
             v1["digest"],
-            {"token": "0xToKeN", "amount": "3000000", "unit": "per_item"})
+            {"amount": "3000000", "unit": "per_item"})
         assert v2["spec"]["image_uri"] == url
 
     @pytest.mark.asyncio
@@ -361,7 +412,7 @@ class TestServiceStore:
             inference={"model": "m", "max_tokens_cap": 64})
         v2 = rt.service_store.update_ask(
             v1["digest"],
-            {"token": "0xToKeN", "amount": "9", "unit": "per_call"})
+            {"amount": "9", "unit": "per_call"})
         assert v2["spec"]["inference"] == {"model": "m", "max_tokens_cap": 64}
         assert rt.service_store.get(v2["digest"]).backing_tool == ""
 
@@ -815,11 +866,53 @@ class TestInvokeServiceLocal:
         assert receipt["degraded"] is True
         assert receipt["tx_hash"] is None
         assert receipt["amount"] == ASK["amount"]
-        assert receipt["token"] == ASK["token"]
+        assert receipt["token"] == "ATN"   # constant label; asks are ATN-only
 
         # It went through the PROVIDER path: the request landed on the log.
         entry = rt.service_store.summary()[svc["digest"]]
         assert entry["count"] == 1 and entry["ok_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_prepaid_proof_skips_daemon_payment(self, tmp_path):
+        """Whoever purchases signs: a proof paid by the app wallet rides
+        through untouched — the daemon pays nothing, the receipt carries
+        the buyer's hash, and the frame reaches the gate with the
+        buyer's request_id (which the gate would verify on-chain when a
+        chain is configured)."""
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        tool = await _register_echo_tool(rt)
+        svc = rt.service_store.register(
+            name="echo_svc", description="Echo service.", input_schema=SCHEMA,
+            author="child", ask=ASK, backing_tool=tool["digest"])
+
+        server = _server(rt)
+        rid = "0x" + "ab" * 32
+        out = await server._handle_message(
+            {"type": "invoke_service", "msg_id": "iv1",
+             "digest": svc["digest"], "args": {"x": "hi"},
+             "tx_hash": "0x" + "cd" * 32, "request_id": rid},
+            _local_session())
+        assert out["ok"] is True
+        result = out["result"]
+        assert result["request_id"] == rid
+        receipt = result["receipt"]
+        assert receipt["paid"] is True
+        assert receipt["degraded"] is False
+        assert receipt["tx_hash"] == "0x" + "cd" * 32
+
+    @pytest.mark.asyncio
+    async def test_prepaid_proof_requires_both_fields(self, tmp_path):
+        """tx_hash without request_id (or vice versa) is a caller bug,
+        refused before anything is resolved or spent."""
+        rt = _make_runtime(tmp_path)
+        server = _server(rt)
+        out = await server._handle_message(
+            {"type": "invoke_service", "msg_id": "iv1", "digest": "d" * 64,
+             "tx_hash": "0x" + "cd" * 32},
+            _local_session())
+        assert out["ok"] is False
+        assert "BOTH" in out["error"]
 
     @pytest.mark.asyncio
     async def test_inference_backed_happy_path(self, tmp_path):
@@ -1191,8 +1284,7 @@ class TestInvokeServicePayment:
         tool = await _register_echo_tool(rt)
         svc = rt.service_store.register(
             name="free_svc", description="d", input_schema=SCHEMA,
-            author="child", ask={"token": "0xToKeN", "amount": "0",
-                                 "unit": "per_item"},
+            author="child", ask={"amount": "0", "unit": "per_item"},
             backing_tool=tool["digest"])
         self._configure_chain(rt)
 

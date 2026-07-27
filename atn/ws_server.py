@@ -1396,6 +1396,13 @@ class WebSocketBridge:
                     "name": record.name,
                     "description": s.get("description", ""),
                     "author": record.author,
+                    # The payment address stamped into the spec at
+                    # registration — the SAME recipient the provider gate
+                    # verifies against. Surfaced so a buyer paying with
+                    # their own wallet can address the payment correctly
+                    # instead of guessing from `author` (an agent id, not
+                    # necessarily a 0x address).
+                    "author_pubkey": s.get("author_pubkey", ""),
                     "ask": record.ask,
                     "endpoint_hint": s.get("endpoint_hint", ""),
                     "image_uri": s.get("image_uri", ""),
@@ -1471,7 +1478,7 @@ class WebSocketBridge:
                 rows.append({
                     "service_id": s.get("service_id"),
                     "provider": s.get("provider"),
-                    "ask": {"token": "", "amount": str(s.get("ask_amount") or 0),
+                    "ask": {"amount": str(s.get("ask_amount") or 0),
                             "unit": "per_item"},
                     "digest": digest,
                     "active": s.get("active"),
@@ -3491,7 +3498,6 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": False, "error": "Service retired"}
 
         ask = record.ask
-        token = str(ask.get("token", ""))
         amount = str(ask.get("amount", ""))
 
         # Payment/voucher validation gate (Stage B — real on-chain verify).
@@ -3499,7 +3505,7 @@ class WebSocketBridge:
         if not gate.get("ok"):
             self.runtime.service_store.record_request(
                 spec_digest, request_id, client, ok=False,
-                amount=amount, token=token)
+                amount=amount)
             return {"msg_id": msg_id, "ok": False,
                     "error": f"Payment validation failed: "
                              f"{gate.get('reason', 'unknown')}"}
@@ -3512,7 +3518,7 @@ class WebSocketBridge:
             ok = "error" not in result
             self.runtime.service_store.record_request(
                 spec_digest, request_id, client, ok=ok,
-                amount=amount, token=token)
+                amount=amount)
             return {"msg_id": msg_id, "ok": ok,
                     "result": {"request_id": request_id, **result}}
 
@@ -3520,7 +3526,7 @@ class WebSocketBridge:
         if not backing:
             self.runtime.service_store.record_request(
                 spec_digest, request_id, client, ok=False,
-                amount=amount, token=token)
+                amount=amount)
             return {"msg_id": msg_id, "ok": False,
                     "error": "Service has no backing implementation"}
 
@@ -3530,7 +3536,7 @@ class WebSocketBridge:
         if tool_record is None:
             self.runtime.service_store.record_request(
                 spec_digest, request_id, client, ok=False,
-                amount=amount, token=token)
+                amount=amount)
             return {"msg_id": msg_id, "ok": False,
                     "error": f"Backing tool {backing[:16]} not found"}
 
@@ -3540,7 +3546,7 @@ class WebSocketBridge:
         ok = "error" not in result
         self.runtime.service_store.record_request(
             spec_digest, request_id, client, ok=ok,
-            amount=amount, token=token)
+            amount=amount)
         if not ok:
             return {"msg_id": msg_id, "ok": False,
                     "result": {"request_id": request_id, **result}}
@@ -3565,7 +3571,8 @@ class WebSocketBridge:
         ``receipt`` is ``{paid, degraded, tx_hash, amount, token,
         recipient}`` — the buyer's proof of what was spent, and honest
         about the local-dev case where nothing was (``paid=false,
-        degraded=true``).
+        degraded=true``). ``token`` is the constant ``"ATN"``: settlement
+        is ATN-only, the key is kept for wire compatibility.
 
         Two resolution paths:
 
@@ -3581,9 +3588,15 @@ class WebSocketBridge:
             chain configured a foreign digest is unresolvable — there is
             nowhere to look up who serves it — so that fails loudly.
 
-        Spend signs with the daemon OWNER key (``autonet.private_key``),
-        the same doctrine as the ``service`` provider type: buying work
-        for the fleet is an owner act.
+        Signing: WHOEVER PURCHASES SIGNS. The app may attach a payment
+        it already made with the HUMAN's wallet — ``tx_hash`` +
+        ``request_id`` in the message (both or neither) — and the
+        handler then pays nothing itself: the proof rides to the
+        provider gate, which verifies recipient/amount/replay on-chain
+        exactly as it would a stranger's. Without a prepaid proof the
+        daemon falls back to signing with the OWNER key
+        (``autonet.private_key``) when one is configured — the headless
+        setup — same doctrine as the ``service`` provider type.
         """
         digest = str(msg.get("digest") or "").strip()
         args = msg.get("args")
@@ -3596,14 +3609,26 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": False,
                     "error": "'args' must be an object"}
 
+        prepaid_tx = str(msg.get("tx_hash") or "").strip()
+        prepaid_rid = str(msg.get("request_id") or "").strip()
+        prepaid: dict[str, str] | None = None
+        if prepaid_tx and prepaid_rid:
+            prepaid = {"tx_hash": prepaid_tx, "request_id": prepaid_rid}
+        elif prepaid_tx or prepaid_rid:
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "A prepaid proof needs BOTH 'tx_hash' and "
+                             "'request_id' (got one without the other)."}
+
         record = self.runtime.service_store.get(digest)
         if record is not None and record.retired:
             return {"msg_id": msg_id, "ok": False,
                     "error": f"Service {record.name or digest[:16]} is retired "
                              "and no longer offered."}
         if record is None:
-            return await self._invoke_foreign_service(digest, args, msg_id)
-        return await self._invoke_local_service(record, args, msg_id)
+            return await self._invoke_foreign_service(
+                digest, args, msg_id, prepaid=prepaid)
+        return await self._invoke_local_service(
+            record, args, msg_id, prepaid=prepaid)
 
     @staticmethod
     async def _offload(factory: Any) -> Any:
@@ -3634,15 +3659,20 @@ class WebSocketBridge:
     @staticmethod
     def _receipt(
         *, paid: bool, degraded: bool, tx_hash: str | None,
-        amount: Any, token: str, recipient: str,
+        amount: Any, recipient: str, token: str = "ATN",
     ) -> dict[str, Any]:
-        """The buyer's receipt, in the exact shape the app parses."""
+        """The buyer's receipt, in the exact shape the app parses.
+
+        ``token`` is a constant "ATN" label: settlement is ATN-only
+        (ratified 2026-07-10) and the ask no longer names a token, but
+        the receipt key stays on the wire so the Flutter Services page
+        keeps parsing unchanged."""
         return {
             "paid": bool(paid),
             "degraded": bool(degraded),
             "tx_hash": tx_hash or None,
             "amount": str(amount if amount is not None else ""),
-            "token": str(token or ""),
+            "token": str(token or "ATN"),
             "recipient": str(recipient or ""),
         }
 
@@ -3702,7 +3732,8 @@ class WebSocketBridge:
                 "request_id": str(paid.get("request_id") or request_id)}
 
     async def _invoke_local_service(
-        self, record: Any, args: dict[str, Any], msg_id: Any
+        self, record: Any, args: dict[str, Any], msg_id: Any,
+        prepaid: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Buy from a service this daemon publishes.
 
@@ -3715,7 +3746,6 @@ class WebSocketBridge:
         from . import service_client
 
         ask = record.ask
-        token = str(ask.get("token") or "")
         amount_raw = ask.get("amount", "")
         try:
             amount = int(str(amount_raw or "0") or "0")
@@ -3735,17 +3765,28 @@ class WebSocketBridge:
                     "error": f"Service {record.name or record.digest[:16]} has "
                              "no backing implementation — nothing to buy."}
 
-        request_id = service_client.new_request_id()
-        payment = await self._pay_for_invoke(
-            recipient=recipient, amount=amount, request_id=request_id)
-        if payment.get("error"):
-            return {"msg_id": msg_id, "ok": False, "error": payment["error"]}
-        tx_hash = str(payment.get("tx_hash") or "")
-        request_id = str(payment.get("request_id") or request_id)
-        receipt = self._receipt(
-            paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
-            tx_hash=tx_hash, amount=amount_raw, token=token,
-            recipient=recipient)
+        if prepaid is not None:
+            # The buyer already paid with their own wallet; the proof
+            # rides to the gate, which verifies it on-chain. A bogus
+            # proof fails at dispatch, not here.
+            tx_hash = prepaid["tx_hash"]
+            request_id = prepaid["request_id"]
+            receipt = self._receipt(
+                paid=True, degraded=False, tx_hash=tx_hash,
+                amount=amount_raw, recipient=recipient)
+        else:
+            request_id = service_client.new_request_id()
+            payment = await self._pay_for_invoke(
+                recipient=recipient, amount=amount, request_id=request_id)
+            if payment.get("error"):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": payment["error"]}
+            tx_hash = str(payment.get("tx_hash") or "")
+            request_id = str(payment.get("request_id") or request_id)
+            receipt = self._receipt(
+                paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
+                tx_hash=tx_hash, amount=amount_raw,
+                recipient=recipient)
 
         frame: dict[str, Any] = {
             "spec_digest": record.digest,
@@ -3759,7 +3800,8 @@ class WebSocketBridge:
         return self._invoke_result(reply, request_id, receipt, msg_id)
 
     async def _invoke_foreign_service(
-        self, digest: str, args: dict[str, Any], msg_id: Any
+        self, digest: str, args: dict[str, Any], msg_id: Any,
+        prepaid: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Buy from a service published by ANOTHER daemon.
 
@@ -3808,17 +3850,26 @@ class WebSocketBridge:
         except (TypeError, ValueError):
             amount = 0
 
-        request_id = service_client.new_request_id()
-        payment = await self._pay_for_invoke(
-            recipient=provider_address, amount=amount, request_id=request_id)
-        if payment.get("error"):
-            return {"msg_id": msg_id, "ok": False, "error": payment["error"]}
-        tx_hash = str(payment.get("tx_hash") or "")
-        request_id = str(payment.get("request_id") or request_id)
-        receipt = self._receipt(
-            paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
-            tx_hash=tx_hash, amount=amount, token="ATN",
-            recipient=provider_address)
+        if prepaid is not None:
+            tx_hash = prepaid["tx_hash"]
+            request_id = prepaid["request_id"]
+            receipt = self._receipt(
+                paid=True, degraded=False, tx_hash=tx_hash,
+                amount=amount, recipient=provider_address)
+        else:
+            request_id = service_client.new_request_id()
+            payment = await self._pay_for_invoke(
+                recipient=provider_address, amount=amount,
+                request_id=request_id)
+            if payment.get("error"):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": payment["error"]}
+            tx_hash = str(payment.get("tx_hash") or "")
+            request_id = str(payment.get("request_id") or request_id)
+            receipt = self._receipt(
+                paid=bool(tx_hash), degraded=bool(payment.get("degraded")),
+                tx_hash=tx_hash, amount=amount,
+                recipient=provider_address)
 
         # Resolve the endpoint off the loop (blocking web3 read) and hand it
         # to request_service so it doesn't read the chain itself; the dial

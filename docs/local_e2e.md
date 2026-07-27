@@ -498,10 +498,12 @@ is reachable from such a session.
    proves liveness with a real `snapshot` round trip rather than trusting
    the TCP accept.
 
-9. **`ask.token` is still required** by `validate_ask` even though
-   settlement is ATN-only (ratified 2026-07-10). Both e2e scripts feed it
-   the Substrate address. A stale validator, not a rail bug — noted here
-   rather than changed.
+9. **`ask.token` is GONE** (2026-07-26). The vestigial field — required
+   by `validate_ask` long after ATN-only settlement was ratified
+   (2026-07-10) — was removed: an ask is `{amount, unit}`, ATN-denominated
+   by construction. Both e2e scripts stopped sending the Substrate
+   address. Removal is tolerant: `normalize_ask` strips a `token` an old
+   caller still passes, and persisted specs carrying one still load.
 
 10. **A reasoning/"thinker" model fails the probe for the wrong reason.**
     It emits hundreds of tokens of deliberation before the one word asked

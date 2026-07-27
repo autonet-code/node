@@ -245,6 +245,37 @@ class TestServiceProviderBindingAuthority:
         return rt, execute_tool
 
     @pytest.mark.asyncio
+    async def test_agent_cannot_change_own_model_or_provider(self, tmp_path):
+        """model/provider carry the same parent-only doctrine as the
+        binding — these fields predate the gate and were self-settable."""
+        rt, execute_tool = await self._fleet(tmp_path)
+        for field, value in (("model", "haiku"), ("provider", "rpb")):
+            res = await execute_tool(
+                "update_agent", {"agent_id": "child-1", field: value},
+                rt, caller_id="child-1")
+            assert "error" in res, field
+            assert "its own" in res["error"]
+        assert rt.get_agent("child-1").cognitive_model == "sonnet"
+
+    @pytest.mark.asyncio
+    async def test_parent_and_owner_can_change_model(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool(
+            "update_agent", {"agent_id": "child-1", "model": "haiku"},
+            rt, caller_id="parent-1")
+        assert "error" not in res, res
+        assert rt.get_agent("child-1").cognitive_model == "haiku"
+        res = await execute_tool(
+            "update_agent", {"agent_id": "child-1", "model": "sonnet"},
+            rt, caller_id=None)
+        assert "error" not in res, res
+        res = await execute_tool(
+            "update_agent", {"agent_id": "child-1", "provider": "rpb"},
+            rt, caller_id="sibling-1")
+        assert "error" in res
+        assert "not the parent" in res["error"]
+
+    @pytest.mark.asyncio
     async def test_parent_can_bind_its_child(self, tmp_path):
         rt, execute_tool = await self._fleet(tmp_path)
         res = await execute_tool(
