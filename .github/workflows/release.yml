@@ -100,10 +100,8 @@ jobs:
 
             **Install tiers:**
             ```bash
-            pip install autonet-computer                  # Agent framework (local)
-            pip install autonet-computer[voice]           # + Voice / TTS
-            pip install autonet-computer[network]         # + Blockchain, P2P, training
-            pip install autonet-computer[network,voice]   # Everything
+            pip install autonet-computer                  # Full node: agents, chain, P2P substrate
+            pip install autonet-computer[voice-full]      # + voice: all TTS backends + push-to-talk STT
             ```
 
             ## Package Integrity Hash

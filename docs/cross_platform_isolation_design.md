@@ -37,8 +37,8 @@ This was the sprint to make isolation + vault OS-agnostic.
   already crosses platforms.
 - Secret store (`atn/_vendor/kevin/keystore.py`): age/`pyrage` + stdlib file I/O.
 - PID-reuse defense in the supervisor (`agent_supervisor._probe_identity`):
-  `psutil.create_time()`/`cmdline()`, cross-platform. (Caveat: `psutil` is a
-  `[network]` extra, not core.)
+  `psutil.create_time()`/`cmdline()`, cross-platform. (Caveat: `psutil` ships in
+  core.)
 
 **Windows-only, needs porting (the two hard parts):**
 1. **Kill-tree containment** (`worker_manager.py`): Win32 Job Objects

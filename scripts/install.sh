@@ -77,4 +77,4 @@ fi
 
 info "Installation complete!"
 info "Run 'atn' to start the agent framework."
-info "Optional extras: pip install autonet-computer[voice] autonet-computer[node] autonet-computer[p2p]"
+info "Optional extras: pip install autonet-computer[voice-full]"

@@ -81,4 +81,4 @@ if ($UserPath -notlike "*$VenvBin*") {
 
 Info "Installation complete!"
 Info "Run 'atn' to start the agent framework."
-Info "Optional extras: pip install autonet-computer[voice] autonet-computer[node] autonet-computer[p2p]"
+Info "Optional extras: pip install autonet-computer[voice-full]"

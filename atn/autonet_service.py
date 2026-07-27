@@ -243,7 +243,7 @@ class AutonetBridge:
             log.info("Jurisdiction '%s' contracts discovered from %s",
                      self.state.jurisdiction_name, self.config.dao_address)
         except ImportError:
-            log.info("Contract discovery skipped (install autonet-computer[network] for on-chain features)")
+            log.info("Contract discovery skipped (web3 not available)")
         except Exception as e:
             log.warning("Failed to discover jurisdiction from %s: %s",
                         self.config.dao_address, e)

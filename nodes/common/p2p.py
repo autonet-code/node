@@ -393,7 +393,7 @@ class AutonetHost:
     - Guild gossip (GossipSub)
     - Node capability advertisement
 
-    Requires ``pip install autonet-computer[network]`` for P2P dependencies.
+    P2P dependencies (libp2p, trio) ship with the core install.
     """
 
     def __init__(
