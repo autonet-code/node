@@ -1011,6 +1011,19 @@ class WebSocketBridge:
                         "params": props}
 
             tool_index = {t.name: t for t in _TOOLS}
+            # Which bundles are DAEMON-COUPLED vs genuinely externalizable.
+            # Every atn_* bundle's executors take the live Runtime (registry,
+            # providers, supervisor), so their manifests are IDENTITY records
+            # over daemon internals — they can never be a subprocess without
+            # handing it daemon authority. The shell bundle is the exception:
+            # its executors take only an input dict, so its code blob is a
+            # real runnable program (atn/shell_tools.py __main__).
+            #
+            # The frontend must not present these as the same kind of thing.
+            # 'kind' says what a bundle IS; 'swappable' says whether a
+            # substrate tool could ever replace it. swappable=True does NOT
+            # mean swapping is live — resolution is built and gated off
+            # (atn/runtime/shell_provider.py explains why).
             bundles = []
             for cat in sorted(_TOOL_CATEGORIES):
                 if cat == "shell":
@@ -1021,20 +1034,31 @@ class WebSocketBridge:
                         _entry(n, tool_index[n].description, tool_index[n].input_schema)
                         for n in sorted(_TOOL_CATEGORIES[cat]) if n in tool_index
                     ]
-                bundles.append({"id": cat, "tools": tools})
+                bundles.append({
+                    "id": cat,
+                    "tools": tools,
+                    "kind": "external" if cat == "shell" else "daemon",
+                    "swappable": cat == "shell",
+                    "swap_enabled": False,
+                })
             # Bridge-native (Claude SDK) built-ins — granted via "sdk_builtin".
             # Schemas live in the SDK; names are the stable contract.
-            bundles.append({"id": "sdk_builtin", "tools": [
-                {"name": n, "description": d, "params": []} for n, d in [
-                    ("Bash", "Run shell commands"),
-                    ("Read", "Read files"), ("Write", "Write files"),
-                    ("Edit", "Edit files"),
-                    ("Glob", "Find files by pattern"),
-                    ("Grep", "Search file contents"),
-                    ("WebSearch", "Search the web"),
-                    ("WebFetch", "Fetch a URL"),
-                    ("Task", "Spawn a sub-task"),
-                ]]})
+            bundles.append({
+                "id": "sdk_builtin",
+                "kind": "provider",   # lives in the Claude SDK, not this daemon
+                "swappable": False,
+                "swap_enabled": False,
+                "tools": [
+                    {"name": n, "description": d, "params": []} for n, d in [
+                        ("Bash", "Run shell commands"),
+                        ("Read", "Read files"), ("Write", "Write files"),
+                        ("Edit", "Edit files"),
+                        ("Glob", "Find files by pattern"),
+                        ("Grep", "Search file contents"),
+                        ("WebSearch", "Search the web"),
+                        ("WebFetch", "Fetch a URL"),
+                        ("Task", "Spawn a sub-task"),
+                    ]]})
             return {"msg_id": msg_id, "ok": True,
                     "result": {"bundles": bundles}}
 

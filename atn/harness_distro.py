@@ -117,6 +117,8 @@ def bootstrap_reference_distro(runtime: "Runtime") -> str | None:
 
         for bundle in sorted(_TOOL_CATEGORIES.keys()):
             tool_names = sorted(_TOOL_CATEGORIES[bundle])
+            caps: dict | None = None
+            schema: dict = {"type": "object"}
 
             if bundle == "shell":
                 # shell tools live in shell_tools.py, not _EXECUTORS.
@@ -124,6 +126,26 @@ def bootstrap_reference_distro(runtime: "Runtime") -> str | None:
                 code = _shell_code()
                 desc_names = names or ["bash", "read_file", "write_file",
                                        "list_directory", "search_files"]
+                # The shell module is the one bundle whose code blob is a
+                # RUNNABLE program (shell_tools.py grew a __main__ that speaks
+                # the sealed tool protocol), so its manifest can describe
+                # itself honestly: the envelope it accepts, the tool names it
+                # provides, and the host access it genuinely needs. Every
+                # other bundle stays an identity-only manifest — its blob is
+                # concatenated source, not a program, and claiming otherwise
+                # would be a lie in the one place the network reads.
+                caps = {
+                    "provides": sorted(desc_names),
+                    "net": True, "fs": True, "spawn": True,
+                }
+                schema = {
+                    "type": "object",
+                    "properties": {
+                        "tool": {"type": "string", "enum": sorted(desc_names)},
+                        "args": {"type": "object"},
+                    },
+                    "required": ["tool"],
+                }
             elif not tool_names:
                 # Other empty placeholder bundles carry no capability — skip.
                 continue
@@ -138,10 +160,11 @@ def bootstrap_reference_distro(runtime: "Runtime") -> str | None:
                 res = store.register(
                     name=f"atn_{bundle}",
                     description=description,
-                    input_schema={"type": "object"},
+                    input_schema=schema,
                     author=_BOOTSTRAP_AUTHOR,
                     code=code,
                     publish=False,
+                    capabilities=caps,
                 )
             except Exception as exc:
                 log.warning("harness distro: module %r failed: %s", bundle, exc)

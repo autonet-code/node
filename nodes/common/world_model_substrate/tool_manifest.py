@@ -177,9 +177,10 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
             errors.append("capabilities must be a dict")
         else:
             for key in caps:
-                if key not in ("net", "fs", "spawn", "env", "secrets"):
+                if key not in ("net", "fs", "spawn", "env", "secrets",
+                               "provides"):
                     errors.append(f"unknown capability {key!r} (allowed: "
-                                  "net, fs, spawn, env, secrets)")
+                                  "net, fs, spawn, env, secrets, provides)")
             for flag in ("net", "fs", "spawn"):
                 if flag in caps and not isinstance(caps[flag], bool):
                     errors.append(f"capability {flag!r} must be a bool")
@@ -206,6 +207,18 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
                 elif any("." in v for v in secrets):
                     errors.append("capability 'secrets' must not name "
                                   "daemon-plane services (no dots)")
+            # 'provides' names the CORE tool names this manifest implements
+            # (the shell bundle). Structural check only — which names are
+            # actually overridable is a daemon-local question (the resident
+            # bundle differs by build), so it is enforced at registration,
+            # not here where a peer validates a gossiped manifest.
+            provides = caps.get("provides")
+            if provides is not None and (
+                not isinstance(provides, list)
+                or not all(isinstance(v, str) and v for v in provides)
+            ):
+                errors.append("capability 'provides' must be a list of "
+                              "tool names")
 
     deps = payload.get("dependencies")
     if deps is not None:

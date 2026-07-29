@@ -260,6 +260,29 @@ class ToolStore:
                     capabilities["secrets"] = sorted(declared)
                 else:
                     capabilities.pop("secrets", None)
+            if "provides" in capabilities:
+                # 'provides' claims authority over CORE tool names (the shell
+                # bundle). Normalize to a sorted unique list and drop anything
+                # outside the overridable set — a manifest cannot invent a name
+                # to provide, and cannot claim a framework tool that is not
+                # swappable. Declaring is not being granted in any case: the
+                # swap is gated off (runtime/shell_provider.py), so today this
+                # field is descriptive only.
+                try:
+                    from .shell_tools import SHELL_TOOL_EXECUTORS as _SHELL
+                    allowed = frozenset(_SHELL)
+                except Exception:  # noqa: BLE001 — fail closed
+                    allowed = frozenset()
+                raw = capabilities.get("provides")
+                claimed = sorted({
+                    s.strip() for s in (raw if isinstance(raw, (list, tuple, set))
+                                        else [])
+                    if isinstance(s, str) and s.strip() in allowed
+                })
+                if claimed:
+                    capabilities["provides"] = claimed
+                else:
+                    capabilities.pop("provides", None)
             if not capabilities:
                 capabilities = None
 
@@ -1451,6 +1474,31 @@ class ToolStore:
         if code_raw is None:
             return {"error": "code blob not fetchable — refusing to install "
                              "a manifest whose code can't be pinned locally"}
+
+        # Provenance is LOAD-BEARING here, not decoration. propose_adoption
+        # assembles {signed, greenlit, busted, vets} for the owner to read,
+        # but approval used to consult NONE of it — a manifest carrying a
+        # WRONG signature installed exactly as readily as a valid one.
+        #
+        # Re-verify against the payload we just re-fetched (not the stored
+        # proposal, which was written when the blob may have differed):
+        #   signed is False -> the signature is PRESENT but does not recover
+        #     to the claimed author. _verify_manifest_sig calls this what it
+        #     is: a re-attribution attempt. Refuse.
+        #   signed is None  -> unsigned / verification unavailable. ALLOWED,
+        #     deliberately: most tools are unsigned today and refusing them
+        #     would break the rail. Absence of a claim is not a false claim.
+        # A CON-busted tool is likewise refused: the network has already
+        # produced reproducible evidence against it.
+        if self._verify_manifest_sig(payload) is False:
+            return {"error": "manifest signature does not recover to its "
+                             "claimed author — refusing to install "
+                             "(re-attribution attempt)"}
+        prov = (proposal.get("provenance") or {}) if isinstance(
+            proposal.get("provenance"), dict) else {}
+        if prov.get("busted") is True:
+            return {"error": "tool is CON-busted on the substrate — refusing "
+                             "to install; clear the evidence claim first"}
 
         record = ToolRecord(
             digest=digest,

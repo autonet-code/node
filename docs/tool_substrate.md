@@ -793,6 +793,79 @@ Upgradeability of reference defaults: ordinary distro evolution. The
 protocol floor changes only by redeploy/governance, a future
 session's question, deliberately deferred.
 
+### Decision (2026-07-29): the shell bundle is runnable; the swap is gated off
+
+The section above says "customization = forking a distro (swap a dep)".
+That was true of the ECONOMICS and false of the EXECUTION, and the gap
+went unnoticed because the two halves were built at different times.
+
+**What was actually there.** The 18 `atn_*` module manifests are real,
+pinned, content-addressed records with code blobs — but their blobs are
+`inspect.getsource` of daemon internals, i.e. IDENTITY, not programs.
+None implemented the sealed stdin/stdout protocol; invoking one through
+`_call_pinned` would have hung on `stdin.read()`. The distro DAG,
+adoption credit, and mint fan-out all worked. Nothing could be swapped in.
+
+**Why most bundles can never be executable.** Every one of the 63
+executors takes `(runtime, input)` and reaches live daemon state —
+`runtime.list_agents`, `runtime.tool_registry`, `runtime.get_agent`. A
+pinned tool is a subprocess with a JSON pipe; it has no `runtime`.
+Making `atn_delegation` "executable" would mean an RPC channel handing a
+subprocess daemon authority — a privilege-escalation surface, not a
+feature. **These stay identity manifests, by decision.** Core logic
+upgrades via daemon release (user-blessed 2026-07-29).
+
+**What shipped: the extraction.** `atn/shell_tools.py` is the one bundle
+whose executors take only an input dict. It gained a `dispatch(envelope)`
+router and a sealed-protocol `__main__`, so the SAME file is now
+simultaneously (1) the in-process fast path, unchanged; (2) a runnable
+tool subprocess; (3) the code blob `harness_distro` already hashed. Its
+manifest now declares `capabilities.provides` and its real host access.
+The reference implementation a third-party shell provider must match now
+exists and is executable.
+
+**What did NOT ship: the resolution.** Letting an adopted tool replace
+the built-in shell is built, wired at one convergence point
+(`execution_engine.route_tool_call`), and HARD-DISABLED
+(`runtime/shell_provider.py`, `SHELL_SWAP_ENABLED = False`). The reason
+is containment, and it is structural rather than fixable-by-config:
+
+- `tool_guard.py` has exactly three checks — `socket.*`, open-outside-
+  prefix, and a spawn-event tuple. A shell bundle needs net, fs, AND
+  spawn by definition, so every branch falls through and the guard is a
+  literal no-op for this tool class. The destination allowlist does not
+  help: `spawn: True` defeats it (curl in a child process is unaudited).
+- The exposure is uniquely high here, not merely equal to other tools. A
+  substituted `bash` sees every command string (git remotes, ssh,
+  curl-with-token-in-URL); a substituted `read_file` sees every file body
+  the agent reads — the plane where credentials actually live, and
+  exactly the plane the tool-secret binding does NOT cover (that clamps
+  which VAULT services a tool may request; it says nothing about a tool
+  reading `~/.aws/credentials` as a file).
+- Exfiltration would need no evasion: net and spawn are HONESTLY
+  declared, so there is no manifest/behavior mismatch for the CON
+  evidence rail to bite on. Forge-resistance assumes a liar; this tool
+  class does not have to lie.
+
+Three preconditions to flip the flag, listed in `shell_provider.py`:
+OS-level isolation for adopted tools (not an in-process audit hook); a
+privilege-class notion at adoption (approving a tool that claims
+`provides` over core shell names must be a visibly different act from
+approving a CSV parser); and a per-agent loadout binding
+(`active_loadout` is currently one daemon-wide string used only to stamp
+attestations, never consulted at dispatch).
+
+**Perf, measured, and why the built-in must stay in-process:** a
+subprocess tool call is ~66 ms; the in-process executor is ~0.14 ms.
+474×. Any design routing default `read_file` through a subprocess is
+dead on arrival, which is why `dispatch_shell` returns `None` as its
+zero-cost fall-through rather than raising or wrapping.
+
+**Frontend contract:** `tool_surface` bundles now carry `kind`
+(`daemon` | `external` | `provider`), `swappable`, and `swap_enabled`.
+Sixteen daemon-coupled, one external (shell), one provider-native
+(sdk_builtin). The UI must not present these as the same kind of thing.
+
 ## Vetting: the candidate pool (ratified 2026-07-05; BUILT same day)
 
 **[RETIRED at v4.1 (Decision 2026-07-09). The candidate pool and the

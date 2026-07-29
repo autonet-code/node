@@ -86,13 +86,25 @@ class TestHarnessDistroBootstrap:
             assert mod.name.startswith("atn_")
 
     def test_shell_module_present(self, tmp_path):
-        """shell bundle has no _EXECUTORS entries but IS included (hashed
-        from shell_tools.py source)."""
+        """The shell bundle IS included, and unlike every other module its
+        blob is a RUNNABLE program (shell_tools.py grew a sealed-protocol
+        __main__), so its manifest declares what it provides.
+
+        The other atn_* modules stay identity-only: their executors take the
+        live Runtime, so their blobs are concatenated source, not programs.
+        See tests/atn/test_shell_bundle.py for the runnability proof.
+        """
         rt = _make_runtime(tmp_path)
         store = rt.tool_store
-        names = {store.get(d).name for d in
-                 (store.get(store.active_loadout).manifest.get("dependencies") or [])}
+        deps = store.get(store.active_loadout).manifest.get("dependencies") or []
+        names = {store.get(d).name for d in deps}
         assert "atn_shell" in names
+
+        shell = next(store.get(d) for d in deps
+                     if store.get(d).name == "atn_shell")
+        assert shell.manifest.get("code_digest"), "shell module lost its blob"
+        assert (shell.manifest.get("capabilities") or {}).get("provides"), \
+            "shell module no longer declares what it provides"
 
     def test_idempotent_stable_digest_no_duplicates(self, tmp_path):
         """A second bootstrap over identical source yields the same distro

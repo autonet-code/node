@@ -596,6 +596,19 @@ class ExecutionEngine:
         # concrete routing below still decides the exact authority target
         # (surface vs connector vs framework tool).
         if name in _SHELL_TOOL_EXECUTORS:
+            # Shell-bundle swap (docs/tool_substrate.md). CURRENTLY A NO-OP:
+            # dispatch_shell hard-returns None while SHELL_SWAP_ENABLED is
+            # False, so this is one function call and a None check before the
+            # unchanged in-process await. Wired here — the single convergence
+            # point both the daemon and (via the framework_tool RPC) the worker
+            # pass through — so that if the swap is ever enabled there is
+            # exactly ONE place it takes effect. Read shell_provider.py's
+            # docstring before flipping that flag.
+            from .shell_provider import dispatch_shell
+            override = await dispatch_shell(
+                getattr(self, "_runtime_ref", None), agent_id, name, tool_input)
+            if override is not None:
+                return override
             return await _SHELL_TOOL_EXECUTORS[name](tool_input)
         # Secret tools are WORKER-ONLY (they need the worker's kernel PID to reach
         # the vault-broker; the daemon holds no broker session and must never

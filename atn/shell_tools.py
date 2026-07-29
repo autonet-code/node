@@ -6,6 +6,28 @@ generic providers need these Python-implemented equivalents.
 This module is the single source of truth for:
   - SHELL_TOOLS:          tool definition dicts (name, description, input_schema)
   - SHELL_TOOL_EXECUTORS: name -> async executor function mapping
+  - dispatch():           the bundle envelope, {tool, args} -> result
+
+DUAL NATURE (docs/tool_substrate.md — "Resident tools, loadouts, distros").
+This file is simultaneously three things, and that is deliberate:
+
+  1. An IMPORTABLE module. The daemon and the worker both import
+     SHELL_TOOL_EXECUTORS by identity and await the executors in-process.
+     That path is the default and stays untouched — a subprocess round-trip
+     is ~470x slower than an in-process await (66ms vs 0.14ms measured), so
+     the built-in must never pay it.
+  2. A RUNNABLE pinned tool. The ``__main__`` block below speaks the sealed
+     tool protocol (JSON envelope on stdin, JSON result on stdout), so this
+     exact file can be executed as a tool subprocess.
+  3. The CODE BLOB of the atn_shell module manifest. harness_distro hashes
+     this file with inspect.getsource, so (2) makes an already-existing
+     manifest honest for the first time: what the digest locks is now a
+     program, not just a description of one.
+
+The point of (2)+(3) is the reference implementation: it is the literal
+contract a third-party shell provider must match. Whether such a provider may
+REPLACE the built-in is a separate, currently-disabled question — see
+atn/runtime/shell_provider.py for why that half is gated off.
 """
 from __future__ import annotations
 
@@ -179,3 +201,65 @@ SHELL_TOOL_EXECUTORS: dict[str, Any] = {
     "list_directory": exec_list_dir,
     "search_files": exec_search_files,
 }
+
+
+# ---------------------------------------------------------------------------
+# Bundle envelope — the contract a shell PROVIDER implements
+# ---------------------------------------------------------------------------
+
+async def dispatch(envelope: dict) -> dict:
+    """Route one ``{"tool": name, "args": {...}}`` envelope to an executor.
+
+    Returns ``{"ok": True, "result": {...}}`` or ``{"ok": False, "error": ...}``.
+
+    The envelope exists because a BUNDLE provides several tools under ONE
+    manifest digest — the digest is the unit of grant, review, and adoption,
+    so five tools sharing one identity need an inner selector. Callers of the
+    in-process fast path do NOT go through here; they index
+    SHELL_TOOL_EXECUTORS directly.
+
+    Never raises: an executor fault becomes an error envelope, because the
+    caller is a subprocess boundary where an exception is just a non-zero
+    exit with a traceback on stderr.
+    """
+    if not isinstance(envelope, dict):
+        return {"ok": False, "error": "envelope must be an object"}
+    name = envelope.get("tool")
+    if not isinstance(name, str) or not name:
+        return {"ok": False, "error": "envelope requires a 'tool' name"}
+    args = envelope.get("args")
+    if not isinstance(args, dict):
+        args = {}
+    fn = SHELL_TOOL_EXECUTORS.get(name)
+    if fn is None:
+        return {"ok": False, "error": f"unknown shell tool: {name}"}
+    try:
+        return {"ok": True, "result": await fn(args)}
+    except Exception as exc:  # noqa: BLE001 — a tool error is data, not a crash
+        return {"ok": False, "error": f"{name} failed: {exc}"}
+
+
+def _main() -> None:
+    """Sealed-tool entrypoint: JSON envelope on stdin, JSON result on stdout.
+
+    Exits 0 even on error — the protocol carries failure in the payload, and a
+    non-zero exit would surface as "tool exited N" instead of the real reason.
+    """
+    import asyncio
+    import json
+    import sys
+
+    try:
+        envelope = json.loads(sys.stdin.read() or "{}")
+    except (ValueError, UnicodeDecodeError) as exc:
+        print(json.dumps({"ok": False, "error": f"bad envelope: {exc}"}))
+        return
+    try:
+        out = asyncio.run(dispatch(envelope))
+    except Exception as exc:  # noqa: BLE001 — absolute backstop
+        out = {"ok": False, "error": f"dispatch failed: {exc}"}
+    print(json.dumps(out))
+
+
+if __name__ == "__main__":
+    _main()
