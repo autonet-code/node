@@ -2385,6 +2385,22 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     # Registered tools may never shadow framework names.
     if get_core_tool_def(name) is not None:
         return {"error": f"'{name}' is a core ATN tool name; pick another"}
+    # ...including the SHELL bundle, which lives in shell_tools.py and is
+    # therefore absent from _TOOLS (get_core_tool_def only scans _TOOLS).
+    # Without this an agent could register a tool named "bash": harmless
+    # today because dispatch checks _SHELL_TOOL_EXECUTORS first, but it
+    # makes the surface ambiguous and pre-poisons any future resolution
+    # that keys on tool NAME. Reserve them now, while nothing depends on
+    # the ambiguity.
+    from ..shell_tools import SHELL_TOOL_EXECUTORS as _SHELL_NAMES
+    if name in _SHELL_NAMES:
+        return {"error": f"'{name}' is a core ATN shell tool name; pick another"}
+    # The daemon's own resident-module manifests are atn_<bundle>
+    # (harness_distro.py). Reserving the prefix keeps a registered tool
+    # from impersonating a harness module in the Tools UI or the distro DAG.
+    if name.startswith("atn_"):
+        return {"error": "tool names may not start with 'atn_' "
+                         "(reserved for daemon harness modules)"}
     for reserved in ("reg_", "pipeline_", "tool_", "connector_"):
         if name.startswith(reserved):
             return {"error": f"tool names may not start with '{reserved}'"}

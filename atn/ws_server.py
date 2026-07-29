@@ -1212,9 +1212,26 @@ class WebSocketBridge:
                     "result": {"digest": digest, "published": published}}
 
         # Adoption rail (docs/tool_substrate.md — Adoption): the approval
-        # queue is HUMAN-ONLY by construction, like grants. Agents can
-        # only propose (adopt_tool, case-by-case granted); installing
-        # foreign code is the owner's call, always per-tool.
+        # queue is HUMAN-ONLY, like grants. Agents can only propose
+        # (adopt_tool, case-by-case granted); installing foreign code is
+        # the owner's call, always per-tool.
+        #
+        # "By construction" USED TO BE FALSE. These handlers sat behind
+        # Gate 2 (authenticated) and nothing else — no scope check, absent
+        # from OWNER_ONLY_TOOLS — so a SCOPED session (a delegated remote
+        # link, which by design does not act for the owner) could install
+        # foreign pinned code. That was a strictly weaker gate than
+        # reading secret NAMES (_SECRETS_MESSAGES above rejects scoped
+        # sessions). Approving an adoption is the single highest-privilege
+        # act on this surface: it installs code that then runs on this
+        # host, so it gets the same owner-only treatment.
+        if msg_type in ("list_adoption_proposals", "approve_adoption",
+                        "reject_adoption"):
+            if session.scope_ids is not None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "adoption approval is owner-only and not "
+                                 "available to a scoped session"}
+
         if msg_type == "list_adoption_proposals":
             status = msg.get("status") or None
             rows = self.runtime.tool_store.list_adoption_proposals(status)
