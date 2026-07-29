@@ -22,6 +22,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -65,15 +66,80 @@ class ConnectorManager:
 
     Owns a registry of ConnectorSpec definitions (from config) and manages
     live ConnectorSession instances.  Connectors are started lazily when
-    an agent needs them and kept alive across executions.
+    an agent needs them and kept alive across executions — but no longer
+    FOREVER: an idle connector is reaped (see ``reap_idle``).
+
+    IDLE COST IS THE POINT. A pinned tool is a subprocess spawned per call
+    that exits when it returns, so an unused pinned tool costs nothing. An
+    MCP connector is the opposite: a long-lived server process that, before
+    the reaper, lived until daemon shutdown (``stop_all`` was reachable only
+    from Runtime.stop and manual removal). Start a Blender connector once
+    and it held RAM until you restarted the daemon. ``set_tool_enabled``
+    does not help — it refuses FUTURE calls, it does not reclaim a running
+    server.
     """
 
-    def __init__(self, specs: dict[str, ConnectorSpec] | None = None) -> None:
+    # Default idle window before a connector is reaped. Deliberately
+    # generous: restarting costs a subprocess spawn + MCP handshake +
+    # tool discovery, so thrashing a connector that is used every few
+    # minutes would be worse than holding it. Configurable per daemon.
+    DEFAULT_IDLE_TIMEOUT_S = 900.0
+
+    def __init__(self, specs: dict[str, ConnectorSpec] | None = None,
+                 idle_timeout_s: float | None = None) -> None:
         self._specs: dict[str, ConnectorSpec] = specs or {}
         self._sessions: dict[str, ConnectorSession] = {}
         # Per-connector runtime env vars (e.g. OAuth tokens loaded from credential store).
         # Merged into the subprocess environment at start time.
         self._runtime_env: dict[str, dict[str, str]] = {}
+        # connector_id -> monotonic timestamp of last start/call. Monotonic,
+        # not wall-clock: a system clock adjustment must not make a live
+        # connector look idle for hours (or immortal).
+        self._last_used: dict[str, float] = {}
+        self._idle_timeout_s: float = (
+            self.DEFAULT_IDLE_TIMEOUT_S if idle_timeout_s is None
+            else float(idle_timeout_s))
+
+    @property
+    def idle_timeout_s(self) -> float:
+        return self._idle_timeout_s
+
+    def _touch(self, connector_id: str) -> None:
+        """Mark a connector as used now. Called on start and on every call."""
+        self._last_used[connector_id] = time.monotonic()
+
+    def idle_seconds(self, connector_id: str) -> float | None:
+        """Seconds since last use, or None if not running."""
+        if connector_id not in self._sessions:
+            return None
+        last = self._last_used.get(connector_id)
+        if last is None:
+            return 0.0
+        return max(0.0, time.monotonic() - last)
+
+    async def reap_idle(self, timeout_s: float | None = None) -> list[str]:
+        """Stop connectors idle longer than the timeout. Returns what was
+        stopped.
+
+        A timeout <= 0 disables reaping entirely (keep-alive-forever, the
+        pre-reaper behavior) — an explicit opt-out rather than an accident.
+        Never raises: a reaper fault must not take down the caller's loop.
+        """
+        window = self._idle_timeout_s if timeout_s is None else float(timeout_s)
+        if window <= 0:
+            return []
+        stopped: list[str] = []
+        for cid in list(self._sessions.keys()):
+            idle = self.idle_seconds(cid)
+            if idle is None or idle < window:
+                continue
+            try:
+                await self.stop(cid)
+                stopped.append(cid)
+                log.info("Connector '%s' reaped after %.0fs idle", cid, idle)
+            except Exception:  # noqa: BLE001 — one bad stop must not block others
+                log.exception("Error reaping connector '%s'", cid)
+        return stopped
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -125,6 +191,7 @@ class ConnectorManager:
             ]
 
             self._sessions[connector_id] = cs
+            self._touch(connector_id)
             log.info(
                 "Connector '%s' started (%d tools discovered)",
                 connector_id, len(cs.tools),
@@ -138,6 +205,7 @@ class ConnectorManager:
     async def stop(self, connector_id: str) -> None:
         """Stop a running connector."""
         cs = self._sessions.pop(connector_id, None)
+        self._last_used.pop(connector_id, None)
         if cs is None:
             return
         await self._cleanup_session(cs)
@@ -257,6 +325,10 @@ class ConnectorManager:
         if cs is None or cs._session is None:
             return {"error": f"Connector '{connector_id}' not running"}
 
+        # Stamp BEFORE the call, not after: a long-running tool call would
+        # otherwise look idle for its whole duration and could be reaped
+        # out from under itself by a concurrent sweep.
+        self._touch(connector_id)
         try:
             result = await cs._session.call_tool(tool_name, arguments)
             # Extract content items

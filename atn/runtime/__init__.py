@@ -117,7 +117,14 @@ class Runtime:
                 env=cc.env,
                 env_required=cc.env_required,
             )
-        self.connectors = ConnectorManager(connector_specs)
+        self.connectors = ConnectorManager(
+            connector_specs,
+            idle_timeout_s=getattr(
+                self._config, "connector_idle_timeout_s", None),
+        )
+        # Periodic idle-connector reaper task (started in start(), cancelled
+        # in stop()). None until start().
+        self._connector_reaper: asyncio.Task | None = None
         inject_connector_credentials(self.connectors, self.credential_store)
 
         # Delegate registry
@@ -630,6 +637,29 @@ class Runtime:
             self._pending_grants.pop(agent_id, None)
         return None
 
+    async def _reap_connectors_loop(self) -> None:
+        """Sweep idle MCP connectors until cancelled.
+
+        Sweeps at a fraction of the idle window (bounded to [30s, 300s]) so a
+        connector is reaped reasonably close to its deadline without the sweep
+        itself becoming a busy loop. Never lets an exception kill the task —
+        a reaper that dies silently is worse than no reaper, because the
+        footprint it was managing grows unobserved.
+        """
+        window = self.connectors.idle_timeout_s
+        interval = max(30.0, min(300.0, window / 4.0))
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                stopped = await self.connectors.reap_idle()
+                if stopped:
+                    log.info("reaped %d idle connector(s): %s",
+                             len(stopped), ", ".join(stopped))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — never let the sweep die
+                log.debug("connector reaper sweep failed", exc_info=True)
+
     async def start(self) -> None:
         # Bind the runtime loop into the audit trail so records written from
         # the vpush/supervisor threads can emit their live SECRET_ACCESS event.
@@ -637,6 +667,16 @@ class Runtime:
             self.secret_audit.bind_loop(asyncio.get_running_loop())
         except RuntimeError:
             pass
+
+        # Idle-connector reaper. An MCP connector is a long-lived server
+        # process started lazily and, before this, never stopped on a running
+        # daemon — stop_all was reachable only from Runtime.stop. One use of a
+        # heavy connector held its memory until restart. Pinned tools need no
+        # equivalent: they are per-call subprocesses that exit on return.
+        # Disabled by a timeout <= 0.
+        if self.connectors.idle_timeout_s > 0:
+            self._connector_reaper = asyncio.create_task(
+                self._reap_connectors_loop())
 
         # Recover crashed executions
         recovered = self.execution_log.recover_running()
@@ -789,6 +829,16 @@ class Runtime:
 
         if self.autonet.state.status.value in ("running", "paused"):
             await self.autonet.stop()
+
+        # Cancel the reaper BEFORE stop_all so a sweep cannot race the
+        # shutdown teardown (both call ConnectorManager.stop).
+        if self._connector_reaper is not None:
+            self._connector_reaper.cancel()
+            try:
+                await self._connector_reaper
+            except (asyncio.CancelledError, Exception):  # noqa: B014
+                pass
+            self._connector_reaper = None
 
         await self.connectors.stop_all()
 

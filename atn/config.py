@@ -429,6 +429,12 @@ class ATNConfig:
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     connectors: dict[str, ConnectorConfig] = field(default_factory=dict)
+    # Seconds an MCP connector may sit idle before the daemon stops it.
+    # Connectors are long-lived server processes started lazily and (before
+    # this) kept until daemon shutdown, so a connector used once held RAM
+    # forever. Pinned tools need no equivalent — they exit per call.
+    # <= 0 disables reaping (keep alive forever, the pre-reaper behavior).
+    connector_idle_timeout_s: float = 900.0
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -907,6 +913,15 @@ def load_config(path: Path | None = None) -> ATNConfig:
     secrets_raw = raw.get("secrets", {})
     config.secrets = _load_secrets(
         secrets_raw if isinstance(secrets_raw, dict) else {})
+
+    # Idle-connector reaping. Top-level (not per-connector): the cost being
+    # managed is the daemon's total resident footprint, not any one server's.
+    _idle_raw = raw.get("connector_idle_timeout_s")
+    if _idle_raw is not None:
+        try:
+            config.connector_idle_timeout_s = float(_idle_raw)
+        except (TypeError, ValueError):
+            pass  # keep the default; a malformed value must not break boot
 
     # Connectors
     for name, craw in raw.get("connectors", {}).items():
