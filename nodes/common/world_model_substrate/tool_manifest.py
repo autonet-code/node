@@ -75,10 +75,14 @@ def build_tool_manifest(
     dependencies: Optional[List[str]] = None,
     # capability manifest (docs/tool_substrate.md, Adoption section):
     # what the code needs from the host, deny-by-default. Shape:
-    # {"net": bool, "fs": bool, "spawn": bool, "env": [VAR, ...]}.
+    # {"net": bool, "fs": bool, "spawn": bool, "env": [VAR, ...],
+    #  "secrets": [SERVICE, ...]}.
     # On an ADOPTING daemon this is the sandbox policy — an undeclared
     # capability is a hard runtime failure, so declarations are honest
     # by construction. Absent = needs nothing beyond stdin/stdout.
+    # 'secrets' is the tool-secret binding (docs/tool_secret_binding.md):
+    # NAMES ONLY, always clamped by the calling agent's own allowance, so
+    # a manifest can never widen what its caller already holds.
     capabilities: Optional[Dict[str, Any]] = None,
     # lineage
     version_of: Optional[str] = None,
@@ -173,9 +177,9 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
             errors.append("capabilities must be a dict")
         else:
             for key in caps:
-                if key not in ("net", "fs", "spawn", "env"):
+                if key not in ("net", "fs", "spawn", "env", "secrets"):
                     errors.append(f"unknown capability {key!r} (allowed: "
-                                  "net, fs, spawn, env)")
+                                  "net, fs, spawn, env, secrets)")
             for flag in ("net", "fs", "spawn"):
                 if flag in caps and not isinstance(caps[flag], bool):
                     errors.append(f"capability {flag!r} must be a bool")
@@ -186,6 +190,22 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
             ):
                 errors.append("capability 'env' must be a list of variable "
                               "names")
+            # 'secrets' (docs/tool_secret_binding.md): vault SERVICE NAMES the
+            # code reads at runtime. Declaring is not being granted — the
+            # daemon clamps this against the CALLING AGENT's allowance and
+            # binds only the intersection to the tool's own process. Dotted
+            # names are the daemon plane (app.*, agent-key.*) and are rejected
+            # here as well as stripped daemon-side: a manifest that names one
+            # is malformed, not merely ineffective.
+            secrets = caps.get("secrets")
+            if secrets is not None:
+                if (not isinstance(secrets, list)
+                        or not all(isinstance(v, str) and v for v in secrets)):
+                    errors.append("capability 'secrets' must be a list of "
+                                  "vault service names")
+                elif any("." in v for v in secrets):
+                    errors.append("capability 'secrets' must not name "
+                                  "daemon-plane services (no dots)")
 
     deps = payload.get("dependencies")
     if deps is not None:

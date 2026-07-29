@@ -13,6 +13,13 @@ used which secret, when" is recorded. Three hook points feed this log (all in
   * ``revoked`` — the worker was reaped and its session torn down
     (``_on_pid_revoked``).
 
+Tool-bound sessions (docs/tool_secret_binding.md) record ``granted`` /
+``revoked`` the same way, but carry a ``tool`` digest: the secret was bound to
+a TOOL subprocess, not to the agent's own worker. That field is what makes the
+log able to answer "what consumed this secret", which the PID-only rows cannot
+— a worker that reads its staged file ten thousand times still produces exactly
+one ``staged`` row.
+
 Owner mutations from the WS surface (``secrets_put`` / ``secrets_delete``)
 also record here (``added`` / ``rotated`` / ``deleted``) so the log is the
 single timeline of everything that happened to the vault.
@@ -80,8 +87,14 @@ class SecretAuditLog:
 
     # -- write path -----------------------------------------------------------
     def record(self, action: str, *, agent_id: str,
-               services: list[str], pid: Optional[int] = None) -> None:
+               services: list[str], pid: Optional[int] = None,
+               tool: Optional[str] = None) -> None:
         """Append one names-only row and emit a live SECRET_ACCESS event.
+
+        ``tool`` is the manifest digest when the secret was bound to a TOOL
+        subprocess rather than the agent's worker — the call-site dimension.
+        Truncated to 16 hex chars: enough to identify the tool in the UI,
+        short enough to keep rows small.
 
         Best-effort at every step: an audit failure must never break the
         grant/stage/revoke path it is observing.
@@ -98,6 +111,8 @@ class SecretAuditLog:
                 row["pid"] = int(pid)
             except (TypeError, ValueError):
                 pass
+        if tool:
+            row["tool"] = str(tool)[:16]
 
         if self._path is not None:
             try:
@@ -122,6 +137,7 @@ class SecretAuditLog:
                 "action": row["action"],
                 "services": row["services"],
                 "pid": row.get("pid"),
+                "tool": row.get("tool"),
                 "ts": row["ts"],
             },
         )

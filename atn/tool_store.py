@@ -61,6 +61,30 @@ _MAX_CODE_BYTES = 512 * 1024
 _COMPOSITE_MAX_DEPTH = 4
 
 
+def _authorized_hosts_for(services) -> set[str]:
+    """Union of ``authorized_hosts`` across ``services`` (keystore sidecar).
+
+    Fail-OPEN by omission, deliberately: a service with no configured hosts
+    contributes nothing, and an empty union means the guard leaves net
+    unrestricted. Configuring hosts is how an owner NARROWS a tool; absence is
+    not a claim that the tool may go nowhere, it is the absence of a claim.
+    Any keystore fault yields an empty set (same outcome: no narrowing).
+    """
+    try:
+        from atn._vendor.kevin import keystore as _ks
+    except Exception:  # noqa: BLE001
+        return set()
+    out: set[str] = set()
+    for svc in services or ():
+        try:
+            for h in _ks.get_authorized_hosts(svc) or ():
+                if isinstance(h, str) and h.strip():
+                    out.add(h.strip().lower())
+        except Exception:  # noqa: BLE001 — one bad service must not blind the rest
+            log.debug("authorized_hosts lookup failed for %s", svc, exc_info=True)
+    return out
+
+
 @dataclass
 class ToolRecord:
     """One registered tool: manifest digest + daemon-local state.
@@ -221,6 +245,23 @@ class ToolStore:
         )
 
         blobs = self._blob_store()
+
+        # Tool-secret declaration (docs/tool_secret_binding.md). Normalized at
+        # registration so the stored manifest is what the binding reads: dotted
+        # daemon-plane names stripped, deduped, sorted (stable content hash).
+        # Declaring is NOT being granted — the binding clamps against the
+        # CALLER's allowance at call time, so a manifest can never widen reach.
+        if capabilities is not None:
+            capabilities = dict(capabilities)
+            if "secrets" in capabilities:
+                from .runtime.tool_secrets import declared_tool_secrets
+                declared = declared_tool_secrets({"capabilities": capabilities})
+                if declared:
+                    capabilities["secrets"] = sorted(declared)
+                else:
+                    capabilities.pop("secrets", None)
+            if not capabilities:
+                capabilities = None
 
         code_digest = ""
         if code:
@@ -525,7 +566,8 @@ class ToolStore:
                     record, arguments, caller_id=caller_id, depth=_depth)
             else:
                 # Sealed path — byte-for-byte legacy contract.
-                result = await self._call_pinned(record, arguments)
+                result = await self._call_pinned(
+                    record, arguments, caller_id=caller_id)
         elif manifest.get("connector_id"):
             result = await self._call_connector(record, arguments)
         else:
@@ -537,11 +579,11 @@ class ToolStore:
 
     def _exec_spec(
         self, record: ToolRecord, script: Path,
+        secrets: frozenset[str] | None = None,
     ) -> tuple[list[str], dict[str, str] | None, str | None]:
         """(argv, env, cwd) for a pinned tool subprocess.
 
-        Authored tools run bare (the author judged their own code).
-        ADOPTED tools run contained (docs/tool_substrate.md — Adoption):
+        ADOPTED tools run fully contained (docs/tool_substrate.md — Adoption):
 
           - argv wraps the script in atn/tool_guard.py, whose audit
             hook hard-fails undeclared net/fs/spawn use;
@@ -549,10 +591,61 @@ class ToolStore:
             variables the capability manifest declares — secrets in
             the daemon's environment never reach foreign code;
           - cwd is a per-tool sandbox directory under the tool store.
+
+        AUTHORED tools historically ran BARE — no guard, no sandbox, and
+        ``env=None`` meaning full inheritance of the daemon environment
+        ("the author judged their own code"). But the author is a model,
+        and register_tool is therefore a general code-execution primitive
+        (docs/tool_secret_binding.md — change 3). They now run under the
+        guard by default, with one deliberate concession: ENV INHERITANCE
+        IS PRESERVED. Authored tools depend on reading daemon config vars,
+        and scrubbing them would break working tools for a benefit the
+        audit hook already delivers. Tightening env is a separate step,
+        gated on a survey of what actually reads what.
+
+        Set ``ATN_AUTHORED_TOOLS_BARE=1`` to restore the old bare exec —
+        an escape hatch for a daemon whose authored tools break under the
+        hook, not a recommended posture.
+
+        ``secrets`` is the RESOLVED tool-secret binding (L_agent ∩
+        declared, docs/tool_secret_binding.md). It is advertised to the
+        subprocess as ATN_TOOL_SECRETS — NAMES ONLY, never values. The
+        tool reads each value from its own broker session, which is
+        bound to its PID after spawn. Advertising the names is not a
+        grant: the broker authorizes from the session, not this env var.
         """
         import sys
+        secret_names = ",".join(sorted(secrets or ()))
+        guard = Path(__file__).with_name("tool_guard.py")
+
         if record.origin != "adopted":
-            return [sys.executable, str(script)], None, None
+            if os.environ.get("ATN_AUTHORED_TOOLS_BARE") == "1":
+                env = None
+                if secret_names:
+                    env = dict(os.environ)
+                    env["ATN_TOOL_SECRETS"] = secret_names
+                return [sys.executable, str(script)], env, None
+
+            # Guarded, but env-inheriting (see docstring). The policy is the
+            # author's own declaration; absent capabilities keep the historical
+            # permissive posture (net/fs/spawn all allowed) so existing tools
+            # keep working — the hook's value here is the DESTINATION check on
+            # a secret-bound tool, not a sudden deny-by-default flip.
+            caps = record.manifest.get("capabilities") or {}
+            declared_any = any(k in caps for k in ("net", "fs", "spawn"))
+            env = dict(os.environ)
+            policy: dict[str, Any] = {
+                "net": bool(caps.get("net")) if declared_any else True,
+                "fs": bool(caps.get("fs")) if declared_any else True,
+                "spawn": bool(caps.get("spawn")) if declared_any else True,
+            }
+            if secret_names:
+                env["ATN_TOOL_SECRETS"] = secret_names
+                hosts = _authorized_hosts_for(secrets or ())
+                if hosts:
+                    policy["hosts"] = sorted(hosts)
+            env["ATN_TOOL_POLICY"] = json.dumps(policy)
+            return ([sys.executable, str(guard), str(script)], env, None)
 
         caps = record.manifest.get("capabilities") or {}
         sandbox = self._dir / "sandbox" / record.digest[:16]
@@ -571,19 +664,66 @@ class ToolStore:
         for name in caps.get("env") or []:
             if name in os.environ:
                 env[name] = os.environ[name]
-        env["ATN_TOOL_POLICY"] = json.dumps({
+        policy: dict[str, Any] = {
             "net": bool(caps.get("net")),
             "fs": bool(caps.get("fs")),
             "spawn": bool(caps.get("spawn")),
-        })
-        guard = Path(__file__).with_name("tool_guard.py")
+        }
+        if secret_names:
+            env["ATN_TOOL_SECRETS"] = secret_names
+            # docs/tool_secret_binding.md (change 2): a tool holding a
+            # credential AND unrestricted egress is the shape worth narrowing.
+            # The destinations come from each bound secret's authorized_hosts
+            # — the field that until now was written and displayed but
+            # consulted by nothing. An empty union leaves net unrestricted
+            # (no hosts configured => no claim about where it may go).
+            hosts = _authorized_hosts_for(secrets or ())
+            if hosts:
+                policy["hosts"] = sorted(hosts)
+        env["ATN_TOOL_POLICY"] = json.dumps(policy)
         return ([sys.executable, str(guard), str(script)], env, str(sandbox))
 
+    def _tool_secret_session(self, record: ToolRecord,
+                             caller_id: str | None) -> tuple[Any, frozenset[str]]:
+        """(session_or_None, resolved_services) for one pinned tool call.
+
+        docs/tool_secret_binding.md — the secret is bound to the TOOL's PID,
+        not the agent's, so the agent never holds a handle to it. Returns a
+        minted-but-unbound session (bind after spawn) or None when the tool
+        declared nothing / the clamp is empty / the tripwire is down.
+
+        Never raises: a fault here means the tool runs WITHOUT secrets, which
+        is the safe outcome. The secret is gated, not the execution.
+        """
+        try:
+            from .runtime.tool_secrets import (
+                ToolSecretSession, resolve_tool_secrets,
+            )
+            services = resolve_tool_secrets(
+                record.manifest, self._runtime, caller_id or "")
+            if not services:
+                return None, frozenset()
+            session = ToolSecretSession(
+                self._runtime, services, agent_id=caller_id or "",
+                tool_digest=record.digest)
+            if not session.mint():
+                return None, frozenset()
+            return session, services
+        except Exception:  # noqa: BLE001 — no secrets is always safe
+            log.debug("tool secret binding failed; running without secrets",
+                      exc_info=True)
+            return None, frozenset()
+
     async def _call_pinned(self, record: ToolRecord,
-                           arguments: dict[str, Any]) -> dict[str, Any]:
+                           arguments: dict[str, Any],
+                           *, caller_id: str | None = None) -> dict[str, Any]:
         """Run the pinned code blob as a subprocess: JSON args on stdin,
         JSON result on stdout. The blob is materialized to a cache file
-        named by its digest, so what runs is exactly what was judged."""
+        named by its digest, so what runs is exactly what was judged.
+
+        If the manifest declares secrets AND the caller's allowance covers
+        them, a short-lived broker session is bound to the subprocess PID for
+        the duration of the call (docs/tool_secret_binding.md)."""
         code_digest = record.manifest["code_digest"]
         blobs = self._blob_store()
         raw = blobs.get_bytes(code_digest)
@@ -596,7 +736,8 @@ class ToolStore:
         if not script.exists():
             script.write_bytes(raw)
 
-        argv, env, cwd = self._exec_spec(record, script)
+        session, services = self._tool_secret_session(record, caller_id)
+        argv, env, cwd = self._exec_spec(record, script, services)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -605,6 +746,10 @@ class ToolStore:
                 stderr=asyncio.subprocess.PIPE,
                 env=env, cwd=cwd,
             )
+            # Bind BEFORE writing stdin: the tool may request its secret the
+            # instant it starts, and an unbound PID is not a broker session.
+            if session is not None:
+                session.bind(proc.pid)
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(json.dumps(arguments).encode("utf-8")),
                 timeout=_PINNED_EXEC_TIMEOUT_S,
@@ -617,6 +762,11 @@ class ToolStore:
             return {"error": f"tool timed out after {_PINNED_EXEC_TIMEOUT_S}s"}
         except Exception as exc:
             return {"error": f"tool subprocess failed to start: {exc}"}
+        finally:
+            # ALWAYS: drops policies + push sink and unlinks every staged file
+            # for the PID, so no raw value outlives the subprocess.
+            if session is not None:
+                session.release()
 
         out_text = stdout.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
@@ -672,7 +822,12 @@ class ToolStore:
         if not script.exists():
             script.write_bytes(raw)
 
-        argv, env, cwd = self._exec_spec(record, script)
+        # Same tool-secret binding as the sealed path. Nested dep calls run
+        # under the ORIGINAL caller's authority (see the frame handler below),
+        # so each tool in a composition gets its own clamp against the same
+        # L_agent — a composite cannot lend its secrets to a dependency.
+        session, services = self._tool_secret_session(record, caller_id)
+        argv, env, cwd = self._exec_spec(record, script, services)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -681,7 +836,11 @@ class ToolStore:
                 stderr=asyncio.subprocess.PIPE,
                 env=env, cwd=cwd,
             )
+            if session is not None:
+                session.bind(proc.pid)
         except Exception as exc:
+            if session is not None:
+                session.release()
             return {"error": f"tool subprocess failed to start: {exc}"}
 
         async def _pump() -> dict[str, Any]:
@@ -765,6 +924,11 @@ class ToolStore:
             except ProcessLookupError:
                 pass
             return {"error": f"composite sandbox failed: {exc}"}
+        finally:
+            # ALWAYS, incl. the kill paths: unlink staged files + drop the
+            # session so no raw value outlives the composite subprocess.
+            if session is not None:
+                session.release()
 
     async def _dispatch_dep_call(
         self,
