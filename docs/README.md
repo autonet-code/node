@@ -27,6 +27,7 @@ Status conventions used below:
 | Doc | What it covers |
 |-----|----------------|
 | `tool_substrate.md` | **The core spec: start here.** Tools as the primary substrate item: manifest, mint formula, combo damper, review-driven position drift, adoption rail. Read the `Decision (2026-07-10)` section first: fees-only emission, money-only close, REP claimed DAO-side, vet gate retired (tools mint from first attested third-party use). Phase-10 amendment inline. |
+| `resilience.md` | **The network-level threat model.** Why the equilibrium holds under sybils, collusion, and wash trading (what's prevented vs priced), the consensus-gated migration escape hatch (chain compromise → governance redeploys, daemons carry the state), and the layer split vs daemon-local security (`secrets.md` / isolation). |
 | `services_market.md` | The remote-API market rail (`ServiceMarket.sol`): registry + EIP-712 payment channels, behavioral trust, ATN-only pricing (2.5% fee taken at settlement through `Substrate.payForService`), no substrate standing. |
 | `charter_anchor.md` | `CharterAnchor.sol`: the governed anchor for the charter *version* (values stay off-chain); drift detection built, migration deferred. |
 | `local_e2e.md` | The two economy proof-of-life scripts (`scripts/local_e2e_tool_economy.py`, `local_e2e_venture_loop.py`); also the reference walk-through of the venture loop. |
