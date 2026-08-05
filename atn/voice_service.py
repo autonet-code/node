@@ -57,6 +57,37 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Shared audio primitives
+# ---------------------------------------------------------------------------
+# The mixer, TTS backends, tones, PTT recorder and transcription used to be
+# duplicated here verbatim from kevin's voice service. They now live in the
+# shared `autonet-voice-core` package, so a fix lands in one place instead of
+# three. `import voice_core` is deliberately lightweight — it pulls in no
+# torch / faster-whisper / kokoro at import time, so the lazy-import contract
+# above still holds.
+from voice_core import (
+    MIXER_SR,
+    AudioChannel,
+    AudioMixer,
+    PushToTalkRecorder,
+    generate_edge,
+    generate_elevenlabs,
+    generate_kokoro,
+    generate_piper,
+    transcribe,
+    make_result_chime,
+    make_startup_chime,
+    make_tool_tone,
+    gen_tone as _gen_tone,
+    strip_markdown,
+    register_tool_sounds,
+    set_stt_backend,
+    TOOL_FREQS,
+    TOOL_SOUND_MAP,
+)
+
+
+# ---------------------------------------------------------------------------
 # Feature gate — single check for the core voice extras
 # ---------------------------------------------------------------------------
 # If atn[voice] is installed, numpy and sounddevice are available.
@@ -83,77 +114,32 @@ PTT_AVAILABLE = (
 )
 _keyboard = None  # lazily bound in the PTT loop
 
+# Transcription stays in-process (faster-whisper). voice_core also supports an
+# out-of-process Nemotron server, but that needs a separately-built isolated
+# NeMo venv, which autonet cannot assume exists. Pinning the backend rather
+# than leaving it on "auto" keeps this a deliberate choice instead of
+# something that would silently change if a Nemotron server were configured
+# elsewhere in the process.
+set_stt_backend("whisper")
+
 
 # ── Constants ─────────────────────────────────────────────────
-MIXER_SR = 44100
 SENTENCE_END = re.compile(r'(?<=[.!?])\s')
 
-# Tool name -> sound category
-TOOL_SOUND_MAP = {
-    "Bash": "execute", "Read": "read", "Edit": "edit", "Write": "write",
-    "Grep": "search", "Glob": "search", "Task": "agent",
-    "WebFetch": "web", "WebSearch": "web", "TodoWrite": "todo",
-    "NotebookEdit": "edit",
-    # Orchestrator tools
+# Orchestrator tools the shared map has no reason to know about. Registered
+# into voice_core rather than kept in a local dict: make_tool_tone() reads
+# voice_core's map, so a local copy would be silently ignored and these tools
+# would fall back to the default tone.
+register_tool_sounds({
     "create_agent": "agent",
-    "trigger_run": "execute", "get_execution": "read",
+    "trigger_run": "execute",
+    "get_execution": "read",
     "use_connector": "execute",
-}
-
-TOOL_FREQS = {
-    "execute": [440, 554],
-    "read":    [659],
-    "edit":    [440, 659],
-    "write":   [554, 440],
-    "search":  [880, 659],
-    "agent":   [440, 554, 659],
-    "web":     [330, 440],
-    "todo":    [554, 659],
-    "default": [440],
-}
+})
 
 
 # ── Markdown / path cleaning for TTS ─────────────────────────
 
-def strip_markdown(text: str) -> str:
-    """Remove markdown formatting so TTS reads natural prose."""
-    text = re.sub(r'```[\s\S]*?```', ' ', text)
-    text = re.sub(r'`([^`]+)`', r'\1', text)
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)
-    text = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', text)
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-    text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', r'\1', text)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'\|', ' ', text)
-    text = re.sub(r'^[\s\-:]+$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
-    # Strip emojis so TTS doesn't read them as words
-    text = re.sub(
-        r'[\U0001F600-\U0001F64F'   # emoticons
-        r'\U0001F300-\U0001F5FF'     # misc symbols & pictographs
-        r'\U0001F680-\U0001F6FF'     # transport & map symbols
-        r'\U0001F1E0-\U0001F1FF'     # flags
-        r'\U0001F900-\U0001F9FF'     # supplemental symbols
-        r'\U0001FA00-\U0001FA6F'     # chess symbols, extended-A
-        r'\U0001FA70-\U0001FAFF'     # symbols extended-A continued
-        r'\U00002702-\U000027B0'     # dingbats
-        r'\U0000FE00-\U0000FE0F'     # variation selectors
-        r'\U0000200D'                # zero-width joiner
-        r'\U000023F0-\U000023FA'     # misc technical
-        r'\U00002600-\U000026FF'     # misc symbols
-        r'\U0000203C\U00002049'      # exclamation marks
-        r'\U000020E3'                # combining enclosing keycap
-        r'\U00002934\U00002935'      # arrows
-        r'\U000025AA-\U000025FE'     # geometric shapes
-        r']+', '', text)
-    # Collapse Windows and Unix paths to basename
-    text = re.sub(r'[A-Z]:\\(?:[^\\\s]+\\)*([^\\\s]+)', r'\1', text)
-    text = re.sub(r'(?<!\w)/(?:[^/\s]+/)+([^/\s]+)', r'\1', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
 
 
 # ── Device lookup ─────────────────────────────────────────────
@@ -204,225 +190,18 @@ def _resample(audio: Any, src_rate: int, dst_rate: int) -> Any:
 #  Audio channel & mixer
 # ==============================================================
 
-class AudioChannel:
-    """A single audio channel with volume and fade support."""
-
-    def __init__(self, volume: float = 1.0) -> None:
-        self.volume = volume
-        self._chunks: list = []
-        self._chunk_offset = 0
-        self._total = 0
-        self._lock = threading.Lock()
-        self._fade_vol = 1.0
-        self._fade_rate = 0.0
-        # When paused, read() returns silence WITHOUT consuming the buffer, so
-        # playback resumes exactly where it left off. Set by AudioMixer.pause().
-        self.paused = False
-
-    def write(self, audio_f32: Any) -> None:
-        with self._lock:
-            self._chunks.append(audio_f32)
-            self._total += len(audio_f32)
-
-    def read(self, n: int) -> Any:
-        # Paused channels emit silence and keep their buffer intact. Do this
-        # BEFORE touching the buffer or the fade envelope so a pause holds the
-        # fade state frozen too (resume picks up mid-fade unchanged).
-        if self.paused:
-            return _np.zeros(n, dtype=_np.float32)
-        with self._lock:
-            if self._total == 0:
-                return None
-            out_parts: list = []
-            remaining = n
-            while remaining > 0 and self._chunks:
-                chunk = self._chunks[0]
-                avail = len(chunk) - self._chunk_offset
-                take = min(avail, remaining)
-                out_parts.append(chunk[self._chunk_offset:self._chunk_offset + take])
-                self._chunk_offset += take
-                remaining -= take
-                self._total -= take
-                if self._chunk_offset >= len(chunk):
-                    self._chunks.pop(0)
-                    self._chunk_offset = 0
-            if not out_parts:
-                return None
-            out = _np.concatenate(out_parts) if len(out_parts) > 1 else out_parts[0].copy()
-            if len(out) < n:
-                out = _np.pad(out, (0, n - len(out)))
-
-        if self._fade_rate != 0.0:
-            start = self._fade_vol
-            end = max(0.0, min(1.0, start + self._fade_rate * n))
-            envelope = _np.linspace(start, end, n, dtype=_np.float32)
-            out *= envelope
-            self._fade_vol = end
-            if self._fade_vol <= 0.0:
-                self.clear()
-                self._fade_rate = 0.0
-        elif self._fade_vol < 1.0:
-            out *= self._fade_vol
-
-        return out
-
-    def fade_out(self, duration_secs: float, sr: int = MIXER_SR) -> None:
-        total = max(1, int(sr * duration_secs))
-        self._fade_rate = -self._fade_vol / total
-
-    def fade_reset(self) -> None:
-        self._fade_rate = 0.0
-        self._fade_vol = 1.0
-
-    def has_data(self) -> bool:
-        with self._lock:
-            return self._total > 0
-
-    def clear(self) -> None:
-        with self._lock:
-            self._chunks.clear()
-            self._chunk_offset = 0
-            self._total = 0
 
 
-class AudioMixer:
-    """Multi-channel audio mixer with real-time output."""
-
-    def __init__(self, sr: int = MIXER_SR, blocksize: int = 2048,
-                 device: int | None = None) -> None:
-        self.sr = sr
-        self._blocksize = blocksize
-        self._device = device
-        self.channels: dict[str, AudioChannel] = {}
-        self.master_volume = 1.0
-        self._duck_level = 0.25
-        self._ducking = False
-        self._muting = False
-        self._stream: Any = None  # sd.OutputStream
-
-    def start(self) -> None:
-        """Start the audio output stream."""
-        if self._stream is not None:
-            return
-        self._stream = _sd.OutputStream(
-            samplerate=self.sr, channels=1, dtype="float32",
-            blocksize=self._blocksize, callback=self._callback,
-            device=self._device,
-        )
-        self._stream.start()
-
-    def stop(self) -> None:
-        """Stop the audio output stream."""
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-
-    def set_device(self, device: int | None) -> None:
-        was_running = self._stream is not None
-        if was_running:
-            self.stop()
-        self._device = device
-        if was_running:
-            self.start()
-
-    def _callback(self, outdata: Any, frames: int,
-                  _time_info: Any, _status: Any) -> None:
-        mixed = _np.zeros(frames, dtype=_np.float32)
-        for ch in self.channels.values():
-            chunk = ch.read(frames)
-            if chunk is not None:
-                mixed += chunk * ch.volume
-        if self._muting:
-            vol = 0.0
-        elif self._ducking:
-            vol = self._duck_level
-        else:
-            vol = self.master_volume
-        outdata[:, 0] = mixed * vol
-
-    def add_channel(self, name: str, volume: float = 1.0) -> None:
-        self.channels[name] = AudioChannel(volume=volume)
-
-    def play(self, channel: str, audio_f32: Any,
-             sr: int | None = None) -> None:
-        if sr and sr != self.sr:
-            audio_f32 = _resample(audio_f32, sr, self.sr)
-        self.channels[channel].write(audio_f32)
-
-    def duck(self) -> None:
-        self._ducking = True
-        self._muting = False
-
-    def unduck(self) -> None:
-        self._ducking = False
-
-    def mute(self) -> None:
-        self._muting = True
-        self._ducking = False
-
-    def unmute(self) -> None:
-        self._muting = False
-
-    def pause(self, name: str) -> None:
-        """Freeze one channel: it emits silence but keeps its buffer + fade
-        state, so unpause() resumes exactly where playback stopped. Distinct
-        from mute (master-level) and stop_all (drains buffers)."""
-        ch = self.channels.get(name)
-        if ch is not None:
-            ch.paused = True
-
-    def unpause(self, name: str) -> None:
-        ch = self.channels.get(name)
-        if ch is not None:
-            ch.paused = False
-
-    def stop_all(self) -> None:
-        for ch in self.channels.values():
-            ch.clear()
-
-    def is_playing(self, name: str | None = None) -> bool:
-        if name:
-            return self.channels[name].has_data()
-        return any(ch.has_data() for ch in self.channels.values())
-
-    def wait_channel(self, name: str) -> None:
-        while self.channels[name].has_data():
-            time.sleep(0.03)
 
 
 # ==============================================================
 #  Tone generation
 # ==============================================================
 
-def _gen_tone(freq: float, dur: float = 0.09, vol: float = 0.25,
-              sr: int = MIXER_SR) -> Any:
-    n = int(sr * dur)
-    t = _np.linspace(0, dur, n, dtype=_np.float32)
-    tone = vol * _np.sin(2 * _np.pi * freq * t)
-    att = min(int(0.005 * sr), n)
-    rel = min(int(0.015 * sr), n)
-    tone[:att] *= _np.linspace(0, 1, att, dtype=_np.float32)
-    tone[-rel:] *= _np.linspace(1, 0, rel, dtype=_np.float32)
-    return tone
 
 
-def make_tool_tone(tool_name: str) -> Any:
-    cat = TOOL_SOUND_MAP.get(tool_name, "default")
-    freqs = TOOL_FREQS.get(cat, TOOL_FREQS["default"])
-    gap = _np.zeros(int(MIXER_SR * 0.015), dtype=_np.float32)
-    parts: list = []
-    for f in freqs:
-        parts.append(_gen_tone(f))
-        parts.append(gap)
-    return _np.concatenate(parts)
 
 
-def make_result_chime() -> Any:
-    c5 = _gen_tone(523, dur=0.12, vol=0.18)
-    g5 = _gen_tone(784, dur=0.15, vol=0.15)
-    gap = _np.zeros(int(MIXER_SR * 0.04), dtype=_np.float32)
-    return _np.concatenate([c5, gap, g5])
 
 
 def make_delegate_spawn_tone() -> Any:
@@ -434,13 +213,6 @@ def make_delegate_spawn_tone() -> Any:
     return _np.concatenate([e4, gap, a4, gap, e5])
 
 
-def make_startup_chime() -> Any:
-    """C-E-G startup chime."""
-    c5 = _gen_tone(523, dur=0.08, vol=0.3)
-    e5 = _gen_tone(659, dur=0.08, vol=0.3)
-    g5 = _gen_tone(784, dur=0.12, vol=0.33)
-    gap = _np.zeros(int(MIXER_SR * 0.015), dtype=_np.float32)
-    return _np.concatenate([c5, gap, e5, gap, g5])
 
 
 def _make_failure_tone() -> Any:
@@ -504,11 +276,6 @@ def _get_kokoro():
     return _kokoro_model
 
 
-def generate_kokoro(text: str, voice: str = "af_heart") -> tuple[Any, int]:
-    kokoro = _get_kokoro()
-    with _kokoro_lock:
-        samples, sr = kokoro.create(text, voice=voice, speed=1.0)
-    return samples, sr
 
 
 # Edge TTS (free, cloud)
@@ -527,124 +294,15 @@ def _get_edge_loop():
     return _edge_loop
 
 
-def generate_edge(text: str, voice: str = "en-US-JennyNeural") -> tuple[Any, int]:
-    try:
-        import edge_tts
-    except ImportError:
-        raise ImportError(
-            "Edge backend requires edge-tts.  "
-            "Install with: pip install atn[voice-edge]"
-        )
-    try:
-        import miniaudio
-    except ImportError:
-        raise ImportError(
-            "Edge backend requires miniaudio.  "
-            "Install with: pip install atn[voice-edge]"
-        )
-
-    async def _synth():
-        communicate = edge_tts.Communicate(text, voice)
-        mp3_bytes = b""
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                mp3_bytes += chunk["data"]
-        return mp3_bytes
-
-    loop = _get_edge_loop()
-    future = asyncio.run_coroutine_threadsafe(_synth(), loop)
-    mp3_bytes = future.result(timeout=30)
-    if not mp3_bytes:
-        raise RuntimeError("Edge TTS returned no audio")
-    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-    try:
-        tmp.write(mp3_bytes)
-        tmp.close()
-        decoded = miniaudio.decode_file(
-            tmp.name, output_format=miniaudio.SampleFormat.SIGNED16,
-            nchannels=1, sample_rate=24000,
-        )
-        audio = _np.frombuffer(
-            decoded.samples, dtype=_np.int16
-        ).astype(_np.float32) / 32768.0
-        return audio, 24000
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
 
 
 # ElevenLabs (paid, cloud)
-def generate_elevenlabs(text: str, voice_id: str | None = None) -> tuple[Any, int]:
-    try:
-        import requests
-    except ImportError:
-        raise ImportError(
-            "ElevenLabs backend requires requests.  "
-            "Install with: pip install atn[voice-11labs]"
-        )
-    api_key = os.environ.get("ELEVENLABS_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("ELEVENLABS_API_KEY not set")
-    voice_id = voice_id or os.environ.get(
-        "ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"
-    )
-    model_id = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_v3")
-    url = (
-        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-        f"?output_format=pcm_24000"
-    )
-    headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
-    payload = {"text": text, "model_id": model_id}
-    resp = requests.post(url, json=payload, headers=headers, timeout=15)
-    resp.raise_for_status()
-    pcm = _np.frombuffer(
-        resp.content, dtype=_np.int16
-    ).astype(_np.float32) / 32768.0
-    return pcm, 24000
 
 
 # Piper (offline, fallback) — requires the voice module
 _piper_module_dir: str | None = None  # configurable via VoiceConfig
 
 
-def generate_piper(text: str, voice: str = "male") -> tuple[Any, int]:
-    voice_dir = _piper_module_dir
-    if not voice_dir:
-        raise RuntimeError(
-            "Piper backend requires voice.piper_module_dir in config.yaml "
-            "pointing to the piper voice module directory"
-        )
-    if voice_dir not in sys.path:
-        sys.path.insert(0, voice_dir)
-    try:
-        from voice import _load_voices, _voice_lock, is_local_tts_available
-    except ImportError:
-        raise ImportError(
-            f"Could not import voice module from {voice_dir}.  "
-            f"Ensure the directory contains voice.py with Piper TTS support."
-        )
-    if not is_local_tts_available():
-        raise RuntimeError("Piper TTS not available (piper package not installed)")
-    with _voice_lock:
-        _load_voices()
-        from voice import _male_voice, _female_voice
-        v = _male_voice if voice == "male" else _female_voice
-        if v is None:
-            raise RuntimeError(f"Piper {voice} voice not loaded")
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(v.config.sample_rate)
-            v.synthesize_wav(text, wf)
-    buf.seek(0)
-    with wave.open(buf, "rb") as wf:
-        raw = wf.readframes(wf.getnframes())
-        sr = wf.getframerate()
-    audio = _np.frombuffer(raw, dtype=_np.int16).astype(_np.float32) / 32768.0
-    return audio, sr
 
 
 # Backend availability check — used for graceful fallback
@@ -684,127 +342,10 @@ _whisper_model = None
 _whisper_lock = threading.Lock()
 
 
-def _get_whisper():
-    global _whisper_model
-    if _whisper_model is None:
-        with _whisper_lock:
-            if _whisper_model is None:
-                # Lazy import — this is where torch actually loads.
-                from faster_whisper import WhisperModel as _WhisperModel
-                try:
-                    _whisper_model = _WhisperModel(
-                        "base.en", device="cuda", compute_type="float16"
-                    )
-                except Exception:
-                    _whisper_model = _WhisperModel(
-                        "base.en", device="cpu", compute_type="int8"
-                    )
-    return _whisper_model
 
 
-def transcribe(audio_i16: Any, sr: int = 16000) -> str:
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    try:
-        with wave.open(tmp, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sr)
-            wf.writeframes(audio_i16.tobytes())
-        tmp.close()
-        model = _get_whisper()
-        segments, _ = model.transcribe(
-            tmp.name, language="en", beam_size=3, vad_filter=True
-        )
-        return " ".join(seg.text.strip() for seg in segments).strip()
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
 
 
-class PushToTalkRecorder:
-    """Records audio while a push-to-talk key is held.
-
-    Requires `keyboard` and `sounddevice`.  If keyboard is not available
-    the VoiceService starts without PTT (TTS-only mode).
-    """
-
-    def __init__(self, keys: list[str] | None = None, sr: int = 16000,
-                 mixer: AudioMixer | None = None,
-                 device: int | None = None,
-                 on_record_start: Callable | None = None) -> None:
-        # Lazy-bind the keyboard module here (only when PTT is actually
-        # constructed) so importing voice_service never pulls it in.
-        global _keyboard
-        if _keyboard is None:
-            import keyboard as _keyboard  # type: ignore[no-redef]
-        self.keys = keys or ["page down"]
-        self.sr = sr
-        self.mixer = mixer
-        self.device = device
-        self.on_record_start = on_record_start
-        self._chunks: list = []
-        self._recording = False
-        self._scan_codes: set[int] = set()
-
-    def _resolve_scan_codes(self) -> None:
-        for k in self.keys:
-            try:
-                codes = _keyboard.key_to_scan_codes(k)
-                self._scan_codes.update(codes)
-            except ValueError:
-                pass
-
-    def _mic_cb(self, indata: Any, _frames: int,
-                _time: Any, _status: Any) -> None:
-        if self._recording:
-            self._chunks.append(indata.copy())
-
-    def wait_and_record(self) -> Any:
-        if not self._scan_codes:
-            self._resolve_scan_codes()
-        self._chunks = []
-        pressed = threading.Event()
-        released = threading.Event()
-
-        def on_press(e):
-            if e.scan_code in self._scan_codes:
-                pressed.set()
-
-        def on_release(e):
-            if pressed.is_set() and e.scan_code in self._scan_codes:
-                released.set()
-
-        press_hook = _keyboard.on_press(on_press)
-        release_hook = _keyboard.on_release(on_release)
-        pressed.wait()
-        _keyboard.unhook(press_hook)
-
-        if self.on_record_start:
-            self.on_record_start()
-
-        if self.mixer:
-            self.mixer.mute()
-
-        self._recording = True
-        stream = _sd.InputStream(
-            samplerate=self.sr, channels=1, dtype="int16",
-            blocksize=1024, callback=self._mic_cb, device=self.device,
-        )
-        stream.start()
-        released.wait()
-        _keyboard.unhook(release_hook)
-        self._recording = False
-        stream.stop()
-        stream.close()
-
-        if self.mixer:
-            self.mixer.unmute()
-
-        if not self._chunks:
-            return None
-        return _np.concatenate(self._chunks)
 
 
 # ==============================================================
