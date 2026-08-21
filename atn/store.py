@@ -4,7 +4,7 @@ OutputStore  — per-agent *last-run result*.  This is the structured data other
                agents consume via pull steps.
 
 ExecutionLog — per-agent *full trace history*.  Persisted to JSONL on disk.
-               This is what the user (and the orchestrator, when debugging) inspects.
+               This is what the user (and a parent agent, when debugging) inspects.
 
 Disk layout (directory-per-agent model):
     agents_dir/<agent_id>/execution.jsonl            Completed execution records

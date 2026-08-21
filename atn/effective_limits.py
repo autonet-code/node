@@ -121,7 +121,7 @@ def _agent_provider_name(defn: Any, config: Any) -> str:
     model = (
         (isinstance(provider, str) and provider)
         or getattr(defn, "cognitive_model", "")
-        or (getattr(getattr(config, "orchestrator", None), "model", "") or "")
+        or (getattr(config, "default_model", "") or "")
         or "claude-sonnet-4-6"
     )
     try:

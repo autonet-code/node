@@ -11,7 +11,7 @@ import pytest
 
 from atn.events import EventBus
 from atn.models import AgentDefinition, AgentMode
-from atn.orchestrator.tools import execute_tool
+from atn.agent_tools import execute_tool
 
 
 def _make_runtime(tmp_path: Path):

@@ -8,7 +8,7 @@ Two render shapes, both edit-in-place (so we never spam):
 
   - `AgentExecutionRender` -- one agent EXECUTION rendered as a single
     edit-in-place status message in a channel/thread. Used for the
-    orchestrator (in the channel) and each top-level delegate (in its
+    bound root agent (in the channel) and each top-level delegate (in its
     thread). Mirrors the AgentExecutionEmbed in fleet_view.py, but via the
     MessagingClient + StatusEmbedHandle protocol.
 
@@ -61,7 +61,7 @@ def _truncate_tail(text: str, limit: int) -> str:
 class AgentExecutionRender:
     """One execution of one agent, rendered as an edit-in-place message.
 
-    Lives in a channel (orchestrator) or a thread (top-level delegate). The
+    Lives in a channel (bound root agent) or a thread (top-level delegate). The
     ChatService creates one per execution.started and finalizes it on
     execution.completed/failed.
     """

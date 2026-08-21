@@ -7,9 +7,9 @@ Config layout:
     data_dir:    ~/.atn              # global state, pidfiles
     agents_dir:  ~/.atn/agents       # agent directories (or ./agents if it exists in CWD)
 
-    orchestrator:
-      provider: anthropic            # which provider the orchestrator uses
-      model: claude-sonnet-4-20250514   # which model (overrides provider default)
+    defaults:
+      provider: anthropic            # daemon-wide default provider
+      model: claude-sonnet-4-20250514   # daemon-wide default model
 
     providers:
       anthropic:
@@ -141,31 +141,19 @@ class ChatConfig:
     platform: str = "discord"       # adapter to use (discord; more later)
     token_env: str = "DISCORD_BOT_TOKEN"  # env var holding the bot token
     channel_id: str = ""            # THE channel bound to the agent below
-    bound_agent: str = "orchestrator"  # agent this channel is bound to
+    # LEGACY-WIRE: persisted routing ids and old configs still name the
+    # retired root agent id as the default binding target.
+    # LEGACY-WIRE: agent this channel is bound to; default keeps the retired
+    # root agent id for existing deployments.
+    bound_agent: str = "orchestrator"
     # Input-seam gating policy: "open" (AllowAll), "operator" (only operator_ids),
     # or "credit" (rolling per-user credits; operators unlimited).
     policy: str = "open"
     operator_ids: list[str] = field(default_factory=list)
     credit_window_secs: int = 86400   # credit: rolling window
     credit_default_limit: int = 5     # credit: requests/window for an unconfigured user
-    orchestrator_label: str = "K3V|N"
+    root_label: str = "K3V|N"
     excluded_agents: list[str] = field(default_factory=list)  # agents never rendered
-
-
-@dataclass
-class OrchestratorConfig:
-    """Configuration for the DEPRECATED root agent.
-
-    The auto-provisioned privileged orchestrator is being phased out: the
-    human owner (via WS/voice/CLI surfaces) is the root of trust, and fleet
-    supervision composes from the fractal primitives (heartbeat +
-    notify_parent + get_children_status) on any agent the user creates.
-    ``enabled=True`` restores the legacy behavior: auto-provision the
-    orchestrator at boot and protect it from removal.
-    """
-    enabled: bool = False       # auto-provision the root agent at boot (legacy)
-    provider: str = ""          # provider name (e.g. "anthropic", "gemini")
-    model: str = ""             # model override (e.g. "claude-sonnet-4-20250514")
 
 
 @dataclass
@@ -199,9 +187,9 @@ class RPBConfig:
     wallet_address: str = ""            # Connected wallet address (empty = not connected)
     # --- Remote-frontend auth (WS server) ------------------------------------
     # The MetaMask wallet that OWNS this daemon. Distinct from wallet_address
-    # (the transient network-connection wallet) and from the orchestrator's
-    # generated identity.json key. A remote connection that signs the auth
-    # challenge with this address is rooted at the orchestrator (full fleet).
+    # (the transient network-connection wallet) and from any agent's generated
+    # identity.json key. A remote connection that signs the auth challenge
+    # with this address is rooted at the full fleet.
     # MUST be pre-configured for the remote listener to start: there is NO
     # trust-on-first-use on a network-reachable socket (it would let the first
     # wallet to find the port claim ownership of the fleet).
@@ -320,7 +308,7 @@ class TraceLoggingConfig:
         trace_logging:
           enabled: true
           trace_dir: ~/.atn/traces   # optional override
-          include_user_data: false   # set true to include orchestrator sessions
+          include_user_data: false   # set true to include user-facing sessions
           min_turns: 1               # quality filter: skip near-empty sessions
     """
     enabled: bool = False
@@ -419,7 +407,11 @@ class ATNConfig:
     """Top-level ATN configuration."""
     data_dir: Path = field(default_factory=lambda: _DEFAULT_DIR)
     agents_dir: Path = field(default_factory=lambda: _default_agents_dir())
-    orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
+    # Daemon-wide defaults for agents that don't specify their own model /
+    # provider. YAML section ``defaults:`` (LEGACY-DATA fallback: the
+    # pre-purge ``orchestrator:`` section is still read on load).
+    default_model: str = ""
+    default_provider: str = ""
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
     autonet: AutonetConfig = field(default_factory=AutonetConfig)
@@ -761,14 +753,22 @@ def load_config(path: Path | None = None) -> ATNConfig:
         # the pre-override data_dir).
         config.agents_dir = _default_agents_dir(config.data_dir)
 
-    # Orchestrator
-    orch_raw = raw.get("orchestrator", {})
-    if isinstance(orch_raw, dict):
-        config.orchestrator = OrchestratorConfig(
-            enabled=bool(orch_raw.get("enabled", False)),
-            provider=orch_raw.get("provider", ""),
-            model=orch_raw.get("model", ""),
-        )
+    # Daemon-wide defaults (model/provider for agents without their own)
+    defaults_raw = raw.get("defaults", {})
+    if isinstance(defaults_raw, dict) and defaults_raw:
+        config.default_provider = str(defaults_raw.get("provider", "") or "")
+        config.default_model = str(defaults_raw.get("model", "") or "")
+    else:
+        # LEGACY-DATA: pre-purge configs kept the daemon default under the
+        # retired root agent's section.
+        legacy_raw = raw.get("orchestrator", {})
+        if isinstance(legacy_raw, dict) and (
+                legacy_raw.get("model") or legacy_raw.get("provider")):
+            config.default_provider = str(legacy_raw.get("provider", "") or "")
+            config.default_model = str(legacy_raw.get("model", "") or "")
+            log.info(
+                "config: 'orchestrator.model/provider' is deprecated — "
+                "use 'defaults.model/provider'")
 
     # Voice
     voice_raw = raw.get("voice", {})
@@ -798,12 +798,15 @@ def load_config(path: Path | None = None) -> ATNConfig:
             platform=chat_raw.get("platform", "discord"),
             token_env=chat_raw.get("token_env", "DISCORD_BOT_TOKEN"),
             channel_id=str(chat_raw.get("channel_id", "")),
+            # LEGACY-WIRE: default binding target keeps the retired root id.
             bound_agent=str(chat_raw.get("bound_agent", "orchestrator")),
             policy=str(chat_raw.get("policy", "open")),
             operator_ids=[str(x) for x in chat_raw.get("operator_ids", [])],
             credit_window_secs=int(chat_raw.get("credit_window_secs", 86400)),
             credit_default_limit=int(chat_raw.get("credit_default_limit", 5)),
-            orchestrator_label=chat_raw.get("orchestrator_label", "K3V|N"),
+            # LEGACY-DATA: chat.orchestrator_label was the pre-purge key.
+            root_label=chat_raw.get(
+                "root_label", chat_raw.get("orchestrator_label", "K3V|N")),
             excluded_agents=[str(x) for x in chat_raw.get("excluded_agents", [])],
         )
 
@@ -1158,13 +1161,13 @@ def save_sponsor_address_to_config(
     log.info("Sponsor address saved to %s", config_path)
 
 
-def save_orchestrator_model_to_config(
+def save_default_model_to_config(
     model: str,
     config_path: Path | None = None,
 ) -> None:
-    """Persist the orchestrator model choice to config.yaml.
+    """Persist the daemon-wide default model to config.yaml.
 
-    Reads the existing YAML, updates orchestrator.model, writes back.
+    Reads the existing YAML, updates defaults.model, writes back.
     Creates the file / section if it doesn't exist.
     """
     config_path = config_path or (_DEFAULT_DIR / "config.yaml")
@@ -1175,26 +1178,26 @@ def save_orchestrator_model_to_config(
         try:
             raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception:
-            log.warning("Failed to read config for orchestrator model save: %s", config_path)
+            log.warning("Failed to read config for default model save: %s", config_path)
             raw = {}
 
-    if "orchestrator" not in raw:
-        raw["orchestrator"] = {}
+    if not isinstance(raw.get("defaults"), dict):
+        raw["defaults"] = {}
 
-    raw["orchestrator"]["model"] = model
+    raw["defaults"]["model"] = model
 
     config_path.write_text(
         yaml.dump(raw, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
     )
-    log.info("Orchestrator model '%s' saved to %s", model, config_path)
+    log.info("Default model '%s' saved to %s", model, config_path)
 
 
-def save_orchestrator_provider_to_config(
+def save_default_provider_to_config(
     provider: str,
     config_path: Path | None = None,
 ) -> None:
-    """Persist the orchestrator provider choice to config.yaml."""
+    """Persist the daemon-wide default provider to config.yaml."""
     config_path = config_path or (_DEFAULT_DIR / "config.yaml")
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1203,19 +1206,19 @@ def save_orchestrator_provider_to_config(
         try:
             raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception:
-            log.warning("Failed to read config for orchestrator provider save: %s", config_path)
+            log.warning("Failed to read config for default provider save: %s", config_path)
             raw = {}
 
-    if "orchestrator" not in raw:
-        raw["orchestrator"] = {}
+    if not isinstance(raw.get("defaults"), dict):
+        raw["defaults"] = {}
 
-    raw["orchestrator"]["provider"] = provider
+    raw["defaults"]["provider"] = provider
 
     config_path.write_text(
         yaml.dump(raw, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
     )
-    log.info("Orchestrator provider '%s' saved to %s", provider, config_path)
+    log.info("Default provider '%s' saved to %s", provider, config_path)
 
 
 def remove_connector_from_config(

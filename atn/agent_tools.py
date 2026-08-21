@@ -1,4 +1,4 @@
-"""Orchestrator tools — Runtime operations exposed as LLM tool calls.
+"""ATN agent tools — the shared tool surface every cognitive agent draws from.
 
 Each tool is a pair: a ToolDefinition (schema for the LLM) and an async
 executor function that performs the operation against the Runtime.
@@ -13,7 +13,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
-from ..models import (
+from .models import (
     AgentDefinition,
     AgentMode,
     AgentStatus,
@@ -28,17 +28,32 @@ from ..models import (
     TaskStatus,
     TaskType,
 )
-from ..agent_registry import DelegateRegistry, DelegateStatus
-from ..config import save_connector_to_config, remove_connector_from_config
-from ..connectors_manager import ConnectorSpec
-from ..delegate_prompts import build_delegate_prompt
-from ..events import Event, EventType
-from ..loader import delete_agent_dir, save_agent
-from ..providers.base import ToolDefinition
-from ..runtime.provider_manager import get_model_tier, get_tier_label
+from .agent_registry import DelegateRegistry, DelegateStatus
+from .config import save_connector_to_config, remove_connector_from_config
+from .connectors_manager import ConnectorSpec
+from .delegate_prompts import build_delegate_prompt
+from .events import Event, EventType
+from .loader import delete_agent_dir, save_agent
+from .providers.base import ToolDefinition
+from .runtime.provider_manager import get_model_tier, get_tier_label
 
 if TYPE_CHECKING:
-    from ..runtime import Runtime
+    from .runtime import Runtime
+
+# The OWNER is the human behind a trusted surface (WS frontend, voice, CLI).
+# Tool calls arriving without an agent caller are attributed to the owner,
+# who holds full permissions. This is the root of trust — NOT an agent.
+OWNER_ID = "user"
+
+# LEGACY-WIRE: old clients/persisted data may still name the retired root
+# agent id. Owner-trusted for compatibility; the role itself is purged.
+_LEGACY_ROOT_ID = "orchestrator"
+
+
+def is_owner_caller(caller_id: str | None) -> bool:
+    """True when a tool call originates from the human owner's surface."""
+    return caller_id in (None, "", OWNER_ID, _LEGACY_ROOT_ID)
+
 
 log = logging.getLogger(__name__)
 
@@ -1046,10 +1061,50 @@ _TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="get_user_profile",
-        description="Get the user's profile summary: goals count, projects count, strengths, weaknesses, onboarding status.",
+        description=(
+            "Read the user dossier (USER.md): the living, fleet-shared record of "
+            "who the user is — background, skills, projects, goals, constraints, "
+            "values. No args returns the full dossier plus a section index; pass "
+            "'section' to read a single section. Claims are dated inline; treat "
+            "old dates as stale, not wrong."
+        ),
         input_schema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "section": {
+                    "type": "string",
+                    "description": "Optional H2 section title to read (case-insensitive).",
+                },
+            },
+        },
+    ),
+    ToolDefinition(
+        name="update_user_profile",
+        description=(
+            "Write one section of the user dossier (USER.md), the fleet-shared "
+            "memory of the user. Prefer updating the relevant section over "
+            "appending duplicates, and date claims inline, e.g. '(as of Aug 2026)'. "
+            "mode: replace (default) rewrites the section, append adds to it, "
+            "remove deletes it. Missing sections are created."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "section": {
+                    "type": "string",
+                    "description": "H2 section title, e.g. 'Skills' or 'Goals'.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Markdown body for the section (omit for mode=remove).",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["replace", "append", "remove"],
+                    "description": "Default: replace.",
+                },
+            },
+            "required": ["section"],
         },
     ),
     # Delegation inspection tools
@@ -1450,7 +1505,7 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         # Live on-chain check if not already known to be registered
         if not defn.identity.registered_on_chain:
             try:
-                from ..on_chain import OnChainService
+                from .on_chain import OnChainService
                 svc = OnChainService(runtime._config.rpb)
                 if svc.available:
                     # Phase 12: agents are always identified by their own
@@ -1497,7 +1552,6 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # is its PARENT's call. These two fields predate the gate and
         # were settable by any agent on any agent — including itself.
         caller_id = input.get("_caller_id")
-        from . import is_owner_caller
         if caller_id is not None and not is_owner_caller(caller_id):
             if caller_id == agent_id:
                 return {"error": "An agent cannot change its own model or "
@@ -1539,7 +1593,6 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # agent — which on this field would let an agent redirect its own
         # cognition to a substrate of its choosing.
         caller_id = input.get("_caller_id")
-        from . import is_owner_caller
         if caller_id is not None and not is_owner_caller(caller_id):
             if caller_id == agent_id:
                 return {"error": "An agent cannot set or change its own "
@@ -1554,7 +1607,7 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         if raw_binding is None:
             defn.service_provider = None
         else:
-            from ..models import normalize_service_binding
+            from .models import normalize_service_binding
             try:
                 defn.service_provider = normalize_service_binding(raw_binding)
             except ValueError as exc:
@@ -1580,7 +1633,6 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # only for its direct children — never its own (no self-raise),
         # never a stranger's — and the cascade re-checks the new limits.
         caller_id = input.get("_caller_id")
-        from . import is_owner_caller
         if caller_id is not None and not is_owner_caller(caller_id):
             if caller_id == agent_id:
                 return {"error": "An agent cannot change its own budget — "
@@ -1605,7 +1657,6 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # budget cascade and rolls back on any violation.
         caller_id = input.get("_caller_id")
         new_parent = input["parent_id"] or None
-        from . import is_owner_caller
         if caller_id is not None and not is_owner_caller(caller_id):
             if caller_id == agent_id:
                 return {"error": "An agent cannot reparent itself."}
@@ -1770,12 +1821,27 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # cross-agent prefix caching (every agent re-created the ~50k prefix).
         system_prompt = input.get("system_prompt", "")
 
-        effective_model = model or runtime._config.orchestrator.model or "sonnet"
-        model_tier = get_model_tier(effective_model)
         # §10: an explicit provider (enum of known providers) pins routing.
         # Omitted → provider is the model id, and _resolve_provider_for_model
         # fails loud if it can't place it (no silent bridge fallback).
         explicit_provider = input.get("provider", "")
+
+        # Model inheritance: a child with no explicit model runs on its
+        # PARENT's model, not the daemon-wide default. Falling
+        # through to the global default silently upgraded/downgraded child
+        # seats (a parent pinned to one model spawned children on another),
+        # which breaks any run where the model seat is a controlled variable.
+        if not model and parent_id:
+            parent_defn = runtime.get_agent(parent_id)
+            if parent_defn is not None:
+                model = getattr(parent_defn, "cognitive_model", "") or ""
+                if not explicit_provider:
+                    parent_provider = getattr(parent_defn, "provider", "") or ""
+                    if parent_provider and parent_provider != model:
+                        explicit_provider = parent_provider
+
+        effective_model = model or runtime._config.default_model or "sonnet"
+        model_tier = get_model_tier(effective_model)
 
         # Marketplace inference binding (docs/services_market.md, ratified
         # 2026-07-26: employer-chooses-the-tool). No authority check is needed
@@ -1784,7 +1850,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # self-set case is impossible — an agent cannot create itself.
         service_binding = None
         if input.get("service_provider") is not None:
-            from ..models import normalize_service_binding
+            from .models import normalize_service_binding
             try:
                 service_binding = normalize_service_binding(
                     input["service_provider"])
@@ -1937,13 +2003,6 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 
 async def _remove_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     agent_id = input["agent_id"]
-    from . import ORCHESTRATOR_ID
-    # Legacy mode only: the auto-provisioned root agent is protected. In a
-    # rootless fleet the orchestrator id is a normal agent (mirrors the
-    # Runtime facade + registry guards).
-    _orch_cfg = getattr(runtime._config, "orchestrator", None)
-    if agent_id == ORCHESTRATOR_ID and getattr(_orch_cfg, "enabled", False):
-        return {"error": "The orchestrator cannot be removed."}
     if runtime.get_agent(agent_id) is None:
         return {"error": f"Agent '{agent_id}' not found."}
     try:
@@ -1985,7 +2044,7 @@ async def _trigger_run(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
     if runtime.get_agent(agent_id) is None:
         return {"error": f"Agent '{agent_id}' not found."}
     try:
-        eid = await runtime.trigger_run(agent_id, source="orchestrator")
+        eid = await runtime.trigger_run(agent_id, source="owner")
         if eid is None:
             return {"agent_id": agent_id, "error": "At concurrency limit. Execution not started."}
         return {"agent_id": agent_id, "execution_id": eid, "status": "started"}
@@ -2079,8 +2138,6 @@ async def _kill_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
 
 
 async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    from ..orchestrator import ORCHESTRATOR_ID
-
     target = input["target"]
     defn = runtime.get_agent(target)
     if defn is None:
@@ -2088,7 +2145,6 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 
     # Hierarchy scoping: agents can only message parent, direct children,
     # or siblings (same parent_id).  The owner surface is unrestricted.
-    from . import is_owner_caller
     caller_id = input.get("_caller_id")
     if caller_id and not is_owner_caller(caller_id):
         caller_defn = runtime.get_agent(caller_id)
@@ -2117,12 +2173,12 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     # NOTE: Do NOT add_user_turn here.  The execution engine records the
     # user turn right before calling the LLM (execution_engine.py lines
     # 624-636), which is the single place responsible for persisting turns
-    # for both the orchestrator and child agents.  Adding it here caused
-    # duplicate user messages in the conversation store.
+    # for every agent.  Adding it here caused duplicate user messages in
+    # the conversation store.
 
     msg = InboxMessage(
         id=InboxMessage.generate_id(),
-        source=input.get("source", "orchestrator"),
+        source=input.get("source", "owner"),
         target=target,
         type=msg_type,
         priority=priority,
@@ -2141,7 +2197,7 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         AgentStatus.ACTIVE, AgentStatus.COMPLETED, AgentStatus.ERROR
     ):
         runtime._status[target] = AgentStatus.ACTIVE
-        execution_id = await runtime.trigger_run(target, source="orchestrator")
+        execution_id = await runtime.trigger_run(target, source="owner")
 
     result: dict[str, Any] = {
         "message_id": msg.id, "target": target, "type": msg_type.value,
@@ -2193,7 +2249,7 @@ async def _list_connectors(runtime: Runtime, input: dict[str, Any]) -> dict[str,
         connectors.append(info)
 
     # Include pipeline-agent-tools count for discoverability
-    from ..tool_registry import ToolCategory
+    from .tool_registry import ToolCategory
     pipeline_tools = runtime.tool_registry.list_all(category=ToolCategory.PIPELINE)
 
     result: dict[str, Any] = {"connectors": connectors}
@@ -2208,7 +2264,7 @@ async def _list_connectors(runtime: Runtime, input: dict[str, Any]) -> dict[str,
 def _get_bundled_ids() -> set[str]:
     """Return the set of bundled connector IDs (for protecting against removal)."""
     try:
-        from ..connectors import get_bundled_specs
+        from .connectors import get_bundled_specs
         return set(get_bundled_specs().keys())
     except Exception:
         return set()
@@ -2337,7 +2393,7 @@ async def _use_connector(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
 # ---------------------------------------------------------------------------
 
 async def _list_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    from ..tool_registry import ToolCategory
+    from .tool_registry import ToolCategory
     category_str = input.get("category")
     category: ToolCategory | None = None
     if category_str:
@@ -2372,9 +2428,7 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     The author is the CALLER — authorship is the scoping primitive, so it
     is derived, never accepted as input. Owner callers author as "user".
     """
-    from ..tool_store import OWNER_AUTHOR
-    from . import is_owner_caller
-
+    from .tool_store import OWNER_AUTHOR
     name = str(input.get("name") or "").strip()
     if not name:
         return {"error": "Missing required field: 'name'"}
@@ -2392,7 +2446,7 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     # makes the surface ambiguous and pre-poisons any future resolution
     # that keys on tool NAME. Reserve them now, while nothing depends on
     # the ambiguity.
-    from ..shell_tools import SHELL_TOOL_EXECUTORS as _SHELL_NAMES
+    from .shell_tools import SHELL_TOOL_EXECUTORS as _SHELL_NAMES
     if name in _SHELL_NAMES:
         return {"error": f"'{name}' is a core ATN shell tool name; pick another"}
     # The daemon's own resident-module manifests are atn_<bundle>
@@ -2468,8 +2522,6 @@ async def _publish_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     per agent, no approval queue. Author-only: you publish your own
     work, nobody else's.
     """
-    from . import is_owner_caller
-
     digest = str(input.get("digest") or "")
     if not digest:
         return {"error": "Missing required field: 'digest'"}
@@ -2501,9 +2553,7 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
     Proposes only — installation is the owner's WS-surface decision
     (approve_adoption). The caller is derived, never accepted as input.
     """
-    from ..tool_store import OWNER_AUTHOR
-    from . import is_owner_caller
-
+    from .tool_store import OWNER_AUTHOR
     digest = str(input.get("digest") or "").strip()
     if not digest:
         return {"error": "Missing required field: 'digest'"}
@@ -2531,9 +2581,7 @@ async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     × credibility) and mints NOTHING. The caller is derived, never
     accepted as input.
     """
-    from ..tool_store import OWNER_AUTHOR
-    from . import is_owner_caller
-
+    from .tool_store import OWNER_AUTHOR
     digest = str(input.get("digest") or "").strip()
     if not digest:
         return {"error": "Missing required field: 'digest'"}
@@ -2591,9 +2639,7 @@ async def _run_trial(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     returns the verdict + report digest + attestTrial calldata so the
     owner surface can submit the on-chain trial record. Caller derived.
     """
-    from ..tool_store import OWNER_AUTHOR
-    from . import is_owner_caller
-
+    from .tool_store import OWNER_AUTHOR
     prospectus_digest = str(input.get("prospectus_digest") or "").strip()
     if not prospectus_digest:
         return {"error": "Missing required field: 'prospectus_digest'"}
@@ -2612,9 +2658,7 @@ async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     attest as "user". This is the per-work-item reflection step — the only
     usage that counts toward a tool author's mint (docs/tool_substrate.md).
     """
-    from ..tool_store import OWNER_AUTHOR
-    from . import is_owner_caller
-
+    from .tool_store import OWNER_AUTHOR
     judgments = input.get("judgments")
     if not isinstance(judgments, list):
         return {"error": "judgments must be an array"}
@@ -2772,8 +2816,6 @@ def _caller_identity(runtime: Runtime, caller_id: str | None):
     the caller isn't a registered agent with a daemon-held key. Owner callers
     have no agent key of their own — a service author/payer must be an agent.
     """
-    from . import is_owner_caller
-
     if caller_id is None or is_owner_caller(caller_id):
         return {"error": "This tool must be called by a registered agent — the "
                          "owner surface has no agent key to sign with. Ask an "
@@ -2799,7 +2841,7 @@ async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     except (TypeError, ValueError):
         limit = 25
 
-    from ..on_chain import ServiceMarketClient
+    from .on_chain import ServiceMarketClient
     smc = ServiceMarketClient(runtime._config.rpb)
     if not smc.registry_available:
         return {"error": "ServiceRegistry not configured "
@@ -2892,7 +2934,7 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
         return {"error": str(exc)}
     spec_digest = built["digest"]
 
-    from ..on_chain import ServiceMarketClient
+    from .on_chain import ServiceMarketClient
     smc = ServiceMarketClient(runtime._config.rpb)
     if not smc.registry_available:
         return {"error": "Local spec persisted but ServiceRegistry not "
@@ -2918,7 +2960,7 @@ async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
 
     Thin wrapper over ``atn.service_client.pay_for_service`` (shared with the
     ``service`` inference provider), which owns the chain mechanics."""
-    from .. import service_client
+    from . import service_client
 
     caller_id = input.get("_caller_id")
     resolved = _caller_identity(runtime, caller_id)
@@ -2948,7 +2990,7 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
 
     Thin wrapper over ``atn.service_client.request_service`` (shared with the
     ``service`` inference provider)."""
-    from .. import service_client
+    from . import service_client
 
     provider_address = str(input.get("provider_address") or "").strip()
     service_id = str(input.get("service_id") or "").strip()
@@ -2982,7 +3024,7 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
 
 
 # ---------------------------------------------------------------------------
-# Conversation management (UI-facing, not exposed to the orchestrator LLM)
+# Conversation management (UI-facing, not exposed to agent LLMs)
 # ---------------------------------------------------------------------------
 
 async def _reset_conversation(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -3112,8 +3154,7 @@ async def _get_history(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
 # ---------------------------------------------------------------------------
 
 async def _get_goals(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Goals are agents — list all non-orchestrator agents as goals."""
-    from ..orchestrator import ORCHESTRATOR_ID
+    """Goals are agents — list all agents as goals."""
     status_filter = input.get("status")
     _STATUS_MAP = {
         "active": (AgentStatus.ACTIVE, AgentStatus.RUNNING),
@@ -3123,8 +3164,6 @@ async def _get_goals(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     }
     goals: list[dict[str, Any]] = []
     for defn, agent_status in runtime.list_agents():
-        if defn.id == ORCHESTRATOR_ID:
-            continue
         # Map agent status to goal status
         if agent_status in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
             goal_status = "active"
@@ -3170,7 +3209,7 @@ async def _add_goal(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         "mode": "cognitive",
         "prompt": description,
         "description": f"Goal: {description}",
-        "model": model or runtime._config.orchestrator.model or "claude-sonnet-4-6",
+        "model": model or runtime._config.default_model or "claude-sonnet-4-6",
     })
     if "error" in result:
         return result
@@ -3260,14 +3299,14 @@ async def _get_my_budget_status(runtime: Runtime, input: dict[str, Any]) -> dict
     Includes own caps, ancestors' caps + headroom, and subscription utilization
     for any provider whose name maps to a known subscription bridge.
     """
-    caller_id = input.get("_caller_id") or ORCHESTRATOR_ID
+    caller_id = input.get("_caller_id") or OWNER_ID
     own = runtime.registry.get_budget_info(caller_id)
 
     # Uniform effective-limits rail: an agent WITHOUT a per-agent budget must
     # see its limits through the SAME shape/verbiage as a budgeted one — for it
     # the "budget" is the daemon-wide provider ceiling (dollar cap or inferred
     # subscription remaining). Route both cases through one function.
-    from ..effective_limits import compute_effective_limits
+    from .effective_limits import compute_effective_limits
     effective = compute_effective_limits(
         caller_id,
         registry=runtime.registry,
@@ -3379,10 +3418,9 @@ async def _get_usage(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     tokens vs their configured budget. Cached ~60s per caller.
     """
     import time
-    from . import ORCHESTRATOR_ID
-    from ..providers.bridge import BridgeProvider
+    from .providers.bridge import BridgeProvider
 
-    caller_id = input.get("_caller_id") or ORCHESTRATOR_ID
+    caller_id = input.get("_caller_id") or OWNER_ID
 
     cached = _USAGE_CACHE.get(caller_id)
     if cached is not None and (time.monotonic() - cached[0]) < _USAGE_CACHE_TTL:
@@ -3539,20 +3577,46 @@ async def _list_tasks(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
 
 
 async def _get_user_profile(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    from ..orchestrator import ORCHESTRATOR_ID
-    p = runtime.user_profile.get_profile()
-    # Count goals from agent registry (non-orchestrator agents)
-    goal_count = sum(1 for defn, _ in runtime.list_agents() if defn.id != ORCHESTRATOR_ID)
+    store = runtime.user_profile
+    section = (input.get("section") or "").strip()
+    if section:
+        body = store.read_dossier_section(section)
+        if body is None:
+            return {"error": f"No dossier section '{section}'",
+                    "sections": store.dossier_sections()}
+        return {"section": section, "content": body}
+
+    p = store.get_profile()
+    dossier = store.read_dossier()
     return {
-        "onboarding_status": p.onboarding_status.value,
-        "summary": p.summary,
-        "goal_count": goal_count,
+        "dossier": dossier or "(empty — the dossier has not been written yet)",
+        "sections": store.dossier_sections(),
+        # Goals are agents (see _get_goals) — every registered agent counts.
+        "goal_count": len(runtime.list_agents()),
         "project_count": len(p.projects),
-        "strengths": p.strengths,
-        "weaknesses": p.weaknesses,
-        "standards_count": len(p.standards),
         "jurisdiction_id": p.jurisdiction_id,
     }
+
+
+# Guard against a single write bloating the dossier past what every profile-
+# granted agent then drags into context on read.
+_DOSSIER_SECTION_MAX_CHARS = 20_000
+
+
+async def _update_user_profile(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    section = (input.get("section") or "").strip()
+    if not section:
+        return {"error": "Missing 'section'"}
+    content = input.get("content") or ""
+    if len(content) > _DOSSIER_SECTION_MAX_CHARS:
+        return {"error": f"Section content too large "
+                         f"({len(content)} > {_DOSSIER_SECTION_MAX_CHARS} chars) — "
+                         "summarize; the dossier is a distillate, not an archive"}
+    mode = input.get("mode") or "replace"
+    try:
+        return runtime.user_profile.write_dossier_section(section, content, mode)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
 
 async def _approve_task(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -3674,7 +3738,10 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # invoke with the proof). Kept off the progressive surface.
     "services": {"find_services", "register_service",
                  "pay_for_service", "request_service"},
-    "profile": {"get_user_profile"},
+    # User-memory bundle: read + write the dossier (USER.md). One grant —
+    # an agent trusted to know the user is trusted to keep the record
+    # current. Assignable to ANY agent; nothing about it is Kevin-specific.
+    "profile": {"get_user_profile", "update_user_profile"},
     # "shell" (bash/read_file/write_file/list_directory/search_files) is NOT a
     # normal category: its tools live in shell_tools.py, not _TOOLS, and are
     # appended by execution_engine for non-bridge providers. resolve_tool_surface
@@ -3814,7 +3881,7 @@ async def _delegate_message(runtime: Runtime, input: dict[str, Any]) -> dict[str
     if defn is not None:
         runtime.inbox.post(InboxMessage(
             id=InboxMessage.generate_id(),
-            source="orchestrator",
+            source="owner",
             target=agent_id,
             type=MessageType.WORK,
             priority=MessagePriority.HIGH,
@@ -3961,9 +4028,7 @@ async def _get_latest_thought(runtime: Runtime, input: dict[str, Any]) -> dict[s
 
 async def _get_children_status(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Get compact status for all direct children of the calling agent."""
-    from . import ORCHESTRATOR_ID
-
-    caller_id = input.get("_caller_id") or ORCHESTRATOR_ID
+    caller_id = input.get("_caller_id") or OWNER_ID
     children = runtime.get_children(caller_id)
 
     if not children:
@@ -4031,7 +4096,7 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
         return {"error": f"No private key stored for '{agent_id}'. "
                          "Root agents must register via the frontend wallet."}
 
-    from ..on_chain import OnChainService
+    from .on_chain import OnChainService
     svc = OnChainService(runtime._config.rpb)
     if not svc.available:
         return {"error": "On-chain service not configured (missing rpb_contract_address or rpc_url)."}
@@ -4065,9 +4130,9 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
 async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Compact a target agent's conversation to free context (§15).
 
-    Permissions: the owner (ORCHESTRATOR_ID caller — this includes the WS/owner
-    surface, whose caller_id defaults to the orchestrator) may compact any
-    agent; a non-owner agent may compact only its DIRECT CHILDREN
+    Permissions: the owner (any is_owner_caller id — this includes the WS/owner
+    surface, whose caller_id defaults to OWNER_ID) may compact any agent; a
+    non-owner agent may compact only its DIRECT CHILDREN
     (target.parent_id == caller_id); no agent may compact itself. Violations
     return an error with no side effects.
 
@@ -4078,12 +4143,10 @@ async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
       - idle (any provider)   -> summarize the persisted store in place, archive
         the original, evict the cached provider (status "compacted").
     """
-    from . import ORCHESTRATOR_ID
-
     agent_id = input.get("agent_id", "")
     if not agent_id:
         return {"error": "Missing 'agent_id'."}
-    caller_id = input.get("_caller_id") or ORCHESTRATOR_ID
+    caller_id = input.get("_caller_id") or OWNER_ID
 
     target = runtime.get_agent(agent_id)
     if target is None:
@@ -4092,7 +4155,6 @@ async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     # --- Permission check (§15) ---------------------------------------------
     if caller_id == agent_id:
         return {"error": "An agent cannot compact itself."}
-    from . import is_owner_caller
     if not is_owner_caller(caller_id) and target.parent_id != caller_id:
         return {
             "error": (
@@ -4126,8 +4188,8 @@ async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         # the Claude Agent SDK input protocol exposes no compact control
         # message (only interrupt / setModel / setPermissionMode). Honestly
         # report unsupported rather than pretend (§15).
-        from ..providers.bridge import BridgeProvider
-        from ..providers.codex_bridge import CodexBridgeProvider
+        from .providers.bridge import BridgeProvider
+        from .providers.codex_bridge import CodexBridgeProvider
         if isinstance(provider, (BridgeProvider, CodexBridgeProvider)):
             return {"status": "unsupported_while_running", "agent_id": agent_id}
         # Generic loop: request_compaction() returns True iff an orchestration
@@ -4197,8 +4259,8 @@ async def _compact_idle_store(
     and closes the cached provider so the next run rebuilds from the store.
     Emits CONTEXT_COMPACTION events with manual: true + requested_by.
     """
-    from ..events import Event, EventType
-    from ..providers.base import (
+    from .events import Event, EventType
+    from .providers.base import (
         COMPACTION_SUMMARIZER_SYSTEM,
         COMPACTION_SUMMARY_PROMPT,
     )
@@ -4378,6 +4440,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "propose_task": _propose_task,
     "list_tasks": _list_tasks,
     "get_user_profile": _get_user_profile,
+    "update_user_profile": _update_user_profile,
     # Delegation
     "delegate_status": _delegate_status,
     "delegate_message": _delegate_message,
@@ -4393,14 +4456,14 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "request_service": _request_service,
     # Manual compaction (§15)
     "compact_agent": _compact_agent,
-    # Conversation management (UI-facing, not in orchestrator's tool list)
+    # Conversation management (UI-facing, not in the agent tool list)
     "reset_conversation": _reset_conversation,
     "get_conversation": _get_conversation,
     "list_conversations": _list_conversations,
     # Agent conversation (UI-facing — universal chat for cognitive agents)
     "get_agent_conversation": _get_agent_conversation,
     "send_agent_message": _send_agent_message,
-    # Task management (UI-facing, not in orchestrator's tool list)
+    # Task management (UI-facing, not in the agent tool list)
     "approve_task": _approve_task,
     "reject_task": _reject_task,
 }
@@ -4410,7 +4473,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
 # route_tool_call/execute_tool are EXACTLY the schema-backed tools in ``_TOOLS``.
 # The extra ``_EXECUTORS`` entries marked "UI-facing" above (send_agent_message,
 # approve_task, reject_task, the *_conversation ops) are internal sinks reachable
-# only by the trusted orchestrator or the WS/surface layer — NEVER by an agent.
+# only by the trusted owner surface (WS/UI) — NEVER by an agent.
 # Left agent-reachable they are confused-deputy escalations: send_agent_message
 # runs with surface=None and bypasses the single-writer input arbiter (spoofing
 # human input); approve_task/reject_task let an agent self-approve its own
@@ -4420,7 +4483,7 @@ _AGENT_CALLABLE_TOOLS: frozenset[str] = frozenset(t.name for t in _TOOLS)
 
 
 def get_tool_definitions() -> list[ToolDefinition]:
-    """Return all orchestrator tool definitions (for the LLM)."""
+    """Return all core ATN tool definitions (for the LLM)."""
     return list(_TOOLS)
 
 
@@ -4472,20 +4535,19 @@ async def execute_tool(
 
     ``caller_id`` identifies the agent invoking the tool (used by delegate/
     create_agent to set parent_id for fractality).  When None, the caller is
-    assumed to be the orchestrator.
+    assumed to be the owner surface.
     """
     executor = _EXECUTORS.get(name)
     if executor is None:
         return {"error": f"Unknown tool: {name}"}
     # Agent-callable confinement (H2). A real sub-agent may only invoke
-    # schema-backed tools; the orchestrator (caller_id None, or explicitly the
-    # orchestrator id) is trusted and unrestricted. This refuses UI-facing /
+    # schema-backed tools; the owner surface (any is_owner_caller id) is
+    # trusted and unrestricted. This refuses UI-facing /
     # internal executors (send_agent_message -> arbiter bypass, approve_task ->
     # self-approval, conversation ops) BEFORE the executor runs, whether the name
     # arrived via a compromised worker's framework_tool RPC or a prompt-injected
     # tool_use in the in-process loop.
     if caller_id is not None:
-        from . import is_owner_caller
         if not is_owner_caller(caller_id) and name not in _AGENT_CALLABLE_TOOLS:
             log.warning("blocked non-agent-callable tool %r by caller %s",
                         name, caller_id)

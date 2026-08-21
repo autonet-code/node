@@ -1,7 +1,7 @@
 """MCP server for Google Calendar and Google Tasks.
 
 Exposes read/write access to Google Calendar events and Google Tasks
-as MCP tools.  The orchestrator discovers these tools via MCP and uses
+as MCP tools.  Agents discover these tools via MCP and use
 them on behalf of the user.
 
 OAuth tokens are passed as environment variables by the ConnectorManager:

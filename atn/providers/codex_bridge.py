@@ -314,7 +314,7 @@ class CodexBridgeProvider(Provider):
         session_id: str = "",
         **kwargs,
     ) -> ProviderResponse:
-        """Multi-turn orchestrator call through the Codex bridge.
+        """Multi-turn orchestrate call through the Codex bridge.
 
         Handles the bidirectional tool relay protocol:
         1. Sends an 'orchestrate' request to the bridge.

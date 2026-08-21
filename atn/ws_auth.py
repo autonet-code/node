@@ -90,7 +90,7 @@ def build_challenge_text(nonce: str, *, daemon_id: str, chain_id: int,
     Domain separation (finding 6 of the security review): a bare host:port is
     identical across every Autonet daemon, so a signature for daemon A would
     replay on daemon B. We bind the signature to:
-      - daemon_id: the orchestrator's identity address (unique per daemon),
+      - daemon_id: the daemon's identity address (unique per daemon),
       - chain_id: so a testnet signature can't authorize a mainnet daemon,
       - owner_wallet: the address this challenge expects to recover,
       - conn_id: a server-random per-connection id, so a signature lifted from
@@ -135,12 +135,12 @@ class ClientSession:
     """Per-connection auth + scope state. One per WS connection.
 
     A connection on the privileged LOCAL listener is constructed pre-authed as
-    the owner rooted at the orchestrator (``local=True, authed=True``) —
+    the owner with full-fleet scope (``local=True, authed=True``) —
     preserving the localhost-is-full-control behavior. A connection on the
     remote listener starts unauthed and must complete the challenge handshake.
 
     ``local`` is set from the accepting listener (primary custody signal), not
-    from remote_address. scope_ids: None means "full fleet" (orchestrator root);
+    from remote_address. scope_ids: None means "full fleet" (root scope);
     a set restricts the snapshot + event stream + tool targets to that subtree.
     """
 
@@ -148,6 +148,7 @@ class ClientSession:
     is_loopback: bool = False              # TCP peer is loopback (defense-in-depth)
     authed: bool = False
     owner: bool = False
+    # LEGACY-WIRE: atn_web sends/reads this id as "full fleet" scope.
     root_agent_id: str = "orchestrator"
     scope_ids: set[str] | None = None      # None = full fleet
     wallet_address: str = ""

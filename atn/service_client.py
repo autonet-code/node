@@ -1,6 +1,6 @@
 """Consumer side of the services market rail (docs/services_market.md).
 
-The three mechanics a buyer needs, factored out of the orchestrator tool
+The three mechanics a buyer needs, factored out of the agent tool
 handlers so the ``service`` inference provider can reuse them verbatim
 instead of re-implementing chain code:
 
@@ -14,7 +14,7 @@ instead of re-implementing chain code:
   4. ``lookup_service_ask()`` — read a service's on-chain ask by
                                 (provider, spec_digest).
 
-``atn/orchestrator/tools.py`` (``pay_for_service`` / ``request_service``
+``atn/agent_tools.py`` (``pay_for_service`` / ``request_service``
 agent tools) and ``atn/providers/service.py`` (the inference provider)
 are both thin wrappers over these.
 

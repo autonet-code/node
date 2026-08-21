@@ -218,6 +218,40 @@ class TestOverflowReduction:
 
 
 # ---------------------------------------------------------------------------
+# §16 Verify step: closing verification turn after code edits
+# ---------------------------------------------------------------------------
+
+class TestVerifyStep:
+    @pytest.mark.asyncio
+    async def test_code_edit_injects_one_verify_turn(self):
+        p = ScriptedProvider([
+            _resp(text="editing", stop_reason="tool_use",
+                  tool_calls=[_tc("edit_file", path="/repo/mod.py",
+                                  old_string="a", new_string="b")]),
+            _resp(text="done", stop_reason="end_turn"),      # natural end → verify turn
+            _resp(text="verified, done", stop_reason="end_turn"),
+        ])
+        resp = await p.send_orchestrate(message="fix", tools=[],
+                                        tool_executor=_noop_executor)
+        assert resp.text == "verified, done"
+        assert p.stream_calls == 3
+        last_user = [m for m in p.seen_messages[-1] if m["role"] == "user"][-1]
+        assert "mod.py" in str(last_user["content"])
+
+    @pytest.mark.asyncio
+    async def test_no_code_edit_no_verify_turn(self):
+        p = ScriptedProvider([
+            _resp(text="looking", stop_reason="tool_use",
+                  tool_calls=[_tc("read_file", path="/repo/mod.py")]),
+            _resp(text="done", stop_reason="end_turn"),
+        ])
+        resp = await p.send_orchestrate(message="look", tools=[],
+                                        tool_executor=_noop_executor)
+        assert resp.text == "done"
+        assert p.stream_calls == 2
+
+
+# ---------------------------------------------------------------------------
 # §2 Compaction: retention, fallback, spiral guard
 # ---------------------------------------------------------------------------
 
@@ -247,20 +281,37 @@ class TestCompaction:
         assert "task" in out[0]["content"]
 
     @pytest.mark.asyncio
-    async def test_spiral_guard_aborts_when_reduction_ineffective(self):
-        # Summarizer returns a summary as long as the input -> <20% reduction
-        # -> ContextOverflowError from _reduce_context.
-        huge = "z" * 60_000
+    async def test_spiral_triggers_hard_reset_then_aborts_at_cap(self):
+        # Summarizer returns a summary as long as the input -> <20% reduction.
+        # Tier 3: the first failures rebuild the stack (hard reset) instead of
+        # aborting; once the per-run reset cap is spent, abort as before.
+        def build_messages():
+            huge = "z" * 60_000
+            return [
+                {"role": "user", "content": huge},
+                {"role": "assistant", "content": huge},
+                {"role": "user", "content": huge},
+                {"role": "assistant", "content": huge},
+            ]
         p = ScriptedProvider(
             script=[],
-            summary_responses=[_resp(text=huge, stop_reason="end_turn")],
+            summary_responses=[_resp(text="z" * 60_000, stop_reason="end_turn")] * 5,
         )
-        messages = [
-            {"role": "user", "content": huge},
-            {"role": "assistant", "content": huge},
-            {"role": "user", "content": huge},
-            {"role": "assistant", "content": huge},
-        ]
+        messages = build_messages()
+        await p._reduce_context(
+            messages, system="", model="claude-haiku-4-5",
+            original_request="the original task", max_tokens=8192, force=True,
+        )
+        # Reset happened: single small user message carrying the task.
+        assert p._hard_resets_this_run == 1
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert "the original task" in messages[0]["content"]
+        assert "[CONTEXT RESET]" in messages[0]["content"]
+        assert p._compactions_this_run == 0  # fresh budget after reset
+
+        p._hard_resets_this_run = 2  # cap spent
+        messages = build_messages()
         with pytest.raises(ContextOverflowError):
             await p._reduce_context(
                 messages, system="", model="claude-haiku-4-5",
@@ -274,6 +325,7 @@ class TestCompaction:
             summary_responses=[_resp(text="s", stop_reason="end_turn")] * 5,
         )
         p._compactions_this_run = 2  # already at the cap
+        p._hard_resets_this_run = 2  # tier 3 also spent — abort is the floor
         messages = [
             {"role": "user", "content": "x" * 60_000},
             {"role": "assistant", "content": "y" * 60_000},

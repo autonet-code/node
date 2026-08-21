@@ -289,7 +289,7 @@ async def test_bridge_script_path():
 
 
 # ---------------------------------------------------------------------------
-# §11 model-tier guard — reject orchestrate on non-orchestrator-capable models
+# §11 model-tier guard — reject orchestrate on non-loop-capable models
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -304,7 +304,7 @@ async def test_orchestrate_rejects_haiku_before_spawning():
         raise AssertionError("_ensure_process should not run for a rejected model")
     provider._ensure_process = _boom  # type: ignore
 
-    with pytest.raises(ProviderError, match="not orchestrator-capable"):
+    with pytest.raises(ProviderError, match="not loop-capable"):
         await provider.send_orchestrate(
             message="hi", tools=[], tool_executor=AsyncMock(),
             model="claude-haiku-4-5",
@@ -334,12 +334,12 @@ async def test_orchestrate_allows_sonnet():
 
 
 def test_model_tier_helper():
-    from atn.providers.bridge import _model_is_orchestrator_capable
-    ok, _ = _model_is_orchestrator_capable("claude-haiku-4-5")
+    from atn.providers.bridge import _model_is_loop_capable
+    ok, _ = _model_is_loop_capable("claude-haiku-4-5")
     assert ok is False
-    ok, _ = _model_is_orchestrator_capable("claude-sonnet-4-6")
+    ok, _ = _model_is_loop_capable("claude-sonnet-4-6")
     assert ok is True
-    ok, _ = _model_is_orchestrator_capable("claude-opus-4-8")
+    ok, _ = _model_is_loop_capable("claude-opus-4-8")
     assert ok is True
 
 

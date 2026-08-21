@@ -260,7 +260,7 @@ class TestCognitiveAgentExecution:
         # After completion the provider STAYS registered: sessions are
         # sticky so delegate_message / follow-up injection can reach a
         # completed-but-resumable agent. Release happens on session
-        # reset (session_manager / orchestrator_setup), not per-run.
+        # reset (session_manager / model_switch), not per-run.
         assert rt._active_providers.get("cog-track") is mock_provider
 
 
@@ -435,7 +435,7 @@ class TestDelegateToolsUnified:
         mock_provider.interrupt = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _create_agent, _delegate_collect
+            from atn.agent_tools import _create_agent, _delegate_collect
 
             result = await _create_agent(rt, {
                 "mode": "cognitive",
@@ -480,7 +480,7 @@ class TestDelegateToolsUnified:
         mock_provider.interrupt = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _create_agent, _delegate_status, _delegate_collect
+            from atn.agent_tools import _create_agent, _delegate_status, _delegate_collect
 
             spawn = await _create_agent(rt, {"mode": "cognitive", "prompt": "Slow task", "_caller_id": "orch"})
             await asyncio.sleep(0.01)  # yield to event loop
@@ -513,7 +513,7 @@ class TestDelegateToolsUnified:
         mock_provider.send_user_message = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _create_agent, _delegate_message, _delegate_collect
+            from atn.agent_tools import _create_agent, _delegate_message, _delegate_collect
 
             spawn = await _create_agent(rt, {"mode": "cognitive", "prompt": "Working", "_caller_id": "orch"})
             agent_id = spawn["agent_id"]
@@ -547,7 +547,7 @@ class TestCompletionCallbacks:
         mock_provider.interrupt = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _create_agent
+            from atn.agent_tools import _create_agent
 
             result = await _create_agent(rt, {"mode": "cognitive", "prompt": "task", "_caller_id": "orch"})
             agent_id = result["agent_id"]
@@ -576,7 +576,7 @@ class TestDelegateRegistryBackwardCompat:
         mock_provider.interrupt = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _create_agent, _delegate_collect
+            from atn.agent_tools import _create_agent, _delegate_collect
 
             result = await _create_agent(rt, {
                 "mode": "cognitive",
@@ -602,7 +602,7 @@ class TestFractality:
     @pytest.mark.asyncio
     async def test_delegate_tools_include_create_agent(self):
         """Cognitive agents must get create_agent and trigger_run tools."""
-        from atn.orchestrator.tools import _get_delegate_tools
+        from atn.agent_tools import _get_delegate_tools
 
         tools = _get_delegate_tools()
         tool_names = {t["name"] for t in tools}
@@ -632,7 +632,7 @@ class TestFractality:
         mock_provider.interrupt = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _create_agent
+            from atn.agent_tools import _create_agent
 
             # Simulate orch.1 (a sub-agent) calling create_agent
             result = await _create_agent(rt, {
@@ -666,7 +666,7 @@ class TestFractality:
         mock_provider.interrupt = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import execute_tool
+            from atn.agent_tools import execute_tool
 
             result = await execute_tool("create_agent", {
                 "id": "child-cog",
@@ -689,7 +689,7 @@ class TestFractality:
         """create_agent with pipeline mode should also set parent_id from caller context."""
         rt = _make_runtime(bus, tmp_path)
 
-        from atn.orchestrator.tools import execute_tool
+        from atn.agent_tools import execute_tool
 
         result = await execute_tool("create_agent", {
             "id": "child-pipe",

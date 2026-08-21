@@ -17,7 +17,7 @@ import pytest
 
 from atn.events import EventBus
 from atn.models import AgentDefinition, AgentMode
-from atn.orchestrator.tools import execute_tool
+from atn.agent_tools import execute_tool
 from atn.trial_runner import PROSPECTUS_KIND, TrialRunner
 
 
@@ -194,7 +194,7 @@ class TestRunTrial:
     async def test_run_trial_tool_dispatch_and_bundle(self, tmp_path):
         """The agent-facing run_trial threads caller and lands in the
         vetting bundle."""
-        from atn.orchestrator.tools import _TOOL_CATEGORIES
+        from atn.agent_tools import _TOOL_CATEGORIES
 
         assert "run_trial" in _TOOL_CATEGORIES["vetting"]
         assert "check_evidence" in _TOOL_CATEGORIES["vetting"]

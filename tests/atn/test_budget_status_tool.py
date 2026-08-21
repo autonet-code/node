@@ -7,7 +7,7 @@ import pytest
 from atn.config import ATNConfig
 from atn.events import EventBus
 from atn.models import AgentDefinition, AgentMode
-from atn.orchestrator.tools import _get_my_budget_status
+from atn.agent_tools import _get_my_budget_status
 from atn.runtime import Runtime
 
 

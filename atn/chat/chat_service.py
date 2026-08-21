@@ -9,8 +9,8 @@ by an InputPolicy), keep a routing table binding chat surfaces to agents.
 
 Interaction model, one dedicated channel:
 
-  - The CHANNEL is bound to the orchestrator. Unprefixed channel messages go
-    to the orchestrator; orchestrator output renders in the channel.
+  - The CHANNEL is bound to one agent (its root for routing). Unprefixed
+    channel messages go to the bound agent; its output renders in the channel.
   - Each TOP-LEVEL delegate (depth 1) gets its own THREAD, created when its
     delegate.spawned / agent.registered event fires. The thread binds to it.
   - NESTED sub-agents (depth >= 2) render as pinned, edit-in-place TILES inside
@@ -37,7 +37,7 @@ from ..input_arbiter import SurfaceId
 from .policy import AllowAll, InputPolicy
 from .rendering import AgentExecutionRender, SubAgentTile
 from .routing import (
-    ORCHESTRATOR, agent_depth, is_top_level_delegate, top_level_delegate,
+    _LEGACY_ROOT_ID, agent_depth, is_top_level_delegate, top_level_delegate,
 )
 
 if TYPE_CHECKING:
@@ -76,12 +76,12 @@ class ChatService:
     client:
         The platform adapter (Discord, or the stub) implementing MessagingClient.
     channel_id:
-        THE channel -- bound to the orchestrator. All orchestrator I/O happens
-        here; delegate threads are created under it.
+        THE channel -- bound to the bound agent. All of its I/O happens here;
+        delegate threads are created under it.
     policy:
         Input-seam policy (operator gate, credits, ...). Defaults to AllowAll.
-    orchestrator_label:
-        Display name for the orchestrator (dОrg presents it as "K3V|N").
+    root_label:
+        Display name for the bound agent (dОrg presents it as "K3V|N").
     excluded_agents:
         Agent ids never rendered (background/infra). Empty by default.
     """
@@ -93,9 +93,9 @@ class ChatService:
         client: "MessagingClient",
         channel_id: "ChannelId",
         *,
-        bound_agent: str = ORCHESTRATOR,
+        bound_agent: str = _LEGACY_ROOT_ID,  # LEGACY-WIRE: atn_web default id
         policy: InputPolicy | None = None,
-        orchestrator_label: str = "K3V|N",
+        root_label: str = "K3V|N",
         excluded_agents: set[str] | None = None,
     ) -> None:
         self.events = event_bus
@@ -103,13 +103,12 @@ class ChatService:
         self.client = client
         self.channel_id = channel_id
         # The agent THIS channel is bound to — its conversation IS the channel.
-        # Usually the orchestrator (fleet control), but can be any agent
-        # (e.g. a support agent on a support channel). Treated as the channel's
-        # root for routing: its output renders in the channel; the agents IT
-        # spawns get threads. Defaults to the orchestrator.
+        # Can be any agent (e.g. a support agent on a support channel). Treated
+        # as the channel's root for routing: its output renders in the channel;
+        # the agents IT spawns get threads.
         self.bound_agent = bound_agent
         self.policy = policy or AllowAll()
-        self.orchestrator_label = orchestrator_label
+        self.root_label = root_label
         self._excluded = set(excluded_agents) if excluded_agents is not None \
             else set(_DEFAULT_EXCLUDED_AGENTS)
 
@@ -120,7 +119,7 @@ class ChatService:
         self._threads: dict[str, "ChannelId"] = {}
         # in-flight thread creations (so concurrent events don't double-create).
         self._thread_locks: dict[str, asyncio.Lock] = {}
-        # agent_id -> current execution render (orchestrator + top-level delegates).
+        # agent_id -> current execution render (bound agent + top-level delegates).
         self._renders: dict[str, AgentExecutionRender] = {}
         # nested agent_id -> its pinned tile.
         self._tiles: dict[str, SubAgentTile] = {}
@@ -134,9 +133,9 @@ class ChatService:
         # walk this instead of string-parsing the id.
         # The bound agent is the channel's root for routing (parent = "" =>
         # depth 0 => renders in the channel; its children get threads), even
-        # if its real lineage has a parent (e.g. support's parent is the
-        # orchestrator). Always include the orchestrator as a root too.
-        self._parent: dict[str, str] = {ORCHESTRATOR: "", bound_agent: ""}
+        # if its real lineage has a parent (e.g. support's parent is another
+        # agent).
+        self._parent: dict[str, str] = {bound_agent: ""}
         # execution start times for duration footers.
         self._started_at: dict[str, float] = {}
         self._lock = asyncio.Lock()
@@ -156,7 +155,7 @@ class ChatService:
     def _in_scope(self, agent_id: str) -> bool:
         """True if this agent renders on THIS channel — i.e. it is the bound
         agent or a (transitive) descendant of it. A channel bound to `support`
-        shows support + its sub-agents only, not the orchestrator's whole fleet.
+        shows support + its sub-agents only, not the whole fleet.
         Walks the parent map up to a root; falls back to dotted-id descent."""
         if agent_id == self.bound_agent:
             return True
@@ -168,7 +167,7 @@ class ChatService:
             if p is None or p == "" or p == cur:
                 break
             cur = p
-        # Dotted fallback (e.g. bound to orchestrator: orchestrator.1.2 descends).
+        # Dotted fallback (e.g. bound to "a": "a.1.2" descends).
         return agent_id.startswith(self.bound_agent + ".")
 
     def _forget_agent(self, agent_id: str) -> None:
@@ -203,7 +202,8 @@ class ChatService:
         if arbiter is not None:
             arbiter.register(self._surface_id)
         self._running = True
-        log.info("ChatService started; channel=%s bound to orchestrator", self.channel_id)
+        log.info("ChatService started; channel=%s bound to %s",
+                 self.channel_id, self.bound_agent)
 
     async def stop(self) -> None:
         if not self._running:
@@ -411,7 +411,7 @@ class ChatService:
             return
 
         # Only render agents on THIS channel's subtree (bound agent + its
-        # descendants). A support channel ignores the orchestrator's fleet.
+        # descendants). A support channel ignores the rest of the fleet.
         if not self._in_scope(agent_id):
             return
 
@@ -429,7 +429,7 @@ class ChatService:
 
     async def _on_agent_registered(self, data: dict) -> None:
         aid = data.get("agent_id", "")
-        if not aid or aid in self._excluded or aid == ORCHESTRATOR:
+        if not aid or aid in self._excluded or aid == self.bound_agent:
             return
         # Always learn the lineage, even for out-of-scope agents — it keeps the
         # parent map complete so scope/depth checks for in-scope descendants
@@ -515,7 +515,7 @@ class ChatService:
     async def _render_for(self, agent_id: str) -> "ChannelId | None":
         """The channel/thread an agent's execution render writes into.
 
-        - orchestrator -> the bound channel
+        - the bound agent (depth 0) -> the bound channel
         - top-level delegate -> its thread (created if needed)
         - nested -> handled as tiles, not execution renders (returns None)
         """
@@ -542,9 +542,9 @@ class ChatService:
         channel = await self._render_for(agent_id)
         if channel is None:
             return
-        # Relabel only the real orchestrator (presentation: "K3V|N"). Any other
-        # bound agent (e.g. support) keeps its own name.
-        label = self.orchestrator_label if agent_id == ORCHESTRATOR else \
+        # Relabel only the bound agent (presentation: "K3V|N"). Every other
+        # agent keeps its own name.
+        label = self.root_label if agent_id == self.bound_agent else \
             self._titles.get(agent_id, agent_id)
         render = AgentExecutionRender(
             client=self.client, channel_id=channel, agent_id=agent_id, label=label)

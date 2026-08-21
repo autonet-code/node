@@ -1,11 +1,11 @@
-"""End-to-end tests for orchestrator interrupt and mid-turn user messages.
+"""End-to-end tests for root-agent interrupt and mid-turn user messages.
 
 Test 1 — Interrupt:
-  Start the orchestrator on a complex task, wait for the first tool call
-  event, then kill the execution.  Verify KILLED status.
+  Start a root cognitive agent on a complex task, wait for the first tool
+  call event, then kill the execution.  Verify KILLED status.
 
 Test 2 — Mid-turn user message:
-  Start the orchestrator with a task that produces a tool call.  Before the
+  Start the root agent with a task that produces a tool call.  Before the
   SDK finishes, push a user message.  The SDK processes it as a continuation.
   Verify the injected request was acted on (agent created).
 """
@@ -24,7 +24,14 @@ if sys.platform == "win32":
 
 from atn.config import load_config, ATNConfig
 from atn.events import Event, EventBus, EventType
-from atn.models import InboxMessage, MessageType, MessagePriority, StepType
+from atn.models import (
+    AgentDefinition,
+    AgentMode,
+    InboxMessage,
+    MessageType,
+    MessagePriority,
+    StepType,
+)
 from atn.runtime import Runtime
 from atn.steps.cognitive import CognitiveStepExecutor
 from atn.providers.bridge import BridgeProvider
@@ -37,6 +44,8 @@ logging.basicConfig(
 log = logging.getLogger("test")
 
 TEST_DIR = Path("./test_data_interrupt")
+
+ROOT_ID = "root"
 
 
 def get_bridge_provider(rt: Runtime) -> BridgeProvider | None:
@@ -54,16 +63,33 @@ def _make_test_config() -> ATNConfig:
     return ATNConfig(
         data_dir=TEST_DIR,
         agents_dir=TEST_DIR / "agents",
-        orchestrator=real.orchestrator,
+        default_model=real.default_model,
+        default_provider=real.default_provider,
         providers=real.providers,
         connectors=real.connectors,
     )
 
 
+async def _register_root(rt: Runtime) -> None:
+    """Register + activate a root cognitive agent (parent None = root)."""
+    defn = AgentDefinition(
+        id=ROOT_ID,
+        name="Root",
+        mode=AgentMode.COGNITIVE,
+        parent_id=None,
+        provider=["claude_max"],
+        max_turns=50,
+        tools=["atn_progressive"],
+        concurrency=1,
+    )
+    await rt.register_agent(defn)
+    await rt.activate_agent(ROOT_ID)
+
+
 async def test_interrupt():
-    """Test 1: Interrupt an active orchestrator execution."""
+    """Test 1: Interrupt an active root-agent execution."""
     print("\n" + "=" * 60)
-    print("TEST 1: Interrupt orchestrator mid-execution")
+    print("TEST 1: Interrupt root agent mid-execution")
     print("=" * 60)
 
     if TEST_DIR.exists():
@@ -75,32 +101,32 @@ async def test_interrupt():
     rt = Runtime(bus, data_dir=TEST_DIR, config=config)
     await rt.start()
 
-    # Set up event listener to detect when orchestrator starts working
+    # Set up event listener to detect when the root agent starts working
     tool_call_seen = asyncio.Event()
     tool_call_count = 0
 
     async def on_event(event: Event):
         nonlocal tool_call_count
-        # The bridge logs "Orchestrate tool_call" to the logger, but we can
-        # also detect STEP_OUTPUT events as a proxy.  Actually, the best
-        # proxy is just a timer after the execution starts.
-        # Let's use the STEP_STARTED event for the orchestrate step.
-        if event.type == EventType.STEP_STARTED and event.data.get("agent_id") == "orchestrator":
+        # The bridge logs tool calls to the logger, but we can also detect
+        # STEP_OUTPUT events as a proxy.  Actually, the best proxy is just a
+        # timer after the execution starts.  Let's use the STEP_STARTED
+        # event for the cognitive step.
+        if event.type == EventType.STEP_STARTED and event.data.get("agent_id") == ROOT_ID:
             tool_call_seen.set()
 
     bus.subscribe(None, on_event)
 
     try:
-        await rt.setup_orchestrator()
-        print("[OK] Orchestrator registered")
+        await _register_root(rt)
+        print("[OK] Root agent registered")
 
         # Give it a complex task: create 5 agents, each with different commands.
-        # This ensures the orchestrator needs many tool calls (5 creates + 5 activates
-        # + 5 triggers + 5 get_execution = ~20 calls).
+        # This ensures the root agent needs many tool calls (5 creates + 5
+        # activates + 5 triggers + 5 get_execution = ~20 calls).
         rt.inbox.post(InboxMessage(
             id=InboxMessage.generate_id(),
             source="test",
-            target="orchestrator",
+            target=ROOT_ID,
             type=MessageType.WORK,
             priority=MessagePriority.NORMAL,
             data={"instruction": (
@@ -115,12 +141,12 @@ async def test_interrupt():
             )},
         ))
 
-        eid = await rt.trigger_run("orchestrator", source="test")
-        assert eid, "Failed to trigger orchestrator"
-        print(f"[OK] Orchestrator triggered: {eid}")
+        eid = await rt.trigger_run(ROOT_ID, source="test")
+        assert eid, "Failed to trigger root agent"
+        print(f"[OK] Root agent triggered: {eid}")
 
         # Wait for the step to start (bridge is spawning + SDK initializing)
-        print("[..] Waiting for orchestrator step to start...")
+        print("[..] Waiting for the cognitive step to start...")
         try:
             await asyncio.wait_for(tool_call_seen.wait(), timeout=30)
         except asyncio.TimeoutError:
@@ -134,16 +160,16 @@ async def test_interrupt():
         rec_check = rt._executions.get(eid)
         if not rec_check:
             print("[INFO] Execution already completed before kill was sent")
-            print("[INFO] (The task was too fast — the orchestrator finished in time)")
+            print("[INFO] (The task was too fast — the agent finished in time)")
 
             # Check the result anyway
-            history = rt.execution_log.get_history("orchestrator", limit=1)
+            history = rt.execution_log.get_history(ROOT_ID, limit=1)
             if history:
                 rec = history[0]
                 # If it completed and we can see agents were created, interrupt timing was off
                 print(f"[INFO] Status: {rec.status.value}")
                 if rec.status.value == "completed":
-                    print("[SKIP] Interrupt test inconclusive — orchestrator finished too fast")
+                    print("[SKIP] Interrupt test inconclusive — the agent finished too fast")
                     print("[INFO] The interrupt mechanism is wired correctly (see code), "
                           "just needs a slower task to test")
                     return
@@ -163,7 +189,7 @@ async def test_interrupt():
                 break
 
         # Check the execution record
-        history = rt.execution_log.get_history("orchestrator", limit=1)
+        history = rt.execution_log.get_history(ROOT_ID, limit=1)
         if history:
             rec = history[0]
             print(f"[INFO] Execution status: {rec.status.value}")
@@ -191,7 +217,7 @@ async def test_interrupt():
 async def test_user_message():
     """Test 2: Inject a user message mid-turn.
 
-    Strategy: Give the orchestrator a task that requires a tool call.
+    Strategy: Give the root agent a task that requires a tool call.
     Immediately after triggering, push a user message into the bridge.
     The SDK will process the initial task PLUS the injected message
     before emitting the result.
@@ -213,14 +239,14 @@ async def test_user_message():
     first_tool_call = asyncio.Event()
 
     async def on_event(event: Event):
-        if event.type == EventType.STEP_STARTED and event.data.get("agent_id") == "orchestrator":
+        if event.type == EventType.STEP_STARTED and event.data.get("agent_id") == ROOT_ID:
             first_tool_call.set()
 
     bus.subscribe(None, on_event)
 
     try:
-        await rt.setup_orchestrator()
-        print("[OK] Orchestrator registered")
+        await _register_root(rt)
+        print("[OK] Root agent registered")
 
         bridge = get_bridge_provider(rt)
         if not bridge:
@@ -231,7 +257,7 @@ async def test_user_message():
         rt.inbox.post(InboxMessage(
             id=InboxMessage.generate_id(),
             source="test",
-            target="orchestrator",
+            target=ROOT_ID,
             type=MessageType.WORK,
             priority=MessagePriority.NORMAL,
             data={"instruction": (
@@ -241,12 +267,12 @@ async def test_user_message():
             )},
         ))
 
-        eid = await rt.trigger_run("orchestrator", source="test")
-        assert eid, "Failed to trigger orchestrator"
-        print(f"[OK] Orchestrator triggered: {eid}")
+        eid = await rt.trigger_run(ROOT_ID, source="test")
+        assert eid, "Failed to trigger root agent"
+        print(f"[OK] Root agent triggered: {eid}")
 
         # Wait for the step to start
-        print("[..] Waiting for orchestrator to start...")
+        print("[..] Waiting for the root agent to start...")
         try:
             await asyncio.wait_for(first_tool_call.wait(), timeout=30)
         except asyncio.TimeoutError:
@@ -264,19 +290,19 @@ async def test_user_message():
         )
         print("[OK] User message injected")
 
-        # Wait for the orchestrator to finish (it should process both the
+        # Wait for the root agent to finish (it should process both the
         # initial task AND the injected message)
-        print("[..] Waiting for orchestrator to finish (up to 120s)...")
+        print("[..] Waiting for the root agent to finish (up to 120s)...")
         for i in range(120):
             await asyncio.sleep(1)
             if eid not in rt._tasks:
                 print(f"[INFO] Execution finished after {i+1}s")
                 break
         else:
-            print("[WARN] Timed out waiting for orchestrator")
+            print("[WARN] Timed out waiting for the root agent")
 
         # Check results
-        history = rt.execution_log.get_history("orchestrator", limit=1)
+        history = rt.execution_log.get_history(ROOT_ID, limit=1)
         if history:
             rec = history[0]
             print(f"[INFO] Execution status: {rec.status.value}")
@@ -298,7 +324,7 @@ async def test_user_message():
             print(f"[{'PASS' if msg_test else 'INFO'}] msg-test agent created: {msg_test is not None}")
 
             if msg_test:
-                print("[PASS] Mid-turn message was processed by the orchestrator!")
+                print("[PASS] Mid-turn message was processed by the root agent!")
                 out = rt.output_store.read("msg-test")
                 if out and out.data:
                     print(f"[INFO] msg-test output: {str(out.data)[:200]}")
@@ -317,7 +343,7 @@ async def test_user_message():
 
 async def main():
     print("=" * 60)
-    print("  ATN Orchestrator: Interrupt & Mid-Turn Message Tests")
+    print("  ATN Root Agent: Interrupt & Mid-Turn Message Tests")
     print("=" * 60)
 
     try:

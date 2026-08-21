@@ -284,7 +284,7 @@ class ConnectorManager:
         """Return tool definitions for a running connector.
 
         Tools are namespaced as `mcp_{connector_id}_{tool_name}` to avoid
-        collisions with orchestrator tools and tools from other connectors.
+        collisions with ATN agent tools and tools from other connectors.
         """
         cs = self._sessions.get(connector_id)
         if cs is None:

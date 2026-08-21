@@ -414,8 +414,8 @@ class ExecutionEngine:
 
         # Snapshot the parent's supervised state so a mid-spawn parent kill can be
         # detected at pre-go (M2). Only a WORKER parent is supervised; an
-        # in-process parent (the orchestrator) is never supervised, so this stays
-        # False and its children are never falsely orphan-killed.
+        # in-process parent is never supervised, so this stays False and its
+        # children are never falsely orphan-killed.
         _parent_id0 = getattr(defn, "parent_id", None)
         _parent_was_supervised = bool(_parent_id0) and \
             self.supervisor.is_supervised(_parent_id0)
@@ -442,7 +442,7 @@ class ExecutionEngine:
         # Register with the supervisor (sole PID-handle holder). This captures
         # defn/record/execution_id so the supervisor can finalize ON BEHALF if
         # the worker is hard-killed, fires _on_pid_bound BEFORE "go", and wires
-        # the wedge clock. Root agent (orchestrator) auto-restarts; delegates
+        # the wedge clock. Root agents auto-restart; delegates
         # don't — mark is_root off the parent link.
         parent_id = getattr(defn, "parent_id", None)
         try:
@@ -589,7 +589,7 @@ class ExecutionEngine:
     async def route_tool_call(
         self, name: str, tool_input: dict, agent_id: str,
     ) -> dict:
-        from ..orchestrator.tools import execute_tool
+        from ..agent_tools import execute_tool
 
         # Dispatch is UNCHANGED (P0). is_authority_tool() above is the
         # declarative statement of the same split for P4 to key off; the
@@ -887,7 +887,7 @@ class ExecutionEngine:
         cancel: asyncio.Event,
     ) -> None:
         from ..delegate_prompts import build_delegate_prompt
-        from ..orchestrator.tools import resolve_tool_surface
+        from ..agent_tools import resolve_tool_surface
 
         sub_provider = None
         owns_provider = True
@@ -1085,10 +1085,13 @@ class ExecutionEngine:
             # agent already has it in history.
             if _inject_identity and not getattr(sub_provider, "_session_id", ""):
                 from ..delegate_prompts import build_identity_header
+                from ..providers.base import get_context_window
                 _ident = build_identity_header(
                     agent_id=defn.id,
                     agent_type=defn.agent_type,
                     parent_id=defn.parent_id,
+                    context_window=get_context_window(
+                        defn.cognitive_model or ""),
                 )
                 user_message = f"{_ident}\n\n{user_message}"
 
@@ -1291,9 +1294,37 @@ class ExecutionEngine:
             # bookkeeping, never the answer.
             from ..delegate_prompts import (
                 REVIEW_STEP_PROMPT,
+                VERIFY_STEP_PROMPT,
                 needs_review_reinvoke,
+                needs_verify_reinvoke,
             )
             _review_session = getattr(sub_provider, "_session_id", "") or ""
+            # §16 verify step for providers whose loop can't inject it
+            # (BridgeProvider): one follow-up turn on the SAME session when
+            # the run modified code files. Capture the set NOW — the
+            # follow-up orchestrate resets the provider's tracking.
+            _modified_code = set(getattr(
+                sub_provider, "last_modified_code_files", None) or ())
+            if _review_session and needs_verify_reinvoke(
+                    sub_provider, _modified_code,
+                    response.stop_reason) and not cancel.is_set():
+                log.info("Verify step: follow-up verification turn for "
+                         "agent %s (%d code files)",
+                         defn.id, len(_modified_code))
+                try:
+                    verify_kwargs = dict(send_kwargs)
+                    verify_kwargs.pop("history", None)  # session carries it
+                    verify_kwargs.update(
+                        message=VERIFY_STEP_PROMPT.format(
+                            files=", ".join(sorted(_modified_code)[:20])),
+                        max_turns=8,
+                        session_id=_review_session,
+                    )
+                    await sub_provider.send_orchestrate(**verify_kwargs)
+                except Exception:
+                    log.warning(
+                        "verify follow-up turn failed for %s; continuing",
+                        defn.id, exc_info=True)
             if _review_session and needs_review_reinvoke(
                     sub_provider, _accumulated_tool_calls,
                     response.stop_reason) and not cancel.is_set():

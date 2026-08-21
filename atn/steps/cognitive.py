@@ -17,8 +17,10 @@ Config keys:
                        If omitted, previous step output is sent as the user message.
 
   max_turns   (int)    Maximum LLM turns.  Default: 1 (single turn, no tool loop).
-  tool_executors (str) Name of tool executor set.  "orchestrator" uses the built-in
-                       orchestrator tools.  Default: None (tools returned but not executed).
+  tool_executors (str) Name of tool executor set.  "atn" uses the built-in
+                       ATN agent tools ("orchestrator" is a legacy alias in
+                       persisted agent defs).  Default: None (tools returned
+                       but not executed).
 
 File references:
   If system or prompt ends with .md, .txt, or .prompt, it is treated as a
@@ -43,6 +45,11 @@ from .base import StepContext, StepExecutor
 
 # File extensions that signal "this is a file path, not inline content"
 _PROMPT_FILE_EXTENSIONS = (".md", ".txt", ".prompt")
+
+# tool_executors values that select the built-in ATN agent tools. "atn" is
+# canonical; "orchestrator" is LEGACY-DATA (persisted agent defs predate the
+# rename and must keep loading).
+_ATN_TOOLSET_NAMES = ("atn", "orchestrator")
 
 log = logging.getLogger(__name__)
 
@@ -143,8 +150,8 @@ class CognitiveStepExecutor(StepExecutor):
         # --- Resolve tool executors ---
         tool_executor_set = step.config.get("tool_executors")
         tool_exec_fn = None
-        if tool_executor_set == "orchestrator":
-            from ..orchestrator.tools import execute_tool
+        if tool_executor_set in _ATN_TOOLSET_NAMES:
+            from ..agent_tools import execute_tool
             tool_exec_fn = execute_tool
 
         max_turns = step.config.get("max_turns", 1)
@@ -154,13 +161,13 @@ class CognitiveStepExecutor(StepExecutor):
         on_chunk, on_thinking = _make_event_emitters(context, step_index, step_name)
 
         # --- Orchestrate path ---
-        # When tool_executors == "orchestrator", delegate the entire
+        # When tool_executors selects the ATN toolset, delegate the entire
         # multi-turn tool loop to the provider's send_orchestrate().
         # Every provider supports this: BridgeProvider uses the Claude Agent
         # SDK natively; other providers use the generic base-class loop
         # that drives send_stream() with tool execution.
         use_orchestrate = (
-            tool_executor_set == "orchestrator"
+            tool_executor_set in _ATN_TOOLSET_NAMES
             and provider.supports_orchestrate
             and context.runtime is not None
         )
@@ -199,7 +206,7 @@ class CognitiveStepExecutor(StepExecutor):
                 fallback_provider = self._pick_fallback(fallback_providers, exclude=already_tried)
             return orch_result  # all providers exhausted
 
-        # --- Simple LLM call (single-turn or multi-turn without orchestrator) ---
+        # --- Simple LLM call (single-turn, or multi-turn without the ATN toolset) ---
         try:
             model = "" if is_fallback else step.config.get("model", "")
             response = await provider.send_stream(
@@ -274,7 +281,7 @@ async def _orchestrate(
     *,
     use_default_model: bool = False,
 ) -> StepResult:
-    """Run the orchestrator through the provider's send_orchestrate().
+    """Run the agentic tool loop through the provider's send_orchestrate().
 
     Works with ANY provider:
     - BridgeProvider: delegates to the Claude Agent SDK subprocess, which
@@ -285,7 +292,7 @@ async def _orchestrate(
     Bridge-specific features (session resumption, interrupt hooks) are
     activated when the provider has the relevant attributes.
     """
-    from ..orchestrator.tools import execute_tool, get_tool_definitions_for_bridge
+    from ..agent_tools import execute_tool, get_tool_definitions_for_bridge
 
     runtime = context.runtime
 
@@ -298,18 +305,18 @@ async def _orchestrate(
     system = _resolve_text(step.config.get("system", ""), context.work_dir)
 
     try:
-        # Create a tool executor that routes to connectors or orchestrator tools
+        # Create a tool executor that routes to connectors or core ATN tools
         async def _tool_executor(name: str, input: dict) -> dict:
             return await _route_tool_call(
                 name, input, context,
-                orchestrator_exec_fn=execute_tool,
+                fallback_exec_fn=execute_tool,
             )
 
-        # Build tool list: orchestrator tools + connector tools
-        orch_tools = get_tool_definitions_for_bridge()
+        # Build tool list: core ATN tools + connector tools
+        loop_tools = get_tool_definitions_for_bridge()
         if context.connectors and context.connector_ids:
             connector_tools = context.connectors.get_all_tools(context.connector_ids)
-            orch_tools.extend(
+            loop_tools.extend(
                 {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                 for t in connector_tools
             )
@@ -333,7 +340,7 @@ async def _orchestrate(
             message=user_content,
             system=system,
             model=model,
-            tools=orch_tools,
+            tools=loop_tools,
             max_turns=step.config.get("max_turns", 20),
             tool_executor=_tool_executor,
             on_chunk=on_chunk,
@@ -572,10 +579,10 @@ def _build_tools(config: dict[str, Any], context: StepContext) -> list[ToolDefin
     """
     tools: list[ToolDefinition] = []
 
-    # Named tool set (e.g. "orchestrator")
+    # Named tool set ("atn"; "orchestrator" is the legacy alias)
     tool_executor_set = config.get("tool_executors")
-    if tool_executor_set == "orchestrator":
-        from ..orchestrator.tools import get_tool_definitions
+    if tool_executor_set in _ATN_TOOLSET_NAMES:
+        from ..agent_tools import get_tool_definitions
         tools.extend(get_tool_definitions())
     else:
         # Inline tool definitions from config
@@ -600,11 +607,11 @@ async def _route_tool_call(
     name: str,
     input: dict[str, Any],
     context: StepContext,
-    orchestrator_exec_fn: Any = None,
+    fallback_exec_fn: Any = None,
 ) -> dict[str, Any]:
     """Route a tool call to the correct handler.
 
-    Checks for connector tool prefix first, falls back to orchestrator tools.
+    Checks for connector tool prefix first, falls back to the core ATN tools.
     """
     # Check if it's a connector tool (mcp_{connector_id}_{tool_name})
     if context.connectors:
@@ -613,9 +620,9 @@ async def _route_tool_call(
             connector_id, tool_name = parsed
             return await context.connectors.call_tool(connector_id, tool_name, input)
 
-    # Fall back to orchestrator tool executor
-    if orchestrator_exec_fn and context.runtime:
-        return await orchestrator_exec_fn(name, input, context.runtime, caller_id=context.agent_id)
+    # Fall back to the core ATN tool executor
+    if fallback_exec_fn and context.runtime:
+        return await fallback_exec_fn(name, input, context.runtime, caller_id=context.agent_id)
 
     return {"error": f"Unknown tool: {name}"}
 

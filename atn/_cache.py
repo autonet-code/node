@@ -25,7 +25,7 @@ Core-protected files (changes here require a governance-published hash update):
   - atn/autonet_service.py     (constitution loading from chain)
   - nodes/core/constitution.py (constitutional framework)
 
-Everything else is extensible: providers, tools, orchestrator, connectors,
+Everything else is extensible: providers, tools, agents, connectors,
 voice, steps, shell_tools, config, CLI, etc.
 """
 from __future__ import annotations

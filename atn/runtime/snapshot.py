@@ -130,7 +130,7 @@ class SnapshotBuilder:
         ``scope_ids`` scopes the view to a subtree: when provided, only agents
         (and their executions / children counts) whose id is in the set are
         included. None (the default) = full fleet — preserving the localhost /
-        orchestrator-root behavior byte-for-byte. Global daemon sections
+        full-fleet-root behavior byte-for-byte. Global daemon sections
         (providers, connectors, voice, autonet, planning) are not per-agent and
         are returned unchanged regardless of scope."""
         agents = {}
@@ -207,25 +207,29 @@ class SnapshotBuilder:
                 "started_at": rec.started_at.isoformat(),
             }
 
-        # Orchestrator info
-        from ..orchestrator import ORCHESTRATOR_ID
-        orch_defn = self.registry._agents.get(ORCHESTRATOR_ID)
-        orch_info = None
-        if orch_defn:
-            raw_provider = orch_defn.provider or ""
+        # Fleet-root info: the first registered agent with no parent. The WS
+        # payload key stays "orchestrator" (LEGACY-WIRE below) but the data is
+        # derived from the fleet root, not a fixed root-agent id.
+        root_defn = next(
+            (d for d in self.registry._agents.values() if not d.parent_id),
+            None,
+        )
+        root_info = None
+        if root_defn:
+            raw_provider = root_defn.provider or ""
             if isinstance(raw_provider, list):
                 primary_provider = raw_provider[0] if raw_provider else ""
                 fallback_providers = raw_provider[1:] if len(raw_provider) > 1 else []
             else:
                 primary_provider = raw_provider
                 fallback_providers = []
-            orch_model = orch_defn.cognitive_model or ""
-            orch_tier = get_model_tier(orch_model)
-            orch_info = {
+            root_model = root_defn.cognitive_model or ""
+            root_tier = get_model_tier(root_model)
+            root_info = {
                 "provider": primary_provider,
-                "model": orch_model,
-                "capability_tier": orch_tier,
-                "tier_label": get_tier_label(orch_tier),
+                "model": root_model,
+                "capability_tier": root_tier,
+                "tier_label": get_tier_label(root_tier),
                 "available_models": self.provider_manager.get_available_models(primary_provider),
                 "fallback_providers": fallback_providers,
             }
@@ -313,8 +317,10 @@ class SnapshotBuilder:
                 "shell": "powershell" if platform.system() == "Windows" else "bash",
             },
             "update": self._update_snapshot(),
-            "orchestrator": orch_info,
-            # Rootless fleets have no orchestrator block, but model pickers
+            # LEGACY-WIRE: atn_web model pickers read this key; the value is
+            # now the fleet-root agent's info (None when no agents exist).
+            "orchestrator": root_info,
+            # Rootless fleets have no fleet-root block, but model pickers
             # still need the catalog — emit it unconditionally. Active-only:
             # a model the daemon has no registered provider for is not
             # pickable, so unconfigured providers stay out of the list.

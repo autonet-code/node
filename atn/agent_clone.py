@@ -135,8 +135,8 @@ async def clone_agent(runtime: Any, agent_id: str) -> dict[str, Any]:
         return {"error": f"Clone registration rejected: {exc}"}
 
     # Fork the conversation: copy the persisted store files BEFORE anything
-    # hydrates a store for the clone. Works for the orchestrator too (its
-    # store lives centrally; the clone gets a normal per-agent store).
+    # hydrates a store for the clone. Works for a root agent too (the clone
+    # gets a normal per-agent store).
     try:
         src_store = runtime.get_agent_conversation_store(agent_id)
         dst_dir = runtime._config.data_dir / "agents" / clone_id / "conversations"

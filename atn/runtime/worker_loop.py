@@ -324,8 +324,34 @@ async def run_cognitive_loop(
     # v3 review step for providers whose loop can't inject it (the SDK
     # bridge): one follow-up turn on the same session prompting
     # attest_tools. Mirrors the in-process engine block exactly.
-    from ..delegate_prompts import REVIEW_STEP_PROMPT, needs_review_reinvoke
+    from ..delegate_prompts import (
+        REVIEW_STEP_PROMPT,
+        VERIFY_STEP_PROMPT,
+        needs_review_reinvoke,
+        needs_verify_reinvoke,
+    )
     _review_session = getattr(provider, "_session_id", "") or ""
+    # §16 verify step (bridge path) — capture before any follow-up
+    # orchestrate resets the provider's tracking.
+    _modified_code = set(getattr(
+        provider, "last_modified_code_files", None) or ())
+    if _review_session and needs_verify_reinvoke(
+            provider, _modified_code, response.stop_reason):
+        log.info("[%s] verify step: follow-up verification turn (%d code "
+                 "files)", agent_label, len(_modified_code))
+        try:
+            verify_kwargs = dict(send_kwargs)
+            verify_kwargs.pop("history", None)  # session carries context
+            verify_kwargs.update(
+                message=VERIFY_STEP_PROMPT.format(
+                    files=", ".join(sorted(_modified_code)[:20])),
+                max_turns=8,
+                session_id=_review_session,
+            )
+            await provider.send_orchestrate(**verify_kwargs)
+        except Exception:
+            log.warning("[%s] verify follow-up turn failed; continuing",
+                        agent_label, exc_info=True)
     if _review_session and needs_review_reinvoke(
             provider, accumulated_tool_calls, response.stop_reason):
         log.info("[%s] review step: follow-up attest turn", agent_label)

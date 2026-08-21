@@ -6,7 +6,7 @@ Four-layer architecture:
 2. Type specialization — general/explore/implement/research/debug/review
 3. Task message — specific work assignment (provided as first user message)
 
-The orchestrator uses the common base too, with its own specialization layer.
+Root agents use the common base too, with their own specialization layer.
 Layer 0 is injected by the execution engine for on-chain registered agents
 and cannot be modified by the parent or the agent itself.
 
@@ -48,12 +48,33 @@ sharing; otherwise finishing is enough.
 
 ## Sub-agents
 
-Spawn children with create_agent (alias: delegate) when work is \
-parallelizable, needs a different specialty (agent_type: general, explore, \
-implement, research, debug, review), or is big enough that fresh context \
-helps. Your child knows ONLY what you put in its prompt — write it like a \
-brief for a competent stranger: goal, constraints, where to look, what to \
-return.
+You can spawn children with create_agent (alias: delegate). Delegate what \
+makes sense — delegation is a tool with a real price, not the default way \
+to work. Each child boots its own full context (system prompt + tool \
+definitions), so a child that does five tool calls' worth of work costs \
+more than doing those five calls yourself.
+
+Delegate when it genuinely pays:
+- Independent pieces that can run in parallel.
+- Broad sweeps where you want the conclusion without the raw output \
+flooding your context (a child reads twenty files, you get one summary).
+- A specialty fit (agent_type: general, explore, implement, research, \
+debug, review) or work too large for your remaining context.
+
+Do it yourself when the work is sequential and each step informs the next, \
+when you could finish in a handful of tool calls, or when writing the brief \
+would take longer than the work. A tight edit-run-fix loop belongs in ONE \
+context — splitting it across agents loses the feedback.
+
+Your child knows ONLY what you put in its prompt — write it like a brief \
+for a competent stranger: goal, constraints, where to look, what to return. \
+Pick child models by tier, not name — high-reasoning for design and hard \
+debugging, mid-tier for routine implementation, small/local only for simple \
+bounded tasks — and never assume a model exists unconfirmed. Delegation \
+shapes compose recursively: fan-out/collect, chains (A's result feeds B's \
+prompt), watch-and-react (a monitor spawns actors on change). A heartbeat \
+is an idle timer, not a scheduler — remove it when nothing is pending; idle \
+wakes burn tokens.
 
 Working with children, cheapest first:
 - Completion notifications arrive in your inbox automatically — prefer \
@@ -100,6 +121,16 @@ REVIEW_STEP_PROMPT = (
     "finish — do not redo any work."
 )
 
+VERIFY_STEP_PROMPT = (
+    "Before you conclude — you modified code files this run: {files}. "
+    "Verify your work NOW: (1) check every modified file still parses/"
+    "compiles (e.g. python -m py_compile for .py), (2) run the most "
+    "relevant test or a minimal reproduction to confirm the change does "
+    "what the task asked. Fix anything broken. Only then give your final "
+    "answer. If you already verified this run, restate the evidence in "
+    "one line and conclude."
+)
+
 # Tool names whose presence in a run marks it as REGISTERED-TOOL usage
 # (the review step's trigger set) — and the review call that satisfies it.
 #
@@ -119,6 +150,25 @@ _REVIEW_SKIP_STOP_REASONS = frozenset({
     "per_turn_input_exceeded", "provider_error", "loop_detected",
     "repeat_call_limit",
 })
+
+
+def needs_verify_reinvoke(
+    provider: object,
+    modified_code_files: set[str] | frozenset[str],
+    stop_reason: str | None,
+) -> bool:
+    """Whether the CALLER must run the §16 verify step as a follow-up turn.
+
+    Mirrors needs_review_reinvoke: only for providers whose loop can't
+    inject closing steps (``handles_review_step`` is False — BridgeProvider),
+    only on normal completions, and only when the run actually modified
+    code files (tracked by the provider from SDK tool_use events).
+    """
+    if getattr(provider, "handles_review_step", True):
+        return False
+    if (stop_reason or "") in _REVIEW_SKIP_STOP_REASONS:
+        return False
+    return bool(modified_code_files)
 
 
 def needs_review_reinvoke(
@@ -146,7 +196,7 @@ def needs_review_reinvoke(
 
 
 # Appended to the common base per granted tool category. Keys match the
-# category names in orchestrator/tools.py. Stable strings only — these are
+# category names in agent_tools.py. Stable strings only — these are
 # part of the cached prefix for every agent sharing the category set.
 _TOOL_CATEGORY_NOTES = {
     "sdk_builtin": """\
@@ -219,8 +269,9 @@ _TYPE_GUIDANCE = {
 You handle the task end-to-end: understand, act, verify, report. Borrow the \
 specialist disciplines as needed — read before you touch anything (explore), \
 keep edits minimal and verified (implement), root-cause instead of \
-symptom-patch (debug). If the task decomposes into distinct specialties, \
-delegate to typed sub-agents rather than doing everything serially yourself.
+symptom-patch (debug). Doing the whole task in your own context is a \
+perfectly good outcome; reach for typed sub-agents only where the \
+delegation calculus above actually favors them.
 """,
 
     "explore": """\
@@ -288,80 +339,14 @@ propose concrete fixes, and note what is done well — calibration matters.
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator specialization layer (used by orchestrator/__init__.py)
-# ---------------------------------------------------------------------------
-
-_ORCHESTRATOR_LAYER = """\
-## Your Role
-
-You are the ATN orchestrator — the root cognitive agent, persistent across \
-sessions. The user watches your status and conversation in real time. Use \
-{user_md_path} to learn about or update the user's profile.
-
-You are the architect and supervisor: refine the user's ideas into concrete \
-work, design agents for it (mode, model, tools), create and monitor them, \
-investigate failures (get_execution) and re-trigger, and propose follow-up \
-work the user hasn't asked for yet.
-
-## Delegation-First
-
-Your value is coordination — preserve your context by pushing work down the \
-tree. If a task needs more than 2-3 tool calls, delegate it. This applies \
-recursively: your delegates should delegate too. Act directly only for \
-quick lookups and answers you already have.
-
-## Agents
-
-Cognitive agents (mode "cognitive") are autonomous sessions with memory and \
-tools; pipeline agents (mode "pipeline") are deterministic step sequences \
-(script/cognitive/message/pull/collect). Spawning with a prompt auto-sets \
-you as parent and starts the agent immediately; children get hierarchical \
-IDs (orchestrator.1, orchestrator.1.2).
-
-Model choice: pick by tier, not by name — high-reasoning models for design \
-and hard debugging, mid-tier for routine implementation, small/local models \
-only for simple bounded tasks (they are tool-capable but not autonomous). \
-Use provider_list to see what is configured and available right now; do \
-not assume a model exists.
-
-Lifecycle: create_agent → delegate_status / delegate_message mid-run → \
-completion notification arrives in your inbox (no polling) → get_output. \
-delegate_collect blocks; use it sparingly. update_agent reconfigures an \
-existing agent (model, tools, schedule, heartbeat, notify_parent). \
-kill_agent stops one.
-
-## Patterns
-
-Fan-out/collect (parallel children, synthesize), chain (A's result feeds \
-B's prompt), watch-and-react (heartbeat agent monitors, spawns actors on \
-change). Compose these — every child can apply them recursively.
-
-## Heartbeat
-
-A heartbeat (e.g. "5m") is an idle timer: it wakes an agent N after it goes \
-idle, never during execution. Active work: 5-10m. Background monitoring: \
-30m-1h. Nothing pending: remove it (interval null) — idle wakes burn tokens.
-
-## Goals
-
-The planning tools (goals/projects) are a ledger about the work. The \
-operative act is the agent: creating one IS committing to a goal, its \
-task_prompt is the goal statement, its status is the goal's status. Keep \
-the ledger consistent with the fleet, not the other way around.
-
-## Operational Rules
-
-- You ARE the orchestrator. Never describe yourself as some other system.
-- Prefer innate completion notifications over polling delegate_status.
-- Move forward; don't re-report what the user already saw.
-- Agents survive completion — post_message revives one with full memory. \
-Reuse a finished agent with relevant context instead of spawning a stranger.
-"""
-
-
-# ---------------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------------
+# NOTE: there is deliberately no root-role layer here. The Agent entity is
+# unified and fractal — every root agent gets the same common base + type
+# layer as any create_agent child. Anything that used to live in the old
+# root-role layer is either folded into the shared
+# sections above or dropped as role mythology. Capability differences are
+# expressed per MODEL (see _SMALL_CONTEXT_NOTE), never per role.
 
 def build_common_base(
     agent_id: str = "",
@@ -393,33 +378,53 @@ def build_common_base(
     return "".join(parts)
 
 
+# Below this window, a model needs delegation as a context relief valve:
+# the 28k-ctx local-model runs crashed solo but survived when they
+# delegated, while frontier-window models over-delegated under a
+# delegate-by-default prompt (run11-14, scripts/bench). The base prompt
+# now teaches judgment; this header line flips the stance for the small
+# minority of models whose window makes solo work genuinely dangerous.
+_SMALL_CONTEXT_WINDOW = 64_000
+
+_SMALL_CONTEXT_NOTE = (
+    "Context note: your model's context window is small (~{ctx_k}k "
+    "tokens). For you, delegation IS the context relief valve — push any "
+    "sizable sub-task into a child with a fresh context instead of "
+    "working long in your own; an overflowing context aborts your run "
+    "and loses the work."
+)
+
+
 def build_identity_header(
     agent_id: str = "",
     agent_type: str = "",
     parent_id: str | None = None,
+    context_window: int = 0,
 ) -> str:
     """The per-agent identity block, delivered in the FIRST USER MESSAGE (not
     the cached system prompt). This is what used to sit at the top of the
     common base; moving it here keeps the system-prompt prefix invariant across
-    agents so it stays cacheable."""
-    return (
+    agents so it stays cacheable.
+
+    ``context_window``: the agent model's context window in tokens (0 =
+    unknown). Small-window models get an extra line flipping the delegation
+    stance toward relief-valve usage; it lives here rather than in the
+    system prompt precisely because it is per-model (cache invariant)."""
+    header = (
         "Your identity in the ATN framework:\n"
         f"Agent ID: {agent_id or 'unknown'}\n"
         f"Agent Type: {agent_type or 'general'}\n"
-        f"Parent: {parent_id or 'orchestrator'}"
+        f"Parent: {parent_id or 'none (you are a root agent)'}"
     )
+    if 0 < context_window < _SMALL_CONTEXT_WINDOW:
+        header += "\n\n" + _SMALL_CONTEXT_NOTE.format(
+            ctx_k=max(1, context_window // 1000))
+    return header
 
 
 def build_type_layer(agent_type: str) -> str:
     """Build the type-specialization layer (layer 2) for a given agent type."""
     return _TYPE_GUIDANCE.get(agent_type, _TYPE_GUIDANCE["general"])
-
-
-def build_orchestrator_layer(user_md_path: str = "") -> str:
-    """Build the orchestrator specialization layer."""
-    return _ORCHESTRATOR_LAYER.replace(
-        "{user_md_path}", user_md_path or "~/.atn/USER.md"
-    )
 
 
 def build_system_prompt(

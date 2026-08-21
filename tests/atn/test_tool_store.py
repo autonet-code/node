@@ -15,7 +15,7 @@ import pytest
 
 from atn.events import EventBus
 from atn.models import AgentDefinition, AgentMode
-from atn.orchestrator.tools import execute_tool
+from atn.agent_tools import execute_tool
 from atn.tool_registry import ToolCategory
 from atn.tool_store import ToolStore
 
@@ -1362,7 +1362,7 @@ class TestProbeTrustPicture:
     inspection count from the economy graph so agents can price risk."""
 
     def test_trust_row_joins_mass_and_inspections(self):
-        from atn.orchestrator.tools import _trust_row
+        from atn.agent_tools import _trust_row
 
         digest = "ab" * 32
         payload = {"name": "t", "description": "d", "author": "0xAuthor",
@@ -1380,7 +1380,7 @@ class TestProbeTrustPicture:
         assert "author_household" not in row    # empty → omitted
 
     def test_trust_row_unreviewed_tool_reads_zero(self):
-        from atn.orchestrator.tools import _trust_row
+        from atn.agent_tools import _trust_row
 
         digest = "cd" * 32
         payload = {"name": "u", "description": "d", "author": "0xA",

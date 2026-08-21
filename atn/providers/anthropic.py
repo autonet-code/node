@@ -38,8 +38,8 @@ Key differences:
     for parity with BridgeProvider without the TypeScript subprocess overhead
 
 Path forward:
-  - Short-term: Both paths coexist. BridgeProvider is used for the orchestrator
-    (needs session persistence + compaction). AnthropicProvider is used for
+  - Short-term: Both paths coexist. BridgeProvider is used for long-lived
+    agents (session persistence + compaction). AnthropicProvider is used for
     delegates and one-shot calls (lighter weight, no subprocess overhead).
   - Medium-term: Consider migrating AnthropicProvider to use the Anthropic Python
     SDK's agent loop (anthropic.Agent) instead of the generic base.py loop.

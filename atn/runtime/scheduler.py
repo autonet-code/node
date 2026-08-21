@@ -147,8 +147,7 @@ class Scheduler:
                         ))
 
                 # Planning review
-                if (self._planning_interval > 0
-                        and not self.user_profile.needs_onboarding()):
+                if self._planning_interval > 0:
                     should_plan = (
                         self._last_planning_review is None
                         or (now - self._last_planning_review).total_seconds() >= self._planning_interval
@@ -168,14 +167,18 @@ class Scheduler:
                 await asyncio.sleep(1)
 
     async def _post_planning_review(self) -> None:
-        from ..orchestrator import ORCHESTRATOR_ID
         from ..planning_prompt import build_planning_context
 
-        # DEPRECATED path: the review digest goes to the legacy root agent's
-        # inbox, so it is meaningless without one. Rootless fleets get the
-        # same behavior compositionally — a heartbeating supervisor agent
-        # pulls its children + user goals itself.
-        if ORCHESTRATOR_ID not in self.registry._agents:
+        # DEPRECATED path: the review digest goes to the fleet root's inbox
+        # (first parentless agent), so it is meaningless without one. Rootless
+        # fleets get the same behavior compositionally — a heartbeating
+        # supervisor agent pulls its children + user goals itself.
+        root_id = next(
+            (aid for aid, defn in self.registry._agents.items()
+             if not defn.parent_id),
+            None,
+        )
+        if root_id is None:
             return
 
         profile = self.user_profile.get_profile()
@@ -183,7 +186,7 @@ class Scheduler:
         goals: list[dict[str, Any]] = []
         active_agents: list[dict[str, Any]] = []
         for aid, defn in self.registry._agents.items():
-            if aid == ORCHESTRATOR_ID:
+            if aid == root_id:
                 continue
             status = self.registry._status.get(aid)
             if status in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
@@ -238,12 +241,12 @@ class Scheduler:
         self.inbox.post(InboxMessage(
             id=InboxMessage.generate_id(),
             source="planning_loop",
-            target=ORCHESTRATOR_ID,
+            target=root_id,
             type=MessageType.WORK,
             priority=MessagePriority.NORMAL,
             data={"type": "planning_review", "instruction": context},
         ))
-        log.info("Planning review posted to orchestrator inbox")
+        log.info("Planning review posted to root agent inbox")
 
     # ------------------------------------------------------------------
     # Module freshness

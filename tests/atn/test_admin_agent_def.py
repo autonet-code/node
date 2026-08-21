@@ -15,7 +15,7 @@ import pytest
 from atn.loader import load_agent_file
 from atn.models import AgentMode
 from atn.runtime.agent_registry import parse_interval
-from atn.orchestrator.tools import resolve_tool_surface, _EXECUTORS
+from atn.agent_tools import resolve_tool_surface, _EXECUTORS
 
 
 ADMIN_YAML = Path(__file__).resolve().parents[2] / "agents" / "admin" / "agent.yaml"

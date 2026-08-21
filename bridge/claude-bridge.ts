@@ -18,7 +18,7 @@ import type { Query, SDKMessage, SDKUserMessage, Options } from "@anthropic-ai/c
 import { z } from "zod"
 import { randomUUID } from "crypto"
 import { execSync } from "child_process"
-import { existsSync, readFileSync } from "fs"
+import { existsSync, readFileSync, appendFileSync, mkdirSync } from "fs"
 import { fileURLToPath } from "url"
 import { join, dirname } from "path"
 import { createInterface } from "readline"
@@ -36,6 +36,28 @@ function log(msg: string, extra?: Record<string, unknown>): void {
     parts.push(JSON.stringify(extra))
   }
   process.stderr.write(parts.join(" ") + "\n")
+}
+
+// -- Effort pinning --
+// ATN_BRIDGE_EFFORT pins the SDK reasoning-effort level (low|medium|high|
+// xhigh|max) for every query this bridge issues. Unset = SDK default (high).
+const pinnedEffort = process.env.ATN_BRIDGE_EFFORT || ""
+
+// -- Turn-level trace capture --
+// ATN_BRIDGE_TRACE_DIR, when set, appends every SDK stream message (assistant
+// turns, tool results, system events) as JSONL to <dir>/<session_id>.jsonl.
+// This is the raw per-turn trajectory record that execution summaries lack.
+const traceDir = process.env.ATN_BRIDGE_TRACE_DIR || ""
+if (traceDir) {
+  try { mkdirSync(traceDir, { recursive: true }) } catch { /* best-effort */ }
+}
+
+function trace(message: unknown): void {
+  if (!traceDir) return
+  try {
+    const sid = (message as any)?.session_id || "unknown"
+    appendFileSync(join(traceDir, `${sid}.jsonl`), JSON.stringify(message) + "\n")
+  } catch { /* tracing must never break the run */ }
 }
 
 // -- Streaming events (@@EVENT@@ on stderr) --
@@ -71,10 +93,14 @@ function handleRateLimitEvent(msg: any): void {
   const info = msg?.rate_limit_info
   if (!info || typeof info !== "object") return
   const key: string = info.rateLimitType || "unknown"
+  // Most rate_limit events carry utilization=null; only some include the
+  // number. Preserve the last-known value so the cache stays meaningful —
+  // a null must never erase a real reading.
+  const prevUtil = rateLimitSnapshot[key]?.utilization
   const entry: RateLimitEntry = {
     status: info.status,
     rateLimitType: key,
-    utilization: info.utilization,
+    utilization: info.utilization ?? prevUtil,
     resetsAt: info.resetsAt,
     overageStatus: info.overageStatus,
     overageResetsAt: info.overageResetsAt,
@@ -810,8 +836,24 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
       allowedTools,
       // Block SDK's Agent tool — forces delegation through ATN's create_agent
       // so child work goes through the registry, budget tracking, and event bus.
-      disallowedTools: ["Agent"],
+      // The mcp__claude_ai_* entries strip the account-level claude.ai
+      // connectors (Gmail/Calendar/Drive) that ride in on the OAuth login:
+      // agents must never see the operator's personal connectors. Server-level
+      // rules (no __toolname suffix) cover every tool the connector exposes.
+      disallowedTools: [
+        "Agent",
+        "mcp__claude_ai_Gmail",
+        "mcp__claude_ai_Google_Calendar",
+        "mcp__claude_ai_Google_Drive",
+      ],
       settingSources: [],
+      // Only the MCP servers we pass above (the in-process atn server) —
+      // ignore every other source, including account-level connectors that
+      // the disallow list doesn't know the name of yet.
+      strictMcpConfig: true,
+    }
+    if (pinnedEffort) {
+      sdkOptions.effort = pinnedEffort
     }
 
     // Native built-in tools (Bash/Read/Write/Edit/Glob/Grep/WebSearch/...) are
@@ -850,6 +892,14 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
     log("request.orchestrate.options", {
       hasSystemPrompt: !!sysPrompt,
       resumeSession: req.session_id || null,
+      effort: sdkOptions.effort || "sdk-default",
+    })
+    trace({
+      type: "bridge_options",
+      session_id: req.session_id || "new",
+      model,
+      effort: sdkOptions.effort || "sdk-default",
+      maxTurns,
     })
 
     // Ack injected messages the moment the SDK dequeues them (finding 8).
@@ -935,6 +985,7 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
         }
         if (iterResult.done) break
         const message = iterResult.value
+        trace(message)
         log("orchestrate.message", {
           type: message.type,
           subtype: (message as any).subtype,
@@ -1169,13 +1220,23 @@ async function handleRequest(req: BridgeRequest): Promise<void> {
 
         log("request.create", { model, messageLen: req.message.length })
 
-        const session = sessionManager.createAndSend(req.message, req.system || "", {
+        const createOptions: Options = {
           maxTurns: 1,
           model,
           pathToClaudeCodeExecutable: claudeExecutable,
           permissionMode: "bypassPermissions",
           allowDangerouslySkipPermissions: true,
-        })
+          // Single-shot completions need no tools at all — strip the
+          // built-in preset and any account-level connectors (see the
+          // orchestrate options for rationale).
+          tools: [],
+          settingSources: [],
+          strictMcpConfig: true,
+        }
+        if (pinnedEffort) {
+          (createOptions as any).effort = pinnedEffort
+        }
+        const session = sessionManager.createAndSend(req.message, req.system || "", createOptions)
 
         const { text, thinking, toolCalls, usage, model: resolvedModel, stopReason } =
           await sessionManager.collectResponse(session)

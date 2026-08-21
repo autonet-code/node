@@ -15,7 +15,7 @@ import pytest
 from atn.events import EventBus
 from atn.harness_distro import DISTRO_NAME, bootstrap_reference_distro
 from atn.models import AgentDefinition, AgentMode
-from atn.orchestrator.tools import execute_tool
+from atn.agent_tools import execute_tool
 
 
 def _make_runtime(tmp_path: Path):

@@ -1,6 +1,6 @@
 """Delegate registry — tracks the hierarchy of spawned sub-agents.
 
-When the orchestrator (or any sub-agent) calls the ``delegate`` tool, a new
+When any agent calls the ``delegate`` tool, a new
 sub-agent is created.  This module tracks the tree of delegates with
 hierarchical IDs (``orch.1``, ``orch.1.2``), status, and metadata.
 
@@ -34,7 +34,7 @@ class DelegateStatus(Enum):
 class DelegateNode:
     """A single delegate sub-agent in the hierarchy."""
     agent_id: str               # Hierarchical: "orch.1", "orch.1.2"
-    parent_id: str | None       # None for root orchestrator
+    parent_id: str | None       # None for a root agent
     agent_type: str             # explore, implement, research, debug, review
     prompt: str                 # Task description sent to the sub-agent
     title: str                  # Short human-readable label

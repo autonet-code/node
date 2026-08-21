@@ -11,7 +11,7 @@ Optional module — install with ``pip install atn[voice]``.
 
 Subscribes to the EventBus and speaks agent output aloud, plays tool
 tones, handles push-to-talk STT, and routes voice input to the
-orchestrator or a specific delegate.
+focused agent.
 
 Adapted from the kevin voice service for ATN's event-driven architecture
 (no UDP, no hooks, no window management).
@@ -126,7 +126,12 @@ set_stt_backend("whisper")
 # ── Constants ─────────────────────────────────────────────────
 SENTENCE_END = re.compile(r'(?<=[.!?])\s')
 
-# Orchestrator tools the shared map has no reason to know about. Registered
+# LEGACY-WIRE: atn_web still defaults its focus pickers to the retired root
+# agent id; the voice focus defaults must echo the same literal so the wire
+# shapes stay in parity.
+_LEGACY_ROOT_ID = "orchestrator"
+
+# ATN agent tools the shared map has no reason to know about. Registered
 # into voice_core rather than kept in a local dict: make_tool_tone() reads
 # voice_core's map, so a local copy would be silently ignored and these tools
 # would fall back to the default tone.
@@ -401,12 +406,12 @@ class VoiceService:
     Requires ``pip install atn[voice]`` for core functionality.
 
     Listens to:
-      - STEP_OUTPUT: speaks orchestrator/delegate text, plays tool tones
+      - STEP_OUTPUT: speaks agent text, plays tool tones
       - DELEGATE_SPAWNED/COMPLETED/FAILED: announces delegate lifecycle
       - EXECUTION_COMPLETED/FAILED: result chimes
 
     Provides:
-      - Push-to-talk -> Whisper STT -> route to orchestrator or delegate
+      - Push-to-talk -> Whisper STT -> route to the focused agent
       - Per-agent focus (which agent you're listening to)
       - Audio mixing with voice/tools/effects channels
 
@@ -434,9 +439,10 @@ class VoiceService:
         self._surface_id = SurfaceId(
             kind="voice", instance="local", label="Local mic", in_process=True)
 
-        # Focus — which agent_id the user is listening to (per channel)
-        self.voice_focus: str = "orchestrator"   # agent whose TTS plays on "voice"
-        self.tools_focus: str = "orchestrator"   # agent whose narration plays on "tools"
+        # Focus — which agent_id the user is listening to (per channel).
+        # Defaults echo the legacy literal for wire parity (see _LEGACY_ROOT_ID).
+        self.voice_focus: str = _LEGACY_ROOT_ID   # agent whose TTS plays on "voice"
+        self.tools_focus: str = _LEGACY_ROOT_ID   # agent whose narration plays on "tools"
 
         # Audio
         self.mixer: AudioMixer | None = None
@@ -1171,7 +1177,7 @@ class VoiceService:
                 time.sleep(0.5)
 
     async def _send_to_agent(self, agent_id: str, text: str) -> None:
-        """Send voice input to any agent (orchestrator or delegate).
+        """Send voice input to any agent.
 
         This is the voice Surface's INPUT SEAM — the one place inbound voice
         becomes runtime.send_agent_message. The InputPolicy is evaluated here,
@@ -1182,8 +1188,6 @@ class VoiceService:
         - Injects mid-session if agent is running (via bridge)
         - Re-activates COMPLETED/ERROR agents and triggers new execution
         """
-        from .orchestrator import ORCHESTRATOR_ID
-
         # Input-seam gate. A denied utterance is dropped (optionally spoken back
         # as the deny reason) and never reaches an agent.
         decision = self.policy.evaluate(self._author, agent_id, text)
@@ -1203,22 +1207,33 @@ class VoiceService:
 
         # If the arbiter denied this surface the mic, the utterance is dropped
         # here (a different surface holds input) — do NOT reroute to the
-        # orchestrator, which would just be denied too.
+        # root agent, which would just be denied too.
         if result.get("code") == "input_not_active":
             log.info("[voice] input not active (mic held by %s); dropping",
                      result.get("holder"))
             return
 
-        # If delivery failed, fall back to the legacy root agent — but only
-        # when one actually exists (rootless fleets have no fallback target).
-        if result.get("error") and agent_id != ORCHESTRATOR_ID \
-                and self.runtime.get_agent(ORCHESTRATOR_ID) is not None:
-            log.warning(
-                "[PTT] Agent '%s' is not available, routing to orchestrator",
-                agent_id,
-            )
-            await self.runtime.send_agent_message(
-                ORCHESTRATOR_ID, tagged, surface=self._surface_id)
+        # If delivery failed, fall back to the fleet-root agent — but only
+        # when one actually exists (empty fleets have no fallback target).
+        if result.get("error"):
+            root_id = self._fleet_root_id()
+            if root_id and root_id != agent_id:
+                log.warning(
+                    "[PTT] Agent '%s' is not available, routing to root agent '%s'",
+                    agent_id, root_id,
+                )
+                await self.runtime.send_agent_message(
+                    root_id, tagged, surface=self._surface_id)
+
+    def _fleet_root_id(self) -> str | None:
+        """The PTT fallback target: the first registered parentless agent."""
+        try:
+            for aid, defn in self.runtime.registry._agents.items():
+                if not getattr(defn, "parent_id", None):
+                    return aid
+        except Exception:
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # Status for WS/UI

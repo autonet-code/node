@@ -502,7 +502,7 @@ class ToolStore:
         Owner callers always may. Agents may when they are the author,
         an ancestor of the author, or explicitly granted by the owner.
         """
-        from .orchestrator import is_owner_caller
+        from .agent_tools import is_owner_caller
         if is_owner_caller(caller_id):
             return True
         assert caller_id is not None
@@ -2045,7 +2045,7 @@ class ToolStore:
     # ------------------------------------------------------------------
 
     def _is_owner(self, caller_id: str | None) -> bool:
-        from .orchestrator import is_owner_caller
+        from .agent_tools import is_owner_caller
         return is_owner_caller(caller_id)
 
     def _ancestors(self, agent_id: str) -> set[str]:

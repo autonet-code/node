@@ -8,7 +8,7 @@ This package is a thin facade that composes focused submodules:
   - provider_manager:   LLM provider lifecycle & resolution
   - session_manager:    Conversation stores, message injection, delegate output
   - snapshot:           Dashboard state aggregation
-  - orchestrator_setup: Orchestrator-specific init & model switching
+  - model_switch:       Per-agent cognitive model switching
   - config_helpers:     Status briefing, credential injection, planning tasks
 
 All public methods are delegated from the ``Runtime`` class below so that
@@ -54,7 +54,7 @@ from .scheduler import Scheduler
 from .provider_manager import ProviderManager
 from .session_manager import SessionManager
 from .snapshot import SnapshotBuilder
-from .orchestrator_setup import OrchestratorSetup
+from .model_switch import ModelSwitch
 from .config_helpers import inject_connector_credentials, load_planning_tasks, save_planning_tasks
 
 log = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ class Runtime:
     """Thin facade that composes all runtime modules.
 
     Every public method signature is preserved so callers (cli.py,
-    ws_server.py, orchestrator/tools.py, tests) need no changes.
+    ws_server.py, agent_tools.py, tests) need no changes.
     """
 
     def __init__(self, event_bus: EventBus, data_dir: Path | None = None, config: ATNConfig | None = None) -> None:
@@ -361,12 +361,11 @@ class Runtime:
             planning_tasks=self.planning_tasks,
         )
 
-        self._orch_setup = OrchestratorSetup(
+        self._model_switch = ModelSwitch(
             registry=self.registry,
             provider_manager=self.providers,
             session_manager=self.sessions,
             config=self._config,
-            user_profile=self.user_profile,
         )
 
         # Voice service (lazy)
@@ -910,7 +909,7 @@ class Runtime:
         *,
         bound_agent: str | None = None,
         policy: Any = None,
-        orchestrator_label: str | None = None,
+        root_label: str | None = None,
         excluded_agents: set[str] | None = None,
     ) -> dict:
         """Start the chat service, binding agents to a chat platform.
@@ -933,11 +932,12 @@ class Runtime:
                 client, channel_id = self._build_chat_adapter(cfg, channel_id)
             if policy is None and cfg is not None:
                 policy = self._build_chat_policy(cfg)
-            if orchestrator_label is None:
-                orchestrator_label = (cfg.orchestrator_label if cfg else "K3V|N")
+            if root_label is None:
+                root_label = (cfg.root_label if cfg else "K3V|N")
             if excluded_agents is None and cfg is not None and cfg.excluded_agents:
                 excluded_agents = set(cfg.excluded_agents)
             if bound_agent is None:
+                # LEGACY-WIRE: persisted chat threads route by this literal id.
                 bound_agent = (cfg.bound_agent if cfg else "orchestrator")
 
             # If the adapter owns a connection (Discord), bring it online first.
@@ -949,7 +949,7 @@ class Runtime:
                 self.events, self, client, channel_id,
                 bound_agent=bound_agent,
                 policy=policy,
-                orchestrator_label=orchestrator_label,
+                root_label=root_label,
                 excluded_agents=excluded_agents,
             )
             # Wire inbound platform messages into the service's input seam.
@@ -1058,15 +1058,6 @@ class Runtime:
         return await self.registry.register_agent(defn, legacy=legacy)
 
     async def unregister_agent(self, agent_id: str, *, _force: bool = False) -> None:
-        from ..orchestrator import ORCHESTRATOR_ID
-        # The root agent is only protected in legacy mode (orchestrator
-        # auto-provisioning enabled). In a rootless fleet it is a normal
-        # agent and the owner may remove it like any other — mirrors the
-        # registry-level guard in agent_registry.unregister_agent.
-        _orch_cfg = getattr(self._config, "orchestrator", None)
-        if agent_id == ORCHESTRATOR_ID and not _force \
-                and getattr(_orch_cfg, "enabled", False):
-            raise ValueError("The orchestrator cannot be unregistered")
         await self.control.kill_agent(agent_id)
         # Clean up the persisted provider (closes session / subprocess)
         old_provider = self.providers._active_providers.pop(agent_id, None)
@@ -1104,6 +1095,16 @@ class Runtime:
 
     def get_agent(self, agent_id: str) -> AgentDefinition | None:
         return self.registry.get_agent(agent_id)
+
+    def _default_agent_id(self) -> str | None:
+        """The fleet root: first registered agent with a falsy parent_id.
+
+        Default target for the agent_id=None session APIs. None when no
+        agents are registered."""
+        for aid, defn in self.registry._agents.items():
+            if not defn.parent_id:
+                return aid
+        return None
 
     def _agent_wallet_address(self, agent_id: str) -> str:
         """An agent's own on-chain 0x address, or "" if it has no identity.
@@ -1168,16 +1169,23 @@ class Runtime:
     async def interrupt_delegate(self, agent_id: str) -> bool:
         return await self.control.interrupt_delegate(agent_id)
 
-    async def interrupt_orchestrator(self) -> bool:
-        return await self.control.interrupt_orchestrator()
+    async def interrupt_root(self) -> bool:
+        """Interrupt the fleet-root agent (the session root)."""
+        root_id = self._default_agent_id()
+        if root_id is None:
+            return False
+        return await self.control.interrupt_delegate(root_id)
 
     # ==================================================================
     # Session management — delegate to sessions
     # ==================================================================
 
     async def new_conversation(self) -> None:
-        from ..orchestrator import ORCHESTRATOR_ID
-        await self.reset_agent_conversation(ORCHESTRATOR_ID)
+        """Reset the fleet root's conversation (legacy wrapper)."""
+        root_id = self._default_agent_id()
+        if root_id is None:
+            return
+        await self.reset_agent_conversation(root_id)
 
     async def reset_agent_conversation(self, agent_id: str) -> None:
         """Reset conversation history for any agent."""
@@ -1193,7 +1201,7 @@ class Runtime:
         """Deliver a user message to an agent. ``surface`` is the SurfaceId of
         the input surface, if this came through one; the SessionManager gates it
         against the InputArbiter (single-writer). surface=None => trusted
-        internal caller (orchestrator tool, scheduler) — never mic-gated.
+        internal caller (agent tool, scheduler) — never mic-gated.
         ALWAYS returns a dict; callers must branch on result.get('error')."""
         return await self.sessions.send_agent_message(agent_id, text, surface=surface)
 
@@ -1209,8 +1217,8 @@ class Runtime:
     def _clear_bridge_session(self) -> None:
         self.sessions.clear_bridge_session()
 
-    def _inject_status_briefing(self) -> None:
-        self.sessions._inject_status_briefing()
+    def _inject_status_briefing(self, agent_id: str | None = None) -> None:
+        self.sessions._inject_status_briefing(agent_id)
 
     # ==================================================================
     # Provider management — delegate to providers
@@ -1220,11 +1228,13 @@ class Runtime:
         return self.providers._resolve_provider_for_model(model_name, agent_id)
 
     def _get_bridge_provider(self, agent_id: str | None = None) -> Any:
-        return self.providers.get_bridge_provider(agent_id)
+        return self.providers.get_bridge_provider(
+            agent_id or self._default_agent_id())
 
     def get_session_stats(self, agent_id: str | None = None) -> dict[str, Any]:
-        from ..orchestrator import ORCHESTRATOR_ID
-        target = agent_id or ORCHESTRATOR_ID
+        target = agent_id or self._default_agent_id()
+        if target is None:
+            return {"error": "no agents registered"}
 
         # 1. Live provider (best — real-time data)
         stats = self.providers.get_session_stats(target)
@@ -1254,9 +1264,10 @@ class Runtime:
           3. reconstructed    — rebuilt from the definition + persisted
                                 conversation store (idle agents, bridge/SDK).
         """
-        from ..orchestrator import ORCHESTRATOR_ID
         from ..context_inspect import breakdown_from_provider, breakdown_reconstructed
-        target = agent_id or ORCHESTRATOR_ID
+        target = agent_id or self._default_agent_id()
+        if target is None:
+            return {"error": "no agents registered"}
 
         # 1. Isolated running worker — same channel discovery as compact_agent.
         wi = getattr(self._config, "worker_isolation", None)
@@ -1319,20 +1330,13 @@ class Runtime:
         return await self.providers.remove_custom_provider(provider_id)
 
     # ==================================================================
-    # Orchestrator setup — delegate to _orch_setup
+    # Model switching — delegate to _model_switch
     # ==================================================================
-
-    async def setup_orchestrator(self, **kwargs: Any) -> str:
-        return await self._orch_setup.setup_orchestrator(**kwargs)
-
-    async def set_orchestrator_model(self, model: str) -> str:
-        from ..orchestrator import ORCHESTRATOR_ID
-        return await self.set_agent_model(ORCHESTRATOR_ID, model)
 
     async def set_agent_model(self, agent_id: str, model: str) -> str:
         """Change the cognitive model for any agent."""
         await self.control.kill_agent(agent_id)
-        return await self._orch_setup.set_agent_model(agent_id, model)
+        return await self._model_switch.set_agent_model(agent_id, model)
 
     # ==================================================================
     # Snapshot — delegate to snapshot builder

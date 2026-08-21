@@ -124,7 +124,7 @@ class TestUpdateAgentEviction:
         return runtime, defn, pmgr
 
     async def test_model_change_evicts_and_closes(self, monkeypatch):
-        from atn.orchestrator import tools
+        from atn import agent_tools as tools
 
         monkeypatch.setattr(tools, "save_agent", lambda *a, **k: None)
         runtime, defn, pmgr = await self._make_runtime_with_agent()
@@ -141,7 +141,7 @@ class TestUpdateAgentEviction:
         assert "a1" not in pmgr._cached_session_stats
 
     async def test_provider_change_evicts(self, monkeypatch):
-        from atn.orchestrator import tools
+        from atn import agent_tools as tools
 
         monkeypatch.setattr(tools, "save_agent", lambda *a, **k: None)
         runtime, defn, pmgr = await self._make_runtime_with_agent()
@@ -155,7 +155,7 @@ class TestUpdateAgentEviction:
         assert "a1" not in pmgr._active_providers
 
     async def test_non_provider_change_does_not_evict(self, monkeypatch):
-        from atn.orchestrator import tools
+        from atn import agent_tools as tools
 
         monkeypatch.setattr(tools, "save_agent", lambda *a, **k: None)
         runtime, defn, pmgr = await self._make_runtime_with_agent()
@@ -176,7 +176,7 @@ class TestUpdateAgentEviction:
 
 class TestCreateAgentProviderSchema:
     def test_schema_has_provider_enum(self):
-        from atn.orchestrator.tools import _TOOLS
+        from atn.agent_tools import _TOOLS
 
         create = next(t for t in _TOOLS if t.name == "create_agent")
         props = create.input_schema["properties"]

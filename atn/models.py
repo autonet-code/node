@@ -78,7 +78,7 @@ class OnboardingStatus(Enum):
 
 
 class TaskStatus(Enum):
-    PROPOSED = "proposed"       # orchestrator suggested it
+    PROPOSED = "proposed"       # an agent suggested it
     APPROVED = "approved"       # user approved it
     ACTIVE = "active"           # being worked on (agent running or calendar event created)
     COMPLETED = "completed"
@@ -174,7 +174,7 @@ class AgentDefinition:
     tools: list[str] = field(default_factory=list)
     # Tool surface: "sdk_builtin" (file/bash/web from bridge),
     #               "atn_core" (create_agent/post_message/get_snapshot/get_output),
-    #               "atn_full" (all orchestrator tools),
+    #               "atn_full" (all ATN agent tools),
     #               "connectors" (MCP connectors)
 
     # --- Common fields ---
@@ -221,7 +221,7 @@ class AgentDefinition:
     # If None and expose_as_tool=True, derived from the first step's expected input.
 
     # --- Hierarchy ---
-    parent_id: str | None = None            # None = root (orchestrator) or user-created
+    parent_id: str | None = None            # None = root agent (user-created)
     created_by: str = ""                    # agent_id of creator
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 

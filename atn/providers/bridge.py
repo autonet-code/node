@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .base import (
+    _CODE_FILE_SUFFIXES,
     Provider,
     ProviderError,
     ProviderResponse,
@@ -195,17 +196,17 @@ _FIRST_EVENT_TIMEOUT = float(os.environ.get("ATN_BRIDGE_FIRST_EVENT_TIMEOUT", "1
 _KILL_GRACE_SECONDS = float(os.environ.get("ATN_BRIDGE_KILL_GRACE", "5"))
 
 
-def _model_is_orchestrator_capable(model: str) -> tuple[bool, str]:
+def _model_is_loop_capable(model: str) -> tuple[bool, str]:
     """§11 model-tier guard (READ-ONLY over model_specs).
 
-    The SDK orchestrate loop is known to misbehave on non-orchestrator-capable
+    The SDK orchestrate loop is known to misbehave on non-loop-capable
     models — a haiku-class model made the bun bridge hot-spin at 100% CPU with
     zero output for 20+ min. Reject orchestrate on those models with a clear
     error BEFORE spawning the SDK loop.
 
     Uses ``model_specs.get_model_tier`` when present (the §14 flag another
     agent may add), else falls back to the class bucket: haiku is not
-    orchestrator-capable. Returns (ok, reason).
+    loop-capable. Returns (ok, reason).
     """
     try:
         from .. import model_specs as _ms
@@ -220,7 +221,8 @@ def _model_is_orchestrator_capable(model: str) -> tuple[bool, str]:
             tier = None
         if isinstance(tier, str) and tier.lower() in ("haiku", "fast", "small"):
             return False, (
-                f"model '{model}' (tier '{tier}') is not orchestrator-capable; "
+                f"model '{model}' (tier '{tier}') is not loop-capable (cannot "
+                "run the agentic loop); "
                 "the SDK orchestrate loop hot-spins on it — pick a "
                 "sonnet/opus-class model or set the model explicitly"
             )
@@ -236,7 +238,8 @@ def _model_is_orchestrator_capable(model: str) -> tuple[bool, str]:
     # which resolves to the default spec (klass "other") in the store.
     if klass == "haiku" or "haiku" in (model or "").lower():
         return False, (
-            f"model '{model}' (haiku-class) is not orchestrator-capable; "
+            f"model '{model}' (haiku-class) is not loop-capable (cannot "
+            "run the agentic loop); "
             "the SDK orchestrate loop hot-spins on it — pick a "
             "sonnet/opus-class model or set the model explicitly"
         )
@@ -250,6 +253,9 @@ class BridgeProvider(Provider):
     send() creates a fresh bridge session, collects the response, and
     cleans up.
     """
+
+    # One subscription, one cache: shared by every instance (see __init__).
+    _shared_rate_limits: dict[str, dict[str, Any]] = {}
 
     # The SDK owns the agentic loop — this provider cannot inject the v3
     # closing review turn mid-loop. The caller (execution engine / worker
@@ -302,6 +308,9 @@ class BridgeProvider(Provider):
         self._total_cost_usd: float = 0.0
         self._context_window: int = 0
         self._max_output_tokens: int = 0
+        # Code files modified by SDK builtins in the LAST orchestrate run —
+        # read by callers to gate the §16 verify follow-up turn.
+        self.last_modified_code_files: set[str] = set()
         self._cumulative_input_tokens: int = 0
         self._cumulative_output_tokens: int = 0
         self._cumulative_cache_read: int = 0
@@ -313,8 +322,14 @@ class BridgeProvider(Provider):
         # Claude Max subscription-quota snapshot.  Keyed by rateLimitType
         # (five_hour, seven_day, seven_day_sonnet, seven_day_opus, overage).
         # Populated from SDKRateLimitEvent stream messages; surfaced via
-        # session_stats["rate_limits"].
-        self._rate_limits: dict[str, dict[str, Any]] = {}
+        # session_stats["rate_limits"]. DAEMON-GLOBAL by design: every bridge
+        # instance burns the same subscription, and short-lived per-agent
+        # instances (one per bench tree, torn down in minutes) each start
+        # blind — most SDK events carry utilization=null, so an instance often
+        # dies before it ever sees a number. Sharing one dict across instances
+        # keeps the last real reading available to quota gates regardless of
+        # which agent's bridge produced it.
+        self._rate_limits: dict[str, dict[str, Any]] = BridgeProvider._shared_rate_limits
 
         # Per-model-class estimator for the 5h subscription window. We track
         # cumulative tokens by class (haiku / sonnet / opus / other) and pair
@@ -582,7 +597,7 @@ class BridgeProvider(Provider):
         usage_recorder: Any = None,
         **kwargs,
     ) -> ProviderResponse:
-        """Multi-turn orchestrator call through the bridge.
+        """Multi-turn orchestrate call through the bridge.
 
         Unlike send()/send_stream() which do one request → one response, this
         method handles a bidirectional conversation on stdout:
@@ -607,11 +622,11 @@ class BridgeProvider(Provider):
         # It CANNOT use _send_request/_send_raw (which assume one-shot).
         # We acquire the lock to prevent concurrent bridge use, but hold it
         # for the entire orchestration session.
-        # §11 model-tier guard: reject non-orchestrator-capable models (haiku)
+        # §11 model-tier guard: reject non-loop-capable models (haiku)
         # BEFORE acquiring the lock or spawning the SDK loop, since the loop
         # hot-spins on them. Cheap, pure model check.
         effective_model = model or self._model
-        _ok, _reason = _model_is_orchestrator_capable(effective_model)
+        _ok, _reason = _model_is_loop_capable(effective_model)
         if not _ok:
             raise ProviderError(_reason, provider="claude_max")
 
@@ -624,6 +639,7 @@ class BridgeProvider(Provider):
 
             if model:
                 self._model = model  # Keep session_stats in sync
+            self.last_modified_code_files = set()
             request: dict[str, Any] = {
                 "id": request_id,
                 "type": "orchestrate",
@@ -704,9 +720,21 @@ class BridgeProvider(Provider):
                             text = event.get("text", "")
                             if text and on_chunk:
                                 await on_chunk(text)
-                        elif event.get("type") == "tool_use_start" and self.event_bus:
+                        elif event.get("type") == "tool_use_start":
                             tool_name = event.get("tool_name", "")
                             tool_input = event.get("input", {})
+                            # §16 verify step: track code-file edits made by
+                            # SDK builtins so the caller can gate a closing
+                            # verification turn (needs_verify_reinvoke) —
+                            # the SDK owns this loop, so we can't inject here.
+                            if tool_name in ("Edit", "Write", "MultiEdit",
+                                             "NotebookEdit"):
+                                _fp = str((tool_input or {}).get(
+                                    "file_path", ""))
+                                if _fp.endswith(_CODE_FILE_SUFFIXES):
+                                    self.last_modified_code_files.add(_fp)
+                            if not self.event_bus:
+                                continue
                             log.debug("AGENT_TOOL_USE_START: tool=%s agent=%s",
                                       tool_name, self.source_agent_id)
                             await self.event_bus.emit(Event(
@@ -1783,9 +1811,19 @@ class BridgeProvider(Provider):
                     if etype == "rate_limit":
                         # Subscription-quota update — store directly and skip the queue.
                         key = event.get("rateLimitType", "unknown")
-                        self._rate_limits[key] = {
-                            k: v for k, v in event.items() if k != "type"
-                        }
+                        entry = {k: v for k, v in event.items() if k != "type"}
+                        # Most events carry utilization=null; a fresh bridge
+                        # subprocess (new agent) must not blank the shared
+                        # cache's last real reading with its first null.
+                        # A number from a PREVIOUS window is not preserved —
+                        # resetsAt moving forward means the old reading
+                        # describes a window that no longer exists.
+                        prev = self._rate_limits.get(key) or {}
+                        if entry.get("utilization") is None and (
+                                prev.get("utilization") is not None
+                                and prev.get("resetsAt") == entry.get("resetsAt")):
+                            entry["utilization"] = prev["utilization"]
+                        self._rate_limits[key] = entry
                         log.info(
                             "rate_limit %s: utilization=%s status=%s",
                             key, event.get("utilization"), event.get("status"),

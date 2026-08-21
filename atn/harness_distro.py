@@ -111,7 +111,7 @@ def bootstrap_reference_distro(runtime: "Runtime") -> str | None:
             log.debug("harness distro: substrate package unavailable; skipping")
             return None
 
-        from .orchestrator.tools import _EXECUTORS, _TOOL_CATEGORIES
+        from .agent_tools import _EXECUTORS, _TOOL_CATEGORIES
 
         module_digests: list[str] = []
 

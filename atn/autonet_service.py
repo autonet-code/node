@@ -288,6 +288,8 @@ class AutonetBridge:
                     "address": self.state.wallet_address,
                     "name": "root",
                     "description": "",
+                    # LEGACY-WIRE: peers read this p2p capability field; the
+                    # retired root-agent label is kept for wire compat.
                     "agent_type": "orchestrator",
                     "model": getattr(rpb_cfg, "sponsor_model", "") or "",
                     "is_root": True,

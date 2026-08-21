@@ -39,9 +39,8 @@ import websockets
 from websockets.asyncio.server import Server as WSServer, ServerConnection
 
 from . import ws_auth
+from .agent_tools import execute_tool
 from .events import Event, EventBus, EventType
-from .orchestrator import ORCHESTRATOR_ID
-from .orchestrator.tools import execute_tool
 from .runtime import Runtime
 from .runtime.provider_manager import get_model_tier, get_tier_label
 from .ws_auth import ClientSession
@@ -56,6 +55,12 @@ logging.getLogger("websockets").setLevel(logging.CRITICAL)
 
 # Default port
 DEFAULT_PORT = 7700
+
+# LEGACY-WIRE: the Flutter frontend (atn_web) still sends and reads the retired
+# root-agent id as a "full fleet" sentinel (session roots, focus defaults,
+# message targets). The literal is accepted and echoed at this boundary only;
+# it maps onto generic root-agent machinery below.
+_LEGACY_ROOT_ID = "orchestrator"
 
 # Messages that export or carry a raw private key over the wire. Refused unless
 # the connection arrived on the privileged LOCAL listener (session.local). The
@@ -129,11 +134,13 @@ _SECRETS_MESSAGES = frozenset({
 
 # Tools an authed-but-SCOPED (non-full-fleet) session may NOT call: they read
 # or mutate owner-global state (budgets, profile/PII, providers, governance).
-# A full-fleet owner session (local, or remote-owner-at-orchestrator) is
-# unaffected. Default-deny still applies on top: see _authorize_tool_call.
+# A full-fleet owner session (local or remote) is unaffected. Default-deny
+# still applies on top: see _authorize_tool_call.
 OWNER_ONLY_TOOLS = frozenset({
     "set_credit_budget", "get_credit_budget", "get_user_profile",
-    "set_orchestrator_model", "set_agent_model",
+    "update_user_profile",
+    "set_orchestrator_model",  # LEGACY-WIRE message type (see handler)
+    "set_agent_model",
 })
 
 # For scoped sessions, the message keys that name a target agent. Every one
@@ -160,7 +167,7 @@ class WSAuthor:
     conn_id: str                     # server-random per-connection id (SurfaceId.instance)
     local: bool = False              # arrived on the privileged loopback listener
     owner: bool = False              # authed as the daemon owner
-    root_agent_id: str = ORCHESTRATOR_ID
+    root_agent_id: str = _LEGACY_ROOT_ID   # LEGACY-WIRE full-fleet sentinel
     is_bot: bool = False             # a WS client is a human driver, never a bot
 
     @classmethod
@@ -178,7 +185,7 @@ class WebSocketBridge:
     """Bridges the ATN Runtime to WebSocket clients.
 
     Handles:
-      - Routing incoming JSON messages to orchestrator tools
+      - Routing incoming JSON messages to agent tools
       - Broadcasting EventBus events to all connected clients
     """
 
@@ -316,8 +323,9 @@ class WebSocketBridge:
             arbiter.register(self._surface_id_for(session))
 
     def _arbiter_gate(self, session: "ClientSession") -> dict | None:
-        """Single-writer gate for the WS sibling input paths (delegate_message,
-        orchestrator_message) that bypass send_agent_message. Returns None if
+        """Single-writer gate for the WS sibling input paths (delegate_message
+        and the LEGACY-WIRE root-message type) that bypass
+        send_agent_message. Returns None if
         this surface may write (holds the mic, or auto-acquired a free mic),
         else a deny payload to merge into the error response. Same is_active
         semantics as the send_agent_message chokepoint, so the three paths
@@ -376,7 +384,7 @@ class WebSocketBridge:
 
         ``local`` is set by which listener accepted the socket (the privileged
         loopback listener => True). A local session is pre-authed as the owner
-        rooted at the orchestrator (today's behavior). A remote session starts
+        rooted at the full fleet (today's behavior). A remote session starts
         unauthed and is issued an auth_challenge instead of a snapshot."""
         remote = ws.remote_address
         session = ClientSession(
@@ -388,7 +396,7 @@ class WebSocketBridge:
             # Privileged local listener: full control, no handshake.
             session.authed = True
             session.owner = True
-            session.root_agent_id = ORCHESTRATOR_ID
+            session.root_agent_id = _LEGACY_ROOT_ID   # LEGACY-WIRE full-fleet sentinel
             session.scope_ids = None          # full fleet
         self._sessions[ws] = session
         # Register this connection as an input surface with the single-writer
@@ -491,16 +499,34 @@ class WebSocketBridge:
         }))
 
     def _daemon_id(self) -> str:
-        """The orchestrator's identity address — the per-daemon unique id that
-        domain-separates the auth challenge (so a signature can't replay across
-        daemons). Falls back to the configured owner wallet, then a constant."""
+        """The fleet-root agent's identity address — the per-daemon unique id
+        that domain-separates the auth challenge (so a signature can't replay
+        across daemons). Falls back to the configured owner wallet, then a
+        constant."""
         try:
-            orch = self.runtime.registry._agents.get(ORCHESTRATOR_ID)
-            if orch and orch.identity and orch.identity.address:
-                return orch.identity.address
+            root_id = self._fleet_root_id()
+            root = self.runtime.registry._agents.get(root_id) if root_id else None
+            if root and root.identity and root.identity.address:
+                return root.identity.address
         except Exception:
             pass
         return self.owner_wallet or "autonet-daemon"
+
+    def _fleet_root_id(self) -> str | None:
+        """The first registered parentless agent, or None in an empty fleet."""
+        for aid, defn in self.runtime.registry._agents.items():
+            if not getattr(defn, "parent_id", None):
+                return aid
+        return None
+
+    def _session_root_agent(self, session: ClientSession) -> str | None:
+        """A session's effective root agent: its root when that names a real
+        agent, else the fleet root. Resolves the LEGACY-WIRE full-fleet
+        sentinel a client may hold as its session root."""
+        root = session.root_agent_id
+        if root and self.runtime.get_agent(root) is not None:
+            return root
+        return self._fleet_root_id()
 
     # ------------------------------------------------------------------
     # Auth handshake
@@ -557,9 +583,9 @@ class WebSocketBridge:
         is_owner = bool(self.owner_wallet) and signer.lower() == self.owner_wallet.lower()
 
         if is_owner:
-            # OWNER: full control. May root at the orchestrator (full fleet) or
-            # name ANY agent subtree to render.
-            root = (msg.get("root") or ORCHESTRATOR_ID).strip()
+            # OWNER: full control. May root at the full fleet (the LEGACY-WIRE
+            # sentinel) or name ANY agent subtree to render.
+            root = (msg.get("root") or _LEGACY_ROOT_ID).strip()
             resolved, err = self._resolve_root(root)
             if err:
                 return {"msg_id": msg_id, "type": "auth_denied", "ok": False, "error": err}
@@ -581,7 +607,7 @@ class WebSocketBridge:
         session.authed = True
         session.wallet_address = signer
         session.root_agent_id = resolved
-        session.scope_ids = (None if resolved == ORCHESTRATOR_ID
+        session.scope_ids = (None if resolved == _LEGACY_ROOT_ID
                              else self.runtime.registry.get_subtree_ids(resolved))
         log.info("Remote auth: signer=%s owner=%s root=%s scoped=%s",
                  signer, session.owner, resolved, session.scope_ids is not None)
@@ -592,11 +618,12 @@ class WebSocketBridge:
                 "owner": session.owner, "root": resolved, "wallet": signer}
 
     def _resolve_root(self, root: str) -> tuple[str, str | None]:
-        """Map a client-named root (agent_id, address, or 'orchestrator') to a
-        canonical agent_id. Returns (agent_id, error). Ambiguous address or
-        unknown root is refused."""
-        if not root or root == ORCHESTRATOR_ID:
-            return ORCHESTRATOR_ID, None
+        """Map a client-named root (agent_id, address, or the LEGACY-WIRE
+        full-fleet sentinel) to a canonical agent_id. Returns (agent_id,
+        error). Ambiguous address or unknown root is refused."""
+        if not root or root == _LEGACY_ROOT_ID:
+            # LEGACY-WIRE: clients send the literal to mean "full fleet".
+            return _LEGACY_ROOT_ID, None
         reg = self.runtime.registry
         # Direct agent_id?
         if root in reg._agents:
@@ -624,8 +651,8 @@ class WebSocketBridge:
 
     def _redact_snapshot(self, snap: dict, session: ClientSession) -> dict:
         """Strip owner-global sections from a SCOPED session's snapshot. A
-        full-fleet session (local owner, or remote owner rooted at the
-        orchestrator) keeps them."""
+        full-fleet session (local owner, or remote owner rooted at the full
+        fleet) keeps them."""
         if session.scope_ids is None:
             return snap            # full fleet => unchanged
         return {k: v for k, v in snap.items() if k not in self._SECRET_SECTIONS}
@@ -749,13 +776,18 @@ class WebSocketBridge:
             except Exception as exc:
                 return {"msg_id": msg_id, "ok": False, "error": f"restart failed: {exc}"}
 
-        # Model selection: change orchestrator model and start new conversation
+        # LEGACY-WIRE: old clients change "the" model via this type. It now
+        # retargets the session's root agent (or the fleet root); root-agent
+        # model changes also persist as the daemon default (model_switch).
         if msg_type == "set_orchestrator_model":
             model = msg.get("model", "")
             if not model:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'model' field"}
+            root_id = self._session_root_agent(session)
+            if root_id is None:
+                return {"msg_id": msg_id, "ok": False, "error": "No agents registered"}
             try:
-                await self.runtime.set_orchestrator_model(model)
+                await self.runtime.set_agent_model(root_id, model)
                 tier = get_model_tier(model)
                 return {"msg_id": msg_id, "ok": True, "result": {
                     "model": model,
@@ -836,6 +868,25 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": True, "result": result}
             except ValueError as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
+        if msg_type == "provider_rate_limits":
+            # Serve the SDK-event-fed rate-limit cache (what /usage shows),
+            # merged across active bridges. NO network call and NO
+            # refresh_usage fallback: the header-probe numbers have been
+            # observed reading ~0% while the subscription window was
+            # exhausted, so a caller pacing itself against this surface must
+            # never receive them. Empty result = no events seen yet.
+            try:
+                # The daemon-global shared cache, NOT the active-provider
+                # aggregate: between tasks there are often zero active bridge
+                # instances, and a quota gate polling this surface must not
+                # go blind at exactly those moments.
+                from .providers.bridge import BridgeProvider
+                merged = dict(BridgeProvider._shared_rate_limits)
+            except Exception:
+                merged = {}
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"rate_limits": merged}}
 
         if msg_type == "provider_refresh_usage":
             provider_id = msg.get("provider_id", "claude_max")
@@ -952,11 +1003,12 @@ class WebSocketBridge:
                         "code": result.get("code"), "holder": result.get("holder")}
             return {"msg_id": msg_id, "ok": True, "result": result}
 
-        # Interrupt — gracefully stop a running LLM session mid-turn
+        # Interrupt — gracefully stop a running LLM session mid-turn.
+        # LEGACY-WIRE message type: interrupts the session root agent.
         if msg_type == "interrupt_orchestrator":
-            sent = await self.runtime.interrupt_orchestrator()
+            sent = await self.runtime.interrupt_root()
             if not sent:
-                return {"msg_id": msg_id, "ok": False, "error": "Orchestrator is not running"}
+                return {"msg_id": msg_id, "ok": False, "error": "Root agent is not running"}
             return {"msg_id": msg_id, "ok": True, "result": {"status": "interrupted"}}
 
         if msg_type == "interrupt_delegate":
@@ -970,7 +1022,7 @@ class WebSocketBridge:
 
         # Context inspection — session stats and conversation history
         if msg_type == "session_stats":
-            agent_id = msg.get("agent_id")  # None = orchestrator
+            agent_id = msg.get("agent_id")  # None = fleet root
             result = self.runtime.get_session_stats(agent_id)
             if "error" in result:
                 return {"msg_id": msg_id, "ok": False, "error": result["error"]}
@@ -984,14 +1036,14 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True, "result": {"agent_id": agent_id, "text": text}}
 
         if msg_type == "session_context":
-            agent_id = msg.get("agent_id")  # None = orchestrator
+            agent_id = msg.get("agent_id")  # None = fleet root
             result = await self.runtime.get_session_context(agent_id)
             if "error" in result:
                 return {"msg_id": msg_id, "ok": False, "error": result["error"]}
             return {"msg_id": msg_id, "ok": True, "result": result}
 
         if msg_type == "context_breakdown":
-            agent_id = msg.get("agent_id")  # None = orchestrator
+            agent_id = msg.get("agent_id")  # None = fleet root
             result = await self.runtime.get_context_breakdown(agent_id)
             if "error" in result:
                 return {"msg_id": msg_id, "ok": False, "error": result["error"]}
@@ -1001,7 +1053,7 @@ class WebSocketBridge:
         # granted, grouped by the same bundle ids the create-agent flow
         # uses, with each tool's endpoints (name / description / params).
         if msg_type == "tool_surface":
-            from .orchestrator.tools import _TOOL_CATEGORIES, _TOOLS
+            from .agent_tools import _TOOL_CATEGORIES, _TOOLS
             from .shell_tools import SHELL_TOOLS
 
             def _entry(name, description, schema):
@@ -1470,7 +1522,7 @@ class WebSocketBridge:
         # published. `list_services` reads the daemon-local store, so before
         # this the app could only ever see its own listings — there was no
         # way for a human to browse the marketplace at all. Mirrors the
-        # agent-side `find_services` tool (orchestrator/tools.py).
+        # agent-side `find_services` tool (agent_tools.py).
         if msg_type == "market_services":
             query = str(msg.get("query") or "").strip().lower()
             try:
@@ -1743,7 +1795,7 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
 
         if msg_type == "voice_focus":
-            agent_id = msg.get("agent_id", "orchestrator")
+            agent_id = msg.get("agent_id", _LEGACY_ROOT_ID)  # LEGACY-WIRE default
             if self.runtime.voice:
                 self.runtime.voice.set_focus(agent_id)
                 return {"msg_id": msg_id, "ok": True, "result": {"focused_agent": agent_id}}
@@ -1766,14 +1818,14 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
 
         if msg_type == "voice_set_voice_focus":
-            agent_id = msg.get("agent_id", "orchestrator")
+            agent_id = msg.get("agent_id", _LEGACY_ROOT_ID)  # LEGACY-WIRE default
             if self.runtime.voice:
                 self.runtime.voice.set_voice_focus(agent_id)
                 return {"msg_id": msg_id, "ok": True, "result": {"voice_focus": agent_id}}
             return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
 
         if msg_type == "voice_set_tools_focus":
-            agent_id = msg.get("agent_id", "orchestrator")
+            agent_id = msg.get("agent_id", _LEGACY_ROOT_ID)  # LEGACY-WIRE default
             if self.runtime.voice:
                 self.runtime.voice.set_tools_focus(agent_id)
                 return {"msg_id": msg_id, "ok": True, "result": {"tools_focus": agent_id}}
@@ -1812,13 +1864,10 @@ class WebSocketBridge:
 
         # User profile
         if msg_type == "get_profile":
-            from .orchestrator import ORCHESTRATOR_ID as _ORCH_ID
             p = self.runtime.user_profile.get_profile()
             # Goals are now agents — build from registry
             agent_goals = []
             for defn, status in self.runtime.list_agents():
-                if defn.id == _ORCH_ID:
-                    continue
                 agent_goals.append({
                     "id": defn.id,
                     "title": defn.name,
@@ -2879,14 +2928,6 @@ class WebSocketBridge:
             agent_id = msg.get("agent_id", "")
             if not agent_id:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
-            from .orchestrator import ORCHESTRATOR_ID
-            # Legacy mode only: the provisioned root agent stays protected.
-            # Rootless fleets treat it as a normal, removable agent (the
-            # registry enforces the same rule — this is just a friendlier
-            # message).
-            _orch_cfg = getattr(self.runtime._config, "orchestrator", None)
-            if agent_id == ORCHESTRATOR_ID and getattr(_orch_cfg, "enabled", False):
-                return {"msg_id": msg_id, "ok": False, "error": "The root agent cannot be removed"}
             try:
                 await self.runtime.unregister_agent(agent_id)
                 return {"msg_id": msg_id, "ok": True, "result": {"status": "removed", "agent_id": agent_id}}
@@ -2915,25 +2956,29 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": {"agent_id": agent_id, "address": address, "private_key": key}}
 
-        # Special case: inject user message into running orchestrator session.
-        # If the bridge process isn't running (e.g. after a daemon restart),
-        # fall through to the normal post_message path which will trigger
-        # a new execution.
+        # LEGACY-WIRE: old clients send "orchestrator_message" to talk to the
+        # session's root agent. Inject the user message into its running
+        # session; if the bridge process isn't running (e.g. after a daemon
+        # restart), fall through to the normal post_message path which will
+        # trigger a new execution.
+        legacy_root_post = False
         if msg_type == "orchestrator_message":
             content = msg.get("content", "")
             if not content:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'content' field"}
-            # G1: orchestrator_message also bypasses send_agent_message (it
-            # injects into the running bridge, or falls through to post_message
-            # which triggers a run). Both are input — gate the arbiter here.
+            # G1: this path also bypasses send_agent_message (it injects into
+            # the running bridge, or falls through to post_message which
+            # triggers a run). Both are input — gate the arbiter here.
             gate = self._arbiter_gate(session)
             if gate is not None:
                 return {"msg_id": msg_id, "ok": False, **gate}
-            from .orchestrator import ORCHESTRATOR_ID
             from .providers.bridge import BridgeProvider
-            provider = self.runtime._active_providers.get(ORCHESTRATOR_ID)
-            orch_is_running = self.runtime._running_count.get(ORCHESTRATOR_ID, 0) > 0
-            if orch_is_running and isinstance(provider, BridgeProvider) and provider._process and provider._process.returncode is None:
+            root_id = self._session_root_agent(session)
+            if root_id is None:
+                return {"msg_id": msg_id, "ok": False, "error": "No agents registered"}
+            provider = self.runtime._active_providers.get(root_id)
+            root_is_running = self.runtime._running_count.get(root_id, 0) > 0
+            if root_is_running and isinstance(provider, BridgeProvider) and provider._process and provider._process.returncode is None:
                 await provider.send_user_message(content)
                 return {"msg_id": msg_id, "ok": True, "result": {"status": "injected"}}
             # Bridge not running — convert to post_message so it triggers an execution
@@ -2941,20 +2986,31 @@ class WebSocketBridge:
             msg = {
                 "msg_id": msg_id,
                 "type": "post_message",
-                "target": "orchestrator",
+                "target": root_id,
                 "message_type": "work",
                 "priority": "high",
                 "data": {"instruction": content},
                 "source": "user",
             }
+            legacy_root_post = True
+
+        # LEGACY-WIRE: old clients post_message to the retired root-agent id.
+        # Remap it onto the session's root agent unless an agent actually
+        # carries the legacy id (persisted fleets may).
+        if msg_type == "post_message" and msg.get("target") == _LEGACY_ROOT_ID:
+            legacy_root_post = True
+            if self.runtime.get_agent(_LEGACY_ROOT_ID) is None:
+                resolved_root = self._session_root_agent(session)
+                if resolved_root:
+                    msg = {**msg, "target": resolved_root}
 
         # Strip protocol fields, pass only tool arguments.
         # Note: "type" is the routing field but also a valid arg for some tools
         # (e.g. post_message).  We strip it since the JSON object can't have two
         # "type" keys anyway — clients should use "message_type" for post_message.
         args = {k: v for k, v in msg.items() if k not in ("msg_id", "type")}
-        # Tag client-initiated post_message with source="user" so the
-        # orchestrator can distinguish user messages from agent messages.
+        # Tag client-initiated post_message with source="user" so the target
+        # agent can distinguish user messages from agent messages.
         if msg_type == "post_message" and "source" not in args:
             args["source"] = "user"
 
@@ -2963,7 +3019,7 @@ class WebSocketBridge:
         # add, but a history reload would lose it without this).
         # The execution engine skips re-adding it (dedup check at line ~624).
         if (msg_type == "post_message"
-                and args.get("target") == "orchestrator"
+                and legacy_root_post
                 and args.get("source") == "user"):
             instruction = ""
             data = args.get("data", {})
@@ -2983,18 +3039,10 @@ class WebSocketBridge:
 
         # caller_id: a full-fleet session may act as any agent (today's UI
         # behavior). A scoped session is clamped to its own root. When no
-        # caller is named, a legacy install with a provisioned root agent
-        # keeps acting as the orchestrator; a rootless fleet acts as the
-        # OWNER ("" → owner-trusted, parentless creates).
+        # caller is named, the call is the OWNER's ("" → owner-trusted,
+        # parentless creates).
         if session.scope_ids is None:
-            caller_id = msg.get("caller_id")
-            if caller_id is None:
-                from .orchestrator import ORCHESTRATOR_ID
-                caller_id = (
-                    "orchestrator"
-                    if self.runtime.get_agent(ORCHESTRATOR_ID) is not None
-                    else ""
-                )
+            caller_id = msg.get("caller_id") or ""
         else:
             caller_id = session.root_agent_id
         result = await execute_tool(msg_type, args, self.runtime, caller_id=caller_id)
@@ -4202,7 +4250,7 @@ class WebSocketBridge:
         # The agent has its own keypair generated at agent creation time
         # (held by the daemon, not the user's wallet). Registration is
         # ALWAYS daemon-signed from the agent's own key — this includes
-        # the root/orchestrator agent. The user's wallet only funds the
+        # root agents. The user's wallet only funds the
         # agent's address; it never signs the registerAgent tx itself.
         #
         # This means consensus operations (anchor submission, training
@@ -4315,7 +4363,7 @@ class WebSocketBridge:
             return {"registered": False, "error": "Agent has no identity"}
 
         # Phase 12: agents are always identified by their own
-        # daemon-held keypair (incl. the orchestrator). Check that
+        # daemon-held keypair (root agents included). Check that
         # one address only — never fall back to the user's wallet.
         registered = False
         if agent_def.identity.address:
@@ -4467,15 +4515,6 @@ async def _init_and_serve(
         # Note: execution history is hydrated automatically in register_agent()
         if agents:
             log.info("Loaded %d agent(s)", len(agents))
-
-    # Legacy root agent — DEPRECATED (rootless fleet is the default).
-    # Only auto-provisioned when explicitly re-enabled in config.
-    if getattr(config.orchestrator, "enabled", False):
-        try:
-            await rt.setup_orchestrator()
-            log.info("Orchestrator registered (legacy mode)")
-        except Exception as exc:
-            log.warning("Failed to register orchestrator: %s", exc)
 
     # Phase 12: auto-start autonet for already-registered agents.
     try:

@@ -1,12 +1,19 @@
 """User profile persistence.
 
-Stores the user's onboarding state, projects, strengths, weaknesses,
-and summary.  JSON file at ``data_dir/profile.json``.
+Two stores live here:
 
-Goals are tracked as agents in the agent registry — creating an agent IS
-setting a goal.  The profile keeps: summary, strengths, weaknesses,
-standards, jurisdiction_id, projects.  Legacy goals data may exist in
-profile.json but is no longer written or read for planning.
+1. The **dossier** — ``data_dir/USER.md``, a markdown document that is the
+   fleet-readable record of who the user is (background, skills, goals,
+   constraints, values).  Section-granular read/write via the profile tool
+   bundle (get_user_profile / update_user_profile).  Hand-editable; there is
+   no "onboarding done" state — the dossier is only ever current or stale,
+   which readers judge from the inline dates agents are instructed to keep.
+
+2. ``data_dir/profile.json`` — structured plumbing (projects, standards,
+   jurisdiction_id).  Goals are tracked as agents in the agent registry —
+   creating an agent IS setting a goal.  The onboarding_status field is
+   LEGACY-WIRE: atn_web still reads it over WS; nothing in the daemon gates
+   on it any more.
 """
 from __future__ import annotations
 
@@ -75,40 +82,108 @@ class UserProfileStore:
             self.load()
         return self._profile  # type: ignore[return-value]
 
-    def needs_onboarding(self) -> bool:
-        """Check if user hasn't completed onboarding."""
-        return self.get_profile().onboarding_status != OnboardingStatus.COMPLETED
-
-    def complete_onboarding(self, results: dict[str, Any]) -> None:
-        """Mark onboarding as completed and populate profile from results."""
-        p = self.get_profile()
-        p.onboarding_status = OnboardingStatus.COMPLETED
-        p.summary = results.get("summary", "")
-        p.standards = results.get("standards", [])
-        p.strengths = results.get("strengths", [])
-        p.weaknesses = results.get("weaknesses", [])
-
-        # Goals are now tracked as agents, not in the profile.
-        # Onboarding goals are returned to the caller to be created as agents.
-        # We no longer write them to profile.goals.
-
-        # Projects — assign IDs if missing
-        for proj in results.get("projects", []):
-            if "id" not in proj:
-                proj["id"] = uuid4().hex[:8]
-            if "status" not in proj:
-                proj["status"] = "active"
-        p.projects = results.get("projects", [])
-
-        self.save()
-        log.info("Onboarding completed: %d projects", len(p.projects))
-
     def skip_onboarding(self) -> None:
-        """Mark onboarding as completed with empty data."""
+        """LEGACY-WIRE: mark the legacy onboarding flag completed (atn_web
+        'skip' button).  Nothing in the daemon gates on the flag."""
         p = self.get_profile()
         p.onboarding_status = OnboardingStatus.COMPLETED
         self.save()
         log.info("Onboarding skipped")
+
+    # ------------------------------------------------------------------
+    # Dossier (USER.md) — section-granular markdown store
+    # ------------------------------------------------------------------
+    # Sections are H2 blocks ("## Title").  Text before the first H2 (the
+    # H1 title line, contact block, etc.) is the preamble and is preserved
+    # verbatim.  Lookup is case-insensitive on the H2 title.
+
+    @property
+    def dossier_path(self) -> Path:
+        return self._path.parent / "USER.md"
+
+    def read_dossier(self) -> str:
+        try:
+            return self.dossier_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ""
+        except Exception:
+            log.exception("Failed to read dossier at %s", self.dossier_path)
+            return ""
+
+    @staticmethod
+    def _split_dossier(text: str) -> tuple[str, list[tuple[str, str]]]:
+        """Split into (preamble, [(title, body)]).  Body excludes the H2 line."""
+        preamble_lines: list[str] = []
+        sections: list[tuple[str, list[str]]] = []
+        current: list[str] | None = None
+        for line in text.splitlines():
+            if line.startswith("## "):
+                sections.append((line[3:].strip(), []))
+                current = sections[-1][1]
+            elif current is not None:
+                current.append(line)
+            else:
+                preamble_lines.append(line)
+        return (
+            "\n".join(preamble_lines),
+            [(t, "\n".join(body).strip("\n")) for t, body in sections],
+        )
+
+    @staticmethod
+    def _join_dossier(preamble: str, sections: list[tuple[str, str]]) -> str:
+        parts = [preamble.rstrip("\n")] if preamble.strip() else []
+        for title, body in sections:
+            parts.append(f"## {title}\n\n{body.strip()}" if body.strip() else f"## {title}")
+        return "\n\n".join(parts) + "\n"
+
+    def dossier_sections(self) -> list[str]:
+        _, sections = self._split_dossier(self.read_dossier())
+        return [t for t, _ in sections]
+
+    def read_dossier_section(self, name: str) -> str | None:
+        _, sections = self._split_dossier(self.read_dossier())
+        want = name.strip().lower()
+        for title, body in sections:
+            if title.lower() == want:
+                return body
+        return None
+
+    def write_dossier_section(self, name: str, content: str = "",
+                              mode: str = "replace") -> dict[str, Any]:
+        """Write one dossier section.  mode: replace | append | remove.
+
+        A missing section is created (replace/append); remove of a missing
+        section is a no-op reported as such.  Returns {section, mode, sections}.
+        """
+        name = name.strip()
+        if not name:
+            raise ValueError("Section name is required")
+        if mode not in ("replace", "append", "remove"):
+            raise ValueError(f"Unknown mode '{mode}' (replace | append | remove)")
+        preamble, sections = self._split_dossier(self.read_dossier())
+        want = name.lower()
+        idx = next((i for i, (t, _) in enumerate(sections) if t.lower() == want), None)
+
+        found = idx is not None
+        if mode == "remove":
+            if found:
+                sections.pop(idx)
+        elif idx is None:
+            sections.append((name, content))
+        elif mode == "append":
+            title, body = sections[idx]
+            sections[idx] = (title, f"{body}\n\n{content}".strip("\n"))
+        else:
+            sections[idx] = (sections[idx][0], content)
+
+        self.dossier_path.write_text(
+            self._join_dossier(preamble, sections), encoding="utf-8")
+        return {
+            "section": name,
+            "mode": mode,
+            "existed": found,
+            "sections": [t for t, _ in sections],
+        }
 
     def update_goal(self, goal_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a goal by ID.  Returns the updated goal or None if not found."""

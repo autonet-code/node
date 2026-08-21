@@ -78,6 +78,25 @@ SHELL_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "edit_file",
+        "description": (
+            "Replace an exact string in a file. old_string must match the "
+            "file exactly (including whitespace) and must be unique unless "
+            "replace_all is set. Prefer this over write_file for changing "
+            "existing files — it cannot clobber the rest of the file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute path to the file"},
+                "old_string": {"type": "string", "description": "Exact text to replace"},
+                "new_string": {"type": "string", "description": "Replacement text"},
+                "replace_all": {"type": "boolean", "description": "Replace every occurrence (default false)", "default": False},
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+    },
+    {
         "name": "list_directory",
         "description": "List files and directories at the given path.",
         "input_schema": {
@@ -155,6 +174,29 @@ async def exec_write_file(inp: dict) -> dict:
         return {"error": str(e)}
 
 
+async def exec_edit_file(inp: dict) -> dict:
+    """Exact-string replacement in a file."""
+    try:
+        p = Path(inp["path"])
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+        old = inp["old_string"]
+        new = inp["new_string"]
+        if old == new:
+            return {"error": "old_string and new_string are identical"}
+        text = p.read_text(encoding="utf-8")
+        count = text.count(old)
+        if count == 0:
+            return {"error": "old_string not found in file — read the file and match it exactly"}
+        if count > 1 and not inp.get("replace_all"):
+            return {"error": f"old_string occurs {count} times — add surrounding context to make it unique, or set replace_all"}
+        replaced = text.replace(old, new) if inp.get("replace_all") else text.replace(old, new, 1)
+        p.write_text(replaced, encoding="utf-8")
+        return {"status": "ok", "path": str(p), "replacements": count if inp.get("replace_all") else 1}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 async def exec_list_dir(inp: dict) -> dict:
     """List directory."""
     try:
@@ -198,6 +240,7 @@ SHELL_TOOL_EXECUTORS: dict[str, Any] = {
     "bash": exec_bash,
     "read_file": exec_read_file,
     "write_file": exec_write_file,
+    "edit_file": exec_edit_file,
     "list_directory": exec_list_dir,
     "search_files": exec_search_files,
 }

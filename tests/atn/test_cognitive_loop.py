@@ -1,29 +1,24 @@
-"""Tests for the orchestrator — multi-turn cognitive loop + tool execution.
+"""Tests for the cognitive loop — multi-turn tool use + tool execution.
 
 Uses mock providers to verify:
   - Multi-turn loop mechanics (tool calls -> tool results -> next turn)
   - Tool execution against a real Runtime
-  - Orchestrator agent factory
-  - End-to-end: orchestrator creates and runs agents via tools
+  - Tool definitions are complete
 """
 import asyncio
-import json
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from atn.config import ATNConfig, OrchestratorConfig
+from atn.config import ATNConfig
 from atn.events import EventBus
 from atn.models import (
     AgentDefinition,
-    AgentMode,
     ExecutionStatus,
     StepDefinition,
     StepType,
 )
-from atn.orchestrator import create_orchestrator_agent, ORCHESTRATOR_ID
-from atn.orchestrator.tools import (
+from atn.agent_tools import (
     execute_tool,
     get_tool_definitions,
     get_tool_executor,
@@ -33,7 +28,7 @@ from atn.runtime import Runtime
 from atn.steps.cognitive import CognitiveStepExecutor
 
 
-TEST_DIR = Path("./test_data_orchestrator")
+TEST_DIR = Path("./test_data_cognitive_loop")
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +168,9 @@ async def test():
     await rt.stop()
 
     # ==================================================================
-    # Test 3: Multi-turn with orchestrator tools (mock provider)
+    # Test 3: Multi-turn with ATN tools (legacy tool_executors alias)
     # ==================================================================
-    print("Test 3: Multi-turn orchestrator tool loop...")
+    print("Test 3: Multi-turn tool loop (legacy executor-set name)...")
     bus = EventBus()
     rt = Runtime(bus, data_dir=TEST_DIR, config=ATNConfig(data_dir=TEST_DIR, agents_dir=TEST_DIR / "agents"))
     await rt.start()
@@ -203,14 +198,16 @@ async def test():
     cognitive.register_provider(mock)
 
     agent = AgentDefinition(
-        id="orch_test",
-        name="Orchestrator Test",
+        id="loop_test",
+        name="Loop Test",
         steps=[StepDefinition(
             type=StepType.COGNITIVE,
             config={
                 "provider": "mock",
                 "prompt": "What agents exist?",
                 "max_turns": 10,
+                # LEGACY-DATA: persisted agent defs may still name the old
+                # executor set; it must keep resolving to the ATN tools.
                 "tool_executors": "orchestrator",
             },
             name="orchestrate",
@@ -241,111 +238,13 @@ async def test():
     await rt.stop()
 
     # ==================================================================
-    # Test 4: Tool creates an agent, then triggers it
-    # ==================================================================
-    print("Test 4: Orchestrator creates and triggers an agent...")
-    bus = EventBus()
-    rt = Runtime(bus, data_dir=TEST_DIR, config=ATNConfig(data_dir=TEST_DIR, agents_dir=TEST_DIR / "agents"))
-    await rt.start()
-
-    mock = ScriptedProvider([
-        # Turn 1: Create agent
-        ProviderResponse(
-            text="I'll create an echo agent.",
-            tool_calls=[ToolCall(id="tc1", name="create_agent", input={
-                "id": "echo01",
-                "name": "Echo Agent",
-                "description": "Echoes hello",
-                "steps": [{"name": "echo", "type": "script", "config": {"command": "echo hello_from_orchestrator", "timeout": 5}}],
-            })],
-            stop_reason="tool_use",
-            usage=Usage(input_tokens=100, output_tokens=50),
-        ),
-        # Turn 2: Activate it
-        ProviderResponse(
-            text="Now I'll activate it.",
-            tool_calls=[ToolCall(id="tc2", name="activate_agent", input={"agent_id": "echo01"})],
-            stop_reason="tool_use",
-            usage=Usage(input_tokens=200, output_tokens=30),
-        ),
-        # Turn 3: Trigger it
-        ProviderResponse(
-            text="Let me trigger it.",
-            tool_calls=[ToolCall(id="tc3", name="trigger_run", input={"agent_id": "echo01"})],
-            stop_reason="tool_use",
-            usage=Usage(input_tokens=250, output_tokens=20),
-        ),
-        # Turn 4: Done
-        ProviderResponse(
-            text="Done! I created echo01 and triggered it.",
-            stop_reason="end_turn",
-            usage=Usage(input_tokens=300, output_tokens=40),
-        ),
-    ])
-    cognitive = rt._executors[StepType.COGNITIVE]
-    assert isinstance(cognitive, CognitiveStepExecutor)
-    cognitive.register_provider(mock)
-
-    # Register the orchestrator-like agent
-    orch_agent = AgentDefinition(
-        id="orch_create",
-        name="Orchestrator Create Test",
-        steps=[StepDefinition(
-            type=StepType.COGNITIVE,
-            config={
-                "provider": "mock",
-                "prompt": "Create an agent that echoes hello",
-                "max_turns": 10,
-                "tool_executors": "orchestrator",
-            },
-            name="orchestrate",
-        )],
-    )
-    await rt.register_agent(orch_agent)
-    await rt.activate_agent(orch_agent.id)
-    await rt.trigger_run(orch_agent.id)
-    # Wait for orchestrator to finish (it triggers echo01 inside — real subprocess)
-    await asyncio.sleep(0.5)
-
-    # Verify the orchestrator ran all 4 turns
-    orch_rec = rt.execution_log.get_latest(orch_agent.id)
-    assert orch_rec.status == ExecutionStatus.COMPLETED
-    assert orch_rec.step_results[0].output["mode"] == "orchestrate"
-    print("  PASS: Orchestrator completed multi-turn interaction")
-
-    # Verify echo01 was created and is registered
-    echo_defn = rt.get_agent("echo01")
-    assert echo_defn is not None
-    assert echo_defn.name == "Echo Agent"
-    assert len(echo_defn.steps) == 1
-    assert echo_defn.steps[0].type == StepType.SCRIPT
-    print("  PASS: echo01 agent was created via tool")
-
-    # Verify echo01 was activated
-    from atn.models import AgentStatus
-    echo_status = rt.get_status("echo01")
-    # Status could be ACTIVE or RUNNING depending on timing
-    assert echo_status in (AgentStatus.ACTIVE, AgentStatus.RUNNING, AgentStatus.REGISTERED), \
-        f"Expected ACTIVE-ish, got {echo_status}"
-    print("  PASS: echo01 was activated")
-
-    # Wait for echo01 subprocess to finish
-    await asyncio.sleep(0.5)
-    echo_rec = rt.execution_log.get_latest("echo01")
-    assert echo_rec is not None, "echo01 should have an execution record"
-    assert echo_rec.status == ExecutionStatus.COMPLETED
-    assert "hello_from_orchestrator" in str(echo_rec.step_results[0].output)
-    print("  PASS: echo01 ran and produced output")
-
-    await rt.stop()
-
-    # ==================================================================
     # Test 5: Tool definitions are complete
     # ==================================================================
     print("Test 5: Tool definitions...")
     tools = get_tool_definitions()
     tool_names = {t.name for t in tools}
     expected = {
+        "find_services", "register_service", "request_service", "pay_for_service",
         "list_agents", "get_agent", "create_agent", "update_agent", "remove_agent",
         "activate_agent", "deactivate_agent", "trigger_run",
         "get_execution", "get_output", "kill_execution", "kill_agent",
@@ -363,7 +262,7 @@ async def test():
         "get_goals", "add_goal", "update_goal",
         "get_projects", "add_project", "update_project",
         "get_credit_budget", "set_credit_budget", "get_usage",
-        "propose_task", "list_tasks", "get_user_profile",
+        "propose_task", "list_tasks", "get_user_profile", "update_user_profile",
         # Delegation
         "delegate_status", "delegate_message", "delegate_collect",
         "get_latest_thought", "get_children_status",
@@ -481,30 +380,6 @@ async def test():
     await rt.stop()
 
     # ==================================================================
-    # Test 7: Orchestrator agent factory
-    # ==================================================================
-    print("Test 7: Orchestrator agent factory...")
-    defn = create_orchestrator_agent()
-    assert defn.id == ORCHESTRATOR_ID
-    assert defn.name == "Orchestrator"
-    assert defn.mode == AgentMode.COGNITIVE
-    assert len(defn.steps) == 0  # pure cognitive agent, no pipeline steps
-    assert defn.max_turns == 50
-    assert isinstance(defn.provider, list)
-    assert defn.provider[0] == "claude_max"  # primary provider first
-    assert defn.concurrency == 1
-    print("  PASS: Default orchestrator definition")
-
-    defn2 = create_orchestrator_agent(
-        OrchestratorConfig(provider="anthropic", model="claude-opus-4-20250514"),
-        max_turns=5,
-    )
-    assert defn2.provider[0] == "anthropic"  # primary provider first
-    assert defn2.cognitive_model == "claude-opus-4-20250514"
-    assert defn2.max_turns == 5
-    print("  PASS: Custom orchestrator config")
-
-    # ==================================================================
     # Test 8: Max turns limit is respected
     # ==================================================================
     print("Test 8: Max turns limit...")
@@ -536,7 +411,7 @@ async def test():
                 "provider": "mock",
                 "prompt": "Do something",
                 "max_turns": 3,
-                "tool_executors": "orchestrator",
+                "tool_executors": "atn",
             },
             name="think",
         )],
@@ -556,7 +431,7 @@ async def test():
 
     # Cleanup
     shutil.rmtree(TEST_DIR)
-    print("\nAll orchestrator tests passed!")
+    print("\nAll cognitive loop tests passed!")
 
 
 if __name__ == "__main__":

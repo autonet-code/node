@@ -23,8 +23,8 @@ import pytest
 
 from atn.events import EventBus, EventType
 from atn.models import AgentDefinition, AgentMode
-from atn.orchestrator import ORCHESTRATOR_ID
-from atn.orchestrator.tools import _compact_agent
+from atn.agent_tools import OWNER_ID
+from atn.agent_tools import _compact_agent
 from atn.providers.base import Provider, ProviderResponse, ToolCall, Usage
 
 
@@ -83,13 +83,13 @@ class TestPermissions:
         await _register(rt, "child-a", parent_id="parent-a")
         _seed_conversation(rt, "child-a", 6)
 
-        # Owner caller (orchestrator). Idle agent -> compacted.
+        # Owner caller. Idle agent -> compacted.
         mock = AsyncMock()
         mock.send = AsyncMock(return_value=ProviderResponse(text="SUMMARY"))
         mock.close = AsyncMock()
         with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
             res = await _compact_agent(rt, {"agent_id": "child-a",
-                                            "_caller_id": ORCHESTRATOR_ID})
+                                            "_caller_id": OWNER_ID})
         assert res["status"] == "compacted"
 
     @pytest.mark.asyncio
@@ -153,7 +153,7 @@ class TestPermissions:
     async def test_unknown_target_errors(self, tmp_path):
         rt = _make_runtime(EventBus(), tmp_path)
         res = await _compact_agent(rt, {"agent_id": "nope",
-                                        "_caller_id": ORCHESTRATOR_ID})
+                                        "_caller_id": OWNER_ID})
         assert "error" in res
         assert "not found" in res["error"]
 
@@ -177,7 +177,7 @@ class TestIdlePath:
         mock.close = AsyncMock()
         with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
             res = await _compact_agent(rt, {"agent_id": "idle-1",
-                                            "_caller_id": ORCHESTRATOR_ID})
+                                            "_caller_id": OWNER_ID})
 
         assert res["status"] == "compacted"
         assert res["turns_before"] == 6
@@ -214,12 +214,12 @@ class TestIdlePath:
         mock.close = AsyncMock()
         with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
             await _compact_agent(rt, {"agent_id": "idle-2",
-                                      "_caller_id": ORCHESTRATOR_ID})
+                                      "_caller_id": OWNER_ID})
 
         comp = [e for e in events if e.type == EventType.CONTEXT_COMPACTION]
         assert comp, "expected CONTEXT_COMPACTION events"
         assert all(e.data.get("manual") is True for e in comp)
-        assert all(e.data.get("requested_by") == ORCHESTRATOR_ID for e in comp)
+        assert all(e.data.get("requested_by") == OWNER_ID for e in comp)
         statuses = {e.data.get("status") for e in comp}
         assert "in_progress" in statuses and "completed" in statuses
 
@@ -236,7 +236,7 @@ class TestIdlePath:
         rt.providers._active_providers["idle-3"] = mock
 
         await _compact_agent(rt, {"agent_id": "idle-3",
-                                  "_caller_id": ORCHESTRATOR_ID})
+                                  "_caller_id": OWNER_ID})
 
         assert "idle-3" not in rt.providers._active_providers
         mock.close.assert_awaited()
@@ -252,7 +252,7 @@ class TestIdlePath:
         mock.close = AsyncMock()
         with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
             res = await _compact_agent(rt, {"agent_id": "idle-4",
-                                            "_caller_id": ORCHESTRATOR_ID})
+                                            "_caller_id": OWNER_ID})
 
         assert "error" in res
         # Never destroy history on summarizer failure.
@@ -268,7 +268,7 @@ class TestIdlePath:
         mock.send = AsyncMock(return_value=ProviderResponse(text="SUMMARY"))
         with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
             res = await _compact_agent(rt, {"agent_id": "idle-5",
-                                            "_caller_id": ORCHESTRATOR_ID})
+                                            "_caller_id": OWNER_ID})
 
         assert res["status"] == "compacted"
         assert res["turns_before"] == res["turns_after"] == 2
@@ -321,10 +321,10 @@ class TestRunningWorker:
         rt.supervisor = _FakeSupervisor({"wkr-1": _FakeWorker(channel)})
 
         res = await _compact_agent(rt, {"agent_id": "wkr-1",
-                                        "_caller_id": ORCHESTRATOR_ID})
+                                        "_caller_id": OWNER_ID})
         assert res == {"status": "queued", "agent_id": "wkr-1"}
         assert channel.awaited == [
-            ("request_compaction", {"requested_by": ORCHESTRATOR_ID})]
+            ("request_compaction", {"requested_by": OWNER_ID})]
 
     @pytest.mark.asyncio
     async def test_running_worker_bridge_unsupported(self, tmp_path):
@@ -336,7 +336,7 @@ class TestRunningWorker:
         rt.supervisor = _FakeSupervisor({"wkr-2": _FakeWorker(channel)})
 
         res = await _compact_agent(rt, {"agent_id": "wkr-2",
-                                        "_caller_id": ORCHESTRATOR_ID})
+                                        "_caller_id": OWNER_ID})
         assert res == {"status": "unsupported_while_running", "agent_id": "wkr-2"}
 
     @pytest.mark.asyncio
@@ -355,7 +355,7 @@ class TestRunningWorker:
         mock.close = AsyncMock()
         with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
             res = await _compact_agent(rt, {"agent_id": "wkr-3",
-                                            "_caller_id": ORCHESTRATOR_ID})
+                                            "_caller_id": OWNER_ID})
         assert res["status"] == "compacted"
 
     @pytest.mark.asyncio
@@ -374,7 +374,7 @@ class TestRunningWorker:
         mock.close = AsyncMock()
         with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
             res = await _compact_agent(rt, {"agent_id": "wkr-4",
-                                            "_caller_id": ORCHESTRATOR_ID})
+                                            "_caller_id": OWNER_ID})
         assert res["status"] == "compacted"
         assert channel.awaited == []   # supervisor path never entered
 
@@ -393,7 +393,7 @@ class TestRunningBridge:
         rt.registry._running_count["bridge-1"] = 1
 
         res = await _compact_agent(rt, {"agent_id": "bridge-1",
-                                        "_caller_id": ORCHESTRATOR_ID})
+                                        "_caller_id": OWNER_ID})
         assert res["status"] == "unsupported_while_running"
 
 

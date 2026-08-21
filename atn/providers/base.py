@@ -350,6 +350,10 @@ class Provider(ABC):
     # Compactions within the current send_orchestrate run (spiral guard, §2).
     # Reset at the start of each run.
     _compactions_this_run: int = 0
+    # Tier-3 hard context resets within the current run (§2). When prune +
+    # compact + tail-trim can't get under budget, the stack is rebuilt from
+    # the original task + a tool-call digest instead of aborting the run.
+    _hard_resets_this_run: int = 0
 
     # Interrupt flag — set via interrupt() to stop the orchestration loop.
     _interrupted: bool = False
@@ -458,6 +462,7 @@ class Provider(ABC):
         # send_user_message() call now enqueues instead of returning False.
         self._steering_queue = asyncio.Queue()
         self._compactions_this_run = 0
+        self._hard_resets_this_run = 0
 
         # Track active model for session stats
         if model:
@@ -506,6 +511,11 @@ class Provider(ABC):
         # runs that never touched registered tools are unaffected.
         called_tool_names: set[str] = set()
         review_injected = False
+        # Verification step (§16): code files the run wrote/edited. If any,
+        # inject ONE closing verify turn at the natural end (same pattern as
+        # the review step) — agents that never touched code are unaffected.
+        verify_injected = False
+        modified_code_files: set[str] = set()
 
         # Per-request output cap comes from the model spec (§7), bounded at 16k
         # so a huge output ceiling doesn't shrink the usable input budget.
@@ -762,6 +772,27 @@ class Provider(ABC):
                 # this condition and needs_review_reinvoke (the bridge path)
                 # must agree, and a duplicated literal here silently drifted
                 # from the real set once already.
+                # §16 verify step: one closing turn before finalize when the
+                # run modified code files. Same one-shot injection pattern as
+                # the review step below; spends a turn of the same budget.
+                if (modified_code_files and not verify_injected
+                        and tool_executor is not None):
+                    verify_injected = True
+                    log.info(
+                        "Verify step: injecting closing verification turn "
+                        "for agent %s (%d code files)",
+                        self.source_agent_id or "?", len(modified_code_files),
+                    )
+                    if response.text:
+                        messages.append(
+                            {"role": "assistant", "content": response.text})
+                    from ..delegate_prompts import VERIFY_STEP_PROMPT
+                    messages.append({
+                        "role": "user",
+                        "content": VERIFY_STEP_PROMPT.format(
+                            files=", ".join(sorted(modified_code_files)[:20])),
+                    })
+                    continue
                 from ..delegate_prompts import _REVIEW_TRIGGER_TOOLS
                 if (review_tools and not review_injected
                         and tool_executor is not None
@@ -797,6 +828,10 @@ class Provider(ABC):
                 assistant_content.append({"type": "text", "text": response.text})
             for tc in response.tool_calls:
                 called_tool_names.add(tc.name)
+                if tc.name in ("write_file", "edit_file"):
+                    _p = str((tc.input or {}).get("path", ""))
+                    if _p.endswith(_CODE_FILE_SUFFIXES):
+                        modified_code_files.add(_p)
                 assistant_content.append({
                     "type": "tool_use",
                     "id": tc.id,
@@ -1151,6 +1186,8 @@ class Provider(ABC):
             if _trim_tail_tool_results(messages, budget_chars) and \
                     _estimate_chars(system, messages) <= budget_chars:
                 return
+            if self._try_hard_reset(messages, original_request):
+                return
             raise ContextOverflowError(
                 "context reduction exhausted (max compactions reached)",
                 status_code=400, provider=self.name,
@@ -1177,9 +1214,11 @@ class Provider(ABC):
                 return
             log.warning(
                 "Compaction reduced estimate by only %.1f%% (<%.0f%%) for agent "
-                "%s — aborting to avoid a spiral", reduction * 100,
+                "%s", reduction * 100,
                 _COMPACTION_MIN_REDUCTION * 100, self.source_agent_id or "?",
             )
+            if self._try_hard_reset(messages, original_request):
+                return
             raise ContextOverflowError(
                 "context reduction ineffective (compaction spiral)",
                 status_code=400, provider=self.name,
@@ -1187,6 +1226,46 @@ class Provider(ABC):
 
         # Apply the compacted list in place.
         messages[:] = compacted
+
+    def _try_hard_reset(
+        self, messages: list[dict[str, Any]], original_request: str,
+    ) -> bool:
+        """Tier-3 reduction (§2): rebuild the stack instead of aborting.
+
+        When prune + compact + tail-trim can't get under budget (the normal
+        end state on small local-model windows), the run used to abort and
+        throw away all work in progress. A hard reset keeps the run alive:
+        the stack becomes the original task + a non-LLM digest of every tool
+        call already made, so the model resumes with fresh context, on-disk
+        state intact, without repeating exploration. Capped per run; returns
+        False when the cap is spent (caller aborts as before).
+        """
+        if self._hard_resets_this_run >= _MAX_HARD_RESETS_PER_RUN:
+            return False
+        self._hard_resets_this_run += 1
+        # The fresh stack may legitimately need compaction again much later.
+        self._compactions_this_run = 0
+        digest = _context_reset_digest(messages)
+        original = original_request
+        if not original and messages:
+            first = messages[0].get("content")
+            original = first if isinstance(first, str) else json.dumps(first, default=str)
+        notice = (
+            "[CONTEXT RESET] The conversation exceeded the context window and "
+            "was cleared. Everything you already did is preserved ON DISK — "
+            "do not repeat prior exploration. Record of your actions so far:\n"
+            f"{digest}\n\n"
+            "Resume from that state and finish the task. Re-read only what "
+            "you need, keep tool output small, and delegate any remaining "
+            "broad exploration to child agents."
+        )
+        messages[:] = [{"role": "user", "content": f"{original}\n\n{notice}"}]
+        log.warning(
+            "Hard context reset %d/%d for agent %s (stack rebuilt, ~%d chars)",
+            self._hard_resets_this_run, _MAX_HARD_RESETS_PER_RUN,
+            self.source_agent_id or "?", _estimate_chars("", messages),
+        )
+        return True
 
     async def _compact_messages(
         self,
@@ -1413,6 +1492,13 @@ def _truncate_tool_result(result_json: str, cap: int = 0) -> str:
 # Context reduction helpers (§2)
 # ---------------------------------------------------------------------------
 
+# Verify step (§16): file suffixes that count as "code" for the closing
+# verification turn.
+_CODE_FILE_SUFFIXES = (
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".rs", ".go", ".java", ".c", ".cc",
+    ".cpp", ".h", ".hpp", ".rb", ".php", ".cs", ".swift", ".kt", ".sol",
+)
+
 # Prune (tier 1): protect the most recent N chars of tool output and only bother
 # pruning if it saves at least M chars.
 _PRUNE_PROTECT_RECENT_CHARS = 40_000
@@ -1424,6 +1510,49 @@ _COMPACT_RETAIN_USER_CHARS = 20_000
 _COMPACT_RETAIN_TURNS = 2
 _MAX_COMPACTIONS_PER_RUN = 2
 _COMPACTION_MIN_REDUCTION = 0.20
+
+# Hard reset (tier 3): stack rebuilds per run, and the size cap on the
+# tool-call digest carried into the fresh stack.
+_MAX_HARD_RESETS_PER_RUN = 2
+_RESET_DIGEST_CAP_CHARS = 6_000
+
+
+def _context_reset_digest(messages: list[dict[str, Any]]) -> str:
+    """Non-LLM digest of a message stack for a tier-3 hard reset.
+
+    One line per tool call (name + truncated input), newest kept when over
+    the cap, plus the last assistant prose. Cheap by construction — this
+    path only runs when the LLM summarizer already failed to help.
+    """
+    entries: list[str] = []
+    last_text = ""
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                last_text = content
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and (block.get("text") or "").strip():
+                last_text = block["text"]
+            elif block.get("type") == "tool_use":
+                try:
+                    arg = json.dumps(block.get("input", {}), default=str)
+                except Exception:
+                    arg = "{}"
+                entries.append(f"- {block.get('name', '?')} {arg[:160]}")
+    digest = "\n".join(entries)
+    if len(digest) > _RESET_DIGEST_CAP_CHARS:
+        digest = "…(older calls elided)…\n" + digest[-_RESET_DIGEST_CAP_CHARS:]
+    if last_text:
+        digest += "\n\nYour last note before the reset: " + last_text[:500]
+    return digest or "(no tool calls recorded)"
 
 
 def _estimate_chars(system: str, messages: list[dict[str, Any]]) -> int:

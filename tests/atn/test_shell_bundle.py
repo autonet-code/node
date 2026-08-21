@@ -86,13 +86,38 @@ def test_executor_faults_become_error_envelopes():
     assert out["ok"] is False or "error" in out.get("result", {})
 
 
+def test_edit_file_is_surgical():
+    """PROPERTY: edit_file changes exactly the matched text — ambiguous or
+    absent matches are errors, never partial writes."""
+    p = Path(tempfile.mkdtemp()) / "t.py"
+    p.write_text("a = 1\nb = 1\nc = 2\n", encoding="utf-8")
+    ex = SHELL_TOOL_EXECUTORS["edit_file"]
+    # ambiguous without replace_all
+    out = asyncio.run(ex({"path": str(p), "old_string": "= 1", "new_string": "= 9"}))
+    assert "error" in out and "2 times" in out["error"]
+    assert p.read_text(encoding="utf-8") == "a = 1\nb = 1\nc = 2\n"
+    # absent
+    out = asyncio.run(ex({"path": str(p), "old_string": "zzz", "new_string": "y"}))
+    assert "error" in out
+    # unique match
+    out = asyncio.run(ex({"path": str(p), "old_string": "c = 2", "new_string": "c = 3"}))
+    assert out.get("status") == "ok"
+    assert p.read_text(encoding="utf-8") == "a = 1\nb = 1\nc = 3\n"
+    # replace_all
+    out = asyncio.run(ex({"path": str(p), "old_string": "= 1", "new_string": "= 7",
+                          "replace_all": True}))
+    assert out.get("replacements") == 2
+    assert p.read_text(encoding="utf-8") == "a = 7\nb = 7\nc = 3\n"
+
+
 def test_public_surface_is_unchanged():
     """PROPERTY: three modules import these by identity at import time
     (execution_engine, worker_loop, ws_server). The extraction must not
     perturb them."""
-    assert len(SHELL_TOOLS) == 5
+    assert len(SHELL_TOOLS) == 6
     assert set(SHELL_TOOL_EXECUTORS) == {
-        "bash", "read_file", "write_file", "list_directory", "search_files"}
+        "bash", "read_file", "write_file", "edit_file", "list_directory",
+        "search_files"}
 
 
 # --------------------------------------------------------------------------

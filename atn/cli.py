@@ -471,11 +471,8 @@ async def _load_agents(runtime: Runtime, config: ATNConfig) -> int:
     current_ids = {defn.id for defn, _ in runtime.list_agents()}
     new_ids = {a.id for a in agents}
 
-    # Unregister agents whose files were removed (skip orchestrator)
-    from .orchestrator import ORCHESTRATOR_ID
+    # Unregister agents whose files were removed
     for removed_id in current_ids - new_ids:
-        if removed_id == ORCHESTRATOR_ID:
-            continue
         try:
             await runtime.unregister_agent(removed_id)
             console.print(f"  [yellow]Removed agent: {removed_id}[/]")
@@ -566,14 +563,14 @@ async def run_cli() -> None:
     event_bus.subscribe(None, _print_event)
 
     console.print(
-        "\n[bold blue]ATN Runtime[/]  [dim]v0.1.0  |  Agent Orchestration Framework[/]\n"
+        "\n[bold blue]ATN Runtime[/]  [dim]v0.1.0  |  Agent Framework[/]\n"
     )
     console.print(f"  [dim]data_dir:   {config.data_dir}[/]")
     console.print(f"  [dim]agents_dir: {config.agents_dir}[/]")
-    if config.orchestrator.provider:
+    if config.default_provider or config.default_model:
         console.print(
-            f"  [dim]orchestrator: provider={config.orchestrator.provider}"
-            f"  model={config.orchestrator.model or '(provider default)'}[/]"
+            f"  [dim]defaults:   provider={config.default_provider or '(auto)'}"
+            f"  model={config.default_model or '(provider default)'}[/]"
         )
     if config.providers:
         for name, prov in config.providers.items():
@@ -585,16 +582,15 @@ async def run_cli() -> None:
     # Load agents from YAML files
     await _load_agents(runtime, config)
 
-    # Legacy root agent — DEPRECATED. Only auto-provisioned when explicitly
-    # re-enabled (orchestrator.enabled: true). The default is a rootless
-    # fleet: the human owner is the root of trust, and supervision composes
-    # from heartbeat + notify_parent + get_children_status on any agent.
-    if getattr(config.orchestrator, "enabled", False):
-        try:
-            await runtime.setup_orchestrator()
-            console.print("  [green]Orchestrator registered (legacy mode)[/]")
-        except Exception as exc:
-            console.print(f"  [yellow]Orchestrator not available: {exc}[/]")
+    # First-boot seeding: a fresh install gets the default onboarding
+    # concierge. One-shot per install — removing it later is respected.
+    try:
+        from .fleet_seed import seed_default_fleet
+        seeded = await seed_default_fleet(runtime, config)
+        if seeded:
+            console.print(f"  [green]Seeded default agent '{seeded}' (onboarding concierge)[/]")
+    except Exception as exc:
+        console.print(f"  [yellow]Default-fleet seeding failed: {exc}[/]")
 
     # Phase 12: if any loaded agent already has on-chain registration,
     # auto-start autonet — the user opted in earlier and the daemon
@@ -683,11 +679,22 @@ async def run_cli() -> None:
                 f"{config.auto_update.check_interval_secs}s — staged, applied on restart)[/]"
             )
 
-    _print_help()
-    console.print("[dim]Events stream below.  Type commands at any time.\n[/]")
+    headless = "--headless" in sys.argv or not sys.stdin.isatty()
+    if headless:
+        # No interactive console (service, tmux-less ssh, benchmark driver):
+        # a closed/redirected stdin would EOF the input loop instantly and
+        # take the daemon down with it. Run until the shutdown signal instead.
+        console.print("[dim]Headless mode: no stdin console; "
+                      "stop via signal or WS.\n[/]")
+    else:
+        _print_help()
+        console.print("[dim]Events stream below.  Type commands at any time.\n[/]")
 
     try:
-        await _input_loop(runtime)
+        if headless:
+            await runtime._shutdown_event.wait()
+        else:
+            await _input_loop(runtime)
     except KeyboardInterrupt:
         pass
     finally:

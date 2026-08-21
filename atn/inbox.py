@@ -1,7 +1,7 @@
 """Per-agent inbox — the unified communication and trigger surface.
 
 Every agent has one inbox.  Messages arrive from other agents, the scheduler,
-the orchestrator, or the user.  The Runtime watches inboxes and decides when
+or the user.  The Runtime watches inboxes and decides when
 to trigger runs.
 """
 from __future__ import annotations

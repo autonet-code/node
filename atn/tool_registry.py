@@ -142,7 +142,7 @@ class ToolRegistry:
             )
 
         # Check core ATN tools
-        from .orchestrator.tools import get_core_tool_def
+        from .agent_tools import get_core_tool_def
         tdef = get_core_tool_def(name)
         if tdef:
             return UnifiedTool(
@@ -382,7 +382,7 @@ class ToolRegistry:
 
     def _list_core_tools(self, include_operations: bool) -> list[dict[str, Any]]:
         """List core ATN tools available for discovery."""
-        from .orchestrator.tools import get_all_tool_defs
+        from .agent_tools import get_all_tool_defs
         tools: list[dict[str, Any]] = []
         for tdef in get_all_tool_defs():
             entry: dict[str, Any] = {
@@ -400,7 +400,7 @@ class ToolRegistry:
         *, caller_id: str | None = None,
     ) -> dict[str, Any]:
         """Execute a core ATN tool via the standard executor."""
-        from .orchestrator.tools import execute_tool
+        from .agent_tools import execute_tool
         return await execute_tool(tool.name, arguments, self._runtime, caller_id=caller_id)
 
     # ------------------------------------------------------------------

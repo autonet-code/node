@@ -16,7 +16,7 @@ mic just by existing.
 
 Enforcement is a single backstop: SessionManager.send_agent_message consults
 ``is_active(surface)`` at its chokepoint. Trusted internal callers (the
-orchestrator tool, the scheduler) pass ``surface=None`` and are never gated.
+agent tool surface, the scheduler) pass ``surface=None`` and are never gated.
 
 The switch-authorization seam (should requester X be allowed to *take* the mic
 from holder Y?) is STUBBED here — ``AllowSwitch`` always says yes. Mic-preemption

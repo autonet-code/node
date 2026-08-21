@@ -45,9 +45,9 @@ def _sdk_platform_tag() -> str:
 # Tier 2: tool-use      — reliable tool calling, structured instructions, single-task
 # Tier 1: conversational — text in/out, unreliable with tools
 #
-# Tier 4 was labelled "orchestrator" — named after a fixed root-agent role
-# that no longer exists. The tier describes what a MODEL can sustain, not a
-# position in the fleet, so the label now names the capability.
+# Tier 4 was once named after a fixed root-agent role that no longer
+# exists. The tier describes what a MODEL can sustain, not a position in
+# the fleet, so the label now names the capability.
 
 TIER_LABELS: dict[int, str] = {
     4: "coordinating",
@@ -329,7 +329,7 @@ class ProviderManager:
 
     def resolve_provider_with_fallback(self, defn: AgentDefinition) -> Any:
         providers = defn.provider
-        model = defn.cognitive_model or self._config.orchestrator.model or "claude-sonnet-4-6"
+        model = defn.cognitive_model or self._config.default_model or "claude-sonnet-4-6"
 
         # Per-agent marketplace binding (docs/services_market.md, ratified
         # 2026-07-26: employer-chooses-the-tool). A binding is a PARENT's
@@ -729,9 +729,9 @@ class ProviderManager:
         )
 
     def get_bridge_provider(self, agent_id: str | None = None) -> Any:
-        from ..orchestrator import ORCHESTRATOR_ID
-        target = agent_id or ORCHESTRATOR_ID
-        provider = self._active_providers.get(target)
+        # Callers (the Runtime facade) resolve the default agent id (fleet
+        # root); None here simply finds no provider.
+        provider = self._active_providers.get(agent_id) if agent_id else None
         return provider if isinstance(provider, BridgeProvider) else None
 
     def get_registered_provider(self, provider_id: str) -> Any:
@@ -991,7 +991,7 @@ class ProviderManager:
             models = self.get_available_models(pid)
             # Loop capability is a per-MODEL property (model_specs), so the
             # provider only reports the best tier it can reach. The old
-            # per-provider orchestrator_capable boolean was dropped: it
+            # per-provider loop-capable boolean was dropped: it
             # squashed a per-model fact into a provider-wide claim that was
             # wrong in both directions (a capable provider serving a haiku
             # model, or ollama flagged incapable regardless of model).
@@ -1278,8 +1278,9 @@ class ProviderManager:
             self._cached_session_stats[agent_id] = provider.session_stats
 
     def get_session_stats(self, agent_id: str | None = None) -> dict[str, Any]:
-        from ..orchestrator import ORCHESTRATOR_ID
-        target = agent_id or ORCHESTRATOR_ID
+        # Callers (the Runtime facade) resolve the default agent id (fleet
+        # root); an unresolvable target falls through to the no-session error.
+        target = agent_id or ""
         # Try active provider first (richest / live stats)
         active = self._active_providers.get(target)
         if active is not None and hasattr(active, 'session_stats'):
@@ -1293,7 +1294,7 @@ class ProviderManager:
     async def get_session_context(self, agent_id: str | None = None) -> dict[str, Any]:
         provider = self.get_bridge_provider(agent_id)
         if provider is None:
-            target = agent_id or "orchestrator"
+            target = agent_id or "(no agent)"
             return {"error": f"No active bridge session for '{target}'"}
         return await provider.get_session_context()
 
@@ -1347,7 +1348,7 @@ class ProviderManager:
                 bridge_script = pconfig.extra.get("bridge_script", "") if pconfig else ""
                 default_model = (
                     (pconfig.default_model if pconfig else "")
-                    or self._config.orchestrator.model
+                    or self._config.default_model
                     or "claude-sonnet-4-6"
                 )
                 provider = BridgeProvider(

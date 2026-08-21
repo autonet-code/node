@@ -289,7 +289,7 @@ def breakdown_reconstructed(runtime: Any, agent_id: str) -> dict[str, Any]:
         except Exception:
             log.debug("system prompt reconstruction failed for %s", agent_id, exc_info=True)
         try:
-            from .orchestrator.tools import resolve_tool_surface
+            from .agent_tools import resolve_tool_surface
             tools = resolve_tool_surface(getattr(defn, "tools", None) or [])
         except Exception:
             log.debug("tool surface reconstruction failed for %s", agent_id, exc_info=True)

@@ -6,7 +6,7 @@ Each completed cognitive execution produces a JSON trace file:
     {
         "session_id": "...",
         "agent_id": "...",
-        "agent_type": "orchestrator | solver | probe | ...",
+        "agent_type": "cognitive | solver | probe | ...",
         "timestamp": "...",
         "turns": [
             {"role": "system", "content": "...", "tool_calls": [], "timestamp": "..."},
@@ -50,14 +50,14 @@ class TraceLoggingConfig:
         trace_logging:
           enabled: true
           trace_dir: ~/.atn/traces   # default: {data_dir}/traces
-          include_user_data: false   # consent gate; set true to include orchestrator sessions
+          include_user_data: false   # consent gate; set true to include root-agent sessions
           min_turns: 1               # quality filter: skip if fewer assistant turns
     """
     enabled: bool = False
     # Empty string means "use {data_dir}/traces/" (resolved at runtime)
     trace_dir: str = ""
     # Consent gate per AGENT_TRACE_TRAINING.md §Data Privacy and Epic 3 Story 3.1.
-    # Orchestrator sessions contain user messages; only stored when this is True.
+    # Root-agent sessions contain user messages; only stored when this is True.
     include_user_data: bool = False
     # Quality filter: minimum number of assistant turns with content or tool calls.
     min_turns: int = 1
@@ -100,6 +100,11 @@ class TraceLogger:
         self._trace_dir = trace_dir
         # In-progress traces: agent_id -> _PendingTrace
         self._pending: dict[str, _PendingTrace] = {}
+        # Runtime reference, wired by Runtime after construction. Needed by
+        # the consent gate to look up an agent's definition (parent_id decides
+        # whether its sessions are user-facing). None => every trace is
+        # treated as user-facing (fail-closed on user data).
+        self.runtime: Any = None
 
     # ------------------------------------------------------------------
     # Setup
@@ -290,7 +295,7 @@ class TraceLogger:
 
         Checks:
         1. At least ``min_turns`` assistant turns with content or tool calls.
-        2. Consent gate: orchestrator (user conversation) traces require
+        2. Consent gate: user-facing (root agent) traces require
            ``include_user_data=True`` (per Epic 3 Story 3.1).
         """
         turns = trace.get("turns", [])
@@ -304,13 +309,25 @@ class TraceLogger:
         if meaningful_assistant_turns < self.config.min_turns:
             return False
 
-        # Consent gate: orchestrator sessions contain user data
-        # Only store if the operator has opted in
-        from .orchestrator import ORCHESTRATOR_ID
-        if trace.get("agent_id") == ORCHESTRATOR_ID and not self.config.include_user_data:
+        # Consent gate: user-facing sessions contain user data.
+        # Only store if the operator has opted in.
+        if self._is_user_facing(trace.get("agent_id", "")) and not self.config.include_user_data:
             return False
 
         return True
+
+    def _is_user_facing(self, agent_id: str) -> bool:
+        """Root agents (falsy parent_id) hold user conversations. An agent we
+        cannot resolve is treated as user-facing — the safe default is to drop
+        its trace unless ``include_user_data`` is set."""
+        try:
+            registry = getattr(self.runtime, "registry", None)
+            defn = registry.get_agent(agent_id) if registry is not None else None
+        except Exception:
+            defn = None
+        if defn is None:
+            return True
+        return not getattr(defn, "parent_id", None)
 
     # ------------------------------------------------------------------
     # Content-addressed storage

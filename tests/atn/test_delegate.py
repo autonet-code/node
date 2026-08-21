@@ -287,7 +287,7 @@ async def test_delegate_tool_executor(tmp_path: Path):
     mock_provider.interrupt = AsyncMock()
 
     with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-        from atn.orchestrator.tools import _create_agent, _delegate_collect
+        from atn.agent_tools import _create_agent, _delegate_collect
 
         # create_agent with mode=cognitive and prompt auto-activates and triggers
         spawn_result = await _create_agent(rt, {
@@ -358,7 +358,7 @@ async def test_delegate_tool_failure(tmp_path: Path):
     mock_provider.close = AsyncMock()
 
     with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-        from atn.orchestrator.tools import _create_agent, _delegate_collect
+        from atn.agent_tools import _create_agent, _delegate_collect
 
         spawn_result = await _create_agent(rt, {
             "mode": "cognitive",
@@ -411,7 +411,7 @@ async def test_delegate_status_tool(tmp_path: Path):
     mock_provider.interrupt = AsyncMock()
 
     with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-        from atn.orchestrator.tools import _create_agent, _delegate_status, _delegate_collect
+        from atn.agent_tools import _create_agent, _delegate_status, _delegate_collect
 
         spawn = await _create_agent(rt, {
             "mode": "cognitive",

@@ -1,4 +1,4 @@
-"""Tests for orchestrator tools — delegate, message passing, agent CRUD.
+"""Tests for the ATN agent tools — delegate, message passing, agent CRUD.
 
 Phase 3: delegates are cognitive agents executed through the unified Runtime.
 Tests use a real Runtime with mocked BridgeProvider.
@@ -69,7 +69,7 @@ class TestDelegateSpawnAndCollect:
         mock_provider.interrupt = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _create_agent, _delegate_collect
+            from atn.agent_tools import _create_agent, _delegate_collect
 
             result = await _create_agent(rt, {
                 "mode": "cognitive",
@@ -101,7 +101,7 @@ class TestDelegateSpawnAndCollect:
         mock_provider.close = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _create_agent, _delegate_collect
+            from atn.agent_tools import _create_agent, _delegate_collect
 
             spawn = await _create_agent(rt, {
                 "mode": "cognitive",
@@ -142,7 +142,7 @@ class TestDelegateStatus:
         mock_provider.interrupt = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
-            from atn.orchestrator.tools import _create_agent, _delegate_status, _delegate_collect
+            from atn.agent_tools import _create_agent, _delegate_status, _delegate_collect
 
             spawn = await _create_agent(rt, {
                 "mode": "cognitive",
@@ -171,7 +171,7 @@ class TestMessageTool:
         defn = AgentDefinition(id="target-1", name="Target")
         await rt.register_agent(defn)
 
-        from atn.orchestrator.tools import _post_message
+        from atn.agent_tools import _post_message
 
         result = await _post_message(rt, {
             "target": "target-1",
@@ -186,7 +186,7 @@ class TestMessageTool:
         bus = EventBus()
         rt = _make_runtime(bus, tmp_path)
 
-        from atn.orchestrator.tools import _post_message
+        from atn.agent_tools import _post_message
 
         result = await _post_message(rt, {
             "target": "nonexistent",
@@ -203,7 +203,7 @@ class TestGetSnapshotTool:
         bus = EventBus()
         rt = _make_runtime(bus, tmp_path)
 
-        from atn.orchestrator.tools import _get_snapshot
+        from atn.agent_tools import _get_snapshot
 
         result = await _get_snapshot(rt, {})
         assert isinstance(result, dict)
@@ -232,7 +232,7 @@ class TestServiceProviderBindingAuthority:
 
     async def _fleet(self, tmp_path):
         """parent-1 with child-1; sibling-1 under a different parent."""
-        from atn.orchestrator.tools import execute_tool
+        from atn.agent_tools import execute_tool
 
         rt = _make_runtime(EventBus(), tmp_path)
         for aid, parent in (("parent-1", None), ("child-1", "parent-1"),

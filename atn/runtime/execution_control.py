@@ -290,7 +290,7 @@ class ExecutionControl:
     def _inbox_fallback(self, agent_id: str, content: str) -> str:
         """Re-post steering content to an agent's inbox as a HIGH WORK message.
 
-        Mirrors orchestrator/tools._post_message's InboxMessage shape. Returns
+        Mirrors agent_tools._post_message's InboxMessage shape. Returns
         "inbox_fallback" on success, "" if the agent is unknown / no inbox."""
         from ..models import InboxMessage, MessagePriority, MessageType
         inbox = getattr(self.engine, "inbox", None)
@@ -304,7 +304,7 @@ class ExecutionControl:
                 return ""
         inbox.post(InboxMessage(
             id=InboxMessage.generate_id(),
-            source="orchestrator",
+            source="owner",
             target=agent_id,
             type=MessageType.WORK,
             priority=MessagePriority.HIGH,
@@ -332,7 +332,3 @@ class ExecutionControl:
             return False
         await provider.interrupt()
         return True
-
-    async def interrupt_orchestrator(self) -> bool:
-        from ..orchestrator import ORCHESTRATOR_ID
-        return await self.interrupt_delegate(ORCHESTRATOR_ID)

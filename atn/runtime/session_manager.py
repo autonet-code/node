@@ -58,20 +58,27 @@ class SessionManager:
     # Conversation reset
     # ------------------------------------------------------------------
 
+    def _fleet_root_id(self) -> str | None:
+        """The fleet root: first registered agent with no parent, or None."""
+        for aid, defn in self.registry._agents.items():
+            if not defn.parent_id:
+                return aid
+        return None
+
     async def new_conversation(self) -> None:
-        """Reset the orchestrator conversation (legacy wrapper)."""
-        from ..orchestrator import ORCHESTRATOR_ID
-        await self.reset_agent_conversation(ORCHESTRATOR_ID)
+        """Reset the fleet root's conversation (legacy wrapper)."""
+        root_id = self._fleet_root_id()
+        if root_id is None:
+            return
+        await self.reset_agent_conversation(root_id)
 
     async def reset_agent_conversation(self, agent_id: str) -> None:
         """Reset conversation history for any agent.
 
         Kills the provider session, archives conversation, and re-injects
-        a status briefing for the root agent.  The caller is responsible
+        a status briefing for root agents.  The caller is responsible
         for killing running executions first.
         """
-        from ..orchestrator import ORCHESTRATOR_ID
-
         store = self.get_agent_conversation_store(agent_id)
         store.reset()
 
@@ -82,9 +89,11 @@ class SessionManager:
             except Exception:
                 pass
 
-        # Root agent gets a fresh status briefing after reset
-        if agent_id == ORCHESTRATOR_ID:
-            self._inject_status_briefing()
+        # Root agents (falsy parent_id) hold user conversations — they get a
+        # fresh status briefing after reset.
+        defn = self.registry.get_agent(agent_id)
+        if defn is not None and not defn.parent_id:
+            self._inject_status_briefing(agent_id)
 
         log.info("Conversation reset for %s", agent_id)
 
@@ -93,10 +102,8 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     def get_agent_conversation_store(self, agent_id: str) -> ConversationStore:
-        from ..orchestrator import ORCHESTRATOR_ID
-        # The root agent's conversation store is the central one visible in the UI.
-        if agent_id == ORCHESTRATOR_ID:
-            return self.conversation
+        # Every agent gets its own per-id store; the central self.conversation
+        # store remains for the owner/UI surface only.
         if agent_id not in self._agent_conversations:
             store_dir = self._config.data_dir / "agents" / agent_id
             store_dir.mkdir(parents=True, exist_ok=True)
@@ -108,7 +115,7 @@ class SessionManager:
     ) -> dict:
         # Single-writer gate (P3): a message that came through an input surface
         # is only delivered if that surface currently holds the mic. surface=None
-        # => trusted internal caller (orchestrator tool, scheduler), never gated.
+        # => trusted internal caller (agent tool, scheduler), never gated.
         # ALWAYS returns a dict; callers must inspect result.get("error").
         if surface is not None and self._arbiter is not None \
                 and not self._arbiter.is_active(surface):
@@ -200,14 +207,19 @@ class SessionManager:
     # Status briefing
     # ------------------------------------------------------------------
 
-    def _inject_status_briefing(self) -> None:
-        from ..orchestrator import ORCHESTRATOR_ID
+    def _inject_status_briefing(self, agent_id: str | None = None) -> None:
+        """Write a fleet status briefing.
+
+        ``agent_id`` names the agent being briefed (skipped in its own
+        listing); its conversation store receives the briefing. With no
+        agent named, the central owner/UI store receives it.
+        """
         from datetime import datetime, timezone
 
         agents = []
         for aid, defn in self.registry._agents.items():
-            if aid == ORCHESTRATOR_ID:
-                continue
+            if aid == agent_id:
+                continue  # skip the agent being briefed itself
             status = self.registry._status.get(aid, AgentStatus.REGISTERED).value
             running = self.registry._running_count.get(aid, 0)
             schedule = defn.schedule or None
@@ -238,8 +250,8 @@ class SessionManager:
             line += f"{last_info})"
             agents.append(line)
 
-        orch_defn = self.registry._agents.get(ORCHESTRATOR_ID)
-        model = orch_defn.cognitive_model if orch_defn else ""
+        briefed_defn = self.registry._agents.get(agent_id) if agent_id else None
+        model = briefed_defn.cognitive_model if briefed_defn else ""
 
         now = datetime.now(timezone.utc)
         lines = [f"Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')} ({now.strftime('%A, %B %d, %Y')})"]
@@ -252,4 +264,8 @@ class SessionManager:
             lines.append("No agents registered. Clean slate.")
 
         briefing = "\n".join(lines)
-        self.conversation.add_system_turn(briefing)
+        store = (
+            self.get_agent_conversation_store(agent_id)
+            if agent_id else self.conversation
+        )
+        store.add_system_turn(briefing)

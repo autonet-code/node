@@ -1,8 +1,8 @@
-"""Orchestrator conversation persistence.
+"""Agent conversation persistence.
 
-Stores the conversation history between the user and the orchestrator so that
+Stores the conversation history between the user and an agent so that
 context carries across invocations.  Each "session" is a linear sequence of
-turns (user message + orchestrator response).
+turns (user message + assistant response).
 
 Disk layout:
     data_dir/conversations/
@@ -69,7 +69,7 @@ class ConversationTurn:
 
 
 class ConversationStore:
-    """Manages orchestrator conversation history with JSONL persistence.
+    """Manages agent conversation history with JSONL persistence.
 
     The "active" conversation is the current ongoing session.  When the user
     resets, the active conversation is archived (moved to <session_id>.jsonl)
@@ -144,7 +144,7 @@ class ConversationStore:
 
         # Build formatted turns
         formatted: list[str] = []
-        _ROLE_PREFIX = {"user": "User", "assistant": "Orchestrator", "system": "System"}
+        _ROLE_PREFIX = {"user": "User", "assistant": "Assistant", "system": "System"}
         for turn in turns:
             prefix = _ROLE_PREFIX.get(turn.role, turn.role.title())
             formatted.append(f"{prefix}: {turn.content}")
@@ -208,7 +208,7 @@ class ConversationStore:
         return turn
 
     def add_assistant_turn(self, content: str, execution_id: str | None = None) -> ConversationTurn:
-        """Record an orchestrator response."""
+        """Record an assistant response."""
         turn = ConversationTurn(role="assistant", content=content, execution_id=execution_id)
         self._turns.append(turn)
         self._persist_turn(turn)
@@ -343,7 +343,7 @@ class ConversationStore:
         """Fix user turns that were corrupted by history-prepending.
 
         Prior to the fix, the execution engine stored the full prompt
-        (including ``System: ...``, ``User: ...``, ``Orchestrator: ...``
+        (including ``System: ...``, ``User: ...``, ``Assistant: ...``
         history) as a single user turn.  This strips those back to just
         the actual user message and removes exact duplicates.
         """
@@ -352,10 +352,13 @@ class ConversationStore:
         for turn in self._turns:
             content = turn.content
             # Detect history-embedded user turns: content has role prefixes
-            # like "System: ...\nUser: ...\nOrchestrator: ..." baked in.
+            # like "System: ...\nUser: ...\nAssistant: ..." baked in.
+            # LEGACY-DATA: "\nOrchestrator: " matches JSONL persisted before
+            # the assistant label was renamed.
             if turn.role == "user" and "\nUser: " in content and (
                 content.startswith("System: ")
                 or content.startswith("User: ")
+                or "\nAssistant: " in content
                 or "\nOrchestrator: " in content
             ):
                 # Extract the last "User: ..." segment as the real message.

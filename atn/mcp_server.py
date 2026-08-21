@@ -1,4 +1,4 @@
-"""MCP server exposing ATN orchestrator tools — thin daemon client.
+"""MCP server exposing ATN agent tools — thin daemon client.
 
 Connects to a RUNNING ATN daemon over its local WebSocket (:7700) and
 proxies tool calls.  It never boots a Runtime of its own: no agent
@@ -31,7 +31,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
 
-from .orchestrator.tools import get_tool_definitions
+from .agent_tools import get_tool_definitions
 from .ws_server import DEFAULT_PORT
 
 log = logging.getLogger(__name__)

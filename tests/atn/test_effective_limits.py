@@ -13,7 +13,7 @@ from atn.config import ATNConfig, ProviderConfig
 from atn.effective_limits import compute_effective_limits
 from atn.events import EventBus
 from atn.models import AgentDefinition, AgentMode
-from atn.orchestrator.tools import _get_my_budget_status
+from atn.agent_tools import _get_my_budget_status
 from atn.runtime import Runtime
 
 

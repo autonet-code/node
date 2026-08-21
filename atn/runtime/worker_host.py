@@ -413,11 +413,11 @@ class WorkerHost:
         # target needs bounding here.
         runtime = getattr(self._engine, "_runtime_ref", None)
         if runtime is not None:
-            from ..orchestrator import ORCHESTRATOR_ID
+            from ..agent_tools import is_owner_caller
             tgt_defn = runtime.get_agent(target)
             if tgt_defn is None:
                 return {"error": f"inbox_post target '{target}' not found"}
-            if agent_id != ORCHESTRATOR_ID:
+            if not is_owner_caller(agent_id):
                 src_defn = runtime.get_agent(agent_id)
                 if src_defn is not None:
                     is_parent = (src_defn.parent_id == target)
@@ -497,7 +497,7 @@ class WorkerHost:
         if not isinstance(payload, dict):
             return {"error": "spawn_child payload must be an object"}
 
-        from ..orchestrator.tools import execute_tool
+        from ..agent_tools import execute_tool
 
         # Hoisted above the binding seam: the seam reads daemon-held parent state
         # (registry) through the runtime, and the stash target
@@ -669,7 +669,7 @@ class WorkerHost:
 
         # P5 subscription-budget snapshot: an isolated bridge agent's provider
         # lives in the WORKER, so it is NOT in the daemon's _active_providers and
-        # get_my_budget_status (orchestrator/tools.py) would answer empty. Cache
+        # get_my_budget_status (agent_tools.py) would answer empty. Cache
         # the worker's last session_stats (which carries ``rate_limits`` +
         # ``tokens_per_pct_by_class`` for bridge) under this agent_id, reusing the
         # SAME dict the "provider is gone, answer from cache" path already reads.

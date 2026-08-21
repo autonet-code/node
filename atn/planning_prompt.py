@@ -1,7 +1,7 @@
 """Planning review context builder.
 
-The planning loop periodically triggers the orchestrator with a work message
-containing a context block built from this module.  The orchestrator then
+The planning loop periodically triggers the fleet-root agent with a work
+message containing a context block built from this module.  That agent then
 reviews goals (which are agents), proposes tasks, and allocates unused
 credit budget.
 """
@@ -50,7 +50,7 @@ def build_planning_context(
 ) -> str:
     """Build the context block injected into the planning review message.
 
-    This is a deterministic text block — no LLM call.  The orchestrator's
+    This is a deterministic text block — no LLM call.  The target agent's
     cognitive step receives it as the inbox message content.
     """
     lines: list[str] = [PLANNING_REVIEW_INSTRUCTION, ""]
