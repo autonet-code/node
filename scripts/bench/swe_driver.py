@@ -45,8 +45,16 @@ issue was reported. Your fix will be evaluated by the repo's own test suite.
 Rules:
 - Modify source code only. Do NOT modify tests or add new test files.
 - Make the minimal change that resolves the issue.
-- You may delegate subtasks to child agents when that is more efficient.
-- When the fix is complete and coherent, state DONE and stop.
+- Before writing the fix, work out what EXACT behavior the maintainers
+  expect (exact error wording, exact output format): read the issue text
+  closely and check nearby tests for the established conventions.
+- MANDATORY before DONE: (1) write a small script that reproduces the
+  issue and run it to confirm your fix changes the behavior; (2) run
+  `python -m py_compile` on every file you modified. If you cannot show
+  both, you are not done.
+- Before DONE, DELETE every scratch file you created (repro scripts,
+  notes): only your fix to the existing source may remain in the tree.
+- When the fix is complete and verified, state DONE and stop.
 """
 
 
@@ -118,6 +126,42 @@ class DaemonClient:
             await self.ws.close()
 
 
+async def usage_gate(client: "DaemonClient", threshold: float):
+    """Block while the shared Claude Max 5h window is above threshold%.
+
+    Reads the daemon's provider_rate_limits surface — the SDK-event-fed
+    cache behind /usage. Utilization arrives as a 0-1 fraction. The raw
+    header probe (refresh_usage style) is deliberately NOT used: it read
+    ~0% while the subscription was exhausted (run14, 2026-08-17).
+    """
+    while True:
+        try:
+            res = await client.call("provider_rate_limits")
+            entry = (res or {}).get("rate_limits", {}).get("five_hour") or {}
+        except Exception as e:
+            print(f"  usage gate: daemon query failed ({e}); pausing 120s", flush=True)
+            await asyncio.sleep(120)
+            continue
+        status = entry.get("status", "")
+        util = entry.get("utilization")
+        util_pct = float(util) * 100.0 if util is not None else None
+        resets_at = entry.get("resetsAt") or 0
+        # A reading from before the window reset describes a spent window
+        # that no longer exists — treat as fresh/unknown and proceed.
+        if resets_at and resets_at < time.time():
+            return util_pct if util_pct is not None else -1.0
+        if status == "rejected" or (util_pct is not None and util_pct >= threshold):
+            wait = max(120.0, resets_at - time.time() + 120.0) if resets_at else 900.0
+            wait = min(wait, 3600.0)
+            print(f"  QUOTA GUARD: 5h window at "
+                  f"{util_pct if util_pct is not None else '?'}% "
+                  f"(status={status or '?'}) >= {threshold}%; sleeping {int(wait)}s",
+                  flush=True)
+            await asyncio.sleep(wait)
+            continue
+        return util_pct if util_pct is not None else -1.0
+
+
 def fetch_tasks(limit: int, offset: int, cache: Path) -> list[dict]:
     cache.parent.mkdir(parents=True, exist_ok=True)
     if cache.exists():
@@ -160,9 +204,26 @@ def checkout(task: dict, work_root: Path, repo_cache: Path) -> Path:
     return workdir
 
 
+def syntax_check(workdir: Path) -> list[str]:
+    """py_compile every modified .py file; return list of broken files."""
+    out = subprocess.run(
+        ["git", "-C", str(workdir), "diff", "--name-only"],
+        check=True, capture_output=True, text=True,
+    )
+    broken = []
+    for name in out.stdout.splitlines():
+        if name.endswith(".py") and (workdir / name).exists():
+            r = subprocess.run(["python3", "-m", "py_compile", str(workdir / name)],
+                               capture_output=True)
+            if r.returncode != 0:
+                broken.append(name)
+    return broken
+
+
 def collect_patch(workdir: Path) -> str:
-    subprocess.run(["git", "-C", str(workdir), "add", "-N", "."],
-                   check=True, capture_output=True)
+    # Tracked files only: untracked leftovers (repro scripts the agent forgot
+    # to delete) polluted run10-12 patches with 100KB+ of scratch. A fix that
+    # genuinely needs a new source file is rare enough to lose.
     out = subprocess.run(
         ["git", "-C", str(workdir), "diff", "--", ".", ":(exclude)tests/", ":(exclude)*/tests/*"],
         check=True, capture_output=True, text=True,
@@ -248,6 +309,16 @@ async def run_task(client: DaemonClient, task: dict, args, workdir: Path) -> dic
     wall = time.monotonic() - started
     ledger, records = await tree_ledger(client, agent_id)
     patch = await asyncio.to_thread(collect_patch, workdir)
+    broken = await asyncio.to_thread(syntax_check, workdir)
+    # the daemon reports execution.completed even for loop aborts — the
+    # truth is in the result text (run10 lesson)
+    result_text = ""
+    for r in records.get(agent_id, []):
+        out_field = r.get("output") or {}
+        if isinstance(out_field, dict):
+            result_text = str(out_field.get("result") or "")
+    if status == "execution.completed" and result_text.startswith("Aborted:"):
+        status = "execution.aborted"
     # export full execution records BEFORE teardown deletes them
     tdir = Path(args.out) / "transcripts"
     tdir.mkdir(parents=True, exist_ok=True)
@@ -270,7 +341,8 @@ async def run_task(client: DaemonClient, task: dict, args, workdir: Path) -> dic
     except RuntimeError:
         pass
     return {"instance_id": iid, "status": status, "wall_s": round(wall, 1),
-            "patch": patch, "ledger": ledger}
+            "patch": patch, "ledger": ledger, "syntax_broken": broken,
+            "result_tail": result_text[:200]}
 
 
 async def main():
@@ -281,8 +353,11 @@ async def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--offset", type=int, default=0)
-    ap.add_argument("--max-turns", type=int, default=60)
+    ap.add_argument("--max-turns", type=int, default=150)
     ap.add_argument("--task-timeout", type=float, default=1800.0)
+    ap.add_argument("--usage-threshold", type=float, default=0.0,
+                    help="pause when the Claude Max 5h window exceeds this %% "
+                         "(0 = guard off; use for claude_max runs)")
     ap.add_argument("--work-root", default="/workspace/bench/work")
     ap.add_argument("--repo-cache", default="/workspace/bench/repos")
     args = ap.parse_args()
@@ -298,20 +373,59 @@ async def main():
     tasks = fetch_tasks(args.limit, args.offset, out / "tasks.jsonl")
     client = DaemonClient(args.ws)
     await client.connect()
+    # Failure-driven backstop: when the subscription window is exhausted the
+    # bridge gets NO rate-limit events (requests die before the stream opens),
+    # so the gate's gauge stays blind. Zero-token tasks are the observable
+    # symptom — back off on them instead of churning junk rows (run14 lesson,
+    # twice).
+    consecutive_empty = 0
     try:
         for i, task in enumerate(tasks):
             iid = task["instance_id"]
             if iid in done:
                 continue
-            print(f"[{i+1}/{len(tasks)}] {iid}", flush=True)
-            workdir = await asyncio.to_thread(
-                checkout, task, Path(args.work_root), Path(args.repo_cache))
+            if args.usage_threshold > 0:
+                util = await usage_gate(client, args.usage_threshold)
+                print(f"[{i+1}/{len(tasks)}] {iid}  (5h window {util:.1f}%)", flush=True)
+            else:
+                print(f"[{i+1}/{len(tasks)}] {iid}", flush=True)
+            workdir = None
             try:
+                # inside the try: a git failure (full disk, transient lock)
+                # must record driver.error and continue, not kill the shard
+                workdir = await asyncio.to_thread(
+                    checkout, task, Path(args.work_root), Path(args.repo_cache))
                 r = await run_task(client, task, args, workdir)
             except Exception as e:
                 print(f"  ERROR {iid}: {e}", flush=True)
                 r = {"instance_id": iid, "status": "driver.error", "error": str(e),
                      "wall_s": 0, "patch": "", "ledger": {}}
+            finally:
+                # worktrees are ~40-400MB each; 138 of them filled the disk
+                # and killed all four run14 shards. Patch is already collected.
+                if workdir is not None:
+                    await asyncio.to_thread(
+                        subprocess.run, ["rm", "-rf", str(workdir)],
+                        check=False, capture_output=True)
+            spent = int((r.get("ledger", {}).get("totals", {}) or {}).get("total", 0) or 0)
+            if spent == 0:
+                # Zero tokens = the attempt never happened (quota rejection,
+                # stall, dead daemon) — not a real result. Don't record;
+                # back off and let a later pass re-run it. This is NOT
+                # retry-until-patch: real attempts are recorded below,
+                # empty patch included (pass@1 = one attempt).
+                consecutive_empty += 1
+                backoff = min(900 * consecutive_empty, 3600)
+                print(f"  BACKSTOP: zero-token attempt #{consecutive_empty}; "
+                      f"NOT recording, sleeping {backoff}s", flush=True)
+                with ledger_path.open("a") as f:
+                    f.write(json.dumps({k: v for k, v in r.items() if k != "patch"}) + "\n")
+                await asyncio.sleep(backoff)
+                continue
+            consecutive_empty = 0
+            if not r["patch"].strip():
+                print("  note: real attempt with empty patch — recorded as a miss",
+                      flush=True)
             with preds_path.open("a") as f:
                 f.write(json.dumps({"instance_id": iid,
                                     "model_name_or_path": f"atn+{args.model}",
@@ -322,7 +436,8 @@ async def main():
             t = r.get("ledger", {}).get("totals", {})
             print(f"  {r['status']}  wall={r['wall_s']}s  "
                   f"tokens={t.get('total', 0)} (in={t.get('input_tokens', 0)} "
-                  f"out={t.get('output_tokens', 0)})  patch={len(r['patch'])}B", flush=True)
+                  f"out={t.get('output_tokens', 0)})  patch={len(r['patch'])}B  "
+                  f"syntax_broken={r.get('syntax_broken', [])}", flush=True)
     finally:
         await client.close()
 

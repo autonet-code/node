@@ -58,3 +58,7 @@ PLAN.md
 /scripts/.instrument_seed_results.json
 # Hardhat build cache (churns on every compile/E2E run)
 cache/
+# Local SWE-bench run artifacts (published separately: EightRice/atn-swe-bench)
+/scripts/bench/results/
+# Local E2E deployment addresses (hardhat-local, regenerated per run)
+/deployments/_e2e_service_provider.json
