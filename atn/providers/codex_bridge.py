@@ -9,7 +9,9 @@ Supports two request types:
   - orchestrate: multi-turn with Codex's built-in tools + ATN tool relay.
 
 Config keys (in ~/.atn/config.yaml under providers.codex_max):
-  model       (str)   "o4-mini" | "o3" | "gpt-4.1".  Default: "o4-mini".
+  model       (str)   e.g. "gpt-5.6-terra" | "gpt-5.5".  Default: "gpt-5.6-terra".
+                      ChatGPT-account auth accepts only current Codex models;
+                      retired ids (o3/o4-mini/gpt-4.1) are remapped by the bridge.
 
 The bridge subprocess is started lazily on first request and kept alive
 for subsequent requests.  It shuts down when the provider is closed.
@@ -71,7 +73,7 @@ class CodexBridgeProvider(Provider):
 
     def __init__(
         self,
-        model: str = "o4-mini",
+        model: str = "gpt-5.6-terra",
         bridge_script: str | Path | None = None,
         api_key: str = "",
     ) -> None:
@@ -103,6 +105,10 @@ class CodexBridgeProvider(Provider):
         self._cumulative_cache_creation: int = 0
         self._last_input_tokens: int = 0
         self._compaction_count: int = 0
+        # Subscription-window utilization cache (see refresh_usage) — same
+        # shape as the claude bridge's _rate_limits so the provider card
+        # renders both providers identically.
+        self._rate_limits: dict[str, Any] = {}
 
     @property
     def name(self) -> str:
@@ -472,19 +478,10 @@ class CodexBridgeProvider(Provider):
                             result = {"error": f"Tool '{tool_name}' failed: {exc}"}
                             is_error = True
 
-                        if self.event_bus:
-                            result_str = str(result)
-                            await self.event_bus.emit(Event(
-                                type=EventType.AGENT_TOOL_USE_RESULT,
-                                source=self.source_agent_id,
-                                data={
-                                    "agent_id": self.source_agent_id,
-                                    "tool_use_id": call_id,
-                                    "tool_name": tool_name,
-                                    "is_error": is_error,
-                                    "result_preview": result_str[:500],
-                                },
-                            ))
+                        # No AGENT_TOOL_USE_RESULT emission here: the bridge's
+                        # item.completed stream event (handled in
+                        # _stream_events) carries the result for the UI.
+                        # Emitting from both paths showed every call twice.
 
                         # Cap oversized results — same rationale as bridge.py
                         result_payload: Any = result
@@ -646,6 +643,86 @@ class CodexBridgeProvider(Provider):
         }
 
     # ------------------------------------------------------------------
+    # Usage refresh
+    # ------------------------------------------------------------------
+
+    async def refresh_usage(self) -> dict[str, Any]:
+        """Fetch ChatGPT-account subscription utilization for Codex.
+
+        The Codex CLI reads its usage meter from the ChatGPT backend
+        (``.../backend-api/wham/usage``, see codex-rs backend-client) using
+        the OAuth token in ``~/.codex/auth.json``. We hit the same endpoint
+        and map the windows onto the claude-bridge ``_rate_limits`` shape
+        (five_hour / seven_day / ...) so the provider card renders both
+        providers the same way.
+        """
+        try:
+            import httpx
+        except ImportError:
+            log.warning("httpx not installed — cannot refresh codex usage")
+            return dict(self._rate_limits)
+
+        auth_path = Path.home() / ".codex" / "auth.json"
+        try:
+            tokens = json.loads(auth_path.read_text(encoding="utf-8")).get("tokens", {})
+        except Exception as exc:
+            log.warning("Failed to read Codex auth from %s: %s", auth_path, exc)
+            return dict(self._rate_limits)
+        access_token = tokens.get("access_token", "")
+        if not access_token:
+            log.warning("No Codex access token in %s", auth_path)
+            return dict(self._rate_limits)
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "User-Agent": "codex-cli",
+        }
+        if tokens.get("account_id"):
+            headers["ChatGPT-Account-Id"] = tokens["account_id"]
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    "https://chatgpt.com/backend-api/wham/usage", headers=headers)
+                if resp.status_code != 200:
+                    log.warning("Codex usage probe returned %s", resp.status_code)
+                    return dict(self._rate_limits)
+                data = resp.json()
+        except Exception as exc:
+            log.warning("Codex usage probe failed: %s", exc)
+            return dict(self._rate_limits)
+
+        def _window_key(seconds: int | None) -> str:
+            # Paid plans meter a 5h + weekly pair like Claude; free meters a
+            # 30-day window. Bucket by duration so the frontend's named slots
+            # light up when they apply.
+            if not seconds:
+                return "primary"
+            if seconds <= 6 * 3600:
+                return "five_hour"
+            if seconds <= 8 * 86_400:
+                return "seven_day"
+            return f"{round(seconds / 86_400)}d"
+
+        rl = data.get("rate_limit") or {}
+        now_ms = int(time.time() * 1000)
+        for win in ("primary_window", "secondary_window"):
+            w = rl.get(win)
+            if not w:
+                continue
+            key = _window_key(w.get("limit_window_seconds"))
+            self._rate_limits[key] = {
+                "status": "limit_reached" if rl.get("limit_reached") else "allowed",
+                "rateLimitType": key,
+                "utilization": (w.get("used_percent") or 0) / 100.0,
+                "resetsAt": w.get("reset_at"),
+                "windowSeconds": w.get("limit_window_seconds"),
+                "updatedAt": now_ms,
+            }
+        log.info("codex refresh_usage: %s", {
+            k: v.get("utilization") for k, v in self._rate_limits.items()})
+        return dict(self._rate_limits)
+
+    # ------------------------------------------------------------------
     # Subprocess management
     # ------------------------------------------------------------------
 
@@ -710,6 +787,10 @@ class CodexBridgeProvider(Provider):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            # One NDJSON line can far exceed asyncio's 64KB default (a fat
+            # tool result or long final text) — readline() then raises
+            # LimitOverrunError and kills the whole run.
+            limit=32 * 1024 * 1024,
             **kwargs,
         )
 
@@ -846,9 +927,15 @@ class CodexBridgeProvider(Provider):
             self._stderr_task = None
         if proc is None or proc.returncode is not None:
             return
+        # Write shutdown straight to the live process — going through
+        # _send_raw here would hit _ensure_process (self._process is already
+        # None) and spawn a FRESH bridge just to tell it to shut down.
         try:
-            async with self._lock:
-                await self._send_raw({"type": "shutdown"}, _retry=False)
+            if proc.stdin:
+                self._request_id += 1
+                proc.stdin.write(
+                    (json.dumps({"type": "shutdown", "id": f"req-{self._request_id}"}) + "\n").encode())
+                await asyncio.wait_for(proc.stdin.drain(), timeout=2)
         except Exception:
             pass
         try:

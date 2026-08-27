@@ -137,6 +137,9 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="Claude Haiku 4.5",
         context_window=200_000, max_output_tokens=8_192,
         relative_cost=0.2, default_channel="claude_max",
+        # Empirically verified 2026-08-22: runs the SDK orchestrate tool
+        # loop cleanly (~4s round-trip). The 2026-07 hot-spin is gone.
+        loop_capable=True,
     ),
     ModelSpec(
         id="claude-sonnet-4", family="claude", klass="sonnet",
@@ -152,6 +155,13 @@ _MODELS: tuple[ModelSpec, ...] = (
     ),
 
     # ---- OpenAI ----
+    ModelSpec(
+        id="gpt-5.6-terra", family="gpt", klass="other",
+        display_name="GPT-5.6 Terra",
+        context_window=400_000, max_output_tokens=128_000,
+        relative_cost=1.0, default_channel="codex_max",
+        loop_capable=True,
+    ),
     ModelSpec(
         id="gpt-5.5", family="gpt", klass="other",
         display_name="GPT-5.5",

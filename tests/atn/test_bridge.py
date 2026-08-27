@@ -289,22 +289,26 @@ async def test_bridge_script_path():
 
 
 # ---------------------------------------------------------------------------
-# §11 model-tier guard — reject orchestrate on non-loop-capable models
+# §11 model-tier guard — RETIRED for haiku (2026-08-22): the SDK hot-spin
+# that justified the block no longer reproduces (bare "haiku" and
+# claude-haiku-4-5 both run the tool loop in ~4s); the idle-ceiling wedge
+# guard is the standing protection. The hook stays; nothing is blocked.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_orchestrate_rejects_haiku_before_spawning():
-    """A haiku-class model on the orchestrate path must be rejected BEFORE the
-    subprocess is spawned (it hot-spins the SDK loop)."""
+async def test_orchestrate_allows_haiku():
+    """Haiku passes the (retired) tier guard — chatting with a haiku agent is
+    supported. Sentinel at _ensure_process proves the guard didn't reject."""
     provider = BridgeProvider(model="claude-haiku-4-5")
 
-    # _ensure_process must never be reached — assert it isn't by making it blow
-    # up if called.
-    async def _boom():
-        raise AssertionError("_ensure_process should not run for a rejected model")
-    provider._ensure_process = _boom  # type: ignore
+    class _Sentinel(Exception):
+        pass
 
-    with pytest.raises(ProviderError, match="not loop-capable"):
+    async def _sentinel():
+        raise _Sentinel()
+    provider._ensure_process = _sentinel  # type: ignore
+
+    with pytest.raises(_Sentinel):
         await provider.send_orchestrate(
             message="hi", tools=[], tool_executor=AsyncMock(),
             model="claude-haiku-4-5",
@@ -335,12 +339,10 @@ async def test_orchestrate_allows_sonnet():
 
 def test_model_tier_helper():
     from atn.providers.bridge import _model_is_loop_capable
-    ok, _ = _model_is_loop_capable("claude-haiku-4-5")
-    assert ok is False
-    ok, _ = _model_is_loop_capable("claude-sonnet-4-6")
-    assert ok is True
-    ok, _ = _model_is_loop_capable("claude-opus-4-8")
-    assert ok is True
+    # Retired guard: everything passes, including haiku and the bare alias.
+    for m in ("claude-haiku-4-5", "haiku", "claude-sonnet-4-6", "claude-opus-4-8"):
+        ok, _ = _model_is_loop_capable(m)
+        assert ok is True
 
 
 # ---------------------------------------------------------------------------

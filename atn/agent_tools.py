@@ -1840,6 +1840,16 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
                     if parent_provider and parent_provider != model:
                         explicit_provider = parent_provider
 
+        # An explicit provider with no model gets THAT provider's default,
+        # never the daemon-wide default_model (which may belong to a
+        # different provider — picking codex_max used to land the agent on
+        # the claude default anyway).
+        if not model and explicit_provider:
+            try:
+                model = runtime.providers.default_model_for(explicit_provider)
+            except Exception:
+                model = ""
+
         effective_model = model or runtime._config.default_model or "sonnet"
         model_tier = get_model_tier(effective_model)
 
@@ -4047,11 +4057,16 @@ async def _get_children_status(runtime: Runtime, input: dict[str, Any]) -> dict[
             "status": status.value if status else "unknown",
         }
 
-        # Get delegate registry info for turns and last_tool
+        # Delegate registry info. DelegateNode tracks tool_calls (not
+        # "turns") and a result preview — reading fields it doesn't have
+        # crashed this tool with AttributeError.
         node = runtime.delegate_registry.get_node(child_id)
         if node:
-            entry["turns"] = node.turns
-            entry["last_tool"] = node.last_tool
+            entry["tool_calls"] = node.tool_calls
+            if node.result_preview:
+                entry["result_preview"] = node.result_preview[:200]
+            if node.error:
+                entry["error"] = node.error
 
         # Determine conversation_path based on agent mode
         if child.mode == AgentMode.COGNITIVE:

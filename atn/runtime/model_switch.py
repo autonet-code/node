@@ -13,24 +13,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _infer_provider_for_model(model: str) -> str | None:
-    """Infer the provider name from a model ID prefix.
-
-    Returns the provider slot best suited for the model, or None if unknown.
-    Prefers bridge providers (claude_max, codex_max) over API-key providers.
-    """
-    m = model.lower()
-    if m.startswith("claude-"):
-        return "claude_max"
-    if m.startswith("gpt-") or m.startswith("o3") or m.startswith("o4") or m.startswith("o1"):
-        return "codex_max"
-    if m.startswith("gemini-"):
-        return "gemini"
-    if m.startswith("deepseek"):
-        return "deepseek"
-    return None
-
-
 class ModelSwitch:
     """Generic per-agent model switching."""
 
@@ -79,6 +61,15 @@ class ModelSwitch:
         await self.registry.unregister_agent(agent_id)
         await self.registry.register_agent(new_defn)
 
+        # Persist to agent.yaml — without this the switch is RAM-only and
+        # every daemon restart silently reverts the agent to whatever model
+        # it was created with.
+        try:
+            from ..loader import save_agent
+            save_agent(new_defn, self._config.agents_dir)
+        except Exception as exc:
+            log.warning("Model changed but YAML save failed for '%s': %s", agent_id, exc)
+
         # Reactivate if it was active/running before
         await self.registry.activate_agent(agent_id)
 
@@ -92,23 +83,14 @@ class ModelSwitch:
 
         self._stamp_active_model(agent_id, model)
 
-        # A root agent (no parent) is the user's main agent; the daemon-wide
-        # default follows it so the next created agent inherits the same model.
-        if not old_defn.parent_id:
-            self._persist_default_model(model)
+        # NOTE: the daemon-wide default deliberately does NOT follow a root
+        # agent's model any more. That rule existed to keep the main agent's
+        # model sticky across restarts — the YAML persistence above does that
+        # properly — and in a multi-root fleet it silently rewrote the daemon
+        # default whenever ANY root agent was retuned.
 
         log.info("Agent '%s' model changed to '%s'", agent_id, model)
         return agent_id
-
-    def _persist_default_model(self, model: str) -> None:
-        """Persist the daemon default model (and inferred provider) to config."""
-        from ..config import save_default_model_to_config, save_default_provider_to_config
-        self._config.default_model = model
-        save_default_model_to_config(model)
-        provider = _infer_provider_for_model(model)
-        if provider is not None:
-            self._config.default_provider = provider
-            save_default_provider_to_config(provider)
 
     def _stamp_active_model(self, agent_id: str, model: str) -> None:
         """Sync the stats surfaces to a just-changed model.

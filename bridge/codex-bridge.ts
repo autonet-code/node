@@ -78,7 +78,9 @@ const pendingToolCalls = new Map<string, {
 
 function relayToolCall(name: string, input: unknown): Promise<any> {
   const callId = randomUUID().slice(0, 12)
-  emitEvent({ type: "tool_use_start", tool_use_id: callId, tool_name: name, input })
+  // No emitEvent here: the SDK's item.started/item.completed thread events
+  // already cover this call (with richer data — result_preview on complete).
+  // Emitting from the relay too made every tool call appear TWICE in the UI.
   return new Promise((resolve, reject) => {
     pendingToolCalls.set(callId, { resolve, reject })
     const msg = JSON.stringify({
@@ -97,8 +99,8 @@ function handleToolResult(callId: string, result: any): void {
   if (pending) {
     pendingToolCalls.delete(callId)
     pending.resolve(result)
-    const isError = result != null && typeof result === "object" && !!result.error
-    emitEvent({ type: "tool_use_result", tool_use_id: callId, is_error: isError })
+    // No emitEvent — see relayToolCall: the SDK item.completed event carries
+    // the result for the UI.
     log("tool_result received from Python", { callId })
   } else {
     // Check if it's for the TCP relay
@@ -206,12 +208,19 @@ function stopRelayServer(): void {
 
 // -- Model mapping --
 
+// ChatGPT-account auth accepts only current Codex models (verified
+// empirically 2026-08: gpt-5.6-terra, gpt-5.5). Retired ids (o3, o4-mini,
+// gpt-4.1, *-codex) are rejected with "not supported when using Codex with
+// a ChatGPT account" — map anything stale onto the default instead of
+// passing it through to a guaranteed 400.
+const DEFAULT_MODEL = "gpt-5.6-terra"
+const RETIRED_MODELS = /^(o[134]|gpt-4)/
+
 function mapModel(model: string): string {
-  if (model.startsWith("o") || model.startsWith("gpt")) return model
-  if (model.includes("codex")) return "o4-mini"
-  if (model.includes("mini")) return "o4-mini"
-  if (model.includes("reasoning") || model.includes("o3")) return "o3"
-  return "o4-mini"
+  if (!model) return DEFAULT_MODEL
+  if (RETIRED_MODELS.test(model)) return DEFAULT_MODEL
+  if (model.startsWith("gpt")) return model
+  return DEFAULT_MODEL
 }
 
 // -- Session tracking --
@@ -286,6 +295,13 @@ function buildMcpConfig(tools: ATNToolDef[], port: number): Record<string, any> 
         ATN_RELAY_PORT: String(port),
         ATN_TOOLS_JSON: JSON.stringify(tools),
       },
+      // Codex CLI >= 0.149 gates MCP tool calls behind per-tool approval;
+      // with approvalPolicy "never" an unapproved call is auto-DENIED
+      // ("MCP tool call requires approval, but approval policy is never").
+      // "approve" = unconditionally approved (codex-rs mcp_tool_call.rs:
+      // Auto consults annotations we don't set, Approve never asks).
+      // ATN tools are our own relay — approve them unconditionally.
+      default_tools_approval_mode: "approve",
     },
   }
 }
@@ -366,7 +382,7 @@ function respond(resp: BridgeResponse): void {
 
 async function handleCreate(req: CreateRequest): Promise<void> {
   try {
-    const model = mapModel(req.model || "o4-mini")
+    const model = mapModel(req.model || DEFAULT_MODEL)
     log("request.create", { model, messageLen: req.message.length })
 
     const codex = getSimpleCodex()
@@ -429,7 +445,7 @@ async function handleCreate(req: CreateRequest): Promise<void> {
 
 async function handleOrchestrate(req: OrchestrateRequest): Promise<void> {
   try {
-    const model = mapModel(req.model || "o4-mini")
+    const model = mapModel(req.model || DEFAULT_MODEL)
     const maxTurns = req.max_turns || 20
 
     log("request.orchestrate", {

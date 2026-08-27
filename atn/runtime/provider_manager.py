@@ -118,11 +118,11 @@ _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "claude-opus-4-6",   "name": "Claude Opus 4.6"},
         {"id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5"},
     ],
+    # ChatGPT-account Codex auth accepts ONLY current Codex models —
+    # verified empirically 2026-08 (retired ids get a 400 from the API).
     "codex_max": [
-        {"id": "gpt-5.5",  "name": "GPT-5.5"},
-        {"id": "gpt-4.1",  "name": "GPT-4.1"},
-        {"id": "o3",       "name": "o3"},
-        {"id": "o4-mini",  "name": "o4-mini"},
+        {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra"},
+        {"id": "gpt-5.5",       "name": "GPT-5.5"},
     ],
     "anthropic": [
         {"id": "claude-fable-5",    "name": "Claude Fable 5"},
@@ -852,6 +852,17 @@ class ProviderManager:
             except Exception as exc:
                 log.warning("Claude Max bridge auto-detect failed: %s", exc)
 
+        if "codex_max" not in cognitive._providers and self._check_codex_auth():
+            try:
+                ready = await self.probe_codex_bridge()
+                if ready:
+                    self._hot_register_provider("codex_max", "")
+                    log.info("Auto-detected Codex bridge")
+                else:
+                    log.info("Codex auth present but bridge not available")
+            except Exception as exc:
+                log.warning("Codex bridge auto-detect failed: %s", exc)
+
         if "ollama" not in cognitive._providers:
             try:
                 models = await self.probe_ollama()
@@ -1063,6 +1074,29 @@ class ProviderManager:
 
         return providers
 
+    def default_model_for(self, provider_id: str) -> str:
+        """The model a new agent should get when the user picked a provider
+        but no model. Precedence: per-provider config default → the daemon
+        default IF it belongs to this provider → curated-list head →
+        provider-defaults table. Never returns a model from a DIFFERENT
+        provider (the create-form bug: picking codex_max still landed agents
+        on the claude default)."""
+        pconfig = self._config.providers.get(provider_id)
+        if pconfig and pconfig.default_model:
+            return pconfig.default_model
+        daemon_default = self._config.default_model
+        if daemon_default:
+            try:
+                from ..model_specs import resolve as _resolve
+                if _resolve(daemon_default).default_channel == provider_id:
+                    return daemon_default
+            except Exception:
+                pass
+        curated = _PROVIDER_MODELS.get(provider_id)
+        if curated:
+            return curated[0]["id"]
+        return self._PROVIDER_DEFAULTS.get(provider_id, {}).get("default_model", "")
+
     async def configure_provider(self, provider_id: str, api_key: str = "") -> dict[str, Any]:
         info = self._KNOWN_PROVIDERS.get(provider_id)
         if not info:
@@ -1101,6 +1135,25 @@ class ProviderManager:
         elif info["auth_type"] == "bridge":
             # Auto-install bridge dependencies if missing
             await self._ensure_bridge_deps()
+
+            if provider_id == "codex_max":
+                # Codex has its own auth (ChatGPT login via 'codex login' →
+                # ~/.codex/auth.json) — the Claude checks below don't apply.
+                if not self._check_codex_auth():
+                    raise ValueError(
+                        "Codex is not logged in. Run 'codex login' in a "
+                        "terminal (ChatGPT account), then connect again."
+                    )
+                ready = await self.probe_codex_bridge()
+                if not ready:
+                    raise ValueError(
+                        "Codex auth found but the bridge failed to respond. "
+                        "Check that 'bun' is installed and bridge dependencies "
+                        "are set up (cd bridge && npm install)."
+                    )
+                self._hot_register_provider(provider_id, "")
+                return {"status": "ok", "provider": provider_id}
+
             auth = await self._check_claude_auth()
             if not auth["installed"]:
                 raise ValueError(
@@ -1334,6 +1387,28 @@ class ProviderManager:
             log.debug("Bridge probe failed: %s", exc)
             return False
 
+    @staticmethod
+    def _check_codex_auth() -> bool:
+        """Codex CLI login state: 'codex login' writes ~/.codex/auth.json."""
+        try:
+            auth_file = Path.home() / ".codex" / "auth.json"
+            return auth_file.is_file() and auth_file.stat().st_size > 2
+        except Exception:
+            return False
+
+    async def probe_codex_bridge(self) -> bool:
+        """Spawn the codex bridge and ping it — no model call, just proves
+        the subprocess + SDK import + pipe protocol work."""
+        try:
+            provider = CodexBridgeProvider()
+            resp = await asyncio.wait_for(provider._send_request({"type": "ping"}), timeout=20)
+            ok = resp.get("ok", False)
+            await provider.close()
+            return bool(ok)
+        except Exception as exc:
+            log.debug("Codex bridge probe failed: %s", exc)
+            return False
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -1354,6 +1429,14 @@ class ProviderManager:
                 provider = BridgeProvider(
                     model=default_model,
                     bridge_script=bridge_script if bridge_script else None,
+                )
+            elif provider_id == "codex_max":
+                pconfig = self._config.providers.get("codex_max")
+                codex_key = api_key or self._resolve_api_key("codex_max") \
+                    or self._resolve_api_key("openai") or ""
+                provider = CodexBridgeProvider(
+                    model=(pconfig.default_model if pconfig else "") or "gpt-5.6-terra",
+                    api_key=codex_key,
                 )
             elif provider_id == "anthropic":
                 pconfig = self._config.providers.get("anthropic")

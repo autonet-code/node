@@ -136,6 +136,11 @@ _SECRETS_MESSAGES = frozenset({
 # or mutate owner-global state (budgets, profile/PII, providers, governance).
 # A full-fleet owner session (local or remote) is unaffected. Default-deny
 # still applies on top: see _authorize_tool_call.
+# Chat attachments (clipboard paste / attach button): size ceiling for one
+# upload. Generous for screenshots and documents; a session that needs more
+# should reference the file by path instead of uploading it.
+_ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024
+
 OWNER_ONLY_TOOLS = frozenset({
     "set_credit_budget", "get_credit_budget", "get_user_profile",
     "update_user_profile",
@@ -2933,6 +2938,45 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": True, "result": {"status": "removed", "agent_id": agent_id}}
             except ValueError as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+
+        # Chat attachment upload (clipboard paste / attach button). The
+        # frontend sends bytes; we persist under data_dir/attachments/ and
+        # return the PATH — the chat message then references the path as
+        # plain text and any agent with a file-read tool views it (Claude
+        # bridge Read renders images; codex has view_image). Content-addressed
+        # filename => repeat pastes of the same image dedupe for free.
+        if msg_type == "attachment_upload":
+            data_b64 = msg.get("data_b64", "")
+            if not data_b64:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'data_b64' field"}
+            import base64 as _b64
+            import hashlib as _hashlib
+            try:
+                blob = _b64.b64decode(data_b64, validate=True)
+            except Exception:
+                return {"msg_id": msg_id, "ok": False, "error": "Invalid base64 payload"}
+            if len(blob) > _ATTACHMENT_MAX_BYTES:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"Attachment too large ({len(blob)} bytes; "
+                                 f"limit {_ATTACHMENT_MAX_BYTES})"}
+            # Extension from the client filename, sanitized to a short
+            # alnum token; the basename itself is the content hash.
+            raw_name = str(msg.get("filename", "") or "")
+            ext = Path(raw_name).suffix.lower().lstrip(".")
+            if not ext.isalnum() or len(ext) > 8:
+                ext = "png"
+            digest = _hashlib.sha256(blob).hexdigest()[:16]
+            att_dir = self.runtime._config.data_dir / "attachments"
+            try:
+                att_dir.mkdir(parents=True, exist_ok=True)
+                dest = att_dir / f"{digest}.{ext}"
+                if not dest.exists():
+                    dest.write_bytes(blob)
+            except Exception as exc:
+                return {"msg_id": msg_id, "ok": False, "error": f"Failed to store attachment: {exc}"}
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "path": str(dest), "size": len(blob), "filename": raw_name or dest.name,
+            }}
 
         # Export an agent's private key. The ONLY message that returns a
         # private key in its body. Gated localhost-only at the top of

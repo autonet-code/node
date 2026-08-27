@@ -197,52 +197,21 @@ _KILL_GRACE_SECONDS = float(os.environ.get("ATN_BRIDGE_KILL_GRACE", "5"))
 
 
 def _model_is_loop_capable(model: str) -> tuple[bool, str]:
-    """§11 model-tier guard (READ-ONLY over model_specs).
+    """§11 model-tier guard — RETIRED for haiku (2026-08-22).
 
-    The SDK orchestrate loop is known to misbehave on non-loop-capable
-    models — a haiku-class model made the bun bridge hot-spin at 100% CPU with
-    zero output for 20+ min. Reject orchestrate on those models with a clear
-    error BEFORE spawning the SDK loop.
+    The original block (any haiku-class id, plus the bare "haiku" alias)
+    protected against an SDK orchestrate hot-spin: 100% CPU with zero
+    output for 20+ min on a haiku model (2026-07). Re-tested empirically on
+    the current SDK: both "claude-haiku-4-5" and the bare "haiku" alias run
+    the full tool loop in ~4s. The block was ALSO what made a plain
+    "chat-to-a-haiku-agent" impossible (agents worked around it by
+    converting to one-shot pipelines).
 
-    Uses ``model_specs.get_model_tier`` when present (the §14 flag another
-    agent may add), else falls back to the class bucket: haiku is not
-    loop-capable. Returns (ok, reason).
+    Kept as a hook: should a model class misbehave again, block it here
+    with a clear reason. The idle-ceiling wedge guard
+    (_read_stdout_guarded) remains the standing protection against any
+    silent hot-spin.
     """
-    try:
-        from .. import model_specs as _ms
-    except Exception:
-        return True, ""  # can't resolve — don't block
-    # Prefer an explicit tier/capability helper if model_specs exposes one.
-    getter = getattr(_ms, "get_model_tier", None)
-    if callable(getter):
-        try:
-            tier = getter(model)
-        except Exception:
-            tier = None
-        if isinstance(tier, str) and tier.lower() in ("haiku", "fast", "small"):
-            return False, (
-                f"model '{model}' (tier '{tier}') is not loop-capable (cannot "
-                "run the agentic loop); "
-                "the SDK orchestrate loop hot-spins on it — pick a "
-                "sonnet/opus-class model or set the model explicitly"
-            )
-        if isinstance(tier, str):
-            return True, ""
-    # Fallback: class bucket. Haiku is the known-bad orchestrate tier.
-    try:
-        klass = _ms.model_class(model)
-    except Exception:
-        klass = "other"
-    # Also catch the bare "haiku" family alias the bridge accepts
-    # (mapModelToClaudeModel maps any string containing "haiku" → haiku),
-    # which resolves to the default spec (klass "other") in the store.
-    if klass == "haiku" or "haiku" in (model or "").lower():
-        return False, (
-            f"model '{model}' (haiku-class) is not loop-capable (cannot "
-            "run the agentic loop); "
-            "the SDK orchestrate loop hot-spins on it — pick a "
-            "sonnet/opus-class model or set the model explicitly"
-        )
     return True, ""
 
 
@@ -1623,6 +1592,11 @@ class BridgeProvider(Provider):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            # One NDJSON line can far exceed asyncio's 64KB default (a fat
+            # tool result or long final text) — readline() then raises
+            # LimitOverrunError and kills the whole run (seen live on the
+            # codex bridge; same latent risk here).
+            limit=32 * 1024 * 1024,
             **kwargs,
         )
 
