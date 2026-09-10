@@ -268,16 +268,55 @@ async def test_reparent_access_control(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_reparent_new_parent_may_adopt(tmp_path):
-    """The prospective new parent may adopt an agent under itself."""
+async def test_reparent_adoption_rejected(tmp_path):
+    """Tightened 2026-08-30: an agent may NOT adopt a stranger under itself
+    (self-appointed parenthood granted model/budget/compact power over the
+    target). Owner-only now."""
     rt = _make_runtime(tmp_path)
     await _register(rt, "manager")
     await _register(rt, "worker")
 
     res = await execute_tool(
         "update_agent", {"agent_id": "worker", "parent_id": "manager"},
-        rt, caller_id="manager")  # the new parent adopts
+        rt, caller_id="manager")  # the would-be new parent adopts
+    assert "error" in res
+    assert rt.get_agent("worker").parent_id is None
+
+
+@pytest.mark.asyncio
+async def test_reparent_parent_delegates_down_own_subtree(tmp_path):
+    """A parent may push its own direct child under one of its descendants."""
+    rt = _make_runtime(tmp_path)
+    await _register(rt, "manager")
+    await _register(rt, "lead", parent_id="manager")
+    await _register(rt, "worker", parent_id="manager")
+
+    res = await execute_tool(
+        "update_agent", {"agent_id": "worker", "parent_id": "lead"},
+        rt, caller_id="manager")
     assert "parent_id" in res.get("changed", []), res
+    assert rt.get_agent("worker").parent_id == "lead"
+
+
+@pytest.mark.asyncio
+async def test_reparent_parent_cannot_emancipate_or_exile_child(tmp_path):
+    """A parent may not promote its child to top level, nor hand it to an
+    agent outside its own subtree (budget caps roll up the parent chain)."""
+    rt = _make_runtime(tmp_path)
+    await _register(rt, "manager")
+    await _register(rt, "worker", parent_id="manager")
+    await _register(rt, "outsider")
+
+    res = await execute_tool(
+        "update_agent", {"agent_id": "worker", "parent_id": None},
+        rt, caller_id="manager")
+    assert "error" in res
+    assert rt.get_agent("worker").parent_id == "manager"
+
+    res = await execute_tool(
+        "update_agent", {"agent_id": "worker", "parent_id": "outsider"},
+        rt, caller_id="manager")
+    assert "error" in res
     assert rt.get_agent("worker").parent_id == "manager"
 
 

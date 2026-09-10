@@ -171,6 +171,29 @@ class TestUpdateAgentEviction:
 
 
 # ---------------------------------------------------------------------------
+# Stale model-shaped provider hint (2026-08-30)
+# ---------------------------------------------------------------------------
+
+class TestStaleModelHint:
+    def test_cognitive_model_overrides_stale_provider_hint(self):
+        """create_agent stores the creation-time model in ``provider`` when no
+        explicit provider was picked. After set_agent_model changes
+        cognitive_model, that stale hint must not decide the model — the run
+        was silently staying on the creation model."""
+        from unittest.mock import patch
+        from atn.models import AgentDefinition, AgentMode
+
+        mgr = _make_manager()
+        defn = AgentDefinition(
+            id="a1", name="A", mode=AgentMode.COGNITIVE,
+            provider="claude-fable-5", cognitive_model="claude-haiku-4-5",
+        )
+        with patch("atn.runtime.provider_manager.BridgeProvider") as bp:
+            mgr.resolve_provider_with_fallback(defn)
+        bp.assert_called_once_with(model="claude-haiku-4-5")
+
+
+# ---------------------------------------------------------------------------
 # create_agent provider field
 # ---------------------------------------------------------------------------
 

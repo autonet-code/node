@@ -707,6 +707,23 @@ class Runtime:
         # Auto-detect providers (async probes)
         await self.providers.auto_detect_providers()
 
+        # Spawn the semantic embed worker now, on its own thread, so the
+        # first caller (Services-page topic clustering, substrate coords)
+        # finds the model loaded instead of paying the import + load at
+        # request time. Absent on a standalone atn install (no substrate
+        # package): the callers already degrade on their own.
+        try:
+            from nodes.common.world_model_substrate.usefulness_coords import (
+                warm_usefulness_embedder,
+            )
+            warm_usefulness_embedder()
+            # ...and pre-embed the service catalogue behind it, so the
+            # Services page's first topic clustering answers from cache.
+            from ..service_topics import warm_service_vectors
+            warm_service_vectors(self.service_store)
+        except Exception:                                  # noqa: BLE001
+            log.debug("embed worker warm-up unavailable", exc_info=True)
+
         # Start scheduler loops
         self.scheduler.start()
 
@@ -1314,8 +1331,8 @@ class Runtime:
     def _get_available_models(self, provider_name: str, **kwargs) -> list[dict[str, str]]:
         return self.providers.get_available_models(provider_name, **kwargs)
 
-    async def provider_list(self) -> list[dict[str, Any]]:
-        return await self.providers.provider_list()
+    async def provider_list(self, *, probe: bool = True) -> list[dict[str, Any]]:
+        return await self.providers.provider_list(probe=probe)
 
     async def configure_provider(self, provider_id: str, api_key: str = "") -> dict[str, Any]:
         return await self.providers.configure_provider(provider_id, api_key)
@@ -1426,22 +1443,6 @@ class Runtime:
     @property
     def _last_idle(self) -> dict:
         return self.registry._last_idle
-
-    @property
-    def _last_planning_review(self):
-        return self.scheduler._last_planning_review
-
-    @_last_planning_review.setter
-    def _last_planning_review(self, value):
-        self.scheduler._last_planning_review = value
-
-    @property
-    def _planning_interval(self):
-        return self.scheduler._planning_interval
-
-    @_planning_interval.setter
-    def _planning_interval(self, value):
-        self.scheduler._planning_interval = value
 
     @property
     def _running(self):

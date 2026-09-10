@@ -199,6 +199,12 @@ class SubprocessEmbedder:
         self._proc = None
         self._ready = False
         self._lock = None  # created lazily (threading import kept local)
+        # Worker stdout lines, pumped by ONE reader thread per process (see
+        # _ensure_proc). A caller that stops waiting never loses a line.
+        self._lines = None
+        self._reader = None
+        # Overridable for tests that stand in a scripted worker.
+        self.worker_path = None
 
     def _ensure_proc(self):
         import subprocess
@@ -209,7 +215,16 @@ class SubprocessEmbedder:
             self._lock = threading.RLock()
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
-        worker = Path(__file__).resolve().parent / "embed_worker.py"
+        import os
+        import queue
+        worker = self.worker_path or (
+            Path(__file__).resolve().parent / "embed_worker.py")
+        env = dict(os.environ)
+        # Keep the model libraries quiet. Progress bars and load reports are
+        # chatter that must never share a pipe with the line protocol.
+        env.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        env.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        env.setdefault("TOKENIZERS_PARALLELISM", "false")
         self._proc = subprocess.Popen(
             [_sys.executable, "-u", str(worker), str(self.dim),
              self.model_name, self.backend],
@@ -218,36 +233,77 @@ class SubprocessEmbedder:
             stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
+            env=env,
         )
         self._ready = False
+        # ONE reader thread for the life of the process. Every line the
+        # worker writes lands in the queue, so a caller that gives up waiting
+        # (ready_within timing out during a slow model load) never loses it:
+        # the READY line is still queued for the next caller. The previous
+        # design spawned a fresh readline thread per wait; a wait that timed
+        # out left that thread blocked on the pipe, and when READY finally
+        # arrived the orphan consumed it into a list nobody read. Every later
+        # wait then blocked on a line that never came, and the embedder
+        # reported "not ready" for the rest of the daemon's life after one
+        # slow boot (observed 2026-09-10: 30s stall per Services-page load,
+        # hashing fallback, junk clusters).
+        lines = queue.Queue()
+        proc = self._proc
+
+        def _pump() -> None:
+            try:
+                for line in proc.stdout:
+                    lines.put(line)
+            except Exception:
+                pass
+            lines.put(None)  # sentinel: worker exited
+
+        self._lines = lines
+        self._reader = threading.Thread(
+            target=_pump, name="embed-worker-reader", daemon=True)
+        self._reader.start()
         return self._proc
+
+    def _next_line(self, timeout: float):
+        """Next worker stdout line within ``timeout``; None on timeout/exit."""
+        import queue
+        try:
+            return self._lines.get(timeout=max(0.0, timeout))
+        except queue.Empty:
+            return None
 
     def ready_within(self, timeout: float) -> bool:
         """Spawn (if needed) and wait up to ``timeout`` for the READY
         line. Non-blocking beyond the timeout: the worker keeps
         loading and a later call can find it ready."""
         import json as _json
-        import threading
-        proc = self._ensure_proc()
+        import time as _time
+        self._ensure_proc()
         if self._ready:
             return True
-
-        result: list = []
-
-        def _read():
-            line = proc.stdout.readline()
-            result.append(line)
-
-        reader = threading.Thread(target=_read, daemon=True)
-        reader.start()
-        reader.join(timeout=timeout)
-        if not result or not result[0]:
-            return False
-        try:
-            self._ready = bool(_json.loads(result[0]).get("ready"))
-        except Exception:
-            self._ready = False
-        return self._ready
+        deadline = _time.monotonic() + timeout
+        while True:
+            # Bounded per-get so a SECOND concurrent waiter (boot warm-up
+            # and a request at once) notices when the first one consumed
+            # the READY line, instead of waiting on the queue until its
+            # own deadline for a line that will never come.
+            if self._ready:
+                return True
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                return False
+            line = self._next_line(min(remaining, 0.25))
+            if line is None:
+                if self._proc is None or self._proc.poll() is not None:
+                    return False  # the worker exited
+                continue  # just a poll tick; keep waiting
+            try:
+                obj = _json.loads(line)
+            except Exception:
+                continue  # stray non-protocol output; keep waiting
+            if isinstance(obj, dict) and "ready" in obj:
+                self._ready = bool(obj.get("ready"))
+                return self._ready
 
     def __call__(self, text: str) -> Tuple[float, ...]:
         import json as _json
@@ -263,15 +319,8 @@ class SubprocessEmbedder:
             proc.stdin.write(_json.dumps({"text": text}) + "\n")
             proc.stdin.flush()
 
-            result: list = []
-
-            def _read():
-                result.append(proc.stdout.readline())
-
-            reader = threading.Thread(target=_read, daemon=True)
-            reader.start()
-            reader.join(timeout=self.request_timeout)
-            if not result or not result[0]:
+            line = self._next_line(self.request_timeout)
+            if not line:
                 # Wedged or dead worker: kill so the next call respawns.
                 try:
                     proc.kill()
@@ -280,7 +329,7 @@ class SubprocessEmbedder:
                 self._proc = None
                 self._ready = False
                 raise RuntimeError("embed worker timed out")
-            resp = _json.loads(result[0])
+            resp = _json.loads(line)
             if "error" in resp:
                 raise RuntimeError(f"embed worker error: {resp['error']}")
             return tuple(float(v) for v in resp["coords"])
@@ -395,6 +444,47 @@ def default_usefulness_embedder(dim: int = DEFAULT_DIM):
         _ST_IMPORT_TIMEOUT_SECONDS,
     )
     return HashingEmbedder(dim=dim)
+
+
+def warm_usefulness_embedder(dim: int = DEFAULT_DIM) -> None:
+    """Spawn the embed worker now, on a background thread, so the first real
+    caller (Services-page clustering, substrate coords) finds the model loaded
+    instead of paying the import + load at request time. No-op unless the
+    subprocess embedder is the configured choice."""
+    import os
+    import threading
+    choice = os.environ.get("ATN_USEFULNESS_EMBEDDER", "subprocess").lower()
+    if choice != "subprocess":
+        return
+
+    def _warm() -> None:
+        try:
+            _shared_subprocess_embedder(dim).ready_within(600.0)
+        except Exception:
+            logger.debug("embed worker warm-up failed", exc_info=True)
+
+    threading.Thread(target=_warm, name="embed-worker-warmup",
+                     daemon=True).start()
+
+
+def usefulness_embedder_if_ready(dim: int = DEFAULT_DIM, wait: float = 0.0):
+    """The SEMANTIC embedder when it is ready within ``wait`` seconds, else
+    None. For interactive callers that would rather answer "not yet" than
+    block a request on a model load or silently degrade to hashing coords
+    (which cluster nothing meaningfully). ``default_usefulness_embedder``
+    keeps its blocking, always-returns contract for the feed path."""
+    import os
+    import sys
+    choice = os.environ.get("ATN_USEFULNESS_EMBEDDER", "subprocess").lower()
+    if choice == "hashing":
+        return HashingEmbedder(dim=dim)
+    if choice == "inprocess":
+        if "sentence_transformers" in sys.modules:
+            return SentenceTransformersEmbedder(dim=dim)
+        _import_st_async()
+        return None
+    embedder = _shared_subprocess_embedder(dim)
+    return embedder if embedder.ready_within(wait) else None
 
 
 # ---------------------------------------------------------------------------

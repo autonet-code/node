@@ -53,9 +53,19 @@ class ModelSwitch:
                     f"Invalid model {model!r}. Available: {', '.join(available_ids)}"
                 )
 
-        # Build an updated definition preserving all existing config
+        # Build an updated definition preserving all existing config.
+        # If the provider field holds a model-shaped routing hint (create_agent
+        # stores the creation-time model there when no explicit provider was
+        # picked), move it in lockstep — a stale hint used to override the
+        # switched model at resolve time (the stuck-on-default-model bug).
         from dataclasses import replace
-        new_defn = replace(old_defn, cognitive_model=model)
+        _hint = old_defn.provider if isinstance(old_defn.provider, str) else ""
+        if (_hint
+                and _hint not in self.provider_manager._KNOWN_PROVIDERS
+                and _hint not in getattr(self.provider_manager, "_custom_providers", {})):
+            new_defn = replace(old_defn, cognitive_model=model, provider=model)
+        else:
+            new_defn = replace(old_defn, cognitive_model=model)
 
         # Re-register: unregister old, register new
         await self.registry.unregister_agent(agent_id)

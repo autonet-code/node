@@ -148,7 +148,8 @@ def _seed_env(tmp_path: Path, agents: list | None = None):
         list_agents=lambda: list(agents or []),
         register_agent=register_agent,
     )
-    config = SimpleNamespace(data_dir=tmp_path, default_provider="claude_max",
+    config = SimpleNamespace(data_dir=tmp_path, agents_dir=tmp_path / "agents",
+                             default_provider="claude_max",
                              default_model="claude-fable-5")
     return runtime, config, registered
 
@@ -161,6 +162,9 @@ def test_seed_fresh_install(tmp_path: Path):
     assert defn.cognitive_model == "claude-fable-5"
     assert "profile" in defn.tools and "sdk_builtin" in defn.tools
     assert (tmp_path / ".fleet_seeded").exists()
+    # The definition is persisted so the loader finds Kevin on the next boot
+    # (registration alone is in-memory; the stamp forbids re-seeding).
+    assert (tmp_path / "agents" / KEVIN_ID / "agent.yaml").exists()
     # Second boot: stamp short-circuits, even with zero agents (Kevin removed).
     assert asyncio.run(seed_default_fleet(runtime, config)) is None
     assert len(registered) == 1

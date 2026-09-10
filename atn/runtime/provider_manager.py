@@ -73,6 +73,8 @@ _MODEL_TIERS: dict[str, int] = {
     "claude-sonnet-3.5": 3,
     "claude-haiku-3.5": 2,
     # OpenAI
+    "gpt-6-astra": 4,
+    "gpt-6": 4,
     "gpt-5.5": 4,
     "gpt-5": 4,
     "o3": 4,
@@ -110,6 +112,7 @@ _DEFAULT_TIER = 2
 # and context window are looked up from _MODEL_TIERS and model_specs.
 _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
     "claude_max": [
+        {"id": "claude-fable-5-1",  "name": "Claude Fable 5.1"},
         {"id": "claude-fable-5",    "name": "Claude Fable 5"},
         {"id": "claude-opus-4-8",   "name": "Claude Opus 4.8"},
         {"id": "claude-opus-4-7",   "name": "Claude Opus 4.7"},
@@ -121,10 +124,12 @@ _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
     # ChatGPT-account Codex auth accepts ONLY current Codex models —
     # verified empirically 2026-08 (retired ids get a 400 from the API).
     "codex_max": [
+        {"id": "gpt-6-astra",   "name": "GPT-6 Astra"},
         {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra"},
         {"id": "gpt-5.5",       "name": "GPT-5.5"},
     ],
     "anthropic": [
+        {"id": "claude-fable-5-1",  "name": "Claude Fable 5.1"},
         {"id": "claude-fable-5",    "name": "Claude Fable 5"},
         {"id": "claude-opus-4-8",   "name": "Claude Opus 4.8"},
         {"id": "claude-opus-4-7",   "name": "Claude Opus 4.7"},
@@ -134,6 +139,7 @@ _PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {
         {"id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5"},
     ],
     "openai": [
+        {"id": "gpt-6-astra", "name": "GPT-6 Astra"},
         {"id": "gpt-5.5",     "name": "GPT-5.5"},
         {"id": "gpt-5",       "name": "GPT-5"},
         {"id": "gpt-4.1",     "name": "GPT-4.1"},
@@ -309,6 +315,13 @@ class ProviderManager:
         self._catalog_cache: dict[str, list[dict[str, str]]] = {}
         self._catalog_cache_ts: dict[str, float] = {}
         self._catalog_ttl: float = 3600.0
+        # probe_ollama result cache (success OR failure). Ollama-down is the
+        # common case and a refused loopback connect costs ~2.5s on Windows;
+        # provider_list used to pay that on EVERY call (the secrets page
+        # timeouts, 2026-09-03).
+        self._ollama_probe_cache: list[dict[str, str]] | None = None
+        self._ollama_probe_cache_ts: float = 0.0
+        self._ollama_probe_ttl: float = 60.0
 
     # ------------------------------------------------------------------
     # API key resolution
@@ -378,7 +391,14 @@ class ProviderManager:
                 return self._resolve_provider_by_name(
                     providers, model, defn.id,
                     agent_address=agent_address, sponsor_address=sponsor_address)
-            return self._resolve_provider_for_model(providers, defn.id)
+            # ``providers`` is a model-shaped routing hint (create_agent stores
+            # the creation-time model when no explicit provider was picked).
+            # The hint goes stale when set_agent_model later changes
+            # cognitive_model, and it must not override the agent's actual
+            # model — route by cognitive_model whenever it is set (the
+            # stuck-on-default-model bug, 2026-08-30).
+            return self._resolve_provider_for_model(
+                defn.cognitive_model or providers, defn.id)
         else:
             return self._resolve_provider_for_model(model, defn.id)
 
@@ -619,6 +639,18 @@ class ProviderManager:
                 log.warning("world_service_resolver failed: %s", e)
         return self._world_service
 
+    def _ollama_base_url(self) -> str:
+        """Configured ollama base URL, normalized for the NATIVE API: no
+        trailing slash and no ``/v1`` suffix (the OpenAI-compat mount some
+        configs carry; ``/v1/api/tags`` and ``/v1/api/chat`` are 404s)."""
+        pconfig = self._config.providers.get("ollama")
+        defaults = self._PROVIDER_DEFAULTS.get("ollama", {})
+        base = ((pconfig.base_url if pconfig else "")
+                or defaults.get("base_url", "http://localhost:11434")).rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        return base
+
     def _ollama_tags_cached(self) -> set[str]:
         """Return the set of locally-installed ollama model ids, cached ~60s.
 
@@ -638,13 +670,11 @@ class ProviderManager:
         tags: set[str] = set()
         try:
             import httpx
-            pconfig = self._config.providers.get("ollama")
-            defaults = self._PROVIDER_DEFAULTS.get("ollama", {})
-            base_url = (
-                (pconfig.base_url if pconfig else "")
-                or defaults.get("base_url", "http://localhost:11434")
-            ).rstrip("/")
-            resp = httpx.get(f"{base_url}/api/tags", timeout=3.0)
+            base_url = self._ollama_base_url()
+            # Sync call on the event loop: keep the connect bound tight so an
+            # absent ollama can't stall the daemon for seconds.
+            resp = httpx.get(f"{base_url}/api/tags",
+                             timeout=httpx.Timeout(3.0, connect=1.0))
             if resp.status_code == 200:
                 for m in resp.json().get("models", []):
                     name = (m.get("name") or "").lower()
@@ -958,11 +988,19 @@ class ProviderManager:
     # Provider management (config UI)
     # ------------------------------------------------------------------
 
-    async def provider_list(self) -> list[dict[str, Any]]:
-        # Prime the live model-catalog cache (best-effort, ~1h TTL) so the
-        # per-provider model lists below reflect newly-released models beyond
-        # the curated set. Network failure → curated list only, no error.
-        await self.refresh_model_catalogs()
+    async def provider_list(self, *, probe: bool = True) -> list[dict[str, Any]]:
+        """Provider entries for the UI.
+
+        ``probe=False`` skips every network touch (live model-catalog refresh,
+        ollama probe) and answers from config + caches alone. Callers that
+        only need ``id``/``configured`` (secrets_status) must use it: the
+        probing path costs seconds when ollama is down.
+        """
+        if probe:
+            # Prime the live model-catalog cache (best-effort, ~1h TTL) so the
+            # per-provider model lists below reflect newly-released models
+            # beyond the curated set. Network failure → curated list only.
+            await self.refresh_model_catalogs()
 
         cognitive = self._executors.get(StepType.COGNITIVE)
         registered: set[str] = set()
@@ -1032,7 +1070,9 @@ class ProviderManager:
                 }
 
             if pid == "ollama":
-                entry["local_models"] = await self.probe_ollama()
+                entry["local_models"] = (
+                    await self.probe_ollama() if probe
+                    else self._ollama_probe_cache)
 
             providers.append(entry)
 
@@ -1356,13 +1396,24 @@ class ProviderManager:
     # ------------------------------------------------------------------
 
     async def probe_ollama(self) -> list[dict[str, str]] | None:
+        """Installed ollama models, or None when ollama is unreachable.
+        Cached ~60s either way (see ``_ollama_probe_ttl``)."""
+        import time as _time
+        now = _time.monotonic()
+        if (now - self._ollama_probe_cache_ts) < self._ollama_probe_ttl:
+            return self._ollama_probe_cache
+        result = await self._probe_ollama_uncached()
+        self._ollama_probe_cache = result
+        self._ollama_probe_cache_ts = now
+        return result
+
+    async def _probe_ollama_uncached(self) -> list[dict[str, str]] | None:
         import httpx
-        pconfig = self._config.providers.get("ollama")
-        defaults = self._PROVIDER_DEFAULTS.get("ollama", {})
-        base_url = (pconfig.base_url if pconfig else "") or defaults.get("base_url", "http://localhost:11434")
+        base_url = self._ollama_base_url()
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(f"{base_url.rstrip('/')}/api/tags")
+            async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(5.0, connect=1.0)) as client:
+                resp = await client.get(f"{base_url}/api/tags")
                 if resp.status_code != 200:
                     return None
                 data = resp.json()

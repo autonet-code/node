@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import platform
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -331,14 +331,12 @@ class SnapshotBuilder:
             "connectors": connectors,
             "user": self.user_profile.to_summary_dict(),
             "budget": self.credit_budget.to_summary_dict(),
+            # LEGACY-WIRE: the periodic planning review is gone (2026-08-30);
+            # review keys stay for old frontends and read as "never scheduled".
             "planning": {
-                "last_review": self.scheduler._last_planning_review.isoformat() if self.scheduler._last_planning_review else None,
-                "next_review": (
-                    (self.scheduler._last_planning_review + timedelta(seconds=self.scheduler._planning_interval)).isoformat()
-                    if self.scheduler._last_planning_review and self.scheduler._planning_interval > 0
-                    else None
-                ),
-                "interval_hours": self.scheduler._planning_interval / 3600 if self.scheduler._planning_interval > 0 else 0,
+                "last_review": None,
+                "next_review": None,
+                "interval_hours": 0,
                 "pending_tasks": pending_task_count,
             },
             "delegates": self._delegates_snapshot(),

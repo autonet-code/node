@@ -1649,23 +1649,31 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         changed.append("budgets")
     if "parent_id" in input:
         # Reparenting (the "regional manager" path): place a parent over a
-        # formerly top-level agent, or re-home a subtree. Access control:
-        # the owner is unconstrained; an agent may reparent only its OWN
-        # direct child (delegating it further down) or adopt an agent under
-        # ITSELF (become the new parent). It may never reparent a stranger
-        # or move itself. The registry validates cycles / spawn+depth limits /
-        # budget cascade and rolls back on any violation.
+        # formerly top-level agent, or re-home a subtree. Access control
+        # (tightened 2026-08-30): the OWNER is unconstrained — growing the
+        # tree upward or sideways is a human act. An agent may only push its
+        # OWN direct child deeper into its OWN subtree. The old "adopt under
+        # ITSELF" arm let any agent self-appoint as a stranger's parent and
+        # inherit parent powers (model/provider, budgets, compact), so it is
+        # gone; so is promoting a child out of the subtree (budget caps roll
+        # up the parent chain — emancipation would shed the rollup). The
+        # registry validates cycles / spawn+depth limits / budget cascade
+        # and rolls back on any violation.
         caller_id = input.get("_caller_id")
         new_parent = input["parent_id"] or None
         if caller_id is not None and not is_owner_caller(caller_id):
             if caller_id == agent_id:
                 return {"error": "An agent cannot reparent itself."}
-            is_current_parent = defn.parent_id == caller_id
-            is_new_parent = new_parent == caller_id
-            if not (is_current_parent or is_new_parent):
-                return {"error": "Reparenting is limited to the owner, the "
-                                 "agent's current parent, or the adopting "
-                                 "new parent."}
+            if defn.parent_id != caller_id:
+                return {"error": "Reparenting is owner-only, except a parent "
+                                 "moving its own direct child."}
+            if new_parent is None or (
+                new_parent != caller_id
+                and new_parent not in runtime.registry.get_subtree_ids(caller_id)
+            ):
+                return {"error": "An agent may re-home its child only under "
+                                 "itself or a descendant — not to top level "
+                                 "or outside its subtree."}
         err = runtime.registry.reparent_agent(agent_id, new_parent)
         if err:
             return {"error": err}

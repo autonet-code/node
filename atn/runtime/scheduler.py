@@ -1,4 +1,4 @@
-"""Background scheduler + inbox watcher loops."""
+﻿"""Background scheduler + inbox watcher loops."""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +14,6 @@ from ..models import (
     MessagePriority,
     MessageType,
     PlanningTask,
-    TaskStatus,
 )
 
 if TYPE_CHECKING:
@@ -34,7 +33,13 @@ _CRASH_LOOP_MAX_FAILURES = 3
 
 
 class Scheduler:
-    """Manages schedule-based triggers, heartbeats, inbox watching, and planning reviews."""
+    """Manages schedule-based triggers, heartbeats, and inbox watching.
+
+    The orchestrator-era periodic planning review (a 6h digest pushed to the
+    fleet root's inbox) was removed 2026-08-30: everything it carried is
+    pullable via the planning/profile tools, and a fleet that wants the
+    impulse gives an agent a heartbeat instead.
+    """
 
     def __init__(
         self,
@@ -57,9 +62,6 @@ class Scheduler:
         self.credit_budget = credit_budget
         self._config = config
         self.planning_tasks = planning_tasks
-
-        self._planning_interval: float = 21600.0  # 6 hours
-        self._last_planning_review: datetime | None = datetime.now(timezone.utc)
 
         self._running = False
         self._scheduler_task: asyncio.Task | None = None
@@ -146,16 +148,6 @@ class Scheduler:
                                   "type": "heartbeat"},
                         ))
 
-                # Planning review
-                if self._planning_interval > 0:
-                    should_plan = (
-                        self._last_planning_review is None
-                        or (now - self._last_planning_review).total_seconds() >= self._planning_interval
-                    )
-                    if should_plan:
-                        self._last_planning_review = now
-                        await self._post_planning_review()
-
                 # Module freshness check
                 await self._check_module_freshness()
 
@@ -166,94 +158,12 @@ class Scheduler:
                 log.exception("Scheduler error")
                 await asyncio.sleep(1)
 
-    async def _post_planning_review(self) -> None:
-        from ..planning_prompt import build_planning_context
-
-        # DEPRECATED path: the review digest goes to the fleet root's inbox
-        # (first parentless agent), so it is meaningless without one. Rootless
-        # fleets get the same behavior compositionally — a heartbeating
-        # supervisor agent pulls its children + user goals itself.
-        root_id = next(
-            (aid for aid, defn in self.registry._agents.items()
-             if not defn.parent_id),
-            None,
-        )
-        if root_id is None:
-            return
-
-        profile = self.user_profile.get_profile()
-
-        goals: list[dict[str, Any]] = []
-        active_agents: list[dict[str, Any]] = []
-        for aid, defn in self.registry._agents.items():
-            if aid == root_id:
-                continue
-            status = self.registry._status.get(aid)
-            if status in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
-                goal_status = "active"
-            elif status == AgentStatus.COMPLETED:
-                goal_status = "completed"
-            elif status == AgentStatus.STOPPED:
-                goal_status = "paused"
-            elif status == AgentStatus.ERROR:
-                goal_status = "abandoned"
-            else:
-                goal_status = status.value if status else "unknown"
-            goals.append({
-                "id": aid,
-                "title": defn.name,
-                "description": defn.task_prompt or defn.description,
-                "status": goal_status,
-            })
-            if status in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
-                active_agents.append({
-                    "id": aid,
-                    "name": defn.name,
-                    "status": status.value if status else "unknown",
-                })
-
-        pending = [
-            {"id": t.id, "title": t.title, "goal_id": t.goal_id, "status": t.status.value}
-            for t in self.planning_tasks
-            if t.status in (TaskStatus.PROPOSED, TaskStatus.APPROVED, TaskStatus.ACTIVE)
-        ]
-
-        calendar_available = False
-        try:
-            from ..credentials import CredentialStore
-            # Access through config data_dir
-            cred_store = CredentialStore(self._config.data_dir)
-            calendar_available = cred_store.exists("google_calendar")
-        except Exception:
-            pass
-
-        context = build_planning_context(
-            goals=goals,
-            projects=profile.projects,
-            strengths=profile.strengths,
-            weaknesses=profile.weaknesses,
-            budget_summary=self.credit_budget.to_summary_dict(),
-            active_agents=active_agents,
-            pending_tasks=pending,
-            calendar_available=calendar_available,
-        )
-
-        self.inbox.post(InboxMessage(
-            id=InboxMessage.generate_id(),
-            source="planning_loop",
-            target=root_id,
-            type=MessageType.WORK,
-            priority=MessagePriority.NORMAL,
-            data={"type": "planning_review", "instruction": context},
-        ))
-        log.info("Planning review posted to root agent inbox")
-
     # ------------------------------------------------------------------
     # Module freshness
     # ------------------------------------------------------------------
 
     async def _check_module_freshness(self) -> None:
-        """Periodic module cache refresh — verifies runtime consistency."""
+        """Periodic module cache refresh â€” verifies runtime consistency."""
         import time
         now = time.monotonic()
         if now < self._next_freshness_check:
@@ -291,7 +201,7 @@ class Scheduler:
                     if status == AgentStatus.ERROR:
                         # Crash-loop backoff: an agent that keeps failing
                         # instantly (e.g. unresolvable provider) would
-                        # otherwise be re-triggered every poll — observed
+                        # otherwise be re-triggered every poll â€” observed
                         # live at ~2 failures/sec. Exponential cool-down,
                         # then a hard stop pending manual reactivation.
                         fails = self.registry._consec_failures.get(agent_id, 0)
@@ -299,7 +209,7 @@ class Scheduler:
                             if agent_id not in self._crash_loop_parked:
                                 self._crash_loop_parked.add(agent_id)
                                 log.warning(
-                                    "Agent %s failed %d times in a row — "
+                                    "Agent %s failed %d times in a row â€” "
                                     "parking (reactivate manually or "
                                     "post a new message after fixing it)",
                                     agent_id, fails,
@@ -312,7 +222,7 @@ class Scheduler:
                             if elapsed < cooldown:
                                 continue
                     if status in (AgentStatus.COMPLETED, AgentStatus.ERROR):
-                        # Keep the provider alive — it holds prompt cache and
+                        # Keep the provider alive â€” it holds prompt cache and
                         # session state.  The execution engine will reuse it.
                         self.registry._status[agent_id] = AgentStatus.ACTIVE
                         log.info("Inbox watcher re-activated %s agent %s",

@@ -1612,42 +1612,72 @@ class WebSocketBridge:
         if msg_type == "service_topics":
             try:
                 from nodes.common.world_model_substrate.usefulness_coords import (
-                    coords_for_query, default_usefulness_embedder,
+                    coords_for_query, usefulness_embedder_if_ready,
                 )
                 import numpy as _np
             except Exception as exc:                       # noqa: BLE001
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
-            from .service_spec import service_embedding_text
             store = self.runtime.service_store
             records = list(store.list(include_retired=False))
             if not records:
                 return {"msg_id": msg_id, "ok": True,
                         "result": {"hits": [], "clusters": []}}
 
-            embedder = default_usefulness_embedder()
-            # Cache per spec digest. Specs are content-addressed, so a
-            # digest's embedding never changes and the cache needs no
-            # invalidation — only growth. Without this every call re-embeds
-            # the whole catalogue (~4.5s for six services, and it scales
-            # with the catalogue, not the query).
-            cache = getattr(self, "_service_vec_cache", None)
-            if cache is None:
-                cache = {}
-                self._service_vec_cache = cache
-            vecs: list[Any] = []
-            digests: list[str] = []
-            for rec in records:
-                vec = cache.get(rec.digest)
-                if vec is None:
-                    text = service_embedding_text(rec.spec)
-                    if not text.strip():
-                        continue
-                    vec = _np.asarray(coords_for_query(text, embedder),
-                                      dtype=_np.float64)
-                    cache[rec.digest] = vec
-                vecs.append(vec)
-                digests.append(rec.digest)
+            # The semantic embedder, or "not yet". This used to call
+            # default_usefulness_embedder(), which BLOCKS the event loop up
+            # to 30s waiting for the embed worker and then hands back a
+            # hashing embedder whose coords cluster nothing meaningfully.
+            # That stall serialised every other request on the connection,
+            # tripped the frontend's 15s timeout (the page fell back to
+            # "Everything else" for the session) and starved keepalive
+            # pings. Now: a short, off-loop readiness check; while the
+            # worker is still loading the answer is `pending` and the
+            # frontend asks again shortly.
+            _pending = {"msg_id": msg_id, "ok": True,
+                        "result": {"hits": [], "clusters": [],
+                                   "indexed": 0, "pending": True}}
+            from .service_topics import DIM as _st_dim
+            try:
+                embedder = await asyncio.to_thread(
+                    usefulness_embedder_if_ready, _st_dim, 1.0)
+            except Exception:                              # noqa: BLE001
+                log.debug("service_topics: embedder unavailable", exc_info=True)
+                embedder = None
+            if embedder is None:
+                return _pending
+
+            # Vectors come from the process-wide cache in service_topics
+            # (pre-filled at boot by warm_service_vectors); only what is
+            # still missing goes through the worker here, on a thread.
+            from . import service_topics as _st
+            query = str(msg.get("query") or "").strip()
+
+            def _embed_all() -> tuple[list[Any], list[str], Any] | None:
+                # None = the boot warm-up is embedding the catalogue right
+                # now; do not push it through the worker a second time.
+                if not _st.EMBED_LOCK.acquire(blocking=False):
+                    return None
+                try:
+                    vecs_, digests_ = _st.embed_services(records, embedder)
+                finally:
+                    _st.EMBED_LOCK.release()
+                q_ = None
+                if query:
+                    q_ = _np.asarray(coords_for_query(query, embedder),
+                                     dtype=_np.float64)
+                return vecs_, digests_, q_
+
+            try:
+                embedded = await asyncio.to_thread(_embed_all)
+            except Exception:                              # noqa: BLE001
+                # A worker that died mid-batch respawns on the next call;
+                # tell the frontend to come back rather than failing loud.
+                log.warning("service_topics: embedding failed", exc_info=True)
+                return _pending
+            if embedded is None:
+                return _pending
+            vecs, digests, q = embedded
             if not vecs:
                 return {"msg_id": msg_id, "ok": True,
                         "result": {"hits": [], "clusters": []}}
@@ -1657,10 +1687,7 @@ class WebSocketBridge:
             unit = matrix / norms
 
             hits: list[dict[str, Any]] = []
-            query = str(msg.get("query") or "").strip()
             if query:
-                q = _np.asarray(coords_for_query(query, embedder),
-                                dtype=_np.float64)
                 qn = _np.linalg.norm(q) or 1.0
                 sims = unit @ (q / qn)
                 order = _np.argsort(-sims)
@@ -3242,7 +3269,10 @@ class WebSocketBridge:
             }
             providers: list[dict[str, Any]] = []
             try:
-                for p in await self.runtime.provider_list():
+                # probe=False: this only needs id + configured. The probing
+                # path costs seconds when ollama is down, and requests on a
+                # connection are serialized, so it was timing out the page.
+                for p in await self.runtime.provider_list(probe=False):
                     providers.append({"id": p.get("id"),
                                       "configured": bool(p.get("configured"))})
             except Exception:  # noqa: BLE001 — display-only, degrade quietly

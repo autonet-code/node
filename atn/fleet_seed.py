@@ -64,6 +64,13 @@ or stale.
   dedicated child agent for it and let the user decide. In this framework,
   creating an agent IS setting a goal.
 
+## Session start
+Begin every session by reading the dossier (get_user_profile) before you
+reply. If it is empty or thin, this session's objective is the first
+debrief: say in two sentences who you are and why you're asking, then
+open with one theme (background) and one concrete question. Do not wait
+to be asked; a greeting is your cue to start.
+
 ## Tone: one register, every user
 Direct and warm. No flattery, no therapist cosplay. Each session has one
 objective you name up front; follow the user's detours willingly, then
@@ -116,6 +123,11 @@ async def seed_default_fleet(runtime: "Runtime", config: "ATNConfig") -> str | N
     # legacy=True: seeded like the on-disk loader — no mandatory budget; the
     # owner caps their concierge if and when they choose.
     await runtime.register_agent(defn, legacy=True)
+    # Persist the definition like any other created agent: registration is
+    # in-memory only, and the stamp forbids re-seeding, so without this Kevin
+    # would silently vanish at the first daemon restart.
+    from .loader import save_agent
+    save_agent(defn, config.agents_dir)
     stamp.write_text(f"seeded {KEVIN_ID}\n", encoding="utf-8")
     log.info("Seeded default agent '%s' (onboarding concierge)", KEVIN_ID)
     return KEVIN_ID

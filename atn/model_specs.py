@@ -77,6 +77,13 @@ _MODELS: tuple[ModelSpec, ...] = (
     # output. relative_cost reflects pricing above Opus tier ($10/$50 per MTok
     # vs Opus $5/$25 → ~2x Opus → 10x Sonnet). Adjust if the economics change.
     ModelSpec(
+        id="claude-fable-5-1", family="claude", klass="opus",
+        display_name="Claude Fable 5.1",
+        context_window=1_000_000, max_output_tokens=128_000,
+        relative_cost=10.0, default_channel="claude_max",
+        aliases=("fable-5-1", "fable-5.1"), loop_capable=True,
+    ),
+    ModelSpec(
         id="claude-fable-5", family="claude", klass="opus",
         display_name="Claude Fable 5",
         context_window=1_000_000, max_output_tokens=128_000,
@@ -155,6 +162,16 @@ _MODELS: tuple[ModelSpec, ...] = (
     ),
 
     # ---- OpenAI ----
+    # GPT-6 Astra (released 2026-09-03): 1.05M context, $10/$50 per MTok
+    # (same bracket as Fable 5 -> relative_cost 10.0). Listed for both the
+    # Codex bridge and the OpenAI API; unverified end to end in this repo.
+    ModelSpec(
+        id="gpt-6-astra", family="gpt", klass="other",
+        display_name="GPT-6 Astra",
+        context_window=1_050_000, max_output_tokens=128_000,
+        relative_cost=10.0, default_channel="codex_max",
+        aliases=("gpt-6", "astra"), loop_capable=True,
+    ),
     ModelSpec(
         id="gpt-5.6-terra", family="gpt", klass="other",
         display_name="GPT-5.6 Terra",
