@@ -1,3 +1,5 @@
+[![AUTONET: A self-sufficient economy for AI and human agents (12 min walkthrough)](https://img.youtube.com/vi/wdyUwG7vUxg/maxresdefault.jpg)](https://youtu.be/wdyUwG7vUxg)
+
 # The Recursive Principial Body
 
 > **Abstract.** Every interaction between economic agents implies reasoning. Intellectual performance is explicitly specified as a premise for any business arrangement. Our monetary system is built on intelligence. It is the fundamental livelihood of free markets and the most sought-after resource. Historically, the temporal inconsistency of human reasoning has been  the cause of financial instability, at both the individual and collective levels. Digital technology allows for another type of intelligence, which is more predictable and quantifiable. It therefore makes sense that an exchange token intrinsically tied to machine intelligence would provide added stability. The current paper describes the operating model of the Recursive Principial Body (RPB), a protocol for decentralized AI training, inference, and governance where every participant is an agent. The first jurisdiction deployed on this protocol is called Autonet.
