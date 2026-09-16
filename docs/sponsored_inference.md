@@ -93,8 +93,11 @@ Two things follow from naming a sponsor:
 - **Routing is bound, not market-discovered.** Only that sponsor is
   considered: the dependent will not silently shop for another.
 - **The sponsor dictates the model.** When a sponsor is named, its
-  advertised model is accepted regardless of what the agent asked for. The
-  employer chooses the tool.
+  advertised model is accepted regardless of what the agent asked for, and
+  the model the sponsor configured (`sponsor_model`) is the one actually
+  served. The employer chooses the tool. A sponsor that leaves
+  `sponsor_model` blank serves whatever the dependent requests, so set it
+  unless you mean to hand your provider key the dependent's choice of model.
 
 Leaving the sponsor address empty is *not* "off": the dependent falls back to
 open discovery and will use any sponsor it finds that matches the requested
@@ -117,6 +120,11 @@ When a budget is exhausted the sponsor refuses with `budget exhausted`.
 There is no failover; the dependent's agents stop until the sponsor raises
 the budget.
 
+A single request cannot overshoot the grant: the sponsor clamps the
+request's `max_tokens` to what is left, and refuses with
+`request exceeds remaining grant` when the prompt alone already exceeds it.
+An unlimited binding (`budget_tokens` of 0) is not clamped.
+
 ## Why the sponsor holds the state
 
 Every piece of authorization lives on the sponsor's disk
@@ -124,9 +132,18 @@ Every piece of authorization lives on the sponsor's disk
 grant, no credential. It presents an address; the sponsor decides.
 
 This means a compromised or malicious dependent can do exactly one thing:
-spend a budget the sponsor already agreed to. It cannot widen its grant,
-reach another sponsor's capacity, or impersonate a different dependent
-without that dependent's wallet key.
+spend a budget the sponsor already agreed to. It cannot widen its grant or
+reach another sponsor's capacity.
+
+**Identity is not authenticated on the wire in v1.** The dependent's address
+travels as a plain field in the request body (`agent_address`); nothing signs
+it and the sponsor does not verify it. Any peer that can dial a sponsor can
+present any bound address and spend that binding's budget. The 0x addresses
+are public (on-chain registry, gossip, the agent directory), so they are not
+a secret that protects the grant. Until the request is signed, enable sponsor
+mode only where the peer set is trusted, and give every binding a real token
+budget rather than the unlimited (0) setting: the budget, not the identity,
+is the operative ceiling.
 
 ## See also
 

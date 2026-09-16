@@ -125,6 +125,10 @@ class Scheduler:
                 for agent_id, interval in list(self.registry._heartbeat_table.items()):
                     if agent_id in self.registry._schedule_table:
                         continue
+                    # A non-positive interval would fire a full execution on
+                    # every poll; the registry floors it, this is the backstop.
+                    if interval <= 0:
+                        continue
                     status = self.registry._status.get(agent_id)
                     if status not in (AgentStatus.ACTIVE, AgentStatus.RUNNING):
                         continue

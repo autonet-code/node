@@ -286,3 +286,143 @@ class TestReplayCarriesDigest:
             for node in tendency.tree.all_nodes()
         }
         assert emitted <= replayed
+
+
+# ---------------------------------------------------------------------------
+# (f) Remote tool-manifest discovery (derived, daemon-local)
+# ---------------------------------------------------------------------------
+
+
+class TestRemoteManifestDiscovery:
+    """Gossip ingest only APPLIED remote events; it never resolved a peer's
+    `artifact_digest` into a manifest, so the ArtifactIndex held only this
+    daemon's own tools and `probe_tools` could not find anyone else's.
+    Ingest now queues the unknown digests for an out-of-band blob pull.
+    """
+
+    def _svc(self, tmp_path, name):
+        return WorldService(
+            name,
+            data_root=tmp_path,
+            embedding_dim=EMBED_DIM,
+            snapshot_every_n_events=10_000,
+            snapshot_every_seconds=10_000.0,
+        )
+
+    def _reg_event(self, digest: str) -> dict:
+        return {
+            "kind": "sub_claim_sprouted",
+            "seq": 1,
+            "author_agent": "0xPeer",
+            "tendency_id": "correctness",
+            "parent_id": "root_correctness",
+            "node_id": "n_remote",
+            "position": "pro",
+            "coords": [0.0, 1.0],
+            "polarity_axis": [1.0, 0.0],
+            "content": "tool foo: does a thing",
+            "observation_id": "tm_" + digest[:16],
+            "artifact_digest": digest,
+            "manifest_meta": {"trust_class": "pinned", "author": "0xPeer"},
+        }
+
+    def test_remote_registration_queues_its_digest(self, tmp_path):
+        svc = self._svc(tmp_path, "0xDiscover1")
+        digest = "b" * 64
+        svc.submit_events([self._reg_event(digest)], equilibrate_after=False,
+                          origin="remote")
+        assert svc.take_pending_remote_manifests() == [digest]
+        # Drained: a second take returns nothing.
+        assert svc.take_pending_remote_manifests() == []
+
+    def test_local_origin_is_not_queued(self, tmp_path):
+        """Local publishes index their manifest in register_tool_manifest."""
+        svc = self._svc(tmp_path, "0xDiscover2")
+        svc.submit_events([self._reg_event("c" * 64)], equilibrate_after=False,
+                          origin="local")
+        assert svc.take_pending_remote_manifests() == []
+
+    def test_indexing_a_fetched_manifest_makes_it_searchable(self, tmp_path):
+        svc = self._svc(tmp_path, "0xDiscover3")
+        manifest = {
+            "kind": "tool_manifest",
+            "name": "summarize_csv",
+            "description": "summarize a csv file into per-column statistics",
+            "author": "0xPeer",
+            "trust_class": "pinned",
+            "input_schema": {"type": "object", "properties": {}},
+            "code_digest": "d" * 64,
+        }
+        digest = svc.index_remote_manifest(manifest)
+        assert digest
+        assert svc._artifact_index.has(digest)
+        hits = svc._artifact_index.search("csv column statistics", k=3)
+        assert digest in [d for d, _ in hits]
+
+    def test_non_manifest_payload_is_rejected(self, tmp_path):
+        svc = self._svc(tmp_path, "0xDiscover4")
+        assert svc.index_remote_manifest({"problem": "x", "resolution": "y"}) is None
+
+    def test_already_indexed_digest_is_not_queued(self, tmp_path):
+        svc = self._svc(tmp_path, "0xDiscover5")
+        manifest = {
+            "kind": "tool_manifest",
+            "name": "known_tool",
+            "description": "a tool this daemon already indexed",
+            "author": "0xPeer",
+            "trust_class": "pinned",
+            "input_schema": {"type": "object", "properties": {}},
+            "code_digest": "e" * 64,
+        }
+        digest = svc.index_remote_manifest(manifest)
+        assert digest
+        svc.submit_events([self._reg_event(digest)], equilibrate_after=False,
+                          origin="remote")
+        assert svc.take_pending_remote_manifests() == []
+
+
+# ---------------------------------------------------------------------------
+# (g) Federated positions outrank the local projection
+# ---------------------------------------------------------------------------
+
+
+class TestFederatedPositionPrecedence:
+    """The LOCAL projection close runs compute_tool_mint with no
+    rep_shares and no credibility, so every household (a zero-reputation
+    sybil included) gets full drift weight. The federated close is the
+    one that weights by rep_share x credibility. Once it hands over its
+    positions, they must stand: library ranking reads the drifted head
+    off the world's observation coords.
+    """
+
+    def _svc(self, tmp_path, name):
+        return WorldService(
+            name,
+            data_root=tmp_path,
+            embedding_dim=EMBED_DIM,
+            snapshot_every_n_events=10_000,
+            snapshot_every_seconds=10_000.0,
+        )
+
+    def test_apply_stores_and_marks_seen(self, tmp_path):
+        svc = self._svc(tmp_path, "0xFedPos1")
+        assert svc._federated_positions_seen is False
+        positions = {
+            "f" * 64: {"head": [0.0] * 6, "mass": [1.0] * 6},
+        }
+        assert svc.apply_federated_tool_positions(positions) == 1
+        assert svc._federated_positions_seen is True
+        assert svc._tool_positions == positions
+
+    def test_empty_payload_is_a_noop(self, tmp_path):
+        svc = self._svc(tmp_path, "0xFedPos2")
+        assert svc.apply_federated_tool_positions({}) == 0
+        assert svc.apply_federated_tool_positions(None) == 0
+        assert svc._federated_positions_seen is False
+
+    def test_applied_positions_persist_across_reload(self, tmp_path):
+        svc = self._svc(tmp_path, "0xFedPos3")
+        positions = {"a" * 64: {"head": [0.5] * 6, "mass": [2.0] * 6}}
+        svc.apply_federated_tool_positions(positions)
+        reloaded = self._svc(tmp_path, "0xFedPos3")
+        assert reloaded._tool_positions == positions

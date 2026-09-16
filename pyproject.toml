@@ -105,7 +105,11 @@ network = [
     "autonet-computer[training]",
     "miniupnpc>=2.0",
 ]
-# Core voice: TTS output + audio mixing
+# Core voice: TTS output + audio mixing.
+# The low-level primitives (mixer, TTS backends, tones, PTT, STT) are VENDORED
+# at atn/_vendor/voice_core, so this extra is self-contained: numpy and
+# sounddevice are the only hard requirements. A separately installed
+# `voice_core` still takes precedence (see atn/voice_service.py).
 voice = [
     "numpy>=1.24",
     "sounddevice>=0.4",
@@ -140,6 +144,10 @@ include = ["atn*", "nodes*", "bridge", "world_model*"]
 
 [tool.setuptools.package-data]
 "atn.connectors" = ["*/connector.json"]
+# The bundled Chrome extension Browser Control loads with --load-extension.
+# Keyed on the child package: package-data patterns resolve relative to the
+# package they are keyed under, and browser_relay is itself a package.
+"atn.connectors.browser_relay" = ["extension/*", "extension/icons/*"]
 "bridge" = ["*.ts", "package.json", "bun.lock"]
 "atn._vendor.kevin.vault" = ["*.md"]
 

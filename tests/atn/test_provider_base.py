@@ -552,3 +552,83 @@ class TestStickyHistoryTrim:
         out = eng._build_history_messages("a3", turns)
         assert out == [{"role": "user", "content": "fresh start"}]
         assert eng._history_trim_start["a3"] == 0
+
+
+class TestCompactionTriggerHelpers:
+    """The pre-send reduction budget, exposed for the context inspector + UI."""
+
+    def test_trigger_matches_window_minus_reserve_minus_buffer(self):
+        from atn.providers.base import (
+            compaction_trigger_tokens,
+            get_context_window,
+            output_reserve_tokens,
+            _reduction_buffer,
+        )
+        for model in ("claude-sonnet-4-5", "claude-haiku-4-5", "qwen3.5:4b"):
+            ctx = get_context_window(model)
+            assert compaction_trigger_tokens(model) == (
+                ctx - output_reserve_tokens(model) - _reduction_buffer(ctx))
+
+    def test_trigger_zero_for_unknown_model(self):
+        """Unknown window means hide the marker, not guess a position."""
+        from atn.providers.base import compaction_trigger_tokens
+        assert compaction_trigger_tokens("") == 0
+
+    def test_trigger_is_not_a_fixed_fraction(self):
+        """Small local windows trigger far earlier than large API ones."""
+        from atn.providers.base import compaction_trigger_tokens, get_context_window
+        local = compaction_trigger_tokens("qwen3.5:4b") / get_context_window("qwen3.5:4b")
+        api = (compaction_trigger_tokens("claude-sonnet-4-5")
+               / get_context_window("claude-sonnet-4-5"))
+        assert local < 0.6 < 0.85 < api
+
+
+class TestHistoryCharBudget:
+    def test_local_budget_fits_under_the_pre_send_trigger(self):
+        """A 16k local model must not arrive over budget from history alone."""
+        from atn.providers.base import compaction_trigger_tokens, history_char_budget
+        budget = history_char_budget("qwen3.5:4b")
+        assert budget < compaction_trigger_tokens("qwen3.5:4b") * 4
+
+    def test_large_window_keeps_historical_ceiling(self):
+        from atn.providers.base import history_char_budget
+        assert history_char_budget("claude-opus-4-8") == 400_000
+
+    def test_unknown_model_falls_back_to_constant(self):
+        from atn.providers.base import history_char_budget
+        assert history_char_budget("") == 400_000
+
+    def test_build_history_scales_with_model(self):
+        from types import SimpleNamespace
+        from atn.runtime.execution_engine import ExecutionEngine
+
+        eng = ExecutionEngine.__new__(ExecutionEngine)
+        turns = [SimpleNamespace(role="user", content="z" * 10_000)
+                 for _ in range(10)]
+        out = eng._build_history_messages("local1", turns, "qwen3.5:4b")
+        kept = sum(len(m["content"]) for m in out)
+        assert kept < 100_000  # trimmed far below the old 400k ceiling
+
+
+class TestSessionCostAccumulation:
+    @pytest.mark.asyncio
+    async def test_priced_model_accumulates_cost(self):
+        from atn.metering import cost_usd
+        p = OrchestrateProvider([
+            ProviderResponse(text="ok", stop_reason="end_turn", model="claude-sonnet-4-5",
+                             usage=Usage(input_tokens=1000, output_tokens=500)),
+        ])
+        await p.send_orchestrate(message="hi", tools=[], model="claude-sonnet-4-5")
+        expected = cost_usd("claude-sonnet-4-5", input_tokens=1000, output_tokens=500)
+        assert expected and expected > 0
+        assert p.session_stats["total_cost_usd"] == pytest.approx(expected, rel=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_unpriced_model_stays_zero(self):
+        """Local/subscription models have no per-token price — chip stays hidden."""
+        p = OrchestrateProvider([
+            ProviderResponse(text="ok", stop_reason="end_turn", model="qwen3.5:4b",
+                             usage=Usage(input_tokens=1000, output_tokens=500)),
+        ])
+        await p.send_orchestrate(message="hi", tools=[], model="qwen3.5:4b")
+        assert p.session_stats["total_cost_usd"] == 0

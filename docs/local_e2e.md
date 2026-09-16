@@ -89,22 +89,22 @@ Seven stages, each verified:
 ## Expected output (sketch)
 
 ```
-  [PASS] Stage 1 — chain up (hardhat node + deploy)
-  [PASS] Stage 2 — fleet (two ATN runtimes, owner-rooted lineage)
+  [PASS] Stage 1: chain up (hardhat node + deploy)
+  [PASS] Stage 2: fleet (two ATN runtimes, owner-rooted lineage)
            author_lineage_root=0xf39Fd6e5…   author_addr=0x…
-  [PASS] Stage 3 — chain identity (owner-bound registration)
+  [PASS] Stage 3: chain identity (owner-bound registration)
            author_owner_onchain=0xf39Fd6e5…  caller_owner_onchain=0x7099797…
            distinct_owners=True
-  [PASS] Stage 4 — tool economy (register + invoke + attest + vet)
+  [PASS] Stage 4: tool economy (register + invoke + attest + vet)
            registration_events=1  attested_receipts=1  vets=2
-  [PASS] Stage 5 — consensus (federated close + owner-map exclusion)
+  [PASS] Stage 5: consensus (federated close + owner-map exclusion)
            tool_mint_raw=4.15888308  agent_mint_raw=8.15888308
            vet_gate=removed (v4.1); author keeps 100%
            control_same_owner_mint=0 (excluded)
-  [PASS] Stage 6 — settlement (anchor + recordTraining + channel)
+  [PASS] Stage 6: settlement (anchor + recordTraining + channel)
            earnings_delta=8158883  atn_delta=8158883
            service_id=1  channel_provider_delta=975  channel_client_refund=2000
-  [PASS] Stage 7 — teardown
+  [PASS] Stage 7: teardown
   7 PASS / 0 FAIL / 0 SKIP
 ```
 
@@ -311,7 +311,7 @@ inference rail (`docs/services_market.md`, "Decision (2026-07-26)") with
 **no mocked seam at all**. Its sibling
 `scripts/local_e2e_service_provider.py` proves the *economics* with the
 model faked (a `CannedProvider` on the selling side, two in-process
-Runtimes); this one answers the question that leaves open — does the thing
+Runtimes); this one answers the question that leaves open: does the thing
 the child paid for actually think?
 
 Three things are real here that are stubbed everywhere else:
@@ -324,7 +324,7 @@ Three things are real here that are stubbed everywhere else:
   *distinguishable* prompt": the script asks for one specific word and
   requires it in the reply, which a canned responder cannot satisfy.
 - **A real agent turn.** The child is driven through
-  `send_agent_message` — the surface a human's app uses — not by calling
+  `send_agent_message` (the surface a human's app uses), not by calling
   `ServiceProvider.send` directly.
 
 ## Run
@@ -336,7 +336,7 @@ python scripts/local_e2e_cross_daemon_inference.py     # 9 stages
 Prerequisite: a reachable ollama with any small model installed
 (`ollama pull qwen3:4b`). The script starts `ollama serve` itself if the
 binary is present and nothing is listening, and refuses to run against a
-canned model — a fake model would defeat its entire purpose.
+canned model, because a fake model would defeat its entire purpose.
 
 ## Parameterized for a remote re-run
 
@@ -346,7 +346,7 @@ script re-runs with the consumer on another machine:
 | Env var | Default | What it names |
 |---|---|---|
 | `E2E_RPC_URL` | `http://127.0.0.1:8545` | chain RPC both daemons dial |
-| `E2E_PROVIDER_WS` | `ws://127.0.0.1:7710` | the endpoint published **on chain** — what the consumer resolves and dials |
+| `E2E_PROVIDER_WS` | `ws://127.0.0.1:7710` | the endpoint published **on chain**, what the consumer resolves and dials |
 | `E2E_PROVIDER_HOST` / `E2E_CONSUMER_HOST` | `127.0.0.1` | bind hosts for the two listeners |
 | `E2E_PROVIDER_PORT` / `E2E_CONSUMER_PORT` | `7710` / `7720` | the two daemons' WS ports |
 | `E2E_HARDHAT_HOST` | `0.0.0.0` | hardhat bind (wide by default, so an off-box consumer can reach the chain) |
@@ -355,7 +355,7 @@ script re-runs with the consumer on another machine:
 | `E2E_SKIP_PROVIDER` | unset | `1` => do not launch the provider; assume one already serves at `E2E_PROVIDER_WS` |
 | `E2E_PROVIDER_HOLD` | unset | `1` => run the **provider side only** (stages 1, 2, 3, 5a, 6), print the consumer's exports, and hold until released |
 | `E2E_HOLD_SENTINEL` | `<provider home>/e2e_provider_release` | a path whose appearance releases a hold (Ctrl+C also works) |
-| `E2E_PROVIDER_REMOTE_PORT` | `E2E_PROVIDER_PORT + 1` | the provider's **remote** (auth-required) listener — the only port an off-box buyer can reach |
+| `E2E_PROVIDER_REMOTE_PORT` | `E2E_PROVIDER_PORT + 1` | the provider's **remote** (auth-required) listener, the only port an off-box buyer can reach |
 
 `E2E_PROVIDER_WS` is deliberately separate from `E2E_PROVIDER_HOST`:
 behind NAT or ZeroTier the reachable address is not the bind address, and
@@ -369,8 +369,8 @@ The consumer half additionally reads what the hold side prints:
 
 Ran green across two machines on a ZeroTier LAN: provider (hardhat +
 ollama `qwen3.5:4b` + provider daemon) on Windows, consumer daemon +
-child agent on an Ubuntu 24.04 EC2 box. **7 PASS / 0 FAIL / 2 SKIP** —
-the two SKIPs being the stages that belong to the other box.
+child agent on an Ubuntu 24.04 EC2 box. **7 PASS / 0 FAIL / 2 SKIP**, the
+two SKIPs being the stages that belong to the other box.
 
 On the **provider** box:
 
@@ -382,7 +382,7 @@ E2E_PROVIDER_WS=ws://<reachable-ip>:7711 E2E_HARDHAT_HOST=0.0.0.0 \
 
 It runs stages 1/2/3/5a/6, prints a block of `export` lines (also written
 to `<provider home>/e2e_exports.json`), and waits. On the **consumer**
-box, paste those and run the same script — it dials the provider's chain,
+box, paste those and run the same script: it dials the provider's chain,
 resolves the listing and the wss endpoint *from chain*, boots its own
 daemon, and drives the paid turn. Release the provider with Ctrl+C or by
 touching the sentinel.
@@ -391,13 +391,13 @@ Each side runs only what it owns. The consumer never starts a chain (it
 would have neither the contracts nor the provider's registrations); the
 provider-local `requests.jsonl` / `served_requests.json` assertions run
 only where those files exist, and cross-machine the replay refusal goes
-over the real wire through `service_client.request_service` instead —
+over the real wire through `service_client.request_service` instead,
 which is the stronger proof of the same gate.
 
 ### Reaching the provider off-box
 
 The privileged local listener is **loopback-only and not configurable**
-(`atn/cli.py` pins `host="localhost"`) — by design: it is pre-authed as
+(`atn/cli.py` pins `host="localhost"`) by design: it is pre-authed as
 owner and exports keys. Off-box reachability is the **remote** listener
 (`autonet.remote_ws_host` / `remote_ws_port`), which is auth-required, so
 the script enables it automatically when `E2E_PROVIDER_HOST` is not
@@ -406,7 +406,7 @@ loopback and publishes *that* port on chain.
 A paying counterparty on another machine can never pass that handshake:
 it is not the daemon's owner and holds no key in the daemon's fleet. So
 `service_request` is dispatched **pre-auth** on the remote listener
-(`PAYMENT_AUTHORIZED_MESSAGES` in `atn/ws_server.py`) — the on-chain
+(`PAYMENT_AUTHORIZED_MESSAGES` in `atn/ws_server.py`): the on-chain
 payment is the credential, which is the doctrine
 `docs/services_market.md` §3 already states ("authenticates the channel,
 validates vouchers"). It is a strictly stronger credential than a session
@@ -416,26 +416,26 @@ is reachable from such a session.
 
 ## What it proves
 
-1. **Chain up** — hardhat + Substrate + ServiceRegistry, bound wide.
-2. **Real model up** — ollama reachable, model installed and warmed.
-3. **Provider daemon** — real subprocess, isolated home, port 7710.
-4. **Consumer daemon** — second real subprocess, port 7720. It has
+1. **Chain up**: hardhat + Substrate + ServiceRegistry, bound wide.
+2. **Real model up**: ollama reachable, model installed and warmed.
+3. **Provider daemon**: real subprocess, isolated home, port 7710.
+4. **Consumer daemon**: second real subprocess, port 7720. It has
    **no provider stack of its own**: the child thinks on purchased
    cognition or not at all, so a silent fallback to a local model cannot
    let the test pass while proving nothing.
-5. **Agents on chain** — provider agent (the payment recipient), consumer
+5. **Agents on chain**: provider agent (the payment recipient), consumer
    parent + child; the child's wallet funded through the production mint
    rail (anchor an epoch, child records its own mint).
-6. **Service listed** — inference-backed spec over the real WS handler,
+6. **Service listed**: inference-backed spec over the real WS handler,
    registered in `ServiceRegistry`, wss endpoint published on chain.
-7. **The real turn** — the child cannot bind itself; the parent binds it;
+7. **The real turn**: the child cannot bind itself; the parent binds it;
    `send_agent_message` drives one turn; a real model answers the probe.
-8. **Settlement** — `ServicePayment` with child payer / provider
+8. **Settlement**: `ServicePayment` with child payer / provider
    recipient / correct amount, provider credited net of the 2.5% fee,
    owner wallet untouched, the provider daemon's own `requests.jsonl`
    recorded the served item, the gate verified on chain rather than
    degrading open, and a replayed `request_id` is refused.
-9. **Teardown** — both daemons, the chain, and any ollama the script
+9. **Teardown**: both daemons, the chain, and any ollama the script
    started, on every path.
 
 ## Seams this e2e revealed
@@ -445,7 +445,7 @@ is reachable from such a session.
    collision called `_try_reclaim_port`, which kills whatever holds the
    port. A second daemon on one machine therefore murdered the running
    one. Fixed: `autonet.local_ws_port` (0/unset => 7700), and an
-   EXPLICITLY configured port is never reclaimed — a configured collision
+   EXPLICITLY configured port is never reclaimed: a configured collision
    is operator error or a live sibling, not the stale-MCP-server case the
    reclaim exists for.
 
@@ -453,7 +453,7 @@ is reachable from such a session.
    methods are `async def` but synchronous inside (web3 HTTP), and
    `_validate_service_payment` awaited `verify_service_payment` directly.
    That occupies the loop for the whole receipt fetch, so the buyer's
-   connection — and every other client of the provider daemon — starves on
+   connection (and every other client of the provider daemon) starves on
    the websocket keepalive and gets dropped mid-request, surfacing as an
    opaque transport error for what is really a server-side stall. Fixed by
    routing it (and the voucher path's `verify_voucher`) through
@@ -470,7 +470,7 @@ is reachable from such a session.
    `system_prompt`, which registers the agent idle.
 
 4. **A fresh agent is `REGISTERED`, not `ACTIVE`, and
-   `send_agent_message` only TRIGGERS a run for an ACTIVE agent** —
+   `send_agent_message` only TRIGGERS a run for an ACTIVE agent**:
    otherwise it queues to the inbox and returns no `execution_id`, and the
    turn silently never happens. The script calls `activate_agent` first
    and asserts it got an `execution_id`, so this failure mode can never
@@ -484,7 +484,7 @@ is reachable from such a session.
 
 6. **The child daemon must not launch from the repo root.**
    `_default_agents_dir` returns a relative `agents/` if one exists in the
-   CWD, *before* consulting `data_dir` — so an "isolated" daemon started
+   CWD, *before* consulting `data_dir`, so an "isolated" daemon started
    from the checkout happily shares `autonet/agents`. The script launches
    from the temp home and puts the repo on `PYTHONPATH`.
 
@@ -498,9 +498,9 @@ is reachable from such a session.
    proves liveness with a real `snapshot` round trip rather than trusting
    the TCP accept.
 
-9. **`ask.token` is GONE** (2026-07-26). The vestigial field — required
-   by `validate_ask` long after ATN-only settlement was ratified
-   (2026-07-10) — was removed: an ask is `{amount, unit}`, ATN-denominated
+9. **`ask.token` is GONE** (2026-07-26). The vestigial field (required
+   by `validate_ask` long after ATN-only settlement was ratified,
+   2026-07-10) was removed: an ask is `{amount, unit}`, ATN-denominated
    by construction. Both e2e scripts stopped sending the Substrate
    address. Removal is tolerant: `normalize_ask` strips a `token` an old
    caller still passes, and persisted specs carrying one still load.
@@ -511,7 +511,7 @@ is reachable from such a session.
     an instruction-following chat model when auto-selecting; `E2E_MODEL`
     overrides.
 
-11. **The replay guard was prefix- and case-sensitive — one payment
+11. **The replay guard was prefix- and case-sensitive, and one payment
     bought TWO real inferences.** Found only by the two-box run
     (2026-07-26), and the most serious defect either e2e has surfaced.
     `ServiceStore.has_served_request` / `mark_request_served` keyed the
@@ -520,14 +520,14 @@ is reachable from such a session.
     `service_client.new_request_id()` emits `0x<64 hex>`, while the
     on-chain `ServicePayment.requestId` decodes to bare hex (case varying
     by web3 version). The payment *verifier* normalizes to bytes32
-    correctly, so both spellings verified against the same receipt — only
+    correctly, so both spellings verified against the same receipt. Only
     the replay set disagreed. A replayer flipping the `0x` (or the case)
     got a second free work item per payment, indefinitely.
 
     The provider's own log recorded it plainly: two `ok:true` rows for one
     `ServicePayment`, ids `8ed3f2…` and `0x8ed3f2…`. Fixed with
     `ServiceStore.normalize_request_id` (lowercase, `0x`-stripped) applied
-    on read, on write, **and on load** — a set persisted by a pre-fix
+    on read, on write, **and on load**, because a set persisted by a pre-fix
     daemon may hold both spellings of one id and must still refuse both
     after the upgrade. Regression test:
     `tests/atn/test_service_store.py::TestServiceRequestDispatch::test_replay_guard_is_prefix_and_case_insensitive`.
@@ -535,7 +535,7 @@ is reachable from such a session.
     Why the single-box runs missed it: on one machine the buyer's request
     id round-trips as the same string, so the two spellings never met. The
     two-box run reads the id back off the *chain event* to build the replay
-    probe, which is what produced the other spelling — and what a real
+    probe, which is what produced the other spelling, and what a real
     attacker would do.
 
 12. **`submitAnchor` hash-chains, so the second box's anchor must read the
@@ -549,7 +549,7 @@ is reachable from such a session.
 13. **A stale pip-installed `atn` will shadow the synced source.** On the
     remote box the venv had `autonet-computer` 0.2.7 installed; with a
     mis-expanded `PYTHONPATH` the daemon silently booted the *ancient*
-    package (which ignored `local_ws_port` and tried to seize 7700 — the
+    package (which ignored `local_ws_port` and tried to seize 7700, the
     live daemon's port). The script always puts the repo first on
     `PYTHONPATH`, but on a box with a pip-installed daemon, verify with
     `python -c "import atn; print(atn.__file__)"` before trusting a run.

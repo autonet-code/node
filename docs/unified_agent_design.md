@@ -4,6 +4,15 @@
 **Date:** 2026-03-24
 **Status:** Design proposal, ready for implementation planning
 
+> **Banner (2026-09).** This is the March 2026 proposal that drove the
+> `atn/` runtime shape, kept as the design record. It is not a description
+> of the current code. Two things it describes are gone: `atn/orchestrator/`
+> was deleted in the Aug 2026 refactor (the agent tool surface is now
+> `atn/agent_tools.py`), and the orchestrator role itself dissolved with it,
+> so the owner trust root is `OWNER_ID` and there is no privileged root
+> agent. Where this doc disagrees with the code, the code is current; for
+> the shipped system start at `docs/README.md`.
+
 ---
 
 ## Table of Contents

@@ -858,6 +858,9 @@ class AutonetService:
         # FederatedCloseDriver). Missing state dir → in-memory only.
         tool_regs_path = None
         tool_vetting_path = None
+        tool_positions_path = None
+        tool_credibility_path = None
+        tool_review_book_path = None
         try:
             state_dir = getattr(
                 getattr(self._world_service, "_persistence", None), "_dir", None,
@@ -865,9 +868,21 @@ class AutonetService:
             if state_dir is not None:
                 tool_regs_path = state_dir / "tool_registrations.json"
                 tool_vetting_path = state_dir / "tool_vetting.json"
+                # v4.1 carry-over: position centroids, reviewer
+                # credibility and the review book are close INPUTS. A
+                # daemon that restarts without them closes against an
+                # empty prior while its peers carry the accumulated one
+                # — a deterministic fork. Same rebuildable-cache
+                # contract as the registration map above.
+                tool_positions_path = state_dir / "tool_positions.json"
+                tool_credibility_path = state_dir / "tool_credibility.json"
+                tool_review_book_path = state_dir / "tool_review_book.json"
         except Exception:
             tool_regs_path = None
             tool_vetting_path = None
+            tool_positions_path = None
+            tool_credibility_path = None
+            tool_review_book_path = None
         self._federated_close_driver = FederatedCloseDriver(
             gossip=self._event_gossip,
             embedding_dim=embedding_dim,
@@ -875,6 +890,9 @@ class AutonetService:
             pricing=pricing,
             tool_registrations_path=tool_regs_path,
             tool_vetting_path=tool_vetting_path,
+            tool_positions_path=tool_positions_path,
+            tool_credibility_path=tool_credibility_path,
+            tool_review_book_path=tool_review_book_path,
         )
 
         # Household voice + fee-recycled emission sourcing. Wired here —

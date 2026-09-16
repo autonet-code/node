@@ -123,6 +123,10 @@ class SnapshotBuilder:
         self._voice_ref = voice_ref
         self._autonet_ref = autonet_ref
         self._arbiter_ref = arbiter_ref
+        # Agent-supervisor reference, refreshed by the Runtime on every
+        # snapshot. Only set when process isolation is wired; None otherwise,
+        # in which case no agent carries a pid.
+        self._supervisor_ref: Any = None
 
     def snapshot(self, scope_ids: set[str] | None = None) -> dict:
         """Build the dashboard snapshot.
@@ -133,6 +137,19 @@ class SnapshotBuilder:
         full-fleet-root behavior byte-for-byte. Global daemon sections
         (providers, connectors, voice, autonet, planning) are not per-agent and
         are returned unchanged regardless of scope."""
+        # Worker PIDs, so an owner can map an agent to an OS process from the
+        # UI (the CLI `agents` view already prints these). Empty when process
+        # isolation is off / the agent runs in-process.
+        worker_pids: dict[str, int] = {}
+        try:
+            for _aid, _w in getattr(
+                    self._supervisor_ref, "_workers", {}).items():
+                pid = getattr(_w, "pid", None)
+                if pid:
+                    worker_pids[_aid] = int(pid)
+        except Exception:  # noqa: BLE001 — display-only, degrade quietly
+            worker_pids = {}
+
         agents = {}
         for aid, defn in self.registry._agents.items():
             if scope_ids is not None and aid not in scope_ids:
@@ -146,6 +163,7 @@ class SnapshotBuilder:
                 "notify_parent": defn.notify_parent,
                 "status": self.registry._status[aid].value,
                 "schedule": defn.schedule,
+                "heartbeat": defn.heartbeat.interval if defn.heartbeat else None,
                 "concurrency": defn.concurrency,
                 "running": self.registry._running_count.get(aid, 0),
                 "steps": len(defn.steps),
@@ -153,6 +171,9 @@ class SnapshotBuilder:
                 "inbox": self.inbox.count(aid),
                 "last_output": _preview(last_output.data) if last_output else None,
                 "path": str(self._config.agents_dir / aid),
+                # OS pid of this agent's isolated worker process, None when it
+                # is not running in one.
+                "pid": worker_pids.get(aid),
             }
             if defn.identity and defn.identity.address:
                 agent_info["agent_address"] = defn.identity.address

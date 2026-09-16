@@ -97,8 +97,38 @@ async def seed_default_fleet(runtime: "Runtime", config: "ATNConfig") -> str | N
     """
     stamp = config.data_dir / _STAMP_NAME
     if stamp.exists():
-        return None
-    if runtime.list_agents():
+        # REPAIR (0.7.3 -> 0.7.4): that build registered the seed in memory
+        # only, so Kevin vanished at the first restart while the stamp forbade
+        # re-seeding — the install was left with zero agents forever. Re-seed
+        # only when the stamp records an actual seed AND the fleet is
+        # completely empty AND the seeded agent's YAML is absent. An empty
+        # fleet is the least surprising rule: a user who removed Kevin on
+        # purpose and kept working has other agents, so he never comes back;
+        # a user who removed Kevin as their ONLY agent gets him back once on
+        # the next boot, which reads as the fresh-install behaviour rather
+        # than as a resurrection.
+        try:
+            recorded = stamp.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        parts = recorded.split(None, 1)
+        if len(parts) != 2 or parts[0] != "seeded":
+            return None
+        seeded_id = parts[1].strip() or KEVIN_ID
+        if runtime.list_agents():
+            return None
+        get_agent = getattr(runtime, "get_agent", None)
+        if get_agent is not None and get_agent(seeded_id) is not None:
+            return None
+        if (config.agents_dir / seeded_id / "agent.yaml").exists():
+            return None
+        if (config.agents_dir / f"{seeded_id}.yaml").exists():
+            return None  # legacy flat layout
+        if seeded_id != KEVIN_ID:
+            return None  # not our default agent; leave it alone
+        log.info("Seed stamp present but fleet is empty — restoring '%s'",
+                 KEVIN_ID)
+    elif runtime.list_agents():
         # Pre-seeding install upgraded in place: respect the existing fleet.
         stamp.write_text("pre-existing fleet\n", encoding="utf-8")
         return None

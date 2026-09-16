@@ -737,6 +737,36 @@ class ToolStore:
                       exc_info=True)
             return None, frozenset()
 
+    async def _alarm_on_scope_violation(
+        self, err_text: str, services: "frozenset[str]", caller_id: str,
+    ) -> None:
+        """Turn tool_guard's egress denial into a real security alarm.
+
+        The guard raises inside the tool subprocess, so without this the
+        violation only ever reaches the caller as an error frame. This is the
+        second of the two alarm triggers (the first being the transcript scan
+        in SecurityMonitor), so an out-of-scope use lands in the Secrets tab's
+        alarm list alongside a leak.
+
+        Best-effort and never raises: a failure here must not mask the tool's
+        own error.
+        """
+        if not services or not err_text:
+            return
+        marker = "destination not authorized:"
+        idx = err_text.find(marker)
+        if idx < 0:
+            return
+        dest = err_text[idx + len(marker):].strip().split()[0].strip("'\"")
+        monitor = getattr(self._runtime, "security_monitor", None)
+        if monitor is None:
+            return
+        try:
+            await monitor.report_scope_violation(
+                caller_id or "<unknown>", sorted(services), dest)
+        except Exception:  # noqa: BLE001 — alarm must not break the call path
+            log.debug("scope-violation alarm failed", exc_info=True)
+
     async def _call_pinned(self, record: ToolRecord,
                            arguments: dict[str, Any],
                            *, caller_id: str | None = None) -> dict[str, Any]:
@@ -794,6 +824,8 @@ class ToolStore:
         out_text = stdout.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
             err_text = stderr.decode("utf-8", errors="replace").strip()
+            await self._alarm_on_scope_violation(
+                err_text, services, caller_id or "")
             return {"error": f"tool exited {proc.returncode}: {err_text[:2000]}"}
         try:
             return {"result": json.loads(out_text)}
@@ -924,6 +956,8 @@ class ToolStore:
             if proc.returncode != 0:
                 err = (await proc.stderr.read()).decode(
                     "utf-8", errors="replace").strip()
+                await self._alarm_on_scope_violation(
+                    err, services, caller_id or "")
                 return {"error": f"tool exited {proc.returncode}: {err[:2000]}"}
             out_text = "\n".join(leftover).strip()
             if not out_text:

@@ -445,12 +445,21 @@ def _local_session():
                          root_agent_id="orchestrator", scope_ids=None)
 
 
-async def _svc_request(rt, spec_digest, request_id, args, client="0xClient"):
+async def _svc_request(rt, spec_digest, request_id, args, client="0xClient",
+                       local=True):
+    """Drive the provider-side dispatch.
+
+    ``local=True`` models a request on the daemon's LOCAL listener, which is
+    what the no-chain-config dev degrade covers. A REMOTE request with no
+    chain config is refused by the gate (it cannot verify the payment), so
+    these dispatch tests would otherwise never reach the dispatch they are
+    about. See TestServicePaymentGateDegrade for the remote case."""
     server = _server(rt)
     return await server._handle_service_request(
         {"spec_digest": spec_digest, "request_id": request_id,
          "args": args, "client": client},
         msg_id="m1",
+        local=local,
     )
 
 
@@ -1092,7 +1101,7 @@ class TestInvokeServicePayment:
         gate_frames: list[dict] = []
         real_gate = server._validate_service_payment
 
-        async def _spy_gate(request, record):
+        async def _spy_gate(request, record, local=False):
             gate_frames.append(dict(request))
             return {"ok": True, "reason": "stubbed"}
 
@@ -1149,7 +1158,7 @@ class TestInvokeServicePayment:
         monkeypatch.setattr(service_client, "pay_for_service", _ok)
         server = _server(rt)
 
-        async def _open_gate(request, record):
+        async def _open_gate(request, record, local=False):
             return {"ok": True, "reason": "stubbed"}
 
         server._validate_service_payment = _open_gate
@@ -1174,6 +1183,90 @@ class TestInvokeServicePayment:
         assert out["ok"] is False
         assert "owner signing key" in out["error"]
         assert svc["digest"] not in rt.service_store.summary()
+
+    @pytest.mark.asyncio
+    async def test_owner_service_stamps_owner_wallet_and_real_gate_agrees(
+            self, tmp_path, monkeypatch):
+        """The payer and the gate must resolve the SAME recipient.
+
+        Before the fix an owner-authored spec stamped an EMPTY
+        author_pubkey: the payer fell back to the owner wallet and paid,
+        and the gate (with no such fallback) then refused to verify. The
+        buyer's money moved and nothing was served. This runs the REAL
+        gate, not a stub."""
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        tool = await _register_echo_tool(rt)
+        self._configure_chain(rt)
+        owner = rt._config.rpb.owner_wallet
+        svc = rt.service_store.register(
+            name="owner_svc", description="d", input_schema=SCHEMA,
+            author="user", ask=ASK, backing_tool=tool["digest"])
+        # The payable address is stamped at registration, not guessed later.
+        assert (rt.service_store.get(svc["digest"]).spec["author_pubkey"]
+                == owner)
+
+        from atn import on_chain, service_client
+        seen: list[str] = []
+
+        async def _ok(config, key, recipient, amount, request_id=""):
+            seen.append(recipient)
+            return {"tx_hash": "0xfeed", "request_id": request_id}
+
+        verified: list[str] = []
+
+        async def _verify(self, *, request_id, recipient, min_amount, tx_hash):
+            verified.append(recipient)
+            return {"verified": True}
+
+        monkeypatch.setattr(service_client, "pay_for_service", _ok)
+        monkeypatch.setattr(on_chain.OnChainService,
+                            "verify_service_payment", _verify)
+
+        out = await _invoke(rt, svc["digest"], {"x": "hi"})
+        assert out["ok"] is True, out
+        # Payer and gate agreed on one recipient: the owner wallet.
+        assert seen == [owner]
+        assert verified == [owner]
+
+    # ---- no chain config: local degrades open, REMOTE fails closed -------
+    #
+    # `service_request` is the only message dispatched PRE-AUTH on the
+    # network-reachable listener, because the payment IS the credential. A
+    # registry outage that left substrate_address empty used to turn that
+    # into no credential at all: unlimited free work, inference included,
+    # for any peer who knew the digest.
+
+    @pytest.mark.asyncio
+    async def test_remote_request_refused_without_chain_config(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        tool = await _register_echo_tool(rt)
+        svc = rt.service_store.register(
+            name="echo_svc", description="d", input_schema=SCHEMA,
+            author="child", ask=ASK, backing_tool=tool["digest"])
+        assert not rt._config.rpb.substrate_address
+
+        out = await _svc_request(rt, svc["digest"], "req-remote",
+                                 {"x": "hi"}, local=False)
+        assert out["ok"] is False
+        assert "no chain configuration" in out["error"]
+        # The refusal is logged as a failed request, and nothing was served.
+        assert rt.service_store.summary()[svc["digest"]]["ok_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_local_request_still_degrades_open(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        tool = await _register_echo_tool(rt)
+        svc = rt.service_store.register(
+            name="echo_svc", description="d", input_schema=SCHEMA,
+            author="child", ask=ASK, backing_tool=tool["digest"])
+
+        out = await _svc_request(rt, svc["digest"], "req-local",
+                                 {"x": "hi"}, local=True)
+        assert out["ok"] is True
+        assert out["result"]["result"] == {"echo": "hi"}
 
     @pytest.mark.asyncio
     async def test_foreign_digest_resolves_provider_and_dials(
@@ -1297,7 +1390,7 @@ class TestInvokeServicePayment:
 
         server = _server(rt)
 
-        async def _open_gate(request, record):
+        async def _open_gate(request, record, local=False):
             return {"ok": True, "reason": "stubbed"}
 
         server._validate_service_payment = _open_gate

@@ -25,6 +25,7 @@ class EventType(Enum):
     # Agent lifecycle
     AGENT_REGISTERED = "agent.registered"
     AGENT_UNREGISTERED = "agent.unregistered"
+    AGENT_UPDATED = "agent.updated"
     AGENT_ACTIVATED = "agent.activated"
     AGENT_DEACTIVATED = "agent.deactivated"
 

@@ -113,7 +113,7 @@ Tokens are paid for — keep tool calls purposeful and output tight.
 # phrase stable: tests and log greps key on it.
 REVIEW_STEP_PROMPT = (
     "Work item closing — one last step: you used registered tools this "
-    "run but did not review them. Call attest_tools ONCE now with one "
+    "run ({tools}) but did not review them. Call attest_tools ONCE now with one "
     "judgment per tool that mattered: ok, and per-charter-axis scores in "
     "'axes' (-1..+1) for the axes you actually observed (correctness, "
     "simplicity, and any alignment axis you have real signal on). Honest "
@@ -142,6 +142,85 @@ VERIFY_STEP_PROMPT = (
 # model tokens producing rows consensus throws away.
 _REVIEW_TRIGGER_TOOLS = frozenset({"use_tool"})
 _REVIEW_TOOL = "attest_tools"
+
+# `use_tool` is a ROUTER (ToolRegistry.call_tool): it dispatches to
+# CONNECTOR, PIPELINE, CORE and REGISTERED tools alike, and only the
+# REGISTERED branch produces a tool_used receipt that enters consensus.
+# Triggering the review step on the router name alone billed agents a
+# closing turn for Gmail-connector and core-tool calls, and the
+# attest_tools row it produced was then dropped by ToolStore.attest_usage
+# ("tool not found"). So resolve the INNER tool name and keep only the
+# calls that can actually have minted.
+#
+# The name space is disjoint by construction (ToolRegistry.get_tool
+# resolves registered tools LAST, and register_tool rejects the reserved
+# prefixes), so the classification is decidable without the registry:
+# `pipeline_*` is a pipeline agent, `mcp_*` is an MCP connector
+# operation, a core ATN tool is in _TOOLS/the shell bundle, and anything
+# else is a registered tool (`reg_<digest>` or the manifest name).
+_ROUTER_NON_REGISTERED_PREFIXES = ("pipeline_", "mcp_")
+
+
+def registered_tool_names(tool_call_args: dict | None) -> str | None:
+    """The registered-tool name a single ``use_tool`` call dispatched to.
+
+    Returns None when the call routed to a connector / pipeline / core
+    tool (nothing entered consensus, so no review is owed). Pure over its
+    input except for the core-tool-name lookup, which is a static table.
+    """
+    if not isinstance(tool_call_args, dict):
+        return None
+    # The agent-facing field is `name`; tolerate `tool` (some callers and
+    # older transcripts use it) rather than silently missing the trigger.
+    raw = tool_call_args.get("name") or tool_call_args.get("tool") or ""
+    name = str(raw).strip()
+    if not name:
+        return None
+    if name.startswith(_ROUTER_NON_REGISTERED_PREFIXES):
+        return None
+    try:
+        from .agent_tools import get_core_tool_def
+        if get_core_tool_def(name) is not None:
+            return None
+        from .shell_tools import SHELL_TOOL_EXECUTORS
+        if name in SHELL_TOOL_EXECUTORS:
+            return None
+    except Exception:  # pragma: no cover - import guard only
+        pass
+    return name
+
+
+def review_owed_tools(tool_calls) -> list[str]:
+    """Registered tool names a run used, in first-seen order.
+
+    ``tool_calls`` is either the bridge path's accumulated list of
+    ``{"tool": name, "args": {...}}`` dicts or an equivalent sequence of
+    ``(name, args)`` pairs (the in-loop provider path). Empty list ⇒ the
+    run owes no review.
+    """
+    owed: list[str] = []
+    for call in tool_calls or []:
+        if isinstance(call, dict):
+            outer = str(call.get("tool") or "")
+            args = call.get("args")
+        else:
+            try:
+                outer, args = call
+            except (TypeError, ValueError):
+                continue
+            outer = str(outer or "")
+        if outer not in _REVIEW_TRIGGER_TOOLS:
+            continue
+        inner = registered_tool_names(args)
+        if inner and inner not in owed:
+            owed.append(inner)
+    return owed
+
+
+def format_review_prompt(owed: list[str] | None) -> str:
+    """REVIEW_STEP_PROMPT with the actual tool names interpolated."""
+    names = ", ".join(owed[:10]) if owed else "the registered tools you called"
+    return REVIEW_STEP_PROMPT.format(tools=names)
 
 # stop_reasons after which a review re-invoke would be wrong (aborted or
 # resource-limited runs get no extra turn).
@@ -192,7 +271,10 @@ def needs_review_reinvoke(
         name = call.get("tool") if isinstance(call, dict) else None
         if name:
             names.add(str(name))
-    return bool(_REVIEW_TRIGGER_TOOLS & names) and _REVIEW_TOOL not in names
+    if _REVIEW_TOOL in names:
+        return False
+    # Not the router name: the REGISTERED tools it actually dispatched to.
+    return bool(review_owed_tools(accumulated_tool_calls))
 
 
 # Appended to the common base per granted tool category. Keys match the

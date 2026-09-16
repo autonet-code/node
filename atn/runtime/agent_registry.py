@@ -46,6 +46,11 @@ _LEGACY_ROOT_ID = "orchestrator"
 DEFAULT_MAX_CHILDREN_PER_PARENT = 20
 DEFAULT_MAX_DEPTH_BELOW_ROOT = 6
 
+# Floor for a heartbeat interval. The scheduler polls every second and fires
+# whenever elapsed >= interval, so a 0-second heartbeat re-launches a full LLM
+# execution on every poll. Anything below this is a configuration mistake.
+MIN_HEARTBEAT_S = 30.0
+
 
 # Period rollover for per-agent budgets. "none" means lifetime / no rollover.
 _PERIOD_SECONDS: dict[str, int] = {
@@ -647,6 +652,14 @@ class AgentRegistry:
         Fresh agent creation (the create_agent tool, frontend
         register-agent) goes through the strict path.
         """
+        # A self-parented agent is a one-node cycle: get_children(X) returns
+        # X, so every tree walk over it never terminates. Heal rather than
+        # raise — this path also hydrates on-disk YAML, and refusing to load
+        # an agent written by an older build would lose it.
+        if defn.parent_id is not None and defn.parent_id == defn.id:
+            log.warning("Agent '%s' names itself as parent; promoting to "
+                        "top level", defn.id)
+            defn.parent_id = None
         self._enforce_spawn_limits(defn)
         self._freeze_parent_pct_budgets(defn)
         if not legacy:
@@ -658,7 +671,8 @@ class AgentRegistry:
         self._note_child_id(defn.id)
         # Heartbeat and legacy schedule are mutually exclusive.
         if defn.heartbeat:
-            self._heartbeat_table[defn.id] = parse_interval(defn.heartbeat.interval)
+            self._heartbeat_table[defn.id] = max(
+                MIN_HEARTBEAT_S, parse_interval(defn.heartbeat.interval))
             self._schedule_table.pop(defn.id, None)
             self._last_idle.setdefault(defn.id, datetime.now(timezone.utc))
         elif defn.schedule:
@@ -891,12 +905,21 @@ class AgentRegistry:
         return children
 
     def get_descendants(self, agent_id: str) -> list[AgentDefinition]:
+        """Every agent beneath ``agent_id``, breadth-first.
+
+        Cycle-guarded like get_subtree_ids: malformed parent data (a
+        self-parent or a loop from an older build) terminates instead of
+        queueing forever."""
         descendants: list[AgentDefinition] = []
+        seen: set[str] = {agent_id}
         queue = [agent_id]
         while queue:
             current = queue.pop(0)
             children = self.get_children(current)
             for child in children:
+                if child.id in seen:
+                    continue
+                seen.add(child.id)
                 descendants.append(child)
                 queue.append(child.id)
         return descendants
@@ -956,6 +979,42 @@ class AgentRegistry:
             defn.parent_id = old_parent
             return str(exc)
         return None
+
+    def reconcile_dangling_parents(self) -> list[str]:
+        """Clear parent_id pointers that name an agent that no longer exists.
+
+        Heals installs written before removal promoted its children: a
+        dangling pointer is silent but breaks budget rollup, parent
+        notification and spawn/depth limits for the whole subtree. Returns the
+        ids that were promoted to top level so the caller can re-save them."""
+        healed: list[str] = []
+        for defn in self._agents.values():
+            pid = defn.parent_id
+            if pid is None:
+                continue
+            if pid == defn.id or self._resolve_parent_agent_id(pid) not in self._agents:
+                defn.parent_id = None
+                healed.append(defn.id)
+        return healed
+
+    async def emit_agent_updated(
+        self, agent_id: str, old_parent_id: str | None,
+    ) -> None:
+        """Announce a hierarchy change so OTHER connected clients redraw.
+
+        reparent_agent only mutates memory; without this a second surface
+        (desktop app and browser on the same daemon) keeps drawing the
+        pre-move tree until it reconnects."""
+        defn = self._agents.get(agent_id)
+        if defn is None:
+            return
+        await self.events.emit(Event(
+            type=EventType.AGENT_UPDATED,
+            source="runtime",
+            data={"agent_id": agent_id,
+                  "parent_id": defn.parent_id,
+                  "old_parent_id": old_parent_id},
+        ))
 
     def _enforce_reparent_limits(self, defn: AgentDefinition) -> None:
         """Spawn-count + depth checks for an EXISTING agent being reparented.
@@ -1421,7 +1480,17 @@ class AgentRegistry:
         if not defn:
             return
         if record.status == ExecutionStatus.COMPLETED:
-            if defn.schedule or defn.heartbeat:
+            # A manual disable (STOPPED) and a budget pause (BUDGET_PAUSED) are
+            # both decisions made WHILE the run was in flight; finishing the run
+            # must not silently undo them and re-arm the scheduler.
+            cur = self._status.get(agent_id)
+            if cur in (AgentStatus.STOPPED, AgentStatus.BUDGET_PAUSED):
+                pass
+            elif defn.heartbeat and defn.heartbeat.on_complete == "self_deactivate":
+                # The agent asked to stand down after finishing a beat.
+                self._status[agent_id] = AgentStatus.STOPPED
+                self._heartbeat_table.pop(agent_id, None)
+            elif defn.schedule or defn.heartbeat:
                 self._status[agent_id] = AgentStatus.ACTIVE
             else:
                 self._status[agent_id] = AgentStatus.COMPLETED
@@ -1464,8 +1533,17 @@ class AgentRegistry:
 # ------------------------------------------------------------------
 
 def parse_interval(schedule: str) -> float:
-    m = re.match(r"^(\d+)\s*([smh])$", schedule.strip().lower())
-    if not m:
-        raise ValueError(f"Invalid schedule: {schedule!r}  (use e.g. '30s', '5m', '1h')")
-    val, unit = int(m.group(1)), m.group(2)
-    return val * {"s": 1, "m": 60, "h": 3600}[unit]
+    """Parse an interval string into seconds.
+
+    Accepts one unit group ('30s', '5m', '1h') or a sequence of them
+    ('1h30m', '1h 30m'), which is what the frontend's side-by-side
+    hours/minutes fields produce.
+    """
+    s = schedule.strip().lower()
+    if not re.match(r"^(\d+\s*[smh]\s*)+$", s):
+        raise ValueError(
+            f"Invalid schedule: {schedule!r}  (use e.g. '30s', '5m', '1h', '1h30m')")
+    total = 0.0
+    for val, unit in re.findall(r"(\d+)\s*([smh])", s):
+        total += int(val) * {"s": 1, "m": 60, "h": 3600}[unit]
+    return total

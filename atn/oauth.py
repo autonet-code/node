@@ -78,6 +78,12 @@ def build_auth_url(connector_id: str) -> str:
     config = _OAUTH_CONFIGS.get(connector_id)
     if config is None:
         raise ValueError(f"No OAuth config for connector '{connector_id}'")
+    if not config.get("client_id"):
+        # Without a client id the URL builds fine but the provider rejects it
+        # with an opaque error page. Fail here so the caller can say why.
+        raise ValueError(
+            f"OAuth for '{connector_id}' is not configured on this daemon: "
+            "set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and restart.")
 
     params = {
         "client_id": config["client_id"],

@@ -244,6 +244,80 @@ def _allowance_to_spec(grant: AllowanceGrant) -> str:
     return ",".join(names) if names else "none"
 
 
+def resolve_effective_grant(agent_id: str, runtime: Any) -> list:
+    """Return the ENFORCED grant for ``agent_id`` as concrete vault service names.
+
+    This is the single daemon-side answer to "what may this agent actually hold
+    on its next run", and it is recomputed per run rather than consumed once, so
+    an agent keeps its grant across repeated triggers.
+
+    Ceiling rules (fail-closed, deny-all on any fault):
+      - isolation flag OFF                 -> [] (no tripwire, no secrets)
+      - a spawn_child pre-seeded override  -> that override verbatim
+        (``runtime._pending_grants``; the parent-side clamp already ran)
+      - an agent WITH a parent             -> own wish INTERSECT L_parent
+      - a parentless (root/UI-created) agent
+                                           -> own wish INTERSECT
+                                              ``secrets.default_root_allowance``
+
+    The root ceiling is what makes ``default_root_allowance`` real: a top-level
+    agent the owner created in the UI has no parent worker to clamp against, so
+    the owner-set default is its L_parent. Leaving that config at ``"none"``
+    (the shipped default) keeps every root agent deny-all.
+    """
+    if runtime is None or not agent_id:
+        return []
+    try:
+        _wi = getattr(getattr(runtime, "_config", None), "worker_isolation", None)
+        if not getattr(_wi, "enabled", False):
+            return []
+    except Exception:  # noqa: BLE001 — fail closed
+        return []
+
+    # A spawn_child stash is an explicit daemon-computed override for this child
+    # (it already went through the parent clamp at Seam A). Honor it as-is.
+    try:
+        staged = (runtime._pending_grants or {}).get(agent_id)
+    except Exception:  # noqa: BLE001
+        staged = None
+    if staged:
+        return list(staged)
+
+    try:
+        defn = runtime.get_agent(agent_id)
+    except Exception:  # noqa: BLE001
+        return []
+    if defn is None:
+        return []
+
+    try:
+        l_requested = _resolve_spec_allowance(
+            {"secrets_allowance": getattr(defn, "secrets_allowance", None)},
+            runtime,
+        )
+        parent_id = getattr(defn, "parent_id", None)
+        if parent_id:
+            l_parent = _resolve_parent_allowance(parent_id, runtime)
+        else:
+            root_spec = getattr(
+                getattr(getattr(runtime, "_config", None), "secrets", None),
+                "default_root_allowance", "none")
+            l_parent = _resolve_spec_allowance(
+                {"secrets_allowance": root_spec}, runtime)
+        l_child = _intersect_allowance(l_requested, l_parent)
+    except Exception:  # noqa: BLE001 — a keystore fault must never fail open
+        log.exception("effective-grant resolution failed for %s; denying all",
+                      agent_id)
+        return []
+
+    if isinstance(l_child, _AllowanceAll):
+        try:
+            return sorted(_resolve_spec("all"))
+        except Exception:  # noqa: BLE001
+            return []
+    return sorted(l_child)
+
+
 # Callback the host invokes exactly once when the worker reports execution_done.
 # The caller (trigger_run cutover / supervisor) uses it to run the clean
 # finalize path. Signature: (status, error, accumulated_tool_calls) -> awaitable.

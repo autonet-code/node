@@ -38,7 +38,7 @@ python scripts/local_e2e_tool_economy.py    # register → publish → adopt →
 python scripts/local_e2e_venture_loop.py    # venture funding + service revenue loop
 ```
 
-### Tests (never run the whole suite: ~624 tests, slow)
+### Tests (never run the whole suite: 1700+ tests, slow)
 ```bash
 pytest tests/test_wm_lineage.py tests/test_federated_reconcile.py
 python tests/test_world_model_substrate_e2e.py

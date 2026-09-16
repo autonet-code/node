@@ -101,7 +101,7 @@ class ConnectorConfig:
 class VoiceConfig:
     """Configuration for the voice service.
 
-    Requires ``pip install atn[voice]`` at minimum.
+    Requires ``pip install autonet-computer[voice]`` at minimum.
     """
     enabled: bool = False       # voice service active on startup
     backend: str = "kokoro"     # TTS backend: kokoro, edge, elevenlabs, piper
@@ -111,6 +111,12 @@ class VoiceConfig:
     tools_volume: float = 0.55
     effects_volume: float = 0.35
     narrate_tools: bool = True
+    # Tool narration and announcements speak in a second voice so the two
+    # channels are easy to tell apart. `tools_backend = None` means "whatever
+    # `backend` is", so the contrast stays a voice difference within the
+    # selected backend instead of silently falling back to another backend.
+    tools_voice: str = "am_michael"
+    tools_backend: str | None = None
     announcements: list[str] = field(default_factory=lambda: [
         "agent_runs", "agent_created", "agent_completed", "delegate_lifecycle"
     ])
@@ -369,8 +375,12 @@ class WorkerIsolationConfig:
     provider (Anthropic / OpenAI-compatible): with the flag ON the provider loop
     + local sandboxed tools run IN THE WORKER PROCESS, while authority tools,
     events, status, and budget booking cross the IPC seam back to the daemon.
-    The bridge/Claude-Max SDK provider (P5) and delegate SPAWN (P6) still run
-    in-process even under the flag. With the flag OFF (default) ``trigger_run``
+    The Claude-Max bridge is worker-eligible as of P5 (the worker owns its node
+    SDK child); ``codex_max`` and rpb/substrate composite providers still run
+    in-process, as does delegate SPAWN (P6): a worker that tries to create a
+    child issues a spawn_child RPC instead. See
+    ``atn.runtime.execution_engine.ExecutionEngine._worker_eligible`` for the
+    single source of truth. With the flag OFF (default) ``trigger_run``
     is byte-identical to today — the in-process asyncio path is untouched.
 
     The flag is read at ``load_config`` time from EITHER the env var (takes
@@ -396,8 +406,9 @@ class SecretsConfig:
     form): "none" (default; deny-all) or "all" (grant every vault service,
     unbounded / picks up new services) or a comma-separated bundle/literal
     spec. This is the L_parent seed for agents with no parent allowance to
-    intersect against. Inert until the enforcement phases (P4+); read only
-    when worker_isolation is also enabled and a real grant is requested.
+    intersect against, applied by
+    ``atn.runtime.worker_host.resolve_effective_grant``; read only when
+    worker_isolation is also enabled and a real grant is requested.
     """
     default_root_allowance: str = "none"
 
@@ -1159,6 +1170,86 @@ def save_sponsor_address_to_config(
         encoding="utf-8",
     )
     log.info("Sponsor address saved to %s", config_path)
+
+
+def save_sponsor_mode_to_config(
+    sponsor_inference: bool,
+    sponsor_provider: str = "",
+    sponsor_model: str = "",
+    config_path: Path | None = None,
+) -> None:
+    """Persist this daemon's sponsor-SIDE mode to config.yaml.
+
+    The mirror of save_sponsor_address_to_config: that one records the
+    sponsor this daemon consumes from, this one records that this daemon
+    serves inference to bound dependents. Without it, enabling sponsor mode
+    from the UI lasted only until the next restart while sponsor_bindings.json
+    survived, so the panel kept listing dependents the daemon no longer served.
+
+    Blank provider/model are left untouched so an enable call that omits them
+    does not wipe a hand-edited value.
+    """
+    config_path = config_path or (_DEFAULT_DIR / "config.yaml")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            log.warning("Failed to read config for sponsor mode save: %s", config_path)
+            raw = {}
+
+    autonet = raw.get("autonet")
+    if not isinstance(autonet, dict):
+        autonet = {}
+        raw["autonet"] = autonet
+    autonet["sponsor_inference"] = bool(sponsor_inference)
+    if sponsor_provider:
+        autonet["sponsor_provider"] = sponsor_provider
+    if sponsor_model:
+        autonet["sponsor_model"] = sponsor_model
+
+    config_path.write_text(
+        yaml.dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    log.info("Sponsor mode saved to %s (enabled=%s)", config_path, bool(sponsor_inference))
+
+
+def save_owner_wallet_to_config(
+    owner_wallet: str,
+    config_path: Path | None = None,
+) -> None:
+    """Persist the daemon's OWNER wallet to config.yaml.
+
+    This is the identity that owns the fleet's earnings (tool_store's author
+    fallback, service_store's provider identity) and the address a remote
+    connection must sign with to be rooted at the full fleet. An empty string
+    clears it, which disables the remote owner handshake.
+    """
+    config_path = config_path or (_DEFAULT_DIR / "config.yaml")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    raw: dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            log.warning("Failed to read config for owner wallet save: %s", config_path)
+            raw = {}
+
+    autonet = raw.get("autonet")
+    if not isinstance(autonet, dict):
+        autonet = {}
+        raw["autonet"] = autonet
+    autonet["owner_wallet"] = (owner_wallet or "").strip()
+
+    config_path.write_text(
+        yaml.dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    log.info("Owner wallet saved to %s", config_path)
 
 
 def save_default_model_to_config(

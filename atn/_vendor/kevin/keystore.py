@@ -99,8 +99,16 @@ def _write_vault(d):
     pub = ident.to_public()
     pt = json.dumps(d).encode("utf-8")
     ct = pyrage.encrypt(pt, [pub])
-    with open(VAULT_PATH, "wb") as f:
+    # Write-then-replace. Two writers on the same path (the daemon plus a
+    # stray process) with plain truncating opens can interleave and leave a
+    # file whose header and body come from different encryptions; os.replace
+    # is atomic on both POSIX and NTFS, so readers only ever see a whole file.
+    tmp_path = f"{VAULT_PATH}.tmp-{os.getpid()}-{_secrets.token_hex(4)}"
+    with open(tmp_path, "wb") as f:
         f.write(ct)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, VAULT_PATH)
 
 
 def put_secret(service, value):

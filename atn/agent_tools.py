@@ -35,6 +35,7 @@ from .delegate_prompts import build_delegate_prompt
 from .events import Event, EventType
 from .loader import delete_agent_dir, save_agent
 from .providers.base import ToolDefinition
+from .runtime.agent_registry import MIN_HEARTBEAT_S
 from .runtime.provider_manager import get_model_tier, get_tier_label
 
 if TYPE_CHECKING:
@@ -164,9 +165,13 @@ _TOOLS: list[ToolDefinition] = [
                     "type": ["string", "null"],
                     "description": (
                         "Reparent this agent under a new parent (the 'regional "
-                        "manager' path), or null to promote it to top-level. "
-                        "Rejected on cycles or if the new subtree breaks spawn/"
-                        "depth/budget limits."
+                        "manager' path). Owner-only, with one exception: a "
+                        "parent may re-home its OWN direct child under itself "
+                        "or one of its descendants. An agent cannot promote a "
+                        "child to top-level or move it outside its own "
+                        "subtree, so null (promote to top-level) is owner-only "
+                        "too. Rejected on cycles or if the new subtree breaks "
+                        "spawn/depth/budget limits."
                     ),
                 },
                 "concurrency": {"type": "integer", "description": "Max parallel executions."},
@@ -619,7 +624,8 @@ _TOOLS: list[ToolDefinition] = [
             "connector-backed). Registration is ALWAYS private: local capability "
             "scoped to you and your superiors; only the user can grant it outside "
             "that lineage. You own what you author. Publishing to the substrate "
-            "(where consensus judges it and you earn mint from standing and usage) "
+            "(where other agents can find, review and adopt it, and you earn a "
+            "pro-rata share of the epoch pool from attested third-party usage) "
             "is the separate publish_tool capability, granted case-by-case. Remote "
             "paid APIs are Services, not tools: use the services rail instead of "
             "an endpoint."
@@ -648,7 +654,8 @@ _TOOLS: list[ToolDefinition] = [
         name="publish_tool",
         description=(
             "Publish a tool YOU authored to the substrate: its manifest becomes "
-            "network-visible, debatable, and (pinned tools) mint-eligible. This is "
+            "network-visible and reviewable, and (pinned tools) earns you a share "
+            "of the epoch pool from attested third-party usage. This is "
             "a separately granted capability — having register_tool does not imply "
             "having this. You can only publish your own tools."
         ),
@@ -1153,7 +1160,8 @@ _TOOLS: list[ToolDefinition] = [
         name="delegate_collect",
         description=(
             "Wait for a delegate sub-agent to finish and return its result. "
-            "Blocks until the delegate completes, fails, or is killed. "
+            "Blocks until the delegate completes, fails, is killed, or the "
+            "timeout elapses (then status is 'still_running'). "
             "Use this when you need the delegate's output before continuing."
         ),
         input_schema={
@@ -1162,6 +1170,13 @@ _TOOLS: list[ToolDefinition] = [
                 "agent_id": {
                     "type": "string",
                     "description": "The delegate agent_id returned by delegate().",
+                },
+                "timeout_s": {
+                    "type": "number",
+                    "description": (
+                        "Seconds to wait before giving up and returning "
+                        "status 'still_running' (default 300)."
+                    ),
                 },
             },
             "required": ["agent_id"],
@@ -1278,10 +1293,12 @@ _TOOLS: list[ToolDefinition] = [
             "local service spec AND registers it on-chain in the ServiceRegistry "
             "under your agent address (you become the provider). Requires you to "
             "be registered on-chain (register_on_chain first) — the contract's "
-            "onlyAgent gate rejects unregistered callers. A service needs a "
-            "backing tool to actually fulfil requests: pass 'backing_tool' (the "
+            "onlyAgent gate rejects unregistered callers. A service needs ONE "
+            "backing to actually fulfil requests: either 'backing_tool' (the "
             "digest of a registered tool you own) so incoming service_requests "
-            "dispatch to it. Returns {service_id, tx_hash, spec_digest}."
+            "dispatch to it, or 'inference' ({model, max_tokens_cap}) to sell "
+            "cognition off this daemon's own provider stack. "
+            "Returns {service_id, tx_hash, spec_digest}."
         ),
         input_schema={
             "type": "object",
@@ -1300,6 +1317,19 @@ _TOOLS: list[ToolDefinition] = [
                 "backing_tool": {
                     "type": "string",
                     "description": "Digest of a registered tool you own that fulfils requests (a Service is a tool the owner chose to sell).",
+                },
+                "inference": {
+                    "type": "object",
+                    "description": "The OTHER backing kind: sell cognition off "
+                                   "this daemon's own provider stack instead of "
+                                   "a tool. {model, max_tokens_cap}. Mutually "
+                                   "exclusive with 'backing_tool' — a service "
+                                   "has exactly one backing.",
+                    "properties": {
+                        "model": {"type": "string", "description": "Model id served to buyers."},
+                        "max_tokens_cap": {"type": "integer", "description": "Ceiling clamped onto every request."},
+                    },
+                    "additionalProperties": False,
                 },
                 "output_schema": {
                     "type": "object",
@@ -1457,6 +1487,8 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
             for s in defn.steps
         ]
     result["notify_parent"] = defn.notify_parent
+    result["wake_parent_on_child"] = bool(
+        getattr(defn, "wake_parent_on_child", False))
     # Which substrate this agent thinks on. `provider` was previously invisible
     # here even though update_agent writes it; a marketplace binding makes the
     # gap worse (it silently overrides provider/model AND names the paying
@@ -1526,6 +1558,14 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     defn = runtime.get_agent(agent_id)
     if defn is None:
         return {"error": f"Agent '{agent_id}' not found."}
+
+    # Refuse the whole payload rather than half-applying it: sponsor_address
+    # used to fall through silently (see the NOTE below), so a caller that
+    # sent it got an "updated" for a field that was never stored.
+    if "sponsor_address" in input:
+        return {"error": "sponsor_address is a daemon-level setting, not a "
+                         "per-agent one (ratified 2026-07-25, "
+                         "docs/sponsored_inference.md). Use set_my_sponsor."}
 
     changed: list[str] = []
 
@@ -1647,6 +1687,16 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             return {"error": cascade_err}
         defn.budgets = input["budgets"]
         changed.append("budgets")
+        # A raise must actually resume the agent: BUDGET_PAUSED is set by the
+        # finalizer and nothing else clears it, so re-check here and re-arm.
+        if runtime.registry._status.get(agent_id) == AgentStatus.BUDGET_PAUSED:
+            prov = defn.provider
+            if isinstance(prov, list):
+                prov = prov[0] if prov else ""
+            ok, _blocker = runtime.registry.check_budget(
+                agent_id, str(prov or ""), model_id=defn.cognitive_model or "")
+            if ok:
+                runtime.registry._status[agent_id] = AgentStatus.ACTIVE
     if "parent_id" in input:
         # Reparenting (the "regional manager" path): place a parent over a
         # formerly top-level agent, or re-home a subtree. Access control
@@ -1674,9 +1724,21 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
                 return {"error": "An agent may re-home its child only under "
                                  "itself or a descendant — not to top level "
                                  "or outside its subtree."}
+        old_parent_id = defn.parent_id
         err = runtime.registry.reparent_agent(agent_id, new_parent)
         if err:
             return {"error": err}
+        # Announce the move so OTHER connected surfaces redraw the tree. The
+        # initiating client refreshes its own snapshot; without this event a
+        # second client (desktop app + browser on the same daemon) keeps
+        # drawing the pre-move hierarchy until it reconnects.
+        if defn.parent_id != old_parent_id:
+            try:
+                await runtime.registry.emit_agent_updated(
+                    agent_id, old_parent_id)
+            except Exception as exc:
+                log.warning("agent.updated emit failed for %s: %s",
+                            agent_id, exc)
         changed.append("parent_id")
 
     if "connector_ids" in input:
@@ -1744,11 +1806,21 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             defn.heartbeat = None
             runtime._heartbeat_table.pop(agent_id, None)
         else:
+            raw_interval = hb.get("interval", "5m")
+            # Parse BEFORE mutating the definition: a bad interval must not
+            # leave defn.heartbeat holding a value the scheduler can't use.
+            try:
+                secs = runtime._parse_interval(raw_interval)
+            except ValueError as exc:
+                return {"error": str(exc)}
+            if secs < MIN_HEARTBEAT_S:
+                return {"error": "Heartbeat interval must be at least "
+                                 f"{MIN_HEARTBEAT_S:.0f}s."}
             defn.heartbeat = HeartbeatConfig(
-                interval=hb.get("interval", "5m"),
+                interval=raw_interval,
                 on_complete=hb.get("on_complete", "notify_parent"),
             )
-            runtime._heartbeat_table[agent_id] = runtime._parse_interval(defn.heartbeat.interval)
+            runtime._heartbeat_table[agent_id] = secs
             # Clear legacy schedule — they are mutually exclusive
             runtime._schedule_table.pop(agent_id, None)
             # Always reset the idle timer so the countdown starts fresh
@@ -1820,6 +1892,14 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             agent_id = runtime.generate_child_id(parent_id)
         elif not agent_id:
             agent_id = input.get("name", "agent").lower().replace(" ", "-")
+
+        # A caller passing its OWN id re-registers itself with parent_id ==
+        # its own id, which is a one-node cycle: get_children(X) returns X,
+        # and every tree walk over it (get_descendants, the frontend card
+        # layout) loops forever. Reject before register_agent overwrites the
+        # live definition.
+        if agent_id and agent_id == parent_id:
+            return {"error": "An agent cannot create itself as its own child."}
 
         # System prompt: keep ONLY a caller-provided custom prompt. Do NOT
         # pre-render the delegate template here — leaving it empty lets the
@@ -1990,6 +2070,11 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # parent_id is ALWAYS derived from the caller — not a user choice
         parent_id = caller_id or None
 
+        # Same one-node-cycle guard as the cognitive branch: a caller passing
+        # its own id would re-register itself as its own child.
+        if input["id"] and input["id"] == parent_id:
+            return {"error": "An agent cannot create itself as its own child."}
+
         defn = AgentDefinition(
             id=input["id"],
             name=input["name"],
@@ -2061,6 +2146,8 @@ async def _trigger_run(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
     agent_id = input["agent_id"]
     if runtime.get_agent(agent_id) is None:
         return {"error": f"Agent '{agent_id}' not found."}
+    if runtime.get_status(agent_id) == AgentStatus.STOPPED:
+        return {"error": f"Agent '{agent_id}' is disabled. Enable it first."}
     try:
         eid = await runtime.trigger_run(agent_id, source="owner")
         if eid is None:
@@ -2379,11 +2466,18 @@ async def _get_connector_tools(runtime: Runtime, input: dict[str, Any]) -> dict[
             "input_schema": t.get("inputSchema", {}),
         })
 
-    return {
+    from .oauth import requires_oauth
+    out: dict[str, Any] = {
         "connector_id": connector_id,
         "tool_count": len(tools),
         "tools": tools,
     }
+    # Same two flags the snapshot carries, so a detail view can offer the
+    # sign-in affordance without a second round trip.
+    if requires_oauth(connector_id):
+        out["requires_oauth"] = True
+        out["authenticated"] = runtime.credential_store.exists(connector_id)
+    return out
 
 
 async def _use_connector(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -2473,7 +2567,7 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     if name.startswith("atn_"):
         return {"error": "tool names may not start with 'atn_' "
                          "(reserved for daemon harness modules)"}
-    for reserved in ("reg_", "pipeline_", "tool_", "connector_"):
+    for reserved in ("reg_", "pipeline_", "tool_", "connector_", "mcp_"):
         if name.startswith(reserved):
             return {"error": f"tool names may not start with '{reserved}'"}
 
@@ -2742,27 +2836,55 @@ async def _probe_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
     except Exception as exc:
         log.debug("probe_tools substrate path failed: %s", exc)
     if not matches:
-        needle = query.lower()
-        for record in runtime.tool_store.visible_to(None):
-            hay = f"{record.name} {record.manifest.get('description', '')}".lower()
-            if all(w in hay for w in needle.split()):
-                matches.append({
-                    "digest": record.digest,
-                    "name": record.name,
-                    "description": record.manifest.get("description", ""),
-                    "author": record.author,
-                    "trust_class": record.trust_class,
-                    "score": 0.0,
-                    "rating": 0.0,
-                    "axes": [],
-                    "mass": [],
-                    "review_mass": 0.0,
-                    "inspections": 0,
-                })
-                if len(matches) >= k:
-                    break
+        # Scoped to the REAL caller (not the owner identity): an agent must
+        # not learn the names of tools it may not call. Owner surfaces pass
+        # caller_id=None and still see everything.
+        matches = local_tool_matches(
+            runtime.tool_store, query, k,
+            caller_id=input.get("_caller_id"),
+        )
         source = "local"
     return {"matches": matches, "source": source}
+
+
+def local_tool_matches(
+    tool_store: Any,
+    query: str,
+    k: int,
+    *,
+    caller_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Substrate-free ranked fallback for probe_tools.
+
+    Scores each visible record by how many query words (len > 2) appear in
+    its name or description and returns the best ``k``, highest first. The
+    old all-words conjunction meant any natural-language query ("summarize
+    a web page") matched nothing; ranking degrades gracefully instead.
+    """
+    words = [w for w in query.lower().split() if len(w) > 2]
+    if not words:
+        words = query.lower().split()
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for record in tool_store.visible_to(caller_id):
+        hay = f"{record.name} {record.manifest.get('description', '')}".lower()
+        score = sum(1 for w in words if w in hay)
+        if not score:
+            continue
+        scored.append((score, {
+            "digest": record.digest,
+            "name": record.name,
+            "description": record.manifest.get("description", ""),
+            "author": record.author,
+            "trust_class": record.trust_class,
+            "score": score / len(words),
+            "rating": 0.0,
+            "axes": [],
+            "mass": [],
+            "review_mass": 0.0,
+            "inspections": 0,
+        }))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [row for _, row in scored[:k]]
 
 
 def _economy_graph_snapshot(world_service: Any) -> dict[str, Any]:
@@ -2936,6 +3058,12 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
     # Asks are ATN-denominated by construction (ratified 2026-07-10) —
     # no token field.
     ask = {"amount": str(ask_amount), "unit": "per_item"}
+    # The second backing kind (docs/services_market.md, decision 2026-07-26):
+    # sell this daemon's own inference. The store refuses it alongside a
+    # backing_tool, so no check is needed here.
+    inference = input.get("inference")
+    if not isinstance(inference, dict):
+        inference = None
     try:
         built = store.register(
             name=name,
@@ -2947,6 +3075,7 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
             output_schema=output_schema,
             endpoint_hint=str(input.get("endpoint_hint") or ""),
             image_uri=str(input.get("image_uri") or "").strip(),
+            inference=inference,
         )
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}
@@ -3779,6 +3908,48 @@ _PROGRESSIVE_DIRECT_TOOLS = {
 }
 
 
+# Tools every agent may call regardless of its grant: its OWN budget
+# status is not a capability, it is self-knowledge (and nothing else is
+# uncategorised — see _TOOL_CATEGORIES above).
+_ALWAYS_GRANTED_TOOLS: frozenset[str] = frozenset({"get_my_budget_status"})
+
+
+def resolve_tool_grant(tool_spec: list[str]) -> set[str] | None:
+    """Resolve a tool spec to the core-tool names the agent may CALL.
+
+    ``resolve_tool_surface`` decides what an agent SEES in its schema
+    block; this decides what it may invoke through ``use_tool`` /
+    ``execute_tool``. They differ in two deliberate places:
+
+    * ``atn_progressive`` shows only the high-frequency tools directly
+      but intends the rest to stay reachable via list_tools/use_tool, so
+      it grants everything.
+    * ``None`` (returned for an empty / bundle-free spec) means "no
+      declared grant, do not restrict" — the gate only binds where the
+      owner actually chose bundles.
+    """
+    if not tool_spec or "atn_full" in tool_spec or "atn_progressive" in tool_spec:
+        return None
+
+    granted: set[str] = set(_ALWAYS_GRANTED_TOOLS)
+    saw_grant = False
+    for spec in tool_spec:
+        if spec in ("sdk_builtin", "connectors", "shell"):
+            continue  # handled by execution_engine, not a core-tool grant
+        saw_grant = True
+        if spec == "atn_core":
+            granted.update(_DELEGATE_TOOL_NAMES)
+        elif spec in _TOOL_CATEGORIES:
+            granted.update(_TOOL_CATEGORIES[spec])
+        else:
+            granted.add(spec)  # explicit tool name
+
+    # Nothing resolved (e.g. only "sdk_builtin"): no declared core-tool
+    # grant, so no restriction — same fall-through resolve_tool_surface
+    # takes when it drops back to the delegate set.
+    return granted if saw_grant else None
+
+
 def resolve_tool_surface(tool_spec: list[str]) -> list[dict[str, Any]]:
     """Resolve a tool spec (categories, flags, or tool names) to tool definitions.
 
@@ -3933,9 +4104,17 @@ async def _delegate_collect(runtime: Runtime, input: dict[str, Any]) -> dict[str
         runtime._delegate_done.pop(agent_id, None)
         return _build_collect_result(runtime, agent_id)
 
-    # Wait for completion
+    # Wait for completion — bounded, so a wedged child can't hold the parent's
+    # tool call open forever.
     if done_event is not None:
-        await done_event.wait()
+        try:
+            timeout_s = float(input.get("timeout_s") or 300)
+        except (TypeError, ValueError):
+            timeout_s = 300.0
+        try:
+            await asyncio.wait_for(done_event.wait(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return {"agent_id": agent_id, "status": "still_running"}
         runtime._delegate_done.pop(agent_id, None)
         return _build_collect_result(runtime, agent_id)
 
@@ -4368,6 +4547,20 @@ async def _compact_idle_store(
         f"Continue from where you left off. Do not repeat completed work."
     )
 
+    # reset() also clears the persisted session stats (conversation.py), and
+    # the provider eviction below drops both live tiers — so without this
+    # snapshot the Context view would read window 0 / no model until the next
+    # run. Capture from the runtime (live or cached provider stats when the
+    # agent ran this process, the persisted file otherwise).
+    prior_stats: dict[str, Any] = {}
+    try:
+        _raw_stats = runtime.get_session_stats(agent_id)
+        if isinstance(_raw_stats, dict) and "error" not in _raw_stats:
+            prior_stats = dict(_raw_stats)
+    except Exception:
+        log.debug("compact_agent: could not snapshot stats for %s", agent_id,
+                  exc_info=True)
+
     # Archive the ORIGINAL history (store.reset() moves active.jsonl -> an
     # archived <session>.jsonl and clears the in-memory buffer), then write the
     # compacted history back. reset() never destroys — it archives.
@@ -4380,6 +4573,23 @@ async def _compact_idle_store(
             store.add_system_turn(t.content)
         else:
             store.add_user_turn(t.content)
+
+    # Restore the stats over the compacted history, counting this compaction
+    # (the idle path has no provider loop to increment it). Must run AFTER the
+    # retained turns are re-added — save_session_stats re-syncs num_turns to
+    # the store — and BEFORE the eviction below. The pre-compaction fullness
+    # figures no longer describe the store, so they are cleared rather than
+    # carried forward; breakdown_from_parts falls back to its own estimate.
+    if prior_stats:
+        prior_stats["compaction_count"] = int(
+            prior_stats.get("compaction_count", 0) or 0) + 1
+        prior_stats["last_input_tokens"] = 0
+        prior_stats["context_used_pct"] = None
+        try:
+            store.save_session_stats(prior_stats)
+        except Exception:
+            log.debug("compact_agent: could not persist stats for %s", agent_id,
+                      exc_info=True)
 
     turns_after = store.turn_count()
 
@@ -4570,12 +4780,27 @@ async def execute_tool(
     # self-approval, conversation ops) BEFORE the executor runs, whether the name
     # arrived via a compromised worker's framework_tool RPC or a prompt-injected
     # tool_use in the in-process loop.
-    if caller_id is not None:
-        if not is_owner_caller(caller_id) and name not in _AGENT_CALLABLE_TOOLS:
+    if caller_id is not None and not is_owner_caller(caller_id):
+        if name not in _AGENT_CALLABLE_TOOLS:
             log.warning("blocked non-agent-callable tool %r by caller %s",
                         name, caller_id)
             return {"error": f"Tool '{name}' is not available to agent "
                              f"'{caller_id}'"}
+        # The BUNDLE GRANT is authoritative at call time, not merely at
+        # schema-build time. Without this, an agent granted only
+        # `unified_tools` could reach publish_tool / adopt_tool /
+        # vet_tool / register_service / metering_report through use_tool,
+        # defeating the case-by-case doctrine those bundles exist to
+        # express (see _TOOL_CATEGORIES). An agent with no declared
+        # bundles (or one the daemon does not know) is left unrestricted:
+        # the gate binds the owner's choice, it does not invent one.
+        defn = runtime.get_agent(caller_id)
+        granted = resolve_tool_grant(list(defn.tools) if defn else [])
+        if granted is not None and name not in granted:
+            log.warning("blocked ungranted tool %r by caller %s", name, caller_id)
+            return {"error": f"Tool '{name}' is not granted to agent "
+                             f"'{caller_id}' — ask the owner for the bundle "
+                             f"that contains it"}
     # Inject caller context so tools that need it can derive parent_id
     if caller_id is not None:
         input = {**input, "_caller_id": caller_id}

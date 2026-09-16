@@ -95,8 +95,8 @@ python scripts/local_e2e_venture_loop.py    # venture funding + service revenue 
 
 ## Running tests
 
-The Python suite is ~624 tests and slow, so pick targeted files and never run
-the whole suite:
+The Python suite is large and slow (1700+ tests), so pick targeted files and
+never run the whole suite:
 
 ```bash
 pytest tests/test_wm_lineage.py tests/test_federated_reconcile.py

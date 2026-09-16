@@ -83,8 +83,9 @@ class ToolRegistry:
                 tools list their MCP operations, pipeline tools list their steps).
                 For core tools, includes the full input_schema.
             caller_id: Identity used for registered-tool scoping (author-
-                lineage visibility, docs/tool_substrate.md). None/owner sees
-                everything.
+                lineage visibility, docs/tool_substrate.md) AND for core-tool
+                bundle scoping — an agent is only shown the core tools its
+                grant lets it call. None/owner sees everything.
 
         Returns:
             List of tool descriptors, each with: name, description, category,
@@ -99,7 +100,7 @@ class ToolRegistry:
             tools.extend(self._list_pipeline_tools(include_operations))
 
         if category is None or category == ToolCategory.CORE:
-            tools.extend(self._list_core_tools(include_operations))
+            tools.extend(self._list_core_tools(include_operations, caller_id))
 
         if category is None or category == ToolCategory.REGISTERED:
             tools.extend(self._list_registered_tools(include_operations, caller_id))
@@ -109,7 +110,7 @@ class ToolRegistry:
     def get_tool(self, name: str) -> UnifiedTool | None:
         """Look up a tool by its unified name.
 
-        Connector tools are named: ``tool_<connector_id>_<tool_name>``
+        Connector tools are named: ``mcp_<connector_id>_<tool_name>``
         Pipeline tools are named: ``pipeline_<agent_id>``
         Core tools use their original name (e.g. ``get_goals``).
         """
@@ -215,29 +216,39 @@ class ToolRegistry:
 
         for cid in available:
             spec = self._runtime.connectors.get_spec(cid)
-            connector_info: dict[str, Any] = {
+            session = (self._runtime.connectors._sessions.get(cid)
+                       if cid in running else None)
+
+            if session and session.tools:
+                # One entry per MCP operation, under the ONE spelling
+                # ``use_tool`` can resolve (parse_tool_name wants mcp_*).
+                for t in session.tools:
+                    op_name = t["name"]
+                    entry: dict[str, Any] = {
+                        "name": f"mcp_{cid}_{op_name}",
+                        "description": t.get("description", "") or f"[{cid}] {op_name}",
+                        "category": ToolCategory.CONNECTOR.value,
+                        "connector_id": cid,
+                        "running": True,
+                    }
+                    if include_operations:
+                        entry["input_schema"] = t.get("inputSchema", {})
+                    tools.append(entry)
+                continue
+
+            # Not started (or no tool list yet): advertise the connector
+            # itself, and say so — its operations appear once it runs.
+            tools.append({
                 "name": f"connector_{cid}",
                 "description": (spec.description if spec and spec.description
                                 else f"MCP connector: {spec.name or cid}" if spec else cid),
                 "category": ToolCategory.CONNECTOR.value,
                 "connector_id": cid,
                 "running": cid in running,
-            }
-
-            if include_operations and cid in running:
-                session = self._runtime.connectors._sessions.get(cid)
-                if session:
-                    connector_info["operations"] = [
-                        {
-                            "name": t["name"],
-                            "description": t.get("description", ""),
-                            "input_schema": t.get("inputSchema", {}),
-                        }
-                        for t in session.tools
-                    ]
-                    connector_info["operation_count"] = len(session.tools)
-
-            tools.append(connector_info)
+                "note": (f"Connector '{cid}' is not started; its operations "
+                         f"appear as mcp_{cid}_<tool> once it is running. "
+                         f"Use get_connector_tools to inspect it."),
+            })
 
         return tools
 
@@ -380,11 +391,28 @@ class ToolRegistry:
     # Core ATN tools (discoverable via list_tools/use_tool)
     # ------------------------------------------------------------------
 
-    def _list_core_tools(self, include_operations: bool) -> list[dict[str, Any]]:
-        """List core ATN tools available for discovery."""
-        from .agent_tools import get_all_tool_defs
+    def _list_core_tools(
+        self, include_operations: bool, caller_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List the core ATN tools ``caller_id`` may actually call.
+
+        Advertising a tool the bundle grant will refuse at call time only
+        teaches the agent to try it, so the listing uses the same set
+        ``execute_tool`` enforces.
+        """
+        from .agent_tools import (
+            get_all_tool_defs, is_owner_caller, resolve_tool_grant,
+        )
+        granted: set[str] | None = None
+        if caller_id is not None and not is_owner_caller(caller_id):
+            defn = self._runtime.get_agent(caller_id)
+            # None = no declared bundles, so no restriction (see
+            # resolve_tool_grant); the listing then shows everything.
+            granted = resolve_tool_grant(list(defn.tools) if defn else [])
         tools: list[dict[str, Any]] = []
         for tdef in get_all_tool_defs():
+            if granted is not None and tdef["name"] not in granted:
+                continue
             entry: dict[str, Any] = {
                 "name": tdef["name"],
                 "description": tdef["description"],

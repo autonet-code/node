@@ -116,13 +116,24 @@ down would hand any reader of the log the tripwire's needle.
 
 ## The tripwire
 
-The security monitor scans agent output for the literal text of known secret
-values. A hit records a names-only alarm and raises it in the app. Values
-shorter than 6 characters are skipped as a false-positive guard.
+Two triggers raise a names-only alarm in the app, and both are live.
 
-This is a **backstop, not a barrier**: it tells you a value has already
-leaked into a transcript, after the fact. Treat an alarm as a rotation
-trigger: rotate the secret, then find out which agent surfaced it and why.
+**Transcript leak.** The security monitor scans agent output for the literal
+text of known secret values. Values shorter than 6 characters are skipped as a
+false-positive guard.
+
+**Out of network scope.** A tool that was bound a host-bound secret runs under
+`atn/tool_guard.py`, which denies any destination outside that secret's
+authorized hosts. The denial fires an alarm carrying the attempted destination
+alongside the secret names. Scope covers secrets bound to a TOOL: a secret the
+agent stages for itself through `secret_request_secret` and reads with its own
+shell or python tool is outside the guard, so host binding does not constrain
+it.
+
+Both are a **backstop, not a barrier**: they tell you a value has already
+leaked or already been aimed somewhere it should not go, after the fact. Treat
+an alarm as a rotation trigger: rotate the secret, then find out which agent
+surfaced it and why.
 
 ## Operational guidance
 

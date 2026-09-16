@@ -106,6 +106,16 @@ Start the agent framework:
 atn
 ```
 
+**Set your owner wallet.** The owner wallet is the identity that owns this
+daemon's earnings (published tools, service revenue) and the address a remote
+connection must sign with to control the whole fleet. Set it from the Config
+page once a wallet is connected, or by hand in `~/.atn/config.yaml`:
+
+```yaml
+autonet:
+  owner_wallet: "0xYourWalletAddress"
+```
+
 ## Quickstart
 
 Prerequisites: Python 3.11+, and Node.js 18+ for contract work.
@@ -137,7 +147,7 @@ See [`docs/local_e2e.md`](docs/local_e2e.md) for what each proves.
 | `contracts/core/` | The four Solidity contracts (see table above). |
 | `experiments/` | Pre-registered contest experiments (phase8 to phase10): prereg committed before any run, raw artifacts, pure `analyze.py`. |
 | `scripts/` | Deploy, install, and operational scripts. `scripts/debug/` groups profiling/repro scripts. |
-| `tests/` | Test suite (~630 tests; run targeted subsets, never the whole thing). |
+| `tests/` | Test suite (large and slow, 1700+ tests; run targeted subsets, never the whole thing). |
 | `legacy/pre-substrate/` | Earlier-paradigm files preserved with history. Not the live path. |
 | `docs/` | The paper (see §7) + experiment records + reference. Start at [`docs/README.md`](docs/README.md). |
 

@@ -328,6 +328,75 @@ async def test_reparent_unknown_new_parent_rejected(tmp_path):
     assert err is not None and "unknown new parent" in err.lower()
 
 
+@pytest.mark.asyncio
+async def test_reparent_emits_agent_updated(tmp_path):
+    """A move must reach OTHER connected clients, not just the initiator."""
+    rt = _make_runtime(tmp_path)
+    seen: list = []
+
+    async def _capture(event):
+        if event.type.value == "agent.updated":
+            seen.append(event)
+
+    rt.events.subscribe(None, _capture)
+    await _register(rt, "manager")
+    await _register(rt, "worker")
+
+    await execute_tool(
+        "update_agent", {"agent_id": "worker", "parent_id": "manager"},
+        rt, caller_id="")  # owner
+    assert len(seen) == 1, seen
+    assert seen[0].data["agent_id"] == "worker"
+    assert seen[0].data["parent_id"] == "manager"
+    assert seen[0].data["old_parent_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_removing_parent_promotes_children_to_top_level(tmp_path):
+    """Children must never be left pointing at a removed agent."""
+    rt = _make_runtime(tmp_path)
+    await _register(rt, "manager")
+    await _register(rt, "worker", parent_id="manager")
+
+    await rt.unregister_agent("manager")
+
+    assert rt.get_agent("worker") is not None  # never cascade-deleted
+    assert rt.get_agent("worker").parent_id is None
+    assert rt.registry.get_children("manager") == []
+
+
+@pytest.mark.asyncio
+async def test_boot_reconcile_heals_dangling_parent(tmp_path):
+    """Installs written before promotion existed heal on the next load."""
+    rt = _make_runtime(tmp_path)
+    await _register(rt, "worker", parent_id="ghost")
+    assert rt.get_agent("worker").parent_id == "ghost"
+
+    healed = rt.registry.reconcile_dangling_parents()
+    assert healed == ["worker"]
+    assert rt.get_agent("worker").parent_id is None
+
+
+@pytest.mark.asyncio
+async def test_self_parent_is_refused_and_walks_terminate(tmp_path):
+    """A caller passing its own id would build a one-node cycle."""
+    from atn.agent_tools import _create_agent
+
+    rt = _make_runtime(tmp_path)
+    await _register(rt, "boss")
+
+    res = await _create_agent(rt, {
+        "mode": "cognitive", "name": "boss", "id": "boss",
+        "_caller_id": "boss",
+    })
+    assert "error" in res and "itself" in res["error"]
+    assert rt.get_agent("boss").parent_id is None
+
+    # Even if such a definition reached the registry, tree walks terminate.
+    rt.get_agent("boss").parent_id = "boss"
+    assert rt.registry.get_descendants("boss") == []
+
+
 # ===========================================================================
 # Track B — push child completions to parents
 # ===========================================================================

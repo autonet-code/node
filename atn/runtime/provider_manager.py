@@ -802,7 +802,17 @@ class ProviderManager:
                     # by the handler below like any other bad provider.
                     provider = self._build_service_provider(
                         pconfig.default_model)
-                elif name in ("gemini", "openai") or pconfig.base_url:
+                elif name in ("gemini", "openai", "deepseek") or (
+                    pconfig.base_url and name in self._KNOWN_PROVIDERS
+                ):
+                    # Built-in slots only. A user-added provider always carries
+                    # a base_url (add_custom_provider requires one), so without
+                    # the _KNOWN_PROVIDERS guard this arm swallowed every custom
+                    # entry on reload: the name never reached the else branch,
+                    # so _custom_providers stayed empty after a restart (no card,
+                    # no delete button, "Unknown provider" for pinned agents) and
+                    # a keyless local endpoint was dropped by the API-key gate
+                    # below.
                     defaults = self._PROVIDER_DEFAULTS.get(name, {})
                     base_url = pconfig.base_url or defaults.get("base_url", "")
                     if not base_url:
@@ -832,7 +842,8 @@ class ProviderManager:
                             api_key=api_key,
                             default_model=pconfig.default_model,
                         )
-                        self._custom_providers.add(name)
+                        if name not in self._KNOWN_PROVIDERS:
+                            self._custom_providers.add(name)
                     else:
                         log.warning("Unknown provider '%s' — skipping", name)
                         continue
@@ -844,7 +855,7 @@ class ProviderManager:
                 log.warning("Failed to initialise provider '%s': %s", name, exc)
 
         # Credential-store providers not in config
-        for pid in ("anthropic", "gemini", "openai"):
+        for pid in ("anthropic", "gemini", "openai", "deepseek"):
             if pid in self._config.providers:
                 continue
             api_key = self._resolve_api_key(pid)
@@ -1074,6 +1085,23 @@ class ProviderManager:
                     await self.probe_ollama() if probe
                     else self._ollama_probe_cache)
 
+            if pid == "claude_max":
+                # The subscription-usage panel's empty state promises that
+                # running a turn fills it in. It only ever filled from the
+                # manual refresh, because provider_list emitted no rate_limits.
+                # BridgeProvider keeps a daemon-global cache fed by live SDK
+                # events, which is exactly what "a turn has run" means.
+                rl = dict(BridgeProvider._shared_rate_limits)
+                if rl:
+                    entry["rate_limits"] = rl
+            elif pid == "codex_max":
+                # Codex keeps its cache per instance, so read the registered
+                # one. Same shape, same panel.
+                _cx = self.get_registered_provider(pid)
+                rl = dict(getattr(_cx, "_rate_limits", {}) or {})
+                if rl:
+                    entry["rate_limits"] = rl
+
             providers.append(entry)
 
         for pid in sorted(self._custom_providers):
@@ -1084,9 +1112,13 @@ class ProviderManager:
             default_model = pconfig.default_model if pconfig else ""
             custom_tier = get_model_tier(default_model)
 
+            display_name = str(
+                ((pconfig.extra if pconfig else {}) or {}).get("display_name")
+                or "").strip()
+
             entry = {
                 "id": pid,
-                "name": pid,
+                "name": display_name or pid,
                 "description": f"Custom OpenAI-compatible provider ({base_url})",
                 "auth_type": "api_key",
                 "configured": True,
@@ -1096,7 +1128,10 @@ class ProviderManager:
                 "custom": True,
                 "base_url": base_url,
                 "default_model": default_model,
-                "models": [],
+                # The user-supplied list (or the default model) — the same
+                # source the agent model pickers already read. This used to be
+                # hardcoded empty, so a custom card never showed its models.
+                "models": self.get_available_models(pid),
                 "setup_hint": None,
             }
 
@@ -1151,6 +1186,16 @@ class ProviderManager:
             return {"status": "ok", "provider": provider_id}
 
         elif info["auth_type"] == "local":
+            if provider_id != "ollama":
+                # The local branch probes Ollama and hot-registers by name.
+                # 'substrate' shares the auth_type but is built per-agent in
+                # _resolve_provider_by_name, so it has no hot-register arm:
+                # this used to probe Ollama, register nothing and still answer
+                # {"status": "ok"}. Say so instead of lying.
+                raise ValueError(
+                    f"Provider '{provider_id}' is not configured here: it is "
+                    "built per agent when the world-model service is running."
+                )
             models = await self.probe_ollama()
             if models is None:
                 raise ValueError("Cannot connect to Ollama at localhost:11434. Is it running?")
@@ -1267,6 +1312,7 @@ class ProviderManager:
             raise ValueError("Base URL is required for custom providers")
 
         import httpx
+        discovered: list[Any] = []
         try:
             test_url = base_url.rstrip("/")
             if not test_url.endswith("/models"):
@@ -1285,6 +1331,19 @@ class ProviderManager:
                 resp = await client.get(models_url, headers=headers)
                 if resp.status_code in (401, 403) and api_key:
                     raise ValueError(f"API key rejected by {base_url} (HTTP {resp.status_code})")
+                # The probe already has the catalog in hand; keep it instead of
+                # discarding the body, so a custom provider lists its models
+                # even though the add form has no model field.
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json().get("data", [])
+                    except Exception:
+                        data = []
+                    if isinstance(data, list):
+                        for item in data:
+                            mid = item.get("id") if isinstance(item, dict) else None
+                            if isinstance(mid, str) and mid.strip():
+                                discovered.append(mid.strip())
         except httpx.ConnectError:
             raise ValueError(f"Cannot connect to {base_url} — check the URL")
         except httpx.TimeoutException:
@@ -1299,6 +1358,12 @@ class ProviderManager:
             "base_url": base_url,
             "default_model": default_model,
         }
+        # The label the user typed in the Add-provider dialog. Kept out of the
+        # dataclass on purpose: the loader drops unknown keys into `extra`, and
+        # provider_list reads it back from there. Without this the card always
+        # rendered the raw slug.
+        if name and name != provider_id:
+            spec["display_name"] = name
         # Normalize the model list — accept either bare strings or {id, name} dicts.
         normalized_models: list[Any] = []
         for entry in (models or []):
@@ -1306,6 +1371,8 @@ class ProviderManager:
                 normalized_models.append(entry.strip())
             elif isinstance(entry, dict) and entry.get("id"):
                 normalized_models.append({"id": entry["id"], "name": entry.get("name", entry["id"])})
+        if not normalized_models and discovered:
+            normalized_models = discovered
         if normalized_models:
             spec["models"] = normalized_models
 
@@ -1320,11 +1387,16 @@ class ProviderManager:
                 base_url=base_url,
                 default_model=default_model,
                 models=normalized_models,
+                extra={"display_name": spec["display_name"]} if "display_name" in spec else {},
             )
         else:
             existing.base_url = base_url
             existing.default_model = default_model
             existing.models = normalized_models
+            if "display_name" in spec:
+                existing.extra["display_name"] = spec["display_name"]
+            else:
+                existing.extra.pop("display_name", None)
 
         if api_key:
             self.credential_store.save(f"provider_{provider_id}", {"api_key": api_key})
@@ -1387,8 +1459,11 @@ class ProviderManager:
     async def get_session_context(self, agent_id: str | None = None) -> dict[str, Any]:
         provider = self.get_bridge_provider(agent_id)
         if provider is None:
+            # Idle agent — a normal state, not a fault. ``no_session`` lets
+            # callers degrade instead of surfacing this as an error.
             target = agent_id or "(no agent)"
-            return {"error": f"No active bridge session for '{target}'"}
+            return {"error": f"No active bridge session for '{target}'",
+                    "no_session": True}
         return await provider.get_session_context()
 
     # ------------------------------------------------------------------
@@ -1496,7 +1571,7 @@ class ProviderManager:
                     default_model=pconfig.default_model if pconfig else "",
                     base_url=pconfig.base_url if pconfig else "",
                 )
-            elif provider_id in ("gemini", "openai"):
+            elif provider_id in ("gemini", "openai", "deepseek"):
                 defaults = self._PROVIDER_DEFAULTS.get(provider_id, {})
                 pconfig = self._config.providers.get(provider_id)
                 provider = OpenAICompatibleProvider(
@@ -1559,6 +1634,18 @@ class ProviderManager:
                 async with httpx.AsyncClient(timeout=15) as client:
                     resp = await client.get(
                         "https://api.openai.com/v1/models",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
+                    if resp.status_code == 401:
+                        raise ValueError("Invalid API key")
+                    if resp.status_code not in (200, 429):
+                        raise ValueError(f"Unexpected response: {resp.status_code}")
+            elif provider_id == "deepseek":
+                defaults = self._PROVIDER_DEFAULTS.get("deepseek", {})
+                base_url = defaults.get("base_url", "https://api.deepseek.com/v1")
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.get(
+                        f"{base_url}/models",
                         headers={"Authorization": f"Bearer {api_key}"},
                     )
                     if resp.status_code == 401:

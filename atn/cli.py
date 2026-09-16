@@ -21,7 +21,7 @@ from rich.table import Table
 
 from .config import ATNConfig, load_config
 from .events import Event, EventBus, EventType
-from .loader import load_agents_dir
+from .loader import load_agents_dir, save_agent
 from .runtime import Runtime
 from .ws_server import WebSocketBridge, DEFAULT_PORT
 
@@ -482,22 +482,49 @@ async def _load_agents(runtime: Runtime, config: ATNConfig) -> int:
     # Register new or update existing. legacy=True so on-disk agents from
     # before the mandatory-budget rule still hydrate; new creates via
     # create_agent / the frontend go through the strict path.
+    loaded = 0
     for defn in agents:
-        if defn.id in current_ids:
-            await runtime.unregister_agent(defn.id)
-        await runtime.register_agent(defn, legacy=True)
+        try:
+            if defn.id in current_ids:
+                # Reload, not removal: the agent comes straight back, so its
+                # children must keep pointing at it.
+                await runtime.unregister_agent(
+                    defn.id, promote_children=False)
+            await runtime.register_agent(defn, legacy=True)
+            loaded += 1
+        except Exception as exc:
+            # One malformed agent file must not take the whole fleet down.
+            console.print(f"  [red]Skipped agent '{defn.id}': {exc}[/]")
+
+    # Heal parent pointers naming an agent that is no longer on disk (written
+    # by installs that removed a parent before removal promoted its children).
+    # A dangling pointer is silent but breaks budget rollup, child->parent
+    # notification and the spawn/depth limits for that whole subtree.
+    for healed_id in runtime.registry.reconcile_dangling_parents():
+        healed = runtime.get_agent(healed_id)
+        if healed is None:
+            continue
+        try:
+            save_agent(healed, config.agents_dir)
+        except Exception:
+            pass
+        console.print(
+            f"  [yellow]Promoted orphaned agent to top level: {healed_id}[/]")
 
     if agents:
-        console.print(f"  [green]Loaded {len(agents)} agent(s) from {config.agents_dir}[/]")
+        console.print(f"  [green]Loaded {loaded} agent(s) from {config.agents_dir}[/]")
     elif not errors:
         console.print(f"  [dim]No agent files in {config.agents_dir}[/]")
 
     # Auto-activate agents that have schedules or heartbeats
     for defn in agents:
         if defn.schedule or defn.heartbeat:
-            await runtime.activate_agent(defn.id)
+            try:
+                await runtime.activate_agent(defn.id)
+            except Exception:
+                pass  # skipped above; nothing to arm
 
-    return len(agents)
+    return loaded
 
 
 def _try_reclaim_port(port: int) -> int | None:
@@ -562,8 +589,12 @@ async def run_cli() -> None:
     # Subscribe the console printer to all events.
     event_bus.subscribe(None, _print_event)
 
+    # Local import: snapshot pulls in voice_service at module import time,
+    # and the banner is the only reason the CLI needs the version resolver.
+    from .runtime.snapshot import _daemon_version
+
     console.print(
-        "\n[bold blue]ATN Runtime[/]  [dim]v0.1.0  |  Agent Framework[/]\n"
+        f"\n[bold blue]ATN Runtime[/]  [dim]v{_daemon_version()}  |  Agent Framework[/]\n"
     )
     console.print(f"  [dim]data_dir:   {config.data_dir}[/]")
     console.print(f"  [dim]agents_dir: {config.agents_dir}[/]")

@@ -201,6 +201,44 @@ class TestIdlePath:
         assert any(s["turn_count"] == 6 for s in sessions)
 
     @pytest.mark.asyncio
+    async def test_idle_preserves_session_stats(self, tmp_path):
+        """reset() deletes the stats file; the idle path must restore it, or
+        the Context view reads window 0 until the next run."""
+        bus = EventBus()
+        rt = _make_runtime(bus, tmp_path)
+        await _register(rt, "idle-stats")
+        _seed_conversation(rt, "idle-stats", 6)
+
+        store = rt.get_agent_conversation_store("idle-stats")
+        store.save_session_stats({
+            "active_model": "claude-sonnet-4-5",
+            "context_window": 200_000,
+            "compaction_count": 2,
+            "cumulative_input_tokens": 1234,
+            "last_input_tokens": 99_000,
+            "context_used_pct": 49.5,
+        })
+
+        mock = AsyncMock()
+        mock.send = AsyncMock(return_value=ProviderResponse(text="SUMMARY"))
+        mock.close = AsyncMock()
+        with patch.object(rt.providers, "resolve_provider_with_fallback", return_value=mock):
+            await _compact_agent(rt, {"agent_id": "idle-stats",
+                                      "_caller_id": OWNER_ID})
+
+        after = store.get_session_stats()
+        assert after.get("context_window") == 200_000
+        assert after.get("active_model") == "claude-sonnet-4-5"
+        assert after.get("cumulative_input_tokens") == 1234
+        # This compaction is counted (the idle path has no provider loop to).
+        assert after.get("compaction_count") == 3
+        # Pre-compaction fullness no longer describes the store.
+        assert after.get("last_input_tokens") == 0
+        assert after.get("context_used_pct") is None
+        # num_turns re-synced to the compacted history.
+        assert after.get("num_turns") == 3
+
+    @pytest.mark.asyncio
     async def test_idle_emits_manual_event(self, tmp_path):
         bus = EventBus()
         events: list[Any] = []

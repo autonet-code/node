@@ -250,6 +250,11 @@ class Provider(ABC):
     _cumulative_turns: int = 0
     _last_input_tokens: int = 0
     _active_model: str = ""
+    # Session-cumulative dollar spend, priced from atn.metering's per-model
+    # table. Stays 0 for unpriced models (local/ollama, subscription), which
+    # is what the UI cost readouts gate on. Cumulative like the _cumulative_*
+    # counters above — NOT reset per run.
+    _total_cost_usd: float = 0.0
 
     # Live context snapshot (set by send_orchestrate for the duration of a
     # run). The message list is otherwise LOCAL to the loop; these references
@@ -275,7 +280,7 @@ class Provider(ABC):
             "session_id": "",
             "active_model": self._active_model,
             "num_turns": self._cumulative_turns,
-            "total_cost_usd": 0,
+            "total_cost_usd": round(self._total_cost_usd, 6),
             "context_window": ctx_window,
             "max_output_tokens": 0,
             "last_input_tokens": self._last_input_tokens,
@@ -343,9 +348,9 @@ class Provider(ABC):
         """
         return True
 
-    # Context compaction: when input tokens exceed this fraction of the
-    # context window, summarize the conversation to free space.
-    _COMPACTION_THRESHOLD = 0.80
+    # Context compaction: the real trigger is the pre-send budget check in
+    # send_orchestrate (window - max_tokens - _reduction_buffer(window)); see
+    # compaction_trigger_tokens() below for the single source of truth.
     _compaction_count: int = 0
     # Compactions within the current send_orchestrate run (spiral guard, §2).
     # Reset at the start of each run.
@@ -510,6 +515,10 @@ class Provider(ABC):
         # review turn at the natural end instead of finalizing. Self-gating:
         # runs that never touched registered tools are unaffected.
         called_tool_names: set[str] = set()
+        # (outer_name, args) for every call, so the review gate can resolve
+        # what `use_tool` actually DISPATCHED to — only REGISTERED tools
+        # enter consensus, and only those owe a review.
+        called_tool_calls: list[tuple[str, dict]] = []
         review_injected = False
         # Verification step (§16): code files the run wrote/edited. If any,
         # inject ONE closing verify turn at the natural end (same pattern as
@@ -518,19 +527,13 @@ class Provider(ABC):
         modified_code_files: set[str] = set()
 
         # Per-request output cap comes from the model spec (§7), bounded at 16k
-        # so a huge output ceiling doesn't shrink the usable input budget.
-        from ..model_specs import max_output_tokens as _spec_max_output
-        max_tokens = min(16_384, _spec_max_output(model or self._active_model))
-        if max_tokens <= 0:
-            max_tokens = 16_384
-        # Small-window models (locals at 16k): the output cap must scale with
-        # the window, or the pre-send input budget (window − max_tokens −
-        # buffer) goes negative and context reduction can never succeed
+        # so a huge output ceiling doesn't shrink the usable input budget, then
+        # clamped to a quarter of the window. Small-window models (locals at
+        # 16k) need that clamp or the pre-send input budget (window − max_tokens
+        # − buffer) goes negative and context reduction can never succeed
         # (observed live: 16k window − 16k max_tokens − 8k buffer → instant
-        # "compaction spiral" abort on turn 1).
-        _ctx_for_cap = get_context_window(model or self._active_model)
-        if _ctx_for_cap > 0:
-            max_tokens = min(max_tokens, max(1_024, _ctx_for_cap // 4))
+        # "compaction spiral" abort on turn 1). See output_reserve_tokens().
+        max_tokens = output_reserve_tokens(model or self._active_model)
 
         # Publish the live context snapshot for out-of-band inspection
         # (context_inspect.breakdown_from_provider). Same list object as the
@@ -697,6 +700,23 @@ class Provider(ABC):
             if response.model:
                 self._active_model = response.model
 
+            # Dollar spend for this turn, priced off the metering table. Returns
+            # None for unpriced models (local/ollama, subscription), so those
+            # keep reporting 0 and the UI cost chips stay hidden.
+            try:
+                from ..metering import cost_usd as _cost_usd
+                _usd = _cost_usd(
+                    response.model or model or self._active_model,
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                    cache_read_tokens=response.usage.cache_read_tokens,
+                    cache_write_tokens=response.usage.cache_creation_tokens,
+                )
+                if _usd:
+                    self._total_cost_usd += _usd
+            except Exception:
+                log.debug("cost accumulation failed; continuing", exc_info=True)
+
             # Inner-loop budget enforcement. usage_recorder is supplied by the
             # execution engine and rolls per-turn tokens into the cascading
             # _budget_used dict; if any ancestor's cap is now exceeded, abort
@@ -754,7 +774,7 @@ class Provider(ABC):
                             "output_tokens": self._cumulative_output_tokens,
                             "cache_read_tokens": self._cumulative_cache_read,
                             "cache_creation_tokens": self._cumulative_cache_creation,
-                            "total_cost_usd": 0,
+                            "total_cost_usd": round(self._total_cost_usd, 6),
                         },
                     },
                 ))
@@ -793,24 +813,30 @@ class Provider(ABC):
                             files=", ".join(sorted(modified_code_files)[:20])),
                     })
                     continue
-                from ..delegate_prompts import _REVIEW_TRIGGER_TOOLS
-                if (review_tools and not review_injected
+                from ..delegate_prompts import review_owed_tools
+                _owed = (
+                    review_owed_tools(called_tool_calls)
+                    if (review_tools and not review_injected
                         and tool_executor is not None
-                        and (_REVIEW_TRIGGER_TOOLS & called_tool_names)
-                        and "attest_tools" not in called_tool_names):
+                        and "attest_tools" not in called_tool_names)
+                    else []
+                )
+                if _owed:
                     review_injected = True
                     log.info(
                         "Review step: injecting closing attest turn for "
-                        "agent %s", self.source_agent_id or "?",
+                        "agent %s (%s)", self.source_agent_id or "?",
+                        ", ".join(_owed[:5]),
                     )
                     if response.text:
                         # Keep the agent's final answer in history so the
                         # review turn doesn't erase it.
                         messages.append(
                             {"role": "assistant", "content": response.text})
-                    from ..delegate_prompts import REVIEW_STEP_PROMPT
+                    from ..delegate_prompts import format_review_prompt
                     messages.append(
-                        {"role": "user", "content": REVIEW_STEP_PROMPT})
+                        {"role": "user",
+                         "content": format_review_prompt(_owed)})
                     continue
                 return Provider._finalize_orchestrate(self,
                     response, messages, cumulative_usage,
@@ -828,6 +854,7 @@ class Provider(ABC):
                 assistant_content.append({"type": "text", "text": response.text})
             for tc in response.tool_calls:
                 called_tool_names.add(tc.name)
+                called_tool_calls.append((tc.name, tc.input or {}))
                 if tc.name in ("write_file", "edit_file"):
                     _p = str((tc.input or {}).get("path", ""))
                     if _p.endswith(_CODE_FILE_SUFFIXES):
@@ -1596,6 +1623,66 @@ def _reduction_buffer(ctx_window: int) -> int:
     if ctx_window <= 0:
         return 8_000
     return min(8_000, max(1_024, ctx_window // 4))
+
+
+# Codebase-wide estimation convention (matches atn/context_inspect.py).
+_CHARS_PER_TOKEN = 4
+# History ceiling used when the model's window can't be resolved. Also the
+# upper bound on the scaled budget, so large-window models keep the historical
+# behaviour instead of suddenly injecting far more history.
+_DEFAULT_HISTORY_CHAR_BUDGET = 400_000
+
+
+def output_reserve_tokens(model: str, ctx_window: int = 0) -> int:
+    """Per-request output cap the orchestrate loop reserves for ``model`` (§7).
+
+    Bounded at 16k so a huge output ceiling doesn't shrink the usable input
+    budget, then clamped to a quarter of the window so small-window (local)
+    models keep a positive input budget. Single source of truth for the cap
+    applied in send_orchestrate.
+    """
+    from ..model_specs import max_output_tokens as _spec_max_output
+    reserve = min(16_384, _spec_max_output(model))
+    if reserve <= 0:
+        reserve = 16_384
+    ctx = ctx_window if ctx_window > 0 else get_context_window(model)
+    if ctx > 0:
+        reserve = min(reserve, max(1_024, ctx // 4))
+    return reserve
+
+
+def compaction_trigger_tokens(model: str, ctx_window: int = 0) -> int:
+    """Estimated input size (tokens) at which pre-send context reduction fires.
+
+    Mirrors the budget check in send_orchestrate: an estimated input above
+    ``window - max_tokens - _reduction_buffer(window)`` triggers prune, then
+    compaction. Returns 0 when the window is unknown, so consumers (the
+    context inspector, the UI's threshold line) can hide the marker rather
+    than draw a made-up one.
+    """
+    if not model and ctx_window <= 0:
+        return 0
+    ctx = ctx_window if ctx_window > 0 else get_context_window(model)
+    if ctx <= 0:
+        return 0
+    return max(0, ctx - output_reserve_tokens(model, ctx) - _reduction_buffer(ctx))
+
+
+def history_char_budget(model: str) -> int:
+    """Chars of prior-turn history the execution engine may inject for ``model``.
+
+    Half the usable input budget (``compaction_trigger_tokens`` in chars),
+    leaving room for the system prompt, tool definitions and the live tool
+    loop. Falls back to the historical constant when the window is unknown.
+    A 200k-window model lands above the old 400k ceiling, so API providers
+    are unchanged; a 16k local model gets ~16k chars and no longer arrives
+    over budget on its first send.
+    """
+    trigger = compaction_trigger_tokens(model)
+    if trigger <= 0:
+        return _DEFAULT_HISTORY_CHAR_BUDGET
+    return max(20_000, min(_DEFAULT_HISTORY_CHAR_BUDGET,
+                           trigger * _CHARS_PER_TOKEN // 2))
 
 
 def _prune_tool_results(messages: list[dict[str, Any]]) -> int:

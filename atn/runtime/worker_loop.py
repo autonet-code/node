@@ -325,10 +325,11 @@ async def run_cognitive_loop(
     # bridge): one follow-up turn on the same session prompting
     # attest_tools. Mirrors the in-process engine block exactly.
     from ..delegate_prompts import (
-        REVIEW_STEP_PROMPT,
+        format_review_prompt,
         VERIFY_STEP_PROMPT,
         needs_review_reinvoke,
         needs_verify_reinvoke,
+        review_owed_tools,
     )
     _review_session = getattr(provider, "_session_id", "") or ""
     # §16 verify step (bridge path) — capture before any follow-up
@@ -359,7 +360,8 @@ async def run_cognitive_loop(
             review_kwargs = dict(send_kwargs)
             review_kwargs.pop("history", None)  # session carries context
             review_kwargs.update(
-                message=REVIEW_STEP_PROMPT,
+                message=format_review_prompt(
+                    review_owed_tools(accumulated_tool_calls)),
                 max_turns=4,
                 session_id=_review_session,
             )

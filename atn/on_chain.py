@@ -1192,7 +1192,12 @@ class OnChainService:
             return False
 
     async def get_agent_record(self, address: str) -> dict[str, Any] | None:
-        """Read an agent's on-chain record from Substrate.sol's ``agents`` map."""
+        """Read an agent's on-chain record from Substrate.sol's ``agents`` map.
+
+        Returns None when the address is simply not registered. An RPC/ABI
+        failure PROPAGATES, so callers can tell "no record" from "could not
+        read"; the two used to collapse into the same silent None.
+        """
         try:
             w3 = self._get_web3()
             contract = self._get_contract(w3)
@@ -1212,8 +1217,8 @@ class OnChainService:
                 "training_submission_count": submission_count,
             }
         except Exception as e:
-            log.debug("Failed to read agent record for %s: %s", address, e)
-            return None
+            log.warning("Failed to read agent record for %s: %s", address, e)
+            raise
 
     async def get_agent_peer_id(self, address: str) -> bytes | None:
         try:
@@ -1238,12 +1243,16 @@ class OnChainService:
             w3 = self._get_web3()
             contract = self._get_contract(w3)
             addr = w3.to_checksum_address(address)
-            reputation = contract.functions.agentMintTotal(addr).call()
+            mint_total = contract.functions.agentMintTotal(addr).call()
             atn = contract.functions.balanceOf(addr).call()
             gas_balance = w3.eth.get_balance(addr)
             return {
                 "address": addr,
-                "reputation": str(reputation),
+                # Cumulative tool-pool earnings (ATN, money). ``reputation``
+                # is the LEGACY-WIRE alias kept for one release so an older
+                # frontend still renders; new clients read ``mint_total``.
+                "mint_total": str(mint_total),
+                "reputation": str(mint_total),
                 "atn_balance": str(atn),
                 "gas_balance": str(gas_balance),
             }
@@ -1306,16 +1315,18 @@ class OnChainService:
 
     async def get_fleet_voice(self, owner: str) -> dict[str, Any] | None:
         """Read an owner's fleet: their wallet ATN plus every bound
-        agent's ATN + reputation, the network ATN supply (money) AND the
-        network reputation supply (voice).
+        agent's ATN balance + cumulative ATN EARNINGS, the network ATN
+        supply (money) AND the network mint total.
 
-        VOICE is REPUTATION (ratified 2026-07-08: ATN = money, reputation
-        = voice). ``fleet_reputation_raw`` (Σ bound agents' reputation) is
-        the household's voice numerator — the number the federated close
-        weights the fleet's reviews and usage by (see
-        nodes/common/voice_state.py), over ``rep_supply_raw``. Owner
-        wallets never earn reputation, so there is no owner-wallet
-        reputation term.
+        The voice numerator here is EARNINGS, not governance REP. Money
+        only (Decision 2026-07-10): Substrate has no reputation surface,
+        so ``fleet_reputation_raw`` carries Σ bound agents'
+        ``agentMintTotal`` and ``rep_supply_raw`` carries
+        ``networkMintTotal``; both names are LEGACY-WIRE. True REP/voice
+        is claimed DAO-side (RepToken), 1:1 against these ratified
+        earnings, and the federated close reads it from RepToken
+        checkpoints (see nodes/common/voice_state.py). Owner wallets
+        never earn, so there is no owner-wallet earnings term.
 
         MONEY figures (owner balance, fleet ATN total, ATN supply) are
         still reported for the Owner page's money panel, but they no

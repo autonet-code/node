@@ -221,6 +221,18 @@ def _validate_agent(raw: dict, file: Path) -> tuple[AgentDefinition | None, list
         else:
             errors.append(LoadError(file, "'heartbeat' must be a mapping or interval string"))
             return None, errors
+        # Validate here rather than at register time: an unparseable interval
+        # raises inside register_agent, which would abort the whole boot load.
+        from .runtime.agent_registry import parse_interval
+        try:
+            parse_interval(heartbeat.interval)
+        except ValueError:
+            errors.append(LoadError(
+                file,
+                f"invalid heartbeat interval {heartbeat.interval!r} "
+                "(use e.g. '30s', '5m', '1h')",
+            ))
+            return None, errors
 
     # --- Cognitive mode fields ---
     provider = raw.get("provider", "")

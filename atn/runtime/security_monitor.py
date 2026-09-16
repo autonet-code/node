@@ -224,6 +224,22 @@ class SecurityMonitor:
         sw = self._sweeper
         return sw is not None and sw.is_alive() and not self._stop.is_set()
 
+    async def report_scope_violation(
+        self, src_agent: str, names: list[str], destination: str,
+    ) -> None:
+        """Fire the OUT-OF-NETWORK-SCOPE alarm: a secret-holding tool tried to
+        reach a destination outside the authorized hosts of the secret(s) it was
+        bound (``atn/tool_guard.py``'s egress check).
+
+        The second of the two alarm triggers, alongside the transcript scan.
+        Same durable names-only record and same SECURITY_ALARM event, so a scope
+        violation lands in the Secrets tab next to a leak. ``destination`` is a
+        hostname or literal address, already plaintext in the keystore's host
+        sidecar, so it travels in its own field; the secret VALUE never does.
+        """
+        dest = str(destination or "").strip()[:200]
+        await self._fire_alarm(src_agent, list(names), destination=dest or None)
+
     def _rebuild_scan_lists(self) -> None:
         """Rebuild the derived (value/path) scan lists. Caller holds the lock."""
         values: list[tuple[str, str, str, int]] = []
@@ -316,18 +332,23 @@ class SecurityMonitor:
                 self._tails.pop(src, None)
         return hits
 
-    async def _fire_alarm(self, src_agent: str, names: list[str]) -> None:
+    async def _fire_alarm(self, src_agent: str, names: list[str],
+                          destination: str | None = None) -> None:
         """Record (names-only, durable) + emit SECURITY_ALARM. Dedup'd.
 
         The event carries NAMES ONLY, ``source=src_agent``, and NO ``agent_id``
         key (subtree-scoping trap). The value NEVER appears.
+
+        ``destination`` marks an out-of-network-scope alarm rather than a
+        transcript leak; it is a hostname/address, never a value, and it also
+        keys the dedup so two different destinations both report.
         """
         names = list(names) or ["<unknown>"]
         now = time.monotonic()
         fresh: list[str] = []
         with self._lock:
             for n in names:
-                key = (src_agent, n)
+                key = (src_agent, n if destination is None else f"{n}@{destination}")
                 last = self._recent.get(key, 0.0)
                 if now - last >= _DEDUP_WINDOW_S:
                     self._recent[key] = now
@@ -345,14 +366,24 @@ class SecurityMonitor:
         except Exception:  # noqa: BLE001
             log.debug("record_alarm failed", exc_info=True)
 
+        data: dict = {"names": fresh}       # NAMES ONLY; NO agent_id key
+        if destination is not None:
+            data["destination"] = destination
+            data["kind"] = "network_scope"
         try:
             await self._events.emit(Event(
                 type=EventType.SECURITY_ALARM,
                 source=src_agent,           # the leaking agent
-                data={"names": fresh},      # NAMES ONLY; NO agent_id key
+                data=data,
             ))
         except Exception:  # noqa: BLE001
             log.debug("SECURITY_ALARM emit failed", exc_info=True)
+
+        if destination is not None:
+            log.error("SECURITY_ALARM: agent %s used secret(s) %s toward an "
+                      "unauthorized destination: %s",
+                      src_agent, ", ".join(fresh), destination)
+            return
 
         # Log names only — NEVER the value.
         log.error("SECURITY_ALARM: agent %s leaked secret value(s): %s",

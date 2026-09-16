@@ -145,8 +145,13 @@ class StepDefinition:
 
 @dataclass
 class HeartbeatConfig:
-    """Intrinsic heartbeat — Runtime pings parent on interval while agent is active."""
-    interval: str = "5m"                    # ping frequency: "30s", "5m", "1h"
+    """Intrinsic heartbeat — while the agent is active and idle, the scheduler
+    posts a WORK message to the AGENT ITSELF on this interval, triggering a
+    run. Nothing is sent to the parent by the beat itself."""
+    interval: str = "5m"                    # beat frequency: "30s", "5m", "1h"
+    # What happens after a heartbeat run completes: "notify_parent" keeps the
+    # agent armed for the next beat; "self_deactivate" stands it down (status
+    # STOPPED, heartbeat disarmed) until it is manually enabled again.
     on_complete: str = "notify_parent"      # "notify_parent" | "self_deactivate"
 
 

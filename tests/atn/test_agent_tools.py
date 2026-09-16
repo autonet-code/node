@@ -435,3 +435,69 @@ class TestServiceProviderBindingAuthority:
         snap = rt.snapshot()
         assert snap["agents"]["child-1"]["service_provider"] == _SVC_BINDING
         assert "service_provider" not in snap["agents"]["parent-1"]
+
+
+class TestBundleGrantIsEnforcedAtCallTime:
+    """An agent's tool BUNDLES are a call-time gate, not just a schema
+    filter. Without this, an agent granted only `unified_tools` reached
+    publish_tool / adopt_tool / vet_tool through use_tool, defeating the
+    case-by-case doctrine those bundles exist to express.
+
+    An agent with NO declared bundles stays unrestricted: the gate binds
+    the owner's choice, it does not invent one.
+    """
+
+    async def _rt(self, tmp_path):
+        from atn.agent_tools import execute_tool
+
+        rt = _make_runtime(EventBus(), tmp_path)
+        for aid, tools in (("narrow-1", ["unified_tools"]),
+                           ("smith-1", ["unified_tools", "publishing"]),
+                           ("open-1", [])):
+            await rt.register_agent(AgentDefinition(
+                id=aid, name=aid, mode=AgentMode.COGNITIVE,
+                cognitive_model="sonnet", tools=list(tools),
+                budgets={"claude_max": 100000},
+            ))
+        return rt, execute_tool
+
+    @pytest.mark.asyncio
+    async def test_ungranted_bundle_is_refused(self, tmp_path):
+        rt, execute_tool = await self._rt(tmp_path)
+        res = await execute_tool("publish_tool", {"digest": "deadbeef"},
+                                 rt, caller_id="narrow-1")
+        assert "error" in res
+        assert "not granted" in res["error"]
+
+    @pytest.mark.asyncio
+    async def test_granted_bundle_reaches_the_executor(self, tmp_path):
+        rt, execute_tool = await self._rt(tmp_path)
+        res = await execute_tool("publish_tool", {"digest": "deadbeef"},
+                                 rt, caller_id="smith-1")
+        # Reached the executor: it fails on the unknown digest, not the gate.
+        assert "not granted" not in res.get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_no_declared_bundles_is_unrestricted(self, tmp_path):
+        rt, execute_tool = await self._rt(tmp_path)
+        res = await execute_tool("publish_tool", {"digest": "deadbeef"},
+                                 rt, caller_id="open-1")
+        assert "not granted" not in res.get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_owner_is_unrestricted(self, tmp_path):
+        rt, execute_tool = await self._rt(tmp_path)
+        res = await execute_tool("publish_tool", {"digest": "deadbeef"},
+                                 rt, caller_id=None)
+        assert "not granted" not in res.get("error", "")
+
+    def test_progressive_grants_everything(self):
+        from atn.agent_tools import resolve_tool_grant
+        assert resolve_tool_grant(["atn_progressive"]) is None
+        assert resolve_tool_grant(["atn_full"]) is None
+        assert resolve_tool_grant(["sdk_builtin"]) is None
+        granted = resolve_tool_grant(["unified_tools"])
+        assert granted is not None
+        assert "use_tool" in granted and "publish_tool" not in granted
+        # Self-knowledge is never a bundle.
+        assert "get_my_budget_status" in granted

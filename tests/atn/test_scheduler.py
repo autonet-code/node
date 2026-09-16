@@ -34,6 +34,10 @@ async def test():
     assert Runtime._parse_interval("2m") == 120.0
     assert Runtime._parse_interval("1h") == 3600.0
     assert Runtime._parse_interval("  30 S  ") == 30.0
+    # Compound form — what the frontend's side-by-side h/m fields emit.
+    assert Runtime._parse_interval("1h30m") == 5400.0
+    assert Runtime._parse_interval("1h 30m") == 5400.0
+    assert Runtime._parse_interval("2h0m") == 7200.0
     try:
         Runtime._parse_interval("abc")
         assert False, "Should have raised ValueError"

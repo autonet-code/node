@@ -8,7 +8,7 @@ over them.
 This is the doc for the **owner** deciding where their agents' inference
 comes from. It covers the built-in providers, what "Add Provider" actually
 does, and the two constraints that most often surprise people
-(orchestrator-capability and model routing).
+(loop capability and model routing).
 
 ## What a provider is
 
@@ -16,17 +16,21 @@ A provider is a place the daemon can send a prompt and get tokens back. Each
 agent picks one; different agents on the same daemon can use different
 providers and different models simultaneously.
 
-There are three authentication shapes:
+There are five authentication shapes:
 
 | Shape | How it authenticates | Examples |
 |-------|---------------------|----------|
 | **bridge** | drives a CLI you are already logged into, using your existing subscription | Claude Max, Codex |
 | **api_key** | a key you paste, stored in the daemon's credential store | Anthropic, OpenAI, Gemini, DeepSeek |
-| **local** | nothing to authenticate; it runs on your machine | Ollama |
+| **local** | nothing to authenticate; it runs on your machine | Ollama, World-Model Substrate |
+| **rpb** | peer-to-peer: a sponsor daemon pays for your tokens (see `sponsored_inference.md`) | RPB Network |
+| **service** | pays ATN per call to another agent's daemon against a purchased spec, with no credential of your own (see `services_market.md`) | Marketplace Service |
 
 Bridges are the cheapest path if you already pay for a subscription: they
 spend your existing plan rather than metered API credit. API-key providers
-bill per token. Local providers cost nothing but your own hardware.
+bill per token. Local providers cost nothing but your own hardware. The rpb
+and service shapes cost you no credential at all: somebody else's daemon
+does the inference, paid for by a sponsor relationship or by ATN per call.
 
 ## Built-in providers
 
@@ -39,8 +43,30 @@ bill per token. Local providers cost nothing but your own hardware.
 | Google Gemini | api key |
 | DeepSeek | api key |
 | Ollama (local) | local |
-| RPB Network | peer-to-peer |
+| RPB Network | rpb (a sponsor daemon pays) |
+| Marketplace Service | service (ATN pay-per-call) |
 | World-Model Substrate | local |
+
+**Marketplace Service** buys inference off the services market: each
+completion is one ATN payment to another agent's daemon, which serves the
+prompt off its own provider stack. A purchase is named by two facts, the
+serving agent's address and the digest of the service spec being bought:
+
+```yaml
+providers:
+  service:
+    provider_address: "0x..."       # the serving agent's 0x
+    spec_digest: "<sha256 hex>"     # the service spec being bought
+    default_model: "..."            # optional display label
+    timeout: 60                     # optional, seconds
+```
+
+That daemon-level block is an owner purchase for the whole fleet, signed
+with `autonet.private_key`. A parent may instead bind one child to a
+purchase of its own (`service_provider` on the agent definition), in which
+case the child's own key signs and the child pays from its own wallet. An
+agent can never set this for itself. See `services_market.md` for the rail
+and `atn/providers/service.py` for the adapter.
 
 ## Loop capability is a property of the MODEL
 
@@ -71,7 +97,7 @@ Studio, OpenRouter, a self-hosted gateway, or any service exposing
 | Field | Notes |
 |-------|-------|
 | **Provider ID** | short slug, e.g. `my-llm`. Cannot collide with a built-in id. |
-| **Display Name** | what you see in the picker. |
+| **Display Name** | the label on the provider's card. |
 | **Base URL** | e.g. `https://api.example.com/v1`. |
 | **API Key** | optional; omit for an unauthenticated local endpoint. |
 | **Default Model** | optional; the model used when an agent does not name one. |

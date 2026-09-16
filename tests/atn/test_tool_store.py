@@ -1393,3 +1393,48 @@ class TestProbeTrustPicture:
         assert row["mass"] == []
         assert row["review_mass"] == 0.0
         assert row["inspections"] == 0
+
+
+class TestProbeToolsLocalFallback:
+    """The substrate-free fallback: ranked partial match, scoped to the
+    REAL caller. The old all-words conjunction meant a natural-language
+    query ("summarize a web page") returned nothing, and visible_to(None)
+    leaked every private tool on the daemon to any calling agent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_natural_language_query_ranks_instead_of_returning_nothing(
+        self, tmp_path,
+    ):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        await _register_echo(rt, caller_id="child", name="summarize_page")
+        res = await execute_tool(
+            "probe_tools", {"query": "summarize a web page"},
+            rt, caller_id="child")
+        assert res["source"] == "local"
+        assert [m["name"] for m in res["matches"]] == ["summarize_page"]
+        assert res["matches"][0]["score"] > 0
+
+    @pytest.mark.asyncio
+    async def test_fallback_is_scoped_to_the_caller(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        await _register_echo(rt, caller_id="child", name="summarize_page")
+        # "sibling" is not the author and not an ancestor of it.
+        res = await execute_tool(
+            "probe_tools", {"query": "summarize"}, rt, caller_id="sibling")
+        assert res["matches"] == []
+        # The owner surface still sees it.
+        res = await execute_tool("probe_tools", {"query": "summarize"}, rt)
+        assert [m["name"] for m in res["matches"]] == ["summarize_page"]
+
+    @pytest.mark.asyncio
+    async def test_no_word_matches_returns_nothing(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _family(rt)
+        await _register_echo(rt, caller_id="child", name="summarize_page")
+        res = await execute_tool(
+            "probe_tools", {"query": "quaternion mesh decimation"},
+            rt, caller_id="child")
+        assert res["matches"] == []

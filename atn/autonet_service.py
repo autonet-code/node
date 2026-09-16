@@ -150,6 +150,9 @@ class AutonetBridge:
         self._events = event_bus
         self._service = None      # Will hold nodes.service.AutonetService
         self._task: asyncio.Task | None = None
+        # Background drain of remote tool manifests into the discovery
+        # index (network tool search). Spawned once gossip is wired.
+        self._manifest_pull_task: asyncio.Task | None = None
         self._autonet_config = None  # Will hold nodes.common.config.AutonetConfig
         # Standards publication state (Story 3.2)
         self._published_standards_hash: str = ""
@@ -406,12 +409,34 @@ class AutonetBridge:
             # consuming its own grant, not a relay chain. Only bound addresses
             # are served at all, which is the real safety boundary.
 
-            model = request.get("model", rpb_cfg.sponsor_model or "")
+            # The employer chooses the tool (docs/sponsored_inference.md):
+            # a configured sponsor_model always wins. The dependent's request
+            # is only honoured when the sponsor left the model blank. Reading
+            # the request first let a dependent bill the sponsor's key for any
+            # model that key could reach, since the dependent always sets it.
+            model = (rpb_cfg.sponsor_model or "") or request.get("model", "")
             messages = request.get("messages", [])
             system = request.get("system", "")
-            max_tokens = request.get("max_tokens", 4096)
+            try:
+                max_tokens = int(request.get("max_tokens", 4096))
+            except (TypeError, ValueError):
+                max_tokens = 4096
+            max_tokens = max(1, max_tokens)
             temperature = request.get("temperature", 0.0)
             tools_raw = request.get("tools", [])
+
+            # Pre-flight clamp. The gate above only asks whether ANYTHING is
+            # left, so a dependent with 1 token remaining could still ask for
+            # a 64k completion and the sponsor would pay for all of it before
+            # the next request is refused. Cap the ceiling at what is actually
+            # granted, and refuse outright when the prompt alone already
+            # overruns the grant (rough 4-chars-per-token estimate).
+            if not binding.unlimited:
+                rem = binding.remaining()
+                max_tokens = max(1, min(max_tokens, rem))
+                prompt_chars = sum(len(str(m)) for m in messages) + len(str(system))
+                if prompt_chars // 4 > rem:
+                    return {"error": "request exceeds remaining grant"}
 
             # Resolve provider — use configured sponsor provider or auto-resolve
             provider = service._resolve_sponsor_provider(rpb_cfg, model)
@@ -548,6 +573,17 @@ class AutonetBridge:
         if model:
             self.config.sponsor_model = model
 
+        # Persist: the flags are read back from config.yaml on boot
+        # (config.py), so without this the mode silently lapses on restart
+        # while sponsor_bindings.json keeps listing the dependents.
+        try:
+            from .config import save_sponsor_mode_to_config
+            save_sponsor_mode_to_config(
+                True, self.config.sponsor_provider, self.config.sponsor_model,
+            )
+        except Exception:
+            log.warning("Failed to persist sponsor mode to config", exc_info=True)
+
         host = self._p2p_host
         if host is not None:
             host._inference_handler = self._create_sponsor_handler(self.config)
@@ -559,6 +595,39 @@ class AutonetBridge:
             log.info("Sponsor inference enabled; handler wires when p2p starts")
         return {
             "sponsor_inference": True,
+            "sponsor_provider": self.config.sponsor_provider,
+            "sponsor_model": self.config.sponsor_model,
+            "p2p_running": host is not None,
+        }
+
+    def disable_sponsor_inference(self) -> dict:
+        """Stop being a sponsor: unwire the handler and drop the advert.
+
+        The mirror of enable_sponsor_inference. Removing the last binding is
+        not an off switch (the handler stays wired and ``is_sponsor`` stays on
+        the advertisement), so the owner needs an explicit one. Existing
+        bindings are left on disk: this turns serving off, it does not revoke
+        grants. Idempotent.
+        """
+        self.config.sponsor_inference = False
+
+        try:
+            from .config import save_sponsor_mode_to_config
+            save_sponsor_mode_to_config(
+                False, self.config.sponsor_provider, self.config.sponsor_model,
+            )
+        except Exception:
+            log.warning("Failed to persist sponsor mode to config", exc_info=True)
+
+        host = self._p2p_host
+        if host is not None:
+            host._inference_handler = None
+            self._refresh_p2p_agents()
+            log.info("Sponsor inference disabled at runtime")
+        else:
+            log.info("Sponsor inference disabled; handler stays unwired when p2p starts")
+        return {
+            "sponsor_inference": False,
             "sponsor_provider": self.config.sponsor_provider,
             "sponsor_model": self.config.sponsor_model,
             "p2p_running": host is not None,
@@ -994,6 +1063,45 @@ class AutonetBridge:
             log.info("ToolStore wired into WorldService rails "
                      "(%d manifests backfilled)", pushed)
 
+            # Network tool DISCOVERY: gossip ingest queues the manifest
+            # digests of tools other households registered, but the blob
+            # itself has to be pulled before `probe_tools` can rank it.
+            # Do that here, off the gossip hot path: the ArtifactIndex is
+            # derived daemon-local state (never gossiped, never anchored),
+            # so a peer that is slow or offline only delays discovery — it
+            # can never stall ingest or fork a close.
+            self._manifest_pull_task = asyncio.create_task(
+                self._pull_remote_manifests(world_service, tool_store))
+
+    async def _pull_remote_manifests(self, world_service, tool_store,
+                                     interval: float = 30.0) -> None:
+        """Drain queued remote manifest digests into the discovery index.
+
+        Digest-verified by ``ToolStore.fetch_bytes`` (sha256 mismatch is
+        dropped). Failures are non-fatal: an unfetched digest simply
+        stays unindexed and is re-queued by the next registration gossip.
+        """
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                digests = world_service.take_pending_remote_manifests(limit=16)
+                if not digests:
+                    continue
+                indexed = 0
+                for digest in digests:
+                    manifest = await tool_store.fetch_payload(digest)
+                    if not isinstance(manifest, dict):
+                        continue
+                    if world_service.index_remote_manifest(manifest):
+                        indexed += 1
+                if indexed:
+                    log.info("indexed %d remote tool manifest(s) for "
+                             "network discovery", indexed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.debug("remote manifest pull cycle failed", exc_info=True)
+
     def _wire_substrate_identity_resolver(self) -> None:
         """Pass an identity resolver to the substrate feed so each
         work unit is attributed to the actual agent's 0x address
@@ -1112,6 +1220,13 @@ class AutonetBridge:
         try:
             if self._service:
                 self._service.stop()
+            if self._manifest_pull_task and not self._manifest_pull_task.done():
+                self._manifest_pull_task.cancel()
+                try:
+                    await self._manifest_pull_task
+                except asyncio.CancelledError:
+                    pass
+            self._manifest_pull_task = None
             if self._task and not self._task.done():
                 self._task.cancel()
                 try:

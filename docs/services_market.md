@@ -1,6 +1,12 @@
 # Services market: decentralized monetizable APIs
 
-Status: BUILT, beta on testnet. `ServiceRegistry` + `PaymentChannel`
+Status: BUILT, beta on testnet, with two pieces still only specified.
+BUILT: the on-chain registry (register / update ask / retire), direct
+`payForService` settlement, the provider-side payment gate, and the
+`service` consumer provider type. SPECIFIED, NOT BUILT: receipt-gated
+reviews (§4) and the voucher-per-call client flow (channels are on
+chain and the gate accepts vouchers, but no client drives them).
+`ServiceRegistry` + `PaymentChannel`
 (`contracts/core/ServiceMarket.sol`) are deployed on the Autonet
 jurisdiction (Etherlink Shadownet; addresses in `registry.json` under
 `service_registry` / `payment_channel`) and exercised end to end by
@@ -39,9 +45,9 @@ wallet attached and receipts are forever.
 ## Decision (2026-07-26): the vestigial `ask.token` field is dropped
 
 ATN-only settlement was ratified 2026-07-10, but `ask.token` survived as
-required dead weight — `validate_ask` demanded a non-empty ERC20 address
+required dead weight: `validate_ask` demanded a non-empty ERC20 address
 that nothing read. The ask is now `{amount, unit}`: specs are
-ATN-denominated by construction. Removal is TOLERANT — `normalize_ask`
+ATN-denominated by construction. Removal is TOLERANT: `normalize_ask`
 strips a `token` a caller still passes rather than rejecting it, and
 persisted specs carrying one load unchanged (the store reads blobs, it
 does not re-validate). The `receipt.token` wire key is KEPT and pinned to
@@ -50,7 +56,7 @@ the constant `"ATN"` so the Flutter Services page parses unchanged.
 ## Decision (2026-07-26): LLM inference as a marketplace service
 
 Ratified in discussion 2026-07-26. Inference joins the marketplace as an
-ordinary service, and a service can back an agent's PROVIDER — closing
+ordinary service, and a service can back an agent's PROVIDER, closing
 the loop the doc always anticipated ("the sponsor/dependent inference
 pipe is the same channel"). Any wallet holding ATN can buy cognition;
 no sponsor relationship required. Strategically this is the piece that
@@ -63,7 +69,7 @@ The v1 slice, costs eaten deliberately:
 1. **Provider side**: a service may declare an inference backing instead
    of a backing tool. Its `service_request` dispatches the work item
    (`messages`, `max_tokens`) through the provider daemon's OWN provider
-   stack (their GPU, their local models, their API key — the owner's
+   stack (their GPU, their local models, their API key: the owner's
    choice and the owner's upstream-ToS risk). The spec declares the
    served model; the daemon clamps to the declared token cap.
 2. **Consumer side**: a new provider type next to `rpb` wraps a
@@ -79,16 +85,16 @@ The v1 slice, costs eaten deliberately:
    actual usage under it).
 5. **NOT in v1**: streaming (responses buffer; the agent loop consumes
    whole completions anyway), fingerprint verification (substitution is
-   deterred behaviorally — payer-signed reviews, same as everywhere
+   deterred behaviorally by payer-signed reviews, same as everywhere
    else on this rail), sponsor-pipe unification (it converges later by
    adopting this same frame).
 6. **Alignment**: NO alignment-differentiated pricing on this rail.
    Fact-checking alignment would mean more eyes on work the consumer
-   already pays to share with exactly one counterparty — a privacy
+   already pays to share with exactly one counterparty, a privacy
    regression. Alignment lives on the tool axes; services stay
    behaviorally trusted (identity, atomic payment, track record).
 
-### As built — the consumer side (`service` provider type)
+### As built: the consumer side (`service` provider type)
 
 `atn/providers/service.py`, resolved by `atn/runtime/provider_manager.py`
 alongside `rpb`. The three consumer mechanics (fresh request id, sign
@@ -96,7 +102,7 @@ alongside `rpb`. The three consumer mechanics (fresh request id, sign
 `atn/service_client.py`, shared verbatim with the `pay_for_service` /
 `request_service` agent tools so there is ONE copy of the chain code.
 
-Configuration is daemon-level — it names ONE purchase, the same way
+Configuration is daemon-level: it names ONE purchase, the same way
 `autonet.sponsor_address` names one employer. There is no per-agent
 service purchase:
 
@@ -117,25 +123,31 @@ Point an agent at `provider: service` and it does ordinary completions.
   dependent-is-the-owner-wallet doctrine. An agent cannot mint itself a
   cheaper provider.
 - **Ask cached, request id fresh.** The on-chain ask (scanned out of
-  `ServiceRegistry` by `(provider, spec_digest)` — there is no digest→id
+  `ServiceRegistry` by `(provider, spec_digest)`, since there is no digest→id
   index) and the resolved wss endpoint are read once per provider
   instance; the `request_id` is regenerated per call because the
   provider-side gate persists seen ids and treats a reuse as a replay.
 - **Wire args**: `{messages, max_tokens?, system?, temperature?}`;
   success envelope `{request_id, content, model, usage, stop_reason,
   max_tokens}`. An empty served `model` is legitimate (the seller resolves
-  its own default). Tool definitions are DROPPED with a warning — v1
+  its own default). Tool definitions are DROPPED with a warning: v1
   carries no tool-use round trip.
 - **Degrades honestly.** With no chain config the payment is skipped with
-  a loud warning and the request still goes out — the provider-side gate
-  degrades open in exactly the same condition, which is what makes a
-  local two-daemon demo possible. With chain configured, a failed payment
-  ABORTS the call before anything is sent.
+  a loud warning and the request still goes out. The provider-side gate
+  degrades open in the same condition, but ONLY for a request that arrived
+  on the LOCAL listener, which is what makes a local two-daemon demo
+  possible. A REMOTE request with no chain config is refused: that
+  listener dispatches `service_request` pre-auth precisely because the
+  payment is the credential, so degrading open there would hand any peer
+  who knows a digest unlimited free work (inference off the owner's
+  provider stack included) on nothing worse than an RPC outage. With
+  chain configured, a failed payment ABORTS the call before anything is
+  sent.
 
 Covered by `tests/atn/test_service_provider.py` (mocked transport +
 mocked chain client).
 
-### As built — the human consumer (`invoke_service` WS handler)
+### As built: the human consumer (`invoke_service` WS handler)
 
 The `service` provider type buys inference for an AGENT. `invoke_service`
 (`atn/ws_server.py`) is the same purchase for a HUMAN: the owner's app buys
@@ -154,7 +166,7 @@ receipt  {paid, degraded, tx_hash, amount, token, recipient}
   doctrine as the `service` provider type.
 - **Local digest** (in `service_store`): pay, then re-enter
   `_handle_service_request` with a real `service_request` frame carrying
-  the payment proof. The gate then verifies the payment we just made — the
+  the payment proof. The gate then verifies the payment we just made: the
   owner buying from their own daemon exercises the production path rather
   than a private shortcut, and works for tool- and inference-backed
   services alike. `output` is the service's result object verbatim, so a
@@ -164,22 +176,22 @@ receipt  {paid, degraded, tx_hash, amount, token, recipient}
 - **Foreign digest**: scanned out of `ServiceRegistry` for its provider +
   ask (no digest→id index), endpoint resolved, paid, then
   `service_client.request_service` cross-daemon. With no chain there is no
-  registry to scan, so a foreign digest is a hard failure — unlike the
+  registry to scan, so a foreign digest is a hard failure. Unlike the
   local path there is no counterparty to reach at all.
 - **Receipt semantics.** `paid` means a tx exists. `degraded=true` means
   the chain was unconfigured so nothing was paid (the provider gate
   degrades open in the same condition). A zero ask with the chain UP is
-  `paid=false, degraded=false` — nothing was owed. The receipt travels on
+  `paid=false, degraded=false`, because nothing was owed. The receipt travels on
   the failure path too: money may already have moved, and hiding that
   would be the one genuinely dishonest thing here.
 - **Refuse before spending.** Retired, and a listing with no backing at
-  all, are refused before any payment — taking the money and then failing
+  all, are refused before any payment: taking the money and then failing
   at dispatch is the outcome to avoid.
 - **Off-loop chain calls.** `on_chain.py`'s methods are `async def` but
   synchronous inside (web3 HTTP, `estimate_gas`, a
   `wait_for_transaction_receipt(timeout=120)`). Awaited directly they
   starve the websocket keepalive, so the payment and registry reads go
-  through `_offload` onto worker threads — the same fix
+  through `_offload` onto worker threads, the same fix
   `owner_binding_status` needed.
 
 Covered by `tests/atn/test_service_store.py`
@@ -287,20 +299,20 @@ payment**. Established by the first genuinely cross-machine run (two
 boxes, `docs/local_e2e.md`).
 
 The daemon has two listeners. The privileged one is loopback-only and not
-configurable — it is pre-authed as owner and exports keys. The other is
+configurable, and it is pre-authed as owner and exports keys. The other is
 network-reachable and auth-required (owner signature, or agent-self for a
 key in *this* daemon's fleet). A paying counterparty on another machine
 satisfies **neither**, by construction: a buyer is a stranger. There is no
 handshake it could ever pass, and inventing one would mean either issuing
 credentials to every buyer or trusting on first use.
 
-So `service_request` — and only `service_request` — is dispatched pre-auth
+So `service_request`, and only `service_request`, is dispatched pre-auth
 on the remote listener (`PAYMENT_AUTHORIZED_MESSAGES` in
 `atn/ws_server.py`). What authorizes it is `_validate_service_payment`:
 fetch the on-chain `ServicePayment` receipt, check recipient == the
 serving agent and amount >= the ask, consume the `request_id` against a
-persisted replay set. That is strictly stronger than a session login — it
-costs ATN per call and cannot be replayed — and it is the only surface
+persisted replay set. That is strictly stronger than a session login (it
+costs ATN per call and cannot be replayed), and it is the only surface
 such a session can reach.
 
 Which makes the replay set load-bearing in a way it was not treated as.
@@ -308,23 +320,40 @@ It was keyed on the raw string, so the same bytes32 spelled `0x…` and `…`
 were two different keys, and **one payment bought two real inferences**
 (`docs/local_e2e.md`, seam 11). Fixed by canonicalizing every id through
 `ServiceStore.normalize_request_id`. On this rail the replay set is not
-bookkeeping — with pre-auth dispatch it is the whole of the access
+bookkeeping: with pre-auth dispatch it is the whole of the access
 control, and any spelling it fails to collapse is free work.
 
-### 4. Reviews
+### 4. Reviews (SPECIFIED, NOT BUILT)
 
-A review = the payer's signed verdict on a request_id (ok/score/note),
-publishable as a gossip event and mirrored by the indexer. Only
-addresses that actually paid for the item can review it (receipt-gated:
-web2's fake-review problem solved by construction). Aggregates
-(success rate, dispute rate, volume) are displayed, never enforced:
-pricing self-regulates because buyers see history; no on-chain math
-beyond settlement.
+Nothing below this paragraph is implemented. There is no review event,
+no review store and no review surface in the app: the strings
+`review` in `atn/service_store.py` are forward-looking comments on the
+request log a review rail would later ride.
+
+What ships instead as the trust surface, and is what the Services page
+actually renders:
+
+- the on-chain provider record (`serviceEarnings`, `agentMintTotal`,
+  registration tenure), read by the `provider_record` WS handler. It is
+  a consequence of other people's payments, so it cannot be
+  self-reported.
+- the provider-local success rate and volume from
+  `ServiceStore.summary()`, returned alongside `list_services`.
+
+The specified design, for when it is built: a review = the payer's
+signed verdict on a request_id (ok/score/note), publishable as a gossip
+event and mirrored by the indexer. Only addresses that actually paid for
+the item can review it (receipt-gated: web2's fake-review problem solved
+by construction). Aggregates (success rate, dispute rate, volume) are
+displayed, never enforced: pricing self-regulates because buyers see
+history; no on-chain math beyond settlement.
 
 ### 5. Marketplace surface
 
 - Web app: new Services screen, offering browse (Firestore-backed storefront),
-  spec inspection, purchase flow (wallet), review history. The
+  spec inspection, purchase flow (wallet), and (once §4 is built) review
+  history; today the trust strip shows the provider record plus the
+  provider-local success rate. The
   framework is both marketplace and consumer; the human benefactor of
   each daemon is the true end-consumer on both sides.
 - Agent-side: the inference probe returns tools + services merged,

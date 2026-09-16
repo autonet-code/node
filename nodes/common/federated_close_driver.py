@@ -293,6 +293,21 @@ class FederatedCloseDriver:
         self._save_tool_vetting()
         self._tool_positions = dict(close_result.get("tool_positions") or {})
         self._save_tool_positions()
+        # These are the AUTHORITATIVE positions: this close weighted review
+        # drift by rep_share × credibility (see the tool_positions=... /
+        # rep_shares=... arguments above), which the daemon's own local
+        # projection does not. Push them onto the live world so library
+        # ranking (infer_artifacts reads the drifted head off the
+        # observation coords) matches consensus instead of an unweighted
+        # local view in which zero-reputation reviews still move rankings.
+        try:
+            world_service = getattr(self.gossip, "world_service", None)
+            applier = getattr(
+                world_service, "apply_federated_tool_positions", None)
+            if applier is not None and self._tool_positions:
+                applier(self._tool_positions)
+        except Exception as e:
+            logger.warning("applying federated tool positions failed: %s", e)
         # v4.1 carried gradient-trust state (rebuildable cache).
         self._tool_credibility = dict(
             close_result.get("tool_credibility") or {})

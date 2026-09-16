@@ -297,3 +297,56 @@ def _rpc_handlers_for(rt, agent_id):
     host = WorkerHost(engine=rt.engine, agent_id=agent_id, record=rec,
                       on_execution_done=_done_cb)
     return host.rpc_handlers()
+
+
+# --- root (parent-less) grant resolution ----------------------------------
+# A UI-created agent has no parent worker to stash a grant for it, so its
+# effective grant is its own wish clamped by secrets.default_root_allowance.
+
+def _root_grant_runtime(tmp_path, monkeypatch, *, wish, root_default,
+                        isolation=True):
+    from atn.runtime import worker_host as wh
+
+    monkeypatch.setattr(
+        wh, "_resolve_spec",
+        lambda spec: ["A", "B"] if str(spec).strip().lower() == "all"
+        else [t.strip() for t in str(spec).split(",") if t.strip()],
+    )
+    rt = _make_runtime(EventBus(), tmp_path, isolation=isolation)
+    rt._config.secrets.default_root_allowance = root_default
+    defn = _root_defn("rootagent")
+    defn.secrets_allowance = wish
+    rt.registry._agents[defn.id] = defn
+    return rt
+
+
+def test_root_agent_grant_is_clamped_by_default_root_allowance(tmp_path, monkeypatch):
+    from atn.runtime.worker_host import resolve_effective_grant
+
+    # Root default opens A+B; the agent asks for A only => it holds A.
+    rt = _root_grant_runtime(tmp_path, monkeypatch, wish="A", root_default="all")
+    assert resolve_effective_grant("rootagent", rt) == ["A"]
+
+    # Root default is the shipped "none" => deny-all regardless of the wish.
+    rt = _root_grant_runtime(tmp_path, monkeypatch, wish="A", root_default="none")
+    assert resolve_effective_grant("rootagent", rt) == []
+
+    # The ceiling clamps a wider wish down to the default.
+    rt = _root_grant_runtime(tmp_path, monkeypatch, wish="all", root_default="B")
+    assert resolve_effective_grant("rootagent", rt) == ["B"]
+
+    # Isolation OFF => no tripwire => no grant, whatever the config says.
+    rt = _root_grant_runtime(tmp_path, monkeypatch, wish="A",
+                             root_default="all", isolation=False)
+    assert resolve_effective_grant("rootagent", rt) == []
+
+
+def test_root_agent_grant_survives_a_second_run(tmp_path, monkeypatch):
+    """The grant is recomputed per run, not consumed once: the old
+    ``_pending_grants.pop`` left an agent ungranted on its SECOND trigger."""
+    from atn.runtime.worker_host import resolve_effective_grant
+
+    rt = _root_grant_runtime(tmp_path, monkeypatch, wish="A", root_default="all")
+    assert resolve_effective_grant("rootagent", rt) == ["A"]
+    rt._pending_grants.pop("rootagent", None)
+    assert resolve_effective_grant("rootagent", rt) == ["A"]

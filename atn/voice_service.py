@@ -7,7 +7,7 @@ reacts to inbound events (push-to-talk), routes them to agents through an INPUT
 SEAM gated by an InputPolicy, and streams agent output back out via the
 EventBus. VoiceService and ChatService are the same shape, different channel.
 
-Optional module — install with ``pip install atn[voice]``.
+Optional module — install with ``pip install autonet-computer[voice]``.
 
 Subscribes to the EventBus and speaks agent output aloud, plays tool
 tones, handles push-to-talk STT, and routes voice input to the
@@ -65,26 +65,70 @@ log = logging.getLogger(__name__)
 # three. `import voice_core` is deliberately lightweight — it pulls in no
 # torch / faster-whisper / kokoro at import time, so the lazy-import contract
 # above still holds.
-from voice_core import (
-    MIXER_SR,
-    AudioChannel,
-    AudioMixer,
-    PushToTalkRecorder,
-    generate_edge,
-    generate_elevenlabs,
-    generate_kokoro,
-    generate_piper,
-    transcribe,
-    make_result_chime,
-    make_startup_chime,
-    make_tool_tone,
-    gen_tone as _gen_tone,
-    strip_markdown,
-    register_tool_sounds,
-    set_stt_backend,
-    TOOL_FREQS,
-    TOOL_SOUND_MAP,
-)
+#
+# The package is VENDORED at atn/_vendor/voice_core so the voice extras are
+# self-contained (the published autonet-voice-core 0.1.0 predates
+# register_tool_sounds / set_stt_backend, so a pip dependency on it would still
+# fail this import). A separately installed `voice_core` still wins, which
+# keeps a dev checkout authoritative. The import needs numpy + sounddevice, so
+# without `pip install autonet-computer[voice]` it degrades to None bindings
+# and VOICE_AVAILABLE stays False instead of exploding at import time.
+try:
+    try:
+        from voice_core import (  # type: ignore[import-not-found]
+            MIXER_SR,
+            AudioChannel,
+            AudioMixer,
+            PushToTalkRecorder,
+            generate_edge,
+            generate_elevenlabs,
+            generate_kokoro,
+            generate_piper,
+            transcribe,
+            make_result_chime,
+            make_startup_chime,
+            make_tool_tone,
+            gen_tone as _gen_tone,
+            strip_markdown,
+            register_tool_sounds,
+            set_stt_backend,
+            TOOL_FREQS,
+            TOOL_SOUND_MAP,
+        )
+    except ImportError:
+        from ._vendor.voice_core import (
+            MIXER_SR,
+            AudioChannel,
+            AudioMixer,
+            PushToTalkRecorder,
+            generate_edge,
+            generate_elevenlabs,
+            generate_kokoro,
+            generate_piper,
+            transcribe,
+            make_result_chime,
+            make_startup_chime,
+            make_tool_tone,
+            gen_tone as _gen_tone,
+            strip_markdown,
+            register_tool_sounds,
+            set_stt_backend,
+            TOOL_FREQS,
+            TOOL_SOUND_MAP,
+        )
+    _VOICE_CORE_OK = True
+except ImportError as _vc_exc:  # numpy / sounddevice missing, or a stale wheel
+    log.debug("voice_core unavailable: %s", _vc_exc)
+    _VOICE_CORE_OK = False
+    MIXER_SR = 48000
+    AudioChannel = AudioMixer = PushToTalkRecorder = None  # type: ignore[assignment]
+    generate_edge = generate_elevenlabs = generate_kokoro = None  # type: ignore[assignment]
+    generate_piper = transcribe = None  # type: ignore[assignment]
+    make_result_chime = make_startup_chime = make_tool_tone = None  # type: ignore[assignment]
+    _gen_tone = strip_markdown = None  # type: ignore[assignment]
+    register_tool_sounds = set_stt_backend = None  # type: ignore[assignment]
+    TOOL_FREQS = {}  # type: ignore[assignment]
+    TOOL_SOUND_MAP = {}  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -96,11 +140,19 @@ from voice_core import (
 try:
     import numpy as _np      # type: ignore[assignment]
     import sounddevice as _sd  # type: ignore[assignment]
-    VOICE_AVAILABLE = True
+    VOICE_AVAILABLE = _VOICE_CORE_OK
 except ImportError:
     _np = None  # type: ignore[assignment]
     _sd = None  # type: ignore[assignment]
     VOICE_AVAILABLE = False
+
+# The one message every "voice is not usable here" path shows the user. Names
+# the real distribution (`autonet-computer`, not `atn`) and the extra that
+# actually brings every backend.
+VOICE_INSTALL_HINT = (
+    "Voice support is not installed.  "
+    "Install with: pip install autonet-computer[voice-full]"
+)
 
 # PTT feature gate — keyboard + faster-whisper.
 # NOTE: faster_whisper transitively imports torch (~590MB, ~5s). We must NOT
@@ -120,7 +172,8 @@ _keyboard = None  # lazily bound in the PTT loop
 # than leaving it on "auto" keeps this a deliberate choice instead of
 # something that would silently change if a Nemotron server were configured
 # elsewhere in the process.
-set_stt_backend("whisper")
+if _VOICE_CORE_OK:
+    set_stt_backend("whisper")
 
 
 # ── Constants ─────────────────────────────────────────────────
@@ -135,12 +188,14 @@ _LEGACY_ROOT_ID = "orchestrator"
 # into voice_core rather than kept in a local dict: make_tool_tone() reads
 # voice_core's map, so a local copy would be silently ignored and these tools
 # would fall back to the default tone.
-register_tool_sounds({
+_ATN_TOOL_SOUNDS = {
     "create_agent": "agent",
     "trigger_run": "execute",
     "get_execution": "read",
     "use_connector": "execute",
-})
+}
+if _VOICE_CORE_OK:
+    register_tool_sounds(_ATN_TOOL_SOUNDS)
 
 
 # ── Markdown / path cleaning for TTS ─────────────────────────
@@ -163,6 +218,10 @@ def find_device(name: str, kind: str | None = None) -> int | None:
 
 def get_device_list() -> tuple[list[dict], list[dict]]:
     """Return (outputs, inputs) device lists for the UI."""
+    if not VOICE_AVAILABLE:
+        # Without the extras `_sd` is None; raise the hint the UI shows rather
+        # than an AttributeError nobody can act on.
+        raise RuntimeError(VOICE_INSTALL_HINT)
     all_devs = list(enumerate(_sd.query_devices()))
     default_out = _sd.default.device[1]
     default_in = _sd.default.device[0]
@@ -251,7 +310,7 @@ def _get_kokoro():
                 except ImportError:
                     raise ImportError(
                         "Kokoro backend requires kokoro-onnx.  "
-                        "Install with: pip install atn[voice-kokoro]"
+                        "Install with: pip install autonet-computer[voice-kokoro]"
                     )
                 # Build search paths — configurable dir first, then alongside this file
                 search_paths = []
@@ -403,7 +462,7 @@ class VoiceAuthor:
 class VoiceService:
     """ATN voice service — EventBus-driven TTS/STT with audio mixing.
 
-    Requires ``pip install atn[voice]`` for core functionality.
+    Requires ``pip install autonet-computer[voice]`` for core functionality.
 
     Listens to:
       - STEP_OUTPUT: speaks agent text, plays tool tones
@@ -470,6 +529,8 @@ class VoiceService:
         # State
         self._running = False
         self._voice_enabled = True
+        # Last VOICE_SPEAKING value emitted — the event fires on transition only.
+        self._speaking = False
         self._last_spoken_text: dict[str, str] = {}
 
         # TTS transport flags (ported from kevin). Three orthogonal controls the
@@ -491,10 +552,7 @@ class VoiceService:
             return
 
         if not VOICE_AVAILABLE:
-            raise ImportError(
-                "Voice service requires the voice extras.  "
-                "Install with: pip install atn[voice]"
-            )
+            raise ImportError(VOICE_INSTALL_HINT)
 
         # Configure backend-specific paths from config
         global _kokoro_model_dir, _piper_module_dir
@@ -571,7 +629,7 @@ class VoiceService:
             log.info("PTT enabled (keys=%s)", self.config.ptt_keys)
         else:
             log.info(
-                "PTT disabled — install with: pip install atn[voice-ptt]"
+                "PTT disabled — install with: pip install autonet-computer[voice-ptt]"
             )
 
         # Subscribe to events
@@ -696,6 +754,13 @@ class VoiceService:
         """Set which announcement categories are active."""
         self.config.announcements = list(categories)
 
+    def set_narrate_tools(self, enabled: bool) -> None:
+        """Speak tool calls aloud, or play only their tone.
+
+        The 'hear everything' vs 'hear responses only' choice. Tool tones and
+        the result chimes are unaffected; only the spoken narration is gated."""
+        self.config.narrate_tools = bool(enabled)
+
     # ------------------------------------------------------------------
     # Announcement cache
     # ------------------------------------------------------------------
@@ -703,16 +768,11 @@ class VoiceService:
     def _cache_verb(self, verb: str) -> None:
         """Render and cache a verb clip."""
         try:
-            audio, sr = generate_kokoro(verb, voice="am_michael")
+            audio, sr = self._generate_tools_tts(verb)
             with self._cache_lock:
                 self._announcement_cache[f"_verb_{verb}"] = (audio, sr)
         except Exception:
-            try:
-                audio, sr = generate_edge(verb)
-                with self._cache_lock:
-                    self._announcement_cache[f"_verb_{verb}"] = (audio, sr)
-            except Exception:
-                log.debug("Failed to cache verb: %s", verb)
+            log.debug("Failed to cache verb: %s", verb)
 
     def _cache_name(self, name: str) -> None:
         """Render and cache an agent name clip."""
@@ -721,16 +781,11 @@ class VoiceService:
             if key in self._announcement_cache:
                 return  # Already cached
         try:
-            audio, sr = generate_kokoro(name, voice="am_michael")
+            audio, sr = self._generate_tools_tts(name)
             with self._cache_lock:
                 self._announcement_cache[key] = (audio, sr)
         except Exception:
-            try:
-                audio, sr = generate_edge(name)
-                with self._cache_lock:
-                    self._announcement_cache[key] = (audio, sr)
-            except Exception:
-                log.debug("Failed to cache name: %s", name)
+            log.debug("Failed to cache name: %s", name)
 
     def _warmup_announcement_cache(self) -> None:
         """Pre-render announcement verb clips on startup."""
@@ -763,12 +818,22 @@ class VoiceService:
     # TTS
     # ------------------------------------------------------------------
 
-    def _generate_tts(self, text: str) -> tuple[Any, int]:
+    def _generate_tts(
+        self,
+        text: str,
+        *,
+        backend: str | None = None,
+        voice: str | None = None,
+    ) -> tuple[Any, int]:
         """Generate TTS audio using the configured backend.
 
-        Falls back through available backends if the primary one fails.
+        ``backend``/``voice`` override the configured pair for one call (the
+        tool-narration channel uses this to speak in a second voice). Falls
+        back through available backends if the chosen one fails; a voice name
+        is backend-specific, so it is only applied to the chosen backend and
+        dropped on the fallbacks.
         """
-        backend = self.config.backend
+        backend = backend or self.config.backend
         generators = {
             "kokoro": generate_kokoro,
             "edge": generate_edge,
@@ -777,10 +842,22 @@ class VoiceService:
         }
         # Try the configured backend first
         if backend in generators:
+            kwargs: dict[str, Any] = {}
+            if voice:
+                # ElevenLabs names the parameter differently.
+                kwargs["voice_id" if backend == "elevenlabs" else "voice"] = voice
             try:
-                return generators[backend](text)
+                return generators[backend](text, **kwargs)
             except Exception as exc:
                 log.warning("TTS backend '%s' failed: %s", backend, exc)
+                # A bad voice name for this backend should not lose the backend.
+                if kwargs:
+                    try:
+                        return generators[backend](text)
+                    except Exception as exc2:
+                        log.warning(
+                            "TTS backend '%s' failed without voice override: %s",
+                            backend, exc2)
 
         # Fall back through others
         for name, gen in generators.items():
@@ -792,6 +869,14 @@ class VoiceService:
                 continue
 
         raise RuntimeError("No TTS backend available")
+
+    def _generate_tools_tts(self, text: str) -> tuple[Any, int]:
+        """TTS for the tools channel: second voice, same backend by default."""
+        return self._generate_tts(
+            text,
+            backend=self.config.tools_backend or self.config.backend,
+            voice=self.config.tools_voice or None,
+        )
 
     def _fade_and_clear_voice(self, fade_secs: float = 0.5) -> None:
         """Crossfade the voice channel out and reset it — the single transition
@@ -882,6 +967,7 @@ class VoiceService:
                             break
                         self._fade_and_clear_voice(fade_secs=0.5)
                         self.mixer.play("voice", audio, sr=sr)
+                        self._set_speaking(True)
                         # Returns early on skip OR cancel. On skip, clear the flag
                         # and fall through to the next sentence (skip_current()
                         # already faded the current one out).
@@ -898,8 +984,14 @@ class VoiceService:
                     if not self._tts_cancelled.is_set():
                         self._fade_and_clear_voice(fade_secs=0.5)
                         self.mixer.play("voice", audio, sr=sr)
+                        self._set_speaking(True)
             except Exception as exc:
                 log.warning("TTS error: %s", exc)
+            # Item done: only clear "speaking" once nothing is left to play, so
+            # a multi-sentence response reads as one continuous speech.
+            if self._tts_q.empty() and not (
+                    self.mixer and self.mixer.is_playing("voice")):
+                self._set_speaking(False)
             self._tts_q.task_done()
 
     def _narrate_loop(self) -> None:
@@ -912,12 +1004,9 @@ class VoiceService:
                 continue
             try:
                 try:
-                    audio, sr = generate_kokoro(narration, voice="am_michael")
+                    audio, sr = self._generate_tools_tts(narration)
                 except Exception:
-                    try:
-                        audio, sr = generate_edge(narration)
-                    except Exception:
-                        continue
+                    continue
                 self.mixer.play("tools", audio, sr=sr)
             except Exception:
                 pass
@@ -1133,11 +1222,36 @@ class VoiceService:
                 self._narrate_q.get_nowait()
             except queue.Empty:
                 break
+        self._set_speaking(False)
 
     def _run_on_main_loop(self, coro) -> None:
         """Schedule a coroutine on the main event loop and wait for it."""
         future = asyncio.run_coroutine_threadsafe(coro, self._main_loop)
         future.result(timeout=60)
+
+    def _set_speaking(self, speaking: bool) -> None:
+        """Emit VOICE_SPEAKING on transition so the UI's speaking indicator
+        tracks playback live instead of only at snapshot time.
+
+        Fire-and-forget: the TTS worker must not block on the event loop
+        between sentences."""
+        if self._speaking == speaking:
+            return
+        self._speaking = speaking
+        loop = self._main_loop
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.events.emit(Event(
+                    type=EventType.VOICE_SPEAKING,
+                    source="voice",
+                    data={"speaking": speaking},
+                )),
+                loop,
+            )
+        except Exception as exc:
+            log.debug("Failed to emit speaking event: %s", exc)
 
     def _ptt_loop(self) -> None:
         """Background thread: wait for PTT, record, transcribe, route."""

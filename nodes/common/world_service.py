@@ -300,6 +300,19 @@ class WorldService:
         self._coverage_index = CoverageIndex(
             index_path=state_dir / "coverage_index.jsonl",
         )
+        # Tool discovery across the network: manifest digests seen on
+        # REMOTE tool-registration events whose payload this daemon does
+        # not hold yet. The ArtifactIndex only ever contained manifests
+        # this daemon published, so `probe_tools` could not find another
+        # household's tool at all. Ingest records the digest here (cheap,
+        # on the gossip hot path); a worker outside this class drains it,
+        # pulls the blob digest-verified and indexes it. Derived,
+        # daemon-local, never anchored — same doctrine as the index
+        # itself, so it cannot touch close determinism.
+        self._pending_remote_manifests: "OrderedDict[str, Dict[str, str]]" = (
+            OrderedDict()
+        )
+        self._pending_remote_manifests_cap = 2048
         # Tool substrate: carry-over state for the LOCAL projection
         # close (registration map digest -> manifest_meta, plus vetting
         # state), mirroring the federated close driver's carry-over so
@@ -313,6 +326,15 @@ class WorldService:
         # v3 position drift carry-over: digest -> {"head": [6], "mass": [6]}.
         self._tool_positions_path = state_dir / "local_tool_positions.json"
         self._tool_positions: Dict[str, Dict[str, Any]] = {}
+        # True once a FEDERATED close has handed us its authoritative
+        # positions. The local projection computes its own positions with
+        # NO rep_shares / credibility (every household, sybil included,
+        # gets full drift weight), so once the real thing is available the
+        # projection must stop overwriting the world's coords — otherwise
+        # library ranking silently contradicts the v4.1 sybil defense
+        # ("zero-reputation reviews move nothing"). A daemon with no peers
+        # never sets this and keeps the projection as its only signal.
+        self._federated_positions_seen = False
         try:
             if self._tool_registrations_path.exists():
                 raw = json.loads(
@@ -564,6 +586,14 @@ class WorldService:
             for ev in events:
                 self._coverage_index.ingest_event(ev)
 
+            # Remote tool registrations: note the manifest digests this
+            # daemon does not hold, so the discovery index can catch up
+            # (drained off this hot path — see drain_pending_remote_
+            # manifests). Local events already indexed their manifest in
+            # register_tool_manifest.
+            if origin == "remote":
+                self._note_remote_manifests_locked(events)
+
             # Notify local-event subscribers (federation gossip).
             # Remote-origin events skip the fan-out so peer ingest
             # doesn't re-publish what it received.
@@ -589,6 +619,100 @@ class WorldService:
                 "root_scores_before": scores_before,
                 "root_scores_after": scores_after,
             }
+
+    # ------------------------------------------------------------------
+    # Remote tool-manifest discovery (derived, daemon-local)
+    # ------------------------------------------------------------------
+
+    def _note_remote_manifests_locked(self, events: List[Dict[str, Any]]) -> None:
+        """Queue unknown manifest digests seen on remote registrations.
+
+        Same filter the close uses for registrations
+        (``federated_reconcile``: a ``sub_claim_sprouted`` carrying both
+        ``artifact_digest`` and ``manifest_meta``). Cheap and allocation-
+        bounded: no blob fetch, no network, so a slow peer cannot stall
+        gossip ingest.
+        """
+        for ev in events:
+            try:
+                if ev.get("kind") != "sub_claim_sprouted":
+                    continue
+                digest = str(ev.get("artifact_digest") or "")
+                meta = ev.get("manifest_meta")
+                if not digest or not isinstance(meta, dict) or not meta:
+                    continue
+                if self._artifact_index.has(digest):
+                    continue
+                if digest in self._pending_remote_manifests:
+                    continue
+                self._pending_remote_manifests[digest] = {
+                    str(k): str(v) for k, v in meta.items()
+                }
+                while (len(self._pending_remote_manifests)
+                       > self._pending_remote_manifests_cap):
+                    self._pending_remote_manifests.popitem(last=False)
+            except Exception:  # pragma: no cover - never break ingest
+                logger.debug("remote manifest note failed", exc_info=True)
+
+    def take_pending_remote_manifests(self, limit: int = 32) -> List[str]:
+        """Pop up to ``limit`` queued remote manifest digests."""
+        out: List[str] = []
+        with self._lock:
+            while self._pending_remote_manifests and len(out) < limit:
+                digest, _meta = self._pending_remote_manifests.popitem(last=False)
+                if self._artifact_index.has(digest):
+                    continue
+                out.append(digest)
+        return out
+
+    def index_remote_manifest(self, manifest: Dict[str, Any]) -> Optional[str]:
+        """Index a manifest fetched from a peer into the discovery index.
+
+        The caller is responsible for the digest verification (the blob
+        rail already does it: ``ToolStore.fetch_bytes`` rejects content
+        whose sha256 does not match). This touches ONLY the derived,
+        daemon-local ArtifactIndex — never the claim graph, never the
+        epoch buffer — so it cannot affect close determinism.
+        """
+        from .world_model_substrate.tool_manifest import is_tool_manifest
+
+        if not is_tool_manifest(manifest):
+            return None
+        with self._lock:
+            try:
+                return self._artifact_index.add_artifact(manifest)
+            except Exception:
+                logger.warning("indexing remote manifest failed", exc_info=True)
+                return None
+
+    def apply_federated_tool_positions(
+        self, positions: Optional[Dict[str, Dict[str, Any]]],
+    ) -> int:
+        """Adopt the federated close's authoritative tool positions.
+
+        The federated close is the one that weights review drift by
+        ``rep_share × credibility`` (federated_close_driver passes
+        ``rep_shares``/``tool_credibility``; the local projection passes
+        neither). Writing its result onto the live world is what makes
+        library ranking — ``infer_artifacts`` reads the drifted head off
+        the observation coords — agree with the documented rule that a
+        zero-reputation review moves nothing.
+
+        Returns the number of positions applied.
+        """
+        if not isinstance(positions, dict) or not positions:
+            return 0
+        from .federated_reconcile import apply_tool_positions
+
+        with self._lock:
+            self._tool_positions = {
+                str(k): dict(v) for k, v in positions.items()
+                if isinstance(v, dict)
+            }
+            self._federated_positions_seen = True
+            apply_tool_positions(self._world, self._tool_positions)
+            self._save_tool_state_locked()
+            return len(self._tool_positions)
 
     def equilibrate(
         self,
@@ -2367,13 +2491,24 @@ class WorldService:
         )
         self._tool_registrations = dict(tool_result["registrations_next"])
         self._tool_vetting = dict(tool_result.get("vetting_next") or {})
-        self._tool_positions = dict(tool_result.get("positions_next") or {})
-        self._save_tool_state_locked()
         # v3 position drift: write the reviewed charter heads onto the
         # live world (claim anchors + observation coords) so retrieval
         # ranking and the viz surfaces see the drifted positions.
-        from .federated_reconcile import apply_tool_positions
-        apply_tool_positions(self._world, self._tool_positions)
+        #
+        # ONLY while this daemon has no federated close to defer to. This
+        # projection calls compute_tool_mint with no rep_shares and no
+        # credibility, so every household — a zero-reputation sybil
+        # included — gets full drift weight (federated_reconcile:
+        # ``if rep_shares is None: base_w = 1.0``). Letting that overwrite
+        # the world would make library ranking contradict the v4.1 sybil
+        # defense. Once apply_federated_tool_positions has run, the
+        # authoritative (rep- and credibility-weighted) positions stand
+        # and the projection's own drift stays a diagnostic.
+        if not self._federated_positions_seen:
+            self._tool_positions = dict(tool_result.get("positions_next") or {})
+            from .federated_reconcile import apply_tool_positions
+            apply_tool_positions(self._world, self._tool_positions)
+        self._save_tool_state_locked()
 
         # Stake-style agent weighting, as on the federated rail.
         node_agent: Dict[str, Dict[str, float]] = {}

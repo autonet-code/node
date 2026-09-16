@@ -163,7 +163,11 @@ def breakdown_from_parts(
     output_reserve_tokens: int = 0,
 ) -> dict[str, Any]:
     """Assemble the breakdown payload from raw context parts + session stats."""
-    from .providers.base import get_context_window, _reduction_buffer
+    from .providers.base import (
+        compaction_trigger_tokens,
+        get_context_window,
+        _reduction_buffer,
+    )
 
     stats = dict(stats or {})
     model = str(stats.get("active_model") or "")
@@ -179,6 +183,11 @@ def breakdown_from_parts(
 
     measured = int(stats.get("last_input_tokens") or 0)
     buffer_tokens = _reduction_buffer(window) if window > 0 else 0
+    # Estimated input size at which pre-send reduction fires. Derived from the
+    # model (not the caller's reserve), so the live and reconstructed paths
+    # report the same number; 0 when the window is unknown, which tells the UI
+    # to hide the marker instead of guessing.
+    trigger_tokens = compaction_trigger_tokens(model, window) if window > 0 else 0
     # Best single number for "how full": the real measurement when we have
     # one and it exceeds our estimate (it includes provider-side overhead
     # the estimate can't see), else the estimate.
@@ -191,6 +200,7 @@ def breakdown_from_parts(
         "context_window": window,
         "output_reserve_tokens": int(output_reserve_tokens or 0),
         "reduction_buffer_tokens": buffer_tokens,
+        "compaction_trigger_tokens": int(trigger_tokens),
         "est_used_tokens": est_used,
         "used_tokens": used_tokens,
         "free_tokens": free_tokens,

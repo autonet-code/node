@@ -93,7 +93,7 @@ class SupervisedWorker:
     max_memory_mb: Optional[float] = None
     max_idle_s: float = DEFAULT_MAX_IDLE_S
 
-    is_root: bool = False                          # root agent auto-restarts; delegates don't
+    is_root: bool = False                          # roots are killed LAST in kill_all; delegates first
     reaped: bool = False
 
     def runtime_s(self) -> float:

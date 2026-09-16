@@ -212,3 +212,82 @@ def test_single_thread_subagent_shares_grant(tmp_path: Path):
 
     # Both calls drew on the one grant: 2 * 30 = 60 spent → 940 remaining.
     assert store.remaining(DEPENDENT_ADDRESS) == 940
+
+
+class _RecordingLLM(_FakeLLM):
+    """Captures the kwargs the sponsor actually passes to its own provider."""
+    def __init__(self, in_tok=20, out_tok=10):
+        super().__init__(in_tok, out_tok)
+        self.calls: list[dict] = []
+
+    async def send(self, **kwargs):
+        self.calls.append(kwargs)
+        return await super().send(**kwargs)
+
+
+def test_sponsor_model_overrides_the_dependents_request(tmp_path: Path):
+    """The employer chooses the tool: a configured sponsor_model is what
+    reaches the sponsor's own provider, whatever the dependent asked for."""
+    llm = _RecordingLLM()
+    bridge, store = _build_sponsor(tmp_path, llm)   # sponsor_model = "test-model"
+    store.add(DEPENDENT_ADDRESS, budget_tokens=1000)
+    handler = bridge._create_sponsor_handler(bridge.config)
+
+    asyncio.run(handler({
+        "agent_address": DEPENDENT_ADDRESS,
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "expensive-model-the-dependent-picked",
+        "max_tokens": 100,
+    }))
+
+    assert llm.calls[0]["model"] == "test-model"
+
+
+def test_max_tokens_clamped_to_remaining_grant(tmp_path: Path):
+    """A dependent cannot overshoot its grant in one shot: the requested
+    ceiling is clamped to what is actually left."""
+    llm = _RecordingLLM()
+    bridge, store = _build_sponsor(tmp_path, llm)
+    store.add(DEPENDENT_ADDRESS, budget_tokens=500)
+    handler = bridge._create_sponsor_handler(bridge.config)
+
+    asyncio.run(handler({
+        "agent_address": DEPENDENT_ADDRESS,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 64000,
+    }))
+
+    assert llm.calls[0]["max_tokens"] == 500
+
+
+def test_prompt_larger_than_grant_is_refused(tmp_path: Path):
+    """An oversized prompt is refused before the sponsor pays for it."""
+    llm = _RecordingLLM()
+    bridge, store = _build_sponsor(tmp_path, llm)
+    store.add(DEPENDENT_ADDRESS, budget_tokens=10)
+    handler = bridge._create_sponsor_handler(bridge.config)
+
+    result = asyncio.run(handler({
+        "agent_address": DEPENDENT_ADDRESS,
+        "messages": [{"role": "user", "content": "x" * 8000}],
+        "max_tokens": 100,
+    }))
+
+    assert result["error"] == "request exceeds remaining grant"
+    assert llm.calls == []
+
+
+def test_unlimited_binding_is_not_clamped(tmp_path: Path):
+    """budget_tokens=0 means unlimited: no clamp, no prompt-size refusal."""
+    llm = _RecordingLLM()
+    bridge, store = _build_sponsor(tmp_path, llm)
+    store.add(DEPENDENT_ADDRESS, budget_tokens=0)
+    handler = bridge._create_sponsor_handler(bridge.config)
+
+    asyncio.run(handler({
+        "agent_address": DEPENDENT_ADDRESS,
+        "messages": [{"role": "user", "content": "x" * 8000}],
+        "max_tokens": 64000,
+    }))
+
+    assert llm.calls[0]["max_tokens"] == 64000

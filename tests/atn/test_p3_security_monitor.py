@@ -132,3 +132,30 @@ def test_other_agent_value_does_not_implicate_src(tmp_path):
         assert len(alarms) == 1
         assert alarms[0].source == "agent-A"
     asyncio.run(go())
+
+
+def test_scope_violation_fires_alarm(tmp_path):
+    """The second trigger: a secret aimed at a destination outside its
+    authorized hosts alarms exactly like a transcript leak, carrying the
+    destination in its own field and never a value."""
+    async def go():
+        bus, mon, alarms = _mk(tmp_path)
+        await mon.report_scope_violation(
+            "agent-H", ["openai_key"], "evil.example.com")
+        assert len(alarms) == 1
+        ev = alarms[0]
+        assert ev.type == EventType.SECURITY_ALARM
+        assert ev.source == "agent-H"
+        assert ev.data["names"] == ["openai_key"]
+        assert ev.data["destination"] == "evil.example.com"
+        assert ev.data["kind"] == "network_scope"
+        assert "agent_id" not in ev.data
+        # A DIFFERENT destination is a distinct alarm, not a dedup'd repeat.
+        await mon.report_scope_violation(
+            "agent-H", ["openai_key"], "other.example.com")
+        assert len(alarms) == 2
+        # The SAME destination inside the window is dedup'd.
+        await mon.report_scope_violation(
+            "agent-H", ["openai_key"], "evil.example.com")
+        assert len(alarms) == 2
+    asyncio.run(go())

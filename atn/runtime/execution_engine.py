@@ -140,6 +140,12 @@ class ExecutionEngine:
         self.registry._status[agent_id] = AgentStatus.RUNNING
         self.execution_log.record(record)
 
+        # A re-run must re-arm the delegate gate: left set from the previous
+        # run, delegate_collect would return instantly with the stale result.
+        done_event = self._delegate_done.get(agent_id)
+        if done_event is not None:
+            done_event.clear()
+
         # ---- Worker isolation cutover (P4, flag-gated, default OFF) -----------
         # When ATN_WORKER_ISOLATION is ON, a COGNITIVE agent whose provider is
         # worker-eligible (an API provider — NOT the bridge/Claude-Max SDK, NOT
@@ -296,7 +302,8 @@ class ExecutionEngine:
         if rt is None:
             return False
         try:
-            return bool(rt._pending_grants.get(agent_id))
+            from .worker_host import resolve_effective_grant
+            return bool(resolve_effective_grant(agent_id, rt))
         except Exception:
             return False
 
@@ -442,8 +449,8 @@ class ExecutionEngine:
         # Register with the supervisor (sole PID-handle holder). This captures
         # defn/record/execution_id so the supervisor can finalize ON BEHALF if
         # the worker is hard-killed, fires _on_pid_bound BEFORE "go", and wires
-        # the wedge clock. Root agents auto-restart; delegates
-        # don't — mark is_root off the parent link.
+        # the wedge clock. Mark is_root off the parent link so kill_all tears
+        # delegates down before their parents.
         parent_id = getattr(defn, "parent_id", None)
         try:
             self.supervisor.register(
@@ -1030,18 +1037,19 @@ class ExecutionEngine:
 
             # --- Secret tool surface (P5, DOUBLE-GATED) ---
             # Append the secret_* tools IFF the isolation flag is ON *and* this
-            # agent has a non-empty daemon-computed grant staged in
-            # runtime._pending_grants. An empty/absent grant => the schemas are
-            # never added => the worker MODEL cannot even name the tools (the
-            # broker would refuse anyway, but we never surface the ability). The
-            # grant list itself (resolved service names) is NEVER put in the
-            # manifest — only the enabling flag is derived from it here; the
-            # worker enumerates its real services over the broker at run time.
+            # agent has a non-empty daemon-computed effective grant (own wish
+            # clamped by its parent's allowance, or by default_root_allowance for
+            # a parentless agent). An empty grant => the schemas are never added
+            # => the worker MODEL cannot even name the tools (the broker would
+            # refuse anyway, but we never surface the ability). The grant list
+            # itself (resolved service names) is NEVER put in the manifest — only
+            # the enabling flag is derived from it here; the worker enumerates its
+            # real services over the broker at run time.
             try:
                 rt_secret = getattr(self, "_runtime_ref", None)
                 if (rt_secret is not None
                         and self._worker_isolation_enabled()
-                        and rt_secret._pending_grants.get(defn.id)):
+                        and self._has_pending_grant(defn.id)):
                     from .worker_loop import SECRET_TOOL_SCHEMAS
                     agent_tools.extend(SECRET_TOOL_SCHEMAS)
             except Exception:
@@ -1129,10 +1137,20 @@ class ExecutionEngine:
                         type(sub_provider).send_orchestrate
                         is _BaseProvider.send_orchestrate
                     )
+                    # Same model identifier the provider loop resolves its
+                    # window from, so the history budget and the pre-send
+                    # reduction trigger agree.
+                    _hist_model = (
+                        defn.cognitive_model
+                        or getattr(sub_provider, "_active_model", "")
+                        or ""
+                    )
                     if _generic_loop:
-                        history_messages = self._build_history_messages(defn.id, prior_turns)
+                        history_messages = self._build_history_messages(
+                            defn.id, prior_turns, _hist_model)
                     else:
-                        system_prompt = self._append_history_to_prompt(system_prompt, prior_turns)
+                        system_prompt = self._append_history_to_prompt(
+                            system_prompt, prior_turns, _hist_model)
 
             # --- Inject UTC time + budget status ---
             # Both ride the newest incoming message ONLY (never the system prompt
@@ -1293,10 +1311,11 @@ class ExecutionEngine:
             # response stays the execution result — the review turn is
             # bookkeeping, never the answer.
             from ..delegate_prompts import (
-                REVIEW_STEP_PROMPT,
+                format_review_prompt,
                 VERIFY_STEP_PROMPT,
                 needs_review_reinvoke,
                 needs_verify_reinvoke,
+                review_owed_tools,
             )
             _review_session = getattr(sub_provider, "_session_id", "") or ""
             # §16 verify step for providers whose loop can't inject it
@@ -1334,7 +1353,8 @@ class ExecutionEngine:
                     review_kwargs = dict(send_kwargs)
                     review_kwargs.pop("history", None)  # session carries it
                     review_kwargs.update(
-                        message=REVIEW_STEP_PROMPT,
+                        message=format_review_prompt(
+                            review_owed_tools(_accumulated_tool_calls)),
                         max_turns=4,
                         session_id=_review_session,
                     )
@@ -1719,10 +1739,15 @@ class ExecutionEngine:
         if self.registry._running_count.get(defn.id, 0) == 0:
             self.registry._last_idle[defn.id] = datetime.now(timezone.utc)
             if record.status == ExecutionStatus.FAILED:
-                self.registry._status[defn.id] = AgentStatus.ERROR
                 self.registry._consec_failures[defn.id] = (
                     self.registry._consec_failures.get(defn.id, 0) + 1
                 )
+                # A disable or a budget pause decided mid-run outranks ERROR:
+                # neither should be undone by the run's own outcome.
+                if self.registry._status.get(defn.id) not in (
+                    AgentStatus.STOPPED, AgentStatus.BUDGET_PAUSED,
+                ):
+                    self.registry._status[defn.id] = AgentStatus.ERROR
             elif self.registry._status.get(defn.id) == AgentStatus.RUNNING:
                 self.registry._status[defn.id] = AgentStatus.ACTIVE
                 self.registry._consec_failures.pop(defn.id, None)
@@ -1793,10 +1818,18 @@ class ExecutionEngine:
     # history the boilerplate carries no information — compress it to a marker.
     _HEARTBEAT_HISTORY_MARKER = "[heartbeat wake-up]"
 
-    def _build_history_messages(self, agent_id: str, prior_turns: list) -> list[dict[str, Any]]:
+    def _build_history_messages(
+        self, agent_id: str, prior_turns: list, model_id: str = "",
+    ) -> list[dict[str, Any]]:
         """Prior turns as canonical message dicts, oldest first, trimmed from
-        the front to a ~100k-token budget. Roles pass through; the provider
-        normalizes (merging, role mapping) at request time.
+        the front to the model's history budget. Roles pass through; the
+        provider normalizes (merging, role mapping) at request time.
+
+        The budget scales with ``model_id``'s context window
+        (providers.base.history_char_budget): a 200k-window API model keeps
+        the historical 400k-char ceiling, while a 16k local model gets a
+        budget that fits under its pre-send reduction trigger, so injecting
+        history no longer forces a compaction round-trip on turn one.
 
         The trim boundary is STICKY per agent: it only advances when the
         kept suffix itself outgrows the budget, and then it jumps deep (to
@@ -1805,13 +1838,21 @@ class ExecutionEngine:
         budget — changing the message prefix every time and permanently
         defeating the provider prompt cache.
         """
-        _HISTORY_CHAR_BUDGET = 400_000
+        from ..providers.base import history_char_budget
+        _HISTORY_CHAR_BUDGET = history_char_budget(model_id)
         trim_map: dict[str, int] = getattr(self, "_history_trim_start", None) or {}
         self._history_trim_start = trim_map
+        model_map: dict[str, str] = getattr(self, "_history_trim_model", None) or {}
+        self._history_trim_model = model_map
 
         start = trim_map.get(agent_id, 0)
         if start >= len(prior_turns):
             start = 0          # conversation was reset/shrunk — start over
+        if model_map.get(agent_id, model_id) != model_id:
+            # The model changed, so the sticky boundary was computed under a
+            # different budget. Restart the window once; it re-sticks below.
+            start = 0
+        model_map[agent_id] = model_id
 
         msgs: list[dict[str, Any]] = []
         for turn in prior_turns[start:]:
@@ -1838,14 +1879,19 @@ class ExecutionEngine:
         return msgs
 
     @staticmethod
-    def _append_history_to_prompt(system_prompt: str, prior_turns: list) -> str:
+    def _append_history_to_prompt(
+        system_prompt: str, prior_turns: list, model_id: str = "",
+    ) -> str:
         _ROLE_PREFIX = {"user": "User", "assistant": "Agent", "system": "System"}
         history_parts = []
         for turn in prior_turns:
             prefix = _ROLE_PREFIX.get(turn.role, turn.role.title())
             history_parts.append(f"{prefix}: {turn.content}")
 
-        _HISTORY_CHAR_BUDGET = 400_000
+        # Same window-scaled budget as _build_history_messages; unknown model
+        # falls back to the historical 400k-char ceiling.
+        from ..providers.base import history_char_budget
+        _HISTORY_CHAR_BUDGET = history_char_budget(model_id)
         total_chars = sum(len(p) for p in history_parts)
         start = 0
         while start < len(history_parts) and total_chars > _HISTORY_CHAR_BUDGET:

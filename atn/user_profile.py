@@ -12,8 +12,9 @@ Two stores live here:
 2. ``data_dir/profile.json`` — structured plumbing (projects, standards,
    jurisdiction_id).  Goals are tracked as agents in the agent registry —
    creating an agent IS setting a goal.  The onboarding_status field is
-   LEGACY-WIRE: atn_web still reads it over WS; nothing in the daemon gates
-   on it any more.
+   LEGACY-WIRE: it is retained for third-party/older clients only.  Nothing
+   in the daemon gates on it, and atn_web no longer reads it either, so on
+   a first-party fleet it stays at its initial value forever.
 """
 from __future__ import annotations
 
@@ -83,8 +84,10 @@ class UserProfileStore:
         return self._profile  # type: ignore[return-value]
 
     def skip_onboarding(self) -> None:
-        """LEGACY-WIRE: mark the legacy onboarding flag completed (atn_web
-        'skip' button).  Nothing in the daemon gates on the flag."""
+        """LEGACY-WIRE: mark the legacy onboarding flag completed.  Retained
+        for third-party/older clients; no first-party caller remains (atn_web
+        dropped its 'skip' button) and nothing in the daemon gates on the
+        flag."""
         p = self.get_profile()
         p.onboarding_status = OnboardingStatus.COMPLETED
         self.save()

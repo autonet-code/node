@@ -72,6 +72,10 @@ _LEGACY_ROOT_ID = "orchestrator"
 KEY_LOCAL_ONLY_MESSAGES = frozenset({
     "export_agent_key",
     "autonet_publish_standards",
+    # DEPRECATED (pre-substrate Autonet.sol, removed Phase 5.6a): the handler
+    # now returns a gone-marker. Kept in the set so an old client that still
+    # sends a private key in the payload is refused on the remote listener
+    # before the payload is read at all.
     "autonet_claim_reward",
     "register_agent_on_chain",
     # Vault mutations carry a raw secret VALUE in the payload; over a
@@ -87,6 +91,11 @@ KEY_LOCAL_ONLY_MESSAGES = frozenset({
     # secrets_config MUTATES daemon config (worker isolation, root allowance).
     # Same custody tier as the vault mutations: owner + local listener only.
     "secrets_config",
+    # set_owner_wallet REASSIGNS fleet ownership: the address it writes both
+    # owns all future earnings and is the one a remote connection may sign
+    # with to be rooted at the full fleet. Local listener only, so it can
+    # never be handed away over the wire.
+    "set_owner_wallet",
 })
 
 # Messages a STRANGER may send on the remote (auth-required) listener without
@@ -533,6 +542,27 @@ class WebSocketBridge:
             return root
         return self._fleet_root_id()
 
+    def _resolve_focus_agent(self, session: ClientSession, agent_id: str) -> str:
+        """Resolve a voice-focus target, remapping the LEGACY-WIRE sentinel.
+
+        The focus gates compare against real agent ids carried on STEP_OUTPUT,
+        so a literal "orchestrator" that names no agent matches nothing and
+        silences voice. Same remap post_message already does for its target."""
+        if agent_id == _LEGACY_ROOT_ID and self.runtime.get_agent(agent_id) is None:
+            return self._session_root_agent(session) or agent_id
+        return agent_id
+
+    def _resolve_legacy_agent_id(self, agent_id: str,
+                                 session: ClientSession) -> str:
+        """LEGACY-WIRE: old clients name the retired root-agent id. Remap it
+        onto the session's root agent unless an agent actually carries the
+        legacy id (persisted fleets may)."""
+        if agent_id != _LEGACY_ROOT_ID:
+            return agent_id
+        if self.runtime.get_agent(_LEGACY_ROOT_ID) is not None:
+            return agent_id
+        return self._session_root_agent(session) or agent_id
+
     # ------------------------------------------------------------------
     # Auth handshake
     # ------------------------------------------------------------------
@@ -730,7 +760,8 @@ class WebSocketBridge:
         # gate verifies. Dispatch it before gate 2. See
         # PAYMENT_AUTHORIZED_MESSAGES.
         if msg_type in PAYMENT_AUTHORIZED_MESSAGES and not session.authed:
-            return await self._handle_service_request(msg, msg_id)
+            return await self._handle_service_request(
+                msg, msg_id, local=bool(session.local))
 
         # --- Gate 2: everything else requires an authed session ------------
         if not session.authed:
@@ -929,7 +960,9 @@ class WebSocketBridge:
         # Custom provider management
         if msg_type == "custom_provider_add":
             provider_id = msg.get("provider_id", "")
-            name = msg.get("name", provider_id)
+            # The frontend has always sent the label as "display_name";
+            # accept both spellings so an older or newer client both land.
+            name = msg.get("name") or msg.get("display_name") or provider_id
             base_url = msg.get("base_url", "")
             api_key = msg.get("api_key", "")
             default_model = msg.get("default_model", "")
@@ -1001,8 +1034,22 @@ class WebSocketBridge:
             if not content:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'content' field"}
             # Gate through the single-writer arbiter as this WS surface.
+            sid = self._surface_id_for(session)
             result = await self.runtime.send_agent_message(
-                agent_id, content, surface=self._surface_id_for(session))
+                agent_id, content, surface=sid)
+            # "Take the mic": when another surface holds it, an owner client
+            # that passed force=true claims it through the arbiter (which
+            # emits input.granted / input.active_changed so the losing
+            # surface learns it lost) and the send is retried once.
+            if (result.get("code") == "input_not_active"
+                    and msg.get("force") is True):
+                arbiter = getattr(self.runtime, "input_arbiter", None)
+                if arbiter is not None:
+                    grant = await arbiter.request_input(
+                        sid, requester_is_owner=bool(session.owner))
+                    if grant.get("granted"):
+                        result = await self.runtime.send_agent_message(
+                            agent_id, content, surface=sid)
             if result.get("error"):
                 return {"msg_id": msg_id, "ok": False, "error": result["error"],
                         "code": result.get("code"), "holder": result.get("holder")}
@@ -1041,8 +1088,15 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True, "result": {"agent_id": agent_id, "text": text}}
 
         if msg_type == "session_context":
-            agent_id = msg.get("agent_id")  # None = fleet root
+            # Omitted agent_id means the session's root agent; resolving it
+            # here keeps the default from degrading into "(no agent)".
+            agent_id = msg.get("agent_id") or self._session_root_agent(session)
             result = await self.runtime.get_session_context(agent_id)
+            if result.get("no_session"):
+                # Idle agent: no live bridge session is normal, not a fault.
+                return {"msg_id": msg_id, "ok": True, "result": {
+                    "agent_id": agent_id, "active": False,
+                    "messages": [], "turns": [], "stats": {}}}
             if "error" in result:
                 return {"msg_id": msg_id, "ok": False, "error": result["error"]}
             return {"msg_id": msg_id, "ok": True, "result": result}
@@ -1155,6 +1209,13 @@ class WebSocketBridge:
                     "description": m.get("description", ""),
                     "trust_class": m.get("trust_class", ""),
                     "author": m.get("author", ""),
+                    # The daemon's own resident-module manifests (atn_*,
+                    # harness_distro.py). The UI shows these as the one
+                    # ATN Harness card, not as ~14 loose tool cards. The
+                    # atn_ prefix is reserved to the daemon by
+                    # _register_tool, so it identifies them regardless of
+                    # whether an owner wallet has restamped the author.
+                    "resident": record.name.startswith("atn_"),
                     "fee_atn": m.get("fee_atn", 0),
                     "grants": sorted(record.grants),
                     "enabled": record.enabled,
@@ -1398,25 +1459,12 @@ class WebSocketBridge:
             except Exception as exc:
                 log.debug("probe_tools substrate path failed: %s", exc)
             if not matches:
-                needle = query.lower()
-                for record in self.runtime.tool_store.visible_to(None):
-                    hay = f"{record.name} {record.manifest.get('description', '')}".lower()
-                    if all(w in hay for w in needle.split()):
-                        matches.append({
-                            "digest": record.digest,
-                            "name": record.name,
-                            "description": record.manifest.get("description", ""),
-                            "author": record.author,
-                            "trust_class": record.trust_class,
-                            "score": 0.0,
-                            "rating": 0.0,
-                            "axes": [],
-                            "mass": [],
-                            "review_mass": 0.0,
-                            "inspections": 0,
-                        })
-                        if len(matches) >= k:
-                            break
+                # Owner surface: caller_id=None sees every visible record.
+                # Ranked (not all-words conjunction) so a natural-language
+                # query still returns its best partial matches.
+                from .agent_tools import local_tool_matches
+                matches = local_tool_matches(
+                    self.runtime.tool_store, query, k, caller_id=None)
                 source = "local"
             return {"msg_id": msg_id, "ok": True,
                     "result": {"matches": matches, "source": source}}
@@ -1479,9 +1527,22 @@ class WebSocketBridge:
                 )
             except (ValueError, RuntimeError) as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            # Chain leg: without it the listing exists only in this
+            # daemon's store, so no other daemon's market can see it and no
+            # buyer can pay for it. Same half agent_tools._register_service
+            # already does; a failure here downgrades to local-only rather
+            # than discarding the persisted spec.
+            try:
+                ask_amount = int(str(result["spec"]["ask"].get("amount") or "0")
+                                 or "0")
+            except (TypeError, ValueError, KeyError):
+                ask_amount = 0
+            chain = await self._register_service_on_chain(
+                author, result["digest"], ask_amount)
             return {"msg_id": msg_id, "ok": True,
                     "result": {"digest": result["digest"],
-                               "spec": result["spec"]}}
+                               "spec": result["spec"],
+                               **chain}}
 
         if msg_type == "list_services":
             include_retired = bool(msg.get("include_retired", False))
@@ -1776,14 +1837,20 @@ class WebSocketBridge:
             digest = msg.get("digest", "")
             if not digest:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'digest' field"}
-            if not self.runtime.service_store.retire(digest):
+            record = self.runtime.service_store.get(digest)
+            if record is None or not self.runtime.service_store.retire(digest):
                 return {"msg_id": msg_id, "ok": False,
                         "error": f"Unknown service digest: {digest[:16]}"}
+            # Chain leg: a local retire alone leaves the registry row active,
+            # and buyers pay before dispatch — so the listing keeps taking
+            # money for a service that then answers "Service retired".
+            chain = await self._retire_service_on_chain(record)
             return {"msg_id": msg_id, "ok": True,
-                    "result": {"digest": digest, "retired": True}}
+                    "result": {"digest": digest, "retired": True, **chain}}
 
         if msg_type == "service_request":
-            return await self._handle_service_request(msg, msg_id)
+            return await self._handle_service_request(
+                msg, msg_id, local=bool(session.local))
 
         # The CONSUMER side of the rail, for a human: buy ONE work item.
         # `service_request` is what a paying counterparty sends US;
@@ -1795,7 +1862,11 @@ class WebSocketBridge:
         # Voice service control
         if msg_type == "voice_start":
             result = await self.runtime.start_voice()
-            return {"msg_id": msg_id, "ok": result.get("status") != "failed", "result": result}
+            # Only a service that is actually up counts as ok. "unavailable"
+            # (extras missing) used to report ok=true, which swallowed the
+            # install hint before it reached the user.
+            started = result.get("status") in ("started", "already_running")
+            return {"msg_id": msg_id, "ok": started, "result": result}
 
         if msg_type == "voice_stop":
             result = await self.runtime.stop_voice()
@@ -1829,6 +1900,7 @@ class WebSocketBridge:
         if msg_type == "voice_focus":
             agent_id = msg.get("agent_id", _LEGACY_ROOT_ID)  # LEGACY-WIRE default
             if self.runtime.voice:
+                agent_id = self._resolve_focus_agent(session, agent_id)
                 self.runtime.voice.set_focus(agent_id)
                 return {"msg_id": msg_id, "ok": True, "result": {"focused_agent": agent_id}}
             return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
@@ -1852,6 +1924,7 @@ class WebSocketBridge:
         if msg_type == "voice_set_voice_focus":
             agent_id = msg.get("agent_id", _LEGACY_ROOT_ID)  # LEGACY-WIRE default
             if self.runtime.voice:
+                agent_id = self._resolve_focus_agent(session, agent_id)
                 self.runtime.voice.set_voice_focus(agent_id)
                 return {"msg_id": msg_id, "ok": True, "result": {"voice_focus": agent_id}}
             return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
@@ -1859,8 +1932,17 @@ class WebSocketBridge:
         if msg_type == "voice_set_tools_focus":
             agent_id = msg.get("agent_id", _LEGACY_ROOT_ID)  # LEGACY-WIRE default
             if self.runtime.voice:
+                agent_id = self._resolve_focus_agent(session, agent_id)
                 self.runtime.voice.set_tools_focus(agent_id)
                 return {"msg_id": msg_id, "ok": True, "result": {"tools_focus": agent_id}}
+            return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
+
+        if msg_type == "voice_set_narrate_tools":
+            enabled = bool(msg.get("enabled", True))
+            if self.runtime.voice:
+                self.runtime.voice.set_narrate_tools(enabled)
+                return {"msg_id": msg_id, "ok": True,
+                        "result": {"narrate_tools": enabled}}
             return {"msg_id": msg_id, "ok": False, "error": "Voice service not running"}
 
         if msg_type == "voice_set_announcements":
@@ -1995,46 +2077,26 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
-        # Earnings dashboard (Story 3.5)
-        if msg_type == "autonet_earnings":
-            try:
-                result = await self.runtime.autonet.get_earnings()
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "autonet_claim_reward":
-            epoch_id = msg.get("epoch_id")
-            service_id = msg.get("service_id", "")
-            private_key = msg.get("private_key", "")
-            if epoch_id is None or not service_id:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'epoch_id' or 'service_id'"}
-            if not private_key:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'private_key'"}
-            try:
-                result = await self.runtime.autonet.claim_reward(
-                    epoch_id=int(epoch_id),
-                    service_id=service_id,
-                    private_key=private_key,
-                )
-                return {"msg_id": msg_id, "ok": result.get("status") != "error", "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        # Proposals & governance (Stories 3.6 / 3.7)
-        if msg_type == "autonet_proposals":
-            try:
-                result = await self.runtime.autonet.get_proposals()
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "autonet_governance":
-            try:
-                result = await self.runtime.autonet.get_governance()
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+        # Pre-substrate earnings/governance handlers (Stories 3.5 / 3.6 / 3.7).
+        # They read Autonet.sol (claimParticipantReward, totalInferenceBurned,
+        # EvolutionProposal, ...), which was deleted wholesale in Phase 5.6a;
+        # there is no such contract to call. Same treatment as the
+        # _DEPRECATED_RPB set below: an explicit gone-marker so the UI can hide
+        # the panel instead of showing a chain error it cannot act on.
+        # The live rails are Substrate.recordTrainingForEpoch, surfaced by
+        # 'tool_earnings' and 'owner_claim_status'.
+        _DEPRECATED_AUTONET = {
+            "autonet_earnings", "autonet_claim_reward",
+            "autonet_proposals", "autonet_governance",
+        }
+        if msg_type in _DEPRECATED_AUTONET:
+            return {
+                "msg_id": msg_id, "ok": False,
+                "error": f"'{msg_type}' read the pre-substrate Autonet.sol "
+                         "contract, which was removed in Phase 5.6a. Use "
+                         "'tool_earnings' / 'owner_claim_status' for the "
+                         "Substrate.sol mint rail.",
+            }
 
         # Alignment dashboard (Story 3.8)
         if msg_type == "autonet_alignment":
@@ -2130,6 +2192,31 @@ class WebSocketBridge:
                 "remaining_budget_tokens": _rpb_last_budget(),
             }}
 
+        if msg_type == "set_owner_wallet":
+            # The owner wallet is the identity that owns this fleet's earnings
+            # (tool_store's author fallback, service_store's provider identity)
+            # and the address a remote connection must sign with to be rooted
+            # at the full fleet. Local listener only (KEY_LOCAL_ONLY_MESSAGES):
+            # setting it from a remote session would let a remote caller hand
+            # ownership of the fleet to an address of its choosing.
+            address = (msg.get("address") or "").strip()
+            if address and not (address.startswith("0x") and len(address) == 42):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "address must be a 0x address (42 chars)"}
+            try:
+                from .config import save_owner_wallet_to_config
+                save_owner_wallet_to_config(address)
+            except Exception as exc:  # noqa: BLE001
+                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            # Mirror onto the live config and the running WS server so the
+            # change takes effect without a restart.
+            self.runtime._config.autonet.owner_wallet = address
+            self.owner_wallet = address
+            log.info("Owner wallet set to %s", address or "(cleared)")
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "owner_wallet": address,
+            }}
+
         if msg_type == "set_my_sponsor":
             sponsor_address = (msg.get("sponsor_address") or "").strip()
             if sponsor_address and not (
@@ -2155,9 +2242,24 @@ class WebSocketBridge:
             }}
 
         if msg_type == "list_sponsor_bindings":
+            # Also report sponsor MODE, so the panel can show whether this
+            # daemon is actually serving: bindings on disk do not imply the
+            # handler is wired (the mode is a separate, persisted flag).
+            sponsor_cfg = self.runtime._config.autonet
             return {"msg_id": msg_id, "ok": True, "result": {
                 "bindings": self.runtime.sponsor_bindings.to_summary_list(),
+                "sponsor_inference": bool(
+                    getattr(sponsor_cfg, "sponsor_inference", False)),
+                "sponsor_provider": getattr(sponsor_cfg, "sponsor_provider", "") or "",
+                "sponsor_model": getattr(sponsor_cfg, "sponsor_model", "") or "",
             }}
+
+        if msg_type == "disable_sponsor_inference":
+            try:
+                result = self.runtime.autonet.disable_sponsor_inference()
+                return {"msg_id": msg_id, "ok": True, "result": result}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
         if msg_type == "update_sponsor_budget":
             dependent_address = msg.get("dependent_address", "")
@@ -2195,6 +2297,7 @@ class WebSocketBridge:
             owner_sig = msg.get("owner_sig", "")
             if not agent_id:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id'"}
+            agent_id = self._resolve_legacy_agent_id(agent_id, session)
             try:
                 result = await self._handle_register_on_chain(
                     agent_id=agent_id,
@@ -2236,6 +2339,7 @@ class WebSocketBridge:
             agent_id = msg.get("agent_id", "")
             if not agent_id:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id'"}
+            agent_id = self._resolve_legacy_agent_id(agent_id, session)
             try:
                 result = await self._handle_check_registration(agent_id)
                 return {"msg_id": msg_id, "ok": True, "result": result}
@@ -2306,8 +2410,10 @@ class WebSocketBridge:
             world_service = getattr(service, "_world_service", None) if service else None
             scheduler = getattr(service, "_epoch_scheduler", None) if service else None
             if world_service is None:
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "autonet world service not running"}
+                # Degrade like economy_graph: a daemon with autonet off is a
+                # normal state, not a fault. Neutral body, ok:true.
+                return {"msg_id": msg_id, "ok": True,
+                        "epoch": {"running": False, "epoch_id": None}}
             try:
                 epoch = world_service.epoch_status()
                 if scheduler is not None:
@@ -2329,14 +2435,17 @@ class WebSocketBridge:
             service = getattr(autonet, "_service", None) if autonet else None
             world_service = getattr(service, "_world_service", None) if service else None
             if world_service is None:
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "autonet world service not running"}
+                # Degrade like economy_graph: autonet off is a normal state.
+                return {"msg_id": msg_id, "ok": True,
+                        "result": {"epochs": [], "total_closed": 0,
+                                   "running": False}}
             try:
                 last_n = max(1, min(int(msg.get("last_n", 20)), 200))
                 history = world_service.epoch_history
                 return {"msg_id": msg_id, "ok": True,
-                        "epochs": history[-last_n:],
-                        "total_closed": len(history)}
+                        "result": {"epochs": history[-last_n:],
+                                   "total_closed": len(history),
+                                   "running": True}}
             except Exception as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
@@ -2575,9 +2684,11 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
         if msg_type == "rpb_agent_training":
-            # Substrate-native: returns reputation + ATN balance for the
-            # agent. The pre-substrate "training tokens / unclaimed rewards"
-            # split is gone — training mints both ledgers directly.
+            # Substrate-native: returns mint_total (cumulative ATN pool
+            # earnings, MONEY) + ATN balance + native gas for the agent.
+            # The pre-substrate "training tokens / unclaimed rewards" split
+            # is gone. Governance REP is NOT here: it is claimed DAO-side
+            # (RepToken), 1:1 against these ratified earnings.
             address = msg.get("address", "")
             if not address:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'address'"}
@@ -2640,11 +2751,17 @@ class WebSocketBridge:
                         "name": local_names.get(addr.lower(), ""),
                         "local": addr.lower() in local_names,
                         "balance": a["balance_raw"] / _scale,
+                        # Cumulative ATN pool earnings (agentMintTotal), NOT
+                        # governance REP. "reputation" is the LEGACY-WIRE
+                        # alias kept for one release.
+                        "mint_total": a["reputation_raw"] / _scale,
                         "reputation": a["reputation_raw"] / _scale,
                     })
                 # MONEY: ATN supply + fleet ATN total (reported, not voted).
                 supply_raw = int(raw["supply_raw"])
-                # VOICE: reputation supply + fleet reputation drive weight.
+                # WEIGHT: derived from cumulative ATN EARNINGS (networkMintTotal
+                # / agentMintTotal), which is what an earned voice is priced
+                # against here. Governance REP itself is DAO-side (RepToken).
                 rep_supply_raw = int(raw.get("rep_supply_raw", 0))
                 fleet_rep_raw = int(raw.get("fleet_reputation_raw", 0))
                 share = ((fleet_rep_raw / rep_supply_raw)
@@ -2657,9 +2774,18 @@ class WebSocketBridge:
                     "owner_balance": raw["owner_balance_raw"] / _scale,
                     "fleet_total": raw["fleet_total_raw"] / _scale,
                     "supply": supply_raw / _scale,
-                    # Voice panel (NEW — weight derives from reputation).
+                    # Voice panel: weight derives from cumulative ATN
+                    # EARNINGS. fleet_mint_total / mint_supply are the honest
+                    # names; fleet_reputation / rep_supply are the LEGACY-WIRE
+                    # aliases, kept for one release.
+                    "fleet_mint_total": fleet_rep_raw / _scale,
+                    "mint_supply": rep_supply_raw / _scale,
                     "fleet_reputation": fleet_rep_raw / _scale,
                     "rep_supply": rep_supply_raw / _scale,
+                    # LEGACY-WIRE version marker: the literal "reputation"
+                    # tells a client this daemon derives the weight from
+                    # agentMintTotal/networkMintTotal rather than from raw
+                    # ATN supply. It is a protocol version tag, not a label.
                     "weight_source": "reputation",
                     "voice_weight": round(_eps + share, 6),
                     "epsilon": _eps,
@@ -2822,7 +2948,14 @@ class WebSocketBridge:
                 if not svc.available:
                     return {"msg_id": msg_id, "ok": False, "error": "Substrate not configured"}
                 result = await svc.get_agent_record(address)
-                return {"msg_id": msg_id, "ok": True, "result": result or {}}
+                # None means cleanly not registered; an RPC/ABI failure
+                # raises and falls through to the ok:false below.
+                if result is None:
+                    return {"msg_id": msg_id, "ok": True,
+                            "result": {"registered": False,
+                                       "agent_address": address}}
+                return {"msg_id": msg_id, "ok": True,
+                        "result": {**result, "registered": True}}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
@@ -3244,6 +3377,13 @@ class WebSocketBridge:
                 except Exception:  # noqa: BLE001 — fail closed
                     return []
 
+            # ``resolved`` is the agent's own authored wish expanded; it is NOT
+            # what the daemon will hand over. ``effective`` is: the same wish
+            # clamped by the parent's allowance (or by
+            # secrets.default_root_allowance for a parent-less agent) and by the
+            # isolation flag, computed by the very resolver the grant path uses.
+            from .runtime.worker_host import resolve_effective_grant
+
             assignments: dict[str, dict[str, Any]] = {}
             for agent_id, defn in self.runtime.registry._agents.items():
                 wish = getattr(defn, "secrets_allowance", None)
@@ -3251,10 +3391,27 @@ class WebSocketBridge:
                 pending = self.runtime._pending_grants.get(agent_id)
                 if not wish and lg is None and not pending:
                     continue  # nothing secret-related about this agent
+                parent_id = getattr(defn, "parent_id", None)
+                if parent_id:
+                    parent_defn = self.runtime.registry._agents.get(parent_id)
+                    parent_spec = getattr(parent_defn, "secrets_allowance", None)
+                else:
+                    parent_spec = \
+                        self.runtime._config.secrets.default_root_allowance
+                try:
+                    effective = resolve_effective_grant(agent_id, self.runtime)
+                except Exception:  # noqa: BLE001 — display path, fail closed
+                    effective = []
                 assignments[agent_id] = {
                     "name": getattr(defn, "name", agent_id),
                     "allowance_spec": wish,
                     "resolved": _resolve_wish(wish),
+                    "effective": effective,
+                    "parent_allowance_spec": parent_spec,
+                    # The ceiling itself, expanded: the widest set this agent
+                    # could ever be granted whatever it asks for. The allowance
+                    # picker greys out everything outside it.
+                    "ceiling": _resolve_wish(parent_spec),
                     "pending": list(pending or []),
                     "granted": list(lg["services"]) if lg else [],
                     "pid": lg["pid"] if lg else None,
@@ -3627,9 +3784,15 @@ class WebSocketBridge:
             return ""
 
     async def _handle_service_request(
-        self, msg: dict[str, Any], msg_id: Any
+        self, msg: dict[str, Any], msg_id: Any, *, local: bool = False
     ) -> dict[str, Any]:
         """Provider-side service entry (docs/services_market.md §3).
+
+        ``local`` says the frame arrived on the privileged LOCAL listener
+        (or was synthesized by the owner's own `invoke_service`). It only
+        widens the no-chain-config degrade: a stranger on the remote
+        listener is refused rather than served for free. Defaults False so
+        an un-threaded caller gets the safe answer.
 
         Wire frame: {spec_digest, request_id, args} → look up spec →
         validate payment (seam) → dispatch to the backing local tool →
@@ -3664,7 +3827,7 @@ class WebSocketBridge:
         amount = str(ask.get("amount", ""))
 
         # Payment/voucher validation gate (Stage B — real on-chain verify).
-        gate = await self._validate_service_payment(msg, record)
+        gate = await self._validate_service_payment(msg, record, local=local)
         if not gate.get("ok"):
             self.runtime.service_store.record_request(
                 spec_digest, request_id, client, ok=False,
@@ -3819,6 +3982,113 @@ class WebSocketBridge:
         autonet_cfg = getattr(self.runtime._config, "rpb", None)
         return str(getattr(autonet_cfg, "owner_wallet", "") or "").strip()
 
+    # ---- ServiceRegistry (the chain half of publish/retire) -------------
+    #
+    # The owner surface publishes through the WS handlers, the agent surface
+    # through agent_tools._register_service. Both must reach the SAME
+    # on-chain registry: `market_services` / `find_services` read the chain,
+    # not the daemon-local store, so a listing that never registers is
+    # invisible to every buyer and `_invoke_foreign_service` refuses it.
+
+    def _service_signing_key(self, author: str) -> str:
+        """The key that signs ServiceRegistry writes for ``author``.
+
+        "user" (the owner surface) signs with the owner key; an agent
+        author signs with its own stored key. Empty when none is held."""
+        if not author or author == "user":
+            return self._owner_signing_key()
+        registry = getattr(self.runtime, "registry", None)
+        if registry is not None and hasattr(registry, "get_agent_key"):
+            return str(registry.get_agent_key(author) or "").strip()
+        return ""
+
+    async def _register_service_on_chain(
+        self, author: str, digest: str, ask_amount: int,
+    ) -> dict[str, Any]:
+        """Mirror a freshly-published spec into the on-chain ServiceRegistry.
+
+        Returns ``{on_chain: bool, service_id?, tx_hash?, reason?}``. Never
+        raises: the local spec is already persisted, so a chain failure
+        downgrades the listing to local-only rather than losing it — the
+        caller surfaces ``on_chain`` so the app can say so plainly."""
+        from .on_chain import ServiceMarketClient
+
+        try:
+            smc = ServiceMarketClient(self.runtime._config.rpb)
+            if not smc.registry_available:
+                return {"on_chain": False,
+                        "reason": "ServiceRegistry not configured (missing "
+                                  "service_registry_address or rpc_url), so "
+                                  "the service is published locally only and "
+                                  "will not appear on the market."}
+            key = self._service_signing_key(author)
+            if not key:
+                return {"on_chain": False,
+                        "reason": f"No signing key held for '{author}', so the "
+                                  "service is published locally only and will "
+                                  "not appear on the market."}
+            res = await self._offload(
+                lambda: smc.register_service(key, digest, int(ask_amount)))
+        except Exception as exc:                            # noqa: BLE001
+            log.warning("register_service on-chain leg failed: %s", exc)
+            return {"on_chain": False, "reason": str(exc)}
+        if not res.get("success"):
+            return {"on_chain": False,
+                    "reason": f"On-chain registration failed: "
+                              f"{res.get('error')}"}
+        return {"on_chain": True,
+                "service_id": res.get("service_id"),
+                "tx_hash": res.get("tx_hash")}
+
+    async def _retire_service_on_chain(
+        self, record: Any,
+    ) -> dict[str, Any]:
+        """Flip the on-chain listing inactive for a locally-retired service.
+
+        A local retire alone leaves the registry row `active`, and every
+        buyer path pays BEFORE dispatch — so a stale row keeps taking money
+        for a service that then answers "Service retired". Returns
+        ``{on_chain: bool, service_id?, tx_hash?, reason?}``; never raises."""
+        from . import service_client
+        from .on_chain import ServiceMarketClient
+
+        try:
+            smc = ServiceMarketClient(self.runtime._config.rpb)
+            if not smc.registry_available:
+                return {"on_chain": False,
+                        "reason": "ServiceRegistry not configured, so the "
+                                  "service is retired locally only."}
+            provider = str(record.spec.get("author_pubkey") or "")
+            found = await self._offload(
+                lambda: service_client.lookup_service_ask(
+                    self.runtime._config.rpb, provider, record.digest))
+            if found.get("error"):
+                return {"on_chain": False, "reason": str(found["error"])}
+            service_id = found.get("service_id")
+            if service_id is None:
+                return {"on_chain": False,
+                        "reason": "no matching on-chain listing"}
+            if not found.get("active"):
+                return {"on_chain": True, "service_id": service_id,
+                        "reason": "already inactive on chain"}
+            key = self._service_signing_key(record.author)
+            if not key:
+                return {"on_chain": False,
+                        "reason": f"No signing key held for "
+                                  f"'{record.author}', so it is retired "
+                                  "locally only: the market listing is still "
+                                  "active."}
+            res = await self._offload(
+                lambda: smc.retire_service(key, int(service_id)))
+        except Exception as exc:                            # noqa: BLE001
+            log.warning("retire_service on-chain leg failed: %s", exc)
+            return {"on_chain": False, "reason": str(exc)}
+        if not res.get("success"):
+            return {"on_chain": False,
+                    "reason": f"On-chain retire failed: {res.get('error')}"}
+        return {"on_chain": True, "service_id": service_id,
+                "tx_hash": res.get("tx_hash")}
+
     @staticmethod
     def _receipt(
         *, paid: bool, degraded: bool, tx_hash: str | None,
@@ -3959,7 +4229,10 @@ class WebSocketBridge:
         }
         if tx_hash:
             frame["tx_hash"] = tx_hash
-        reply = await self._handle_service_request(frame, msg_id)
+        # The owner buying from their own daemon: `_pay_for_invoke` already
+        # degraded open in the same no-chain condition, so the gate must
+        # match or the owner pays nothing and is then refused.
+        reply = await self._handle_service_request(frame, msg_id, local=True)
         return self._invoke_result(reply, request_id, receipt, msg_id)
 
     async def _invoke_foreign_service(
@@ -4160,7 +4433,7 @@ class WebSocketBridge:
         }
 
     async def _validate_service_payment(
-        self, request: dict[str, Any], record: Any
+        self, request: dict[str, Any], record: Any, *, local: bool = False
     ) -> dict[str, Any]:
         """Verify a service request's payment proof (Stage B).
 
@@ -4179,10 +4452,15 @@ class WebSocketBridge:
             cumulative per channel and storing the voucher so the provider can
             settle later via close_channel.
 
-        Config escape hatch: when the daemon has NO chain config (local dev),
-        we log a LOUD warning and ALLOW — mirroring the chain-optional paths
-        elsewhere (OnChainService.available). When chain IS configured, the
-        gate is enforced.
+        Config escape hatch: when the daemon has NO chain config, a request
+        that arrived on the LOCAL listener (the two-daemon dev demo) is
+        allowed with a LOUD warning. A request from the REMOTE listener is
+        REFUSED: `service_request` is dispatched pre-auth precisely because
+        the payment IS the credential, so degrading open there would turn a
+        transient registry outage into unlimited free work (including
+        inference off the owner's provider stack) for any stranger who
+        knows the digest. When chain IS configured, the gate is enforced
+        on both listeners.
 
         Returns ``{ok: bool, reason: str}``.
         """
@@ -4191,8 +4469,13 @@ class WebSocketBridge:
         config = self.runtime._config.rpb
         oc = OnChainService(config)
         # Resolve the serving agent's address (the payment recipient) — the
-        # spec's author_pubkey is stamped at registration time.
-        recipient = str(record.spec.get("author_pubkey") or "")
+        # spec's author_pubkey is stamped at registration time. The owner
+        # wallet fallback mirrors the PAYER's resolution in
+        # `_invoke_local_service`: without it, a legacy owner-authored spec
+        # (stamped before ServiceStore._author_address learned the owner
+        # fallback) takes the buyer's money and is then refused here.
+        recipient = (str(record.spec.get("author_pubkey") or "")
+                     or self._owner_client_address())
 
         ask = record.ask
         try:
@@ -4200,12 +4483,24 @@ class WebSocketBridge:
         except (TypeError, ValueError):
             ask_amount = 0
 
-        # --- Config escape hatch: no chain -> degrade loud-and-open ---------
+        # --- Config escape hatch: no chain ----------------------------------
+        # Local listener: degrade loud-and-open (the dev demo).
+        # Remote listener: fail CLOSED — see the docstring.
         if not oc.available:
+            if not local:
+                log.warning(
+                    "SERVICE PAYMENT GATE: no chain config "
+                    "(substrate_address/rpc_url unset) — REFUSING remote "
+                    "service request for %s; payment cannot be verified.",
+                    record.name or record.digest[:16])
+                return {"ok": False,
+                        "reason": "this daemon has no chain configuration, so "
+                                  "it cannot verify payment and will not serve "
+                                  "paid requests"}
             log.warning(
                 "SERVICE PAYMENT GATE DEGRADED: no chain config "
                 "(substrate_address/rpc_url unset) — ALLOWING service request "
-                "for %s WITHOUT payment verification (local-dev only).",
+                "for %s WITHOUT payment verification (local listener only).",
                 record.name or record.digest[:16])
             return {"ok": True, "reason": "chain not configured (dev degrade)"}
 
@@ -4458,7 +4753,13 @@ class WebSocketBridge:
                      agent_id, registered, agent_def.identity.address)
 
         if registered:
-            record = await svc.get_agent_record(matched_address)
+            # Detail enrichment only — a read failure must not fail the
+            # registration check itself (get_agent_record now raises).
+            try:
+                record = await svc.get_agent_record(agent_def.identity.address)
+            except Exception as exc:                       # noqa: BLE001
+                log.debug("check_registration record read failed: %s", exc)
+                record = None
             if record:
                 result["record"] = record
 
@@ -4586,6 +4887,19 @@ async def _init_and_serve(
             await rt.register_agent(defn)
             if defn.schedule or defn.heartbeat:
                 await rt.activate_agent(defn.id)
+        # Heal parent pointers naming an agent that is no longer on disk (see
+        # AgentRegistry.reconcile_dangling_parents).
+        from .loader import save_agent
+        for healed_id in rt.registry.reconcile_dangling_parents():
+            healed = rt.get_agent(healed_id)
+            if healed is None:
+                continue
+            try:
+                save_agent(healed, config.agents_dir)
+            except Exception:
+                log.warning("Promoted orphan %s but YAML save failed",
+                            healed_id, exc_info=True)
+            log.info("Promoted orphaned agent to top level: %s", healed_id)
         # Note: execution history is hydrated automatically in register_agent()
         if agents:
             log.info("Loaded %d agent(s)", len(agents))

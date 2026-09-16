@@ -1,134 +1,136 @@
-# Vault credential broker — setup runbook
+# Vault credential broker: Windows setup runbook
 
-The code is built and tested (logic verified end-to-end against a dev Vault).
-What remains is the **privileged setup only you can do** — creating the separate
-OS user and handling your offline master key. That separation IS the security
-boundary; without it the broker is just the old same-user design again.
+The vault ships in the wheel and WORKS out of the box (self-contained
+age-encrypted keystore, no HashiCorp). `atn-vault-setup` provisions the data
+plane (age identity + `service_policy_map.json`).
+
+What remains is the **privileged setup only an administrator can do**: running
+the PID-auth broker under a **separate OS account** so a same-user agent cannot
+read the age key out of the keystore or out of the broker's memory. That account
+split IS the security boundary; without it the broker is just the same-user
+design again.
 
 ## The trust model in one paragraph
-Vault + the broker run as a dedicated low-priv user **`vault-svc`**. Agents run
-as you (`astmo`). Agents never hold a Vault token — they ask the broker over a
-named pipe; the broker reads their kernel PID, looks up the policies the *owner*
-granted that session, fetches from Vault with the broker's OWN token, and stages
-the value to a nameless file. Because the broker's token + owner-secret live in a
-`vault-svc` process, an agent running as a *different* OS user can't read them.
+The broker runs as a dedicated low-priv user **`vault-svc`**. Agents run as the
+daemon's own account. Agents never hold the age key: they connect to the
+broker's **named pipe** (`\\.\pipe\vault-broker`); the broker reads their kernel
+PID via `GetNamedPipeClientProcessId`, looks up the policies the *owner* granted
+that session, decrypts the secret with the age key (readable only by
+`vault-svc`), and stages the value to a nameless file. It returns
+`{var_name, path}`, never the value. Because the age key and the owner secret
+live in a `vault-svc` process, an agent running as a *different* OS user cannot
+read them.
 
-## ⚠️ THREAT MODEL — read this before deploying
-This system defends secrets against **misaligned local AI agents** — agents you
+## ⚠️ THREAT MODEL: read this before deploying
+This system defends secrets against **misaligned local AI agents**: agents you
 run that may actively try to break out. The entire boundary is **OS user
-separation**: a process owned by user A cannot `ReadProcessMemory` a process
+separation**, a process owned by user A cannot `ReadProcessMemory` a process
 owned by user B. That is the only thing keeping a misaligned agent out of the
-broker's Vault token.
+broker's age key.
 
 **This boundary is bypassed by `SeDebugPrivilege`.** Any process holding it can
-read *any* process's memory regardless of owner — including `vault-svc`, which
-hands over the broker's Vault token directly and defeats everything below it.
+read *any* process's memory regardless of owner, including `vault-svc`.
 `SeDebugPrivilege` is available to **Administrators when elevated**.
 
 Therefore the boundary is REAL only if **agents do not run as a local
-administrator**. A misaligned agent that runs as an admin account — even
-unelevated — has interaction-free elevation paths (UAC auto-elevation bypasses
+administrator**. A misaligned agent that runs as an admin account, even
+unelevated, has interaction-free elevation paths (UAC auto-elevation bypasses
 like `fodhelper`/`computerdefaults`, service/scheduled-task creation as SYSTEM).
-Once elevated it gets `SeDebugPrivilege` and reads the token out of `vault-svc`'s
+Once elevated it gets `SeDebugPrivilege` and reads the key out of `vault-svc`'s
 memory. "Assume agents stay non-elevated" is an assumption a *misaligned* agent
 will not honor.
 
 **REQUIRED for the boundary to hold:**
-- Run all AI agents as a **dedicated standard (non-admin) OS user** — NOT as your
+- Run all AI agents as a **dedicated standard (non-admin) OS user**, NOT as your
   admin account, NOT as any account in the Administrators group.
-- Explicitly **deny `SeDebugPrivilege`** to that user (belt-and-suspenders: even a
-  future misconfig or privilege grant won't reopen the hole). See step 0 below.
 - Keep that user out of Administrators, Backup Operators, and any group that
   confers debug/restore privileges.
+- Optionally deny `SeDebugPrivilege` to that user outright via Local Security
+  Policy (`secpol.msc` → Local Policies → User Rights Assignment → Debug
+  programs), as belt-and-suspenders against a later misconfiguration.
 
 If you run agents as an admin account, this system still *raises the cost* over
-the naive same-user design (the agent must now know to elevate and run a bypass),
-but it does **not** close the hole against a determined misaligned agent. Do not
-deploy it that way and believe the boundary holds.
+the naive same-user design (the agent must now know to elevate and run a
+bypass), but it does **not** close the hole against a determined misaligned
+agent. Do not deploy it that way and believe the boundary holds.
 
-## Steps that need YOU (admin + your offline key)
+## Steps that need an administrator (one-time)
 
-### 0. Create the dedicated AGENT user and strip its privileges  (admin shell)
-This is the step that makes the whole boundary real (see THREAT MODEL above).
-Run agents as THIS user, never as your admin account.
-```
-net user agent-user <a-strong-password> /add
-# standard user only — do NOT add to Administrators or any debug/backup group.
+Placeholders used below:
+- `<KEYSTORE_DIR>`: the keystore directory `atn-vault-setup` printed (default
+  `%USERPROFILE%\.atn\keystore`).
+- `<PYTHON>`: the full path to the interpreter autonet is installed into
+  (`python -c "import sys; print(sys.executable)"`).
+- `<AGENT-USER>`: the standard account the daemon and its agents run as.
 
-# Explicitly deny SeDebugPrivilege (belt-and-suspenders). Run the helper:
-powershell -ExecutionPolicy Bypass -File C:\code\kevin\vault\deny-debug-privilege.ps1 agent-user
-```
-Verify it is NOT an admin and has no debug right:
-```
-net localgroup Administrators            # agent-user must NOT appear
-whoami /priv                              # (run AS agent-user) — no SeDebugPrivilege
-```
-
-### 1. Create the vault-svc user  (admin shell)
+### 1. Create the two accounts (elevated shell)
 ```
 net user vault-svc <a-strong-password> /add
-# keep it out of interactive logon groups; it only runs the service
+net user <AGENT-USER> <a-strong-password> /add
+```
+Keep BOTH out of Administrators. `vault-svc` only runs the service, it never
+needs interactive logon.
+
+Verify:
+```
+net localgroup Administrators            # neither account may appear
 ```
 
-### 2. Lay down Vault storage, ACL'd away from astmo  (admin)
+### 2. Lock the keystore to vault-svc (elevated)
 ```
-mkdir C:\vault\data
-copy C:\code\kevin\vault\vault.hcl C:\vault\vault.hcl
-icacls C:\vault /inheritance:r /grant vault-svc:(OI)(CI)F Administrators:(OI)(CI)F
-# note: astmo gets NOTHING — that's the point
+icacls "<KEYSTORE_DIR>" /inheritance:r ^
+  /grant vault-svc:(OI)(CI)F Administrators:(OI)(CI)F
+icacls "<KEYSTORE_DIR>\identity.age-key" /inheritance:r ^
+  /grant vault-svc:F Administrators:F
 ```
+`<AGENT-USER>` gets NOTHING on the keystore directory, that is the point. The
+daemon reaches secrets only over the broker pipe, never by reading files.
 
-### 3. Run Vault as a service under vault-svc  (admin)
+### 3. Owner secret in the service environment (elevated)
+Generate one and keep it out of agent space:
 ```
-sc create Vault binPath= "\"C:\...\vault.exe\" server -config=C:\vault\vault.hcl" obj= ".\vault-svc" password= "<pw>" start= auto
-sc start Vault
+powershell -Command "[guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')"
 ```
-
-### 4. Initialize — THIS is your offline master key  (you, once)
+Set it (and the keystore location) as the service's own environment rather than
+on the command line, so it never appears in any process's argv:
 ```
-set VAULT_ADDR=http://127.0.0.1:8200
-vault operator init -key-shares=5 -key-threshold=3
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\atn-vault-broker" ^
+  /v Environment /t REG_MULTI_SZ ^
+  /d "BROKER_OWNER_SECRET=<the value>\0KEYSTORE_DIR=<KEYSTORE_DIR>" /f
 ```
-- **Write the 5 unseal keys + root token to OFFLINE media. Do NOT leave them on
-  this box.** These are your master key.
-- Unseal: `vault operator unseal` ×3 (feed 3 of the offline shares).
+The daemon needs the SAME secret to `mint_nonce` / `release_session`. Provide it
+to the daemon process out-of-band (its own environment), never on any
+agent-readable path.
 
-### 5. Migrate the age vault → Vault  (you, with the root token transiently)
+### 4. Install and start the broker service (elevated)
 ```
-set VAULT_TOKEN=<root token from step 4>
-python C:\code\kevin\vault\migrate_and_policies.py
+sc create atn-vault-broker ^
+  binPath= "\"<PYTHON>\" -m atn._vendor.kevin.vault.vault_broker" ^
+  obj= ".\vault-svc" password= "<vault-svc password>" start= auto
+sc start atn-vault-broker
 ```
-- This writes every secret into Vault KV + one read-only policy each, and emits
-  `service_policy_map.json` for the broker.
-- Verify, then delete the age files:
-  `del C:\code\secrets\keystore\vault.age C:\code\secrets\keystore\identity.age-key`
-- **Revoke the root token** when done: `vault token revoke <root>`. No standing
-  root on the box.
+Expect the broker to log `listening on \\.\pipe\vault-broker (age keystore,
+local)`.
 
-### 6. Give the broker a long-lived, least-priv Vault token  (you)
-Create an AppRole or a periodic token that can ONLY read `kv/data/cloud/*`, and
-put it + an owner secret in the broker service's environment (as vault-svc, not
-astmo). Then run `vault_broker.py` as vault-svc (a second service, or under the
-voice service if that runs as vault-svc).
+### 5. Verify from the app
+Open the daemon's Secrets tab. It should show **Broker push: armed** (the
+`push_armed` status field). If it does not, the daemon could not reach the
+broker: check that the service is running as `vault-svc` and that the daemon
+holds the same `BROKER_OWNER_SECRET`.
 
-### 7. Wire cc.bat to mint a nonce per launch
-`cc --secrets <spec>` must, as an **owner-side step**, call the broker's
-`mint_nonce` with `BROKER_OWNER_SECRET` (held by vault-svc/you, NOT in astmo
-space) and the resolved policy set, then pass the returned nonce to the session
-so the MCP shim registers with it. **This nonce-mint is the one piece that must
-run with the owner secret** — design it so an agent can't read that secret
-(e.g. cc.bat shells out to a tiny vault-svc helper for the mint).
+### 6. The nonce-mint stays owner-side
+The daemon (holding `BROKER_OWNER_SECRET`) mints a one-time nonce per worker via
+`mint_nonce(services)` and passes it to the worker's `register`. The owner secret
+must never enter agent space: the daemon process holds it, agents do not.
 
-## What's already done (no action needed)
-- `vault.hcl`, `vault_broker.py`, `vault_client.py`, `migrate_and_policies.py`
-- MCP shim (`keystore_mcp.py`) prefers the Vault broker, falls back to age.
-- Verified: broker fetches from real Vault, stages nameless file, value never in
-  response; granted service served, non-granted denied; no-nonce/fake-nonce/
-  self-mint/unregistered all denied.
+## What's already verified (no action needed)
+- Named-pipe broker with `GetNamedPipeClientProcessId` peer-PID auth
+  (kernel-authenticated, unforgeable).
+- Granted service served as `{var_name, path}`, the value never in the reply;
+  value-push tripwire delivers the raw value to the daemon monitor.
+- Fail-closed: unregistered request denied, no-tripwire request denied, PID-reuse
+  (identity mismatch) denied, post-`release_session` denied with the staged file
+  unlinked.
 
-## The honest open question (step 7)
-The nonce-mint needs the owner secret. If cc.bat (running as astmo) holds it, an
-agent reads it. The clean answer is a tiny **vault-svc-owned mint helper** that
-cc.bat calls — so the owner secret never enters astmo space. That helper is the
-last piece to build; flag me when you've done steps 1–6 and I'll build it to
-match how you set up vault-svc.
+See `RUNBOOK_POSIX.md` for the Linux/macOS equivalent (AF_UNIX socket,
+`SO_PEERCRED`, systemd unit).

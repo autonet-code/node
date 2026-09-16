@@ -193,7 +193,12 @@ class TestReinvokePredicate:
         handles_review_step = True
 
     def _calls(self, *names):
-        return [{"tool": n, "args": {}, "result": {}, "success": True}
+        # `use_tool` is a router: the review gate resolves the INNER tool
+        # name, so a use_tool call needs args naming what it dispatched to.
+        return [{"tool": n,
+                 "args": ({"name": "summarize_csv"} if n == "use_tool"
+                          else {}),
+                 "result": {}, "success": True}
                 for n in names]
 
     def test_bridge_needs_reinvoke(self):
@@ -239,3 +244,43 @@ class TestReinvokePredicate:
         # (never double-prompt by default).
         assert not needs_review_reinvoke(
             object(), self._calls("use_tool"), "end_turn")
+
+
+class TestRouterDispatchGating:
+    """`use_tool` routes to CONNECTOR / PIPELINE / CORE / REGISTERED, but
+    only the REGISTERED branch emits a tool_used receipt. Reviewing the
+    others is a wasted turn whose attest row is dropped downstream
+    ("tool not found"), so the gate resolves the inner name."""
+
+    class _BridgeLike:
+        handles_review_step = False
+
+    def _use(self, inner):
+        return [{"tool": "use_tool", "args": {"name": inner},
+                 "result": {}, "success": True}]
+
+    def test_connector_call_owes_no_review(self):
+        from atn.delegate_prompts import needs_review_reinvoke, review_owed_tools
+        calls = self._use("mcp_gmail_send_message")
+        assert review_owed_tools(calls) == []
+        assert not needs_review_reinvoke(self._BridgeLike(), calls, "end_turn")
+
+    def test_pipeline_call_owes_no_review(self):
+        from atn.delegate_prompts import review_owed_tools
+        assert review_owed_tools(self._use("pipeline_researcher")) == []
+
+    def test_core_tool_call_owes_no_review(self):
+        from atn.delegate_prompts import review_owed_tools
+        assert review_owed_tools(self._use("get_goals")) == []
+
+    def test_registered_call_owes_a_review(self):
+        from atn.delegate_prompts import needs_review_reinvoke, review_owed_tools
+        calls = self._use("summarize_csv")
+        assert review_owed_tools(calls) == ["summarize_csv"]
+        assert needs_review_reinvoke(self._BridgeLike(), calls, "end_turn")
+
+    def test_prompt_names_the_tools(self):
+        from atn.delegate_prompts import format_review_prompt
+        text = format_review_prompt(["summarize_csv", "fetch_prices"])
+        assert "Work item closing" in text
+        assert "summarize_csv" in text and "fetch_prices" in text

@@ -187,7 +187,7 @@ and continue the loop. Applies to all three adapters' parse paths.
 ## §11 Bridge: spin guard + kill ladder
 
 - Root-cause the haiku hot-spin in `bridge/claude-bridge.ts` (SDK
-  `query()` with a non-orchestrator model). Whatever the mechanism:
+  `query()` with a model that is not loop-capable). Whatever the mechanism:
   errors from `query()` must surface as an `@@EVENT@@ error` +
   request failure, never a bare loop continue.
 - First-event watchdog: if a sent orchestrate request produces zero
@@ -199,7 +199,7 @@ and continue the loop. Applies to all three adapters' parse paths.
   by the daemon (poll PID, `taskkill /F` fallback). A "killed"
   execution must never leave the provider subprocess running.
 - Model-tier guard: reject orchestrate requests on models whose spec
-  says non-orchestrator-capable (haiku) with a clear error before
+  says `loop_capable=False` (haiku) with a clear error before
   spawning the SDK loop, since the SDK loop is known to misbehave.
 
 ## §12 InputArbiter liveness
@@ -226,13 +226,12 @@ and continue the loop. Applies to all three adapters' parse paths.
   subscription the way the operator does, instead of running blind
   until a budget abort.
 
-## §14 Local orchestrator eligibility (owner request 2026-07-04)
+## §14 Local loop eligibility (owner request 2026-07-04)
 
 - The "no cloud available" contingency: ollama models may serve as the
-  orchestrator/root cognitive agent. Gate, don't hardcode: a model spec
-  flag `orchestrator_capable` that local models can earn; the
-  provider-level `orchestrator_capable: False` on ollama
-  (`provider_manager.py:216`) becomes per-model.
+  root cognitive agent. Gate, don't hardcode: a model spec flag
+  `loop_capable` (`atn/model_specs.py`) that local models can earn,
+  rather than a blanket provider-level refusal on ollama.
 - Prerequisites before flipping any local model on: §9 structured tool
   history (multi-turn tool use must round-trip), §7 num_ctx, and a
   smoke test (spawn child → collect → summarize) passing on that model.
@@ -245,7 +244,7 @@ and continue the loop. Applies to all three adapters' parse paths.
 
 New tool + WS message `compact_agent(agent_id)`.
 
-Permissions: the owner (WS / ORCHESTRATOR_ID caller) may compact any
+Permissions: the owner (WS / OWNER_ID caller) may compact any
 agent; an agent may compact only its **direct children**
 (`target.parent_id == caller_id`); never itself. Violations return an
 error, no side effects.

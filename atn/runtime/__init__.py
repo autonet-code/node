@@ -249,9 +249,10 @@ class Runtime:
         # The broker value-push (P2) is armed here: each staged exposure the
         # broker pushes back over the owner-authenticated pipe is delivered
         # straight into the monitor's live-set (value scanned daemon-side ONLY,
-        # never into model context, never logged). Arming is Windows-only and
-        # best-effort; a failure to arm leaves value_push_armed False, which P4
-        # will treat as monitor-down (fail-closed: refuse to grant).
+        # never into model context, never logged). Arming is cross-platform
+        # (named pipe on Windows, AF_UNIX elsewhere) and best-effort; a failure
+        # to arm leaves value_push_armed False, which P4 will treat as
+        # monitor-down (fail-closed: refuse to grant).
         from .security_monitor import SecurityMonitor
         self.security_monitor = SecurityMonitor(
             self.events, data_dir=self._config.data_dir)
@@ -484,6 +485,9 @@ class Runtime:
         # Update mutable refs
         self._snapshot_builder._voice_ref = self.voice
         self._snapshot_builder._autonet_ref = self.autonet
+        # Worker PIDs (isolation on): the supervisor is the only holder, so the
+        # snapshot reads it live rather than caching a stale map.
+        self._snapshot_builder._supervisor_ref = getattr(self, "supervisor", None)
         return self._snapshot_builder
 
     # ==================================================================
@@ -535,8 +539,13 @@ class Runtime:
                     "push_armed=%s (fail-closed)", agent_id, pid, monitor_up, push_up)
             return None
 
-        # (2) The daemon-computed enforced grant (Seam A). Popped exactly once.
-        l_child = self._pending_grants.pop(agent_id, [])
+        # (2) The daemon-computed enforced grant. Recomputed per run so an agent
+        # keeps its grant across repeated triggers; a spawn_child stash (Seam A)
+        # is honored as an override and popped exactly once so it can never leak
+        # into a later PID rebind.
+        from .worker_host import resolve_effective_grant
+        l_child = resolve_effective_grant(agent_id, self)
+        self._pending_grants.pop(agent_id, None)
         if not l_child:
             return None
 
@@ -890,17 +899,24 @@ class Runtime:
         if self.voice is not None:
             return {"status": "already_running"}
         try:
-            from ..voice_service import VOICE_AVAILABLE, VoiceService
+            from ..voice_service import (
+                VOICE_AVAILABLE, VOICE_INSTALL_HINT, VoiceService)
             if not VOICE_AVAILABLE:
                 return {
                     "status": "unavailable",
-                    "error": "Voice extras not installed.  "
-                             "Install with: pip install atn[voice]",
+                    "error": VOICE_INSTALL_HINT,
                 }
             # Voice is a Surface; it gates input at the same seam chat does.
             # No policy supplied → AllowAll (today's pass-through behavior).
             self.voice = VoiceService(
                 self.events, self, self._config.voice, policy=policy)
+            # Both focus fields default to the retired root-agent sentinel, and
+            # STEP_OUTPUT carries real agent ids — left as-is, the speak gate
+            # never matches and nothing is ever spoken. Seed from the fleet
+            # root so voice is on a real agent before the first WS focus call.
+            root = self._default_agent_id()
+            if root:
+                self.voice.set_focus(root)
             await self.voice.start()
             return {"status": "started", "backend": self._config.voice.backend}
         except Exception as exc:
@@ -1074,8 +1090,22 @@ class Runtime:
     ) -> str:
         return await self.registry.register_agent(defn, legacy=legacy)
 
-    async def unregister_agent(self, agent_id: str, *, _force: bool = False) -> None:
+    async def unregister_agent(
+        self, agent_id: str, *, _force: bool = False,
+        promote_children: bool = True,
+    ) -> None:
+        # Promote the removed agent's direct children to top level instead of
+        # leaving them pointing at an id that no longer exists. A dangling
+        # parent_id is persisted and silent: budget rollup stops at the gap,
+        # child->parent notifications are dropped, and spawn/depth limits stop
+        # applying to that subtree. Promotion (rather than re-homing under the
+        # grandparent) keeps removal a single, predictable step and never
+        # deletes an agent the owner did not ask to delete.
+        # ``promote_children=False`` is for the reload path, where the agent is
+        # unregistered only to be re-registered a moment later.
         await self.control.kill_agent(agent_id)
+        if promote_children:
+            await self._promote_orphaned_children(agent_id)
         # Clean up the persisted provider (closes session / subprocess)
         old_provider = self.providers._active_providers.pop(agent_id, None)
         if old_provider is not None:
@@ -1103,6 +1133,30 @@ class Runtime:
             log.warning("Agent %s unregistered but persisted definition "
                         "could not be deleted", agent_id, exc_info=True)
         await self.registry.unregister_agent(agent_id, _force=_force)
+
+    async def _promote_orphaned_children(self, agent_id: str) -> None:
+        """Move the direct children of a departing agent to top level.
+
+        Best-effort per child: a failed save must not abort the removal."""
+        from ..loader import save_agent
+        for child in self.registry.get_children(agent_id):
+            if child.id == agent_id:
+                continue  # malformed self-parent — nothing to promote
+            err = self.registry.reparent_agent(child.id, None)
+            if err:
+                log.warning("Could not promote orphaned child %s of %s: %s",
+                            child.id, agent_id, err)
+                continue
+            try:
+                save_agent(child, self._config.agents_dir)
+            except Exception:
+                log.warning("Promoted %s to top level but YAML save failed",
+                            child.id, exc_info=True)
+            try:
+                await self.registry.emit_agent_updated(child.id, agent_id)
+            except Exception:
+                log.debug("agent.updated emit failed for %s", child.id,
+                          exc_info=True)
 
     async def activate_agent(self, agent_id: str) -> None:
         return await self.registry.activate_agent(agent_id)
@@ -1459,8 +1513,11 @@ class Runtime:
         return parse_interval(schedule)
 
     @staticmethod
-    def _append_history_to_prompt(system_prompt: str, prior_turns: list) -> str:
-        return ExecutionEngine._append_history_to_prompt(system_prompt, prior_turns)
+    def _append_history_to_prompt(
+        system_prompt: str, prior_turns: list, model_id: str = "",
+    ) -> str:
+        return ExecutionEngine._append_history_to_prompt(
+            system_prompt, prior_turns, model_id)
 
     # Helper used by external code
     def _require_agent(self, agent_id: str) -> None:

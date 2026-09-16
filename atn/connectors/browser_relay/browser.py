@@ -177,6 +177,18 @@ def ensure_chrome():
         log.info("Extension already connected")
         return
 
+    # Fail fast, and BEFORE touching the user's Chrome profile below: in a
+    # wheel the browser_relay package dir exists while the extension subtree
+    # may not, so probe for real content rather than the directory. Without
+    # this, Chrome launches against a missing --load-extension path and the
+    # only symptom is a 30s timeout blaming chrome://extensions.
+    if not (EXTENSION_DIR / "manifest.json").is_file():
+        raise RuntimeError(
+            f"Browser Control extension assets are missing at {EXTENSION_DIR}. "
+            "This install is incomplete: reinstall with "
+            "pip install --force-reinstall autonet-computer"
+        )
+
     chrome = find_chrome()
     log.info("Launching Chrome: %s", chrome)
 

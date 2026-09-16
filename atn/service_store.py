@@ -485,9 +485,27 @@ class ServiceStore:
     # ------------------------------------------------------------------
 
     def _author_address(self, author: str) -> str:
-        defn = self._runtime.get_agent(author)
-        identity = getattr(defn, "identity", None) if defn else None
-        return str(getattr(identity, "address", "") or "")
+        """The payable 0x the spec stamps as ``author_pubkey``.
+
+        The owner ("user") has no agent identity, so an owner-published
+        service used to stamp an EMPTY address: the payer path fell back
+        to the owner wallet and paid, while the provider gate (which has
+        no such fallback) refused to verify — money moved and nothing was
+        served. Mirrors ``ToolStore._consensus_identity``: the owner, and
+        any author whose agent carries no address, resolve to the owner
+        wallet."""
+        if author != OWNER_AUTHOR:
+            defn = self._runtime.get_agent(author)
+            identity = getattr(defn, "identity", None) if defn else None
+            addr = str(getattr(identity, "address", "") or "")
+            if addr:
+                return addr
+        return self._owner_wallet()
+
+    def _owner_wallet(self) -> str:
+        return str(getattr(
+            getattr(getattr(self._runtime, "_config", None),
+                    "autonet", None), "owner_wallet", "") or "")
 
     def _sign(self, author: str, spec: dict[str, Any]) -> None:
         """Sign the canonical spec bytes with the author agent's key.
