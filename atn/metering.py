@@ -61,7 +61,7 @@ log = logging.getLogger(__name__)
 # openai.com/api/pricing, ai.google.dev/pricing, deepseek published rates),
 # reconciled 2026-07-05. Subscription models (claude_max) have no per-token
 # dollar price — their cost is a flat monthly fee, metered by quota instead.
-_PRICING_AS_OF = "2026-07-05"
+_PRICING_AS_OF = "2026-09-17"
 
 
 @dataclass(frozen=True)
@@ -83,8 +83,12 @@ class ModelPricing:
 # per-MTok USD. See _PRICING_AS_OF above.
 _PRICING: dict[str, ModelPricing] = {
     # ---- Anthropic / Claude (direct API; NOT the claude_max subscription) ----
+    "claude-fable-5-1":  ModelPricing(input=10.0, output=50.0, cache_read=0.25, cache_write=12.5),
+    "claude-mythos-5-1": ModelPricing(input=10.0, output=50.0, cache_read=0.25, cache_write=12.5),
     "claude-fable-5":    ModelPricing(input=10.0, output=50.0, cache_read=1.0,  cache_write=12.5),
     "claude-mythos-5":   ModelPricing(input=10.0, output=50.0, cache_read=1.0,  cache_write=12.5),
+    "claude-opus-5":     ModelPricing(input=5.0,  output=25.0, cache_read=0.5,  cache_write=6.25),
+    "claude-sonnet-5":   ModelPricing(input=2.0,  output=10.0, cache_read=0.2,  cache_write=2.5),
     "claude-opus-4-8":   ModelPricing(input=5.0,  output=25.0, cache_read=0.5,  cache_write=6.25),
     "claude-opus-4-7":   ModelPricing(input=5.0,  output=25.0, cache_read=0.5,  cache_write=6.25),
     "claude-opus-4-6":   ModelPricing(input=5.0,  output=25.0, cache_read=0.5,  cache_write=6.25),
