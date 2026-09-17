@@ -1,248 +1,272 @@
-# Manual test plan, prime-time pass (2026-09-17)
+# Manual end-to-end test plan (2026-09-17)
 
-Walk the platform in the order of the video script. Every step has an expected
-result. Steps tagged `F<n>` verify a fix from the 2026-09-16 audit pass; the
-number is the audit finding index (see the pass notes in the session). Steps
-without a tag check a script claim that the audit found solid but that only
-you can confirm end to end.
+Walk the platform the way a new user would, in the order of the video script.
+Start from an empty fleet. Every step has an expected result; anything else is
+a bug. Report failures by section and step number.
 
-## 0. Before you start
+Keep the daemon running in the terminal I own so I can read its log; tell me
+when you need it restarted.
 
-- [ ] Backend: `cd C:\code\autonet` and confirm `git log -1` shows the
-      prime-time commit. Restart the daemon from this tree (`atn` in a terminal
-      or `python -m atn`). The boot log must show NO `DecryptError` lines
-      (your vault was torn by concurrent test writes yesterday and recovered;
-      backups sit next to it as `vault.age.bak-2026-09-16-2153`).
-- [ ] Frontend: rebuild atn_web (web and, if you want to test section 8, the
-      Windows desktop build) from the committed tree.
-- [ ] `python -c "import atn; print(atn.__version__)"` prints 0.7.4 (F105).
-      The terminal banner says `ATN Runtime  v0.7.4+src` (F44).
-- [ ] Open autonet.computer in the browser with the daemon running: the UI
-      appears without any manual step (script: "as soon as it detects atn").
+## 0. Clean slate
 
-## 1. AI input (Config > AI Input)
+1. Remove every agent from the Agents page. Restart the daemon (ask me).
+   Expected: the boot log shows no DecryptError line, and exactly one agent
+   comes back: Kevin. (The seed stamp is present, so an empty fleet restores
+   the guide agent once.)
+2. Terminal banner reads `ATN Runtime  v0.7.5+src`.
+3. Open autonet.computer in the browser with the daemon running. Expected: the
+   UI appears on its own, no manual connect step, and the connection info
+   shows endpoint `ws://localhost:7700` and node version 0.7.5.
+4. Stop the daemon (ask me). Expected: the site shows its disconnected state
+   with install instructions, and the Docs and Whitepaper pages still render.
+   Start it again.
 
-- [ ] F13 / F14: no "World-Model Substrate" card saying "Ollama not detected",
-      no empty "Marketplace Service" card. The real Ollama card still has a
-      working Retry.
-- [ ] F12: paste a DeepSeek key: badge goes Active, DeepSeek models appear in an
-      agent's model picker. A junk key is rejected at save time.
-- [ ] F11 / F15 / F16: add a custom provider (ID `my-llm`, display name
-      `My LLM`, base URL of any OpenAI-compatible endpoint, key optional). The
-      card title reads "My LLM" and lists model chips. Restart the daemon: the
-      card is still there with its delete button.
-- [ ] F18 / F119: with the Claude Max bridge, run one agent turn, leave and
-      return to the AI Input tab: the Subscription Usage section is already
-      populated (no Refresh click).
-- [ ] Prompt caching claim: after two turns on an Anthropic-backed agent, the
-      Context view's cache stat shows cached input tokens > 0.
+## 1. Install path (optional, 5 minutes)
 
-## 2. Kevin and onboarding
+1. In a fresh venv: `pip install autonet-computer` then `atn --version`.
+   Expected: 0.7.5 installs from PyPI and prints its version.
+2. Run `atn` from that venv with the tree daemon stopped. Expected: boots,
+   listens on 7700, autonet.computer connects to it. Stop it and go back to
+   the tree daemon for the rest of the plan.
 
-- [ ] F29: with no provider configured, the Agents tab shows the red "No AI
-      provider configured" banner above Kevin, and Kevin's composer send arrow
-      stays disabled.
-- [ ] Talk to Kevin: he debriefs you (strengths, weaknesses, goals) and the
-      Profile page fills in.
-- [ ] Remove Kevin, restart the daemon: he stays gone (fleet was non-empty) or
-      returns once if he was your only agent (F28, by design). Note which you
-      saw.
+## 2. AI Input
 
-## 3. Fractal org chart
+1. AI Input page with nothing configured. Expected: one card per known
+   provider, each "Not configured"; no card that is blank or shows a wrong
+   provider's error (Ollama text on a non-Ollama card).
+2. Claude Max bridge: configure it. Expected: badge goes Active, Anthropic
+   models appear in an agent's model picker.
+3. An API-key provider (Anthropic key, OpenAI, DeepSeek, any you have): paste
+   the key. Expected: Active, models listed. Paste junk: rejected at save with
+   a readable error, card stays Not configured.
+4. Ollama: with Ollama running, the card lists your local models; with Ollama
+   stopped, Retry reports it cannot connect.
+5. Custom provider (the "catch all"): add ID `my-llm`, name `My LLM`, an
+   OpenAI-compatible base URL, key optional. Expected: card titled "My LLM"
+   with model chips. Restart the daemon: the card is still there and can be
+   deleted.
+6. Bridge usage: after one agent turn on the bridge, leave the page and come
+   back. Expected: Subscription Usage is populated without pressing Refresh.
 
-- [ ] Add Agent: create a child under any existing agent via the parent picker.
-- [ ] Add Agent with "SET AS PARENT OF" over two existing top-level agents: the
-      chart shows the new boss above them.
-- [ ] F30 / F81 / F96: in Add Agent, expand "advanced grants": `profile`,
-      `toolsmith`, `publishing` and the rest of the 9 advanced bundles are
-      listed with captions. Tick `toolsmith`, create, reopen Config: still
-      ticked.
-- [ ] F33: create a parent with one child, remove the parent. The child is now
-      top-level and survives a daemon restart. The remove dialog told you how
-      many children would be promoted.
-- [ ] F35: with the browser and the desktop app both connected, reparent in
-      one; the other redraws without a reconnect.
-- [ ] F32: ask an agent (via chat) to create an agent with its own id as the
-      id; it gets a clear refusal and the chart keeps rendering.
+## 3. Kevin and onboarding
 
-## 4. Heartbeats and wake-ups
+1. With NO provider configured (temporarily remove them, or do this before
+   section 2). Expected: Agents page shows the "No AI provider configured"
+   banner and Kevin's send button is disabled.
+2. With a provider: talk to Kevin. Expected: he debriefs you one theme at a
+   time (background, skills, goals, constraints), no intake form, and the
+   Profile page fills in as you go, with dated claims.
+3. Ask Kevin for a plan toward one goal. Expected: a concrete plan, and he
+   offers to set up agents for it.
+4. Remove Kevin while other agents exist. Restart. Expected: he stays gone.
 
-- [ ] F45: heartbeat editor, 1 h + 30 m, Save: no "Invalid schedule" error,
-      the panel re-reads 1h30m.
-- [ ] F46: clear both fields: Save is disabled.
-- [ ] F49: the agent card shows a pink `heartbeat 5m` chip, not "On-demand".
-- [ ] F47: with a heartbeat running, press Disable mid-run; after the run
-      ends the card stays disabled and no countdown restarts.
-- [ ] F54: a disabled agent has no Run Now button.
-- [ ] F50: parent agent panel has a "Wake on child" switch; it round-trips.
-- [ ] Child finishes a delegated task: parent wakes (with the switch on) and
-      you can see the child's result via the parent.
-- [ ] F117: set a tiny credit budget, run until it trips: the card's dot goes
-      amber with "budget reached". F48: raise the budget: status returns to
-      active without a restart.
+## 4. Building the fractal
 
-## 5. Context and cost
+1. Add Agent (top level): name, model, system prompt. Expected: card appears,
+   chat works on the first message.
+2. Add a child under it via the parent picker. Expected: the chart draws the
+   tree; the child's config shows the parent.
+3. Add a boss: create an agent with "set as parent of" over two existing top
+   level agents. Expected: the new agent sits above both.
+4. Reparent an agent by editing its parent. Expected: chart redraws; a second
+   client (desktop app or another browser tab) redraws without reconnecting.
+5. Remove a parent that has children. Expected: the dialog says how many
+   children will be promoted; they become top level; survives a restart.
+6. Advanced grants: in Add Agent, expand the advanced grants. Expected: the
+   bundles (profile, toolsmith, publishing, and the rest) are listed with
+   captions; tick one, create, reopen Config: still ticked.
+7. Ask an agent in chat to create an agent using its own id as the new id.
+   Expected: a clear refusal, chart still renders.
 
-- [ ] F37: Context view on a 200k Claude model shows "auto-compact 92%"; on an
-      ollama model about 50%; a never-run agent shows no line.
-- [ ] F38: an API-key agent (not the bridge) shows a non-zero cost chip after a
-      turn; an ollama agent shows none.
-- [ ] F39: Compact an idle agent from the chat header: Context view keeps the
-      model and window, compactions count +1.
+## 5. Running agents
 
-## 6. Voice (needs the voice extras installed)
+1. Chat with an agent that has tools. Expected: tool calls are visible in
+   the transcript, the answer follows, no stuck spinner.
+2. Delegation: ask a parent to hand a task to its child. Expected: the child
+   runs, the parent receives the result and reports it to you.
+3. Wake on child: parent panel has the "Wake on child" switch. With it on, a
+   child finishing on its own wakes the parent; with it off, it does not.
+4. Wake by user and by parent: a message to an idle agent starts a run; a
+   parent messaging a child starts the child's run.
+5. Heartbeats: set 1 h + 30 m, Save. Expected: no validation error, panel
+   re-reads 1h30m, card chip reads the schedule (not On-demand). Clear both
+   fields: Save disabled. Set 5 m and watch one fire.
+6. Disable mid-run. Expected: the run ends, the card stays disabled, no
+   countdown restarts, no Run Now button on a disabled agent.
+7. Kill: kill a running execution from the UI. Expected: it stops within a
+   few seconds, agent returns to idle, daemon keeps running.
+8. Credit budget: set a tiny budget, run until it trips. Expected: the card's
+   dot goes amber with "budget reached". Raise the budget: active again
+   without a restart.
 
-- [ ] F59: on a machine without the extras, the mic button shows the "Voice
-      support is not installed" snackbar.
-- [ ] F55: start voice, message the root agent: the reply is spoken; the mic
-      popup focus rows name the root agent (not "Orchestrator").
-- [ ] F60: root agent chat has a PTT mic icon; holding Page Down / Insert turns
-      it into a red Recording chip; releasing sends the transcript.
-- [ ] F57: untick "Narrate tool calls": tool tone still plays, no narration.
-- [ ] F61: during a long reply: Pause, Resume, Skip sentence, Mute speech all
-      behave as labelled.
-- [ ] F62: the mic icon pulses while speaking and returns to idle after.
-- [ ] Two-voice claim: agent speech and tool narration use different voices
-      (F58 if you set `voice.tools_voice` in config.yaml).
+## 6. Context and cost
 
-## 7. Desktop build (Windows app)
+1. Context view after two turns on an Anthropic-backed agent. Expected: cached
+   input tokens > 0 (prompt caching).
+2. Context view shows the model, the window size and the auto-compact
+   threshold; a never-run agent shows no context line.
+3. Cost chip: an API-key agent shows a non-zero cost after a turn; a bridge or
+   Ollama agent shows none.
+4. Compact from the chat header on an idle agent. Expected: compactions count
+   +1, model and window unchanged, the agent still remembers the gist of the
+   conversation on the next turn.
+5. Sliding window: run a long conversation (or a low-window model) until
+   trimming kicks in. Expected: the run keeps going, no provider error about
+   context length.
 
-- [ ] Transparency toggle works and persists across restart.
-- [ ] Pop out an agent window: it shows live chat (F0 also with a remote
-      daemon URL in the header).
-- [ ] F3: message the popped-out agent: no duplicate in-app window appears.
-- [ ] F4: switch the pop-out to Config, close it: the docked window lands on
-      Config.
-- [ ] F2: Connectors page: "Download Releases" and "pip install" buttons open
-      real pages, not 404s.
+## 7. Voice (voice extras installed)
 
-## 8. Sponsor-dependent inference
+1. Start voice mode, message the root agent. Expected: the reply is spoken;
+   the focus rows in the mic popup name your agents (not "Orchestrator").
+2. Push to talk: hold the PTT key (Page Down or Insert). Expected: a red
+   Recording chip; release sends the transcript to the selected agent.
+3. Select a different agent to listen to. Expected: only that agent is spoken.
+4. "Everything" vs "responses only": with everything on, tool calls are
+   narrated in a different voice from the agent's speech; untick it and only
+   the tool tone plays.
+5. During a long reply: Pause, Resume, Skip sentence, Mute speech all behave
+   as labelled; the mic icon pulses while speaking and goes idle after.
+6. On a machine without the extras, the mic button shows the "Voice support
+   is not installed" message.
 
-- [ ] F22 / F114: agent Config > Dependent Inference > "Sponsored" + Save: no
-      address box; the panel shows the daemon-level sponsor or the discovery
-      warning; the choice survives a reopen.
-- [ ] F23: Sponsor Inference panel: add a dependent; the row says "Serving",
-      config.yaml has `autonet.sponsor_inference: true`; "Stop serving" flips
-      it to false.
-- [ ] F24: after one answered request, the remaining-grant chip renders with a
-      real number.
-- [ ] F27 (two daemons): dependent asks for 64k max_tokens on a 500-token
-      grant: sponsor caps it; a prompt bigger than the grant is refused.
+## 8. Desktop app (Windows)
 
-## 9. Isolation and secrets
+1. Launch the desktop build, it connects to the daemon like the web does.
+2. Transparency toggle works and persists across restart.
+3. Pop out an agent window. Expected: live chat, messaging it does not open
+   a duplicate window in the main app; switch the pop-out to Config and close
+   it: the docked window lands on Config.
+4. Connectors page: the Download Releases and pip install buttons open real
+   pages.
 
-- [ ] Security dialog: worker isolation is OFF by default. Decide whether to
-      ship it on (owner decision, see the pass notes). Turn it on for the
-      next steps.
-- [ ] F8: run an API-provider agent; its detail header shows `pid NNNNN`
-      matching `atn agents` in the terminal. Kill that PID: the run ends, the
-      daemon survives.
-- [ ] Secrets tab: add a secret, run the host scan, open the access log.
-- [ ] F63 / F7: create a top-level agent, give it a secret in its Config
-      allowance picker, set the root allowance in the Security dialog to that
-      secret, trigger it twice: the log shows a session minted both times and
-      the agent has `secret_*` tools.
-- [ ] F64 / F68: root allowance set to a different secret: the Secrets tab
-      strikes through the agent's request with a "clamped" tooltip; a child's
-      picker greys out secrets its parent lacks.
-- [ ] Revoke the secret from the agent's Config: the next run has no
-      `secret_*` tools.
-- [ ] F66: a tool that calls a host outside a secret's authorized hosts fails
-      AND raises an alarm in the Secrets tab.
-- [ ] Not built, do not look for it: automatic key rotation and wallet
-      transfer on alarm (script claim; owner decision).
+## 9. Sponsor-dependent inference
 
-## 10. Tools, single player
+Needs two daemons (or the same daemon acting as both, for the config half).
 
-- [ ] F122: Tools page search "summarize a web page" returns ranked partial
-      matches (was empty).
-- [ ] F79: an agent with only `unified_tools` calling `publish_tool` via
-      use_tool is refused with "not granted"; add `publishing` and it passes
-      the gate.
-- [ ] F80: with an MCP connector running, `list_tools(category='connector')`
-      names are `mcp_<id>_<op>` and `use_tool` on them works.
-- [ ] F82: Grant a tool to an agent lacking `unified_tools`: the dialog offers
-      to grant the bundle.
-- [ ] F84: with `autonet.owner_wallet` set, the Tools page still shows exactly
-      one ATN Harness card.
-- [ ] Ask an agent to build a tool for a repeated task: it registers one; a
-      sibling agent granted that tool can call it.
+1. Sponsor side: Sponsor Inference panel, add a dependent identity and a
+   token grant from one of your providers. Expected: the row reads Serving,
+   config.yaml has `autonet.sponsor_inference: true`; Stop serving flips it.
+2. Dependent side: agent Config > Dependent Inference > Sponsored, Save.
+   Expected: no address box; the panel shows the sponsor or a discovery
+   warning; the choice survives a reopen.
+3. Run the dependent agent. Expected: the answer comes back through the
+   sponsor, the sponsor's remaining-grant chip shows a real number that went
+   down, and the sponsor's log shows the request.
+4. Limits: ask for a huge max_tokens on a small grant. Expected: capped. A
+   prompt bigger than the grant: refused with a readable reason.
 
-## 11. Tools, multiplayer (needs a peer daemon or the shadownet)
+## 10. Security: isolation and secrets
 
-- [ ] F98: Tools page, Network scope: a task description reorders results by
-      relevance; digest-only tools show real names.
-- [ ] F97: an agent that used only a connector gets no closing review turn;
-      one that used a registered network tool gets the review prompt naming
-      that tool.
-- [ ] F93: publish a tool on daemon A; within ~30 s daemon B logs "indexed N
-      remote tool manifest(s)" and B's probe finds it.
-- [ ] F95 / F94: after one federated close, the world state dir has
-      tool_positions.json, tool_credibility.json, tool_review_book.json, and
-      local_tool_positions.json matches the driver's file.
-- [ ] F100: a tool window shows Calls and OK rate, plus "Mint (recent)"; no
-      "Fees earned 0.00".
+1. Security dialog: note the worker isolation default (it ships OFF; decide).
+   Turn it on for the rest of this section and restart.
+2. Run an API-provider agent. Expected: its detail header shows `pid NNNNN`
+   matching `atn agents` in a terminal. Kill that PID from Task Manager.
+   Expected: the run ends with an error, the daemon and the other agents
+   survive.
+3. Secrets page: add a secret with a name, value and authorized hosts.
+   Expected: it appears masked, the value is never shown again.
+4. Host scan. Expected: it runs and reports exposed secrets on the machine
+   (or none), with paths.
+5. Access log opens and is empty for the new secret.
+6. Grant: give a top-level agent the secret in its Config allowance picker
+   and set the root allowance in the Security dialog to include it. Run it
+   on a task that needs the secret. Expected: the agent has `secret_*` tools,
+   uses the secret as a temporary variable, the transcript never shows the
+   value, and the access log shows a session minted.
+7. Fractal propagation: a child's picker greys out secrets its parent lacks;
+   a parent can extend its own allowance to a child.
+8. Clamp: set the root allowance to a different secret. Expected: the Secrets
+   page strikes through the agent's request with a "clamped" tooltip.
+9. Revoke the secret from the agent. Expected: next run has no `secret_*`
+   tools.
+10. Alarm: have the agent print the secret value into the transcript, or call
+    a host outside the authorized list. Expected: the call fails and an alarm
+    appears on the Secrets page.
+11. Not built: automatic key rotation and wallet transfer on alarm. Do not
+    look for them.
 
-## 12. Services
+## 11. Tools, single player
 
-- [ ] F76 / F75: Publish a service backed by "This machine's model": the card
-      shows inference-backed and its Purchase button is enabled.
-- [ ] F74: publish with ask price `1`: the card reads "1 ATN per item" and the
-      wallet prompt asks for 1 ATN, not 1 wei. Older listings show the
-      legacy-scale note.
-- [ ] F70 / F115: with `service_registry_address` configured the snackbar
-      says "Published and listed on the market" and another daemon's Market
-      tab lists it; without it, "Published on this daemon only".
-- [ ] F71 / F116: buy one unit of your own listing: you get a result plus a
-      receipt, and after reload the card reads Requests 1, Success 100%.
-- [ ] F72: retire it: the market row goes inactive (or the "still listed"
-      snackbar appears without a registry).
-- [ ] F77 (two machines): with no chain config, a remote service_request is
-      refused with "no chain configuration"; a local buy still works.
+1. Tools page lists the built-in bundles and one ATN Harness card (not
+   thirteen copies). Search "summarize a web page". Expected: ranked partial
+   matches.
+2. Ask an agent to build a tool for a task it has repeated. Expected: it
+   registers one; the Tools page shows it under your local scope.
+3. Grant that tool to a sibling agent. Expected: if the sibling lacks the
+   unified tools bundle the dialog offers to grant it; the sibling can call
+   the tool.
+4. Dynamic expansion: with an MCP connector running, the agent sees a short
+   list of tools; calling the connector's discovery tool exposes the
+   connector's operations, named `mcp_<id>_<op>`, and using one works.
+5. Gate: an agent without the publishing bundle asked to publish a tool is
+   refused with "not granted"; add the bundle and it passes.
+6. Tool window shows Calls and OK rate after use.
 
-## 13. Web3 identity and earnings
+## 12. Web3 identity
 
-- [ ] F90: with MetaMask disconnected, Register says "Connect a wallet to fund
-      the agent address, then register."
-- [ ] F85 / F89: connect a wallet, register the root agent: the on-chain tab
-      badge reads registered and the record block fills in.
-- [ ] F86: the Network tab address links resolve on Etherlink Shadownet to the
-      current Substrate (0x4C4dAEd1...).
-- [ ] F87: sponsor panel "Use 0x..." writes `autonet.owner_wallet` into
-      config.yaml.
-- [ ] F102: Owner page tiles read "Fleet earnings" and "Network mint total"
-      in ATN, not "Reputation".
-- [ ] F126: Network page query of an unregistered address says
-      registered:false; with a broken RPC URL it shows an RPC error.
+1. Network page with MetaMask disconnected: Register on the root agent says
+   to connect a wallet first.
+2. Connect a wallet, register the root agent. Expected: the on-chain badge
+   reads registered, the record block fills in, the address links resolve on
+   Etherlink Shadownet to the current Substrate.
+3. Sponsor panel "Use 0x..." writes `autonet.owner_wallet` into config.yaml.
+4. Network page query of an unregistered address says registered: false; a
+   broken RPC URL shows an RPC error, not a hang.
 
-## 14. Docs and website
+## 13. Tools, multiplayer (two daemons or the shadownet)
 
-- [ ] Whitepaper page opens scrolled past the YouTube thumbnail; scrolling up
-      reveals it. (Not verified by me: the browser probe was cut off, and it
-      reported that mouse-wheel scrolling did nothing on Whitepaper and
-      Secrets; please check with a real mouse.)
-- [ ] F103: with the daemon stopped, the Docs tab still renders the bundled
-      paper, current content, no em dashes.
-- [ ] F106 / F109 / F112: Docs "Full index" links open; the Create Agent
-      dialog's Docs link shows the 2026-09 banner; the Add Provider Docs link
-      lists Marketplace Service.
-- [ ] Read README.md once as a newcomer: the three claims the audit flagged as
-      not backed by code are "work halts if the governance heartbeat goes
-      silent", the alignment score being "computed and displayed", and no
-      mention of the UI / autonet.computer / port 7700. Decide the wording.
+1. Publish the tool from section 11 on daemon A. Expected: within about 30 s
+   daemon B logs indexed remote manifests and B's Tools page, Network scope,
+   finds it by description; results reorder by relevance to the query.
+2. Agent on B uses the tool via probe_tools. Expected: after the run, the
+   harness adds one closing review turn naming that tool; an agent that used
+   only a connector gets no review turn.
+3. Review scores land: the tool's per-axis scores update on both daemons.
+4. Epoch close: after one federated close, both daemons' world state dirs
+   hold matching tool_positions, credibility and review book files, and the
+   tool window shows "Mint (recent)".
+5. Composition: publish tool B that imports tool A; use B. Expected: A's
+   usage count also moves (attribution follows the import).
 
-## 15. Not covered by this pass (owner decisions)
+## 14. Services
 
-- Worker isolation ships OFF by default while the script says every agent is
-  process-isolated.
-- No published Windows build or download link exists.
-- Sponsor path has no audit trail the sponsor can browse and no semantic
-  alignment check (script claims both).
-- Key rotation / wallet transfer hooks on alarm do not exist.
-- The README's 1:1 DAO-side REP claim has no daemon or UI implementation.
-- Dependent identity is self-declared (no signature); the doc was corrected
-  to say so.
-- The vault holds about 125 `agent-key.<test-id>` entries from months of tests
-  writing to the real keystore. Safe to delete the ones with no matching
-  `~/.atn/agents/<id>` directory, once you confirm none is registered on a
-  chain you care about.
+1. Publish a service (what, backed by, unit of work, price). Expected: the
+   card reads "N ATN per item" and, with a service registry configured, the
+   snackbar says listed on the market and another daemon's Market tab shows
+   it; without one, "Published on this daemon only".
+2. Publish one backed by "This machine's model". Expected: inference-backed
+   card with an enabled Purchase button.
+3. Buy one unit of your own listing. Expected: the wallet prompt asks for
+   exactly the ask price in ATN, you get a result plus a receipt, and after
+   reload the card reads Requests 1, Success 100%.
+4. Agent-side: ask an agent to find and request a service. Expected:
+   find_services returns the listing, request_service pays one unit and
+   returns the result.
+5. Retire the service. Expected: market row goes inactive (or the "still
+   listed" note without a registry).
+6. Not served: point a listing at a backend that fails. Expected: the buyer
+   loses at most one unit and the failure is recorded on the card.
+
+## 15. Owner, docs, website
+
+1. Owner page: Fleet earnings and Network mint total in ATN; fleet voice
+   weights listed per household.
+2. Docs page: Full index links open; content is current; no em dashes.
+3. Whitepaper page opens scrolled past the video thumbnail; scrolling up with
+   the mouse wheel reveals it (unverified by me, please check).
+4. About, Privacy, Terms open.
+5. README as a newcomer: the three claims the audit flagged as not backed by
+   code are "work halts if the governance heartbeat goes silent", the
+   alignment score being "computed and displayed", and the missing mention of
+   the UI at autonet.computer. Decide the wording.
+
+## 16. Known gaps (owner decisions, not bugs to report)
+
+- Worker isolation ships OFF while the script says every agent is isolated.
+- No published Windows build download.
+- Sponsor path has no browsable audit trail and no semantic alignment check.
+- No key rotation or wallet transfer hooks on alarm.
+- Dependent identity is self-declared, not signed.
+- The vault holds about 125 `agent-key.<test-id>` entries from old test
+  runs; safe to delete once you confirm none is registered on a chain you
+  care about.
