@@ -41,14 +41,13 @@ from ..model_specs import context_window, max_output_tokens
 
 log = logging.getLogger(__name__)
 
-# Locate the bridge directory
+# Locate the bridge directory. Same resolution as the Claude bridge: a dev
+# checkout with node_modules next to the sources runs in place; a pip install
+# runs from the staged copy in ~/.atn/bridge, where _ensure_bridge_deps puts
+# the sources and installs their dependencies (site-packages never has them).
 def _find_bridge_dir() -> Path:
-    try:
-        import bridge as _bridge_pkg
-        return Path(_bridge_pkg.__file__).resolve().parent
-    except ImportError:
-        pass
-    return Path(__file__).resolve().parent.parent.parent / "bridge"
+    from .bridge import resolve_bridge_dir
+    return resolve_bridge_dir()
 
 _BRIDGE_DIR = _find_bridge_dir()
 _BRIDGE_SCRIPT = _BRIDGE_DIR / "codex-bridge.ts"
@@ -730,6 +729,18 @@ class CodexBridgeProvider(Provider):
         """Spawn bridge subprocess if not running."""
         if self._process and self._process.returncode is None:
             return
+
+        # A provider built before configure_provider staged the sources may
+        # still point at a script that is not there yet: re-resolve once.
+        if self._bridge_script == _BRIDGE_SCRIPT and not (
+            self._bridge_script.parent / "node_modules"
+        ).exists():
+            try:
+                from .bridge import stage_bridge_sources
+                staged_dir, _ = stage_bridge_sources()
+                self._bridge_script = staged_dir / "codex-bridge.ts"
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Codex bridge re-stage failed: %s", exc)
 
         if not self._bridge_script.exists():
             raise ProviderError(

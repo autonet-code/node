@@ -1532,7 +1532,7 @@ class ProviderManager:
             await provider.close()
             return bool(ok)
         except Exception as exc:
-            log.debug("Codex bridge probe failed: %s", exc)
+            log.warning("Codex bridge probe failed: %s", exc)
             return False
 
     # ------------------------------------------------------------------
