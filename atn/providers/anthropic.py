@@ -52,6 +52,8 @@ import asyncio
 import logging
 from typing import Any
 
+import os
+
 import httpx
 
 from .base import (
@@ -69,6 +71,58 @@ log = logging.getLogger(__name__)
 
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
+
+# Organization-scoped API keys (Console > API keys > Scope: Organization) are
+# rejected unless every request names the workspace to bill via the
+# ``anthropic-workspace-id`` header. Workspace-scoped keys need nothing.
+# The daemon sets this from ``providers.anthropic.workspace_id`` in
+# config.yaml (or the ANTHROPIC_WORKSPACE_ID env var); isolated workers pick
+# it up from the same env var, which the daemon exports.
+_WORKSPACE_ID_ENV = "ANTHROPIC_WORKSPACE_ID"
+
+
+def set_default_workspace_id(workspace_id: str) -> None:
+    """Record the daemon-wide Anthropic workspace id (may be empty)."""
+    ws = (workspace_id or "").strip()
+    if ws:
+        os.environ[_WORKSPACE_ID_ENV] = ws
+    else:
+        os.environ.pop(_WORKSPACE_ID_ENV, None)
+
+
+def default_workspace_id() -> str:
+    return (os.environ.get(_WORKSPACE_ID_ENV) or "").strip()
+
+
+def _accepts_sampling(model: str) -> bool:
+    """Whether the Messages API still takes ``temperature`` for this model.
+
+    Sampling knobs were removed on the 2026 generations (Fable 5/5.1, Mythos,
+    Opus 5, Opus 4.7/4.8, Sonnet 5): sending ``temperature`` returns a 400
+    "temperature is deprecated for this model". Opus/Sonnet 4.6, Haiku 4.5
+    and older still accept it.
+    """
+    m = (model or "").lower()
+    if "fable" in m or "mythos" in m:
+        return False
+    for marker in ("opus-5", "opus-4-7", "opus-4-8", "sonnet-5"):
+        if marker in m:
+            return False
+    return True
+
+
+def anthropic_headers(api_key: str, workspace_id: str = "") -> dict[str, str]:
+    """Request headers for the Messages API, workspace header included when
+    a workspace id is known (explicit argument or the daemon default)."""
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": _API_VERSION,
+        "content-type": "application/json",
+    }
+    ws = (workspace_id or "").strip() or default_workspace_id()
+    if ws:
+        headers["anthropic-workspace-id"] = ws
+    return headers
 _DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
 # Retry config for transient errors
@@ -85,10 +139,12 @@ class AnthropicProvider(Provider):
         api_key: str,
         default_model: str = "",
         base_url: str = "",
+        workspace_id: str = "",
     ) -> None:
         if not api_key:
             raise ProviderError("Anthropic API key is required", provider="anthropic")
         self._api_key = api_key
+        self._workspace_id = (workspace_id or "").strip()
         self._default_model = default_model or _DEFAULT_MODEL
         # Raw base_url as passed in (before path normalisation) so an isolated
         # worker can rebuild this provider identically from a manifest — see
@@ -117,8 +173,9 @@ class AnthropicProvider(Provider):
             "model": model,
             "max_tokens": max_tokens,
             "messages": _with_moving_breakpoint(messages),
-            "temperature": temperature,
         }
+        if _accepts_sampling(model):
+            body["temperature"] = temperature
         if system:
             # Structure system prompt as a content block with cache_control.
             # Anthropic caches the system prompt across requests with identical
@@ -134,11 +191,7 @@ class AnthropicProvider(Provider):
         if tools:
             body["tools"] = [_tool_to_api(t) for t in tools]
 
-        headers = {
-            "x-api-key": self._api_key,
-            "anthropic-version": _API_VERSION,
-            "content-type": "application/json",
-        }
+        headers = anthropic_headers(self._api_key, self._workspace_id)
 
         # Send with retry
         data = await self._send_with_retry(headers, body)
@@ -163,9 +216,10 @@ class AnthropicProvider(Provider):
             "model": model,
             "max_tokens": max_tokens,
             "messages": _with_moving_breakpoint(messages),
-            "temperature": temperature,
             "stream": True,
         }
+        if _accepts_sampling(model):
+            body["temperature"] = temperature
         if system:
             body["system"] = [
                 {
@@ -177,11 +231,7 @@ class AnthropicProvider(Provider):
         if tools:
             body["tools"] = [_tool_to_api(t) for t in tools]
 
-        headers = {
-            "x-api-key": self._api_key,
-            "anthropic-version": _API_VERSION,
-            "content-type": "application/json",
-        }
+        headers = anthropic_headers(self._api_key, self._workspace_id)
 
         return await self._send_stream_impl(headers, body, model, on_chunk, on_thinking)
 

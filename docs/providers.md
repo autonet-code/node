@@ -47,6 +47,20 @@ does the inference, paid for by a sponsor relationship or by ATN per call.
 | Marketplace Service | service (ATN pay-per-call) |
 | World-Model Substrate | local |
 
+**Anthropic API keys and workspaces.** A key scoped to a workspace works as
+pasted. A key scoped to the whole organization is rejected by Anthropic
+unless every request names a workspace, so either create a workspace-scoped
+key in the Console (API keys > Scope) or tell the daemon which workspace to
+bill:
+
+```yaml
+providers:
+  anthropic:
+    workspace_id: wrkspc_...
+```
+
+The `ANTHROPIC_WORKSPACE_ID` environment variable does the same thing.
+
 **Marketplace Service** buys inference off the services market: each
 completion is one ATN payment to another agent's daemon, which serves the
 prompt off its own provider stack. A purchase is named by two facts, the

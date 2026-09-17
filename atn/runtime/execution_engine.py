@@ -290,6 +290,7 @@ class ExecutionEngine:
         # post-normalised ``_url``/``_base_url`` (that would double-append the
         # path suffix). "" => default endpoint.
         cfg["base_url"] = str(getattr(provider, "_config_base_url", "") or "")
+        cfg["workspace_id"] = str(getattr(provider, "_workspace_id", "") or "")
         return cfg
 
     def _has_pending_grant(self, agent_id: str) -> bool:
@@ -1087,10 +1088,15 @@ class ExecutionEngine:
                 prompt_parts.append(defn.description or defn.name)
             user_message = "\n\n".join(prompt_parts)
 
-            # Prepend the identity header to the FIRST user message only (fresh
-            # session, no prior turns) — keeps it out of the cached system
-            # prefix while still orienting the agent. On resumed sessions the
-            # agent already has it in history.
+            # Identity header: rides the provider text of this execution the
+            # way the time/budget stamp does (see the stamp block below), and
+            # is NEVER stored in the conversation. Storing it made every turn
+            # of a generic-loop agent (no SDK session, history rebuilt from
+            # the store each run) carry the block twice: once as the typed
+            # message the surface recorded, once as the engine's copy with
+            # the header on top. Session (bridge) providers keep their own
+            # conversation, so they get it on the first message only.
+            _ident = ""
             if _inject_identity and not getattr(sub_provider, "_session_id", ""):
                 from ..delegate_prompts import build_identity_header
                 from ..providers.base import get_context_window
@@ -1101,7 +1107,6 @@ class ExecutionEngine:
                     context_window=get_context_window(
                         defn.cognitive_model or ""),
                 )
-                user_message = f"{_ident}\n\n{user_message}"
 
             # --- Session resume / history (unified for all agents) ---
             agent_convo = self.session_manager.get_agent_conversation_store(defn.id)
@@ -1165,6 +1170,10 @@ class ExecutionEngine:
             budget_line = self._budget_stamp(defn, record)
             if budget_line:
                 stamp = f"{stamp}\n{budget_line}"
+            if _ident:
+                # Same leading block as the stamp: conversation.py strips
+                # everything up to the first blank line when it hydrates.
+                stamp = f"{stamp}\n{_ident}"
             user_message = f"{stamp}\n\n{user_message}"
 
             # --- P4 worker-isolation cutover (flag-gated, API providers only) ---

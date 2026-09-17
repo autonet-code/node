@@ -276,16 +276,14 @@ _TOOLS: list[ToolDefinition] = [
                 },
                 "provider": {
                     "type": "string",
-                    "enum": [
-                        "claude_max", "codex_max", "anthropic", "openai",
-                        "gemini", "deepseek", "ollama", "rpb", "substrate",
-                    ],
                     "description": (
-                        "Explicit provider for this agent. Omit to route by the "
-                        "model id (the daemon fails loud if a model can't be "
-                        "placed rather than defaulting onto the subscription). "
-                        "Set 'ollama' for local models, 'rpb' for sponsor-routed "
-                        "dependents."
+                        "Explicit provider for this agent: a built-in id "
+                        "(claude_max, codex_max, anthropic, openai, gemini, "
+                        "deepseek, ollama, substrate), a custom provider id "
+                        "from config.yaml, or 'rpb' for sponsor-routed "
+                        "dependents. Omit to route by the model id (the daemon "
+                        "fails loud if a model can't be placed rather than "
+                        "defaulting onto the subscription)."
                     ),
                 },
                 "max_turns": {
@@ -1410,8 +1408,35 @@ _TOOLS: list[ToolDefinition] = [
 # Tool executors — async functions that perform the actual operations
 # ---------------------------------------------------------------------------
 
+def _visible_ids(runtime: Runtime, input: dict[str, Any]) -> set[str] | None:
+    """Agent ids an observation tool may reveal to this caller.
+
+    None means unrestricted (the owner surface). An AGENT caller sees its own
+    subtree (itself and every descendant) plus its parent's id: the fractal
+    doctrine is that each level manages only what sits beneath it, and a
+    peer's existence, config or transcript is not the agent's business.
+    """
+    caller_id = input.get("_caller_id")
+    if caller_id is None or is_owner_caller(caller_id):
+        return None
+    ids = set(runtime.registry.get_subtree_ids(caller_id))
+    defn = runtime.get_agent(caller_id)
+    if defn is not None and defn.parent_id:
+        ids.add(defn.parent_id)
+    return ids
+
+
+def _not_visible(agent_id: str) -> dict[str, Any]:
+    # Same wording as a missing agent: a peer must not be enumerable by
+    # probing ids.
+    return {"error": f"Agent '{agent_id}' not found."}
+
+
 async def _list_agents(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     agents = runtime.list_agents()
+    visible = _visible_ids(runtime, input)
+    if visible is not None:
+        agents = [(d, st) for d, st in agents if d.id in visible]
     return {
         "agents": [
             {
@@ -1437,6 +1462,9 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     defn = runtime.get_agent(agent_id)
     if defn is None:
         return {"error": f"Agent '{agent_id}' not found."}
+    visible = _visible_ids(runtime, input)
+    if visible is not None and agent_id not in visible:
+        return _not_visible(agent_id)
     status = runtime.get_status(agent_id)
     result: dict[str, Any] = {
         "id": defn.id,
@@ -1861,6 +1889,14 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     except Exception as exc:
         log.warning("Agent updated in memory but YAML save failed: %s", exc)
 
+    if provider_or_model_changed:
+        # Same event the reparent path emits; carries model + provider so
+        # every connected client refreshes its pickers without a reload.
+        try:
+            await runtime.registry.emit_agent_updated(agent_id, defn.parent_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("agent.updated emit failed for %s: %s", agent_id, exc)
+
     return {"agent_id": agent_id, "status": "updated", "changed": changed}
 
 
@@ -2172,6 +2208,11 @@ async def _get_execution(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
             return {"error": f"No execution history for agent '{agent_id}'."}
     else:
         return {"error": "Provide either 'agent_id' or 'execution_id'."}
+    visible = _visible_ids(runtime, input)
+    if visible is not None and rec.agent_id not in visible:
+        if execution_id:
+            return {"error": f"Execution '{execution_id}' not found."}
+        return _not_visible(str(agent_id))
 
     return {
         "execution_id": rec.execution_id,
@@ -2209,6 +2250,9 @@ async def _get_execution(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
 
 async def _get_output(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     agent_id = input["agent_id"]
+    visible = _visible_ids(runtime, input)
+    if visible is not None and agent_id not in visible:
+        return _not_visible(agent_id)
     output = runtime.output_store.read(agent_id)
     if output is None:
         return {"error": f"No output for agent '{agent_id}'."}
@@ -2313,8 +2357,22 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     return result
 
 
+# Snapshot sections that exist for the UI (provider cards, model pickers,
+# update banner, voice/input arbitration). An agent asking for "the state
+# of things" does not need them, and they are the bulk of the payload
+# (available_models alone is ~1k tokens on a daemon with a few providers).
+_SNAPSHOT_UI_ONLY = frozenset({
+    "available_models", "providers", "update", "voice", "input",
+    "orchestrator", "user",
+})
+
+
 async def _get_snapshot(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    return runtime.snapshot()
+    visible = _visible_ids(runtime, input)
+    if visible is None:
+        return runtime.snapshot()
+    snap = runtime.snapshot(visible)
+    return {k: v for k, v in snap.items() if k not in _SNAPSHOT_UI_ONLY}
 
 
 async def _list_connectors(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -3276,6 +3334,9 @@ async def _get_history(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
     agent_id = input["agent_id"]
     if runtime.get_agent(agent_id) is None:
         return {"error": f"Agent '{agent_id}' not found."}
+    visible = _visible_ids(runtime, input)
+    if visible is not None and agent_id not in visible:
+        return _not_visible(agent_id)
     limit = min(input.get("limit", 20), 50)
     records = runtime.execution_log.get_history(agent_id, limit=limit)
     return {
@@ -4194,6 +4255,9 @@ async def _get_latest_thought(runtime: Runtime, input: dict[str, Any]) -> dict[s
 
     defn = runtime.get_agent(agent_id)
     if defn is None:
+        return {"error": f"Unknown agent: {agent_id}"}
+    visible = _visible_ids(runtime, input)
+    if visible is not None and agent_id not in visible:
         return {"error": f"Unknown agent: {agent_id}"}
 
     store = runtime.get_agent_conversation_store(agent_id)

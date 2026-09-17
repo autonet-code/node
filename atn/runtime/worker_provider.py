@@ -114,6 +114,7 @@ def build_provider_from_manifest(cfg: dict[str, Any]) -> Provider:
         from ..providers.anthropic import AnthropicProvider
         prov = AnthropicProvider(
             api_key=api_key, default_model=default_model, base_url=base_url,
+            workspace_id=str(cfg.get("workspace_id", "") or ""),
         )
         return prov
 

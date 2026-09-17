@@ -483,10 +483,12 @@ def build_identity_header(
     parent_id: str | None = None,
     context_window: int = 0,
 ) -> str:
-    """The per-agent identity block, delivered in the FIRST USER MESSAGE (not
-    the cached system prompt). This is what used to sit at the top of the
-    common base; moving it here keeps the system-prompt prefix invariant across
-    agents so it stays cacheable.
+    """The per-agent identity block. It never enters the cached system prompt
+    (keeps the prefix invariant across agents) and is never stored in the
+    conversation: the execution engine rides it on the leading stamp block
+    of the provider text (every execution for generic-loop providers, the
+    first message only for SDK-session bridges), so the chat and the
+    rebuilt history stay clean.
 
     ``context_window``: the agent model's context window in tokens (0 =
     unknown). Small-window models get an extra line flipping the delegation

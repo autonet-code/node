@@ -155,10 +155,16 @@ class SnapshotBuilder:
             if scope_ids is not None and aid not in scope_ids:
                 continue
             last_output = self.output_store.read(aid)
+            _prov = defn.provider or ""
+            if isinstance(_prov, list):
+                _prov = _prov[0] if _prov else ""
             agent_info: dict = {
                 "name": defn.name,
                 "description": defn.description,
                 "model": defn.model,
+                # Pinned inference provider ("" = daemon default). Model
+                # pickers use it to offer only that provider's models.
+                "provider": _prov,
                 "mode": defn.mode.value,
                 "notify_parent": defn.notify_parent,
                 "status": self.registry._status[aid].value,

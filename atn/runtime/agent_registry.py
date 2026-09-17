@@ -737,6 +737,8 @@ class AgentRegistry:
                   "steps": len(defn.steps), "schedule": defn.schedule,
                   "description": defn.description,
                   "model": defn.model,
+                  "provider": (defn.provider[0] if isinstance(defn.provider, list) and defn.provider
+                               else (defn.provider if isinstance(defn.provider, str) else "")),
                   "parent_id": defn.parent_id,
                   "concurrency": defn.concurrency,
                   "notify_parent": defn.notify_parent},
@@ -1008,12 +1010,20 @@ class AgentRegistry:
         defn = self._agents.get(agent_id)
         if defn is None:
             return
+        _prov = defn.provider or ""
+        if isinstance(_prov, list):
+            _prov = _prov[0] if _prov else ""
         await self.events.emit(Event(
             type=EventType.AGENT_UPDATED,
             source="runtime",
             data={"agent_id": agent_id,
                   "parent_id": defn.parent_id,
-                  "old_parent_id": old_parent_id},
+                  "old_parent_id": old_parent_id,
+                  # Inference pin + model travel with every update so a
+                  # provider/model change made from one surface (or by a
+                  # parent agent) shows up in the other clients' pickers.
+                  "model": defn.model or "",
+                  "provider": _prov},
         ))
 
     def _enforce_reparent_limits(self, defn: AgentDefinition) -> None:

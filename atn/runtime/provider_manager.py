@@ -800,7 +800,21 @@ class ProviderManager:
     # Setup and auto-detect
     # ------------------------------------------------------------------
 
+    def _apply_anthropic_workspace(self) -> None:
+        """Push ``providers.anthropic.workspace_id`` (config.yaml) into the
+        provider module so every Anthropic call, in-process or in an isolated
+        worker, carries the ``anthropic-workspace-id`` header."""
+        from ..providers.anthropic import set_default_workspace_id, default_workspace_id
+        pconfig = self._config.providers.get("anthropic")
+        ws = ""
+        if pconfig is not None:
+            ws = str(getattr(pconfig, "workspace_id", "") or pconfig.extra.get("workspace_id", "") or "")
+        # An env var set by the user outranks an empty config value.
+        if ws or not default_workspace_id():
+            set_default_workspace_id(ws)
+
     def setup_providers(self, cognitive: CognitiveStepExecutor) -> None:
+        self._apply_anthropic_workspace()
         for name, pconfig in self._config.providers.items():
             try:
                 if name in ("claude_max", "ollama"):
@@ -1621,20 +1635,28 @@ class ProviderManager:
                 # List models rather than sending a message: it needs no
                 # model name (a retired one used to turn into a bare 400)
                 # and no credit balance, so it only tests the key itself.
+                from ..providers.anthropic import anthropic_headers
+                self._apply_anthropic_workspace()
                 async with httpx.AsyncClient(timeout=15) as client:
                     resp = await client.get(
                         "https://api.anthropic.com/v1/models",
-                        headers={
-                            "x-api-key": api_key,
-                            "anthropic-version": "2023-06-01",
-                        },
+                        headers=anthropic_headers(api_key),
                     )
                     if resp.status_code == 401:
                         raise ValueError("Invalid API key")
                     if resp.status_code == 403:
                         raise ValueError("API key does not have access")
                     if resp.status_code not in (200, 429, 529):
-                        raise ValueError(_api_error_text(resp))
+                        text = _api_error_text(resp)
+                        if "workspace" in text.lower():
+                            text += (
+                                " This key is scoped to the whole organization. "
+                                "Either create a key scoped to a workspace "
+                                "(Console > API keys > Scope), or put the "
+                                "workspace id in config.yaml under "
+                                "providers.anthropic.workspace_id and restart."
+                            )
+                        raise ValueError(text)
             elif provider_id == "gemini":
                 defaults = self._PROVIDER_DEFAULTS.get("gemini", {})
                 base_url = defaults.get("base_url", "")
