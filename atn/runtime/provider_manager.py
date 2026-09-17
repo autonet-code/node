@@ -20,6 +20,7 @@ from ..providers.openai_compat import OpenAICompatibleProvider
 from ..steps.cognitive import CognitiveStepExecutor
 
 if TYPE_CHECKING:
+    import httpx
     from ..credentials import CredentialStore
     from ..store import ExecutionLog
 
@@ -181,6 +182,25 @@ def get_model_tier(model_id: str) -> int:
 def get_tier_label(tier: int) -> str:
     """Return the human-readable label for a tier number."""
     return TIER_LABELS.get(tier, "unknown")
+
+
+
+def _api_error_text(resp: "httpx.Response") -> str:
+    """Readable text for a non-2xx provider reply: the API's own error
+    message when the body carries one, else the bare status."""
+    msg = ""
+    try:
+        body = resp.json()
+        err = body.get("error") if isinstance(body, dict) else None
+        if isinstance(err, dict):
+            msg = str(err.get("message") or "")
+        elif isinstance(err, str):
+            msg = err
+    except Exception:  # noqa: BLE001
+        pass
+    if msg:
+        return f"Provider replied {resp.status_code}: {msg[:200]}"
+    return f"Unexpected response: {resp.status_code}"
 
 
 class ProviderManager:
@@ -1598,18 +1618,15 @@ class ProviderManager:
         import httpx
         try:
             if provider_id == "anthropic":
+                # List models rather than sending a message: it needs no
+                # model name (a retired one used to turn into a bare 400)
+                # and no credit balance, so it only tests the key itself.
                 async with httpx.AsyncClient(timeout=15) as client:
-                    resp = await client.post(
-                        "https://api.anthropic.com/v1/messages",
+                    resp = await client.get(
+                        "https://api.anthropic.com/v1/models",
                         headers={
                             "x-api-key": api_key,
                             "anthropic-version": "2023-06-01",
-                            "content-type": "application/json",
-                        },
-                        json={
-                            "model": "claude-sonnet-4-20250514",
-                            "max_tokens": 1,
-                            "messages": [{"role": "user", "content": "hi"}],
                         },
                     )
                     if resp.status_code == 401:
@@ -1617,7 +1634,7 @@ class ProviderManager:
                     if resp.status_code == 403:
                         raise ValueError("API key does not have access")
                     if resp.status_code not in (200, 429, 529):
-                        raise ValueError(f"Unexpected response: {resp.status_code}")
+                        raise ValueError(_api_error_text(resp))
             elif provider_id == "gemini":
                 defaults = self._PROVIDER_DEFAULTS.get("gemini", {})
                 base_url = defaults.get("base_url", "")
@@ -1629,7 +1646,7 @@ class ProviderManager:
                     if resp.status_code == 401:
                         raise ValueError("Invalid API key")
                     if resp.status_code not in (200, 429):
-                        raise ValueError(f"Unexpected response: {resp.status_code}")
+                        raise ValueError(_api_error_text(resp))
             elif provider_id == "openai":
                 async with httpx.AsyncClient(timeout=15) as client:
                     resp = await client.get(
@@ -1639,7 +1656,7 @@ class ProviderManager:
                     if resp.status_code == 401:
                         raise ValueError("Invalid API key")
                     if resp.status_code not in (200, 429):
-                        raise ValueError(f"Unexpected response: {resp.status_code}")
+                        raise ValueError(_api_error_text(resp))
             elif provider_id == "deepseek":
                 defaults = self._PROVIDER_DEFAULTS.get("deepseek", {})
                 base_url = defaults.get("base_url", "https://api.deepseek.com/v1")
@@ -1651,7 +1668,7 @@ class ProviderManager:
                     if resp.status_code == 401:
                         raise ValueError("Invalid API key")
                     if resp.status_code not in (200, 429):
-                        raise ValueError(f"Unexpected response: {resp.status_code}")
+                        raise ValueError(_api_error_text(resp))
         except httpx.ConnectError:
             raise ValueError(f"Cannot reach {provider_id} API — check your network")
         except httpx.TimeoutException:
