@@ -42,6 +42,7 @@ import os
 from typing import Any
 
 from ..shell_tools import SHELL_TOOL_EXECUTORS as _SHELL_TOOL_EXECUTORS
+from ..web_tools import WEB_TOOL_EXECUTORS as _WEB_TOOL_EXECUTORS
 
 log = logging.getLogger("atn.agent_worker.loop")
 
@@ -135,7 +136,7 @@ def _is_authority_tool(name: str) -> bool:
     AUTHORITY (True): everything else (surface_*, mcp_*, framework tools) —
     RPC back to the daemon.
     """
-    if name in _SHELL_TOOL_EXECUTORS:
+    if name in _SHELL_TOOL_EXECUTORS or name in _WEB_TOOL_EXECUTORS:
         return False
     return True
 
@@ -502,7 +503,8 @@ async def _route_tool(client: Any, name: str, tool_input: dict, agent_label: str
 
     if not _is_authority_tool(name):
         try:
-            return await _SHELL_TOOL_EXECUTORS[name](tool_input)
+            _local = _SHELL_TOOL_EXECUTORS.get(name) or _WEB_TOOL_EXECUTORS[name]
+            return await _local(tool_input)
         except Exception as exc:
             return {"error": f"{name} failed: {exc}"}
 

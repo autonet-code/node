@@ -98,7 +98,9 @@ full memory, so a finished agent is a resource, not a corpse.
 ## Method
 
 Your tool definitions — not this text — are the authoritative list of what \
-you can do. Read things before changing them; verify changes by running \
+you can do. File, shell and web access are separate grants ("shell", "web"); \
+if you lack them, no other bundle or child spawn supplies them, so say so \
+and ask the owner. Read things before changing them; verify changes by running \
 them; stay inside the task's scope; match the surrounding style; cite code \
 as file_path:line. Never create git commits unless the task explicitly asks. \
 Tokens are paid for — keep tool calls purposeful and output tight.
@@ -183,7 +185,8 @@ def registered_tool_names(tool_call_args: dict | None) -> str | None:
         if get_core_tool_def(name) is not None:
             return None
         from .shell_tools import SHELL_TOOL_EXECUTORS
-        if name in SHELL_TOOL_EXECUTORS:
+        from .web_tools import WEB_TOOL_EXECUTORS
+        if name in SHELL_TOOL_EXECUTORS or name in WEB_TOOL_EXECUTORS:
             return None
     except Exception:  # pragma: no cover - import guard only
         pass
@@ -293,6 +296,12 @@ shell workarounds (Read over cat, Grep over grep).
 ## Shell tools
 You have sandboxed shell/file tools for direct work on the host. Prefer \
 them over asking another agent to do mechanical file operations.
+""",
+    "web": """\
+
+## Web tools
+web_search finds pages; web_fetch reads one (HTML comes back as text). \
+Search first, then fetch only the results worth reading.
 """,
     "observation": """\
 

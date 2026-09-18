@@ -1114,6 +1114,7 @@ class WebSocketBridge:
         if msg_type == "tool_surface":
             from .agent_tools import _TOOL_CATEGORIES, _TOOLS
             from .shell_tools import SHELL_TOOLS
+            from .web_tools import WEB_TOOLS
 
             def _entry(name, description, schema):
                 props = list(((schema or {}).get("properties")) or {})
@@ -1140,6 +1141,9 @@ class WebSocketBridge:
                 if cat == "shell":
                     tools = [_entry(t["name"], t.get("description", ""),
                                     t.get("input_schema")) for t in SHELL_TOOLS]
+                elif cat == "web":
+                    tools = [_entry(t["name"], t.get("description", ""),
+                                    t.get("input_schema")) for t in WEB_TOOLS]
                 else:
                     tools = [
                         _entry(n, tool_index[n].description, tool_index[n].input_schema)

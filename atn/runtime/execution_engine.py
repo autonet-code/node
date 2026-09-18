@@ -28,6 +28,7 @@ from ..store import AgentOutput, ExecutionLog, OutputStore
 from ..steps.base import StepContext, StepExecutor
 from ..run_summary import extract_run_summary
 from ..shell_tools import SHELL_TOOLS as _SHELL_TOOLS, SHELL_TOOL_EXECUTORS as _SHELL_TOOL_EXECUTORS
+from ..web_tools import WEB_TOOLS as _WEB_TOOLS, WEB_TOOL_EXECUTORS as _WEB_TOOL_EXECUTORS
 
 if TYPE_CHECKING:
     from .agent_registry import AgentRegistry
@@ -588,7 +589,7 @@ class ExecutionEngine:
         below: every branch route_tool_call handles locally is a LOCAL tool,
         every branch it routes to an authority is an AUTHORITY tool.
         """
-        if name in _SHELL_TOOL_EXECUTORS:
+        if name in _SHELL_TOOL_EXECUTORS or name in _WEB_TOOL_EXECUTORS:
             return False
         # surface_* → surfaces; mcp_* → ConnectorManager; everything else →
         # framework tools (execute_tool → registries/stores/on-chain/creds).
@@ -618,6 +619,9 @@ class ExecutionEngine:
             if override is not None:
                 return override
             return await _SHELL_TOOL_EXECUTORS[name](tool_input)
+        if name in _WEB_TOOL_EXECUTORS:
+            # Web bundle (web_search/web_fetch): local like shell, no swap rail.
+            return await _WEB_TOOL_EXECUTORS[name](tool_input)
         # Secret tools are WORKER-ONLY (they need the worker's kernel PID to reach
         # the vault-broker; the daemon holds no broker session and must never
         # stage a secret for itself). They can only appear here if a granted
@@ -1003,6 +1007,16 @@ class ExecutionEngine:
             from ..providers.bridge import BridgeProvider as _BP
             if not isinstance(sub_provider, _BP) and _wants_shell:
                 agent_tools.extend(_SHELL_TOOLS)
+            # Web access is the same shape: bridges have WebSearch/WebFetch
+            # natively (sdk_builtin); API/local providers get the daemon's
+            # web_tools.py equivalents when the agent is granted "web".
+            _wants_web = (
+                "web" in _tool_spec
+                or "atn_full" in _tool_spec
+                or "sdk_builtin" in _tool_spec
+            )
+            if not isinstance(sub_provider, _BP) and _wants_web:
+                agent_tools.extend(_WEB_TOOLS)
 
             # Start this agent's declared connectors and add their tools. The
             # pipeline path does this too; cognitive agents need it for the

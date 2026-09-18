@@ -2617,8 +2617,9 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     # that keys on tool NAME. Reserve them now, while nothing depends on
     # the ambiguity.
     from .shell_tools import SHELL_TOOL_EXECUTORS as _SHELL_NAMES
-    if name in _SHELL_NAMES:
-        return {"error": f"'{name}' is a core ATN shell tool name; pick another"}
+    from .web_tools import WEB_TOOL_EXECUTORS as _WEB_NAMES
+    if name in _SHELL_NAMES or name in _WEB_NAMES:
+        return {"error": f"'{name}' is a core ATN shell/web tool name; pick another"}
     # The daemon's own resident-module manifests are atn_<bundle>
     # (harness_distro.py). Reserving the prefix keeps a registered tool
     # from impersonating a harness module in the Tools UI or the distro DAG.
@@ -3956,6 +3957,10 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # skips it (like "sdk_builtin"). §9: non-bridge agents opt in via
     # tools=["shell", ...] instead of getting the whole schema block by default.
     "shell": set(),
+    # "web" (web_search/web_fetch) works the same way: tools live in
+    # web_tools.py and execution_engine appends them for non-bridge
+    # providers; bridges get WebSearch/WebFetch natively via sdk_builtin.
+    "web": set(),
 }
 
 
@@ -3995,7 +4000,7 @@ def resolve_tool_grant(tool_spec: list[str]) -> set[str] | None:
     granted: set[str] = set(_ALWAYS_GRANTED_TOOLS)
     saw_grant = False
     for spec in tool_spec:
-        if spec in ("sdk_builtin", "connectors", "shell"):
+        if spec in ("sdk_builtin", "connectors", "shell", "web"):
             continue  # handled by execution_engine, not a core-tool grant
         saw_grant = True
         if spec == "atn_core":
@@ -4036,8 +4041,8 @@ def resolve_tool_surface(tool_spec: list[str]) -> list[dict[str, Any]]:
     resolved_names: set[str] = set()
 
     for spec in tool_spec:
-        if spec in ("sdk_builtin", "connectors", "shell"):
-            continue  # handled by execution_engine (shell → _SHELL_TOOLS, §9)
+        if spec in ("sdk_builtin", "connectors", "shell", "web"):
+            continue  # handled by execution_engine (shell/web → their modules, §9)
         if spec == "atn_core":
             resolved_names.update(_DELEGATE_TOOL_NAMES)
         elif spec in _TOOL_CATEGORIES:

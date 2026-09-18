@@ -169,6 +169,14 @@ and continue the loop. Applies to all three adapters' parse paths.
   `_SHELL_TOOLS` unconditionally for non-bridge providers; shell tools
   ride the existing `tools` categories (add a `"shell"` category) so
   a lean agent's prompt stays small.
+- Web access is the same shape (2026-09-18): bridges have
+  WebSearch/WebFetch natively under `"sdk_builtin"`; API and local
+  providers get the daemon's `web_search`/`web_fetch`
+  (`atn/web_tools.py`, keyless, DuckDuckGo HTML + httpx) only when the
+  agent is granted `"web"`. Both are LOCAL tools like shell: the worker
+  runs them in-process. No other bundle carries file or web access, and
+  the common base prompt says so, so an agent without the grant asks
+  instead of guessing that `atn_full` might.
 
 ## §10 Provider routing + lifecycle
 
