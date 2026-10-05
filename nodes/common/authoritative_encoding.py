@@ -9,7 +9,7 @@ Spec
 
 The authoritative payload is a dict with these fields, in this order:
 
-  1. schema:           int (currently 3)
+  1. schema:           int (currently 4)
   2. epoch_id:         str
   3. epoch_root:       64-char lowercase hex string (sha256 digest)
   4. prev_epoch_root:  64-char lowercase hex string (sha256 digest)
@@ -25,6 +25,13 @@ The authoritative payload is a dict with these fields, in this order:
                        blob for this epoch (state sync), or "" when no
                        canonical tracker is wired. Added in schema 2;
                        schema-1 anchors on chain predate it.
+  14. carry_cid:       str — sha256 cid of the carry-over bundle blob
+                       (``encode_carry_bundle``): the five tool maps this
+                       close produced, i.e. the INPUTS of the next close.
+                       Lets a daemon that first boots after anchors exist
+                       fetch + verify the carry-over instead of trusting a
+                       peer. Added in schema 4; schema <= 3 anchors on
+                       chain predate it (and cannot be joined trustlessly).
 
 Float formatting
 ----------------
@@ -69,12 +76,16 @@ import math
 from typing import Any, Dict, List, Tuple
 
 
+# Schema 4 (verifiable carry-over): the payload gains ``carry_cid``, the
+# cid of the canonical carry-over bundle (see ``encode_carry_bundle``), so
+# a joiner can verify the five tool maps against the anchor. FLAG DAY:
+# every daemon must run this build, on a fresh genesis.
 # Schema 3 (fees-only, Decision 2026-07-10): MONEY ONLY. The authoritative
 # payload was always money-only; the off-chain mint blob drops its optional
 # ``agent_rep`` key (REP is claimed DAO-side now, never anchored). Schema 2
 # was the v4.1 era (3-field merkle leaf + agent_rep blob key); bumped so the
 # blob shape change is explicit, not silently reusing a different-shape number.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_DECIMALS = 10
 
 # The fixed top-level field order. Encoding will lay these out in
@@ -93,6 +104,7 @@ _FIELD_ORDER = [
     "n_batches",
     "n_events",
     "world_cid",
+    "carry_cid",
 ]
 
 
@@ -160,6 +172,7 @@ def encode_authoritative_payload(
         "n_batches": int(payload.get("n_batches", 0)),
         "n_events": int(payload.get("n_events", 0)),
         "world_cid": str(payload.get("world_cid", "")),
+        "carry_cid": str(payload.get("carry_cid", "")),
     }
 
     # Canonical order: NOT alphabetical, but the explicit _FIELD_ORDER.
@@ -184,7 +197,7 @@ def encode_agent_mint_blob(
 
     Format:
       {
-        "schema": 3,
+        "schema": 4,
         "agent_mint": {agent_id: float-as-str (sorted keys)}
       }
 
@@ -232,3 +245,92 @@ def decode_agent_mint_blob(blob: bytes) -> Dict[str, float]:
     for k, v in data.get("agent_mint", {}).items():
         out[str(k)] = float(v)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Carry-over bundle (schema-4 payload ``carry_cid``)
+# ---------------------------------------------------------------------------
+
+CARRY_BUNDLE_SCHEMA = 1
+
+# The five maps a federated close produces and the next close consumes.
+# Order is documentation only: the bundle serializes with sorted keys.
+CARRY_KEYS: Tuple[str, ...] = (
+    "tool_registrations",
+    "tool_vetting",
+    "tool_positions",
+    "tool_credibility",
+    "tool_review_book",
+)
+
+
+def encode_carry_bundle(carry: Dict[str, Any], *, epoch_id: str) -> bytes:
+    """Canonical bytes for the carry-over bundle a close produces.
+
+    Format (compact JSON, UTF-8, ALL keys sorted at every level)::
+
+      {"carry": {<the five CARRY_KEYS maps>}, "epoch_id": str, "schema": 1}
+
+    ``epoch_id`` is the epoch whose close PRODUCED these maps (they are
+    the inputs of the following close).
+
+    Why ``sort_keys`` is safe here (unlike world checkpoints, whose
+    insertion order is semantic): every consumer of these maps
+    (``compute_tool_mint`` and its ``_normalize_*`` helpers) iterates
+    them in sorted-key order, and the close already emits them
+    key-sorted, so key order carries no meaning. Sorting makes the bytes
+    a pure function of the values.
+
+    Floats are emitted as Python's shortest round-trip ``repr`` (NOT the
+    payload's fixed 10-decimal form): the joiner must load the EXACT
+    values an always-on daemon holds, or its next close would drift. The
+    close already rounds them (positions/credibility to 9 places, review
+    sums to 10), so the repr is short and stable. NaN/Inf are rejected.
+    """
+    missing = [k for k in CARRY_KEYS if not isinstance(carry.get(k), dict)]
+    if missing:
+        raise ValueError(f"carry bundle missing maps: {', '.join(missing)}")
+    blob = {
+        "schema": CARRY_BUNDLE_SCHEMA,
+        "epoch_id": str(epoch_id),
+        "carry": {k: carry[k] for k in CARRY_KEYS},
+    }
+    return json.dumps(
+        blob,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def decode_carry_bundle(blob: bytes) -> Dict[str, Any]:
+    """Reverse of ``encode_carry_bundle``; strict.
+
+    Returns ``{"epoch_id": str, "carry": {key: map}}``. Raises
+    ``ValueError`` on a wrong schema, a missing/non-object map, or bytes
+    that are not in canonical form (re-encoding must reproduce them
+    exactly, so the cid commits to one unambiguous value).
+    """
+    try:
+        data = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(f"carry bundle is not valid JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError("carry bundle is not a JSON object")
+    if data.get("schema") != CARRY_BUNDLE_SCHEMA:
+        raise ValueError(
+            f"unsupported carry bundle schema: {data.get('schema')!r}")
+    carry = data.get("carry")
+    if not isinstance(carry, dict):
+        raise ValueError("carry bundle has no carry object")
+    missing = [k for k in CARRY_KEYS if not isinstance(carry.get(k), dict)]
+    if missing:
+        raise ValueError(f"carry bundle missing maps: {', '.join(missing)}")
+    extra = sorted(set(carry) - set(CARRY_KEYS))
+    if extra:
+        raise ValueError(f"carry bundle has unknown maps: {', '.join(extra)}")
+    epoch_id = str(data.get("epoch_id", ""))
+    if encode_carry_bundle(carry, epoch_id=epoch_id) != blob:
+        raise ValueError("carry bundle bytes are not canonical")
+    return {"epoch_id": epoch_id, "carry": {k: carry[k] for k in CARRY_KEYS}}

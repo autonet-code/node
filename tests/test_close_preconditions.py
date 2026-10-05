@@ -8,6 +8,9 @@ AutonetService sets it), ``FederatedCloseDriver.run()`` logs and skips
   - chain read access is wired (``voice_source``: substrate + rpc), and
   - the five carry-over files exist, OR the chain has no anchors yet
     (genesis, where an empty prior is the correct prior).
+
+A joiner (files missing, chain anchored) fetches the verified carry-over
+through ``carry_source`` and observes until it succeeds.
 """
 
 from __future__ import annotations
@@ -15,8 +18,10 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock
 
+from nodes.common.authoritative_encoding import decode_carry_bundle
 from nodes.common.event_gossip import EventBatch, EventGossip, Keypair
 from nodes.common.federated_close_driver import FederatedCloseDriver
+from nodes.common.state_sync import CarryOverFetch
 
 CARRY = [
     "tool_registrations",
@@ -147,38 +152,101 @@ def test_default_off_keeps_library_behavior(tmp_path):
     assert d.run({"epoch_id": "e1"}) is not None
 
 
-def test_joiner_after_genesis_recovers_via_seed(tmp_path):
-    # A fresh daemon on a chain with anchors: refused until seeded, then
-    # closes and keeps closing (the refusal is not permanent).
+def _peer_bundle(tmp_path):
     peer_dir = tmp_path / "peer"
     peer_dir.mkdir()
     peer = _driver(peer_dir, voice_state=GENESIS)
-    assert peer.run({"epoch_id": "e1"}) is not None
+    first = peer.run({"epoch_id": "e1"})
+    assert first is not None and first.carry_cid
+    return peer, first
 
+
+def _observing_joiner(tmp_path):
+    """A fresh daemon on an anchored chain that has observed one epoch."""
     me_dir = tmp_path / "me"
     me_dir.mkdir()
     me = _driver(me_dir, voice_state=ANCHORED)
-    assert me.run({"epoch_id": "e2"}) is None
+    me.carry_source = lambda: CarryOverFetch(status="unavailable")
+    assert me.run({"epoch_id": "local_1"}) is None
+    assert me._last_observed_root is not None
+    return me, me_dir
 
-    assert sorted(me.import_carry_over(peer_dir)) == sorted(CARRY)
-    me._refresh_voice()
+
+def test_joiner_installs_verified_carry_and_closes(tmp_path):
+    # A fresh daemon on a chain with anchors: the carry_source hook (in
+    # production: fetch_carry_over_from_chain, hash-verified against the
+    # anchor) supplies the bundle; the driver installs it and closes,
+    # because the anchor is the epoch it observed just before.
+    peer, first = _peer_bundle(tmp_path)
+    me, me_dir = _observing_joiner(tmp_path)
+    observed = me._last_observed_root
+    me.carry_source = lambda: CarryOverFetch(
+        status="ok", epoch_id="e1", epoch_root_hex=observed,
+        carry_cid=first.carry_cid,
+        carry=decode_carry_bundle(first.carry_bundle_blob)["carry"])
+    assert me.run({"epoch_id": "local_2"}) is not None
+    for k in CARRY:
+        assert (me_dir / f"{k}.json").exists()
     assert me.participation_blockers() == []
     assert me._tool_positions == peer._tool_positions
     assert me._tool_review_book == peer._tool_review_book
-    me.gossip = _gossip()
-    assert me.run({"epoch_id": "e3"}) is not None
 
 
-def test_seed_import_never_overwrites_local_state(tmp_path):
-    peer_dir = tmp_path / "peer"
-    peer_dir.mkdir()
-    (peer_dir / "tool_credibility.json").write_text('{"h": 0.5}', encoding="utf-8")
-    (peer_dir / "tool_vetting.json").write_text("[1]", encoding="utf-8")
+def test_joiner_first_epoch_only_observes(tmp_path, caplog):
+    # No prior epoch observed: never fetch, even if a bundle exists.
+    calls = []
     me_dir = tmp_path / "me"
     me_dir.mkdir()
-    (me_dir / "tool_credibility.json").write_text('{"h": 0.9}', encoding="utf-8")
     me = _driver(me_dir, voice_state=ANCHORED)
-    # Local credibility kept; non-object vetting seed rejected.
-    assert me.import_carry_over(peer_dir) == []
-    assert me._tool_credibility == {"h": 0.9}
-    assert not (me_dir / "tool_vetting.json").exists()
+    me.carry_source = lambda: calls.append(1)
+    with caplog.at_level(logging.INFO):
+        assert me.run({"epoch_id": "local_1"}) is None
+    assert calls == []
+    assert "has not observed a prior epoch yet" in caplog.text
+
+
+def test_joiner_refuses_lagging_anchor(tmp_path, caplog):
+    # The latest anchor is NOT the epoch observed just before this close
+    # (the last winner failed to anchor): installing would be stale.
+    _, first = _peer_bundle(tmp_path)
+    me, me_dir = _observing_joiner(tmp_path)
+    me.carry_source = lambda: CarryOverFetch(
+        status="ok", epoch_id="e_old", epoch_root_hex="ff" * 32,
+        carry_cid=first.carry_cid,
+        carry=decode_carry_bundle(first.carry_bundle_blob)["carry"])
+    with caplog.at_level(logging.WARNING):
+        assert me.run({"epoch_id": "local_2"}) is None
+    assert "is not the epoch observed immediately before this close" in caplog.text
+    assert "refusing to install a stale carry-over" in caplog.text
+    assert not any((me_dir / f"{k}.json").exists() for k in CARRY)
+
+
+def test_joiner_keeps_refusing_on_pre_schema_anchor(tmp_path, caplog):
+    me, me_dir = _observing_joiner(tmp_path)
+    me.carry_source = lambda: CarryOverFetch(
+        status="pre_schema", epoch_id="old", payload_schema=3)
+    with caplog.at_level(logging.INFO):
+        assert me.run({"epoch_id": "local_2"}) is None
+    assert "predates carry-over commitments" in caplog.text
+    assert "missing carry-over files (chain has prior anchors)" in caplog.text
+    assert not any((me_dir / f"{k}.json").exists() for k in CARRY)
+
+
+def test_joiner_rejects_failed_verification(tmp_path, caplog):
+    def tampered():
+        raise ValueError("carry bundle hash mismatch")
+    me, me_dir = _observing_joiner(tmp_path)
+    me.carry_source = tampered
+    with caplog.at_level(logging.WARNING):
+        assert me.run({"epoch_id": "local_2"}) is None
+    assert "REJECTED anchored carry-over bundle" in caplog.text
+    assert not any((me_dir / f"{k}.json").exists() for k in CARRY)
+
+
+def test_carry_source_not_consulted_when_files_present(tmp_path):
+    _write_all(tmp_path)
+    calls = []
+    me = _driver(tmp_path, voice_state=ANCHORED)
+    me.carry_source = lambda: calls.append(1)
+    assert me.run({"epoch_id": "e3"}) is not None
+    assert calls == []

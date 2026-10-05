@@ -10,7 +10,9 @@ supply-pegged β cap and the rep/ATN mint split are DELETED; (3) REP is no
 longer minted on the close path: it is a pure DAO-side pull claim
 (RepToken, 1:1) on ratified ATN earnings, and the review weighting reads
 RepToken checkpoints. Substrate.sol is now a PURE MONEY contract. The
-authoritative payload is schema 3 with a 2-field `(agent, amount)` leaf.
+mint leaf is 2-field `(agent, amount)`; the authoritative payload was
+schema 3 at this decision and is schema 4 now (adds `carry_cid`, the
+verifiable carry-over commitment; see Consensus mechanics).
 
 The prior `Decision (2026-07-09)` v4.1 section retired the v3 vetting GATE
 (tools mint from first attested use) and introduced continuous
@@ -1091,10 +1093,45 @@ is the agent-facing daemon flow; the on-chain greenlight
   tolerantly) + `tool_credibility` + `tool_review_book` (both same
   rebuildable-cache contract). The close does NOT emit `agent_rep` or
   `tool_beta`; those were the v4.1 rep/ATN-split fields, deleted
-  2026-07-10; the authoritative payload is schema 3, 2-field
-  `(agent, amount)` leaf. `rep_shares` (the un-ε-floored raw reputation
-  share, read from RepToken) survives as an input, but drives POSITION
-  DRIFT weight only.
+  2026-07-10; the mint leaf is the 2-field `(agent, amount)` leaf (the
+  authoritative payload is schema 4 since the carry-over commitment,
+  below). `rep_shares` (the un-ε-floored raw reputation share, read from
+  RepToken) survives as an input, but drives POSITION DRIFT weight only.
+- Carry-over commitment (authoritative payload schema 4): the five
+  carry-over maps derive from raw canonical events that are never
+  published, so a daemon that first boots after anchors exist cannot
+  replay them. Each close therefore serializes the maps it produced (the
+  next close's inputs) into one canonical bundle blob
+  (`encode_carry_bundle`: compact JSON, sorted keys, shortest-repr
+  floats; key order is not semantic here because every consumer iterates
+  sorted) and commits its sha256 as the payload's `carry_cid`. Every
+  daemon publishes the bundle like the world checkpoint. A joiner whose
+  carry-over files are missing reads the latest anchor, verifies the
+  payload against the on-chain `payloadHash`, fetches the bundle from
+  any peer, verifies sha256 == `carry_cid`, installs the five files and
+  closes normally (`state_sync.fetch_carry_over_from_chain`). It installs
+  only a bundle whose anchored `epoch_root` equals the canonical root of
+  the epoch it observed immediately before the close it is about to run
+  (epoch ids are per-daemon, roots are shared). So a fresh joiner always
+  observes one full epoch first, and a lagging anchor (the last winner
+  failed to anchor), a partially observed epoch, or an anchor for the
+  epoch being closed all keep it observing instead of installing a stale
+  or double-applied carry-over. It also keeps refusing with a clear log
+  line when the latest anchor predates schema 4. This replaced the
+  operator seed workaround (`ATN_CARRY_OVER_SEED_DIR`). Blobs are served
+  by ONE host-level `/autonet/blob/1.0.0` handler (`HostBlobServer`):
+  every `LibP2PBlobResolver` and the `BlobStore` share it instead of each
+  replacing the host's handler.
+  **FLAG-DAY:** the payload schema change (4, new `carry_cid` field)
+  changes the anchored payload bytes and hash, so every daemon must run
+  the new build and the network must start from a fresh genesis (bundled
+  with the next shadownet reset); mixed builds fork on payloadHash.
+  **Known gap (keyless daemons):** the bundle (like the world checkpoint)
+  is published, and the joiner's blob resolver is obtained, through the
+  chain-submission driver, which only attaches when the daemon has a
+  `private_key`. A read-only daemon (chain RPC but no key) therefore
+  neither serves the bundle nor can fetch it to join; it stays in
+  observe mode. Left as is for now.
 - Wash-trading dampers: per-household log1p + owner-map + wire-key
   exclusions are live; rep-weighted drift (no ε floor) and continuous
   reversal-aware credibility carry over from v4.1. The supply-pegged β cap

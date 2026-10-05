@@ -663,7 +663,7 @@ class TestMoneyOnlyMint:
         )
         assert result["agent_mint"].get(AUTHOR, 0) > 0
         assert "agent_rep" not in result
-        assert result["authoritative_payload"]["schema"] == 3
+        assert result["authoritative_payload"]["schema"] == 4
         assert "agent_rep" not in result["authoritative_payload"]
 
 

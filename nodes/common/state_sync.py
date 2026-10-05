@@ -16,7 +16,7 @@ canonical world** alongside it:
 Every daemon tracks it (``CanonicalWorldTracker``), snapshots it at
 each close (exact snapshot via ``world_model.generalized.serialize``),
 and embeds the checkpoint blob's cid into the authoritative payload as
-``world_cid`` (encoding schema 2). Because the tracker replay is
+``world_cid`` (added in encoding schema 2). Because the tracker replay is
 deterministic, every daemon computes the SAME blob bytes → same cid →
 payload stays consensus-identical.
 
@@ -25,6 +25,16 @@ Catch-up for a rejoiner is then pure chain + blob-store reads:
     latest anchor → payload bytes (cid == on-chain payloadHash)
                   → world_cid → checkpoint blob (sha256-verified)
                   → restore_world → live
+
+The same anchor also commits the close's carry-over (schema 4,
+``carry_cid``): the five tool maps the NEXT close reads as inputs, which
+derive from raw canonical events that are never published and so cannot
+be replayed from anchored data. A daemon that first boots after anchors
+exist fetches them the same way (``fetch_carry_over_from_chain``):
+
+    latest anchor → payload bytes (cid == on-chain payloadHash)
+                  → carry_cid → carry bundle blob (sha256-verified,
+                    canonical-form checked) → install → close
 
 Mint semantics are untouched: ``federated_epoch_close`` still scores
 each epoch on a fresh charter world. The cumulative canonical world is
@@ -46,7 +56,7 @@ from world_model.generalized import (
     snapshot_world,
 )
 
-from .authoritative_encoding import cid_for_blob
+from .authoritative_encoding import cid_for_blob, decode_carry_bundle
 from .world_model_substrate.adapter import build_charter_world
 from .world_model_substrate.aggregate import apply_events
 
@@ -221,6 +231,140 @@ def _blob_getter(source: Any) -> Callable[[str], Optional[bytes]]:
     raise TypeError(f"unusable blob source: {type(source).__name__}")
 
 
+@dataclass
+class AnchoredPayload:
+    """The latest anchor plus its hash-verified authoritative payload."""
+    epoch_id: str
+    epoch_root_hex: str
+    payload_hash_hex: str
+    payload: Dict[str, Any]
+
+
+def read_latest_anchored_payload(
+    contract: Any,
+    get_blob: Callable[[str], Optional[bytes]],
+) -> Tuple[str, Optional[AnchoredPayload]]:
+    """Latest anchor → payload blob, verified against the on-chain
+    ``payloadHash``.
+
+    Returns ``(status, anchored)`` with status ``"genesis"`` (no anchors),
+    ``"unavailable"`` (payload blob not retrievable) or ``"ok"``. Raises
+    ``ValueError`` when the fetched payload contradicts the chain.
+    """
+    count = int(contract.functions.anchorCount().call())
+    if count == 0:
+        return "genesis", None
+
+    anchor = contract.functions.getAnchor(count - 1).call()
+    # Anchor struct order: (epochId, epochRoot, prevEpochRoot,
+    # prevAnchorHash, agentMintCid, payloadHash, submitter,
+    # blockNumber, timestamp, ...)
+    epoch_id = str(anchor[0])
+    epoch_root_hex = bytes(anchor[1]).hex()
+    payload_hash_hex = bytes(anchor[5]).hex()
+
+    payload_bytes = get_blob(payload_hash_hex)
+    if payload_bytes is None:
+        logger.warning(
+            "authoritative payload blob %s (epoch %s) not retrievable",
+            payload_hash_hex[:16], epoch_id,
+        )
+        return "unavailable", None
+    if cid_for_blob(payload_bytes) != payload_hash_hex:
+        raise ValueError(
+            "payload blob hash mismatch against on-chain "
+            f"payloadHash {payload_hash_hex[:16]}"
+        )
+    payload = json.loads(payload_bytes.decode("utf-8"))
+    return "ok", AnchoredPayload(
+        epoch_id=epoch_id,
+        epoch_root_hex=epoch_root_hex,
+        payload_hash_hex=payload_hash_hex,
+        payload=payload,
+    )
+
+
+@dataclass
+class CarryOverFetch:
+    """Outcome of ``fetch_carry_over_from_chain``.
+
+    ``status``:
+      - ``"ok"``: ``carry`` holds the five verified maps produced by the
+        close of ``epoch_id`` (the inputs of the close after it).
+      - ``"genesis"``: no anchors; an empty carry-over is correct.
+      - ``"pre_schema"``: the latest anchor's payload has no
+        ``carry_cid`` (payload schema <= 3); nothing to verify against.
+      - ``"unavailable"``: a required blob is not retrievable (yet).
+    """
+    status: str
+    epoch_id: str = ""
+    # The anchored epoch_root of ``epoch_id`` (canonical-batch merkle
+    # root). The joiner installs only when this equals the root of the
+    # epoch it observed immediately before the close it is about to run.
+    epoch_root_hex: str = ""
+    carry_cid: str = ""
+    payload_schema: Any = None
+    carry: Dict[str, Any] = field(repr=False, default_factory=dict)
+
+
+def fetch_carry_over_from_chain(
+    contract: Any,
+    blob_source: Any,
+) -> CarryOverFetch:
+    """Fetch + verify the latest anchored carry-over bundle.
+
+    latest anchor → payload (cid == on-chain payloadHash) → carry_cid →
+    bundle blob (sha256 == carry_cid, canonical form, epoch_id matches
+    the anchor). Nothing here trusts the peer that served the bytes: the
+    chain commits the payload hash, the payload commits the bundle cid.
+
+    Raises ``ValueError`` on any integrity violation.
+    """
+    get_blob = _blob_getter(blob_source)
+    status, anchored = read_latest_anchored_payload(contract, get_blob)
+    if anchored is None:
+        return CarryOverFetch(status=status)
+
+    schema = anchored.payload.get("schema")
+    carry_cid = str(anchored.payload.get("carry_cid", "") or "")
+    if not carry_cid:
+        return CarryOverFetch(
+            status="pre_schema", epoch_id=anchored.epoch_id,
+            epoch_root_hex=anchored.epoch_root_hex, payload_schema=schema,
+        )
+
+    blob = get_blob(carry_cid)
+    if blob is None:
+        logger.info(
+            "carry-over bundle %s (epoch %s) not retrievable yet",
+            carry_cid[:16], anchored.epoch_id,
+        )
+        return CarryOverFetch(
+            status="unavailable", epoch_id=anchored.epoch_id,
+            epoch_root_hex=anchored.epoch_root_hex,
+            carry_cid=carry_cid, payload_schema=schema,
+        )
+    if cid_for_blob(blob) != carry_cid:
+        raise ValueError(
+            f"carry bundle hash mismatch for cid {carry_cid[:16]} "
+            f"(epoch {anchored.epoch_id})"
+        )
+    bundle = decode_carry_bundle(blob)
+    if bundle["epoch_id"] != anchored.epoch_id:
+        raise ValueError(
+            f"carry bundle epoch {bundle['epoch_id']!r} contradicts the "
+            f"anchor for {anchored.epoch_id!r}"
+        )
+    return CarryOverFetch(
+        status="ok",
+        epoch_id=anchored.epoch_id,
+        epoch_root_hex=anchored.epoch_root_hex,
+        carry_cid=carry_cid,
+        payload_schema=schema,
+        carry=bundle["carry"],
+    )
+
+
 def catch_up_from_chain(
     contract: Any,
     blob_source: Any,
@@ -239,34 +383,19 @@ def catch_up_from_chain(
     """
     get_blob = _blob_getter(blob_source)
 
-    count = int(contract.functions.anchorCount().call())
-    if count == 0:
+    try:
+        status, anchored = read_latest_anchored_payload(contract, get_blob)
+    except ValueError as e:
+        raise ValueError(f"catch-up: {e}") from e
+    if status == "genesis":
         logger.info("catch-up: chain has no anchors yet")
         return None
-
-    anchor = contract.functions.getAnchor(count - 1).call()
-    # Anchor struct order: (epochId, epochRoot, prevEpochRoot,
-    # prevAnchorHash, agentMintCid, payloadHash, submitter,
-    # blockNumber, timestamp)
-    epoch_id = str(anchor[0])
-    epoch_root_hex = bytes(anchor[1]).hex()
-    payload_hash_hex = bytes(anchor[5]).hex()
-
-    payload_bytes = get_blob(payload_hash_hex)
-    if payload_bytes is None:
-        logger.warning(
-            "catch-up: authoritative payload blob %s not retrievable",
-            payload_hash_hex[:16],
-        )
+    if anchored is None:
         return None
-    if cid_for_blob(payload_bytes) != payload_hash_hex:
-        raise ValueError(
-            "catch-up: payload blob hash mismatch against on-chain "
-            f"payloadHash {payload_hash_hex[:16]}"
-        )
+    epoch_id = anchored.epoch_id
+    epoch_root_hex = anchored.epoch_root_hex
 
-    payload = json.loads(payload_bytes.decode("utf-8"))
-    world_cid = str(payload.get("world_cid", ""))
+    world_cid = str(anchored.payload.get("world_cid", ""))
     if not world_cid:
         logger.info(
             "catch-up: anchored payload for %s carries no world_cid "

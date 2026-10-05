@@ -133,7 +133,11 @@ class BlobStore:
         and enables async P2P fallback in get_bytes_async().
         """
         self._p2p_host = host
-        host.set_blob_handler(self._serve_blob_for_p2p)
+        # Register as a source on the host's single blob handler instead
+        # of replacing it (which would silently stop serving blobs other
+        # components published, e.g. world checkpoints / carry bundles).
+        from .blob_resolver import host_blob_server
+        host_blob_server(host).add_source(self.get_bytes_local)
         logger.info("BlobStore wired to P2P host — serving blobs to peers")
 
     async def _serve_blob_for_p2p(self, content_hash: str) -> Optional[bytes]:

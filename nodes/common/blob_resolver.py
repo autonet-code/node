@@ -73,13 +73,96 @@ class BlobIntegrityError(RuntimeError):
     bytes we asked for. Indicates tampering or a confused resolver."""
 
 
+class HostBlobServer:
+    """The ONE ``/autonet/blob/1.0.0`` handler on an ``AutonetHost``.
+
+    ``AutonetHost.set_blob_handler`` holds a single handler, so every
+    component that used to install its own (each LibP2PBlobResolver, the
+    BlobStore) silently replaced the previous one, and whichever was
+    built last was the only store peers could read. Now the host gets
+    exactly one handler (installed on first use, see
+    ``host_blob_server``) serving a shared in-memory map, then any
+    registered read-only sources (e.g. ``BlobStore.get_bytes_local``).
+    Resolvers write into the shared map and only FETCH from peers.
+    """
+
+    def __init__(self, host: Any):
+        self._blobs: dict[str, bytes] = {}
+        self._sources: list = []
+        self._lock = threading.RLock()
+
+        async def _serve(content_hash: str) -> Optional[bytes]:
+            return self.lookup(content_hash)
+
+        self._serve = _serve
+        host.set_blob_handler(_serve)
+
+    def put(self, blob: bytes) -> str:
+        cid = cid_for_blob(blob)
+        with self._lock:
+            self._blobs[cid] = blob
+        return cid
+
+    def get_local(self, cid: str) -> Optional[bytes]:
+        with self._lock:
+            return self._blobs.get(cid)
+
+    def has(self, cid: str) -> bool:
+        with self._lock:
+            return cid in self._blobs
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._blobs)
+
+    def add_source(self, source: Any) -> None:
+        """Register a sync ``cid -> Optional[bytes]`` fallback (served
+        only when its bytes hash to the requested cid)."""
+        with self._lock:
+            if source not in self._sources:
+                self._sources.append(source)
+
+    def lookup(self, cid: str) -> Optional[bytes]:
+        blob = self.get_local(cid)
+        if blob is not None:
+            return blob
+        with self._lock:
+            sources = list(self._sources)
+        for source in sources:
+            try:
+                data = source(cid)
+            except Exception as e:
+                logger.debug("blob source failed for %s: %s", cid[:16], e)
+                continue
+            if data is not None and cid_for_blob(data) == cid:
+                return data
+        return None
+
+
+_HOST_SERVER_LOCK = threading.Lock()
+_HOST_SERVER_ATTR = "_autonet_blob_server"
+
+
+def host_blob_server(host: Any) -> HostBlobServer:
+    """Return the host's single blob server, installing it on first use."""
+    with _HOST_SERVER_LOCK:
+        existing = getattr(host, _HOST_SERVER_ATTR, None)
+        if isinstance(existing, HostBlobServer):
+            return existing
+        server = HostBlobServer(host)
+        setattr(host, _HOST_SERVER_ATTR, server)
+        return server
+
+
 class LibP2PBlobResolver:
     """Cross-daemon blob resolver backed by an ``AutonetHost``.
 
-    Writes go to a local in-memory map AND register a blob handler on
-    the host so peers can fetch via ``/autonet/blob/1.0.0``.
+    Writes go to the host's shared ``HostBlobServer`` map, which the
+    host's single blob handler serves to peers via
+    ``/autonet/blob/1.0.0``. Any number of resolvers on one host share
+    that map; none of them replaces the handler.
 
-    Reads: local map first; on miss, walk every known peer and try
+    Reads: shared map first; on miss, walk every known peer and try
     ``host.fetch_blob`` over libp2p. The host already verifies
     content-hash integrity inside ``fetch_blob``; this resolver
     additionally confirms the returned hex matches the requested
@@ -95,40 +178,22 @@ class LibP2PBlobResolver:
         if host is None:
             raise ValueError("LibP2PBlobResolver requires an AutonetHost")
         self._host = host
-        self._local: dict[str, bytes] = {}
-        self._lock = threading.RLock()
         self._fetch_timeout = fetch_timeout
-
-        # Wire ourselves as the blob handler so peers fetching from
-        # this daemon hit our local store. The host invokes the
-        # handler async (trio); we serve from the in-memory map.
-        async def _serve(content_hash: str) -> Optional[bytes]:
-            with self._lock:
-                return self._local.get(content_hash)
-
-        try:
-            host.set_blob_handler(_serve)
-        except Exception as e:
-            logger.debug("LibP2PBlobResolver: set_blob_handler failed: %s", e)
+        # Shared per-host store + the host's single blob handler.
+        self._server = host_blob_server(host)
 
     def put(self, blob: bytes) -> str:
-        cid = cid_for_blob(blob)
-        with self._lock:
-            self._local[cid] = blob
-        return cid
+        return self._server.put(blob)
 
     def has(self, cid: str) -> bool:
-        with self._lock:
-            return cid in self._local
+        return self._server.has(cid)
 
     def __len__(self) -> int:
-        with self._lock:
-            return len(self._local)
+        return len(self._server)
 
     def get(self, cid: str) -> Optional[bytes]:
-        # Local first.
-        with self._lock:
-            blob = self._local.get(cid)
+        # Local first (shared map + registered sources).
+        blob = self._server.lookup(cid)
         if blob is not None:
             return blob
 
@@ -150,8 +215,7 @@ class LibP2PBlobResolver:
                 )
                 continue
             # Cache so subsequent calls (including peers hitting us) hit local.
-            with self._lock:
-                self._local[cid] = blob
+            self._server.put(blob)
             return blob
         return None
 

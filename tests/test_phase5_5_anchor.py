@@ -79,6 +79,7 @@ def chain():
         w3, deployer, abi, bytecode,
         deployer,  # treasury
         "0x0000000000000000000000000000000000000000",  # vaultMinter (off)
+        "0x0000000000000000000000000000000000000000",  # governor (unset)
     )
     contract = w3.eth.contract(address=addr, abi=abi)
     return {

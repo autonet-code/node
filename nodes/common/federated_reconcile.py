@@ -1342,7 +1342,9 @@ def federated_epoch_close(
         # leaf. ``agent_rep`` is gone: REP is claimed DAO-side on ratified
         # ATN earnings, not federation-minted here. (Schema 2 was the v4.1
         # 3-field agent_rep shape; not reused for this different shape.)
-        "schema": 3,
+        # schema 4: + carry_cid (set by FederatedCloseDriver, like
+        # world_cid) committing the next close's carry-over bundle.
+        "schema": 4,
         "epoch_root": result["epoch_root"],
         "agent_mint": result["agent_mint"],
         "agent_novelty": result["agent_novelty"],

@@ -9,7 +9,6 @@ Story 6.1: Solver node as daemon background service.
 """
 
 import logging
-import os
 import signal
 import sys
 import time
@@ -910,17 +909,6 @@ class AutonetService:
         # identically to its peers: no chain read access below, or no
         # carry-over files past genesis. See participation_blockers().
         self._federated_close_driver.enforce_preconditions = True
-        # Bootstrap for a daemon joining after genesis: the carry-over
-        # files are only written by a successful close, so without a seed
-        # the refusal above would be permanent. The operator points this
-        # at an in-sync peer's state dir (copied or mounted); only missing
-        # files are imported.
-        seed_dir = os.environ.get("ATN_CARRY_OVER_SEED_DIR")
-        if seed_dir:
-            try:
-                self._federated_close_driver.import_carry_over(seed_dir)
-            except Exception as e:
-                logger.warning("carry-over seed import failed: %s", e)
 
         # Household voice + fee-recycled emission sourcing. Wired here —
         # NOT in attach_chain_submission — because these are CLOSE
@@ -946,6 +934,36 @@ class AutonetService:
                 )
 
             self._federated_close_driver.voice_source = _voice_source
+
+            # Joiner bootstrap (payload schema 4): a daemon that first
+            # boots after anchors exist has no carry-over files, and they
+            # are only written by a close. The driver fetches the latest
+            # anchor's carry_cid bundle from peers and verifies it against
+            # the on-chain payloadHash before installing it; it observes
+            # until that succeeds. Blobs come from the chain-submission
+            # resolver (libp2p in the daemon), looked up per call because
+            # it is attached after this driver.
+            def _carry_source():
+                from web3 import Web3
+                from .common.state_sync import (
+                    CarryOverFetch,
+                    fetch_carry_over_from_chain,
+                )
+                from .common.voice_state import _VOICE_ABI
+                csd = getattr(self, "_chain_submission_driver", None)
+                resolver = getattr(csd, "blob_resolver", None)
+                if resolver is None:
+                    logger.info(
+                        "carry-over fetch: no blob resolver attached yet")
+                    return CarryOverFetch(status="unavailable")
+                w3 = Web3(Web3.HTTPProvider(rpc_url))
+                contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(substrate_addr),
+                    abi=_VOICE_ABI,
+                )
+                return fetch_carry_over_from_chain(contract, resolver)
+
+            self._federated_close_driver.carry_source = _carry_source
             logger.info(
                 "Voice/emission source wired (substrate=%s, rep_token=%s)",
                 substrate_addr, rep_token_addr or "(none)",

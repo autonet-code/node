@@ -34,6 +34,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .authoritative_encoding import (
+    CARRY_KEYS,
+    cid_for_blob,
+    encode_carry_bundle,
+)
 from .canonical_ordering import canonical_order
 from .event_gossip import EventBatch, EventGossip
 from .federated_reconcile import federated_epoch_close
@@ -59,6 +64,13 @@ class FederatedCloseResult:
     # the blob resolver by the chain submission driver.
     world_cid: str = ""
     world_checkpoint_blob: bytes = b""
+    # Verifiable carry-over (payload schema 4). Every daemon computes the
+    # same canonical bundle of the five tool maps this close produced
+    # (the next close's inputs); its cid rides the payload's carry_cid
+    # field and every daemon publishes the blob, so a joiner can fetch
+    # and verify it against the anchor instead of trusting a peer.
+    carry_cid: str = ""
+    carry_bundle_blob: bytes = b""
 
 
 def pick_submitter(
@@ -206,6 +218,20 @@ class FederatedCloseDriver:
         # has no anchors yet (genesis, empty carry-over is correct),
         # False when it has anchors, None when unknown.
         self._chain_at_genesis: Optional[bool] = None
+        # Joiner bootstrap (payload schema 4): zero-arg hook returning a
+        # state_sync.CarryOverFetch for the latest anchor (wired by the
+        # host from chain read access + the blob resolver). Consulted
+        # only while carry-over files are missing past genesis; the
+        # daemon observes (refuses to close) until it yields a verified
+        # bundle.
+        self.carry_source: Optional[Callable[[], Any]] = None
+        # Canonical epoch_root (hex) of the most recent epoch whose
+        # batches this daemon drained, closed or merely observed. A joiner
+        # installs an anchored bundle only when the anchor's epoch_root
+        # equals this value at the next close: that proves the bundle is
+        # the output of the epoch IMMEDIATELY before the one being closed
+        # (epoch ids are per-daemon, so roots are the shared identity).
+        self._last_observed_root: Optional[str] = None
 
     def carry_over_paths(self) -> Dict[str, Optional[Path]]:
         """The on-disk carry-over files every close reads as INPUTS."""
@@ -217,57 +243,115 @@ class FederatedCloseDriver:
             "tool_review_book": self._tool_review_book_path,
         }
 
-    def import_carry_over(self, source_dir: Any) -> List[str]:
-        """Seed missing carry-over files from another daemon's state dir.
+    def carry_over_maps(self) -> Dict[str, Any]:
+        """The in-memory carry-over (keyed like ``CARRY_KEYS``)."""
+        return {
+            "tool_registrations": self._tool_registrations,
+            "tool_vetting": self._tool_vetting,
+            "tool_positions": self._tool_positions,
+            "tool_credibility": self._tool_credibility,
+            "tool_review_book": self._tool_review_book,
+        }
 
-        The bootstrap path for a daemon that first boots after the chain
-        has anchors: without this, the precondition refusal is permanent
-        (the files are only written by a successful close, and a close is
-        refused until they exist). The source must be a daemon that is in
-        sync with the network (same last anchored epoch); the files are a
-        rebuildable cache, so the trust is the operator's choice of peer.
-        Nothing on chain commits the carry-over yet, so it cannot be
-        verified here.
+    def install_carry_over(self, carry: Dict[str, Any]) -> None:
+        """Install a VERIFIED carry-over bundle (all five maps) as this
+        daemon's close inputs: persist every file, then reload the
+        in-memory maps through the normal loaders so the joiner holds
+        exactly what an always-on daemon would after a restart.
 
-        Copies only files that are missing locally (never overwrites
-        state this daemon accumulated itself), validates each as a JSON
-        object, then reloads the in-memory maps. Returns the keys
-        imported.
+        Callers must only pass maps from ``fetch_carry_over_from_chain``
+        (hash-checked against the anchored payload's ``carry_cid``).
         """
-        src = Path(source_dir)
-        imported: List[str] = []
-        for key, dest in self.carry_over_paths().items():
-            if dest is None or dest.exists():
-                continue
-            candidate = src / dest.name
-            if not candidate.is_file():
-                continue
-            try:
-                data = json.loads(candidate.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as e:
-                logger.warning("carry-over seed %s unreadable: %s", candidate, e)
-                continue
-            if not isinstance(data, dict):
-                logger.warning("carry-over seed %s is not a JSON object", candidate)
-                continue
-            try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                tmp = dest.with_suffix(dest.suffix + ".tmp")
-                tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
-                os.replace(tmp, dest)
-            except OSError as e:
-                logger.warning("failed to import carry-over %s: %s", key, e)
-                continue
-            imported.append(key)
-        if imported:
-            self._tool_registrations = self._load_tool_registrations()
-            self._tool_vetting = self._load_tool_vetting()
-            self._tool_positions = self._load_tool_positions()
-            self._tool_credibility = self._load_tool_credibility()
-            self._tool_review_book = self._load_tool_review_book()
-            logger.info("imported carry-over from %s: %s",
-                        src, ", ".join(imported))
-        return imported
+        missing = [k for k in CARRY_KEYS if not isinstance(carry.get(k), dict)]
+        if missing:
+            raise ValueError(
+                "carry-over install missing maps: " + ", ".join(missing))
+        self._tool_registrations = dict(carry["tool_registrations"])
+        self._save_tool_registrations()
+        self._tool_vetting = dict(carry["tool_vetting"])
+        self._save_tool_vetting()
+        self._tool_positions = dict(carry["tool_positions"])
+        self._save_tool_positions()
+        self._tool_credibility = dict(carry["tool_credibility"])
+        self._save_tool_credibility()
+        self._tool_review_book = dict(carry["tool_review_book"])
+        self._save_tool_review_book()
+        self._tool_registrations = self._load_tool_registrations()
+        self._tool_vetting = self._load_tool_vetting()
+        self._tool_positions = self._load_tool_positions()
+        self._tool_credibility = self._load_tool_credibility()
+        self._tool_review_book = self._load_tool_review_book()
+
+    def _carry_files_missing(self) -> bool:
+        paths = self.carry_over_paths()
+        return any(v is not None and not v.exists() for v in paths.values())
+
+    def _maybe_join_from_chain(self, prev_root: Optional[str]) -> Optional[str]:
+        """Joiner bootstrap: while carry-over files are missing and the
+        chain has anchors, fetch the latest anchored carry-over bundle
+        (payload ``carry_cid``, sha256-verified) and install it, but only
+        if that anchor is the epoch this daemon observed immediately
+        before the close it is about to run (``prev_root``). A lagging
+        anchor (the winner failed to anchor the last epoch) or a partially
+        observed prior epoch means the bundle would be stale: observe.
+
+        Returns the epoch_id whose close produced the installed bundle,
+        or None when nothing was installed (the daemon keeps observing).
+        """
+        if self.carry_source is None or self._chain_at_genesis is not False:
+            return None
+        paths = self.carry_over_paths()
+        if any(v is None for v in paths.values()):
+            return None
+        if not self._carry_files_missing():
+            return None
+        if prev_root is None:
+            logger.info(
+                "federated close: joiner has not observed a prior epoch yet; "
+                "observing this one before fetching the anchored carry-over")
+            return None
+        try:
+            fetch = self.carry_source()
+        except ValueError as e:
+            logger.error(
+                "federated close: REJECTED anchored carry-over bundle "
+                "(integrity check failed, staying in observe mode): %s", e)
+            return None
+        except Exception as e:
+            logger.warning(
+                "federated close: carry-over fetch failed (observing): %s", e)
+            return None
+        status = getattr(fetch, "status", "")
+        if status == "ok" and str(
+                getattr(fetch, "epoch_root_hex", "") or "") != prev_root:
+            logger.warning(
+                "federated close: latest anchor (epoch %s, root %s) is not "
+                "the epoch observed immediately before this close (root "
+                "%s): the anchor lags (last winner failed to anchor) or this "
+                "daemon saw only part of that epoch; refusing to install a "
+                "stale carry-over, observing",
+                fetch.epoch_id, str(fetch.epoch_root_hex)[:16],
+                prev_root[:16])
+            return None
+        if status == "ok":
+            self.install_carry_over(fetch.carry)
+            logger.info(
+                "federated close: installed verified carry-over from the "
+                "anchor for epoch %s (carry_cid=%s)",
+                fetch.epoch_id, str(fetch.carry_cid)[:16])
+            return str(fetch.epoch_id)
+        if status == "pre_schema":
+            logger.warning(
+                "federated close: latest anchor (epoch %s, payload schema "
+                "%s) predates carry-over commitments (no carry_cid); this "
+                "daemon cannot verify a carry-over and will not close until "
+                "the network anchors a schema-4 epoch",
+                fetch.epoch_id, fetch.payload_schema)
+        elif status == "unavailable":
+            logger.info(
+                "federated close: anchored carry-over for epoch %s not "
+                "retrievable from peers yet; observing", fetch.epoch_id)
+        return None
 
     def participation_blockers(self) -> List[str]:
         """Reasons this daemon must not take part in a federated close.
@@ -342,29 +426,39 @@ class FederatedCloseDriver:
 
         self._refresh_voice()
 
-        if self.enforce_preconditions:
-            blockers = self.participation_blockers()
-            if blockers:
-                # Batches are already drained, so they don't leak into
-                # the next epoch's close.
-                hint = ""
-                if any(b.startswith("missing carry-over") for b in blockers):
-                    hint = (" (to join, seed the tool_*.json files from an "
-                            "in-sync peer's state dir: set "
-                            "ATN_CARRY_OVER_SEED_DIR and restart)")
-                logger.warning(
-                    "federated close: refusing to participate in epoch %s: %s%s",
-                    local_close_result.get("epoch_id"), "; ".join(blockers),
-                    hint,
-                )
-                return None
-
         canonical = canonical_order(batches)
         if not canonical.ordered_batches:
             logger.debug(
                 "federated close: canonical empty after dropping invalid senders",
             )
             return None
+        # Remember this epoch's canonical root (closed or only observed)
+        # so the NEXT close can check a fetched bundle is exactly the
+        # output of the epoch before it.
+        prev_root = self._last_observed_root
+        self._last_observed_root = canonical.epoch_root().hex()
+
+        if self.enforce_preconditions:
+            self._maybe_join_from_chain(prev_root)
+            blockers = self.participation_blockers()
+            if blockers:
+                # Batches are already drained, so they don't leak into
+                # the next epoch's close.
+                hint = ""
+                if any(b.startswith("missing carry-over") for b in blockers):
+                    hint = (" (observing: the carry-over is installed from the "
+                            "latest anchor's carry_cid once that anchor is the "
+                            "epoch observed just before a close and its bundle "
+                            "is retrievable from peers)"
+                            if self.carry_source is not None else
+                            " (no carry-over source wired: needs chain read "
+                            "access and a blob resolver)")
+                logger.warning(
+                    "federated close: refusing to participate in epoch %s: %s%s",
+                    local_close_result.get("epoch_id"), "; ".join(blockers),
+                    hint,
+                )
+                return None
 
         # Replay the canonical sequence on a fresh charter world. This
         # produces the bit-identical authoritative_payload across
@@ -443,6 +537,17 @@ class FederatedCloseDriver:
         epoch_id = str(local_close_result.get("epoch_id") or "")
         close_result["epoch_id"] = epoch_id
 
+        # Verifiable carry-over (payload schema 4): commit the five maps
+        # this close produced (the next close's inputs) as one canonical
+        # bundle whose cid rides the payload. Pure function of the close
+        # output, so identical on every honest daemon.
+        carry_blob = encode_carry_bundle(
+            self.carry_over_maps(), epoch_id=epoch_id)
+        carry_cid = cid_for_blob(carry_blob)
+        _payload = close_result.get("authoritative_payload")
+        if _payload is not None:
+            _payload["carry_cid"] = carry_cid
+
         # State sync: advance the cumulative canonical world and embed
         # its checkpoint cid in the payload BEFORE the payload gets
         # encoded/anchored. Deterministic across daemons, so the
@@ -489,6 +594,8 @@ class FederatedCloseDriver:
             n_batches=len(canonical.ordered_batches),
             world_cid=world_cid,
             world_checkpoint_blob=world_blob,
+            carry_cid=carry_cid,
+            carry_bundle_blob=carry_blob,
         )
 
     # ---- tool-registration carry-over persistence -------------------

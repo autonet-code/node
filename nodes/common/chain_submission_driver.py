@@ -155,6 +155,17 @@ class ChainSubmissionDriver:
                 out["world_cid"] = fed.world_cid
             except Exception as e:
                 logger.warning("world checkpoint blob put failed: %s", e)
+        # Verifiable carry-over (payload schema 4): same contract as the
+        # world blob. Every daemon computed the identical bundle, so every
+        # daemon serves it; a joiner verifies it against the anchored
+        # payload's carry_cid, so it doesn't matter which peer answers.
+        carry_blob = getattr(fed, "carry_bundle_blob", b"")
+        if carry_blob:
+            try:
+                self._blob_resolver.put(carry_blob)
+                out["carry_cid"] = fed.carry_cid
+            except Exception as e:
+                logger.warning("carry-over bundle blob put failed: %s", e)
 
         if fed.is_winner:
             anchor_result = self._anchor(fed)
