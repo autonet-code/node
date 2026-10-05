@@ -150,6 +150,10 @@ include = ["atn*", "nodes*", "bridge", "world_model*"]
 "atn.connectors.browser_relay" = ["extension/*", "extension/icons/*"]
 "bridge" = ["*.ts", "package.json", "bun.lock"]
 "atn._vendor.kevin.vault" = ["*.md"]
+# ABI-only contract copies (artifacts/ is gitignored and never ships).
+# Resolved by nodes/common/contract_artifacts.py; refresh with
+# scripts/sync_contract_abis.py.
+"nodes.common" = ["abi/*.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

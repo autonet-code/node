@@ -1,0 +1,108 @@
+# Autonet daemon container: the full ATN Runtime (keystore, vault, event
+# gossip, federated close, chain submission, tool_guard execution).
+#
+# Supersedes the pre-substrate Dockerfile.node (moved to
+# legacy/pre-substrate/, it ran the dissolved nodes.core.node roles).
+#
+# Build from the repo root:
+#   docker build -f docker/Dockerfile.daemon -t autonet-daemon .
+#
+# State lives on ONE volume at /data/atn (the daemon's ~/.atn: config.yaml,
+# keystore, vault, agents, world state, carry-over files). The image's
+# ~/.atn is a symlink to it, so the root filesystem can stay read-only.
+#
+# Ports: only two leave the container.
+#   ATN_INTEGRATION_WS_PORT (7710) - bearer-token integration listener for
+#                                    an embedding host
+#                                    (docs/integration_listener.md). Internal
+#                                    Docker network only, never published.
+#   AUTONET_P2P_PORT        (4001) - libp2p event gossip / blob transfer.
+# The local owner WS (:7700) binds 127.0.0.1 inside the container and is
+# deliberately NOT exposed.
+#
+# Compose snippet (hardened):
+#
+#   services:
+#     autonet-node:
+#       build:
+#         context: .
+#         dockerfile: docker/Dockerfile.daemon
+#       volumes:
+#         - atn-data:/data/atn
+#       ports:
+#         - "4001:4001"            # libp2p (public)
+#       expose:
+#         - "7710"                 # integration listener (internal network only)
+#       environment:
+#         AUTONET_RPC_URL: ${AUTONET_RPC_URL}
+#         AUTONET_SUBSTRATE_ADDRESS: ${AUTONET_SUBSTRATE_ADDRESS}
+#       cap_drop: [ALL]
+#       security_opt: ["no-new-privileges:true"]
+#       read_only: true
+#       tmpfs:
+#         - /tmp:rw,noexec,nosuid,size=256m
+#       pids_limit: 512
+#       restart: unless-stopped
+#   volumes:
+#     atn-data:
+
+# ---- build stage: compile wheels that need a toolchain (libp2p deps) ----
+FROM python:3.11-slim-bookworm AS build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential libgmp-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE ./
+COPY atn/ atn/
+COPY nodes/ nodes/
+COPY bridge/ bridge/
+COPY world_model/ world_model/
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install .
+
+# ---- runtime stage ----
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgmp10 tini \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG ATN_UID=10001
+RUN groupadd --system --gid ${ATN_UID} atn \
+    && useradd --system --uid ${ATN_UID} --gid atn \
+       --home-dir /home/atn --create-home --shell /usr/sbin/nologin atn \
+    && mkdir -p /data/atn \
+    && chown atn:atn /data/atn \
+    && chmod 0700 /data/atn \
+    && ln -s /data/atn /home/atn/.atn
+
+COPY --from=build /opt/venv /opt/venv
+
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/home/atn \
+    KEYSTORE_DIR=/data/atn/keystore \
+    ATN_DATA_DIR=/data/atn \
+    XDG_CACHE_HOME=/tmp/cache \
+    ATN_INTEGRATION_WS=1 \
+    ATN_INTEGRATION_WS_HOST=0.0.0.0 \
+    ATN_INTEGRATION_WS_PORT=7710 \
+    AUTONET_P2P_PORT=4001
+
+VOLUME ["/data/atn"]
+EXPOSE 7710 4001
+
+USER atn
+WORKDIR /home/atn
+
+# tini reaps the tool_guard / worker subprocesses the runtime spawns.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["atn", "--headless"]

@@ -240,6 +240,7 @@ def _apply_env_overrides(raw: dict) -> dict:
         AUTONET_NUM_SAMPLES     -> training.num_samples
         AUTONET_IMAGE_SIZE      -> model.image_size
         AUTONET_ARCHITECTURE    -> model.architecture
+        AUTONET_P2P_PORT        -> p2p.listen_port
     """
     env_map = {
         "AUTONET_DEVICE": ("device", str),
@@ -250,6 +251,7 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_BLOB_DIR": ("blob_store.data_dir", str),
         "AUTONET_DATA_DIR": ("data_dir", str),
         "AUTONET_LOG_LEVEL": ("log_level", str),
+        "AUTONET_P2P_PORT": ("p2p.listen_port", int),
         "AUTONET_SEED": ("seed", int),
         "AUTONET_TASK_TYPE": ("training.task_type", str),
         "AUTONET_EPOCHS": ("training.epochs", int),

@@ -1,0 +1,1973 @@
+{
+ "contractName": "Substrate",
+ "abi": [
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "treasury_",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "vaultMinter_",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "governor_",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "nonpayable",
+   "type": "constructor"
+  },
+  {
+   "inputs": [],
+   "name": "AgentNotActive",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "AlreadyRegistered",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "AlreadySubmittedForEpoch",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "BadOwnerBindingSignature",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "CheckpointUnorderedInsertion",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "ECDSAInvalidSignature",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "length",
+     "type": "uint256"
+    }
+   ],
+   "name": "ECDSAInvalidSignatureLength",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "s",
+     "type": "bytes32"
+    }
+   ],
+   "name": "ECDSAInvalidSignatureS",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "string",
+     "name": "epochId",
+     "type": "string"
+    }
+   ],
+   "name": "EpochAlreadyAnchored",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "EpochIdEmpty",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "EpochNotAnchored",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint16",
+     "name": "bps",
+     "type": "uint16"
+    }
+   ],
+   "name": "FeeOutOfBounds",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "requested",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "available",
+     "type": "uint256"
+    }
+   ],
+   "name": "InsufficientATN",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "requested",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "available",
+     "type": "uint256"
+    }
+   ],
+   "name": "InsufficientAllowance",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "InvalidShortString",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "LineageHashAlreadyUsed",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "LineageHashRequired",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "ManifestDigestRequired",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "MintProofInvalid",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "MintRootMissing",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "NotGovernor",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "NotVaultMinter",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "OwnerRequired",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "ParentNotRegistered",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "ParentOwnerMismatch",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "PeerIdRequired",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "expected",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "got",
+     "type": "bytes32"
+    }
+   ],
+   "name": "PrevAnchorHashMismatch",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "expected",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "got",
+     "type": "bytes32"
+    }
+   ],
+   "name": "PrevEpochRootMismatch",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "string",
+     "name": "str",
+     "type": "string"
+    }
+   ],
+   "name": "StringTooLong",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "manifestDigest",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "address",
+     "name": "author",
+     "type": "address"
+    }
+   ],
+   "name": "ToolAlreadyRegistered",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "TransferToZero",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "VaultDisabled",
+   "type": "error"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "owner",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "spender",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "ATNApproval",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "from",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "to",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "ATNTransfer",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "bytes32",
+     "name": "lineageHash",
+     "type": "bytes32"
+    },
+    {
+     "indexed": false,
+     "internalType": "bytes",
+     "name": "peerId",
+     "type": "bytes"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "timestamp",
+     "type": "uint256"
+    }
+   ],
+   "name": "AgentRegistered",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [],
+   "name": "EIP712DomainChanged",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "string",
+     "name": "wsEndpoint",
+     "type": "string"
+    }
+   ],
+   "name": "EndpointUpdated",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "string",
+     "name": "epochId",
+     "type": "string"
+    },
+    {
+     "indexed": true,
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    },
+    {
+     "indexed": true,
+     "internalType": "bytes32",
+     "name": "epochRoot",
+     "type": "bytes32"
+    },
+    {
+     "indexed": false,
+     "internalType": "bytes32",
+     "name": "prevEpochRoot",
+     "type": "bytes32"
+    },
+    {
+     "indexed": false,
+     "internalType": "bytes32",
+     "name": "prevAnchorHash",
+     "type": "bytes32"
+    },
+    {
+     "indexed": false,
+     "internalType": "bytes32",
+     "name": "payloadHash",
+     "type": "bytes32"
+    },
+    {
+     "indexed": false,
+     "internalType": "string",
+     "name": "agentMintCid",
+     "type": "string"
+    },
+    {
+     "indexed": false,
+     "internalType": "address",
+     "name": "submitter",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "blockNumber",
+     "type": "uint256"
+    }
+   ],
+   "name": "EpochAnchored",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "owner",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "parent",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "address",
+     "name": "prevOwner",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "nonce",
+     "type": "uint256"
+    }
+   ],
+   "name": "OwnerBound",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "bytes",
+     "name": "peerId",
+     "type": "bytes"
+    }
+   ],
+   "name": "PeerIdUpdated",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "payer",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "recipient",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "burned",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "toTreasury",
+     "type": "uint256"
+    }
+   ],
+   "name": "ServiceFee",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": false,
+     "internalType": "uint16",
+     "name": "oldBps",
+     "type": "uint16"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint16",
+     "name": "newBps",
+     "type": "uint16"
+    }
+   ],
+   "name": "ServiceFeeBpsSet",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "payer",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "recipient",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    },
+    {
+     "indexed": true,
+     "internalType": "bytes32",
+     "name": "requestId",
+     "type": "bytes32"
+    }
+   ],
+   "name": "ServicePayment",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "bytes32",
+     "name": "manifestDigest",
+     "type": "bytes32"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "timestamp",
+     "type": "uint256"
+    }
+   ],
+   "name": "ToolRegistered",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "cumulativeForAgent",
+     "type": "uint256"
+    }
+   ],
+   "name": "TrainingRecorded",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "to",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "VaultMint",
+   "type": "event"
+  },
+  {
+   "inputs": [],
+   "name": "BPS_DENOM",
+   "outputs": [
+    {
+     "internalType": "uint16",
+     "name": "",
+     "type": "uint16"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "FEE_TREASURY_BPS",
+   "outputs": [
+    {
+     "internalType": "uint16",
+     "name": "",
+     "type": "uint16"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "MAX_SERVICE_FEE_BPS",
+   "outputs": [
+    {
+     "internalType": "uint16",
+     "name": "",
+     "type": "uint16"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "MIN_SERVICE_FEE_BPS",
+   "outputs": [
+    {
+     "internalType": "uint16",
+     "name": "",
+     "type": "uint16"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "name": "agentByLineage",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "agentMintTotal",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "agentOwner",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "agentParent",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "agents",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "lineageHash",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "uint256",
+     "name": "registeredAt",
+     "type": "uint256"
+    },
+    {
+     "internalType": "bool",
+     "name": "active",
+     "type": "bool"
+    },
+    {
+     "internalType": "uint256",
+     "name": "totalTrainingMint",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "trainingSubmissionCount",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "owner",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "spender",
+     "type": "address"
+    }
+   ],
+   "name": "allowance",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "anchorCount",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "spender",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "approve",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address[]",
+     "name": "addrs",
+     "type": "address[]"
+    }
+   ],
+   "name": "areRegistered",
+   "outputs": [
+    {
+     "internalType": "bool[]",
+     "name": "",
+     "type": "bool[]"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "atnTotalSupply",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "blockNumber",
+     "type": "uint256"
+    }
+   ],
+   "name": "atnTotalSupplyAt",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "owner",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "parentAgent",
+     "type": "address"
+    },
+    {
+     "internalType": "bytes",
+     "name": "ownerSig",
+     "type": "bytes"
+    }
+   ],
+   "name": "attachOwner",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    }
+   ],
+   "name": "balanceOf",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "blockNumber",
+     "type": "uint256"
+    }
+   ],
+   "name": "balanceOfAt",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "parent",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "nonce",
+     "type": "uint256"
+    }
+   ],
+   "name": "bindingHash",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "bindingNonce",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "eip712Domain",
+   "outputs": [
+    {
+     "internalType": "bytes1",
+     "name": "fields",
+     "type": "bytes1"
+    },
+    {
+     "internalType": "string",
+     "name": "name",
+     "type": "string"
+    },
+    {
+     "internalType": "string",
+     "name": "version",
+     "type": "string"
+    },
+    {
+     "internalType": "uint256",
+     "name": "chainId",
+     "type": "uint256"
+    },
+    {
+     "internalType": "address",
+     "name": "verifyingContract",
+     "type": "address"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "salt",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "uint256[]",
+     "name": "extensions",
+     "type": "uint256[]"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    }
+   ],
+   "name": "getAgentEndpoint",
+   "outputs": [
+    {
+     "internalType": "string",
+     "name": "",
+     "type": "string"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    }
+   ],
+   "name": "getAgentOwner",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    }
+   ],
+   "name": "getAgentParent",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    }
+   ],
+   "name": "getAgentPeerId",
+   "outputs": [
+    {
+     "internalType": "bytes",
+     "name": "",
+     "type": "bytes"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    }
+   ],
+   "name": "getAnchor",
+   "outputs": [
+    {
+     "components": [
+      {
+       "internalType": "string",
+       "name": "epochId",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "epochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevEpochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevAnchorHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "string",
+       "name": "agentMintCid",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "payloadHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "address",
+       "name": "submitter",
+       "type": "address"
+      },
+      {
+       "internalType": "uint256",
+       "name": "blockNumber",
+       "type": "uint256"
+      },
+      {
+       "internalType": "uint256",
+       "name": "timestamp",
+       "type": "uint256"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "agentMintRoot",
+       "type": "bytes32"
+      }
+     ],
+     "internalType": "struct Substrate.Anchor",
+     "name": "",
+     "type": "tuple"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "string",
+     "name": "epochId",
+     "type": "string"
+    }
+   ],
+   "name": "getAnchorByEpochId",
+   "outputs": [
+    {
+     "components": [
+      {
+       "internalType": "string",
+       "name": "epochId",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "epochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevEpochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevAnchorHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "string",
+       "name": "agentMintCid",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "payloadHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "address",
+       "name": "submitter",
+       "type": "address"
+      },
+      {
+       "internalType": "uint256",
+       "name": "blockNumber",
+       "type": "uint256"
+      },
+      {
+       "internalType": "uint256",
+       "name": "timestamp",
+       "type": "uint256"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "agentMintRoot",
+       "type": "bytes32"
+      }
+     ],
+     "internalType": "struct Substrate.Anchor",
+     "name": "",
+     "type": "tuple"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    }
+   ],
+   "name": "getRegisteredAgent",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "governor",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "hasSubmittedForEpoch",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "string",
+     "name": "epochId",
+     "type": "string"
+    }
+   ],
+   "name": "isAnchored",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "isAnchoredByHash",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agent",
+     "type": "address"
+    }
+   ],
+   "name": "isRegistered",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "manifestDigest",
+     "type": "bytes32"
+    }
+   ],
+   "name": "isToolRegistered",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "latestAnchorHash",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "latestEpochRoot",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "name": "mintForEpoch",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "to",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "mintFromVault",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "networkMintTotal",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "recipient",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "requestId",
+     "type": "bytes32"
+    }
+   ],
+   "name": "payForService",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "epochIdHash",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes32[]",
+     "name": "proof",
+     "type": "bytes32[]"
+    }
+   ],
+   "name": "recordTrainingForEpoch",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "lineageHash",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes",
+     "name": "peerId",
+     "type": "bytes"
+    }
+   ],
+   "name": "registerAgent",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "lineageHash",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes",
+     "name": "peerId",
+     "type": "bytes"
+    },
+    {
+     "internalType": "address",
+     "name": "owner",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "parentAgent",
+     "type": "address"
+    },
+    {
+     "internalType": "bytes",
+     "name": "ownerSig",
+     "type": "bytes"
+    }
+   ],
+   "name": "registerAgentBound",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "manifestDigest",
+     "type": "bytes32"
+    }
+   ],
+   "name": "registerTool",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "registeredAgentCount",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "newOwner",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "newParent",
+     "type": "address"
+    },
+    {
+     "internalType": "bytes",
+     "name": "newOwnerSig",
+     "type": "bytes"
+    }
+   ],
+   "name": "rotateOwner",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "agentA",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "agentB",
+     "type": "address"
+    }
+   ],
+   "name": "sameOwner",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "serviceEarnings",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "serviceFeeBps",
+   "outputs": [
+    {
+     "internalType": "uint16",
+     "name": "",
+     "type": "uint16"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint16",
+     "name": "newBps",
+     "type": "uint16"
+    }
+   ],
+   "name": "setServiceFeeBps",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "string",
+     "name": "epochId",
+     "type": "string"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "epochRoot",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "prevEpochRoot",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "prevAnchorHash",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "string",
+     "name": "agentMintCid",
+     "type": "string"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "payloadHash",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "agentMintRoot",
+     "type": "bytes32"
+    }
+   ],
+   "name": "submitAnchor",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "name": "toolAuthor",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "toolCountByAgent",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "name": "toolRegisteredAt",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "to",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "transfer",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "from",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "to",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "transferFrom",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "treasury",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "string",
+     "name": "wsEndpoint",
+     "type": "string"
+    }
+   ],
+   "name": "updateEndpoint",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes",
+     "name": "peerId",
+     "type": "bytes"
+    }
+   ],
+   "name": "updatePeerId",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "vaultMinter",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  }
+ ]
+}

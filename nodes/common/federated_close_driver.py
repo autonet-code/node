@@ -197,12 +197,117 @@ class FederatedCloseDriver:
         # close prices this epoch's voices from current chain state; on
         # failure the previous maps stand (stale beats forked).
         self.voice_source: Optional[Any] = None
+        # Participation preconditions (off by default so library/test use
+        # is unchanged; AutonetService turns it on). When on, run()
+        # refuses to close (log + skip) while a close here would fork
+        # from peers: no chain read access, or missing carry-over state.
+        self.enforce_preconditions: bool = False
+        # Set by the latest successful voice refresh: True when the chain
+        # has no anchors yet (genesis, empty carry-over is correct),
+        # False when it has anchors, None when unknown.
+        self._chain_at_genesis: Optional[bool] = None
+
+    def carry_over_paths(self) -> Dict[str, Optional[Path]]:
+        """The on-disk carry-over files every close reads as INPUTS."""
+        return {
+            "tool_registrations": self._tool_registrations_path,
+            "tool_vetting": self._tool_vetting_path,
+            "tool_positions": self._tool_positions_path,
+            "tool_credibility": self._tool_credibility_path,
+            "tool_review_book": self._tool_review_book_path,
+        }
+
+    def import_carry_over(self, source_dir: Any) -> List[str]:
+        """Seed missing carry-over files from another daemon's state dir.
+
+        The bootstrap path for a daemon that first boots after the chain
+        has anchors: without this, the precondition refusal is permanent
+        (the files are only written by a successful close, and a close is
+        refused until they exist). The source must be a daemon that is in
+        sync with the network (same last anchored epoch); the files are a
+        rebuildable cache, so the trust is the operator's choice of peer.
+        Nothing on chain commits the carry-over yet, so it cannot be
+        verified here.
+
+        Copies only files that are missing locally (never overwrites
+        state this daemon accumulated itself), validates each as a JSON
+        object, then reloads the in-memory maps. Returns the keys
+        imported.
+        """
+        src = Path(source_dir)
+        imported: List[str] = []
+        for key, dest in self.carry_over_paths().items():
+            if dest is None or dest.exists():
+                continue
+            candidate = src / dest.name
+            if not candidate.is_file():
+                continue
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning("carry-over seed %s unreadable: %s", candidate, e)
+                continue
+            if not isinstance(data, dict):
+                logger.warning("carry-over seed %s is not a JSON object", candidate)
+                continue
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                tmp = dest.with_suffix(dest.suffix + ".tmp")
+                tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+                os.replace(tmp, dest)
+            except OSError as e:
+                logger.warning("failed to import carry-over %s: %s", key, e)
+                continue
+            imported.append(key)
+        if imported:
+            self._tool_registrations = self._load_tool_registrations()
+            self._tool_vetting = self._load_tool_vetting()
+            self._tool_positions = self._load_tool_positions()
+            self._tool_credibility = self._load_tool_credibility()
+            self._tool_review_book = self._load_tool_review_book()
+            logger.info("imported carry-over from %s: %s",
+                        src, ", ".join(imported))
+        return imported
+
+    def participation_blockers(self) -> List[str]:
+        """Reasons this daemon must not take part in a federated close.
+
+        Empty list = clear to close. A close needs (a) chain read access,
+        since voice weights and the fees-only pool are close inputs (see
+        AutonetService._init_federated_close_driver), and (b) the
+        carry-over files. Missing carry-over is only correct at genesis
+        (chain has no anchors yet); after that, closing against an empty
+        prior while peers carry the accumulated one is a deterministic
+        fork.
+        """
+        blockers: List[str] = []
+        if self.voice_source is None:
+            blockers.append(
+                "chain RPC not configured (substrate_address + rpc_url)")
+        paths = self.carry_over_paths()
+        unset = sorted(k for k, v in paths.items() if v is None)
+        if unset:
+            blockers.append(
+                "no state dir for carry-over: " + ", ".join(unset))
+        missing = sorted(
+            k for k, v in paths.items() if v is not None and not v.exists())
+        if missing and self._chain_at_genesis is not True:
+            why = ("chain has prior anchors"
+                   if self._chain_at_genesis is False
+                   else "genesis status unknown")
+            blockers.append(
+                f"missing carry-over files ({why}): " + ", ".join(missing))
+        return blockers
 
     def _refresh_voice(self) -> None:
         if self.voice_source is None:
             return
         try:
             state = self.voice_source() or {}
+            if "snapshot_block" in state:
+                # read_voice_state reports snapshot_block=None exactly
+                # when anchorCount == 0.
+                self._chain_at_genesis = state.get("snapshot_block") is None
             owner_map = state.get("owner_map")
             weights = state.get("voice_weights")
             if isinstance(owner_map, dict):
@@ -236,6 +341,23 @@ class FederatedCloseDriver:
             return None
 
         self._refresh_voice()
+
+        if self.enforce_preconditions:
+            blockers = self.participation_blockers()
+            if blockers:
+                # Batches are already drained, so they don't leak into
+                # the next epoch's close.
+                hint = ""
+                if any(b.startswith("missing carry-over") for b in blockers):
+                    hint = (" (to join, seed the tool_*.json files from an "
+                            "in-sync peer's state dir: set "
+                            "ATN_CARRY_OVER_SEED_DIR and restart)")
+                logger.warning(
+                    "federated close: refusing to participate in epoch %s: %s%s",
+                    local_close_result.get("epoch_id"), "; ".join(blockers),
+                    hint,
+                )
+                return None
 
         canonical = canonical_order(batches)
         if not canonical.ordered_batches:

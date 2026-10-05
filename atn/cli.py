@@ -548,6 +548,27 @@ def _try_reclaim_port(port: int) -> int | None:
     return None
 
 
+def _integration_listener_settings(an) -> tuple[str, int, float, int]:
+    """(host, port, rate, burst) for the integration listener; host "" means
+    disabled. Env ATN_INTEGRATION_WS / _HOST / _PORT override the config."""
+    enabled = bool(getattr(an, "integration_ws_enabled", False)) if an else False
+    env_on = os.environ.get("ATN_INTEGRATION_WS", "").strip().lower()
+    if env_on:
+        enabled = env_on in ("1", "true", "yes", "on")
+    host = (os.environ.get("ATN_INTEGRATION_WS_HOST", "").strip()
+            or (getattr(an, "integration_ws_host", "") if an else "")
+            or "127.0.0.1")
+    try:
+        port = int(os.environ.get("ATN_INTEGRATION_WS_PORT", "").strip()
+                   or (getattr(an, "integration_ws_port", 0) if an else 0)
+                   or 7710)
+    except ValueError:
+        port = 7710
+    rate = float(getattr(an, "integration_rate_per_sec", 5.0) or 5.0) if an else 5.0
+    burst = int(getattr(an, "integration_burst", 20) or 20) if an else 20
+    return (host if enabled else ""), port, rate, burst
+
+
 async def run_cli() -> None:
     """Main async entry point."""
     from .lock_manager import LockManager
@@ -640,6 +661,7 @@ async def run_cli() -> None:
     _remote_host = getattr(_an, "remote_ws_host", "") if _an else ""
     _remote_port = getattr(_an, "remote_ws_port", 0) if _an else 0
     _owner_wallet = getattr(_an, "owner_wallet", "") if _an else ""
+    _int_host, _int_port, _int_rate, _int_burst = _integration_listener_settings(_an)
     # The privileged local listener's port. Configurable (autonet.local_ws_port)
     # so a second daemon can coexist on one machine; 0/unset keeps 7700.
     _local_port = int(getattr(_an, "local_ws_port", 0) or 0) if _an else 0
@@ -655,6 +677,8 @@ async def run_cli() -> None:
             runtime, host="localhost", port=_local_port,
             remote_host=_remote_host, remote_port=_remote_port,
             owner_wallet=_owner_wallet,
+            integration_host=_int_host, integration_port=_int_port,
+            integration_rate=_int_rate, integration_burst=_int_burst,
         )
         try:
             await ws_bridge.start()
@@ -669,6 +693,10 @@ async def run_cli() -> None:
                 console.print(
                     f"  [green]Remote (auth: {_modes}) WS on "
                     f"ws://{_remote_host}:{ws_bridge.remote_port}[/]")
+            if _int_host and ws_bridge._integration_server is not None:
+                console.print(
+                    f"  [green]Integration (bearer token, agent-clamped) WS on "
+                    f"ws://{_int_host}:{_int_port}[/]")
             break
         except OSError as exc:
             ws_bridge = None
@@ -876,6 +904,11 @@ async def _update_poll_loop(runtime: Runtime, config: ATNConfig) -> None:
 
 
 def main() -> None:
+    # Offline subcommands: run and exit without booting the daemon.
+    if len(sys.argv) > 1 and sys.argv[1] == "integration-token":
+        from .integration_token_cli import main as _token_main
+        sys.exit(_token_main(sys.argv[2:]))
+
     # Auto-update: apply any staged release BEFORE importing heavy runtime
     # modules, so a pip-install can cleanly replace them, then re-exec once.
     # Import-light and self-contained (stdlib only); no-ops when nothing is

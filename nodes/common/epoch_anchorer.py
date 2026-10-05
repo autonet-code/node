@@ -129,18 +129,14 @@ class EpochAnchorer:
 
         # Production path: build via blockchain.BlockchainInterface.
         from .blockchain import BlockchainInterface
-        import json as _json
-        from pathlib import Path
 
         bc = BlockchainInterface(
             rpc_url=self.config.rpc_url,
             chain_id=self.config.chain_id,
             private_key=self.config.private_key,
         )
-        artifact_path = Path("C:/code/autonet/artifacts/contracts/core/Substrate.sol/Substrate.json")
-        with artifact_path.open("r", encoding="utf-8") as fh:
-            artifact = _json.load(fh)
-        self._abi = artifact["abi"]
+        from .contract_artifacts import load_abi
+        self._abi = load_abi("Substrate")
         self._w3 = bc.web3
         self._contract = bc.web3.eth.contract(
             address=bc.web3.to_checksum_address(self.config.epoch_anchor_address),

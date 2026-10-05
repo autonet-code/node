@@ -116,15 +116,10 @@ def build_chain_candle_seed(
     if not substrate_address or not rpc_url:
         return None
     try:
-        import json
-        from pathlib import Path
-
         from web3 import Web3
 
-        artifact = Path(
-            "C:/code/autonet/artifacts/contracts/core/Substrate.sol/Substrate.json"
-        )
-        abi = json.loads(artifact.read_text(encoding="utf-8"))["abi"]
+        from .contract_artifacts import load_abi
+        abi = load_abi("Substrate")
         w3 = Web3(Web3.HTTPProvider(rpc_url))
         contract = w3.eth.contract(
             address=w3.to_checksum_address(substrate_address), abi=abi,

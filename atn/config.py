@@ -214,6 +214,17 @@ class RPBConfig:
     # (wss://autonet.computer -> proxy) points at this.
     remote_ws_host: str = ""        # e.g. "0.0.0.0"; empty = remote disabled
     remote_ws_port: int = 7701
+    # INTEGRATION listener (third socket; docs/integration_listener.md): a
+    # guest harness authenticates with a per-agent bearer token minted by
+    # `atn integration-token create` and is clamped to that one agent.
+    # Off by default. Env ATN_INTEGRATION_WS=1 / ATN_INTEGRATION_WS_HOST /
+    # ATN_INTEGRATION_WS_PORT override (the Docker sidecar binds 0.0.0.0 on
+    # an internal network).
+    integration_ws_enabled: bool = False
+    integration_ws_host: str = "127.0.0.1"
+    integration_ws_port: int = 7710
+    integration_rate_per_sec: float = 5.0
+    integration_burst: int = 20
     # The browser-reachable wss:// URL this daemon advertises so a remote
     # frontend can find it by an agent's 0x address. Behind a reverse proxy the
     # daemon can't infer its own public URL, so it must be configured here
@@ -892,6 +903,11 @@ def load_config(path: Path | None = None) -> ATNConfig:
         local_ws_port=int(resolved.get("local_ws_port", 0) or 0),
         remote_ws_host=resolved.get("remote_ws_host", ""),
         remote_ws_port=int(resolved.get("remote_ws_port", 7701)),
+        integration_ws_enabled=bool(resolved.get("integration_ws_enabled", False)),
+        integration_ws_host=resolved.get("integration_ws_host", "127.0.0.1") or "127.0.0.1",
+        integration_ws_port=int(resolved.get("integration_ws_port", 7710) or 7710),
+        integration_rate_per_sec=float(resolved.get("integration_rate_per_sec", 5.0) or 5.0),
+        integration_burst=int(resolved.get("integration_burst", 20) or 20),
         public_ws_endpoint=resolved.get("public_ws_endpoint", ""),
         firestore_project=resolved.get("firestore_project", ""),
         ws_input_policy=resolved.get("ws_input_policy", "allow"),

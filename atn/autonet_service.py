@@ -896,16 +896,11 @@ class AutonetBridge:
             Runs in an executor so the blocking RPC never stalls the event
             loop (which would freeze the WS server's accept path)."""
             from web3 import Web3
-            from pathlib import Path
-            import json as _json
 
             w3 = Web3(Web3.HTTPProvider(rpb_cfg.rpc_url))
-            artifact_path = Path(
-                "C:/code/autonet/artifacts/contracts/core/Substrate.sol/Substrate.json"
-            )
             try:
-                with artifact_path.open("r", encoding="utf-8") as fh:
-                    abi = _json.load(fh)["abi"]
+                from nodes.common.contract_artifacts import load_abi
+                abi = load_abi("Substrate")
             except FileNotFoundError:
                 from atn.on_chain import SUBSTRATE_ABI as abi  # type: ignore
 

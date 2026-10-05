@@ -163,6 +163,89 @@ OWNER_ONLY_TOOLS = frozenset({
 # the target straight from the message and ignore caller_id.
 _TARGET_ARG_KEYS = ("agent_id", "target", "parent_id", "id")
 
+# ---------------------------------------------------------------------------
+# Integration listener (third socket, default 127.0.0.1:7710); see
+# docs/integration_listener.md. A guest harness authenticates with a per-agent
+# bearer token and is CLAMPED to that one agent. Dispatch is a strict
+# ALLOW-list: nothing in _handle_message is reachable from this listener; the
+# allowlisted names go straight to execute_tool with caller_id forced to the
+# bound agent (so the H2 agent-callable gate and the agent's bundle grant
+# both still apply on top).
+# ---------------------------------------------------------------------------
+INTEGRATION_ALLOWED_MESSAGES = frozenset({
+    "status",          # handled here: who am I bound as, what may I call
+    "list_tools",      # clamped to category=registered
+    "probe_tools",     # library search (scoped to the bound agent)
+    "use_tool",        # REGISTERED tools only, via tool_store.call -> tool_guard
+    "attest_tools",    # post-use reviews (per-axis scores), as the bound agent
+    "publish_tool",    # author-only, and only if the agent holds the grant
+    "adopt_tool",      # PROPOSES adoption; approval stays owner-only
+})
+
+# Defense in depth: every owner-only / custody / money / fleet-mutating
+# message type, named explicitly. The allowlist already excludes them; this
+# set exists so a careless future allowlist edit fails at import (the
+# disjointness assert below) instead of silently opening an owner surface,
+# and so a denied call gets a precise error.
+INTEGRATION_DENIED_MESSAGES = frozenset({
+    # Key custody + vault (values, exports, private-key payloads).
+    *KEY_LOCAL_ONLY_MESSAGES,
+    *_SECRETS_MESSAGES,
+    # Owner-global tools a scoped session already may not call.
+    *OWNER_ONLY_TOOLS,
+    # Owner decisions on the adoption / tool-grant rails.
+    "approve_adoption", "reject_adoption", "list_adoption_proposals",
+    "grant_tool", "revoke_tool", "set_tool_enabled", "set_tool_published",
+    "vet_tool",
+    # Tool AUTHORING. An authored (non-adopted) tool runs with the daemon's
+    # full environment and cwd, so register_tool + use_tool would hand the
+    # token holder code execution on the daemon host (keystore, vault, and
+    # the pre-authenticated owner socket on :7700). Guests use tools; they
+    # don't author them here.
+    "register_tool",
+    # Ownership, wallets, chain registration + signing, money movement.
+    "set_owner_wallet", "rotate_owner", "owner_binding_status",
+    "owner_claim_status", "autonet_wallet_connect", "autonet_wallet_disconnect",
+    "autonet_set_chain", "autonet_start", "autonet_stop",
+    "register_agent_on_chain", "confirm_agent_registration",
+    "check_agent_registration", "register_on_chain", "rpb_reconcile_registrations",
+    "pay_for_service", "request_service", "invoke_service", "register_service",
+    "retire_service", "service_request",
+    # Budgets + sponsor inference.
+    "set_budget", "get_budget", "update_sponsor_budget", "create_sponsor_agent",
+    "set_my_sponsor", "remove_sponsor_binding", "disable_sponsor_inference",
+    "get_my_budget_status", "get_usage", "metering_report",
+    # Agent lifecycle / fleet shape.
+    "create_agent", "remove_agent", "update_agent", "clone_agent", "merge_clone",
+    "activate_agent", "deactivate_agent", "kill_agent", "kill_execution",
+    "trigger_run", "post_message", "send_agent_message", "orchestrator_message",
+    "delegate_message", "delegate_status", "delegate_collect",
+    "interrupt_delegate", "interrupt_orchestrator", "approve_task",
+    "reject_task", "propose_task", "set_local_model",
+    # Providers, connectors, OAuth, daemon control, profile.
+    "provider_configure", "provider_remove", "custom_provider_add",
+    "custom_provider_remove", "provider_list", "provider_refresh_usage",
+    "provider_rate_limits", "provider_record",
+    "add_connector", "remove_connector", "use_connector", "oauth_start",
+    "oauth_status", "daemon_restart", "update_status", "skip_onboarding",
+    "autonet_publish_standards", "autonet_set_capture_config",
+    # Whole-fleet reads (snapshot carries owner-global sections).
+    "snapshot", "get_snapshot", "list_agents",
+})
+assert not (INTEGRATION_ALLOWED_MESSAGES & INTEGRATION_DENIED_MESSAGES), (
+    "integration allowlist overlaps the owner deny-list: "
+    f"{sorted(INTEGRATION_ALLOWED_MESSAGES & INTEGRATION_DENIED_MESSAGES)}")
+
+# Message keys that name an identity. On the integration listener each one,
+# if present, must equal the bound agent: a request that names any other
+# agent is refused outright (not silently rewritten), so a confused client
+# learns it is pinned.
+_INTEGRATION_IDENTITY_KEYS = ("caller_id", "agent_id", "target", "parent_id",
+                              "id", "author", "author_id", "caller")
+
+# Max inbound frame on the integration listener (manifests carry code).
+_INTEGRATION_MAX_FRAME = 2 * 1024 * 1024
+
 
 from dataclasses import dataclass
 
@@ -205,7 +288,12 @@ class WebSocketBridge:
 
     def __init__(self, runtime: Runtime, host: str = "localhost", port: int = DEFAULT_PORT,
                  *, remote_host: str = "", remote_port: int = 0,
-                 owner_wallet: str = "") -> None:
+                 owner_wallet: str = "",
+                 integration_host: str = "",
+                 integration_port: int = ws_auth.DEFAULT_INTEGRATION_PORT,
+                 integration_rate: float = 5.0,
+                 integration_burst: int = 20,
+                 integration_max_conns: int = 4) -> None:
         self.runtime = runtime
         self.host = host
         self.port = port
@@ -220,6 +308,17 @@ class WebSocketBridge:
         self.owner_wallet = owner_wallet
         self._server: WSServer | None = None          # local (privileged) listener
         self._remote_server: WSServer | None = None    # remote (auth) listener
+        # The INTEGRATION (bearer-token, agent-clamped) listener. Empty host
+        # => disabled (the default). See docs/integration_listener.md.
+        self.integration_host = integration_host
+        self.integration_port = integration_port or ws_auth.DEFAULT_INTEGRATION_PORT
+        self.integration_rate = float(integration_rate)
+        self.integration_burst = int(integration_burst)
+        self.integration_max_conns = int(integration_max_conns)
+        self._integration_server: WSServer | None = None
+        self._integration_store: ws_auth.IntegrationTokenStore | None = None
+        self._integration_sessions: dict[ServerConnection, ws_auth.IntegrationSession] = {}
+        self._integration_buckets: dict[str, ws_auth.TokenBucket] = {}
         # Per-connection auth/scope state (replaces the old flat client set).
         self._sessions: dict[ServerConnection, ClientSession] = {}
         self._event_handler_registered = False
@@ -294,9 +393,40 @@ class WebSocketBridge:
                 "WebSocket server (remote, auth-required: %s) listening on "
                 "ws://%s:%d", "+".join(auth_modes), self.remote_host, self.remote_port)
 
+        # Integration listener: bearer token bound to ONE agent, strict
+        # allowlist. Disabled unless a bind host is configured.
+        # A bind failure here is logged, not raised: the CLI treats an OSError
+        # from start() as "the LOCAL port is taken" and would try to reclaim
+        # 7700 from whoever holds it.
+        if self.integration_host:
+            try:
+                await self.start_integration_listener()
+            except OSError as exc:
+                self._integration_server = None
+                log.error("Integration listener failed to bind %s:%d: %s",
+                          self.integration_host, self.integration_port, exc)
+
+    async def start_integration_listener(self) -> None:
+        """Start the third (integration) listener. Tokens are read from
+        ``<data_dir>/integration_tokens.json``; a missing file means no token
+        is valid (every handshake is refused with 401)."""
+        if self._integration_store is None:
+            self._integration_store = ws_auth.IntegrationTokenStore(
+                self.runtime._config.data_dir)
+        self._integration_server = await websockets.serve(
+            self._handle_integration_client,
+            self.integration_host,
+            self.integration_port,
+            process_request=self._integration_process_request,
+            max_size=_INTEGRATION_MAX_FRAME,
+        )
+        log.info("WebSocket server (integration, bearer-token, agent-clamped) "
+                 "listening on ws://%s:%d", self.integration_host,
+                 self.integration_port)
+
     async def stop(self) -> None:
         """Stop the WebSocket server(s)."""
-        for srv_attr in ("_server", "_remote_server"):
+        for srv_attr in ("_server", "_remote_server", "_integration_server"):
             srv = getattr(self, srv_attr)
             if srv:
                 srv.close()
@@ -673,6 +803,233 @@ class WebSocketBridge:
             if len(matches) > 1:
                 return "", "ambiguous root address"
         return "", f"unknown agent root: {root}"
+
+    # ------------------------------------------------------------------
+    # Integration listener (bearer token -> exactly one agent)
+    # ------------------------------------------------------------------
+
+    def _integration_verify_header(self, headers: Any) -> ws_auth.IntegrationToken | None:
+        """Verify the upgrade request's Authorization header against the
+        token store. None on any failure (fails closed)."""
+        store = self._integration_store
+        if store is None:
+            return None
+        try:
+            raw = headers.get("Authorization") if headers is not None else None
+        except Exception:
+            raw = None
+        rec = store.verify(ws_auth.parse_bearer(raw))
+        if rec is None:
+            return None
+        if not self._integration_agent_ok(rec.agent_id):
+            return None
+        return rec
+
+    def _integration_agent_ok(self, agent_id: str) -> bool:
+        """The clamp invariant: the bound id is a real agent in this fleet and
+        is NOT anything is_owner_caller() would treat as the owner."""
+        from .agent_tools import is_owner_caller
+        if not ws_auth.is_bindable_agent_id(agent_id):
+            return False
+        if is_owner_caller(agent_id):
+            return False
+        return self.runtime.get_agent(agent_id) is not None
+
+    async def _integration_process_request(self, connection: ServerConnection,
+                                           request: Any) -> Any:
+        """Reject before the WebSocket upgrade: 401 for a missing/invalid/
+        revoked token or an unavailable bound agent, 429 when the token
+        already has its maximum number of live connections."""
+        rec = self._integration_verify_header(request.headers)
+        if rec is None:
+            return connection.respond(401, "invalid or revoked integration token\n")
+        live = sum(1 for s in self._integration_sessions.values()
+                   if s.token_hash == rec.token_hash)
+        if live >= self.integration_max_conns:
+            return connection.respond(429, "too many connections for this token\n")
+        return None
+
+    def _integration_reaches_connector(self, digest: str | None) -> bool:
+        """True if the registered tool ``digest`` is connector-backed or
+        declares (transitively, bounded) a connector-backed dependency.
+        Unresolvable digests count as reaching nothing; the store itself
+        rejects unknown tools."""
+        store = getattr(self.runtime, "tool_store", None)
+        if store is None or not digest:
+            return False
+        seen: set[str] = set()
+        frontier = [digest]
+        for _ in range(8):                    # composition depth is <= 4
+            nxt: list[str] = []
+            for d in frontier:
+                rec = store.resolve(d)
+                if rec is None or rec.digest in seen:
+                    continue
+                seen.add(rec.digest)
+                manifest = rec.manifest or {}
+                if manifest.get("connector_id"):
+                    return True
+                nxt.extend(x for x in (manifest.get("dependencies") or [])
+                           if isinstance(x, str))
+            if not nxt:
+                break
+            frontier = nxt
+        return False
+
+    def _integration_bucket(self, token_hash: str) -> ws_auth.TokenBucket:
+        bucket = self._integration_buckets.get(token_hash)
+        if bucket is None:
+            bucket = ws_auth.TokenBucket(self.integration_rate, self.integration_burst)
+            self._integration_buckets[token_hash] = bucket
+        return bucket
+
+    async def _handle_integration_client(self, ws: ServerConnection) -> None:
+        """One integration connection. The token was checked in
+        process_request; it is re-verified here (the store may have changed
+        between the two) and then on every message."""
+        rec = self._integration_verify_header(
+            getattr(getattr(ws, "request", None), "headers", None))
+        if rec is None:
+            await ws.close(code=4401, reason="unauthorized")
+            return
+        isession = ws_auth.IntegrationSession(
+            token_id=rec.token_id, token_hash=rec.token_hash,
+            agent_id=rec.agent_id, label=rec.label,
+            conn_id=ws_auth.new_nonce())
+        self._integration_sessions[ws] = isession
+        log.info("Integration client connected: token=%s agent=%s",
+                 rec.token_id, rec.agent_id)
+        try:
+            await ws.send(json.dumps({
+                "type": "integration_ready",
+                "agent_id": isession.agent_id,
+                "token_id": isession.token_id,
+                "allowed": sorted(INTEGRATION_ALLOWED_MESSAGES),
+            }))
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    await ws.send(json.dumps({"ok": False, "error": "Invalid JSON"}))
+                    continue
+                if not isinstance(msg, dict):
+                    await ws.send(json.dumps({"ok": False, "error": "Expected a JSON object"}))
+                    continue
+                response = await self._handle_integration_message(msg, isession)
+                await ws.send(json.dumps(response, default=str))
+                if response.get("code") == "token_revoked":
+                    await ws.close(code=4401, reason="token revoked")
+                    break
+        except websockets.ConnectionClosed:
+            pass
+        except Exception:
+            log.exception("Integration client handler error")
+        finally:
+            self._integration_sessions.pop(ws, None)
+            log.info("Integration client disconnected: token=%s", isession.token_id)
+
+    async def _handle_integration_message(
+            self, msg: dict[str, Any],
+            isession: ws_auth.IntegrationSession) -> dict[str, Any]:
+        """Dispatch one integration request. Order: revocation re-check, rate
+        limit, deny-list, allow-list, clamp, then execute_tool with caller_id
+        forced to the bound agent. Never reaches _handle_message."""
+        msg_id = msg.get("msg_id")
+        msg_type = msg.get("type", "")
+
+        def _err(error: str, code: str) -> dict[str, Any]:
+            return {"msg_id": msg_id, "ok": False, "error": error, "code": code}
+
+        if not msg_type or not isinstance(msg_type, str):
+            return _err("Missing 'type' field", "bad_request")
+
+        # 1. Token still active (CLI revoke takes effect mid-connection).
+        store = self._integration_store
+        rec = store.lookup_active(isession.token_hash) if store is not None else None
+        if rec is None or rec.agent_id != isession.agent_id:
+            return _err("integration token revoked", "token_revoked")
+
+        # 2. Per-token rate limit (shared across the token's connections).
+        if not self._integration_bucket(isession.token_hash).allow():
+            return _err("rate limit exceeded", "rate_limited")
+
+        # 3/4. Deny-list, then allow-list.
+        if msg_type in INTEGRATION_DENIED_MESSAGES:
+            return _err(f"'{msg_type}' is owner-only and not available on the "
+                        "integration listener", "owner_only")
+        if msg_type not in INTEGRATION_ALLOWED_MESSAGES:
+            return _err(f"'{msg_type}' is not available on the integration "
+                        "listener", "not_allowed")
+
+        # 5. Clamp. The bound agent must still be a real, non-owner agent.
+        agent_id = isession.agent_id
+        if not self._integration_agent_ok(agent_id):
+            return _err("the agent this token is bound to is unavailable",
+                        "agent_unavailable")
+        for key in _INTEGRATION_IDENTITY_KEYS:
+            if key in msg and msg[key] not in (None, agent_id):
+                return _err(f"this token is bound to agent '{agent_id}'; "
+                            f"'{key}' may not name another identity",
+                            "wrong_agent")
+
+        if msg_type == "status":
+            defn = self.runtime.get_agent(agent_id)
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "agent_id": agent_id,
+                "agent_name": getattr(defn, "name", agent_id),
+                "token_id": isession.token_id,
+                "label": isession.label,
+                "allowed": sorted(INTEGRATION_ALLOWED_MESSAGES),
+                "rate_limit": {"per_sec": self.integration_rate,
+                               "burst": self.integration_burst},
+            }}
+
+        # Tool arguments: drop protocol fields, identity fields (validated
+        # above) and any private "_"-prefixed key (e.g. a forged _caller_id).
+        args = {k: v for k, v in msg.items()
+                if k not in ("msg_id", "type")
+                and k not in _INTEGRATION_IDENTITY_KEYS
+                and not (isinstance(k, str) and k.startswith("_"))}
+
+        if msg_type == "list_tools":
+            # Only registered tools are callable here; do not advertise the
+            # daemon's connectors / pipelines / core surface.
+            args["category"] = "registered"
+        elif msg_type == "use_tool":
+            # use_tool can name ANY unified tool, including core tools
+            # (create_agent, pay_for_service, ...) and the owner's MCP
+            # connectors. Restrict it to tool-substrate REGISTERED tools,
+            # which execute through tool_store.call -> tool_guard.
+            from .tool_registry import ToolCategory
+            name = args.get("name")
+            if not isinstance(name, str) or not name:
+                return _err("Missing required field: 'name'", "bad_request")
+            tool = self.runtime.tool_registry.get_tool(name)
+            if tool is None:
+                return _err(f"Unknown tool: {name}", "unknown_tool")
+            if tool.category != ToolCategory.REGISTERED:
+                return _err("only registered (tool-substrate) tools may be "
+                            "called on the integration listener", "not_allowed")
+            if not isinstance(args.get("arguments", {}), dict):
+                return _err("'arguments' must be an object", "bad_request")
+            # A connector-backed manifest (or a composite reaching one through
+            # its declared deps) runs the OWNER's MCP connector with the
+            # owner's credentials. Not a guest capability.
+            if self._integration_reaches_connector(tool.digest):
+                return _err("connector-backed tools are not callable on the "
+                            "integration listener", "not_allowed")
+
+        # Last-line assertion: never dispatch with an owner-trusted caller.
+        from .agent_tools import is_owner_caller
+        if is_owner_caller(agent_id):
+            return _err("refusing owner-trusted caller", "agent_unavailable")
+        result = await execute_tool(msg_type, args, self.runtime, caller_id=agent_id)
+        if not isinstance(result, dict):
+            result = {"value": result}
+        if result.get("error"):
+            return {"msg_id": msg_id, "ok": False, "error": result["error"],
+                    "code": "tool_error"}
+        return {"msg_id": msg_id, "ok": True, "result": result}
 
     # ------------------------------------------------------------------
     # Snapshot redaction (non-local sessions never see owner-global secrets)

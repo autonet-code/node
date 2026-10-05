@@ -1,0 +1,13 @@
+# Allowlist: the daemon image needs only the Python packages and their
+# metadata. Everything else (secrets/, .env, data/, artifacts/, node_modules,
+# experiment outputs) stays out of the build context.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!atn/
+!nodes/
+!bridge/
+!world_model/
+**/__pycache__
+**/*.pyc

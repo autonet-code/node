@@ -9,6 +9,7 @@ Story 6.1: Solver node as daemon background service.
 """
 
 import logging
+import os
 import signal
 import sys
 import time
@@ -55,8 +56,17 @@ class AutonetService:
         SIGTERM/SIGINT → stop()
     """
 
-    def __init__(self, config: Optional[AutonetConfig] = None, data_dir: Optional[str] = None):
+    def __init__(
+        self,
+        config: Optional[AutonetConfig] = None,
+        data_dir: Optional[str] = None,
+        *,
+        configure_logging: bool = True,
+    ):
         self.config = config or load_config()
+        # False lets an embedding host keep its own logging setup:
+        # start() then never touches the root logger.
+        self._configure_logging = configure_logging
         self._state = ServiceState.STOPPED
         self._start_time: float = 0.0
         self._cycles: int = 0
@@ -140,9 +150,11 @@ class AutonetService:
         self._start_time = time.time()
         self._shutdown_requested = False
 
-        # Configure logging
-        log_level = getattr(logging, self.config.log_level.upper(), logging.INFO)
-        logging.basicConfig(level=log_level, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+        # Configure logging (global root-logger setup; an embedding host
+        # opts out with configure_logging=False).
+        if self._configure_logging:
+            log_level = getattr(logging, self.config.log_level.upper(), logging.INFO)
+            logging.basicConfig(level=log_level, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
         logger.info("AutonetService starting...")
 
@@ -894,6 +906,21 @@ class AutonetService:
             tool_credibility_path=tool_credibility_path,
             tool_review_book_path=tool_review_book_path,
         )
+        # Refuse (log + skip) any close this daemon can't compute
+        # identically to its peers: no chain read access below, or no
+        # carry-over files past genesis. See participation_blockers().
+        self._federated_close_driver.enforce_preconditions = True
+        # Bootstrap for a daemon joining after genesis: the carry-over
+        # files are only written by a successful close, so without a seed
+        # the refusal above would be permanent. The operator points this
+        # at an in-sync peer's state dir (copied or mounted); only missing
+        # files are imported.
+        seed_dir = os.environ.get("ATN_CARRY_OVER_SEED_DIR")
+        if seed_dir:
+            try:
+                self._federated_close_driver.import_carry_over(seed_dir)
+            except Exception as e:
+                logger.warning("carry-over seed import failed: %s", e)
 
         # Household voice + fee-recycled emission sourcing. Wired here —
         # NOT in attach_chain_submission — because these are CLOSE
