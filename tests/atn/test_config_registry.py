@@ -198,3 +198,19 @@ def test_load_config_agents_dir_tracks_custom_data_dir(tmp_path, monkeypatch):
 
     assert conf.data_dir == data_dir
     assert conf.agents_dir == data_dir / "agents"
+
+
+def test_load_config_no_file_still_seeds_chain(_isolate_registry, tmp_path, monkeypatch):
+    """A container with an empty data volume (no config.yaml) still gets the
+    chain addresses from the registry (here: the cache, URL dead)."""
+    cache = _isolate_registry["cache"]
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps(_SAMPLE), encoding="utf-8")
+    monkeypatch.setattr(cfg, "_load_dotenv", lambda: None)
+
+    an = cfg.load_config(tmp_path / "missing.yaml").autonet
+
+    assert an.rpc_url == "https://rpc.example.test"
+    assert an.substrate_address == "0x5UB000000000000000000000000000000000beef"
+    assert an.service_registry_address == "0x5E4000000000000000000000000000000000cafe"
+    assert an.enabled is False  # Phase 12: still starts on registration

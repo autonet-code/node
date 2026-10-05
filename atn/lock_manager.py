@@ -105,6 +105,42 @@ class LockManager:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
 
+    def _lock_is_held(self) -> bool:
+        """True if some process holds the OS lock on the lock file.
+
+        The pid in the file is advisory only. In a container the previous
+        run's pid is routinely reused after a hard stop (often by this very
+        process: the daemon is pid 7 under tini every time), so a live pid
+        alone would refuse to start forever. The OS lock dies with its owner,
+        so probing it is the authoritative check.
+        """
+        try:
+            fh = open(self.lock_file, "a+")
+        except OSError:
+            return False
+        try:
+            fh.seek(0)
+            if sys.platform == "win32":
+                import msvcrt
+
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    return True
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return True
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            return False
+        finally:
+            fh.close()
+
     # ------------------------------------------------------------------
     # Stale-lock cleanup
     # ------------------------------------------------------------------
@@ -222,7 +258,7 @@ class LockManager:
             return None
 
         pid = info.get("pid")
-        if pid and self._is_process_alive(pid):
+        if pid and self._is_process_alive(pid) and self._lock_is_held():
             return {
                 "pid": pid,
                 "started_at": info.get("started_at"),

@@ -180,7 +180,29 @@ INTEGRATION_ALLOWED_MESSAGES = frozenset({
     "attest_tools",    # post-use reviews (per-axis scores), as the bound agent
     "publish_tool",    # author-only, and only if the agent holds the grant
     "adopt_tool",      # PROPOSES adoption; approval stays owner-only
+    # Public reads (see INTEGRATION_PUBLIC_READS): network state any peer can
+    # already see. Handled inline; they carry no agent authority.
+    "find_services",   # the on-chain services market (read-only)
+    "tool_reviews",    # reviews + drifted position of a tool the agent can see
+    "network_status",  # node/chain/epoch/peer summary, no secrets
 })
+
+# Allowlisted messages that read PUBLIC network state (the on-chain service
+# registry, the close's economy graph, chain id and peer count). They are
+# answered inline instead of through execute_tool: they act as nobody, move
+# nothing, and need no bundle grant (a guest agent should not need the
+# `services` bundle, which also carries pay_for_service, just to browse the
+# market). Paying, requesting and every other money action stay denied here
+# and go through the owner's wallet-authed remote listener.
+INTEGRATION_PUBLIC_READS = frozenset({"find_services", "tool_reviews",
+                                      "network_status"})
+assert INTEGRATION_PUBLIC_READS <= INTEGRATION_ALLOWED_MESSAGES
+
+# Chain ids the integration surface names in network_status. Anything else is
+# reported by number only; the label must never imply value that isn't there.
+_CHAIN_LABELS = {
+    127823: "Etherlink Shadownet (testnet)",
+}
 
 # Defense in depth: every owner-only / custody / money / fleet-mutating
 # message type, named explicitly. The allowlist already excludes them; this
@@ -984,6 +1006,10 @@ class WebSocketBridge:
                                "burst": self.integration_burst},
             }}
 
+        if msg_type in INTEGRATION_PUBLIC_READS:
+            return await self._handle_integration_public_read(
+                msg_type, msg, msg_id, agent_id)
+
         # Tool arguments: drop protocol fields, identity fields (validated
         # above) and any private "_"-prefixed key (e.g. a forged _caller_id).
         args = {k: v for k, v in msg.items()
@@ -1029,7 +1055,164 @@ class WebSocketBridge:
         if result.get("error"):
             return {"msg_id": msg_id, "ok": False, "error": result["error"],
                     "code": "tool_error"}
+        if msg_type == "list_tools":
+            # The manifest `author` is the consensus 0x identity; a guest UI
+            # needs to know which listed tools ITS agent authored here.
+            store = self.runtime.tool_store
+            for row in result.get("tools") or []:
+                rec = store.get(str(row.get("digest") or "")) if isinstance(row, dict) else None
+                if rec is not None:
+                    row["mine"] = rec.author_id == agent_id and rec.origin == "authored"
+                    row["origin"] = rec.origin
+                    row["published"] = bool(rec.published)
         return {"msg_id": msg_id, "ok": True, "result": result}
+
+    async def _handle_integration_public_read(
+            self, msg_type: str, msg: dict[str, Any], msg_id: Any,
+            agent_id: str) -> dict[str, Any]:
+        """Answer an INTEGRATION_PUBLIC_READS message. The caller has already
+        passed the revocation, rate-limit and clamp checks."""
+        def _err(error: str, code: str) -> dict[str, Any]:
+            return {"msg_id": msg_id, "ok": False, "error": error, "code": code}
+
+        if msg_type == "find_services":
+            from .agent_tools import _find_services
+            result = await _find_services(self.runtime, {
+                "query": msg.get("query") or "", "limit": msg.get("limit")})
+            if result.get("error"):
+                return _err(result["error"], "tool_error")
+            return {"msg_id": msg_id, "ok": True, "result": result}
+
+        if msg_type == "tool_reviews":
+            digest = str(msg.get("digest") or "").strip().lower()
+            if not digest:
+                return _err("Missing 'digest' field", "bad_request")
+            store = self.runtime.tool_store
+            record = store.get(digest)
+            # Local review rows only for a tool the bound agent can see (the
+            # same author-lineage visibility list_tools applies). A digest
+            # this daemon doesn't hold still gets its public close state.
+            if record is not None and not store.allowed(agent_id, record):
+                return _err(f"Unknown tool: {digest[:16]}", "unknown_tool")
+            try:
+                payload = self._tool_reviews_payload(
+                    digest, msg.get("limit"), include_local=record is not None)
+            except Exception as exc:                       # noqa: BLE001
+                return _err(str(exc), "tool_error")
+            return {"msg_id": msg_id, "ok": True, "result": payload}
+
+        if msg_type == "network_status":
+            return {"msg_id": msg_id, "ok": True,
+                    "result": self._network_status_payload()}
+
+        return _err(f"'{msg_type}' is not available on the integration "
+                    "listener", "not_allowed")
+
+    def _world_service(self) -> Any:
+        autonet = getattr(self.runtime, "autonet", None)
+        service = getattr(autonet, "_service", None) if autonet else None
+        return getattr(service, "_world_service", None) if service else None
+
+    def _tool_reviews_payload(self, digest: str, limit: Any = None, *,
+                              include_local: bool = True) -> dict[str, Any]:
+        """Reviews, drifted position, vetting and usage for one tool digest.
+        Shared by the owner `tool_reviews` handler and the integration
+        listener's public read."""
+        try:
+            limit = int(limit or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        reviews = (self.runtime.tool_store.recent_attestations(digest, limit=limit)
+                   if include_local else [])
+        world_service = self._world_service()
+        position: dict[str, Any] = {}
+        vetting: dict[str, Any] = {}
+        usage: dict[str, Any] = {}
+        if world_service is not None:
+            eg = world_service.read_economy_graph(last_n_epochs=10)
+            position = dict(eg.get("positions", {}).get(digest) or {})
+            vetting = dict(eg.get("vetting", {}).get(digest) or {})
+            # Usage/mint economics for the tool window: recent mint
+            # over the window + the last close's per-digest entry
+            # (ok_count, attesters, usage_term, mint).
+            usage = {
+                "recent_mint": float(
+                    (eg.get("recent_tool_mint") or {}).get(digest)
+                    or 0.0),
+                "epochs_considered": eg.get("epochs_considered", 0),
+            }
+            last = eg.get("last_epoch") or {}
+            entry = (last.get("tool_mint") or {}).get(digest)
+            if isinstance(entry, dict):
+                usage["last_epoch"] = {
+                    "ok_count": entry.get("ok_count", 0),
+                    "attesters": entry.get("attesters", 0),
+                    "usage_term": entry.get("usage_term", 0.0),
+                    "mint": entry.get("mint", 0.0),
+                }
+        return {
+            "digest": digest,
+            "reviews": reviews,
+            "position": position,
+            "vetting": vetting,
+            "usage": usage,
+        }
+
+    def _network_status_payload(self) -> dict[str, Any]:
+        """Node, chain, epoch and peer summary for a guest UI. Public facts
+        only: no RPC URL (it can embed a provider key), no wallet, no keys."""
+        autonet = getattr(self.runtime, "autonet", None)
+        state: dict[str, Any] = {}
+        if autonet is not None:
+            try:
+                state = autonet.get_status() or {}
+            except Exception:                              # noqa: BLE001
+                state = {}
+        cfg = getattr(self.runtime._config, "rpb", None)
+        chain_id = int(state.get("chain_id") or getattr(cfg, "chain_id", 0) or 0)
+        substrate = (state.get("substrate_address")
+                     or getattr(cfg, "substrate_address", "") or "")
+        peers: int | None = None
+        host = getattr(autonet, "_p2p_host", None) if autonet else None
+        if host is not None:
+            try:
+                peers = len(host.get_connected_peers())
+            except Exception:                              # noqa: BLE001
+                peers = None
+        service = getattr(autonet, "_service", None) if autonet else None
+        epoch: dict[str, Any] = {"running": False, "epoch_id": None}
+        closed = 0
+        world_service = self._world_service()
+        if world_service is not None:
+            try:
+                epoch = dict(world_service.epoch_status())
+                scheduler = getattr(service, "_epoch_scheduler", None)
+                if scheduler is not None:
+                    sched = scheduler.status()
+                    sched.pop("opened_at", None)
+                    epoch.update(sched)
+                closed = len(world_service.epoch_history)
+            except Exception:                              # noqa: BLE001
+                pass
+        return {
+            "autonet": state.get("status", "disabled"),
+            "chain": {
+                "chain_id": chain_id,
+                "label": _CHAIN_LABELS.get(chain_id,
+                                           f"chain {chain_id}" if chain_id
+                                           else "not configured"),
+                "testnet": chain_id in _CHAIN_LABELS,
+                "substrate_address": substrate,
+            },
+            "p2p": {
+                "running": host is not None,
+                "peers": peers,
+                "gossip": getattr(service, "_event_gossip", None) is not None,
+            },
+            "epoch": epoch,
+            "epochs_closed": closed,
+            "service_market": bool(getattr(cfg, "service_registry_address", "")),
+        }
 
     # ------------------------------------------------------------------
     # Snapshot redaction (non-local sessions never see owner-global secrets)
@@ -3004,43 +3187,9 @@ class WebSocketBridge:
             if not digest:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'digest' field"}
             try:
-                reviews = self.runtime.tool_store.recent_attestations(
-                    digest, limit=int(msg.get("limit") or 50))
-                autonet = getattr(self.runtime, "autonet", None)
-                service = getattr(autonet, "_service", None) if autonet else None
-                world_service = getattr(service, "_world_service", None) if service else None
-                position: dict[str, Any] = {}
-                vetting: dict[str, Any] = {}
-                usage: dict[str, Any] = {}
-                if world_service is not None:
-                    eg = world_service.read_economy_graph(last_n_epochs=10)
-                    position = dict(eg.get("positions", {}).get(digest) or {})
-                    vetting = dict(eg.get("vetting", {}).get(digest) or {})
-                    # Usage/mint economics for the tool window: recent mint
-                    # over the window + the last close's per-digest entry
-                    # (ok_count, attesters, usage_term, mint).
-                    usage = {
-                        "recent_mint": float(
-                            (eg.get("recent_tool_mint") or {}).get(digest)
-                            or 0.0),
-                        "epochs_considered": eg.get("epochs_considered", 0),
-                    }
-                    last = eg.get("last_epoch") or {}
-                    entry = (last.get("tool_mint") or {}).get(digest)
-                    if isinstance(entry, dict):
-                        usage["last_epoch"] = {
-                            "ok_count": entry.get("ok_count", 0),
-                            "attesters": entry.get("attesters", 0),
-                            "usage_term": entry.get("usage_term", 0.0),
-                            "mint": entry.get("mint", 0.0),
-                        }
-                return {"msg_id": msg_id, "ok": True, "result": {
-                    "digest": digest,
-                    "reviews": reviews,
-                    "position": position,
-                    "vetting": vetting,
-                    "usage": usage,
-                }}
+                return {"msg_id": msg_id, "ok": True,
+                        "result": self._tool_reviews_payload(
+                            digest, msg.get("limit"))}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 

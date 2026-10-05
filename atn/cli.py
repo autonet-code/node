@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -569,6 +570,34 @@ def _integration_listener_settings(an) -> tuple[str, int, float, int]:
     return (host if enabled else ""), port, rate, burst
 
 
+def _remote_listener_settings(an) -> tuple[str, int, str]:
+    """(host, port, owner_wallet) for the remote (wallet-auth) listener; host
+    "" means disabled. Env ATN_REMOTE_WS_HOST / ATN_REMOTE_WS_PORT override
+    the config (a container has no editable config file). ATN_OWNER_WALLET
+    only FILLS an unset owner_wallet: a wallet already in the config (set on
+    the local listener or by the operator) is never replaced from the env.
+    When it does fill it, it is also written to ``an.owner_wallet`` (in
+    memory, not config.yaml), so the wallet that signs in as owner is the one
+    owner earnings, claim status and sponsor binding are keyed to."""
+    host = (os.environ.get("ATN_REMOTE_WS_HOST", "").strip()
+            or (getattr(an, "remote_ws_host", "") if an else ""))
+    try:
+        port = int(os.environ.get("ATN_REMOTE_WS_PORT", "").strip()
+                   or (getattr(an, "remote_ws_port", 0) if an else 0) or 0)
+    except ValueError:
+        port = 0
+    wallet = (getattr(an, "owner_wallet", "") if an else "") or ""
+    env_wallet = os.environ.get("ATN_OWNER_WALLET", "").strip()
+    if not wallet and env_wallet:
+        if re.fullmatch(r"0x[0-9a-fA-F]{40}", env_wallet):
+            wallet = env_wallet
+            if an is not None:
+                an.owner_wallet = wallet
+        else:
+            log.warning("ATN_OWNER_WALLET is not a 0x address; ignored")
+    return host, port, wallet
+
+
 async def run_cli() -> None:
     """Main async entry point."""
     from .lock_manager import LockManager
@@ -658,9 +687,7 @@ async def run_cli() -> None:
     # If the port is held by a stale MCP server, attempt to reclaim it.
     ws_bridge: WebSocketBridge | None = None
     _an = getattr(runtime._config, "autonet", None)
-    _remote_host = getattr(_an, "remote_ws_host", "") if _an else ""
-    _remote_port = getattr(_an, "remote_ws_port", 0) if _an else 0
-    _owner_wallet = getattr(_an, "owner_wallet", "") if _an else ""
+    _remote_host, _remote_port, _owner_wallet = _remote_listener_settings(_an)
     _int_host, _int_port, _int_rate, _int_burst = _integration_listener_settings(_an)
     # The privileged local listener's port. Configurable (autonet.local_ws_port)
     # so a second daemon can coexist on one machine; 0/unset keeps 7700.

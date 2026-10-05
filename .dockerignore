@@ -11,3 +11,5 @@
 !world_model/
 **/__pycache__
 **/*.pyc
+# bridge/node_modules is a dev install (800+ MB); the wheel ships only the .ts sources.
+**/node_modules

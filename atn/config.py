@@ -729,6 +729,103 @@ def _load_secrets(secrets_raw: dict[str, Any]) -> SecretsConfig:
     return SecretsConfig(default_root_allowance=root.strip())
 
 
+def _apply_auto_update_env(config: ATNConfig) -> None:
+    """ATN_AUTO_UPDATE wins over the config file, with or without one. An
+    immutable container image updates by rebuild, so the daemon image sets
+    ATN_AUTO_UPDATE=0 (no PyPI polling from inside it)."""
+    env = os.environ.get("ATN_AUTO_UPDATE", "").strip().lower()
+    if env in ("0", "false", "no", "off"):
+        config.auto_update.enabled = False
+    elif env in ("1", "true", "yes", "on"):
+        config.auto_update.enabled = True
+
+
+def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
+    """The autonet section, seeded from the network registry. Runs with or
+    without a config file (``raw`` is ``{}`` then), so a fresh install or a
+    container with an empty data volume still gets the chain addresses."""
+    # Autonet / RPB network layer
+    # Merge priority (lowest to highest):
+    #   registry.json (repo-level defaults) < blockchain < rpb < autonet
+    autonet_raw = raw.get("autonet", {})
+    if not isinstance(autonet_raw, dict):
+        autonet_raw = {}
+    rpb_raw = raw.get("rpb", {})
+    if not isinstance(rpb_raw, dict):
+        rpb_raw = {}
+    blockchain_raw = raw.get("blockchain", {})
+    if not isinstance(blockchain_raw, dict):
+        blockchain_raw = {}
+    # Seed from registry.json (repo-level jurisdiction registry)
+    jurisdiction_id = (
+        autonet_raw.get("jurisdiction_id")
+        or rpb_raw.get("jurisdiction_id")
+        or "autonet"
+    )
+    merged = _load_registry_seed(jurisdiction_id)
+    # Layer blockchain section on top
+    if blockchain_raw.get("rpc_url"):
+        merged["rpc_url"] = blockchain_raw["rpc_url"]
+    if blockchain_raw.get("chain_id"):
+        merged["chain_id"] = blockchain_raw["chain_id"]
+    # Pull dao_address from blockchain.contracts.AutonetDAO
+    bc_contracts = blockchain_raw.get("contracts", {})
+    if isinstance(bc_contracts, dict) and bc_contracts.get("AutonetDAO"):
+        merged["dao_address"] = bc_contracts["AutonetDAO"]
+    merged.update(rpb_raw)
+    merged.update(autonet_raw)
+    resolved = _resolve_env(merged)
+    # Phase 12: autonet starts on registration, not on boot — having a
+    # dao_address/rpc_url configured is necessary but no longer sufficient.
+    # Users who want eager startup (bootstrap nodes, services that always
+    # participate) set ``autonet.enabled: true`` explicitly.
+    enabled = resolved.get("enabled", False)
+    return RPBConfig(
+        enabled=enabled,
+        config_path=resolved.get("config_path", ""),
+        rpc_url=resolved.get("rpc_url", ""),
+        chain_id=resolved.get("chain_id", 0),
+        gas_symbol=resolved.get("gas_symbol", "XTZ"),
+        gas_decimals=int(resolved.get("gas_decimals", 18)),
+        private_key=resolved.get("private_key", ""),
+        wallet_address=resolved.get("wallet_address", ""),
+        dao_address=resolved.get("dao_address", ""),
+        jurisdiction_id=resolved.get("jurisdiction_id", "autonet"),
+        rpb_contract_address=resolved.get("rpb_contract_address", ""),
+        substrate_address=resolved.get("substrate_address", ""),
+        rep_token_address=resolved.get("rep_token_address", ""),
+        charter_anchor_address=resolved.get("charter_anchor_address", ""),
+        registry_address=resolved.get("registry_address", ""),
+        service_registry_address=resolved.get("service_registry_address", ""),
+        payment_channel_address=resolved.get("payment_channel_address", ""),
+        token_address=resolved.get("token_address", ""),
+        economy_address=resolved.get("economy_address", ""),
+        timelock_address=resolved.get("timelock_address", ""),
+        min_alignment_threshold=resolved.get("min_alignment_threshold", 0.5),
+        generate_keypairs=resolved.get("generate_keypairs", True),
+        # Sponsored inference (docs/sponsored_inference.md). These were
+        # dataclass-only until now — never read from config.yaml, so sponsor
+        # mode could not actually be configured on disk.
+        sponsor_inference=bool(resolved.get("sponsor_inference", False)),
+        sponsor_provider=resolved.get("sponsor_provider", ""),
+        sponsor_model=resolved.get("sponsor_model", ""),
+        sponsor_address=resolved.get("sponsor_address", ""),
+        # Remote-frontend auth + reachability (this session's work).
+        owner_wallet=resolved.get("owner_wallet", ""),
+        local_ws_port=int(resolved.get("local_ws_port", 0) or 0),
+        remote_ws_host=resolved.get("remote_ws_host", ""),
+        remote_ws_port=int(resolved.get("remote_ws_port", 7701)),
+        integration_ws_enabled=bool(resolved.get("integration_ws_enabled", False)),
+        integration_ws_host=resolved.get("integration_ws_host", "127.0.0.1") or "127.0.0.1",
+        integration_ws_port=int(resolved.get("integration_ws_port", 7710) or 7710),
+        integration_rate_per_sec=float(resolved.get("integration_rate_per_sec", 5.0) or 5.0),
+        integration_burst=int(resolved.get("integration_burst", 20) or 20),
+        public_ws_endpoint=resolved.get("public_ws_endpoint", ""),
+        firestore_project=resolved.get("firestore_project", ""),
+        ws_input_policy=resolved.get("ws_input_policy", "allow"),
+    )
+
+
 def load_config(path: Path | None = None) -> ATNConfig:
     """Load configuration from a YAML file.
 
@@ -745,9 +842,11 @@ def load_config(path: Path | None = None) -> ATNConfig:
     # config file (the early-return path below). The file-load path re-applies
     # it with the same precedence.
     config.worker_isolation = _load_worker_isolation({})
+    _apply_auto_update_env(config)
 
     if not path.exists():
         log.info("No config file at %s — using defaults", path)
+        config.autonet = _load_autonet_config({})
         return config
 
     try:
@@ -832,86 +931,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
             excluded_agents=[str(x) for x in chat_raw.get("excluded_agents", [])],
         )
 
-    # Autonet / RPB network layer
-    # Merge priority (lowest to highest):
-    #   registry.json (repo-level defaults) < blockchain < rpb < autonet
-    autonet_raw = raw.get("autonet", {})
-    if not isinstance(autonet_raw, dict):
-        autonet_raw = {}
-    rpb_raw = raw.get("rpb", {})
-    if not isinstance(rpb_raw, dict):
-        rpb_raw = {}
-    blockchain_raw = raw.get("blockchain", {})
-    if not isinstance(blockchain_raw, dict):
-        blockchain_raw = {}
-    # Seed from registry.json (repo-level jurisdiction registry)
-    jurisdiction_id = (
-        autonet_raw.get("jurisdiction_id")
-        or rpb_raw.get("jurisdiction_id")
-        or "autonet"
-    )
-    merged = _load_registry_seed(jurisdiction_id)
-    # Layer blockchain section on top
-    if blockchain_raw.get("rpc_url"):
-        merged["rpc_url"] = blockchain_raw["rpc_url"]
-    if blockchain_raw.get("chain_id"):
-        merged["chain_id"] = blockchain_raw["chain_id"]
-    # Pull dao_address from blockchain.contracts.AutonetDAO
-    bc_contracts = blockchain_raw.get("contracts", {})
-    if isinstance(bc_contracts, dict) and bc_contracts.get("AutonetDAO"):
-        merged["dao_address"] = bc_contracts["AutonetDAO"]
-    merged.update(rpb_raw)
-    merged.update(autonet_raw)
-    resolved = _resolve_env(merged)
-    # Phase 12: autonet starts on registration, not on boot — having a
-    # dao_address/rpc_url configured is necessary but no longer sufficient.
-    # Users who want eager startup (bootstrap nodes, services that always
-    # participate) set ``autonet.enabled: true`` explicitly.
-    enabled = resolved.get("enabled", False)
-    config.autonet = RPBConfig(
-        enabled=enabled,
-        config_path=resolved.get("config_path", ""),
-        rpc_url=resolved.get("rpc_url", ""),
-        chain_id=resolved.get("chain_id", 0),
-        gas_symbol=resolved.get("gas_symbol", "XTZ"),
-        gas_decimals=int(resolved.get("gas_decimals", 18)),
-        private_key=resolved.get("private_key", ""),
-        wallet_address=resolved.get("wallet_address", ""),
-        dao_address=resolved.get("dao_address", ""),
-        jurisdiction_id=resolved.get("jurisdiction_id", "autonet"),
-        rpb_contract_address=resolved.get("rpb_contract_address", ""),
-        substrate_address=resolved.get("substrate_address", ""),
-        rep_token_address=resolved.get("rep_token_address", ""),
-        charter_anchor_address=resolved.get("charter_anchor_address", ""),
-        registry_address=resolved.get("registry_address", ""),
-        service_registry_address=resolved.get("service_registry_address", ""),
-        payment_channel_address=resolved.get("payment_channel_address", ""),
-        token_address=resolved.get("token_address", ""),
-        economy_address=resolved.get("economy_address", ""),
-        timelock_address=resolved.get("timelock_address", ""),
-        min_alignment_threshold=resolved.get("min_alignment_threshold", 0.5),
-        generate_keypairs=resolved.get("generate_keypairs", True),
-        # Sponsored inference (docs/sponsored_inference.md). These were
-        # dataclass-only until now — never read from config.yaml, so sponsor
-        # mode could not actually be configured on disk.
-        sponsor_inference=bool(resolved.get("sponsor_inference", False)),
-        sponsor_provider=resolved.get("sponsor_provider", ""),
-        sponsor_model=resolved.get("sponsor_model", ""),
-        sponsor_address=resolved.get("sponsor_address", ""),
-        # Remote-frontend auth + reachability (this session's work).
-        owner_wallet=resolved.get("owner_wallet", ""),
-        local_ws_port=int(resolved.get("local_ws_port", 0) or 0),
-        remote_ws_host=resolved.get("remote_ws_host", ""),
-        remote_ws_port=int(resolved.get("remote_ws_port", 7701)),
-        integration_ws_enabled=bool(resolved.get("integration_ws_enabled", False)),
-        integration_ws_host=resolved.get("integration_ws_host", "127.0.0.1") or "127.0.0.1",
-        integration_ws_port=int(resolved.get("integration_ws_port", 7710) or 7710),
-        integration_rate_per_sec=float(resolved.get("integration_rate_per_sec", 5.0) or 5.0),
-        integration_burst=int(resolved.get("integration_burst", 20) or 20),
-        public_ws_endpoint=resolved.get("public_ws_endpoint", ""),
-        firestore_project=resolved.get("firestore_project", ""),
-        ws_input_policy=resolved.get("ws_input_policy", "allow"),
-    )
+    config.autonet = _load_autonet_config(raw)
 
     # Trace logging
     trace_raw = raw.get("trace_logging", {})
@@ -933,6 +953,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
             pypi_index_url=auto_update_raw.get("pypi_index_url", ""),
             package_name=auto_update_raw.get("package_name", "autonet-computer"),
         )
+    _apply_auto_update_env(config)
 
     # Worker isolation (agent per-PID process isolation, default OFF).
     wi_raw = raw.get("worker_isolation", {})

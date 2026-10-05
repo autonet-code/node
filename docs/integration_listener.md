@@ -80,8 +80,9 @@ On success the first frame is:
 
 ```json
 {"type": "integration_ready", "agent_id": "guest", "token_id": "6f068b184446",
- "allowed": ["adopt_tool", "attest_tools", "list_tools", "probe_tools",
-             "publish_tool", "status", "use_tool"]}
+ "allowed": ["adopt_tool", "attest_tools", "find_services", "list_tools",
+             "network_status", "probe_tools", "publish_tool", "status",
+             "tool_reviews", "use_tool"]}
 ```
 
 There is no snapshot and no event stream on this listener.
@@ -110,12 +111,22 @@ Error codes: `bad_request`, `token_revoked`, `rate_limited`, `owner_only`,
 | type | arguments | notes |
 |---|---|---|
 | `status` | none | `{agent_id, agent_name, token_id, label, allowed, rate_limit}` |
-| `list_tools` | `include_operations?` | forced to `category=registered` |
+| `list_tools` | `include_operations?` | forced to `category=registered`; each row adds `mine` (authored here by the bound agent), `origin`, `published` |
 | `probe_tools` | `query`, `k?` (1..25) | library search; local fallback scoped to the bound agent |
 | `use_tool` | `name`, `arguments` | **registered tools only**: resolves the name, refuses core/connector/pipeline tools and any connector-backed manifest (or composite reaching one); runs through `tool_store.call` and the `tool_guard` containment path, author-lineage checked against the bound agent |
 | `attest_tools` | `judgments[]`, `context` | post-use reviews with optional per-axis scores, recorded as the bound agent |
 | `publish_tool` | `digest` | author-only (the bound agent's own tools), and only if the agent's bundle grant includes `publish_tool` |
 | `adopt_tool` | `digest`, `reason` | **proposes** adoption; approval (`approve_adoption`) stays owner-only |
+| `find_services` | `query?`, `limit?` | public read: the on-chain services market (same rows as the agent `find_services` tool) |
+| `tool_reviews` | `digest`, `limit?` | public read: drifted position, vetting, usage; local review rows only for a tool the bound agent can see (else `unknown_tool`); a digest the node doesn't hold gets close state only |
+| `network_status` | none | public read: `{autonet, chain{chain_id, label, testnet, substrate_address}, p2p{running, peers, gossip}, epoch, epochs_closed, service_market}`; never the RPC URL (it can embed a provider key) |
+
+The three public reads (`INTEGRATION_PUBLIC_READS`) are answered inline, not
+through `execute_tool`: they read network state any peer can see, act as
+nobody and move nothing, so they need no bundle grant. In particular a guest
+does not need the `services` bundle (which also carries `pay_for_service`)
+to browse the market. Paying for or requesting a service stays denied here;
+the owner does it over the remote listener (below).
 
 `register_tool` is **denied** (`owner_only`). An authored (non-adopted) tool
 runs with the daemon's full environment and working directory, so
@@ -165,6 +176,24 @@ the allowlist is also refused (`not_allowed`). Denied groups:
   `send_agent_message`, delegate and task approval messages
 - providers, connectors, OAuth, daemon control, profile, model setters
 - whole-fleet reads: `snapshot`, `get_snapshot`, `list_agents`
+
+## Owner actions go through the remote listener
+
+Money and owner decisions (approve adoption, register on chain, owner
+binding, pay for / request a service) never ride an integration token. A
+guest UI (the Odysseus Economy panel) sends them from the browser over the
+existing remote listener, signed in with the owner wallet (the same
+`auth_challenge` / `auth_response` handshake atn_web uses). For a container,
+env overrides configure it:
+
+| env | effect |
+|---|---|
+| `ATN_REMOTE_WS_HOST` | bind host for the remote listener (empty = disabled) |
+| `ATN_REMOTE_WS_PORT` | its port (default `local_ws_port + 1`, 7701) |
+| `ATN_OWNER_WALLET` | fills `owner_wallet` only when the config has none; never replaces a configured owner; ignored unless it is a 0x address |
+
+Publish that port on the host's loopback only (`127.0.0.1:7701:7701`). The
+remote listener has no TLS; behind HTTPS put it behind a wss proxy.
 
 ## Rate limiting
 

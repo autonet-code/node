@@ -352,3 +352,153 @@ def test_cli_create_list_revoke(tmp_path, capsys):
     assert main(["--data-dir", dd, "revoke", "ody"]) == 0
     assert ws_auth.IntegrationTokenStore(tmp_path).verify(token) is None
     assert main(["--data-dir", dd, "revoke", "ody"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Public reads (find_services, tool_reviews, network_status)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_public_reads_need_no_grant_and_move_nothing(tmp_path, monkeypatch):
+    from atn.ws_server import INTEGRATION_PUBLIC_READS
+    assert INTEGRATION_PUBLIC_READS <= INTEGRATION_ALLOWED_MESSAGES
+    # Money stays denied: browsing the market never opens paying.
+    for t in ("pay_for_service", "request_service", "register_service"):
+        assert t in INTEGRATION_DENIED_MESSAGES
+    rt = await _fleet(tmp_path)
+    # A guest whose bundle has no `services`: find_services still answers,
+    # because it is not dispatched through execute_tool.
+    rt.get_agent("guest").tools = ["unified_tools"]
+    bridge = _bridge(rt)
+    _, rec = bridge._integration_store.create("guest", "g")
+    sess = _session(rec)
+
+    seen = {}
+
+    async def fake_find(runtime, args):
+        seen.update(args)
+        return {"services": [{"service_id": 1, "ask": 5}], "count": 1}
+
+    import atn.agent_tools as agent_tools
+    monkeypatch.setattr(agent_tools, "_find_services", fake_find)
+    resp = await bridge._handle_integration_message(
+        {"type": "find_services", "msg_id": "1", "query": "ocr",
+         "_caller_id": OWNER_ID}, sess)
+    assert resp["ok"] is True, resp
+    assert resp["result"]["count"] == 1
+    assert seen == {"query": "ocr", "limit": None}      # no _caller_id leaks in
+
+    # Naming another identity is still refused before the read.
+    resp = await bridge._handle_integration_message(
+        {"type": "find_services", "msg_id": "2", "caller_id": "other"}, sess)
+    assert resp["code"] == "wrong_agent"
+
+
+@pytest.mark.asyncio
+async def test_tool_reviews_scoped_to_visible_tools(tmp_path):
+    rt = await _fleet(tmp_path)
+    bridge = _bridge(rt)
+    _, rec = bridge._integration_store.create("guest", "g")
+    sess = _session(rec)
+    mine = rt.tool_store.register(
+        name="guest_tool", description="g", input_schema=_SCHEMA,
+        author="guest", code="print(1)")
+    theirs = rt.tool_store.register(
+        name="other_private", description="o", input_schema=_SCHEMA,
+        author="other", code="print(2)")
+    resp = await bridge._handle_integration_message(
+        {"type": "tool_reviews", "msg_id": "1", "digest": mine["digest"]}, sess)
+    assert resp["ok"] is True, resp
+    assert resp["result"]["digest"] == mine["digest"]
+    assert resp["result"]["reviews"] == []
+    # Another agent's private tool: its local review rows are not exposed.
+    assert not rt.tool_store.allowed("guest", rt.tool_store.get(theirs["digest"]))
+    resp = await bridge._handle_integration_message(
+        {"type": "tool_reviews", "msg_id": "2", "digest": theirs["digest"]}, sess)
+    assert resp["ok"] is False and resp["code"] == "unknown_tool"
+    # A digest this daemon doesn't hold: public close state only.
+    resp = await bridge._handle_integration_message(
+        {"type": "tool_reviews", "msg_id": "3", "digest": "ab" * 32}, sess)
+    assert resp["ok"] is True and resp["result"]["reviews"] == []
+    resp = await bridge._handle_integration_message(
+        {"type": "tool_reviews", "msg_id": "4"}, sess)
+    assert resp["code"] == "bad_request"
+
+
+@pytest.mark.asyncio
+async def test_network_status_has_no_secrets(tmp_path):
+    rt = await _fleet(tmp_path)
+    rt._config.rpb.rpc_url = "https://rpc.example/v1/SECRETKEY"
+    rt._config.rpb.chain_id = 127823
+    bridge = _bridge(rt)
+    _, rec = bridge._integration_store.create("guest", "g")
+    resp = await bridge._handle_integration_message(
+        {"type": "network_status", "msg_id": "1"}, _session(rec))
+    assert resp["ok"] is True, resp
+    body = resp["result"]
+    assert body["chain"]["chain_id"] == 127823
+    assert body["chain"]["label"] == "Etherlink Shadownet (testnet)"
+    assert body["chain"]["testnet"] is True
+    assert "SECRETKEY" not in json.dumps(body)
+    assert set(body) >= {"autonet", "chain", "p2p", "epoch", "epochs_closed"}
+
+
+def test_remote_listener_env_overrides(monkeypatch):
+    from types import SimpleNamespace
+
+    from atn.cli import _remote_listener_settings
+    an = SimpleNamespace(remote_ws_host="", remote_ws_port=7701, owner_wallet="")
+    for k in ("ATN_REMOTE_WS_HOST", "ATN_REMOTE_WS_PORT", "ATN_OWNER_WALLET"):
+        monkeypatch.delenv(k, raising=False)
+    assert _remote_listener_settings(an) == ("", 7701, "")
+    w = "0x" + "ab" * 20
+    monkeypatch.setenv("ATN_REMOTE_WS_HOST", "0.0.0.0")
+    monkeypatch.setenv("ATN_REMOTE_WS_PORT", "7801")
+    monkeypatch.setenv("ATN_OWNER_WALLET", w)
+    assert _remote_listener_settings(an) == ("0.0.0.0", 7801, w)
+    # It also becomes the runtime's owner (earnings / claim identity).
+    assert an.owner_wallet == w
+    # The env never replaces an owner wallet the config already holds.
+    cfg_w = "0x" + "cd" * 20
+    an.owner_wallet = cfg_w
+    assert _remote_listener_settings(an)[2] == cfg_w
+    # A malformed env wallet is ignored, not trusted.
+    an.owner_wallet = ""
+    monkeypatch.setenv("ATN_OWNER_WALLET", "not-a-wallet")
+    assert _remote_listener_settings(an)[2] == ""
+
+
+@pytest.mark.asyncio
+async def test_owner_tool_reviews_handler_unchanged(tmp_path):
+    rt = await _fleet(tmp_path)
+    bridge = _bridge(rt)
+    tool = rt.tool_store.register(
+        name="owner_seen", description="o", input_schema=_SCHEMA,
+        author="other", code="print(1)")
+    owner = ws_auth.ClientSession(local=True, authed=True, owner=True,
+                                  scope_ids=None)
+    resp = await bridge._handle_message(
+        {"type": "tool_reviews", "msg_id": "1", "digest": tool["digest"]}, owner)
+    assert resp["ok"] is True, resp
+    assert set(resp["result"]) == {"digest", "reviews", "position", "vetting", "usage"}
+
+
+@pytest.mark.asyncio
+async def test_list_tools_marks_the_bound_agents_own_tools(tmp_path):
+    rt = await _fleet(tmp_path)
+    bridge = _bridge(rt)
+    _, rec = bridge._integration_store.create("root", "r")
+    mine = rt.tool_store.register(
+        name="root_tool", description="r", input_schema=_SCHEMA,
+        author="root", code="print(1)")
+    child = rt.tool_store.register(
+        name="guest_tool", description="g", input_schema=_SCHEMA,
+        author="guest", code="print(2)")
+    resp = await bridge._handle_integration_message(
+        {"type": "list_tools", "msg_id": "1"}, _session(rec))
+    assert resp["ok"] is True, resp
+    by_digest = {t["digest"]: t for t in resp["result"]["tools"]}
+    assert by_digest[mine["digest"]]["mine"] is True
+    # Visible through lineage (root is guest's ancestor) but not authored.
+    assert by_digest[child["digest"]]["mine"] is False
+    assert by_digest[mine["digest"]]["published"] is False
