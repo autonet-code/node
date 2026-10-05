@@ -191,4 +191,5 @@ The codebase splits into a **core-protected layer** (seven files enforcing the j
 
 ## License
 
-MIT
+AGPL-3.0-or-later (see `LICENSE`). The Solidity contracts under `contracts/` stay MIT (see `contracts/LICENSE`).
+Releases up to v0.7.5 were published under MIT.
