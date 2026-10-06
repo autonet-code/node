@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -914,6 +915,13 @@ class ProviderManager:
     async def auto_detect_providers(self) -> None:
         cognitive = self._executors.get(StepType.COGNITIVE)
         if not isinstance(cognitive, CognitiveStepExecutor):
+            return
+        # Test isolation (scripts/e2e_live): a harness daemon must run only
+        # the providers its config.yaml names. Without this gate the probes
+        # below adopt the machine's Claude Max / Codex login (subscription
+        # quota) even though the daemon's home is redirected.
+        if os.environ.get("ATN_DISABLE_PROVIDER_AUTODETECT", "").strip() == "1":
+            log.info("Provider auto-detect disabled (ATN_DISABLE_PROVIDER_AUTODETECT=1)")
             return
 
         if "claude_max" not in cognitive._providers:

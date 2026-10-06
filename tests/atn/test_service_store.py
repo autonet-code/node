@@ -495,6 +495,57 @@ class TestRegisterServiceWS:
         assert loose["result"]["spec"]["image_uri"] == "not-a-url"
 
 
+class TestRegisterServiceWSDefaultSchema:
+    """The app's Publish dialog sends a backing but no input_schema; the
+    WS surface inherits the schema from the backing instead of refusing
+    ("missing required field 'input_schema'", found by the live E2E)."""
+
+    async def _register(self, rt, msg):
+        server = _server(rt)
+        return await server._handle_message(
+            {"type": "register_service", "msg_id": "r1", **msg},
+            _local_session())
+
+    @pytest.mark.asyncio
+    async def test_tool_backed_inherits_the_tool_schema(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        await _register_agent(rt, "child")
+        tool = await _register_echo_tool(rt)
+        res = await self._register(rt, {
+            "name": "from_app", "description": "d", "ask": ASK,
+            "backing_tool": tool["digest"], "tool_digest": tool["digest"]})
+        assert res["ok"] is True, res
+        assert res["result"]["spec"]["input_schema"] == SCHEMA
+
+    @pytest.mark.asyncio
+    async def test_inference_backed_gets_the_chat_schema(self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        res = await self._register(rt, {
+            "name": "cog", "description": "d", "ask": ASK,
+            "inference": {"model": "echo-1"}})
+        assert res["ok"] is True, res
+        schema = res["result"]["spec"]["input_schema"]
+        assert schema["required"] == ["messages"]
+
+    @pytest.mark.asyncio
+    async def test_explicit_schema_wins_and_unknown_tool_still_refused(
+            self, tmp_path):
+        rt = _make_runtime(tmp_path)
+        explicit = {"type": "object", "properties": {"q": {"type": "string"}}}
+        res = await self._register(rt, {
+            "name": "explicit", "description": "d", "ask": ASK,
+            "input_schema": explicit, "backing_tool": "deadbeef"})
+        assert res["ok"] is True
+        assert res["result"]["spec"]["input_schema"] == explicit
+        # No schema and a backing the daemon does not know: nothing to
+        # inherit, so the validator refuses as before.
+        res = await self._register(rt, {
+            "name": "dead", "description": "d", "ask": ASK,
+            "backing_tool": "deadbeef"})
+        assert res["ok"] is False
+        assert "input_schema" in res["error"]
+
+
 class TestServiceRequestDispatch:
     @pytest.mark.asyncio
     async def test_dispatch_through_backing_tool(self, tmp_path):

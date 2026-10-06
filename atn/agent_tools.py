@@ -95,6 +95,26 @@ def _flat_budgets(runtime: "Runtime", defn: Any) -> dict[str, Any]:
                 flat[key] = 0
     return flat
 
+def _budget_periods(defn: Any) -> dict[str, str]:
+    """Rollover period per budget key ("none", "daily", "weekly", "monthly").
+
+    ``_flat_budgets`` keeps the scalar ``{key: limit}`` shape existing clients
+    expect, which drops the period. A client that edits budgets reads it back
+    from here; without it a saved "per day" cap reads back as lifetime and the
+    next save rewrites every key without its period."""
+    if not getattr(defn, "budgets", None):
+        return {}
+    from atn.runtime.agent_registry import _resolve_budget
+
+    out: dict[str, str] = {}
+    for key in defn.budgets.keys():
+        try:
+            out[key] = _resolve_budget(defn, key)[1] or "none"
+        except Exception:
+            out[key] = "none"
+    return out
+
+
 # Type for tool executor functions: (runtime, input_dict) -> result_dict
 ToolExecutor = Callable[["Runtime", dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
 
@@ -1476,6 +1496,7 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         "schedule": defn.schedule,
         "concurrency": defn.concurrency,
         "budgets": _flat_budgets(runtime, defn),
+        "budget_periods": _budget_periods(defn),
         "path": str(runtime._config.agents_dir / defn.id),
         "system_prompt": defn.system_prompt or "",
         "task_prompt": defn.task_prompt or "",

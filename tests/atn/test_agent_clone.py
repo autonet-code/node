@@ -48,6 +48,24 @@ async def _register_original(rt, agent_id="orig", **over):
 
 class TestClone:
     @pytest.mark.asyncio
+    async def test_clone_registered_event_carries_cloned_from(self, tmp_path):
+        """The app builds the clone's card from agent.registered; without
+        cloned_from it offered no Brief & retire until the next snapshot."""
+        from atn.events import EventType
+
+        rt = _make_runtime(tmp_path)
+        await _register_original(rt)
+        res = await clone_agent(rt, "orig")
+        clone_id = res["agent_id"]
+
+        regs = {e.data.get("agent_id"): e.data
+                for e in rt.events.history
+                if e.type == EventType.AGENT_REGISTERED}
+        assert regs[clone_id]["cloned_from"] == "orig"
+        assert regs[clone_id]["parent_id"] == "orig"
+        assert regs["orig"]["cloned_from"] is None
+
+    @pytest.mark.asyncio
     async def test_clone_copies_definition_and_history(self, tmp_path):
         rt = _make_runtime(tmp_path)
         await _register_original(rt)

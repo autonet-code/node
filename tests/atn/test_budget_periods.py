@@ -164,3 +164,25 @@ async def test_period_state_persists_across_restart(tmp_path):
     rt2 = _make_runtime(tmp_path)
     assert rt2.registry._budget_period_start["a"]["claude_max"] == stamp
     assert rt2.registry._budget_used["a"]["claude_max"] == 1000
+
+
+# ---------------------------------------------------------------------------
+# get_agent surfaces the period alongside the flat limit
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_agent_reports_budget_periods(tmp_path):
+    """Regression: get_agent flattened budgets to bare ints and dropped the
+    period, so a client re-saving budgets rewrote every key as lifetime."""
+    from atn.agent_tools import _get_agent
+
+    rt = _make_runtime(tmp_path)
+    await rt.registry.register_agent(_bare_agent(
+        "a", None, budgets={
+            "claude_max": {"limit": 5000, "period": "daily"},
+            "ollama": 1000,
+        },
+    ))
+    result = await _get_agent(rt, {"agent_id": "a"})
+    assert result["budgets"] == {"claude_max": 5000, "ollama": 1000}
+    assert result["budget_periods"] == {"claude_max": "daily", "ollama": "none"}

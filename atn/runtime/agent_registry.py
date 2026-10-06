@@ -741,7 +741,11 @@ class AgentRegistry:
                                else (defn.provider if isinstance(defn.provider, str) else "")),
                   "parent_id": defn.parent_id,
                   "concurrency": defn.concurrency,
-                  "notify_parent": defn.notify_parent},
+                  "notify_parent": defn.notify_parent,
+                  # A full-memory clone must be recognisable from the event
+                  # alone: clients offer "Brief & retire" on it without
+                  # waiting for the next snapshot.
+                  "cloned_from": getattr(defn, "cloned_from", None)},
         ))
         return defn.id
 

@@ -2151,6 +2151,13 @@ class WebSocketBridge:
                 inference = None
             if not name:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'name' field"}
+            if not input_schema:
+                # The app's Publish dialog names a backing, not a schema:
+                # the backing already defines what a buyer sends. Without
+                # this the spec validator refused every app-published
+                # service ("missing required field 'input_schema'").
+                input_schema = self._default_service_input_schema(
+                    backing_tool, inference)
             try:
                 result = self.runtime.service_store.register(
                     name=name,
@@ -4615,6 +4622,35 @@ class WebSocketBridge:
         if registry is not None and hasattr(registry, "get_agent_key"):
             return str(registry.get_agent_key(author) or "").strip()
         return ""
+
+    # A buyer of an inference-backed service sends a chat request (see
+    # the inference fulfilment path: args {messages, max_tokens?}).
+    _INFERENCE_INPUT_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "messages": {"type": "array", "items": {"type": "object"}},
+            "max_tokens": {"type": "integer"},
+        },
+        "required": ["messages"],
+    }
+
+    def _default_service_input_schema(
+        self, backing_tool: str, inference: dict | None,
+    ) -> dict:
+        """The input schema a service inherits from its backing when the
+        caller names none: the backing tool's manifest schema, or the chat
+        request shape for an inference backing. ``{}`` when neither is
+        known (the spec validator then refuses, as before)."""
+        if inference is not None:
+            return dict(self._INFERENCE_INPUT_SCHEMA)
+        if backing_tool:
+            store = getattr(self.runtime, "tool_store", None)
+            record = store.get(backing_tool) if store is not None else None
+            schema = (record.manifest.get("input_schema")
+                      if record is not None else None)
+            if isinstance(schema, dict) and schema:
+                return dict(schema)
+        return {}
 
     async def _register_service_on_chain(
         self, author: str, digest: str, ask_amount: int,
