@@ -95,6 +95,44 @@ def _flat_budgets(runtime: "Runtime", defn: Any) -> dict[str, Any]:
                 flat[key] = 0
     return flat
 
+def _effective_provider(runtime: "Runtime", defn: Any) -> str:
+    """The provider id ``defn``'s runs are booked against (its budget key).
+    "" when the runtime cannot resolve it."""
+    pmgr = getattr(runtime, "providers", None)
+    fn = getattr(pmgr, "effective_provider_id", None)
+    out: Any = None
+    if callable(fn):
+        try:
+            out = fn(defn)
+        except Exception:
+            out = None
+    if isinstance(out, str) and out:
+        return out
+    # No provider manager to consult key availability: resolve from the
+    # definition and daemon default model alone.
+    from .provider_identity import effective_provider_id
+    try:
+        cfg = getattr(runtime, "_config", None)
+        dm = getattr(cfg, "default_model", "")
+        return effective_provider_id(
+            defn, default_model=dm if isinstance(dm, str) else "")
+    except Exception:
+        return ""
+
+
+def _unpinned_provider(runtime: "Runtime", defn: Any) -> str:
+    """The provider ``defn`` would run on with its pin cleared."""
+    pmgr = getattr(runtime, "providers", None)
+    fn = getattr(pmgr, "unpinned_provider_id", None)
+    if not callable(fn):
+        return ""
+    try:
+        out = fn(defn)
+    except Exception:
+        return ""
+    return out if isinstance(out, str) else ""
+
+
 def _budget_periods(defn: Any) -> dict[str, str]:
     """Rollover period per budget key ("none", "daily", "weekly", "monthly").
 
@@ -1497,6 +1535,10 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         "concurrency": defn.concurrency,
         "budgets": _flat_budgets(runtime, defn),
         "budget_periods": _budget_periods(defn),
+        # The provider the agent's budget is keyed to (what its runs are
+        # booked against), and the one it would run on with no pin.
+        "effective_provider": _effective_provider(runtime, defn),
+        "default_provider": _unpinned_provider(runtime, defn),
         "path": str(runtime._config.agents_dir / defn.id),
         "system_prompt": defn.system_prompt or "",
         "task_prompt": defn.task_prompt or "",
@@ -1739,11 +1781,11 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # A raise must actually resume the agent: BUDGET_PAUSED is set by the
         # finalizer and nothing else clears it, so re-check here and re-arm.
         if runtime.registry._status.get(agent_id) == AgentStatus.BUDGET_PAUSED:
-            prov = defn.provider
-            if isinstance(prov, list):
-                prov = prov[0] if prov else ""
+            # Check against the provider the agent actually runs on (its
+            # budget key), not the raw pin, which may be a model-id hint.
+            prov = _effective_provider(runtime, defn)
             ok, _blocker = runtime.registry.check_budget(
-                agent_id, str(prov or ""), model_id=defn.cognitive_model or "")
+                agent_id, prov, model_id=defn.cognitive_model or "")
             if ok:
                 runtime.registry._status[agent_id] = AgentStatus.ACTIVE
     if "parent_id" in input:
@@ -1884,6 +1926,19 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 
     if not changed:
         return {"agent_id": agent_id, "status": "no_changes"}
+
+    # Budgets a client keyed under the legacy default-provider stand-in move
+    # to the provider the agent actually runs on (provider_identity).
+    if "budgets" in changed or provider_or_model_changed:
+        migrate = getattr(runtime, "migrate_budget_keys", None)
+        if callable(migrate):
+            try:
+                moved = migrate(defn)
+                if moved:
+                    runtime.registry.rekey_budget_state(agent_id, moved)
+            except Exception:
+                log.debug("budget key migration failed for %s", agent_id,
+                          exc_info=True)
 
     # §10: a provider/model change must be LIVE. The resolved provider instance
     # is cached in ``providers._active_providers[agent_id]``; without eviction
@@ -3556,6 +3611,7 @@ async def _get_my_budget_status(runtime: Runtime, input: dict[str, Any]) -> dict
         registry=runtime.registry,
         metering=getattr(runtime, "metering", None),
         config=getattr(runtime, "_config", None),
+        providers=getattr(runtime, "providers", None),
     ).to_dict()
 
     # Walk ancestors: report each one's cap and remaining headroom for the
@@ -3605,9 +3661,12 @@ async def _get_my_budget_status(runtime: Runtime, input: dict[str, Any]) -> dict
         pmgr = getattr(runtime, "providers", None)
         cache = getattr(pmgr, "_cached_session_stats", None)
         cached = cache.get(caller_id) if isinstance(cache, dict) else None
-        key = "claude_max"
+        caller_defn = runtime.registry.get_agent(caller_id)
+        key = _effective_provider(runtime, caller_defn) if caller_defn else ""
         rl = cached.get("rate_limits") if isinstance(cached, dict) else None
-        if rl and key not in subscription:
+        if not key:
+            pass
+        elif rl and key not in subscription:
             subscription[key] = {
                 "rate_limits": dict(rl),
                 "tokens_per_percent": cached.get("tokens_per_percent"),
@@ -3685,7 +3744,7 @@ async def _get_usage(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     if isinstance(provider, BridgeProvider):
         # Subscription-window utilization. Prefer the already-cached
         # rate_limits; only hit the network if we've never populated them.
-        result["provider"] = "claude_max"
+        result["provider"] = getattr(provider, "provider_id", None) or provider.name
         rate_limits = dict(getattr(provider, "_rate_limits", {}) or {})
         if not rate_limits:
             try:

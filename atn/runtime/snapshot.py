@@ -150,6 +150,9 @@ class SnapshotBuilder:
         except Exception:  # noqa: BLE001 — display-only, degrade quietly
             worker_pids = {}
 
+        # One key probe for the whole pass: resolving each agent's effective
+        # provider may ask whether an API key is on file.
+        _key_probe = self.provider_manager._key_probe()
         agents = {}
         for aid, defn in self.registry._agents.items():
             if scope_ids is not None and aid not in scope_ids:
@@ -165,6 +168,10 @@ class SnapshotBuilder:
                 # Pinned inference provider ("" = daemon default). Model
                 # pickers use it to offer only that provider's models.
                 "provider": _prov,
+                # The provider its runs (and so its budget) are booked
+                # against, resolved the way the engine routes it.
+                "effective_provider": self._effective_provider(
+                    defn, _key_probe),
                 "mode": defn.mode.value,
                 "notify_parent": defn.notify_parent,
                 "status": self.registry._status[aid].value,
@@ -353,6 +360,9 @@ class SnapshotBuilder:
             # pickable, so unconfigured providers stay out of the list.
             "available_models": self.provider_manager.get_available_models(require_active=True),
             "providers": providers_summary,
+            # The provider an unpinned new agent runs on (the create form's
+            # "(daemon default)" choice), so budgets key to it, not a guess.
+            "default_provider": self._default_provider(_key_probe),
             "agents": agents,
             "executions": executions,
             "connectors": connectors,
@@ -374,6 +384,22 @@ class SnapshotBuilder:
             # connected. Deliberately outside _SECRET_SECTIONS in ws_server.
             "input": self._arbiter_ref.state() if self._arbiter_ref else {},
         }
+
+    def _effective_provider(self, defn: Any, key_probe: Any) -> str:
+        try:
+            out = self.provider_manager.effective_provider_id(
+                defn, has_api_key=key_probe)
+        except Exception:
+            return ""
+        return out if isinstance(out, str) else ""
+
+    def _default_provider(self, key_probe: Any) -> str:
+        try:
+            out = self.provider_manager.default_provider_id(
+                has_api_key=key_probe)
+        except Exception:
+            return ""
+        return out if isinstance(out, str) else ""
 
     def _aggregate_claude_max_rate_limits(self) -> dict:
         """Merge rate-limit snapshots across all active claude_max bridges.

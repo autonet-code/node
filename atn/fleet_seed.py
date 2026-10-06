@@ -137,7 +137,9 @@ async def seed_default_fleet(runtime: "Runtime", config: "ATNConfig") -> str | N
         id=KEVIN_ID,
         name="Kevin",
         mode=AgentMode.COGNITIVE,
-        provider=config.default_provider or "claude_max",
+        # No configured default provider: leave Kevin unpinned so he routes
+        # like any other daemon-default agent (by model).
+        provider=config.default_provider or "",
         cognitive_model=config.default_model or "",
         system_prompt=KEVIN_SYSTEM_PROMPT,
         description=(

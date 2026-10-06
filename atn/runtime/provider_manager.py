@@ -358,6 +358,52 @@ class ProviderManager:
         return ""
 
     # ------------------------------------------------------------------
+    # Provider identity (no instantiation)
+    # ------------------------------------------------------------------
+
+    def _key_probe(self) -> Any:
+        """A memoized ``has_api_key`` for one resolution pass."""
+        cache: dict[str, bool] = {}
+
+        def has_api_key(pid: str) -> bool:
+            if pid not in cache:
+                try:
+                    cache[pid] = bool(self._resolve_api_key(pid))
+                except Exception:
+                    cache[pid] = False
+            return cache[pid]
+        return has_api_key
+
+    def effective_provider_id(self, defn: Any, *, has_api_key: Any = None) -> str:
+        """The provider id ``defn``'s runs are booked against (its budget key).
+        Mirrors resolve_provider_with_fallback without building a provider."""
+        from ..provider_identity import effective_provider_id
+        return effective_provider_id(
+            defn,
+            default_model=self._config.default_model or "",
+            has_api_key=has_api_key or self._key_probe(),
+            custom_providers=self._custom_providers,
+        )
+
+    def unpinned_provider_id(self, defn: Any, *, has_api_key: Any = None) -> str:
+        """The provider ``defn`` would run on with its pin cleared."""
+        from ..provider_identity import unpinned_provider_id
+        return unpinned_provider_id(
+            defn,
+            default_model=self._config.default_model or "",
+            has_api_key=has_api_key or self._key_probe(),
+        )
+
+    def default_provider_id(self, *, has_api_key: Any = None) -> str:
+        """The provider a new top-level agent with no pin and no model runs
+        on: the daemon default as the create form presents it."""
+        from ..provider_identity import provider_for_model, FALLBACK_MODEL
+        return provider_for_model(
+            self._config.default_model or FALLBACK_MODEL,
+            has_api_key=has_api_key or self._key_probe(),
+        )
+
+    # ------------------------------------------------------------------
     # Provider resolution
     # ------------------------------------------------------------------
 
@@ -403,9 +449,12 @@ class ProviderManager:
                         agent_address=agent_address, sponsor_address=sponsor_address)
                 except Exception:
                     log.info("Provider '%s' not available for %s, trying next", provider_name, defn.id)
-            first = providers[0] if providers else "claude_max"
+            if not providers:
+                # An empty chain names nothing: route by model like an
+                # unpinned agent rather than assuming any one provider.
+                return self._resolve_provider_for_model(model, defn.id)
             return self._resolve_provider_by_name(
-                first, model, defn.id,
+                providers[0], model, defn.id,
                 agent_address=agent_address, sponsor_address=sponsor_address)
         elif providers:
             if providers in self._KNOWN_PROVIDERS or providers in self._custom_providers:
@@ -444,6 +493,7 @@ class ProviderManager:
             defaults = self._PROVIDER_DEFAULTS.get("gemini", {})
             return OpenAICompatibleProvider(
                 name=f"gemini-{agent_id}",
+                provider_id="gemini",
                 base_url=defaults.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai"),
                 api_key=api_key,
                 default_model=model,
@@ -454,6 +504,7 @@ class ProviderManager:
                 raise ProviderError("No OpenAI API key configured")
             return OpenAICompatibleProvider(
                 name=f"openai-{agent_id}",
+                provider_id="openai",
                 base_url="https://api.openai.com/v1",
                 api_key=api_key,
                 default_model=model,
@@ -465,6 +516,7 @@ class ProviderManager:
             defaults = self._PROVIDER_DEFAULTS.get("deepseek", {})
             return OpenAICompatibleProvider(
                 name=f"deepseek-{agent_id}",
+                provider_id="deepseek",
                 base_url=defaults.get("base_url", "https://api.deepseek.com/v1"),
                 api_key=api_key,
                 default_model=model,
@@ -733,6 +785,7 @@ class ProviderManager:
                 )
             return OpenAICompatibleProvider(
                 name=f"gemini-{agent_id}",
+                provider_id="gemini",
                 base_url=defaults.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai"),
                 api_key=api_key,
                 default_model=model_name,
@@ -748,6 +801,7 @@ class ProviderManager:
                 )
             return OpenAICompatibleProvider(
                 name=f"openai-{agent_id}",
+                provider_id="openai",
                 base_url=defaults.get("base_url", "https://api.openai.com/v1"),
                 api_key=api_key,
                 default_model=model_name,

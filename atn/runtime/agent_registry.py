@@ -1115,6 +1115,22 @@ class AgentRegistry:
     # Budget tracking
     # ------------------------------------------------------------------
 
+    def rekey_budget_state(self, agent_id: str, moved: dict[str, str]) -> None:
+        """Carry an agent's usage counters and period starts from old budget
+        keys to new ones (see provider_identity.migrate_legacy_budget_keys),
+        so a re-keyed cap keeps what was already spent against it."""
+        changed = False
+        for table in (self._budget_used, self._budget_period_start):
+            per_agent = table.get(agent_id)
+            if not per_agent:
+                continue
+            for old, new in moved.items():
+                if old in per_agent and new not in per_agent:
+                    per_agent[new] = per_agent.pop(old)
+                    changed = True
+        if changed:
+            self._save_budget_state()
+
     def _load_budget_state(self) -> None:
         """Load persisted per-agent budget usage from disk."""
         path = self._budget_state_path

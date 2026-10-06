@@ -26,13 +26,6 @@ log = logging.getLogger(__name__)
 # Kept in sync with metering.SUBSCRIPTION_PROVIDERS.
 _SUBSCRIPTION_PROVIDERS = frozenset({"claude_max", "codex_max"})
 
-# Known explicit provider names — a defn.provider that is one of these is used
-# verbatim; anything else is treated as a model id and resolved to its channel.
-_KNOWN_PROVIDER_NAMES = frozenset({
-    "claude_max", "codex_max", "anthropic", "openai", "gemini",
-    "deepseek", "ollama", "rpb", "substrate",
-})
-
 
 @dataclass
 class EffectiveLimits:
@@ -108,30 +101,23 @@ def format_budget_line(
     return line + "]"
 
 
-def _agent_provider_name(defn: Any, config: Any) -> str:
-    """Best-effort resolve the provider NAME an agent runs on, WITHOUT
-    instantiating a provider. Uses the explicit provider field when it names a
-    known provider, else resolves the model id to its default channel."""
-    provider = getattr(defn, "provider", "") or ""
-    if isinstance(provider, list):
-        provider = provider[0] if provider else ""
-    if isinstance(provider, str) and provider in _KNOWN_PROVIDER_NAMES:
-        return provider
-    # Otherwise `provider` is (or falls back to) a model id → resolve channel.
-    model = (
-        (isinstance(provider, str) and provider)
-        or getattr(defn, "cognitive_model", "")
-        or (getattr(config, "default_model", "") or "")
-        or "claude-sonnet-4-6"
-    )
-    try:
-        from .model_specs import resolve as _resolve_model
-        spec = _resolve_model(model)
-        if spec.default_channel:
-            return spec.default_channel
-    except Exception:
-        pass
-    return "claude_max"
+def _agent_provider_name(defn: Any, config: Any, providers: Any = None) -> str:
+    """Resolve the provider id an agent runs on, WITHOUT instantiating a
+    provider. Prefers the runtime's ProviderManager (which knows which API keys
+    are on file); otherwise resolves from the definition and the daemon
+    default model alone. ``defn`` None means a fresh unpinned agent."""
+    fn = getattr(providers, "effective_provider_id", None)
+    if defn is not None and callable(fn):
+        try:
+            out = fn(defn)
+            if isinstance(out, str) and out:
+                return out
+        except Exception:
+            pass
+    from .provider_identity import effective_provider_id
+    dm = getattr(config, "default_model", "") if config is not None else ""
+    return effective_provider_id(
+        defn, default_model=dm if isinstance(dm, str) else "")
 
 
 def compute_effective_limits(
@@ -140,6 +126,7 @@ def compute_effective_limits(
     registry: Any,
     metering: Any = None,
     config: Any = None,
+    providers: Any = None,
 ) -> EffectiveLimits:
     """Return the effective limits for an agent through the uniform rail.
 
@@ -181,7 +168,7 @@ def compute_effective_limits(
         )
 
     # --- Case 2: no per-agent budget → the daemon-wide ceiling binds. -------
-    provider = _agent_provider_name(defn, config) if defn else "claude_max"
+    provider = _agent_provider_name(defn, config, providers)
     entries = []
 
     if provider in _SUBSCRIPTION_PROVIDERS:

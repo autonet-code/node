@@ -1565,7 +1565,10 @@ class WebSocketBridge:
                     "result": {"rate_limits": merged}}
 
         if msg_type == "provider_refresh_usage":
-            provider_id = msg.get("provider_id", "claude_max")
+            provider_id = str(msg.get("provider_id") or "")
+            if not provider_id:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "provider_refresh_usage needs a provider_id"}
             # _active_providers is keyed by agent_id, not provider_id. Find any
             # active provider instance whose .name matches the requested provider.
             prov = None

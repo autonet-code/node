@@ -885,6 +885,7 @@ class ExecutionEngine:
                 registry=self.registry,
                 metering=getattr(rt, "metering", None),
                 config=getattr(rt, "_config", None),
+                providers=self.provider_manager,
             )
             last = self._last_turn_tokens(defn.id, record.execution_id)
             return format_budget_line(limits, last)
@@ -1950,11 +1951,18 @@ def _preview(obj: Any, max_len: int = 120) -> str:
 
 
 def _provider_name(provider: Any) -> str:
-    """Provider's budget/usage key. ALWAYS a string: a non-string key
-    (e.g. an AsyncMock attribute in tests) poisons every JSON roll-up
-    downstream — budget state, execution store, usage snapshots."""
-    name = getattr(provider, "name", "claude_max")
-    return name if isinstance(name, str) else "claude_max"
+    """Provider's budget/usage key: its canonical provider id (a per-agent
+    "openai-<agent_id>" instance books under "openai"), else its name.
+
+    ALWAYS a string: a non-string key (e.g. an AsyncMock attribute in tests)
+    poisons every JSON roll-up downstream — budget state, execution store,
+    usage snapshots. A provider with no usable id books under "unknown"
+    rather than under some other provider's key."""
+    pid = getattr(provider, "provider_id", None)
+    if isinstance(pid, str) and pid:
+        return pid
+    name = getattr(provider, "name", None)
+    return name if isinstance(name, str) and name else "unknown"
 
 
 def _accumulate_usage(record: ExecutionRecord, provider: str, output: dict) -> None:

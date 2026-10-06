@@ -50,8 +50,12 @@ class OpenAICompatibleProvider(Provider):
         base_url: str,
         api_key: str = "",
         default_model: str = "",
+        provider_id: str = "",
     ) -> None:
         self._name = name
+        # Canonical provider id for budget/usage keys. Per-agent instances are
+        # named "<provider>-<agent_id>"; the budget key is the provider alone.
+        self._provider_id = provider_id or name
         self._api_key = api_key
         self._default_model = default_model
 
@@ -74,6 +78,10 @@ class OpenAICompatibleProvider(Provider):
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def provider_id(self) -> str:
+        return self._provider_id
 
     async def send(
         self,

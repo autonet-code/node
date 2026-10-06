@@ -300,6 +300,13 @@ class Provider(ABC):
     def name(self) -> str:
         """Provider name (e.g. 'anthropic', 'openai')."""
 
+    @property
+    def provider_id(self) -> str:
+        """Canonical provider id: the key budgets and usage are booked under.
+        Defaults to ``name``; per-agent instances whose name carries the agent
+        id override it."""
+        return self.name
+
     @abstractmethod
     async def send(
         self,

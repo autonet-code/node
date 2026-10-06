@@ -1088,7 +1088,35 @@ class Runtime:
     async def register_agent(
         self, defn: AgentDefinition, *, legacy: bool = False,
     ) -> str:
-        return await self.registry.register_agent(defn, legacy=legacy)
+        moved = self.migrate_budget_keys(defn)
+        aid = await self.registry.register_agent(defn, legacy=legacy)
+        if moved:
+            self.registry.rekey_budget_state(aid, moved)
+            from ..loader import save_agent
+            try:
+                save_agent(defn, self._config.agents_dir)
+            except Exception:
+                log.warning("Migrated budget keys for %s but YAML save failed",
+                            defn.id, exc_info=True)
+        return aid
+
+    def migrate_budget_keys(self, defn: AgentDefinition) -> dict[str, str]:
+        """Re-key budgets written under the legacy default-provider stand-in
+        (``claude_max``) onto the provider the agent actually runs on, so the
+        cap binds. Read-compat for configs saved by older clients; limits are
+        moved, never dropped. Returns ``{old_key: new_key}``."""
+        from ..provider_identity import migrate_legacy_budget_keys
+        try:
+            effective = self.providers.effective_provider_id(defn)
+        except Exception:
+            log.debug("effective provider unresolved for %s", defn.id,
+                      exc_info=True)
+            return {}
+        moved = migrate_legacy_budget_keys(defn, effective)
+        if moved:
+            log.info("Agent %s: budget keys %s moved to the provider it runs "
+                     "on (%s)", defn.id, sorted(moved), effective)
+        return moved
 
     async def unregister_agent(
         self, agent_id: str, *, _force: bool = False,
