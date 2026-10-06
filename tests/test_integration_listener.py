@@ -435,6 +435,7 @@ async def test_network_status_has_no_secrets(tmp_path):
     rt = await _fleet(tmp_path)
     rt._config.rpb.rpc_url = "https://rpc.example/v1/SECRETKEY"
     rt._config.rpb.chain_id = 127823
+    rt._config.rpb.network_joined = True
     bridge = _bridge(rt)
     _, rec = bridge._integration_store.create("guest", "g")
     resp = await bridge._handle_integration_message(
@@ -446,6 +447,35 @@ async def test_network_status_has_no_secrets(tmp_path):
     assert body["chain"]["testnet"] is True
     assert "SECRETKEY" not in json.dumps(body)
     assert set(body) >= {"autonet", "chain", "p2p", "epoch", "epochs_closed"}
+    assert body["joined"] is True
+
+
+@pytest.mark.asyncio
+async def test_public_reads_before_joining_say_not_joined(tmp_path):
+    """Before the first registration (or autonet.enabled) the daemon is local
+    only: network_status and find_services say "not joined" instead of chain
+    data or an empty list, and never touch the chain."""
+    rt = await _fleet(tmp_path)
+    rt._config.rpb.chain_id = 127823
+    rt._config.rpb.service_registry_address = "0x" + "5e" * 20
+    assert rt._config.rpb.network_joined is False
+    bridge = _bridge(rt)
+    _, rec = bridge._integration_store.create("guest", "g")
+    sess = _session(rec)
+
+    resp = await bridge._handle_integration_message(
+        {"type": "network_status", "msg_id": "1"}, sess)
+    assert resp["ok"] is True, resp
+    body = resp["result"]
+    assert body["joined"] is False and body["status"] == "not_joined"
+    assert "register an agent" in body["message"]
+    assert body["chain"] is None
+
+    resp = await bridge._handle_integration_message(
+        {"type": "find_services", "msg_id": "2"}, sess)
+    assert resp["ok"] is True, resp
+    assert resp["result"]["status"] == "not_joined"
+    assert "services" not in resp["result"]
 
 
 def test_remote_listener_env_overrides(monkeypatch):

@@ -383,7 +383,8 @@ def _registry_substrate_address(config_path: Optional[str]) -> str:
     """Resolve the deployed Substrate.sol address from registry.json.
 
     Looks next to the loaded config file first, then the repo root
-    (two levels up from this module), then the CWD.
+    (two levels up from this module), then the CWD, then the copy packaged
+    with atn.
     """
     import json as _json
 
@@ -392,6 +393,8 @@ def _registry_substrate_address(config_path: Optional[str]) -> str:
         candidates.append(Path(config_path).resolve().parent / "registry.json")
     candidates.append(Path(__file__).resolve().parents[2] / "registry.json")
     candidates.append(Path("registry.json"))
+    # The copy packaged with atn (the only one a pip install has).
+    candidates.append(Path(__file__).resolve().parents[2] / "atn" / "registry.json")
     for candidate in candidates:
         try:
             if not candidate.exists():

@@ -7,9 +7,9 @@ one-paragraph "what is this" start at the repo-root `README.md`.
 **Status (v0.7.0, 2026-07-10): beta on testnet.** `Substrate.sol` and the
 DAO/economy suite are deployed on Etherlink Shadownet; the canonical
 jurisdiction is a werule-platform DAO (governor `0xD5691B7c…`) with the
-addresses of record in `registry.json` (daemons resolve the network from
-it: repo-root in a dev checkout, else the GitHub-raw copy cached under
-`~/.atn/`). The tool-economy paradigm is the shipped system: `tool_substrate.md`
+addresses of record in `registry.json` (each release ships a copy as
+package data, `atn/registry.json`, read when the daemon joins the network
+by registering an agent or `autonet.enabled`; never fetched at boot). The tool-economy paradigm is the shipped system: `tool_substrate.md`
 is the core spec (read its `Decision (2026-07-10)` section first). The
 architecture-reference set and the two guides below still describe the
 retired pre-substrate paradigm and are banner-marked historical.

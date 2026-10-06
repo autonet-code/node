@@ -297,6 +297,13 @@ class RPBConfig:
     # Mirrors chat.policy; the single-writer decision is enforced by the
     # runtime-owned InputArbiter, not by this policy object.
     ws_input_policy: str = "allow"
+    # Runtime-only, never read from or written to config.yaml. The daemon
+    # stays local until it joins the network (first on-chain registration or
+    # ``enabled``); resolve_network_registry() then fills the chain addresses
+    # from the packaged registry and sets ``network_joined``.
+    network_joined: bool = False
+    # Keys the operator set in config.yaml; the registry never replaces them.
+    explicit_fields: list[str] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
         """Apply jurisdiction defaults for empty fields."""
@@ -458,34 +465,42 @@ class ATNConfig:
 
 
 # ---------------------------------------------------------------------------
-# Registry seed — network jurisdiction defaults (public chain addresses)
+# Network registry: public chain addresses, resolved lazily
 # ---------------------------------------------------------------------------
 #
-# Resolution order (see _load_registry_seed):
-#   1. repo-root registry.json next to the source tree (dev override) — this
-#      is the ONLY copy present when running from a git checkout;
-#   2. else the cached copy at ~/.atn/registry.json, refreshed on boot from
-#      the canonical GitHub raw URL with a short timeout. Pip-installed wheels
-#      have NO repo-root file, so this is their sole source of network config.
+# registry.json ships INSIDE the package (atn/registry.json, package data),
+# pinned per release; tests/atn/test_config_registry.py keeps it identical to
+# the repo-root copy of record. Nothing is fetched at boot: the daemon stays
+# fully local until it joins the network, which happens when the first agent
+# registers on chain or when ``autonet.enabled`` is set. Only then is the
+# registry read (resolve_network_registry) and its addresses filled into the
+# autonet config. user config.yaml values (blockchain/rpb/autonet sections)
+# still win over it.
 #
-# The registry contains only public chain addresses + a public RPC URL, so it
-# is safe to fetch over plain HTTPS. It is a SEED: user config.yaml values
-# (blockchain/rpb/autonet sections) still override it downstream.
+# An operator may point ATN_REGISTRY_URL at a registry document (a private
+# fork, a test network). It is fetched at join time, never at boot, and the
+# packaged copy is the fallback if it is unreachable.
 
-# Canonical location of the published registry. Override with ATN_REGISTRY_URL
-# for testing / private forks.
-_DEFAULT_REGISTRY_URL = (
-    "https://raw.githubusercontent.com/autonet-code/node/master/registry.json"
-)
-# Where the fetched copy is cached for offline/degraded boots.
-_REGISTRY_CACHE_PATH = _DEFAULT_DIR / "registry.json"
-# Short worst-case network wait at first boot; never blocks meaningfully.
+# Read before joining by find_services / market_services / network_status.
+NOT_JOINED_MESSAGE = "Not joined: register an agent to join the network."
+# Short worst-case wait for an ATN_REGISTRY_URL override fetch.
 _REGISTRY_FETCH_TIMEOUT = 4.0
 
 
-def _registry_url() -> str:
-    """The registry fetch URL, honoring the ATN_REGISTRY_URL override."""
-    return os.environ.get("ATN_REGISTRY_URL", "").strip() or _DEFAULT_REGISTRY_URL
+def not_joined_state() -> dict[str, Any]:
+    """The payload a read-only chain call returns before the daemon joined."""
+    return {"joined": False, "status": "not_joined",
+            "message": NOT_JOINED_MESSAGE}
+
+
+def _packaged_registry_path() -> Path:
+    """The registry.json shipped with this release (package data)."""
+    return Path(__file__).resolve().parent / "registry.json"
+
+
+def _registry_override_url() -> str:
+    """The operator's ATN_REGISTRY_URL, or "" when unset."""
+    return os.environ.get("ATN_REGISTRY_URL", "").strip()
 
 
 def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str, Any]:
@@ -529,93 +544,50 @@ def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str
     return seed
 
 
-def _repo_registry_path() -> Path:
-    """Path to the repo-root registry.json (present only in a source checkout)."""
-    return Path(__file__).resolve().parent.parent / "registry.json"
-
-
-def _refresh_registry_cache() -> dict[str, Any] | None:
-    """Fetch the registry from GitHub and atomically update the local cache.
-
-    Returns the parsed document on success, or None on any failure (network
-    error, timeout, bad JSON). Never raises.
-    """
-    url = _registry_url()
+def _fetch_registry(url: str) -> dict[str, Any] | None:
+    """Fetch a registry document from ``url``. None on any failure; never
+    raises. Only used for the ATN_REGISTRY_URL override."""
     try:
-        # httpx is a core dependency; requests is too, but httpx is already
-        # imported across the daemon so we prefer it here.
         import httpx
 
         resp = httpx.get(url, timeout=_REGISTRY_FETCH_TIMEOUT,
                          follow_redirects=True)
         resp.raise_for_status()
-        text = resp.text
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            return None
+        data = json.loads(resp.text)
     except Exception as exc:
         log.debug("Registry fetch from %s failed: %s", url, exc)
         return None
-    # Atomically write the cache (temp file + replace) so a partial write
-    # never corrupts the stale copy we fall back to.
-    try:
-        _REGISTRY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _REGISTRY_CACHE_PATH.with_suffix(".json.tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, _REGISTRY_CACHE_PATH)
-    except Exception as exc:
-        log.debug("Registry cache write failed: %s", exc)
-        # Still usable this boot even if we couldn't persist it.
-    return data
+    return data if isinstance(data, dict) else None
 
 
 def _load_registry_seed(jurisdiction_id: str = "autonet") -> dict[str, Any]:
     """Resolve network + contract defaults for ``jurisdiction_id``.
 
-    Resolution order:
-      1. repo-root registry.json (dev override — kept first);
-      2. else GitHub fetch → ~/.atn/registry.json cache (refreshed on boot);
-      3. else the stale cache (silent);
-      4. else {} with ONE clear warning (degraded: network features off).
+    Called only when the daemon joins the network, never at boot:
+      1. ATN_REGISTRY_URL, when the operator set it (fetched now);
+      2. else (or if that fetch fails) the packaged registry.json;
+      3. else {} with one warning.
 
     Returns a flat dict suitable for merging into the RPBConfig builder.
     """
-    # 1. Repo-root file wins (dev running from a source checkout).
-    repo_path = _repo_registry_path()
-    if repo_path.is_file():
-        try:
-            data = json.loads(repo_path.read_text(encoding="utf-8"))
-            seed = _parse_registry_data(data, jurisdiction_id)
-            log.info("Registry seed (repo) for '%s': dao=%s, substrate=%s",
-                     jurisdiction_id,
-                     (seed.get("dao_address") or "")[:10] or "(none)",
-                     (seed.get("substrate_address") or "")[:10] or "(none)")
-            return seed
-        except Exception:
-            log.warning("Failed to parse repo registry.json", exc_info=True)
-            # Fall through to the network/cache path rather than dying.
-
-    # 2. Try a fresh fetch (updates the cache atomically on success).
-    data = _refresh_registry_cache()
-    source = "github"
-
-    # 3. Fall back to the stale cache if the fetch failed.
-    if data is None and _REGISTRY_CACHE_PATH.is_file():
-        try:
-            data = json.loads(_REGISTRY_CACHE_PATH.read_text(encoding="utf-8"))
-            source = "cache"
-        except Exception:
-            log.debug("Stale registry cache unreadable", exc_info=True)
-            data = None
-
-    # 4. Nothing available — degrade loudly, exactly once.
+    data: dict[str, Any] | None = None
+    source = "packaged"
+    url = _registry_override_url()
+    if url:
+        data = _fetch_registry(url)
+        if data is None:
+            log.warning("ATN_REGISTRY_URL %s unreachable; using the packaged "
+                        "registry", url)
+        else:
+            source = url
     if data is None:
-        log.warning(
-            "network registry unavailable — substrate features disabled "
-            "until reachable (tried %s; no cache at %s)",
-            _registry_url(), _REGISTRY_CACHE_PATH)
-        return {}
-
+        path = _packaged_registry_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            log.warning("network registry unavailable: packaged %s missing or "
+                        "unreadable, chain features off", path)
+            return {}
     try:
         seed = _parse_registry_data(data, jurisdiction_id)
     except Exception:
@@ -626,6 +598,37 @@ def _load_registry_seed(jurisdiction_id: str = "autonet") -> dict[str, Any]:
              (seed.get("dao_address") or "")[:10] or "(none)",
              (seed.get("substrate_address") or "")[:10] or "(none)")
     return seed
+
+
+def _seed_defaults() -> dict[str, Any]:
+    """Values an RPBConfig holds when nobody set them (dataclass defaults and
+    the atn.jurisdiction fallbacks). The registry may replace these."""
+    from .jurisdiction import GOVERNOR_ADDRESS, RPC_URL, CHAIN_ID
+    return {"rpc_url": RPC_URL, "chain_id": CHAIN_ID,
+            "dao_address": GOVERNOR_ADDRESS, "gas_symbol": "XTZ",
+            "gas_decimals": 18, "jurisdiction_id": "autonet"}
+
+
+def resolve_network_registry(an: "RPBConfig", *, force: bool = False) -> bool:
+    """Join the network: fill ``an`` (in place) from the registry.
+
+    Fields the operator set explicitly (config.yaml or the RPBConfig
+    constructor) are never replaced. Marks ``an.network_joined``. Returns
+    True if the registry yielded any addresses. Idempotent unless ``force``.
+    """
+    if getattr(an, "network_joined", False) and not force:
+        return True
+    seed = _load_registry_seed(getattr(an, "jurisdiction_id", "") or "autonet")
+    explicit = set(getattr(an, "explicit_fields", ()) or ())
+    defaults = _seed_defaults()
+    for key, value in seed.items():
+        if key in explicit or not hasattr(an, key):
+            continue
+        current = getattr(an, key)
+        if current in ("", 0, None) or current == defaults.get(key):
+            setattr(an, key, value)
+    an.network_joined = True
+    return bool(seed)
 
 
 # ---------------------------------------------------------------------------
@@ -741,12 +744,13 @@ def _apply_auto_update_env(config: ATNConfig) -> None:
 
 
 def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
-    """The autonet section, seeded from the network registry. Runs with or
-    without a config file (``raw`` is ``{}`` then), so a fresh install or a
-    container with an empty data volume still gets the chain addresses."""
+    """The autonet section. Runs with or without a config file (``raw`` is
+    ``{}`` then). The network registry is NOT read here: it is resolved when
+    the daemon joins (resolve_network_registry), except that an explicit
+    ``enabled: true`` joins at load time (a local file read, no network)."""
     # Autonet / RPB network layer
     # Merge priority (lowest to highest):
-    #   registry.json (repo-level defaults) < blockchain < rpb < autonet
+    #   registry.json (applied at join time) < blockchain < rpb < autonet
     autonet_raw = raw.get("autonet", {})
     if not isinstance(autonet_raw, dict):
         autonet_raw = {}
@@ -756,13 +760,7 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
     blockchain_raw = raw.get("blockchain", {})
     if not isinstance(blockchain_raw, dict):
         blockchain_raw = {}
-    # Seed from registry.json (repo-level jurisdiction registry)
-    jurisdiction_id = (
-        autonet_raw.get("jurisdiction_id")
-        or rpb_raw.get("jurisdiction_id")
-        or "autonet"
-    )
-    merged = _load_registry_seed(jurisdiction_id)
+    merged: dict[str, Any] = {}
     # Layer blockchain section on top
     if blockchain_raw.get("rpc_url"):
         merged["rpc_url"] = blockchain_raw["rpc_url"]
@@ -780,7 +778,7 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
     # Users who want eager startup (bootstrap nodes, services that always
     # participate) set ``autonet.enabled: true`` explicitly.
     enabled = resolved.get("enabled", False)
-    return RPBConfig(
+    an = RPBConfig(
         enabled=enabled,
         config_path=resolved.get("config_path", ""),
         rpc_url=resolved.get("rpc_url", ""),
@@ -823,7 +821,12 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
         public_ws_endpoint=resolved.get("public_ws_endpoint", ""),
         firestore_project=resolved.get("firestore_project", ""),
         ws_input_policy=resolved.get("ws_input_policy", "allow"),
+        explicit_fields=sorted(k for k, v in resolved.items()
+                               if v not in ("", None)),
     )
+    if enabled:
+        resolve_network_registry(an)
+    return an
 
 
 def load_config(path: Path | None = None) -> ATNConfig:

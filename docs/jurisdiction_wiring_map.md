@@ -19,8 +19,9 @@ REP), plus Registry self-description keys (`jurisdiction.parity.*` for the
 vault buy rail, `jurisdiction.autonet.{substrate,vault,rep_claim}` naming the
 attached contracts).
 
-**Addresses of record live in `registry.json`** at the repo root (daemons
-fetch it from GitHub raw master, cached at `~/.atn/registry.json`); do not
+**Addresses of record live in `registry.json`** at the repo root (each release ships a copy as package data,
+`atn/registry.json`, read when the daemon joins the network; nothing is
+fetched at boot); do not
 trust any address literal in the body of this doc. Discovery root is the DAO
 governor (`atn/jurisdiction.py: GOVERNOR_ADDRESS`); `autonet.yaml`
 `blockchain.contracts.AutonetDAO` overrides it.

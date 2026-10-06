@@ -131,6 +131,13 @@ does not need the `services` bundle (which also carries `pay_for_service`)
 to browse the market. Paying for or requesting a service stays denied here;
 the owner does it over the remote listener (below).
 
+Before the node joins the network (no agent registered on chain yet and
+`autonet.enabled` unset) it is local-only and reads no chain. `find_services`
+and `network_status` then answer `ok: true` with
+`{joined: false, status: "not_joined", message: "Not joined: register an
+agent to join the network."}` (`network_status` keeps its other keys with
+`chain: null`). Once joined, both payloads carry `joined: true`.
+
 ### Guest tool authoring
 
 An ordinary authored tool runs with the daemon's environment and working

@@ -1248,7 +1248,18 @@ class WebSocketBridge:
 
     def _network_status_payload(self) -> dict[str, Any]:
         """Node, chain, epoch and peer summary for a guest UI. Public facts
-        only: no RPC URL (it can embed a provider key), no wallet, no keys."""
+        only: no RPC URL (it can embed a provider key), no wallet, no keys.
+        Before the daemon joined the network (first registration or
+        autonet.enabled) it is local-only: the payload says "not joined"
+        instead of reporting chain data."""
+        cfg = getattr(self.runtime._config, "rpb", None)
+        if not getattr(cfg, "network_joined", False):
+            from .config import not_joined_state
+            return {**not_joined_state(), "autonet": "disabled",
+                    "chain": None, "p2p": {"running": False, "peers": None,
+                                           "gossip": False},
+                    "epoch": {"running": False, "epoch_id": None},
+                    "epochs_closed": 0, "service_market": False}
         autonet = getattr(self.runtime, "autonet", None)
         state: dict[str, Any] = {}
         if autonet is not None:
@@ -1256,7 +1267,6 @@ class WebSocketBridge:
                 state = autonet.get_status() or {}
             except Exception:                              # noqa: BLE001
                 state = {}
-        cfg = getattr(self.runtime._config, "rpb", None)
         chain_id = int(state.get("chain_id") or getattr(cfg, "chain_id", 0) or 0)
         substrate = (state.get("substrate_address")
                      or getattr(cfg, "substrate_address", "") or "")
@@ -1283,6 +1293,8 @@ class WebSocketBridge:
             except Exception:                              # noqa: BLE001
                 pass
         return {
+            "joined": True,
+            "status": "joined",
             "autonet": state.get("status", "disabled"),
             "chain": {
                 "chain_id": chain_id,
@@ -2227,6 +2239,10 @@ class WebSocketBridge:
                 limit = max(1, min(int(msg.get("limit") or 100), 200))
             except (TypeError, ValueError):
                 limit = 100
+            if not getattr(self.runtime._config.rpb, "network_joined", False):
+                from .config import not_joined_state
+                return {"msg_id": msg_id, "ok": True,
+                        "result": not_joined_state()}
             try:
                 from .on_chain import ServiceMarketClient
                 smc = ServiceMarketClient(self.runtime._config.rpb)
@@ -5196,6 +5212,9 @@ class WebSocketBridge:
         """
         from .on_chain import OnChainService
 
+        # Registering is joining the network: resolve the packaged registry
+        # into the config now (the daemon is local-only until this point).
+        self.runtime.autonet.ensure_network_config()
         config = self.runtime.autonet.config
         svc = OnChainService(config)
 

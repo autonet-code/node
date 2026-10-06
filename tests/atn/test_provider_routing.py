@@ -198,14 +198,18 @@ class TestStaleModelHint:
 # ---------------------------------------------------------------------------
 
 class TestCreateAgentProviderSchema:
-    def test_schema_has_provider_enum(self):
+    def test_schema_provider_is_open_string(self):
+        """No enum: custom provider ids from config.yaml are valid too
+        (fbaa84a). The built-ins are named in the description."""
         from atn.agent_tools import _TOOLS
 
         create = next(t for t in _TOOLS if t.name == "create_agent")
         props = create.input_schema["properties"]
         assert "provider" in props
-        assert "ollama" in props["provider"]["enum"]
-        assert "rpb" in props["provider"]["enum"]
+        assert props["provider"]["type"] == "string"
+        assert "enum" not in props["provider"]
+        assert "ollama" in props["provider"]["description"]
+        assert "rpb" in props["provider"]["description"]
 
 
 # ---------------------------------------------------------------------------

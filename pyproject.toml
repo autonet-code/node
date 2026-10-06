@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonet-computer"
-version = "0.7.5"
+version = "0.8.0"
 description = "Decentralized AI alignment network with agent orchestration framework"
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
@@ -143,6 +143,10 @@ atn-vault-setup = "atn.vault_setup:main"
 include = ["atn*", "nodes*", "bridge", "world_model*"]
 
 [tool.setuptools.package-data]
+# The network registry (chain addresses + public RPC), pinned per release.
+# Copy of the repo-root registry.json of record; a test keeps them identical.
+# Read when the daemon joins the network, never fetched at boot.
+"atn" = ["registry.json"]
 "atn.connectors" = ["*/connector.json"]
 # The bundled Chrome extension Browser Control loads with --load-extension.
 # Keyed on the child package: package-data patterns resolve relative to the

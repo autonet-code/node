@@ -3048,6 +3048,12 @@ async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     except (TypeError, ValueError):
         limit = 25
 
+    if not getattr(runtime._config.rpb, "network_joined", False):
+        # Fully local until the first registration (or autonet.enabled):
+        # say so instead of reading the chain or listing nothing.
+        from .config import not_joined_state
+        return not_joined_state()
+
     from .on_chain import ServiceMarketClient
     smc = ServiceMarketClient(runtime._config.rpb)
     if not smc.registry_available:
@@ -4374,6 +4380,11 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
     if not private_key:
         return {"error": f"No private key stored for '{agent_id}'. "
                          "Root agents must register via the frontend wallet."}
+
+    # Registering is joining the network: resolve the packaged registry now.
+    autonet = getattr(runtime, "autonet", None)
+    if autonet is not None:
+        autonet.ensure_network_config()
 
     from .on_chain import OnChainService
     svc = OnChainService(runtime._config.rpb)

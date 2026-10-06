@@ -201,6 +201,33 @@ class AutonetBridge:
         # Raw constitution text (loaded once, cached for prompt injection)
         self._constitution_text: str = ""
 
+    @property
+    def network_joined(self) -> bool:
+        """True once the daemon joined the network (first on-chain
+        registration, or ``autonet.enabled``). Before that it is fully local
+        and read-only chain calls answer "not joined"."""
+        return bool(getattr(self.config, "network_joined", False))
+
+    def ensure_network_config(self) -> bool:
+        """Join the network: resolve the packaged registry (or the operator's
+        ATN_REGISTRY_URL) into the config and refresh the surfaced state.
+        Idempotent. Called by start() and by the registration paths before
+        they touch the chain. Returns ``network_joined``."""
+        if self.network_joined:
+            return True
+        try:
+            from .config import resolve_network_registry
+            resolve_network_registry(self.config)
+        except Exception:
+            log.warning("Network registry resolution failed", exc_info=True)
+            return False
+        if self.config.rpc_url:
+            self.state.rpc_url = self.config.rpc_url
+        if self.config.chain_id:
+            self.state.chain_id = self.config.chain_id
+        self._discover_jurisdiction()
+        return self.network_joined
+
     def _discover_jurisdiction(self) -> None:
         """Discover all contract addresses from the DAO Governor at startup."""
         # Always surface substrate_address + gas token info from config —
@@ -748,6 +775,9 @@ class AutonetBridge:
 
         self.state.status = AutonetStatus.STARTING
         log.info("Starting autonet service...")
+        # Starting autonet IS joining the network: resolve the registry now
+        # (never at boot).
+        self.ensure_network_config()
 
         # Pre-flight cache refresh
         try:
@@ -776,6 +806,9 @@ class AutonetBridge:
                 self._autonet_config.blockchain.chain_id = self.config.chain_id
             if self.config.private_key:
                 self._autonet_config.blockchain.private_key = self.config.private_key
+            if (getattr(self.config, "substrate_address", "")
+                    and not self._autonet_config.blockchain.substrate_address):
+                self._autonet_config.blockchain.substrate_address =                     self.config.substrate_address
 
             # Create the service. Note: AutonetService.start() blocks,
             # so we create here and start in an executor below. We wire

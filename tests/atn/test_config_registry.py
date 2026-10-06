@@ -1,14 +1,12 @@
-"""Tests for registry-seed resolution and agents_dir defaulting in atn.config.
+"""Tests for registry resolution and agents_dir defaulting in atn.config.
 
-Covers the two pip-parity fixes:
+  Fix 1 - network registry: packaged with the release (atn/registry.json,
+    identical to the repo-root copy), never fetched at boot, resolved when
+    the daemon joins the network (first registration or autonet.enabled).
+    ATN_REGISTRY_URL is the one network source, fetched at join time only.
+    Every test here fails on any unexpected fetch.
 
-  Fix 1 — registry seed resolution order:
-    repo-root registry.json (dev override) > GitHub fetch/cache > stale
-    cache > {} + one warning. No real network is used: the URL is pointed
-    at a dead localhost port, and the repo-root path is monkeypatched so the
-    real checked-in registry.json doesn't shadow the cache/degraded branches.
-
-  Fix 2 — agents_dir default:
+  Fix 2 - agents_dir default:
     ./agents in CWD wins (back-compat); otherwise <data_dir>/agents. An
     explicit agents_dir in config.yaml is always honored verbatim.
 """
@@ -23,7 +21,7 @@ from atn import config as cfg
 
 
 # ---------------------------------------------------------------------------
-# Fix 1: registry seed resolution
+# Fix 1: network registry
 # ---------------------------------------------------------------------------
 
 _SAMPLE = {
@@ -50,29 +48,52 @@ _SAMPLE = {
 
 @pytest.fixture(autouse=True)
 def _isolate_registry(tmp_path, monkeypatch):
-    """Point the cache at a tmp dir and the fetch at a dead port by default.
+    """Point the packaged registry at a tmp copy of _SAMPLE, clear the
+    ATN_REGISTRY_URL override, and fail on any network fetch."""
+    packaged = tmp_path / "pkg" / "registry.json"
+    packaged.parent.mkdir(parents=True)
+    packaged.write_text(json.dumps(_SAMPLE), encoding="utf-8")
+    monkeypatch.setattr(cfg, "_packaged_registry_path", lambda: packaged)
+    monkeypatch.delenv("ATN_REGISTRY_URL", raising=False)
+    fetched: list[str] = []
 
-    Individual tests override the repo path / URL as needed.
-    """
-    cache = tmp_path / "cache" / "registry.json"
-    monkeypatch.setattr(cfg, "_REGISTRY_CACHE_PATH", cache)
-    # Dead localhost port — connection refused is immediate, no real network.
-    monkeypatch.setenv("ATN_REGISTRY_URL", "http://127.0.0.1:1/registry.json")
-    # By default hide the real checked-in repo registry.json so the
-    # cache/degraded branches are actually exercised. Tests that want the
-    # repo-override branch re-point this at a real file.
-    monkeypatch.setattr(cfg, "_repo_registry_path",
-                        lambda: tmp_path / "no-such-repo-registry.json")
-    return {"cache": cache, "tmp": tmp_path}
+    def _no_network(url):
+        fetched.append(url)
+        raise AssertionError(f"unexpected registry fetch: {url}")
+
+    monkeypatch.setattr(cfg, "_fetch_registry", _no_network)
+    return {"packaged": packaged, "fetched": fetched, "tmp": tmp_path}
 
 
-def test_repo_root_file_wins(_isolate_registry, tmp_path, monkeypatch):
-    """A repo-root registry.json takes precedence over cache/network."""
-    repo_file = tmp_path / "repo" / "registry.json"
-    repo_file.parent.mkdir(parents=True)
-    repo_file.write_text(json.dumps(_SAMPLE), encoding="utf-8")
-    monkeypatch.setattr(cfg, "_repo_registry_path", lambda: repo_file)
+def _no_dotenv(monkeypatch):
+    # Avoid touching the real ~/.atn env dotfile.
+    monkeypatch.setattr(cfg, "_load_dotenv", lambda *a, **k: 0)
 
+
+def test_packaged_registry_matches_repo_copy():
+    """atn/registry.json (package data, pinned per release) must equal the
+    repo-root registry.json of record. Compared parsed, so line endings of a
+    Windows checkout don't matter. Re-sync: copy registry.json to atn/."""
+    packaged = Path(cfg.__file__).resolve().parent / "registry.json"
+    repo_copy = packaged.parent.parent / "registry.json"
+    assert packaged.is_file(), "atn/registry.json missing from the package"
+    if not repo_copy.is_file():
+        pytest.skip("not a source checkout (no repo-root registry.json)")
+    assert (json.loads(packaged.read_text(encoding="utf-8"))
+            == json.loads(repo_copy.read_text(encoding="utf-8"))), (
+        "atn/registry.json is stale: copy the repo-root registry.json over it")
+
+
+def test_pyproject_ships_registry_as_package_data():
+    pyproject = Path(cfg.__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.is_file():
+        pytest.skip("not a source checkout")
+    import tomllib
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    assert "registry.json" in data["tool"]["setuptools"]["package-data"]["atn"]
+
+
+def test_seed_reads_packaged_copy(_isolate_registry):
     seed = cfg._load_registry_seed("autonet")
 
     assert seed["rpc_url"] == "https://rpc.example.test"
@@ -81,24 +102,12 @@ def test_repo_root_file_wins(_isolate_registry, tmp_path, monkeypatch):
     assert seed["substrate_address"] == "0x5UB000000000000000000000000000000000beef"
     assert seed["charter_anchor_address"] == "0xC4A000000000000000000000000000000000face"
     assert seed["registry_address"] == "0x5E4000000000000000000000000000000000cafe"
-    # Cache must NOT have been written — repo file short-circuits the fetch.
-    assert not _isolate_registry["cache"].exists()
-
-
-def test_cache_used_when_url_unreachable(_isolate_registry):
-    """With no repo file and a dead URL, a pre-existing cache is used."""
-    cache = _isolate_registry["cache"]
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(_SAMPLE), encoding="utf-8")
-
-    seed = cfg._load_registry_seed("autonet")
-
-    assert seed["rpc_url"] == "https://rpc.example.test"
-    assert seed["substrate_address"] == "0x5UB000000000000000000000000000000000beef"
+    assert _isolate_registry["fetched"] == []
 
 
 def test_degraded_empty_with_warning(_isolate_registry, caplog):
-    """No repo file, dead URL, no cache -> {} with exactly one warning."""
+    """Packaged copy missing -> {} with exactly one warning, no fetch."""
+    _isolate_registry["packaged"].unlink()
     with caplog.at_level("WARNING"):
         seed = cfg._load_registry_seed("autonet")
 
@@ -106,23 +115,129 @@ def test_degraded_empty_with_warning(_isolate_registry, caplog):
     warnings = [r for r in caplog.records
                 if "network registry unavailable" in r.getMessage()]
     assert len(warnings) == 1
+    assert _isolate_registry["fetched"] == []
 
 
 def test_unknown_jurisdiction_returns_empty(_isolate_registry):
-    """A present registry that lacks the jurisdiction yields {} (from cache)."""
-    cache = _isolate_registry["cache"]
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(_SAMPLE), encoding="utf-8")
-
     assert cfg._load_registry_seed("nonexistent-guild") == {}
 
 
-def test_registry_url_override_respected(monkeypatch):
-    """ATN_REGISTRY_URL overrides the default fetch URL."""
+def test_no_network_call_at_boot_without_config(_isolate_registry, tmp_path,
+                                                monkeypatch):
+    """A fresh install (no config.yaml) boots fully local: no registry fetch,
+    no chain addresses, not joined."""
+    _no_dotenv(monkeypatch)
+    an = cfg.load_config(tmp_path / "missing.yaml").autonet
+
+    assert _isolate_registry["fetched"] == []
+    assert an.network_joined is False
+    assert an.substrate_address == ""
+    assert an.service_registry_address == ""
+    assert an.enabled is False  # Phase 12: still starts on registration
+
+
+def test_no_network_call_at_boot_even_with_override(_isolate_registry,
+                                                     tmp_path, monkeypatch):
+    """ATN_REGISTRY_URL is read at join time, never at boot."""
+    _no_dotenv(monkeypatch)
     monkeypatch.setenv("ATN_REGISTRY_URL", "https://fork.example/registry.json")
-    assert cfg._registry_url() == "https://fork.example/registry.json"
-    monkeypatch.delenv("ATN_REGISTRY_URL", raising=False)
-    assert cfg._registry_url() == cfg._DEFAULT_REGISTRY_URL
+    an = cfg.load_config(tmp_path / "missing.yaml").autonet
+
+    assert _isolate_registry["fetched"] == []
+    assert an.network_joined is False
+
+
+def test_registry_resolved_on_join_from_packaged_copy(_isolate_registry,
+                                                      tmp_path, monkeypatch):
+    """Joining (first registration / autonet start) fills the chain
+    addresses from the packaged copy, without any fetch."""
+    _no_dotenv(monkeypatch)
+    an = cfg.load_config(tmp_path / "missing.yaml").autonet
+    assert cfg.resolve_network_registry(an) is True
+
+    assert an.network_joined is True
+    assert an.rpc_url == "https://rpc.example.test"
+    assert an.chain_id == 424242
+    assert an.gas_symbol == "ZZZ"
+    assert an.substrate_address == "0x5UB000000000000000000000000000000000beef"
+    assert an.service_registry_address == "0x5E4000000000000000000000000000000000cafe"
+    assert _isolate_registry["fetched"] == []
+
+
+def test_registry_resolved_when_enabled(_isolate_registry, tmp_path, monkeypatch):
+    """``autonet.enabled: true`` joins at load time (packaged copy, no fetch)."""
+    _no_dotenv(monkeypatch)
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("autonet:\n  enabled: true\n", encoding="utf-8")
+    an = cfg.load_config(cfg_file).autonet
+
+    assert an.enabled is True
+    assert an.network_joined is True
+    assert an.substrate_address == "0x5UB000000000000000000000000000000000beef"
+    assert _isolate_registry["fetched"] == []
+
+
+def test_explicit_config_wins_over_registry(_isolate_registry, tmp_path,
+                                            monkeypatch):
+    _no_dotenv(monkeypatch)
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "autonet:\n  rpc_url: https://my.rpc\n"
+        "  substrate_address: '0xMINE'\n", encoding="utf-8")
+    an = cfg.load_config(cfg_file).autonet
+    cfg.resolve_network_registry(an)
+
+    assert an.rpc_url == "https://my.rpc"
+    assert an.substrate_address == "0xMINE"
+    # Unset fields still come from the registry.
+    assert an.service_registry_address == "0x5E4000000000000000000000000000000000cafe"
+
+
+def test_registry_url_override_used_on_join(_isolate_registry, monkeypatch):
+    """ATN_REGISTRY_URL, when set, is fetched at join time and wins over the
+    packaged copy."""
+    fork = json.loads(json.dumps(_SAMPLE))
+    fork["jurisdictions"]["autonet"]["contracts"]["substrate"] = "0xF0RK"
+    seen: list[str] = []
+
+    def _fake_fetch(url):
+        seen.append(url)
+        return fork
+
+    monkeypatch.setattr(cfg, "_fetch_registry", _fake_fetch)
+    monkeypatch.setenv("ATN_REGISTRY_URL", "https://fork.example/registry.json")
+    an = cfg.RPBConfig()
+    cfg.resolve_network_registry(an)
+
+    assert seen == ["https://fork.example/registry.json"]
+    assert an.substrate_address == "0xF0RK"
+
+
+def test_registry_url_override_falls_back_to_packaged(_isolate_registry,
+                                                      monkeypatch, caplog):
+    monkeypatch.setattr(cfg, "_fetch_registry", lambda url: None)
+    monkeypatch.setenv("ATN_REGISTRY_URL", "http://127.0.0.1:1/registry.json")
+    with caplog.at_level("WARNING"):
+        seed = cfg._load_registry_seed("autonet")
+
+    assert seed["substrate_address"] == "0x5UB000000000000000000000000000000000beef"
+    assert any("ATN_REGISTRY_URL" in r.getMessage() for r in caplog.records)
+
+
+def test_bridge_ensure_network_config_joins(_isolate_registry):
+    """The registration path's join hook resolves the registry and refreshes
+    the bridge state the UI reads."""
+    from atn.autonet_service import AutonetBridge
+
+    bridge = AutonetBridge(cfg.RPBConfig())
+    assert bridge.network_joined is False
+    assert bridge.state.substrate_address == ""
+
+    assert bridge.ensure_network_config() is True
+    assert bridge.network_joined is True
+    assert bridge.state.substrate_address == "0x5UB000000000000000000000000000000000beef"
+    assert bridge.state.chain_id == 424242
+    assert _isolate_registry["fetched"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -198,19 +313,3 @@ def test_load_config_agents_dir_tracks_custom_data_dir(tmp_path, monkeypatch):
 
     assert conf.data_dir == data_dir
     assert conf.agents_dir == data_dir / "agents"
-
-
-def test_load_config_no_file_still_seeds_chain(_isolate_registry, tmp_path, monkeypatch):
-    """A container with an empty data volume (no config.yaml) still gets the
-    chain addresses from the registry (here: the cache, URL dead)."""
-    cache = _isolate_registry["cache"]
-    cache.parent.mkdir(parents=True)
-    cache.write_text(json.dumps(_SAMPLE), encoding="utf-8")
-    monkeypatch.setattr(cfg, "_load_dotenv", lambda: None)
-
-    an = cfg.load_config(tmp_path / "missing.yaml").autonet
-
-    assert an.rpc_url == "https://rpc.example.test"
-    assert an.substrate_address == "0x5UB000000000000000000000000000000000beef"
-    assert an.service_registry_address == "0x5E4000000000000000000000000000000000cafe"
-    assert an.enabled is False  # Phase 12: still starts on registration
