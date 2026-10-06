@@ -1,8 +1,7 @@
 """Budgets are keyed to the provider an agent actually runs on.
 
-An unpinned ("daemon default") agent used to have its budget keyed under
-``claude_max`` whatever provider the daemon routed it to, so the cap never
-bound. The budget key is now the daemon-resolved effective provider
+Older clients keyed budgets under ``claude_max`` whatever provider the agent
+ran on, so the cap never bound. The budget key is the agent's own provider
 (atn/provider_identity.py), surfaced to clients, and legacy ``claude_max``
 keys on agents that do not run on claude_max are moved on load.
 """
@@ -18,7 +17,9 @@ from atn.models import AgentDefinition, AgentMode
 from atn.provider_identity import (
     effective_provider_id,
     migrate_legacy_budget_keys,
-    unpinned_provider_id,
+)
+from atn.legacy_routing_migration import (
+    pin_unpinned_agents_from_legacy_defaults,
 )
 from atn.providers.openai_compat import OpenAICompatibleProvider
 from atn.runtime import Runtime
@@ -42,23 +43,12 @@ def _keys(*pids):
 # Pure resolver mirrors the engine's routing
 # ---------------------------------------------------------------------------
 
-def test_unpinned_claude_model_routes_by_key_availability():
-    defn = _agent(model="claude-sonnet-4-6")
-    assert effective_provider_id(defn) == "claude_max"
-    assert effective_provider_id(
-        defn, has_api_key=_keys("anthropic")) == "anthropic"
-
-
-def test_unpinned_routes_by_model_family():
-    assert effective_provider_id(_agent(model="gpt-5")) == "openai"
-    assert effective_provider_id(_agent(model="gemini-2.5-pro")) == "gemini"
-    assert effective_provider_id(_agent(model="qwen3:4b")) == "ollama"
-
-
-def test_model_shaped_pin_routes_by_cognitive_model():
-    # create_agent stores the creation-time model as the provider hint.
-    defn = _agent(provider="sonnet", model="gpt-5")
-    assert effective_provider_id(defn) == "openai"
+def test_agent_without_a_provider_has_no_effective_provider():
+    # No routing by model prefix: an agent that names no provider is a
+    # routing error, not a guess.
+    assert effective_provider_id(_agent(model="claude-sonnet-4-6")) == ""
+    assert effective_provider_id(_agent(model="gpt-5")) == ""
+    assert effective_provider_id(_agent(provider="gpt-5", model="gpt-5")) == ""
 
 
 def test_explicit_pin_and_custom_provider_are_used_verbatim():
@@ -74,20 +64,14 @@ def test_fallback_chain_takes_first_buildable():
         defn, has_api_key=_keys("anthropic")) == "anthropic"
 
 
-def test_empty_chain_routes_by_model_not_a_fixed_provider():
-    assert effective_provider_id(_agent(provider=[], model="gpt-5")) == "openai"
+def test_empty_chain_names_no_provider():
+    assert effective_provider_id(_agent(provider=[], model="gpt-5")) == ""
 
 
 def test_service_binding_overrides_everything():
     defn = _agent(provider="anthropic", service_provider={
         "provider_address": "0x" + "1" * 40, "spec_digest": "a" * 64})
     assert effective_provider_id(defn) == "service"
-
-
-def test_default_model_used_when_agent_names_none():
-    assert effective_provider_id(_agent(), default_model="gpt-5") == "openai"
-    assert unpinned_provider_id(
-        _agent(provider="anthropic", model="qwen3:4b")) == "ollama"
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +128,7 @@ def test_nameless_provider_does_not_book_under_another_provider():
     assert _provider_name(_Nameless()) == "unknown"
 
 
-def _make_runtime(tmp_path, providers=None, default_model="") -> Runtime:
+def _make_runtime(tmp_path, providers=None) -> Runtime:
     data_dir = tmp_path / "data"
     agents_dir = tmp_path / "agents"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -152,7 +136,6 @@ def _make_runtime(tmp_path, providers=None, default_model="") -> Runtime:
     config = ATNConfig(data_dir=data_dir, agents_dir=agents_dir)
     config.autonet.enabled = False
     config.voice.enabled = False
-    config.default_model = default_model
     for name, pc in (providers or {}).items():
         config.providers[name] = pc
     return Runtime(EventBus(), data_dir=data_dir, config=config)
@@ -168,6 +151,11 @@ async def test_load_moves_legacy_key_to_routed_provider(tmp_path):
 
     defs, errors = load_agents_dir(rt._config.agents_dir)
     assert not errors
+    # Boot order: the one-time pinning migration turns the model-shaped
+    # provider hint into the provider it routed to, then registration moves
+    # the legacy budget key onto it.
+    assert pin_unpinned_agents_from_legacy_defaults(
+        defs, rt._config, rt.providers) == ["worker"]
     rt.registry._budget_used["worker"] = {"claude_max": 1234}
     await rt.register_agent(defs[0], legacy=True)
 
@@ -189,41 +177,37 @@ async def test_load_moves_legacy_key_to_routed_provider(tmp_path):
 async def test_load_keeps_key_when_agent_runs_on_claude_max(tmp_path):
     rt = _make_runtime(tmp_path)  # no anthropic key: claude routes to the bridge
     await rt.register_agent(
-        _agent("kevin", provider="sonnet", model="sonnet",
+        _agent("kevin", provider="claude_max", model="sonnet",
                budgets={"claude_max": 40_000}), legacy=True)
     assert rt.get_agent("kevin").budgets == {"claude_max": 40_000}
 
 
 @pytest.mark.asyncio
-async def test_get_agent_reports_effective_and_default_provider(tmp_path):
+async def test_get_agent_reports_effective_provider(tmp_path):
     rt = _make_runtime(tmp_path, providers={
         "anthropic": ProviderConfig(name="anthropic", api_key="sk-ant-test")})
     await rt.register_agent(
         _agent("pinned", provider="ollama", model="sonnet"), legacy=True)
     res = await _get_agent(rt, {"agent_id": "pinned"})
     assert res["effective_provider"] == "ollama"
-    # With its pin cleared it would route sonnet to the Anthropic API.
-    assert res["default_provider"] == "anthropic"
 
 
 @pytest.mark.asyncio
-async def test_snapshot_reports_routed_and_default_provider(tmp_path):
-    rt = _make_runtime(tmp_path, default_model="gpt-5", providers={
+async def test_snapshot_reports_the_agents_own_provider(tmp_path):
+    rt = _make_runtime(tmp_path, providers={
         "openai": ProviderConfig(name="openai", api_key="sk-test")})
     await rt.register_agent(
-        _agent("unpinned", provider="gpt-5", model="gpt-5"), legacy=True)
+        _agent("pinned", provider="openai", model="gpt-5"), legacy=True)
     snap = rt.snapshot()
-    assert snap["default_provider"] == "openai"
-    assert snap["agents"]["unpinned"]["effective_provider"] == "openai"
-    # The raw pin is still reported as-is for the pickers.
-    assert snap["agents"]["unpinned"]["provider"] == "gpt-5"
+    assert snap["agents"]["pinned"]["effective_provider"] == "openai"
+    assert snap["agents"]["pinned"]["provider"] == "openai"
 
 
 @pytest.mark.asyncio
 async def test_update_agent_rekeys_legacy_budget_from_old_client(tmp_path):
     rt = _make_runtime(tmp_path)
     await rt.register_agent(
-        _agent("local", provider="qwen3:4b", model="qwen3:4b"), legacy=True)
+        _agent("local", provider="ollama", model="qwen3:4b"), legacy=True)
     res = await _update_agent(rt, {
         "agent_id": "local", "budgets": {"claude_max": 2500}})
     assert res.get("status") == "updated", res

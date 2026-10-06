@@ -63,8 +63,6 @@ def _make_test_config() -> ATNConfig:
     return ATNConfig(
         data_dir=TEST_DIR,
         agents_dir=TEST_DIR / "agents",
-        default_model=real.default_model,
-        default_provider=real.default_provider,
         providers=real.providers,
         connectors=real.connectors,
     )

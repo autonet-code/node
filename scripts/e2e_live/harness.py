@@ -371,7 +371,6 @@ def daemon_config(contracts: Dict[str, str]) -> Dict[str, Any]:
     registry (atn/config.py resolve_network_registry), so even a failed
     ATN_REGISTRY_URL fetch cannot pull Shadownet addresses in."""
     return {
-        "defaults": {"provider": STUB_PROVIDER, "model": STUB_MODEL},
         "providers": {
             STUB_PROVIDER: {"base_url": f"{STUB_URL}/v1", "api_key": "e2e",
                             "default_model": STUB_MODEL,

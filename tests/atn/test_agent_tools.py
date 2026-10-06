@@ -76,6 +76,7 @@ class TestDelegateSpawnAndCollect:
                 "prompt": "Search for auth code",
                 "agent_type": "explore",
                 "name": "Auth search",
+                "provider": "claude_max", "model": "sonnet",
                 "_caller_id": "orch",
             })
             assert result["status"] == "running"
@@ -106,6 +107,7 @@ class TestDelegateSpawnAndCollect:
             spawn = await _create_agent(rt, {
                 "mode": "cognitive",
                 "prompt": "Will fail", "agent_type": "implement",
+                "provider": "claude_max", "model": "sonnet",
                 "_caller_id": "orch",
             })
             assert spawn["status"] == "running"
@@ -147,6 +149,7 @@ class TestDelegateStatus:
             spawn = await _create_agent(rt, {
                 "mode": "cognitive",
                 "prompt": "Slow task", "agent_type": "implement",
+                "provider": "claude_max", "model": "sonnet",
                 "_caller_id": "orch",
             })
             await asyncio.sleep(0.05)
@@ -239,8 +242,8 @@ class TestServiceProviderBindingAuthority:
                             ("other-1", None), ("sibling-1", "other-1")):
             await rt.register_agent(AgentDefinition(
                 id=aid, name=aid, mode=AgentMode.COGNITIVE,
-                cognitive_model="sonnet", parent_id=parent,
-                budgets={"claude_max": 100000},
+                provider="claude_max", cognitive_model="sonnet",
+                parent_id=parent, budgets={"claude_max": 100000},
             ))
         return rt, execute_tool
 

@@ -320,14 +320,6 @@ class ProviderManager:
         # can still fetch stats after execution completes.
         self._cached_session_stats: dict[str, dict[str, Any]] = {}
 
-        # §10: cache the ollama /api/tags probe so unknown-model routing can
-        # check "is this installed locally?" without a network call per resolve.
-        # ``_ollama_tags_cache`` is the set of installed model ids (names, with
-        # and without their :tag), refreshed at most every ~60s.
-        self._ollama_tags_cache: set[str] | None = None
-        self._ollama_tags_cache_ts: float = 0.0
-        self._ollama_tags_ttl: float = 60.0
-
         # Live model-catalog cache for API providers that expose a /models
         # endpoint (anthropic, openai, gemini). Maps provider_id -> list of
         # {"id", "name"} dicts fetched from the provider, merged (union by id)
@@ -380,28 +372,27 @@ class ProviderManager:
         from ..provider_identity import effective_provider_id
         return effective_provider_id(
             defn,
-            default_model=self._config.default_model or "",
             has_api_key=has_api_key or self._key_probe(),
             custom_providers=self._custom_providers,
         )
 
-    def unpinned_provider_id(self, defn: Any, *, has_api_key: Any = None) -> str:
-        """The provider ``defn`` would run on with its pin cleared."""
-        from ..provider_identity import unpinned_provider_id
-        return unpinned_provider_id(
-            defn,
-            default_model=self._config.default_model or "",
-            has_api_key=has_api_key or self._key_probe(),
-        )
+    def routing_error(self, provider: Any, model: Any, *,
+                      service_bound: bool = False) -> str | None:
+        """Why an agent with this provider/model cannot run, or None. Every
+        cognitive agent names both on purpose; nothing falls back."""
+        from ..provider_identity import routing_error
+        return routing_error(provider, model,
+                             custom_providers=self._custom_providers,
+                             service_bound=service_bound)
 
-    def default_provider_id(self, *, has_api_key: Any = None) -> str:
-        """The provider a new top-level agent with no pin and no model runs
-        on: the daemon default as the create form presents it."""
-        from ..provider_identity import provider_for_model, FALLBACK_MODEL
-        return provider_for_model(
-            self._config.default_model or FALLBACK_MODEL,
-            has_api_key=has_api_key or self._key_probe(),
-        )
+    def registered_provider_ids(self) -> list[str]:
+        """Provider ids registered with the cognitive executor, in
+        registration order (config.yaml order, then credential-store and
+        auto-detected providers, then ones configured at runtime)."""
+        cognitive = self._executors.get(StepType.COGNITIVE)
+        if not isinstance(cognitive, CognitiveStepExecutor):
+            return []
+        return list(cognitive._providers.keys())
 
     # ------------------------------------------------------------------
     # Provider resolution
@@ -409,7 +400,7 @@ class ProviderManager:
 
     def resolve_provider_with_fallback(self, defn: AgentDefinition) -> Any:
         providers = defn.provider
-        model = defn.cognitive_model or self._config.default_model or "claude-sonnet-4-6"
+        model = defn.cognitive_model or ""
 
         # Per-agent marketplace binding (docs/services_market.md, ratified
         # 2026-07-26: employer-chooses-the-tool). A binding is a PARENT's
@@ -441,36 +432,27 @@ class ProviderManager:
         sponsor_address = (
             getattr(self._config.autonet, "sponsor_address", "") or "").strip()
 
+        # Every agent names its provider and model on purpose (decision
+        # 2026-10-06): no daemon-level fallback, no routing by model prefix.
+        err = self.routing_error(providers, model)
+        if err:
+            raise ProviderError(f"Agent '{defn.id}' cannot run: {err}.")
+
         if isinstance(providers, list):
-            for provider_name in providers:
+            names = [p for p in providers if isinstance(p, str) and p]
+            for provider_name in names:
                 try:
                     return self._resolve_provider_by_name(
                         provider_name, model, defn.id,
                         agent_address=agent_address, sponsor_address=sponsor_address)
                 except Exception:
                     log.info("Provider '%s' not available for %s, trying next", provider_name, defn.id)
-            if not providers:
-                # An empty chain names nothing: route by model like an
-                # unpinned agent rather than assuming any one provider.
-                return self._resolve_provider_for_model(model, defn.id)
             return self._resolve_provider_by_name(
-                providers[0], model, defn.id,
+                names[0], model, defn.id,
                 agent_address=agent_address, sponsor_address=sponsor_address)
-        elif providers:
-            if providers in self._KNOWN_PROVIDERS or providers in self._custom_providers:
-                return self._resolve_provider_by_name(
-                    providers, model, defn.id,
-                    agent_address=agent_address, sponsor_address=sponsor_address)
-            # ``providers`` is a model-shaped routing hint (create_agent stores
-            # the creation-time model when no explicit provider was picked).
-            # The hint goes stale when set_agent_model later changes
-            # cognitive_model, and it must not override the agent's actual
-            # model — route by cognitive_model whenever it is set (the
-            # stuck-on-default-model bug, 2026-08-30).
-            return self._resolve_provider_for_model(
-                defn.cognitive_model or providers, defn.id)
-        else:
-            return self._resolve_provider_for_model(model, defn.id)
+        return self._resolve_provider_by_name(
+            providers, model, defn.id,
+            agent_address=agent_address, sponsor_address=sponsor_address)
 
     def _resolve_provider_by_name(
         self, provider_name: str, model: str, agent_id: str,
@@ -723,115 +705,6 @@ class ProviderManager:
         if base.endswith("/v1"):
             base = base[:-3]
         return base
-
-    def _ollama_tags_cached(self) -> set[str]:
-        """Return the set of locally-installed ollama model ids, cached ~60s.
-
-        Sync (called from the sync resolve path). Tolerates ollama being down —
-        returns an empty set on any error and caches that so we don't hammer a
-        dead endpoint. Ids are stored both with and without their ``:tag`` so a
-        bare name like ``qwen3.5`` also matches an installed ``qwen3.5:4b``.
-        """
-        import time
-        now = time.monotonic()
-        if (
-            self._ollama_tags_cache is not None
-            and (now - self._ollama_tags_cache_ts) < self._ollama_tags_ttl
-        ):
-            return self._ollama_tags_cache
-
-        tags: set[str] = set()
-        try:
-            import httpx
-            base_url = self._ollama_base_url()
-            # Sync call on the event loop: keep the connect bound tight so an
-            # absent ollama can't stall the daemon for seconds.
-            resp = httpx.get(f"{base_url}/api/tags",
-                             timeout=httpx.Timeout(3.0, connect=1.0))
-            if resp.status_code == 200:
-                for m in resp.json().get("models", []):
-                    name = (m.get("name") or "").lower()
-                    if name:
-                        tags.add(name)
-                        if ":" in name:
-                            tags.add(name.split(":", 1)[0])
-        except Exception as exc:
-            log.debug("ollama tags probe failed (treating as not installed): %s", exc)
-
-        self._ollama_tags_cache = tags
-        self._ollama_tags_cache_ts = now
-        return tags
-
-    def _model_installed_in_ollama(self, model_name: str) -> bool:
-        lower = model_name.lower()
-        tags = self._ollama_tags_cached()
-        if lower in tags:
-            return True
-        # Also match on the bare base name (``qwen3.5`` matches ``qwen3.5:4b``).
-        base = lower.split(":", 1)[0]
-        return base in tags
-
-    def _resolve_provider_for_model(self, model_name: str, agent_id: str) -> Any:
-        model_lower = model_name.lower()
-        if model_lower.startswith("gemini"):
-            defaults = self._PROVIDER_DEFAULTS.get("gemini", {})
-            api_key = self._resolve_api_key("gemini")
-            if not api_key:
-                # §10: no silent BridgeProvider fallback onto the user's
-                # subscription. A keyless gemini model is a routing error.
-                raise ProviderError(
-                    f"No Gemini API key configured for model '{model_name}': "
-                    f"set a key or specify provider explicitly"
-                )
-            return OpenAICompatibleProvider(
-                name=f"gemini-{agent_id}",
-                provider_id="gemini",
-                base_url=defaults.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai"),
-                api_key=api_key,
-                default_model=model_name,
-            )
-        if model_lower.startswith(("gpt", "o1", "o3", "o4")):
-            defaults = self._PROVIDER_DEFAULTS.get("openai", {})
-            api_key = self._resolve_api_key("openai")
-            if not api_key:
-                # §10: fail loud rather than silently billing the bridge.
-                raise ProviderError(
-                    f"No OpenAI API key configured for model '{model_name}': "
-                    f"set a key or specify provider explicitly"
-                )
-            return OpenAICompatibleProvider(
-                name=f"openai-{agent_id}",
-                provider_id="openai",
-                base_url=defaults.get("base_url", "https://api.openai.com/v1"),
-                api_key=api_key,
-                default_model=model_name,
-            )
-        # Default for claude models: prefer Anthropic API if key available, else
-        # the Claude Max bridge (an explicit, expected route for claude ids).
-        # Match the "claude" prefix AND the canonical short aliases the bridge
-        # accepts (sonnet/opus/haiku/fable/mythos) — these are Claude models, not
-        # unknown ids, so they must NOT hit the fail-loud path below.
-        _CLAUDE_ALIASES = ("sonnet", "opus", "haiku", "fable", "mythos")
-        if model_lower.startswith("claude") or model_lower.startswith(_CLAUDE_ALIASES):
-            api_key = self._resolve_api_key("anthropic")
-            if api_key:
-                return AnthropicProvider(api_key=api_key, default_model=model_name)
-            return BridgeProvider(model=model_name)
-        # §10: unknown prefix. Probe the ollama tags cache — if the model is
-        # installed locally, route to ollama. Otherwise FAIL LOUD instead of
-        # falling onto the bridge (the qwen3.5:4b-burned-45k-subscription bug,
-        # live finding 1).
-        if self._model_installed_in_ollama(model_name):
-            defaults = self._PROVIDER_DEFAULTS.get("ollama", {})
-            pconfig = self._config.providers.get("ollama")
-            return OllamaProvider(
-                base_url=(pconfig.base_url if pconfig else "") or defaults.get("base_url", "http://localhost:11434"),
-                default_model=model_name,
-            )
-        raise ProviderError(
-            f"unknown model '{model_name}': not a known cloud model and not "
-            f"installed in ollama — set provider explicitly"
-        )
 
     def get_bridge_provider(self, agent_id: str | None = None) -> Any:
         # Callers (the Runtime facade) resolve the default agent id (fleet
@@ -1245,29 +1118,6 @@ class ProviderManager:
 
         return providers
 
-    def default_model_for(self, provider_id: str) -> str:
-        """The model a new agent should get when the user picked a provider
-        but no model. Precedence: per-provider config default → the daemon
-        default IF it belongs to this provider → curated-list head →
-        provider-defaults table. Never returns a model from a DIFFERENT
-        provider (the create-form bug: picking codex_max still landed agents
-        on the claude default)."""
-        pconfig = self._config.providers.get(provider_id)
-        if pconfig and pconfig.default_model:
-            return pconfig.default_model
-        daemon_default = self._config.default_model
-        if daemon_default:
-            try:
-                from ..model_specs import resolve as _resolve
-                if _resolve(daemon_default).default_channel == provider_id:
-                    return daemon_default
-            except Exception:
-                pass
-        curated = _PROVIDER_MODELS.get(provider_id)
-        if curated:
-            return curated[0]["id"]
-        return self._PROVIDER_DEFAULTS.get(provider_id, {}).get("default_model", "")
-
     async def configure_provider(self, provider_id: str, api_key: str = "") -> dict[str, Any]:
         info = self._KNOWN_PROVIDERS.get(provider_id)
         if not info:
@@ -1643,13 +1493,11 @@ class ProviderManager:
             if provider_id == "claude_max":
                 pconfig = self._config.providers.get("claude_max")
                 bridge_script = pconfig.extra.get("bridge_script", "") if pconfig else ""
-                default_model = (
-                    (pconfig.default_model if pconfig else "")
-                    or self._config.default_model
-                    or "claude-sonnet-4-6"
-                )
+                # The registry instance serves no agent directly (each agent
+                # gets its own instance built with its own model).
+                _label = pconfig.default_model if pconfig else ""
                 provider = BridgeProvider(
-                    model=default_model,
+                    **({"model": _label} if _label else {}),
                     bridge_script=bridge_script if bridge_script else None,
                 )
             elif provider_id == "codex_max":

@@ -5405,6 +5405,11 @@ async def _init_and_serve(
     # Load agents
     if config.agents_dir.exists():
         agents, errors = load_agents_dir(config.agents_dir)
+        # One-time pinning of pre-2026-10-06 agents (see cli._load_agents).
+        from .legacy_routing_migration import (
+            pin_unpinned_agents_from_legacy_defaults,
+        )
+        pin_unpinned_agents_from_legacy_defaults(agents, config, rt.providers)
         for defn in agents:
             await rt.register_agent(defn)
             if defn.schedule or defn.heartbeat:

@@ -180,14 +180,17 @@ and continue the loop. Applies to all three adapters' parse paths.
 
 ## §10 Provider routing + lifecycle
 
-- `_resolve_provider_for_model`: unknown prefix → probe the ollama
-  tags cache; if the model is installed locally → OllamaProvider.
-  Otherwise raise `ProviderError("unknown model '<m>': set provider
-  explicitly")`. **No silent BridgeProvider fallback.** (Explicit
-  `provider: claude_max` config keeps working; gemini/openai keyless
-  fallbacks at provider_manager.py:459/471 also become errors.)
-- `create_agent` tool schema gains optional `provider` (enum of known
-  providers); plumbed into `AgentDefinition.provider`.
+- Routing is explicit (decision 2026-10-06): every cognitive agent names
+  its `provider` AND `model`. There is no daemon-wide default, no
+  inheritance from the parent and no routing by model prefix; an agent
+  missing either raises `ProviderError` at resolve time. A per-agent
+  `service_provider` binding (or provider `service`) names the model
+  itself. Validation: `provider_identity.routing_error`.
+- `create_agent` requires `provider` and `model` (cognitive mode);
+  `update_agent` / `set_agent_model` can change them but never clear them.
+- Agents written before the decision are pinned once at boot to what they
+  already resolved to (`atn/legacy_routing_migration.py`), which also
+  consumes and deletes the retired config.yaml `defaults:` section.
 - `update_agent`: when `provider` or `model` changes, evict + close
   `_active_providers[agent_id]` (same cleanup as unregister_agent,
   minus file deletion) so the change is live.

@@ -105,28 +105,30 @@ def _effective_provider(runtime: "Runtime", defn: Any) -> str:
     if isinstance(out, str) and out:
         return out
     # No provider manager to consult key availability: resolve from the
-    # definition and daemon default model alone.
+    # definition alone.
     from .provider_identity import effective_provider_id
     try:
-        cfg = getattr(runtime, "_config", None)
-        dm = getattr(cfg, "default_model", "")
-        return effective_provider_id(
-            defn, default_model=dm if isinstance(dm, str) else "")
+        return effective_provider_id(defn)
     except Exception:
         return ""
 
 
-def _unpinned_provider(runtime: "Runtime", defn: Any) -> str:
-    """The provider ``defn`` would run on with its pin cleared."""
+def _routing_error(runtime: "Runtime", provider: Any, model: Any, *,
+                   service_bound: bool = False) -> str | None:
+    """Why an agent with this provider/model cannot run, or None. Consults
+    the runtime's provider manager (it knows the custom provider ids) and
+    falls back to the pure check."""
     pmgr = getattr(runtime, "providers", None)
-    fn = getattr(pmgr, "unpinned_provider_id", None)
-    if not callable(fn):
-        return ""
-    try:
-        out = fn(defn)
-    except Exception:
-        return ""
-    return out if isinstance(out, str) else ""
+    fn = getattr(pmgr, "routing_error", None)
+    if callable(fn):
+        try:
+            out = fn(provider, model, service_bound=service_bound)
+        except Exception:
+            out = False
+        if out is None or isinstance(out, str):
+            return out
+    from .provider_identity import routing_error
+    return routing_error(provider, model, service_bound=service_bound)
 
 
 def _budget_periods(defn: Any) -> dict[str, str]:
@@ -201,7 +203,10 @@ _TOOLS: list[ToolDefinition] = [
                 "description": {"type": "string"},
                 "name": {"type": "string"},
                 "max_turns": {"type": "integer"},
-                "model": {"type": "string", "description": "Model override (e.g. 'claude-opus-4-7', 'gpt-5.5')."},
+                "model": {"type": "string", "description": (
+                    "Change the model (e.g. 'claude-opus-4-7', 'gpt-5.5'). Must be "
+                    "valid for the agent's provider; pass 'provider' too when "
+                    "switching providers. Cannot be cleared.")},
                 "notify_parent": {
                     "type": "boolean",
                     "description": "If false, skip auto-notification to parent on completion. Default: true.",
@@ -262,9 +267,9 @@ _TOOLS: list[ToolDefinition] = [
                 "provider": {
                     "type": "string",
                     "description": (
-                        "Explicit provider for this agent (e.g. 'ollama', "
-                        "'anthropic', 'rpb'). Set after 'model', so it wins "
-                        "when both are given."
+                        "Change the provider this agent runs on (e.g. "
+                        "'ollama', 'anthropic', 'rpb'). Pass 'model' too, "
+                        "valid for the new provider. Cannot be cleared."
                     ),
                 },
                 "service_provider": {
@@ -298,9 +303,12 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="create_agent",
         description=(
-            "Create and register a new agent. Most agents are 'cognitive' — just provide "
-            "id, name, and prompt. Use update_agent afterwards for advanced config "
-            "(schedule, budgets, connectors, pipeline steps, concurrency)."
+            "Create and register a new agent. Most agents are 'cognitive': provide "
+            "id, name, prompt, AND the provider and model it runs on. Provider and "
+            "model are required and are never inherited from the creating agent, "
+            "so choose them deliberately for the task. Use update_agent afterwards "
+            "for advanced config (schedule, budgets, connectors, pipeline steps, "
+            "concurrency)."
         ),
         input_schema={
             "type": "object",
@@ -326,18 +334,24 @@ _TOOLS: list[ToolDefinition] = [
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model override (e.g. 'sonnet', 'opus').",
+                    "description": (
+                        "REQUIRED (cognitive mode). The model the child runs "
+                        "on, valid for 'provider' (e.g. 'claude-sonnet-4-6', "
+                        "'gpt-5.5', 'qwen3:4b'). Choose deliberately: nothing "
+                        "is inherited from you and there is no default."
+                    ),
                 },
                 "provider": {
                     "type": "string",
                     "description": (
-                        "Explicit provider for this agent: a built-in id "
-                        "(claude_max, codex_max, anthropic, openai, gemini, "
-                        "deepseek, ollama, substrate), a custom provider id "
-                        "from config.yaml, or 'rpb' for sponsor-routed "
-                        "dependents. Omit to route by the model id (the daemon "
-                        "fails loud if a model can't be placed rather than "
-                        "defaulting onto the subscription)."
+                        "REQUIRED (cognitive mode). The provider the child "
+                        "runs on: a built-in id (claude_max, codex_max, "
+                        "anthropic, openai, gemini, deepseek, ollama, "
+                        "substrate, service), a custom provider id from "
+                        "config.yaml, or 'rpb' for sponsor-routed dependents. "
+                        "Choose deliberately: nothing is inherited from you "
+                        "and there is no default. Not needed when "
+                        "'service_provider' binds the child to a purchase."
                     ),
                 },
                 "max_turns": {
@@ -955,9 +969,10 @@ _TOOLS: list[ToolDefinition] = [
             "properties": {
                 "title": {"type": "string", "description": "Short goal title (becomes agent name)."},
                 "description": {"type": "string", "description": "What success looks like (becomes agent task_prompt)."},
-                "model": {"type": "string", "description": "Model for the goal agent. Defaults to sonnet."},
+                "provider": {"type": "string", "description": "Provider the goal agent runs on (required; no default)."},
+                "model": {"type": "string", "description": "Model the goal agent runs on, valid for 'provider' (required; no default)."},
             },
-            "required": ["title", "description"],
+            "required": ["title", "description", "provider", "model"],
         },
     ),
     ToolDefinition(
@@ -1532,9 +1547,8 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         "budgets": _flat_budgets(runtime, defn),
         "budget_periods": _budget_periods(defn),
         # The provider the agent's budget is keyed to (what its runs are
-        # booked against), and the one it would run on with no pin.
+        # booked against).
         "effective_provider": _effective_provider(runtime, defn),
-        "default_provider": _unpinned_provider(runtime, defn),
         "path": str(runtime._config.agents_dir / defn.id),
         "system_prompt": defn.system_prompt or "",
         "task_prompt": defn.task_prompt or "",
@@ -1688,15 +1702,25 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
                 return {"error": "model/provider are parent-settable only: "
                                  f"'{caller_id}' is not the parent of "
                                  f"'{agent_id}'."}
+    if (("model" in input or "provider" in input or "service_provider" in input)
+            and defn.mode == AgentMode.COGNITIVE):
+        # A pin can be changed but never cleared: every cognitive agent keeps
+        # a deliberately chosen provider and model (decision 2026-10-06).
+        _binding = (input["service_provider"] if "service_provider" in input
+                    else defn.service_provider)
+        routing_err = _routing_error(
+            runtime,
+            input["provider"] if "provider" in input else defn.provider,
+            input["model"] if "model" in input else defn.cognitive_model,
+            service_bound=bool(isinstance(_binding, dict) and _binding))
+        if routing_err:
+            return {"error": f"update_agent: {routing_err}. Provider and "
+                             "model can be changed but not cleared."}
     if "model" in input:
         defn.cognitive_model = input["model"]
-        defn.provider = input["model"]
         changed.append("model")
         provider_or_model_changed = True
     if "provider" in input:
-        # Explicit provider override (e.g. "rpb" for a dependent agent that
-        # routes inference to a sponsor). Set after "model" so it wins when
-        # both are present.
         defn.provider = input["provider"]
         changed.append("provider")
         provider_or_model_changed = True
@@ -2017,37 +2041,10 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         # cross-agent prefix caching (every agent re-created the ~50k prefix).
         system_prompt = input.get("system_prompt", "")
 
-        # §10: an explicit provider (enum of known providers) pins routing.
-        # Omitted → provider is the model id, and _resolve_provider_for_model
-        # fails loud if it can't place it (no silent bridge fallback).
+        # Provider AND model are chosen deliberately by the creator (decision
+        # 2026-10-06): nothing falls back, nothing is inherited from the parent.
         explicit_provider = input.get("provider", "")
-
-        # Model inheritance: a child with no explicit model runs on its
-        # PARENT's model, not the daemon-wide default. Falling
-        # through to the global default silently upgraded/downgraded child
-        # seats (a parent pinned to one model spawned children on another),
-        # which breaks any run where the model seat is a controlled variable.
-        if not model and parent_id:
-            parent_defn = runtime.get_agent(parent_id)
-            if parent_defn is not None:
-                model = getattr(parent_defn, "cognitive_model", "") or ""
-                if not explicit_provider:
-                    parent_provider = getattr(parent_defn, "provider", "") or ""
-                    if parent_provider and parent_provider != model:
-                        explicit_provider = parent_provider
-
-        # An explicit provider with no model gets THAT provider's default,
-        # never the daemon-wide default_model (which may belong to a
-        # different provider — picking codex_max used to land the agent on
-        # the claude default anyway).
-        if not model and explicit_provider:
-            try:
-                model = runtime.providers.default_model_for(explicit_provider)
-            except Exception:
-                model = ""
-
-        effective_model = model or runtime._config.default_model or "sonnet"
-        model_tier = get_model_tier(effective_model)
+        effective_model = model
 
         # Marketplace inference binding (docs/services_market.md, ratified
         # 2026-07-26: employer-chooses-the-tool). No authority check is needed
@@ -2063,9 +2060,19 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             except ValueError as exc:
                 return {"error": str(exc)}
 
+        routing_err = _routing_error(
+            runtime, explicit_provider, effective_model,
+            service_bound=service_binding is not None)
+        if routing_err:
+            return {"error": f"create_agent: {routing_err}. Pass both "
+                             "'provider' and 'model' explicitly; a child "
+                             "never inherits its parent's."}
+
+        model_tier = get_model_tier(effective_model)
+
         # Warn if model tier seems low for agent_type
         tier_warning = None
-        if agent_type in ("general",) and model_tier < 3:
+        if effective_model and agent_type in ("general",) and model_tier < 3:
             tier_warning = (
                 f"Model '{effective_model}' is tier {model_tier} ({get_tier_label(model_tier)}). "
                 f"Agent type '{agent_type}' works best with tier 3+ (autonomous) models."
@@ -2076,7 +2083,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
             id=agent_id,
             name=input.get("name", "") or input.get("id", agent_id),
             mode=AgentMode.COGNITIVE,
-            provider=explicit_provider or effective_model,
+            provider=explicit_provider,
             cognitive_model=effective_model,
             system_prompt=system_prompt,
             task_prompt=prompt,
@@ -3438,8 +3445,6 @@ async def _add_goal(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Add a goal by creating a cognitive agent."""
     title = input["title"]
     description = input["description"]
-    model = input.get("model", "")
-
     # Generate a unique agent ID from the title
     import re
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40]
@@ -3455,7 +3460,8 @@ async def _add_goal(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         "mode": "cognitive",
         "prompt": description,
         "description": f"Goal: {description}",
-        "model": model or runtime._config.default_model or "claude-sonnet-4-6",
+        "provider": input.get("provider", ""),
+        "model": input.get("model", ""),
     })
     if "error" in result:
         return result

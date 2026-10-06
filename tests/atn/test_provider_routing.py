@@ -1,8 +1,9 @@
 """§10 Provider routing (fail-loud) + update_agent eviction.
 
-- _resolve_provider_for_model must NOT silently fall back to BridgeProvider for
-  keyless gemini/openai or for an unknown model. Unknown models that ARE
-  installed in ollama route to OllamaProvider; otherwise it raises ProviderError.
+- Routing is explicit (decision 2026-10-06): an agent names its provider and
+  model, a keyless gemini/openai pin raises instead of falling back onto the
+  bridge, and an agent that names no provider (or a model id as its
+  provider) raises rather than being routed by model prefix.
 - update_agent must evict + close the cached provider when provider/model changes.
 """
 from __future__ import annotations
@@ -34,62 +35,38 @@ def _make_manager() -> ProviderManager:
 # Fail-loud routing
 # ---------------------------------------------------------------------------
 
+def _defn(provider, model):
+    from atn.models import AgentDefinition, AgentMode
+    return AgentDefinition(id="agent-1", name="A", mode=AgentMode.COGNITIVE,
+                           provider=provider, cognitive_model=model)
+
+
 class TestFailLoudRouting:
     def test_keyless_gemini_raises(self):
         mgr = _make_manager()
         with pytest.raises(ProviderError, match="Gemini API key"):
-            mgr._resolve_provider_for_model("gemini-3-pro", "agent-1")
+            mgr.resolve_provider_with_fallback(_defn("gemini", "gemini-3-pro"))
 
     def test_keyless_openai_raises(self):
         mgr = _make_manager()
         with pytest.raises(ProviderError, match="OpenAI API key"):
-            mgr._resolve_provider_for_model("gpt-5.5", "agent-1")
+            mgr.resolve_provider_with_fallback(_defn("openai", "gpt-5.5"))
 
-    def test_unknown_model_not_in_ollama_raises(self):
+    def test_no_provider_raises_instead_of_routing_by_model(self):
         mgr = _make_manager()
-        # Ollama reports no models installed.
-        mgr._ollama_tags_cached = MagicMock(return_value=set())
-        with pytest.raises(ProviderError, match="unknown model"):
-            mgr._resolve_provider_for_model("qwen3.5:4b", "agent-1")
+        with pytest.raises(ProviderError, match="provider is required"):
+            mgr.resolve_provider_with_fallback(_defn("", "qwen3.5:4b"))
 
-    def test_unknown_model_installed_in_ollama_routes_to_ollama(self):
+    def test_model_id_as_provider_raises(self):
         mgr = _make_manager()
-        mgr._ollama_tags_cached = MagicMock(
-            return_value={"qwen3.5:4b", "qwen3.5"}
-        )
-        prov = mgr._resolve_provider_for_model("qwen3.5:4b", "agent-1")
+        with pytest.raises(ProviderError, match="unknown provider"):
+            mgr.resolve_provider_with_fallback(
+                _defn("claude-fable-5", "claude-haiku-4-5"))
+
+    def test_pinned_ollama_routes_to_ollama(self):
+        mgr = _make_manager()
+        prov = mgr.resolve_provider_with_fallback(_defn("ollama", "qwen3.5:4b"))
         assert isinstance(prov, OllamaProvider)
-
-    def test_ollama_match_on_bare_base_name(self):
-        mgr = _make_manager()
-        # Only the tagged name is installed; a bare-name request still matches.
-        mgr._ollama_tags_cached = MagicMock(return_value={"qwen3.5:4b", "qwen3.5"})
-        prov = mgr._resolve_provider_for_model("qwen3.5", "agent-1")
-        assert isinstance(prov, OllamaProvider)
-
-
-class TestOllamaTagsCache:
-    def test_cache_tolerates_ollama_down(self):
-        """A dead ollama endpoint yields an empty set, not an exception."""
-        mgr = _make_manager()
-        # No ollama running at the default port during the test — probe fails,
-        # returns empty, and caches it.
-        tags = mgr._ollama_tags_cached()
-        assert isinstance(tags, set)
-
-    def test_cache_is_reused_within_ttl(self, monkeypatch):
-        mgr = _make_manager()
-        calls = {"n": 0}
-
-        def fake_get(url, timeout=0):
-            calls["n"] += 1
-            raise RuntimeError("down")
-
-        monkeypatch.setattr("httpx.get", fake_get)
-        mgr._ollama_tags_cached()
-        mgr._ollama_tags_cached()
-        # Second call served from cache — probe fired once.
-        assert calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +89,7 @@ class TestUpdateAgentEviction:
         runtime = MagicMock()
         defn = AgentDefinition(
             id=agent_id, name="A", mode=AgentMode.COGNITIVE,
-            provider="claude-sonnet-4-6", cognitive_model="claude-sonnet-4-6",
+            provider="claude_max", cognitive_model="claude-sonnet-4-6",
         )
         runtime.get_agent = MagicMock(return_value=defn)
         runtime._config.agents_dir = "/tmp/agents"
@@ -168,29 +145,6 @@ class TestUpdateAgentEviction:
         # Untouched — a name change must not tear down the live provider.
         assert fake.closed is False
         assert pmgr._active_providers.get("a1") is fake
-
-
-# ---------------------------------------------------------------------------
-# Stale model-shaped provider hint (2026-08-30)
-# ---------------------------------------------------------------------------
-
-class TestStaleModelHint:
-    def test_cognitive_model_overrides_stale_provider_hint(self):
-        """create_agent stores the creation-time model in ``provider`` when no
-        explicit provider was picked. After set_agent_model changes
-        cognitive_model, that stale hint must not decide the model — the run
-        was silently staying on the creation model."""
-        from unittest.mock import patch
-        from atn.models import AgentDefinition, AgentMode
-
-        mgr = _make_manager()
-        defn = AgentDefinition(
-            id="a1", name="A", mode=AgentMode.COGNITIVE,
-            provider="claude-fable-5", cognitive_model="claude-haiku-4-5",
-        )
-        with patch("atn.runtime.provider_manager.BridgeProvider") as bp:
-            mgr.resolve_provider_with_fallback(defn)
-        bp.assert_called_once_with(model="claude-haiku-4-5")
 
 
 # ---------------------------------------------------------------------------

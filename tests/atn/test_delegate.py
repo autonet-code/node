@@ -290,7 +290,7 @@ async def test_delegate_tool_executor(tmp_path: Path):
         from atn.agent_tools import _create_agent, _delegate_collect
 
         # create_agent with mode=cognitive and prompt auto-activates and triggers
-        spawn_result = await _create_agent(rt, {
+        spawn_result = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet",
             "mode": "cognitive",
             "prompt": "Explore the auth system",
             "agent_type": "explore",
@@ -360,7 +360,7 @@ async def test_delegate_tool_failure(tmp_path: Path):
     with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
         from atn.agent_tools import _create_agent, _delegate_collect
 
-        spawn_result = await _create_agent(rt, {
+        spawn_result = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet",
             "mode": "cognitive",
             "prompt": "This will fail",
             "agent_type": "implement",
@@ -413,7 +413,7 @@ async def test_delegate_status_tool(tmp_path: Path):
     with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
         from atn.agent_tools import _create_agent, _delegate_status, _delegate_collect
 
-        spawn = await _create_agent(rt, {
+        spawn = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet",
             "mode": "cognitive",
             "prompt": "Do something", "agent_type": "implement",
             "_caller_id": "orch",

@@ -166,7 +166,7 @@ def test_locator_retrieves_on_embedding_tail(tmp_path):
 
 
 def test_default_embedding_dim_is_full_usefulness_layer(tmp_path):
-    """The daemon defaults to a non-zero embedding_dim so the
+    """The daemon ships a non-zero embedding_dim so the
     usefulness layer is on out of the box (64 since the Phase 2.2
     dim_sweep — 95% of native-384 categorical separation). Pure-
     charter mode is opt-in via embedding_dim=0."""

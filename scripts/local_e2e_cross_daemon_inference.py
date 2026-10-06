@@ -1086,7 +1086,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     "type": "create_agent", "id": parent_agent,
                     "name": parent_agent, "mode": "cognitive",
                     "system_prompt": "You are the employer.",
-                    "model": model,
+                    "provider": "ollama", "model": model,
                 })
             # The provider's selling agent. Its 0x is the payment recipient the
             # gate checks, so it must be a real registered identity. It never
@@ -1105,7 +1105,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     "type": "create_agent", "id": prov_agent,
                     "name": prov_agent, "mode": "cognitive",
                     "system_prompt": "You sell cognition.",
-                    "model": model,
+                    "provider": "ollama", "model": model,
                 })
                 exported = await prov_client.ok({
                     "type": "export_agent_key", "agent_id": prov_agent})
@@ -1124,7 +1124,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
                     "mode": "cognitive",
                     "system_prompt": "Answer exactly what you are asked, "
                                      "nothing more. Never use tools.",
-                    "model": model,
+                    "provider": "ollama", "model": model,
                 })
                 p_exp = await cons_client.ok({
                     "type": "export_agent_key", "agent_id": parent_agent})

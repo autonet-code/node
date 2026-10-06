@@ -385,7 +385,7 @@ async def test_self_parent_is_refused_and_walks_terminate(tmp_path):
     rt = _make_runtime(tmp_path)
     await _register(rt, "boss")
 
-    res = await _create_agent(rt, {
+    res = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet",
         "mode": "cognitive", "name": "boss", "id": "boss",
         "_caller_id": "boss",
     })

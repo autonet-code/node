@@ -104,8 +104,8 @@ def format_budget_line(
 def _agent_provider_name(defn: Any, config: Any, providers: Any = None) -> str:
     """Resolve the provider id an agent runs on, WITHOUT instantiating a
     provider. Prefers the runtime's ProviderManager (which knows which API keys
-    are on file); otherwise resolves from the definition and the daemon
-    default model alone. ``defn`` None means a fresh unpinned agent."""
+    are on file); otherwise resolves from the definition alone. "" when the
+    agent names no provider (there is no daemon-wide fallback)."""
     fn = getattr(providers, "effective_provider_id", None)
     if defn is not None and callable(fn):
         try:
@@ -115,9 +115,7 @@ def _agent_provider_name(defn: Any, config: Any, providers: Any = None) -> str:
         except Exception:
             pass
     from .provider_identity import effective_provider_id
-    dm = getattr(config, "default_model", "") if config is not None else ""
-    return effective_provider_id(
-        defn, default_model=dm if isinstance(dm, str) else "")
+    return effective_provider_id(defn)
 
 
 def compute_effective_limits(

@@ -113,7 +113,7 @@ def _accepts_sampling(model: str) -> bool:
 
 def anthropic_headers(api_key: str, workspace_id: str = "") -> dict[str, str]:
     """Request headers for the Messages API, workspace header included when
-    a workspace id is known (explicit argument or the daemon default)."""
+    a workspace id is known (explicit argument or the daemon-configured one)."""
     headers = {
         "x-api-key": api_key,
         "anthropic-version": _API_VERSION,

@@ -1,16 +1,16 @@
 """Which provider an agent actually runs on, resolved WITHOUT instantiating it.
 
 Budgets are keyed by provider id, so the budget key for an agent must be the
-provider its runs are actually booked against. That is not always the
-agent's ``provider`` field: an unpinned agent stores its creation-time MODEL
-there (a routing hint), a fallback chain names several providers, and a
+provider its runs are actually booked against. That is the agent's own
+``provider`` pin, except that a fallback chain names several providers and a
 marketplace binding overrides both. This module mirrors
 ``ProviderManager.resolve_provider_with_fallback`` as a pure function so the
 snapshot, ``get_agent``, the effective-limits rail and the budget-key
 migration all name the same provider the execution engine books against.
 
-No call site may substitute a fixed provider name for "the default provider";
-the default is whatever this resolver returns for an unpinned agent.
+There is no daemon-wide default: every cognitive agent names its provider and
+model on purpose (decision 2026-10-06). An agent without both is an error,
+never silently routed.
 """
 
 from __future__ import annotations
@@ -26,32 +26,9 @@ KNOWN_PROVIDER_IDS = frozenset({
 # Providers that can only be built with an API key on file.
 _API_KEY_PROVIDERS = frozenset({"anthropic", "gemini", "openai", "deepseek"})
 
-# Short aliases the Claude routes accept (mirrors _resolve_provider_for_model).
-_CLAUDE_ALIASES = ("sonnet", "opus", "haiku", "fable", "mythos")
-
-# resolve_provider_with_fallback's model when neither the agent nor the
-# daemon names one.
-FALLBACK_MODEL = "claude-sonnet-4-6"
-
 # The provider id older clients wrote as a stand-in for "whatever the daemon
-# default is". Only the migration below may reference it.
+# picks". Only the budget-key migration below may reference it.
 LEGACY_DEFAULT_BUDGET_KEY = "claude_max"
-
-
-def provider_for_model(model: str, *, has_api_key: Callable[[str], bool]) -> str:
-    """The provider a bare model id routes to (``_resolve_provider_for_model``).
-
-    An unknown prefix can only succeed on ollama (anything else fails loud at
-    run time), so it maps to ``ollama`` without probing the local server.
-    """
-    m = (model or "").lower()
-    if m.startswith("gemini"):
-        return "gemini"
-    if m.startswith(("gpt", "o1", "o3", "o4")):
-        return "openai"
-    if m.startswith("claude") or m.startswith(_CLAUDE_ALIASES):
-        return "anthropic" if has_api_key("anthropic") else "claude_max"
-    return "ollama"
 
 
 def _usable(pid: str, has_api_key: Callable[[str], bool],
@@ -62,50 +39,68 @@ def _usable(pid: str, has_api_key: Callable[[str], bool],
     return pid in KNOWN_PROVIDER_IDS or pid in custom
 
 
+def routing_error(
+    provider: Any, model: Any, *, custom_providers: Iterable[str] = (),
+    service_bound: bool = False,
+) -> str | None:
+    """Why a cognitive agent with this provider/model cannot run, or None.
+
+    Both must be chosen deliberately: a non-empty provider the daemon knows
+    (a built-in id, a custom provider id, or a non-empty fallback chain of
+    them) and a non-empty model. Used at create/update time and again at
+    resolve time, so a hand-edited agent.yaml fails loud instead of being
+    routed somewhere nobody chose.
+
+    Two choices name the model by themselves: a per-agent marketplace binding
+    (``service_bound``) and the ``service`` provider. The seller declares the
+    served model, so neither needs a model of its own.
+    """
+    if service_bound:
+        return None
+    custom = frozenset(custom_providers or ())
+    if isinstance(provider, list):
+        names = [p for p in provider if isinstance(p, str) and p]
+        if not names:
+            return "provider is required: choose the provider this agent runs on"
+        unknown = [p for p in names
+                   if p not in KNOWN_PROVIDER_IDS and p not in custom]
+        if unknown:
+            return f"unknown provider(s): {', '.join(unknown)}"
+    elif not (isinstance(provider, str) and provider.strip()):
+        return "provider is required: choose the provider this agent runs on"
+    elif provider not in KNOWN_PROVIDER_IDS and provider not in custom:
+        return (f"unknown provider {provider!r}: use a built-in provider id "
+                "or a configured custom provider")
+    if provider == "service":
+        return None
+    if not (isinstance(model, str) and model.strip()):
+        return "model is required: choose the model this agent runs on"
+    return None
+
+
 def effective_provider_id(
     defn: Any,
     *,
-    default_model: str = "",
     has_api_key: Callable[[str], bool] = lambda _pid: False,
     custom_providers: Iterable[str] = (),
 ) -> str:
-    """The provider id an agent's runs are booked against."""
+    """The provider id an agent's runs are booked against ("" when the agent
+    names none, which is a routing error the engine reports at run time)."""
     custom = frozenset(custom_providers or ())
     binding = getattr(defn, "service_provider", None)
     if isinstance(binding, dict) and binding:
         return "service"
     raw = getattr(defn, "provider", None)
-    model = (getattr(defn, "cognitive_model", "") or default_model
-             or FALLBACK_MODEL)
     if isinstance(raw, list):
         names = [p for p in raw if isinstance(p, str) and p]
         for pid in names:
             if _usable(pid, has_api_key, custom):
                 return pid
-        if names:
-            return names[0]
-        return provider_for_model(model, has_api_key=has_api_key)
-    if isinstance(raw, str) and raw:
-        if raw in KNOWN_PROVIDER_IDS or raw in custom:
-            return raw
-        # Model-shaped routing hint: the engine routes by cognitive_model.
-        return provider_for_model(
-            getattr(defn, "cognitive_model", "") or raw,
-            has_api_key=has_api_key)
-    return provider_for_model(model, has_api_key=has_api_key)
-
-
-def unpinned_provider_id(
-    defn: Any,
-    *,
-    default_model: str = "",
-    has_api_key: Callable[[str], bool] = lambda _pid: False,
-) -> str:
-    """The provider this agent would run on with its pin cleared (the
-    "daemon default" choice in the UI): routed by its model."""
-    model = (getattr(defn, "cognitive_model", "") or default_model
-             or FALLBACK_MODEL)
-    return provider_for_model(model, has_api_key=has_api_key)
+        return names[0] if names else ""
+    if isinstance(raw, str) and raw and (raw in KNOWN_PROVIDER_IDS
+                                         or raw in custom):
+        return raw
+    return ""
 
 
 def explicit_provider_ids(defn: Any) -> set[str]:

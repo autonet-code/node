@@ -147,8 +147,10 @@ def test_migrate_legacy_orchestrator_config_moves_defaults(tmp_path):
     # Idempotent: a second load is a no-op, and load_config reads the result.
     assert _migrate_legacy_orchestrator_config(path) is False
     cfg = load_config(path)
-    assert cfg.default_model == "claude-sonnet-4-6"
-    assert cfg.default_provider == "claude_max"
+    # The resulting defaults: section is read only for the one-time agent
+    # pinning migration (atn/legacy_routing_migration.py).
+    assert cfg.legacy_agent_routing == {"model": "claude-sonnet-4-6",
+                                        "provider": "claude_max"}
     assert cfg.chat.root_label == "HQ"
     assert cfg.chat.bound_agent == ""
 

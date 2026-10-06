@@ -7,10 +7,6 @@ Config layout:
     data_dir:    ~/.atn              # global state, pidfiles
     agents_dir:  ~/.atn/agents       # agent directories (or ./agents if it exists in CWD)
 
-    defaults:
-      provider: anthropic            # daemon-wide default provider
-      model: claude-sonnet-4-20250514   # daemon-wide default model
-
     providers:
       anthropic:
         api_key: ${ANTHROPIC_API_KEY}
@@ -434,11 +430,14 @@ class ATNConfig:
     """Top-level ATN configuration."""
     data_dir: Path = field(default_factory=lambda: _DEFAULT_DIR)
     agents_dir: Path = field(default_factory=lambda: _default_agents_dir())
-    # Daemon-wide defaults for agents that don't specify their own model /
-    # provider. YAML section ``defaults:`` (older config files are rewritten
-    # on load, see the legacy config migration below).
-    default_model: str = ""
-    default_provider: str = ""
+    # The config.yaml this was loaded from (None when built in code).
+    source_path: Path | None = None
+    # LEGACY-DATA: the retired top-level ``defaults:`` section ({model,
+    # provider}), read only so the one-time agent-pinning migration
+    # (atn/legacy_routing_migration.py) can pin unpinned agents to what they
+    # resolved to before agents had to choose. Nothing else reads it; the
+    # migration removes the section from config.yaml.
+    legacy_agent_routing: dict[str, str] = field(default_factory=dict)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
     autonet: AutonetConfig = field(default_factory=AutonetConfig)
@@ -836,6 +835,10 @@ def _migrate_legacy_orchestrator_config(path: Path) -> bool:
     back to a YAML rewrite only when both ``orchestrator:`` and
     ``defaults:`` exist (``defaults`` wins, the old section is dropped).
     Returns True when the file was rewritten.
+
+    The resulting ``defaults:`` section is itself retired: load_config reads
+    it into ``legacy_agent_routing`` and the one-time agent-pinning migration
+    (atn/legacy_routing_migration.py) pins agents with it, then deletes it.
     """
     import re as _re
     try:
@@ -905,6 +908,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
         return config
 
     config.raw = raw
+    config.source_path = path
     config_dir = path.parent  # resolve relative paths against config file location
 
     if "data_dir" in raw:
@@ -923,11 +927,14 @@ def load_config(path: Path | None = None) -> ATNConfig:
         # the pre-override data_dir).
         config.agents_dir = _default_agents_dir(config.data_dir)
 
-    # Daemon-wide defaults (model/provider for agents without their own)
-    defaults_raw = raw.get("defaults", {})
-    if isinstance(defaults_raw, dict) and defaults_raw:
-        config.default_provider = str(defaults_raw.get("provider", "") or "")
-        config.default_model = str(defaults_raw.get("model", "") or "")
+    # LEGACY-DATA: the retired ``defaults:`` section, kept only for the
+    # one-time pinning migration (see ATNConfig.legacy_agent_routing).
+    legacy_raw = raw.get("defaults", {})
+    if isinstance(legacy_raw, dict) and legacy_raw:
+        config.legacy_agent_routing = {
+            "provider": str(legacy_raw.get("provider", "") or ""),
+            "model": str(legacy_raw.get("model", "") or ""),
+        }
 
     # Voice
     voice_raw = raw.get("voice", {})
@@ -1322,66 +1329,6 @@ def save_owner_wallet_to_config(
         encoding="utf-8",
     )
     log.info("Owner wallet saved to %s", config_path)
-
-
-def save_default_model_to_config(
-    model: str,
-    config_path: Path | None = None,
-) -> None:
-    """Persist the daemon-wide default model to config.yaml.
-
-    Reads the existing YAML, updates defaults.model, writes back.
-    Creates the file / section if it doesn't exist.
-    """
-    config_path = config_path or (_DEFAULT_DIR / "config.yaml")
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    raw: dict[str, Any] = {}
-    if config_path.exists():
-        try:
-            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except Exception:
-            log.warning("Failed to read config for default model save: %s", config_path)
-            raw = {}
-
-    if not isinstance(raw.get("defaults"), dict):
-        raw["defaults"] = {}
-
-    raw["defaults"]["model"] = model
-
-    config_path.write_text(
-        yaml.dump(raw, default_flow_style=False, sort_keys=False),
-        encoding="utf-8",
-    )
-    log.info("Default model '%s' saved to %s", model, config_path)
-
-
-def save_default_provider_to_config(
-    provider: str,
-    config_path: Path | None = None,
-) -> None:
-    """Persist the daemon-wide default provider to config.yaml."""
-    config_path = config_path or (_DEFAULT_DIR / "config.yaml")
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    raw: dict[str, Any] = {}
-    if config_path.exists():
-        try:
-            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except Exception:
-            log.warning("Failed to read config for default provider save: %s", config_path)
-            raw = {}
-
-    if not isinstance(raw.get("defaults"), dict):
-        raw["defaults"] = {}
-
-    raw["defaults"]["provider"] = provider
-
-    config_path.write_text(
-        yaml.dump(raw, default_flow_style=False, sort_keys=False),
-        encoding="utf-8",
-    )
-    log.info("Default provider '%s' saved to %s", provider, config_path)
 
 
 def remove_connector_from_config(

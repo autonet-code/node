@@ -98,7 +98,7 @@ class TestGenerateChildId:
         for aid in ("orch.1", "orch.2", "orch.1.3"):
             await rt.register_agent(AgentDefinition(
                 id=aid, name=aid, mode=AgentMode.COGNITIVE,
-                provider="sonnet", description="restored",
+                provider="claude_max", cognitive_model="sonnet", description="restored",
             ))
         assert rt.generate_child_id("orch") == "orch.3"
         assert rt.generate_child_id("orch.1") == "orch.1.4"
@@ -133,7 +133,7 @@ class TestCognitiveAgentExecution:
             id="cog-1",
             name="Test Cognitive Agent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max",
             cognitive_model="sonnet",
             system_prompt="You are a test agent.",
             agent_type="implement",
@@ -175,7 +175,7 @@ class TestCognitiveAgentExecution:
             id="cog-fail",
             name="Failing Agent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
             description="Will fail.",
         )
 
@@ -244,7 +244,7 @@ class TestCognitiveAgentExecution:
             id="cog-track",
             name="Tracked Agent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
             description="Track me.",
         )
 
@@ -276,7 +276,7 @@ class TestInnateWakeUp:
             id="parent-1",
             name="Parent Agent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
         )
         await rt.register_agent(parent)
         await rt.activate_agent("parent-1")
@@ -297,7 +297,7 @@ class TestInnateWakeUp:
             id="child-1",
             name="Child Agent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
             parent_id="parent-1",
             description="Do child work.",
         )
@@ -341,7 +341,7 @@ class TestInnateWakeUp:
             id="orphan",
             name="No Parent Agent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
             description="No parent.",
         )
         await rt.register_agent(defn)
@@ -368,7 +368,7 @@ class TestInnateWakeUp:
             id="parent-2",
             name="Active Parent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
         )
         await rt.register_agent(parent)
         await rt.activate_agent("parent-2")
@@ -393,7 +393,7 @@ class TestInnateWakeUp:
             id="child-2",
             name="Child",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
             parent_id="parent-2",
             description="Child task.",
         )
@@ -437,7 +437,7 @@ class TestDelegateToolsUnified:
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             from atn.agent_tools import _create_agent, _delegate_collect
 
-            result = await _create_agent(rt, {
+            result = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet",
                 "mode": "cognitive",
                 "prompt": "Search for auth code",
                 "agent_type": "explore",
@@ -482,7 +482,7 @@ class TestDelegateToolsUnified:
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             from atn.agent_tools import _create_agent, _delegate_status, _delegate_collect
 
-            spawn = await _create_agent(rt, {"mode": "cognitive", "prompt": "Slow task", "_caller_id": "orch"})
+            spawn = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet", "mode": "cognitive", "prompt": "Slow task", "_caller_id": "orch"})
             await asyncio.sleep(0.01)  # yield to event loop
 
             status = await _delegate_status(rt, {"agent_id": spawn["agent_id"]})
@@ -515,7 +515,7 @@ class TestDelegateToolsUnified:
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             from atn.agent_tools import _create_agent, _delegate_message, _delegate_collect
 
-            spawn = await _create_agent(rt, {"mode": "cognitive", "prompt": "Working", "_caller_id": "orch"})
+            spawn = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet", "mode": "cognitive", "prompt": "Working", "_caller_id": "orch"})
             agent_id = spawn["agent_id"]
             await asyncio.sleep(0.01)  # yield to event loop
 
@@ -549,7 +549,7 @@ class TestCompletionCallbacks:
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             from atn.agent_tools import _create_agent
 
-            result = await _create_agent(rt, {"mode": "cognitive", "prompt": "task", "_caller_id": "orch"})
+            result = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet", "mode": "cognitive", "prompt": "task", "_caller_id": "orch"})
             agent_id = result["agent_id"]
             # Completion callbacks may be tracked via delegate registry or done events
             assert agent_id in rt._delegate_done or agent_id in getattr(rt, '_completion_callbacks', {})
@@ -578,7 +578,7 @@ class TestDelegateRegistryBackwardCompat:
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             from atn.agent_tools import _create_agent, _delegate_collect
 
-            result = await _create_agent(rt, {
+            result = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet",
                 "mode": "cognitive",
                 "prompt": "do work",
                 "agent_type": "implement",
@@ -635,7 +635,7 @@ class TestFractality:
             from atn.agent_tools import _create_agent
 
             # Simulate orch.1 (a sub-agent) calling create_agent
-            result = await _create_agent(rt, {
+            result = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet",
                 "mode": "cognitive",
                 "prompt": "Sub-sub task",
                 "agent_type": "explore",
@@ -668,7 +668,7 @@ class TestFractality:
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
             from atn.agent_tools import execute_tool
 
-            result = await execute_tool("create_agent", {
+            result = await execute_tool("create_agent", {"provider": "claude_max", "model": "sonnet",
                 "id": "child-cog",
                 "name": "Child Cognitive",
                 "mode": "cognitive",
@@ -715,7 +715,7 @@ class TestFractality:
             id="parent-frac",
             name="Parent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
         )
         await rt.register_agent(parent)
         await rt.activate_agent("parent-frac")
@@ -762,7 +762,7 @@ class TestInnateWakeUpInstruction:
             id="parent-inst",
             name="Parent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
         )
         await rt.register_agent(parent)
         await rt.activate_agent("parent-inst")
@@ -782,7 +782,7 @@ class TestInnateWakeUpInstruction:
             id="child-inst",
             name="Worker Child",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
             parent_id="parent-inst",
             description="Do child work.",
         )
@@ -815,7 +815,7 @@ class TestInnateWakeUpInstruction:
             id="parent-fail",
             name="Parent",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
         )
         await rt.register_agent(parent)
         await rt.activate_agent("parent-fail")
@@ -828,7 +828,7 @@ class TestInnateWakeUpInstruction:
             id="child-fail",
             name="Failing Child",
             mode=AgentMode.COGNITIVE,
-            provider="sonnet",
+            provider="claude_max", cognitive_model="sonnet",
             parent_id="parent-fail",
         )
         await rt.register_agent(child)

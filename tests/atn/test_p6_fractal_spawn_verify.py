@@ -198,6 +198,7 @@ async def test_p6_isolated_parent_spawns_isolated_child(tmp_path):
     child_spec = {
         "name": "Delegate",
         "prompt": "do a subtask",
+        "provider": "anthropic",
         "model": "sonnet",
         "mode": "cognitive",
         "parent_agent_id": "ATTACKER-FORGED",   # must be ignored

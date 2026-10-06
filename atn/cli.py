@@ -468,6 +468,14 @@ async def _load_agents(runtime: Runtime, config: ATNConfig) -> int:
     for err in errors:
         console.print(f"  [red]Load error: {err}[/]")
 
+    # One-time: agents written before provider+model became mandatory get
+    # pinned to what they already ran on (atn/legacy_routing_migration.py).
+    from .legacy_routing_migration import pin_unpinned_agents_from_legacy_defaults
+    for pinned_id in pin_unpinned_agents_from_legacy_defaults(
+            agents, config, getattr(runtime, "providers", None)):
+        console.print(f"  [yellow]Pinned agent '{pinned_id}' to its current "
+                      f"provider and model[/]")
+
     # Determine what changed
     current_ids = {defn.id for defn, _ in runtime.list_agents()}
     new_ids = {a.id for a in agents}
@@ -648,11 +656,6 @@ async def run_cli() -> None:
     )
     console.print(f"  [dim]data_dir:   {config.data_dir}[/]")
     console.print(f"  [dim]agents_dir: {config.agents_dir}[/]")
-    if config.default_provider or config.default_model:
-        console.print(
-            f"  [dim]defaults:   provider={config.default_provider or '(auto)'}"
-            f"  model={config.default_model or '(provider default)'}[/]"
-        )
     if config.providers:
         for name, prov in config.providers.items():
             key_hint = (prov.api_key[:4] + "...") if len(prov.api_key) > 4 else ("(not set)" if not prov.api_key else "***")

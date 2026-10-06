@@ -144,13 +144,19 @@ def _seed_env(tmp_path: Path, agents: list | None = None):
         registered.append((defn, legacy))
         return defn.id
 
+    # One configured provider: Kevin is seeded on it with its top-tier model.
+    providers = SimpleNamespace(
+        registered_provider_ids=lambda: ["claude_max"],
+        get_available_models=lambda pid: [
+            {"id": "claude-sonnet-5", "capability_tier": 3},
+            {"id": "claude-fable-5", "capability_tier": 4},
+        ])
     runtime = SimpleNamespace(
         list_agents=lambda: list(agents or []),
         register_agent=register_agent,
+        providers=providers,
     )
-    config = SimpleNamespace(data_dir=tmp_path, agents_dir=tmp_path / "agents",
-                             default_provider="claude_max",
-                             default_model="claude-fable-5")
+    config = SimpleNamespace(data_dir=tmp_path, agents_dir=tmp_path / "agents")
     return runtime, config, registered
 
 
@@ -159,7 +165,8 @@ def test_seed_fresh_install(tmp_path: Path):
     assert asyncio.run(seed_default_fleet(runtime, config)) == KEVIN_ID
     (defn, legacy) = registered[0]
     assert defn.id == KEVIN_ID and legacy is True
-    assert defn.cognitive_model == "claude-fable-5"
+    assert (defn.provider, defn.cognitive_model) == ("claude_max",
+                                                     "claude-fable-5")
     assert "profile" in defn.tools and "sdk_builtin" in defn.tools
     assert (tmp_path / ".fleet_seeded").exists()
     # The definition is persisted so the loader finds Kevin on the next boot

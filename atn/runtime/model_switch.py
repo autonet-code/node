@@ -42,6 +42,18 @@ class ModelSwitch:
         if old_defn.mode != AgentMode.COGNITIVE:
             raise ValueError(f"Agent '{agent_id}' is not a cognitive agent")
 
+        if not (model or "").strip():
+            raise ValueError("model is required: an agent cannot be left "
+                             "without a model")
+        # The agent must already name its provider: a model switch never
+        # picks one for it.
+        err = self.provider_manager.routing_error(
+            old_defn.provider, model,
+            service_bound=bool(isinstance(old_defn.service_provider, dict)
+                               and old_defn.service_provider))
+        if err:
+            raise ValueError(f"Agent '{agent_id}': {err}")
+
         # Validate model against the agent's provider
         raw_provider = old_defn.provider or ""
         primary_provider = raw_provider[0] if isinstance(raw_provider, list) else raw_provider
@@ -54,18 +66,8 @@ class ModelSwitch:
                 )
 
         # Build an updated definition preserving all existing config.
-        # If the provider field holds a model-shaped routing hint (create_agent
-        # stores the creation-time model there when no explicit provider was
-        # picked), move it in lockstep — a stale hint used to override the
-        # switched model at resolve time (the stuck-on-default-model bug).
         from dataclasses import replace
-        _hint = old_defn.provider if isinstance(old_defn.provider, str) else ""
-        if (_hint
-                and _hint not in self.provider_manager._KNOWN_PROVIDERS
-                and _hint not in getattr(self.provider_manager, "_custom_providers", {})):
-            new_defn = replace(old_defn, cognitive_model=model, provider=model)
-        else:
-            new_defn = replace(old_defn, cognitive_model=model)
+        new_defn = replace(old_defn, cognitive_model=model)
 
         # Re-register: unregister old, register new
         await self.registry.unregister_agent(agent_id)
@@ -92,12 +94,6 @@ class ModelSwitch:
                 pass
 
         self._stamp_active_model(agent_id, model)
-
-        # NOTE: the daemon-wide default deliberately does NOT follow a root
-        # agent's model any more. That rule existed to keep the main agent's
-        # model sticky across restarts — the YAML persistence above does that
-        # properly — and in a multi-root fleet it silently rewrote the daemon
-        # default whenever ANY root agent was retuned.
 
         log.info("Agent '%s' model changed to '%s'", agent_id, model)
         return agent_id

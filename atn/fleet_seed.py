@@ -8,6 +8,16 @@ and granting the same tool bundles. There is no dedicated type behind him.
 Seeding runs once per install: the stamp file records that the decision was
 made, so removing Kevin later is respected forever (he is never quietly
 re-provisioned). Installs that already have agents are stamped and skipped.
+
+Kevin is pinned to an explicit provider and model like every other agent
+(nothing falls back to a daemon-level choice). The rule, ``seed_route``: the FIRST provider
+registered with the daemon (config.yaml order, then credential-store and
+auto-detected providers, then providers configured at runtime) that lists at
+least one model, and from that provider's model list the model with the
+highest capability tier, ties broken by list order (the curated lists run
+newest/strongest first). Kevin's work needs a top-tier model, hence the tier
+rule. With no provider configured yet, seeding is deferred (no stamp is
+written) and retried when the user configures one.
 """
 from __future__ import annotations
 
@@ -90,6 +100,31 @@ deep debriefs and research for a stronger session.
 """
 
 
+def seed_route(runtime: "Runtime") -> tuple[str, str] | None:
+    """``(provider, model)`` to seed Kevin on, or None when no configured
+    provider offers a model yet. See the module docstring for the rule."""
+    providers = getattr(runtime, "providers", None)
+    ids_fn = getattr(providers, "registered_provider_ids", None)
+    if not callable(ids_fn):
+        return None
+    for pid in ids_fn():
+        try:
+            models = providers.get_available_models(pid)
+        except Exception:
+            log.debug("model list unavailable for %s", pid, exc_info=True)
+            continue
+        best: dict | None = None
+        for m in models or []:
+            if not m.get("id"):
+                continue
+            if best is None or m.get("capability_tier", 0) > best.get(
+                    "capability_tier", 0):
+                best = m
+        if best is not None:
+            return pid, best["id"]
+    return None
+
+
 async def seed_default_fleet(runtime: "Runtime", config: "ATNConfig") -> str | None:
     """Provision the default agent on a truly fresh install.
 
@@ -133,14 +168,21 @@ async def seed_default_fleet(runtime: "Runtime", config: "ATNConfig") -> str | N
         stamp.write_text("pre-existing fleet\n", encoding="utf-8")
         return None
 
+    route = seed_route(runtime)
+    if route is None:
+        # No stamp: retried at the next boot and whenever a provider is
+        # configured (Runtime.configure_provider / add_custom_provider).
+        log.info("Default agent '%s' not seeded yet: no provider configured",
+                 KEVIN_ID)
+        return None
+    provider, model = route
+
     defn = AgentDefinition(
         id=KEVIN_ID,
         name="Kevin",
         mode=AgentMode.COGNITIVE,
-        # No configured default provider: leave Kevin unpinned so he routes
-        # like any other daemon-default agent (by model).
-        provider=config.default_provider or "",
-        cognitive_model=config.default_model or "",
+        provider=provider,
+        cognitive_model=model,
         system_prompt=KEVIN_SYSTEM_PROMPT,
         description=(
             "Onboarding concierge: debriefs the user, stewards the dossier "
