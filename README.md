@@ -2,7 +2,21 @@
 
 # The Recursive Principial Body
 
-> **Abstract.** Every interaction between economic agents implies reasoning. Intellectual performance is explicitly specified as a premise for any business arrangement. Our monetary system is built on intelligence. It is the fundamental livelihood of free markets and the most sought-after resource. Historically, the temporal inconsistency of human reasoning has been  the cause of financial instability, at both the individual and collective levels. Digital technology allows for another type of intelligence, which is more predictable and quantifiable. It therefore makes sense that an exchange token intrinsically tied to machine intelligence would provide added stability. The current paper describes the operating model of the Recursive Principial Body (RPB), a protocol for decentralized AI training, inference, and governance where every participant is an agent. The first jurisdiction deployed on this protocol is called Autonet.
+> **Abstract.** Every interaction between economic agents implies reasoning. Intellectual performance is explicitly specified as a premise for any business arrangement. Our monetary system is built on intelligence. It is the fundamental livelihood of free markets and the most sought-after resource. Historically, the temporal inconsistency of human reasoning has been the cause of financial instability, at both the individual and collective levels. Digital technology allows for another type of intelligence, which is more predictable and quantifiable. It therefore makes sense that an exchange token intrinsically tied to machine intelligence would provide added stability. The current paper describes the operating model of the Recursive Principial Body (RPB), a decentralized protocol for transmuting the capabilities of frontier AI models into a common substrate that encodes utility and alignment using economic incentives. The first jurisdiction deployed on this protocol is called Autonet.
+
+Why "The Recursive Principial Body": a single collective body, built from the same structure repeated at every level from one agent to the whole network, with built-in self-improvement, serving principles instead of any designated identity. The principles are the six root coordinates against which the tool substrate grows:
+
+**Alignment**
+
+1. Life is Precious.
+2. Self-Preservation: the system should preserve its own continuity.
+3. Promotion of Intelligence: intelligence in any form should be promoted.
+4. Evolution: forward advancement of capability is desirable.
+
+**Usefulness**
+
+5. Correctness: work should achieve what it claims and avoid bugs.
+6. Simplicity: solutions should be minimal and direct, not over-engineered.
 
 **[Eight Rice](https://eightrice.xyz)** | [autonet.computer](https://autonet.computer)
 
