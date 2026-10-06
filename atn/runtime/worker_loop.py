@@ -2,7 +2,7 @@
 
 This is the worker-side mirror of ``ExecutionEngine._execute_cognitive_agent``'s
 inner body — the part that, under isolation, runs in the WORKER process. It
-drives ``provider.send_orchestrate`` with:
+drives ``provider.run_agent_loop`` with:
 
   - a ``_tool_executor`` that splits LOCAL shell tools (run here) from AUTHORITY
     tools (RPC to the daemon over ``DaemonClient.rpc``);
@@ -33,7 +33,7 @@ The manifest keys this reads (all JSON-safe, all built daemon-side):
     history         : list[dict] | None — prior turns as canonical messages
     per_turn_input_max : int | None
     repeat_call_limit  : int | None
-    model           : str   — model override for send_orchestrate
+    model           : str   — model override for run_agent_loop
 """
 from __future__ import annotations
 
@@ -163,7 +163,7 @@ async def run_cognitive_loop(
     manifest: dict[str, Any],
     agent_label: str = "?",
 ) -> dict[str, Any]:
-    """Drive one cognitive orchestration in the worker; return the output dict.
+    """Drive one cognitive agent loop in the worker; return the output dict.
 
     Returns a JSON-safe dict shaped for the daemon's ``execution_done`` handler::
 
@@ -299,7 +299,7 @@ async def run_cognitive_loop(
             return False, exceeded
         return True, None
 
-    # --- Run the orchestration. ---
+    # --- Run the agent loop. ---
     send_kwargs: dict[str, Any] = {
         "message": message,
         "system": system,
@@ -320,7 +320,7 @@ async def run_cognitive_loop(
     if repeat_call_limit is not None:
         send_kwargs["repeat_call_limit"] = repeat_call_limit
 
-    response = await provider.send_orchestrate(**send_kwargs)
+    response = await provider.run_agent_loop(**send_kwargs)
 
     # v3 review step for providers whose loop can't inject it (the SDK
     # bridge): one follow-up turn on the same session prompting
@@ -334,7 +334,7 @@ async def run_cognitive_loop(
     )
     _review_session = getattr(provider, "_session_id", "") or ""
     # §16 verify step (bridge path) — capture before any follow-up
-    # orchestrate resets the provider's tracking.
+    # agent loop resets the provider's tracking.
     _modified_code = set(getattr(
         provider, "last_modified_code_files", None) or ())
     if _review_session and needs_verify_reinvoke(
@@ -350,7 +350,7 @@ async def run_cognitive_loop(
                 max_turns=8,
                 session_id=_review_session,
             )
-            await provider.send_orchestrate(**verify_kwargs)
+            await provider.run_agent_loop(**verify_kwargs)
         except Exception:
             log.warning("[%s] verify follow-up turn failed; continuing",
                         agent_label, exc_info=True)
@@ -366,7 +366,7 @@ async def run_cognitive_loop(
                 max_turns=4,
                 session_id=_review_session,
             )
-            await provider.send_orchestrate(**review_kwargs)
+            await provider.run_agent_loop(**review_kwargs)
         except Exception:
             log.warning("[%s] review follow-up turn failed; continuing",
                         agent_label, exc_info=True)
@@ -425,11 +425,11 @@ async def run_cognitive_loop(
     # provider, so it can only happen where the provider lives. It also freshens
     # ``_rate_limits`` for the subscription snapshot below. Best-effort — a
     # reconcile failure never affects the user-visible result.
-    if hasattr(provider, "reconcile_after_orchestration"):
+    if hasattr(provider, "reconcile_after_agent_loop"):
         try:
-            await provider.reconcile_after_orchestration()
+            await provider.reconcile_after_agent_loop()
         except Exception:
-            log.debug("[%s] reconcile_after_orchestration failed; continuing",
+            log.debug("[%s] reconcile_after_agent_loop failed; continuing",
                       agent_label, exc_info=True)
 
     # Session-stat sync (the daemon owns the conversation store; it records the

@@ -211,7 +211,7 @@ async def test_request_compaction_accepted():
 
 async def test_request_compaction_not_active_reports_false():
     prov = GenericQueueProvider()
-    prov._active = False   # orchestration already ended -> request_compaction False
+    prov._active = False   # agent-loop run already ended -> request_compaction False
     channel, worker, close = await _wire_worker(prov)
     try:
         ack = await asyncio.wait_for(

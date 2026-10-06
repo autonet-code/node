@@ -5,7 +5,7 @@ EventBus Event objects (the same shapes the runtime emits) plus a minimal fake
 runtime that records send_agent_message calls, then asserts the stub transcript
 reflects the design:
 
-  - orchestrator output renders in the bound channel
+  - bound agent output renders in the bound channel
   - each top-level delegate (depth 1) gets its own thread
   - nested sub-agents (depth >= 2) render as pinned tiles in that thread
   - a non-dotted create_agent agent (agent.registered with parent_id) gets a
@@ -91,7 +91,8 @@ async def main() -> int:
     bus = EventBus()
     rt = _FakeRuntime()
     adapter = StubAdapter()
-    svc = ChatService(bus, rt, adapter, CHANNEL, policy=OperatorGate({OPERATOR}))
+    svc = ChatService(bus, rt, adapter, CHANNEL, bound_agent="lead",
+                      policy=OperatorGate({OPERATOR}))
     await svc.start()
 
     async def emit(e: Event) -> None:
@@ -100,18 +101,18 @@ async def main() -> int:
         await svc._on_bus_event(e)
 
     # --- OUTPUT PATH ---
-    await emit(_evt(EventType.EXECUTION_STARTED, "orchestrator", agent_id="orchestrator"))
-    await emit(_step("orchestrator", "text", "On it — spinning up a researcher."))
-    await emit(_spawned("orchestrator.1", "orchestrator", "Research competitors"))
-    await emit(_evt(EventType.EXECUTION_STARTED, "orchestrator.1", agent_id="orchestrator.1"))
-    await emit(_evt(EventType.AGENT_TOOL_USE_START, "orchestrator.1", tool_name="mcp__atn__web_search"))
-    await emit(_step("orchestrator.1", "text", "Found three competitors."))
-    await emit(_spawned("orchestrator.1.1", "orchestrator.1", "Summarize Acme"))
-    await emit(_evt(EventType.EXECUTION_STARTED, "orchestrator.1.1", agent_id="orchestrator.1.1"))
-    await emit(_step("orchestrator.1.1", "text", "Acme charges per-seat."))
-    await emit(_evt(EventType.EXECUTION_COMPLETED, "orchestrator.1.1", agent_id="orchestrator.1.1"))
-    await emit(_evt(EventType.EXECUTION_COMPLETED, "orchestrator.1", agent_id="orchestrator.1"))
-    await emit(_evt(EventType.EXECUTION_COMPLETED, "orchestrator", agent_id="orchestrator"))
+    await emit(_evt(EventType.EXECUTION_STARTED, "lead", agent_id="lead"))
+    await emit(_step("lead", "text", "On it — spinning up a researcher."))
+    await emit(_spawned("lead.1", "lead", "Research competitors"))
+    await emit(_evt(EventType.EXECUTION_STARTED, "lead.1", agent_id="lead.1"))
+    await emit(_evt(EventType.AGENT_TOOL_USE_START, "lead.1", tool_name="mcp__atn__web_search"))
+    await emit(_step("lead.1", "text", "Found three competitors."))
+    await emit(_spawned("lead.1.1", "lead.1", "Summarize Acme"))
+    await emit(_evt(EventType.EXECUTION_STARTED, "lead.1.1", agent_id="lead.1.1"))
+    await emit(_step("lead.1.1", "text", "Acme charges per-seat."))
+    await emit(_evt(EventType.EXECUTION_COMPLETED, "lead.1.1", agent_id="lead.1.1"))
+    await emit(_evt(EventType.EXECUTION_COMPLETED, "lead.1", agent_id="lead.1"))
+    await emit(_evt(EventType.EXECUTION_COMPLETED, "lead", agent_id="lead"))
 
     print("=== STUB TRANSCRIPT ===")
     print(adapter.transcript())
@@ -124,20 +125,20 @@ async def main() -> int:
         print(f"[{'PASS' if cond else 'FAIL'}] {label}")
         ok = ok and cond
 
-    check("top-level delegate has a thread", "orchestrator.1" in svc._threads)
-    check("no thread for nested orchestrator.1.1", "orchestrator.1.1" not in svc._threads)
-    thread_id = svc._threads.get("orchestrator.1")
-    tile = svc._tiles.get("orchestrator.1.1")
+    check("top-level delegate has a thread", "lead.1" in svc._threads)
+    check("no thread for nested lead.1.1", "lead.1.1" not in svc._threads)
+    thread_id = svc._threads.get("lead.1")
+    tile = svc._tiles.get("lead.1.1")
     check("nested agent has a tile", tile is not None)
     if tile and tile.message_id:
         m = adapter.store.messages.get(tile.message_id)
         check("tile lives in the delegate's thread", m and m["channel_id"] == thread_id)
         check("completed tile is unpinned", m and not m["pinned"])
-    check("orchestrator rendered in the channel",
+    check("bound agent rendered in the channel",
           any(m["channel_id"] == CHANNEL for m in adapter.store.messages.values()))
 
     # --- create_agent (non-dotted) path ---
-    await emit(_registered("test-simple", "orchestrator", "Simple test agent"))
+    await emit(_registered("test-simple", "lead", "Simple test agent"))
     await emit(_evt(EventType.EXECUTION_STARTED, "test-simple", agent_id="test-simple"))
     await emit(_step("test-simple", "text", "Simple test agent reporting in."))
     await emit(_evt(EventType.EXECUTION_COMPLETED, "test-simple", agent_id="test-simple"))
@@ -148,19 +149,19 @@ async def main() -> int:
               for m in adapter.store.messages.values()))
 
     # --- INPUT PATH: addressing + policy + relay ---
-    check("channel -> orchestrator",
-          svc.resolve_target(_inbound("status?", CHANNEL, OPERATOR)) == "orchestrator")
+    check("channel -> bound agent",
+          svc.resolve_target(_inbound("status?", CHANNEL, OPERATOR)) == "lead")
     check("thread -> delegate",
-          svc.resolve_target(_inbound("x", thread_id, OPERATOR, parent_id=CHANNEL)) == "orchestrator.1")
+          svc.resolve_target(_inbound("x", thread_id, OPERATOR, parent_id=CHANNEL)) == "lead.1")
     if tile and tile.message_id:
         check("reply-to-tile -> sub-agent",
               svc.resolve_target(_inbound("x", thread_id, OPERATOR,
-                                          reply_to_id=tile.message_id, parent_id=CHANNEL)) == "orchestrator.1.1")
+                                          reply_to_id=tile.message_id, parent_id=CHANNEL)) == "lead.1.1")
 
     # operator relays through to runtime.send_agent_message (tagged in channel)
     relayed = await svc.handle_inbound(
         _inbound("do the thing", CHANNEL, OPERATOR, mentions_bot=True))
-    check("operator (tagged) relayed to runtime", relayed and rt.relayed[-1][0] == "orchestrator")
+    check("operator (tagged) relayed to runtime", relayed and rt.relayed[-1][0] == "lead")
     # untagged channel message is ignored (people can chat without the bot butting in)
     before = len(rt.relayed)
     ignored = await svc.handle_inbound(_inbound("just chatting", CHANNEL, OPERATOR))

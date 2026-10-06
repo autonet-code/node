@@ -1,4 +1,4 @@
-"""Tests for inner-loop budget enforcement in send_orchestrate (issue #21 / task #13)."""
+"""Tests for inner-loop budget enforcement in run_agent_loop (issue #21 / task #13)."""
 from __future__ import annotations
 
 import pytest
@@ -62,7 +62,7 @@ async def test_inner_loop_aborts_when_recorder_returns_not_ok():
     async def _tool_executor(name, input):  # noqa: ARG001
         return {"ok": True}
 
-    response = await provider.send_orchestrate(
+    response = await provider.run_agent_loop(
         message="hi",
         tools=[],
         max_turns=10,
@@ -97,7 +97,7 @@ async def test_inner_loop_lets_work_continue_when_recorder_ok():
     async def _tool_executor(name, input):  # noqa: ARG001
         return {"ok": True}
 
-    response = await provider.send_orchestrate(
+    response = await provider.run_agent_loop(
         message="hi",
         tools=[],
         max_turns=10,
@@ -111,7 +111,7 @@ async def test_inner_loop_lets_work_continue_when_recorder_ok():
 
 @pytest.mark.asyncio
 async def test_no_recorder_runs_loop_unchanged():
-    """Backward compat: omitting usage_recorder must not break orchestration."""
+    """Backward compat: omitting usage_recorder must not break the agent loop."""
     turns = [
         ProviderResponse(
             text="done",
@@ -124,7 +124,7 @@ async def test_no_recorder_runs_loop_unchanged():
     async def _tool_executor(name, input):  # noqa: ARG001
         return {"ok": True}
 
-    response = await provider.send_orchestrate(
+    response = await provider.run_agent_loop(
         message="hi",
         tools=[],
         max_turns=5,
@@ -159,7 +159,7 @@ async def test_recorder_exception_does_not_break_loop():
     async def _tool_executor(name, input):  # noqa: ARG001
         return {"ok": True}
 
-    response = await provider.send_orchestrate(
+    response = await provider.run_agent_loop(
         message="hi",
         tools=[],
         max_turns=5,
@@ -196,7 +196,7 @@ async def test_async_recorder_supported():
     async def _tool_executor(name, input):  # noqa: ARG001
         return {"ok": True}
 
-    response = await provider.send_orchestrate(
+    response = await provider.run_agent_loop(
         message="hi",
         tools=[],
         max_turns=5,

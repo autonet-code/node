@@ -37,7 +37,7 @@ from ..input_arbiter import SurfaceId
 from .policy import AllowAll, InputPolicy
 from .rendering import AgentExecutionRender, SubAgentTile
 from .routing import (
-    _LEGACY_ROOT_ID, agent_depth, is_top_level_delegate, top_level_delegate,
+    agent_depth, is_top_level_delegate, top_level_delegate,
 )
 
 if TYPE_CHECKING:
@@ -93,7 +93,7 @@ class ChatService:
         client: "MessagingClient",
         channel_id: "ChannelId",
         *,
-        bound_agent: str = _LEGACY_ROOT_ID,  # LEGACY-WIRE: atn_web default id
+        bound_agent: str,
         policy: InputPolicy | None = None,
         root_label: str = "K3V|N",
         excluded_agents: set[str] | None = None,

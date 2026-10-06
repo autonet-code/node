@@ -1,6 +1,6 @@
 """Phase 6.3: SubstrateProvider — composite substrate locate + LLM render.
 
-Tests use a mock renderer Provider so the substrate orchestration
+Tests use a mock renderer Provider so the substrate pipeline
 logic is exercised without an actual LLM call. Phase 6.4 swaps in
 the real ollama renderer.
 
@@ -147,7 +147,7 @@ def test_construction_requires_renderer(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# send() orchestration
+# send() pipeline
 # ---------------------------------------------------------------------------
 
 

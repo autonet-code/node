@@ -9,7 +9,7 @@
  *                              (gemini --experimental-acp)
  *
  * The Python side speaks the same NDJSON protocol it uses for the Claude and
- * Codex bridges (request types: create / orchestrate / shutdown).  We translate
+ * Codex bridges (request types: create / agent_loop / shutdown).  We translate
  * those into ACP calls (initialize / authenticate / newSession / loadSession /
  * prompt / cancel) on the Gemini side.
  *
@@ -167,7 +167,7 @@ class GeminiAgent {
       requestPermission: async (
         params: RequestPermissionRequest,
       ): Promise<RequestPermissionResponse> => {
-        // Auto-deny for now.  The orchestrator can later approve specific
+        // Auto-deny for now.  The owning agent can later approve specific
         // tool patterns; ATN's existing approval model is per-tool, not per-call.
         log("requestPermission auto-denied", { tool: (params as any).toolCall?.title })
         return { outcome: { outcome: "cancelled" } }

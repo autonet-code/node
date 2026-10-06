@@ -47,10 +47,10 @@ async def _make_runtime(tmp_path, owner_wallet):
         return AgentDefinition(id=aid, name=aid, mode=AgentMode.COGNITIVE,
                                parent_id=pid, identity=ident, budgets={})
 
-    await rt.registry.register_agent(_agent("orchestrator", None))
-    await rt.registry.register_agent(_agent("a", "orchestrator"))
+    await rt.registry.register_agent(_agent("lead", None))
+    await rt.registry.register_agent(_agent("a", "lead"))
     await rt.registry.register_agent(_agent("a.1", "a"))
-    await rt.registry.register_agent(_agent("b", "orchestrator"))
+    await rt.registry.register_agent(_agent("b", "lead"))
     return rt
 
 
@@ -73,7 +73,7 @@ async def test_live_two_listener_handshake(tmp_path):
         async with websockets.connect(f"ws://127.0.0.1:{LOCAL_PORT}") as ws:
             first = await _recv_json(ws)
             assert first["type"] == "snapshot"
-            assert set(first["data"]["agents"].keys()) == {"orchestrator", "a", "a.1", "b"}
+            assert set(first["data"]["agents"].keys()) == {"lead", "a", "a.1", "b"}
 
         # --- REMOTE listener: challenge -> sign -> scoped snapshot -----------
         async with websockets.connect(f"ws://127.0.0.1:{REMOTE_PORT}") as ws:
@@ -129,10 +129,10 @@ async def test_live_agent_self_auth_no_owner(tmp_path):
         ident = AgentIdentity(public_key=addr or "", address=addr or "") if addr else None
         return AgentDefinition(id=aid, name=aid, mode=AgentMode.COGNITIVE,
                                parent_id=pid, identity=ident, budgets={})
-    await rt.registry.register_agent(_ag("orchestrator", None))
-    await rt.registry.register_agent(_ag("a", "orchestrator", addr=agent_acct.address))
+    await rt.registry.register_agent(_ag("lead", None))
+    await rt.registry.register_agent(_ag("a", "lead", addr=agent_acct.address))
     await rt.registry.register_agent(_ag("a.1", "a"))
-    await rt.registry.register_agent(_ag("b", "orchestrator"))
+    await rt.registry.register_agent(_ag("b", "lead"))
 
     bridge = WebSocketBridge(
         rt, host="127.0.0.1", port=LOCAL_PORT + 10,

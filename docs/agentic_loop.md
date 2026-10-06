@@ -1,6 +1,6 @@
 # Generic agentic loop: hardening spec (2026-07-04)
 
-Binding spec for upgrading `atn/providers/base.py:send_orchestrate` (the
+Binding spec for upgrading `atn/providers/base.py:run_agent_loop` (the
 loop behind anthropic / openai_compat / ollama agents) and its adapters
 to parity with current harnesses (Claude Code / Agent SDK, opencode,
 Codex CLI). Grounded in: the 2026-07-04 live daemon session (findings
@@ -24,14 +24,14 @@ Live findings this spec answers:
 5. Ollama multi-turn tool history is flattened to text
    (`_normalize_content`): the structured `tool_calls` / `role:"tool"`
    linkage is lost after turn 1.
-6. A transient stream drop mid-loop aborts the whole orchestration
+6. A transient stream drop mid-loop aborts the whole agent loop
    (no loop-level retry); compaction failure silently no-ops into a
    guaranteed overflow.
 7. Bridge + `claude-haiku-4-5` main-loop model = silent hot-spin
    (100% core, zero events, 20+ min); `kill_agent` reported success
    but left the spinning bun subprocess alive.
 8. `delegate_message` mid-turn injection races turn completion: a
-   message written to bridge stdin as the orchestration ends is
+   message written to bridge stdin as the agent loop ends is
    accepted ("User message injected") and silently dropped: the
    daemon reports `injected` with no consumption ack and no inbox
    fallback. (Observed live: injection at 01:32:45.685, execution
@@ -114,8 +114,8 @@ Anthropic-shape APIs.
 
 - `Provider` base gains `send_user_message(content) -> bool` backed by
   an `asyncio.Queue` (`_steering_queue`). Returns True if an
-  orchestration is active to consume it.
-- `send_orchestrate` drains the queue at each iteration boundary
+  an agent loop is active to consume it.
+- `run_agent_loop` drains the queue at each iteration boundary
   (after tool results are appended, before the next send) and appends
   each item as a `user` message.
 - `execution_control.send_delegate_message` already prefers
@@ -125,7 +125,7 @@ Anthropic-shape APIs.
   only "delivered" when consumed. Bridge: `claude-bridge.ts` emits
   `@@EVENT@@ user_message_consumed` when the SDK loop actually reads
   the injected message; `bridge.py` tracks pending injections and, on
-  orchestration end with unconsumed injections, re-posts them to the
+  agent-loop end with unconsumed injections, re-posts them to the
   agent's inbox (HIGH WORK) so the next run picks them up. Generic
   loop: same contract, where steering-queue items not drained by run end
   are re-posted to the inbox. `delegate_message` result distinguishes
@@ -198,7 +198,7 @@ and continue the loop. Applies to all three adapters' parse paths.
   `query()` with a model that is not loop-capable). Whatever the mechanism:
   errors from `query()` must surface as an `@@EVENT@@ error` +
   request failure, never a bare loop continue.
-- First-event watchdog: if a sent orchestrate request produces zero
+- First-event watchdog: if a sent agent-loop request produces zero
   bridge events within 120s (configurable `ATN_BRIDGE_FIRST_EVENT_TIMEOUT`),
   kill the subprocess and fail the request; don't wait for the 1800s
   idle ceiling.
@@ -206,7 +206,7 @@ and continue the loop. Applies to all three adapters' parse paths.
   subprocess termination (bun PID) within a 5s grace window, verified
   by the daemon (poll PID, `taskkill /F` fallback). A "killed"
   execution must never leave the provider subprocess running.
-- Model-tier guard: reject orchestrate requests on models whose spec
+- Model-tier guard: reject agent-loop requests on models whose spec
   says `loop_capable=False` (haiku) with a clear error before
   spawning the SDK loop, since the SDK loop is known to misbehave.
 

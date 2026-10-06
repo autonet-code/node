@@ -29,26 +29,18 @@ AgentId = str
 # parent carried out-of-band (agent.registered event / snapshot parent_id).
 ParentOf = Callable[[AgentId], Optional[AgentId]]
 
-# LEGACY-DATA: persisted Discord threads carry dotted ids under the retired
-# root agent id (e.g. "orchestrator.1"). Kept ONLY so the dotted-id fallback
-# paths keep resolving that persisted lineage; the role itself is purged.
-_LEGACY_ROOT_ID = "orchestrator"
-
-
 # How many ancestors to walk before giving up (cycle / bad-data guard).
 _MAX_LINEAGE = 64
 
 
 def _is_root(pid: AgentId | None, of: AgentId) -> bool:
     """True if `pid` denotes the root (no enclosing agent above `of`)."""
-    return pid is None or pid == "" or pid == of or pid == _LEGACY_ROOT_ID
+    return pid is None or pid == "" or pid == of
 
 
 def _is_root_id(node: AgentId, parent_of: ParentOf) -> bool:
-    """A node is a root if it has no parent (empty/None) in the map, or is the
-    legacy root id. Roots own the channel; their children are thread owners."""
-    if node == _LEGACY_ROOT_ID:
-        return True
+    """A node is a root if it has no parent (empty/None) in the map. Roots
+    own the channel; their children are thread owners."""
     p = parent_of(node)
     return p == "" or p is None
 
@@ -62,8 +54,6 @@ def agent_depth(agent_id: AgentId, parent_of: ParentOf | None = None) -> int:
     dotted delegates behave exactly as before.
     """
     if not agent_id:
-        return 0
-    if agent_id == _LEGACY_ROOT_ID:
         return 0
     if parent_of is not None and parent_of(agent_id) is not None:
         # Count edges from the agent up until we reach a node whose parent

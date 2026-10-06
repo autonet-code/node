@@ -34,7 +34,7 @@ Status conventions used below:
 | [`ledger_pricing.md`](ledger_pricing.md) | Post-phase8 default: ledger (net_score tree recursion) replaces geometric equilibration for mint pricing; the arm-B context-render rule. |
 | [`two_plane_inference.md`](two_plane_inference.md) | Claim graph demoted to a verdict layer; artifacts (full payloads) live in blob store + `ArtifactIndex`, referenced by sha256. |
 | [`epoch_economics.md`](epoch_economics.md) | Epoch close + candle mechanics. Note: the emission model shipped as **fees-only** (2026-07-10): the epoch pool is burned service fees only, no base emission (Σ minted == Σ burned); see `tool_substrate.md` `Decision (2026-07-10)`. |
-| [`agentic_loop.md`](agentic_loop.md) | Hardening spec for `send_orchestrate` (the anthropic/openai_compat/ollama agent loop) and its adapters. |
+| [`agentic_loop.md`](agentic_loop.md) | Hardening spec for `run_agent_loop` (the anthropic/openai_compat/ollama agent loop) and its adapters. |
 | [`cross_platform_isolation_design.md`](cross_platform_isolation_design.md) | Isolation + vault port plan. IMPLEMENTED + Linux-verified (POSIX AF_UNIX / SO_PEERCRED, tracked-PID kill). |
 | [`secrets.md`](secrets.md) | **Owner-facing.** The secret vault and agent security: the honest threat model, the fail-closed allowance algebra (parent ∩ child clamp), host binding, the names-only audit trail, and the leak tripwire. Linked from the app's "Add secret" dialog. |
 | [`providers.md`](providers.md) | **Owner-facing.** Inference providers: the three auth shapes (bridge / api key / local), adding an OpenAI-compatible endpoint (validation, credential storage), loop capability as a per-model property, and the model-routing gotchas. Linked from the app's "Add Provider" dialog. |
@@ -42,7 +42,7 @@ Status conventions used below:
 | [`epoch_economics.md`](epoch_economics.md) · [`ledger_pricing.md`](ledger_pricing.md) | (see above) the economic core as shipped. |
 | [`auto_update_design.md`](auto_update_design.md) | Daemon auto-update: stage-on-poll, apply-on-next-boot (running daemon never self-restarts). Implementing. |
 | [`anti_tamper_design.md`](anti_tamper_design.md) | Consensus-node anti-tamper: the "other half" of auto-update. Designed, pre-implementation. |
-| [`unified_agent_design.md`](unified_agent_design.md) | Fractal agent unification (orchestrator ≡ child agent): the definitive design that drove the `atn/` runtime shape. |
+| [`unified_agent_design.md`](unified_agent_design.md) | Fractal agent unification (former root agent ≡ child agent): the definitive design that drove the `atn/` runtime shape. |
 
 ## Experiment records (pre-registered, DO NOT EDIT)
 
@@ -68,7 +68,7 @@ Status conventions used below:
 | [`guides/QUICKSTART.md`](guides/QUICKSTART.md) | Current install/run quickstart: `pip install autonet-computer`, `atn` starts the daemon, `deploy_substrate.js` for local contracts. (The old "Absolute Zero" role-split quickstart was replaced.) |
 | [`guides/TRAINING_LOOP.md`](guides/TRAINING_LOOP.md) | **Historical (pre-substrate)**: the "Absolute Zero" FedAvg role-split loop; native training is off the live path (see `VALIDATION_FINDINGS.md`). Banner-marked. |
 | [`CHEATSHEET.md`](CHEATSHEET.md) | Common operations quick reference. The contract-call/staking sections are **historical (pre-substrate)** and banner-marked; the current-command section is live. |
-| [`architecture-audit.md`](architecture-audit.md) | 2026-03-25 audit of orchestrator vs child-agent divergences (historical snapshot). |
+| [`architecture-audit.md`](architecture-audit.md) | 2026-03-25 audit of root-agent vs child-agent divergences (historical snapshot). |
 
 ## Moved from root (2026-07-06)
 

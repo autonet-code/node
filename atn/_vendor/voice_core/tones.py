@@ -45,7 +45,7 @@ def gen_tone(freq: float, dur: float = 0.09, vol: float = 0.25, sr: int = MIXER_
 def register_tool_sounds(mapping: dict) -> None:
     """Teach the shared tone map about host-specific tools.
 
-    A consumer with its own vocabulary (autonet's orchestrator tools, say)
+    A consumer with its own vocabulary (autonet's agent tools, say)
     registers them here rather than shadowing TOOL_SOUND_MAP locally — a local
     copy would be ignored, because make_tool_tone reads this module's map.
     """

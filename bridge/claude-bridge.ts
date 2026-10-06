@@ -8,7 +8,7 @@
  *
  * Request types:
  *   create      — single-turn LLM call (maxTurns=1, no tools)
- *   orchestrate — multi-turn with ATN tools as in-process MCP server
+ *   agent loop — multi-turn with ATN tools as in-process MCP server
  *   delete      — clean up a session
  *   shutdown    — graceful exit
  */
@@ -118,19 +118,19 @@ function handleRateLimitEvent(msg: any): void {
 //
 // A swallowed error is the root of the haiku hot-spin: the SDK's query()
 // loop can reject in a background promise (e.g. an invalid/rejected model
-// like claude-haiku-4-5 on the orchestrate path). The old handlers just
-// logged and kept the process alive, so the running orchestration never got
+// like claude-haiku-4-5 on the agent loop path). The old handlers just
+// logged and kept the process alive, so the running agent-loop run never got
 // a `result` message, never called respond(), and the SDK kept retrying
-// internally at 100% CPU with zero @@EVENT@@ output. If an orchestration is
-// active when an unhandled error fires, we now FAIL that orchestration
+// internally at 100% CPU with zero @@EVENT@@ output. If an agent-loop run is
+// active when an unhandled error fires, we now FAIL that agent-loop run
 // loudly (error event + ok:false response + query.close) instead of leaving
 // it to spin. When nothing is active, we keep the old keep-alive behaviour.
 
-function failActiveOrchestration(reason: string): boolean {
-  if (!activeOrchestration) return false
-  const ao = activeOrchestration
-  activeOrchestration = null
-  log("failing active orchestration due to unhandled error", { reason })
+function failActiveAgentLoop(reason: string): boolean {
+  if (!activeAgentLoop) return false
+  const ao = activeAgentLoop
+  activeAgentLoop = null
+  log("failing active agent-loop run due to unhandled error", { reason })
   emitEvent({ type: "error", error: reason })
   try { ao.inputQueue.done() } catch {}
   try { ao.query.close() } catch {}
@@ -143,12 +143,12 @@ function failActiveOrchestration(reason: string): boolean {
 
 process.on("unhandledRejection", (reason: unknown) => {
   const msg = reason instanceof Error ? reason.message : String(reason)
-  if (failActiveOrchestration(`unhandled rejection: ${msg}`)) return
+  if (failActiveAgentLoop(`unhandled rejection: ${msg}`)) return
   log("unhandled rejection (kept alive)", { error: msg })
 })
 
 process.on("uncaughtException", (err: Error) => {
-  if (failActiveOrchestration(`uncaught exception: ${err.message}`)) return
+  if (failActiveAgentLoop(`uncaught exception: ${err.message}`)) return
   log("uncaught exception (kept alive)", { error: err.message })
 })
 
@@ -213,7 +213,7 @@ function mapModelToClaudeModel(model: string): string {
 
 // Capability rules, version-aware so new point releases in a family work with
 // no edit here.  Returns true when the model carries a 1M-token context window
-// (and therefore needs the context-1m beta on the orchestrate path).
+// (and therefore needs the context-1m beta on the agent loop path).
 function modelHasLargeContext(model: string): boolean {
   const m = (model || "").toLowerCase()
   // Fable/Mythos 5 and all Sonnet 4.x are 1M.
@@ -273,7 +273,7 @@ class AsyncQueue<T> implements AsyncIterable<T> {
 }
 
 // -- Tool relay --
-// During an orchestrate request, ATN tool calls are relayed to Python for
+// During an agent loop request, ATN tool calls are relayed to Python for
 // execution.  The bridge sends tool_call on stdout, Python responds with
 // tool_result on stdin.  Pending calls are tracked by call_id.
 
@@ -655,9 +655,9 @@ interface CreateRequest {
   model?: string
 }
 
-interface OrchestrateRequest {
+interface AgentLoopRequest {
   id: string
-  type: "orchestrate"
+  type: "agent_loop"
   message: string
   system?: string
   system_prompt?: string   // Passed as SDK systemPrompt option (cached)
@@ -705,7 +705,7 @@ interface SessionContextRequest {
   session_id: string
 }
 
-type BridgeRequest = CreateRequest | OrchestrateRequest | DeleteRequest | ShutdownRequest | PingRequest | SessionContextRequest
+type BridgeRequest = CreateRequest | AgentLoopRequest | DeleteRequest | ShutdownRequest | PingRequest | SessionContextRequest
 
 interface BridgeResponse {
   id: string
@@ -744,10 +744,10 @@ function respond(resp: BridgeResponse): void {
 
 const sessionManager = new SessionManager()
 
-// Active orchestration state — allows stdin to reach the running query.
+// Active agent-loop run state — allows stdin to reach the running query.
 //   onFatal:  invoked by the global error handlers to reject the in-flight
 //             collection when the SDK loop dies in a background promise.
-let activeOrchestration: {
+let activeAgentLoop: {
   query: Query
   inputQueue: AsyncQueue<SDKUserMessage>
   onFatal?: (err: Error) => void
@@ -786,12 +786,12 @@ function attachConsumptionAcks(q: AsyncQueue<SDKUserMessage>): AsyncQueue<SDKUse
   return q
 }
 
-async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> {
+async function handleAgentLoopRequest(req: AgentLoopRequest): Promise<void> {
   try {
     const model = mapModelToClaudeModel(req.model || "sonnet")
     const maxTurns = req.max_turns || 20
 
-    log("request.orchestrate", {
+    log("request.agent_loop", {
       model,
       maxTurns,
       toolCount: req.tools.length,
@@ -873,7 +873,7 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
     // Opus 4.7+, Fable/Mythos 5).  Version-aware so new releases work unedited.
     if (modelHasLargeContext(model)) {
       sdkOptions.betas = ["context-1m-2025-08-07"]
-      log("request.orchestrate.beta", { betas: sdkOptions.betas })
+      log("request.agent_loop.beta", { betas: sdkOptions.betas })
     }
 
     // System prompt — passed as SDK option so it gets server-side caching.
@@ -889,7 +889,7 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
       sdkOptions.resume = req.session_id
     }
 
-    log("request.orchestrate.options", {
+    log("request.agent_loop.options", {
       hasSystemPrompt: !!sysPrompt,
       resumeSession: req.session_id || null,
       effort: sdkOptions.effort || "sdk-default",
@@ -917,7 +917,7 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
     const fatalPromise = new Promise<never>((_, reject) => { fatalReject = reject })
 
     // Expose to stdin handler for interrupt / user_message
-    activeOrchestration = {
+    activeAgentLoop = {
       query: q,
       inputQueue,
       onFatal: (err: Error) => { if (fatalReject) fatalReject(err) },
@@ -945,7 +945,7 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
 
     // First-event watchdog (§11): the SDK must produce its FIRST stream
     // message within ATN_BRIDGE_FIRST_EVENT_TIMEOUT. A model the SDK loop
-    // rejects (haiku on orchestrate) can otherwise sit at 100% CPU emitting
+    // rejects (haiku on agent loop) can otherwise sit at 100% CPU emitting
     // nothing. We only guard the FIRST .next(); once the stream is producing,
     // long quiet stretches are normal (tools run in-process) and the Python
     // idle ceiling covers mid-run silence.
@@ -986,7 +986,7 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
         if (iterResult.done) break
         const message = iterResult.value
         trace(message)
-        log("orchestrate.message", {
+        log("agent_loop.message", {
           type: message.type,
           subtype: (message as any).subtype,
         })
@@ -1006,20 +1006,20 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
         // Detect interrupt result
         if (message.type === "system" && (message as any).subtype === "interrupt") {
           wasInterrupted = true
-          log("orchestrate.interrupted")
+          log("agent_loop.interrupted")
         }
 
         // Detect compaction status
         if (message.type === "system" && (message as any).subtype === "status") {
           const status = (message as any).status
-          log("orchestrate.status", { status })
+          log("agent_loop.status", { status })
           emitEvent({ type: "status", status: status ?? "idle" })
         }
 
         // Detect compaction boundary
         if (message.type === "system" && (message as any).subtype === "compact_boundary") {
           const meta = (message as any).compact_metadata ?? {}
-          log("orchestrate.compact_boundary", meta)
+          log("agent_loop.compact_boundary", meta)
           emitEvent({
             type: "compaction",
             trigger: meta.trigger ?? "auto",
@@ -1039,7 +1039,7 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
               (msgUsage.cache_read_input_tokens ?? 0) +
               (msgUsage.cache_creation_input_tokens ?? 0)
             // Inner-loop budget enforcement: emit a per-turn usage event so the
-            // Python side can roll into cascading budgets and abort mid-orchestration
+            // Python side can roll into cascading budgets and abort mid-run
             // if a cap is crossed. Includes model so the per-class estimator
             // can attribute tokens correctly.
             const turnModel = (message as any).message?.model || resolvedModel || ""
@@ -1128,7 +1128,7 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
             }
           }
 
-          log("orchestrate.result", {
+          log("agent_loop.result", {
             textLen: text.length,
             thinkingBlocks: thinking.length,
             interrupted: wasInterrupted,
@@ -1141,14 +1141,14 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
           // Close the input queue — this turn is done.
           // If a user_message was already pushed before this result, the SDK
           // will have consumed it.  Any future user_messages should start a
-          // new orchestration, not inject into a completed one.
+          // new agent-loop run, not inject into a completed one.
           try { inputQueue.done() } catch {}
           break
         }
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)
-      log("orchestrate.error", { error: errMsg })
+      log("agent_loop.error", { error: errMsg })
       // Surface the failure as a stream event (§11): an SDK error, a
       // first-event-watchdog timeout, or a background fatal reject must never
       // be a silent loop exit. The Python side keys @@EVENT@@ error / done.
@@ -1158,12 +1158,12 @@ async function handleOrchestrateRequest(req: OrchestrateRequest): Promise<void> 
       try { q.close() } catch {}
       if (!text) {
         fatalError = errMsg
-        text = `[Bridge: orchestration error: ${errMsg}]`
+        text = `[Bridge: agent-loop run error: ${errMsg}]`
       }
     } finally {
-      // Clean up — close the input queue and clear active orchestration
+      // Clean up — close the input queue and clear active agent-loop run
       try { inputQueue.done() } catch {}
-      activeOrchestration = null
+      activeAgentLoop = null
     }
 
     emitEvent({ type: "done" })
@@ -1228,7 +1228,7 @@ async function handleRequest(req: BridgeRequest): Promise<void> {
           allowDangerouslySkipPermissions: true,
           // Single-shot completions need no tools at all — strip the
           // built-in preset and any account-level connectors (see the
-          // orchestrate options for rationale).
+          // agent loop options for rationale).
           tools: [],
           settingSources: [],
           strictMcpConfig: true,
@@ -1264,8 +1264,8 @@ async function handleRequest(req: BridgeRequest): Promise<void> {
       break
     }
 
-    case "orchestrate": {
-      await handleOrchestrateRequest(req)
+    case "agent_loop": {
+      await handleAgentLoopRequest(req)
       break
     }
 
@@ -1348,7 +1348,7 @@ async function handleRequest(req: BridgeRequest): Promise<void> {
 }
 
 // -- stdin line reader --
-// Routes tool_result, interrupt, and user_message to active orchestration,
+// Routes tool_result, interrupt, and user_message to active agent-loop run,
 // everything else to handleRequest.
 
 const rl = createInterface({ input: process.stdin })
@@ -1366,32 +1366,32 @@ rl.on("line", async (line: string) => {
       return
     }
 
-    // Interrupt the active orchestration
+    // Interrupt the active agent-loop run
     if (parsed.type === "interrupt") {
-      if (activeOrchestration) {
+      if (activeAgentLoop) {
         log("interrupt requested")
         try {
-          await activeOrchestration.query.interrupt()
+          await activeAgentLoop.query.interrupt()
         } catch (err) {
           log("interrupt error", {
             error: err instanceof Error ? err.message : String(err),
           })
         }
       } else {
-        log("interrupt requested but no active orchestration")
+        log("interrupt requested but no active agent-loop run")
       }
       return
     }
 
-    // Push a user message into the active orchestration.
+    // Push a user message into the active agent-loop run.
     // The Python side assigns an id (parsed.id); we tag the queued message with
     // __atn_injection_id so attachConsumptionAcks emits user_message_consumed
-    // the instant the SDK dequeues it. If no orchestration is active, the write
+    // the instant the SDK dequeues it. If no agent-loop run is active, the write
     // raced turn completion — reply with a not-consumed ack so the Python side
     // routes the content to the inbox fallback (nothing is silently dropped).
     if (parsed.type === "user_message" && parsed.content) {
       const injId = parsed.id || `inj-${++injectionSeq}`
-      if (activeOrchestration) {
+      if (activeAgentLoop) {
         log("user_message injected", { contentLen: parsed.content.length, id: injId })
         const injMsg: any = {
           type: "user",
@@ -1401,7 +1401,7 @@ rl.on("line", async (line: string) => {
         }
         injMsg.__atn_injection_id = injId
         try {
-          activeOrchestration.inputQueue.push(injMsg)
+          activeAgentLoop.inputQueue.push(injMsg)
         } catch (err) {
           // Queue already closed (turn ended between the active-check and the
           // push) — treat as not consumed so Python falls back to the inbox.
@@ -1409,7 +1409,7 @@ rl.on("line", async (line: string) => {
           emitEvent({ type: "user_message_dropped", id: injId })
         }
       } else {
-        log("user_message received but no active orchestration", { id: injId })
+        log("user_message received but no active agent-loop run", { id: injId })
         emitEvent({ type: "user_message_dropped", id: injId })
       }
       return

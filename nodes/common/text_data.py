@@ -55,7 +55,7 @@ def _extract_conversation_segments(
     conversations_dir: Path,
     exclude_patterns: list[str] | None = None,
 ) -> Iterator[str]:
-    """Yield text segments from orchestrator and archived conversations.
+    """Yield text segments from active and archived conversations.
 
     Each segment is a sequence of turns formatted as:
 

@@ -2,7 +2,7 @@
 
 Runs ``run_cognitive_loop`` WITHOUT a daemon, WITHOUT a network, and WITHOUT a
 real pipe. A fake DaemonClient answers every RPC/emit locally and records what
-crossed the seam; a fake provider mimics ``send_orchestrate`` calling into the
+crossed the seam; a fake provider mimics ``run_agent_loop`` calling into the
 tool_executor / on_chunk / usage_recorder exactly as the base provider loop
 does. This proves:
 
@@ -63,7 +63,7 @@ class FakeDaemonClient:
 
 
 # ---------------------------------------------------------------------------
-# Fake provider — mirrors the base send_orchestrate contract closely enough
+# Fake provider — mirrors the base run_agent_loop contract closely enough
 # to exercise every callback the worker wires in.
 # ---------------------------------------------------------------------------
 
@@ -89,7 +89,7 @@ class FakeProvider:
     async def close(self) -> None:
         self.closed = True
 
-    async def send_orchestrate(
+    async def run_agent_loop(
         self, *, message, system, tools, tool_executor, on_chunk,
         usage_recorder, model="", **kw,
     ) -> ProviderResponse:
@@ -156,7 +156,7 @@ async def _run() -> int:
     provider._probe_path = str(tmp)
 
     # Wrap the provider so read_file gets the real path.
-    orig = provider.send_orchestrate
+    orig = provider.run_agent_loop
     async def _wrapped(**kw):
         te = kw["tool_executor"]
         async def _te(name, inp):
@@ -165,7 +165,7 @@ async def _run() -> int:
             return await te(name, inp)
         kw["tool_executor"] = _te
         return await orig(**kw)
-    provider.send_orchestrate = _wrapped
+    provider.run_agent_loop = _wrapped
 
     result = await run_cognitive_loop(
         client=client, provider=provider, manifest=manifest, agent_label="agent-xyz",

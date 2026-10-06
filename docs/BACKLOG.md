@@ -207,7 +207,7 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
 - TrialRunner: transport seam → wire to live WS service-request
   client; OnChainService needs a generic contract-call so attestTrial
   submits directly (currently returns calldata).
-- Orchestrator drawer: add the 120s stall timeout the chat surface
+- Agent drawer: add the 120s stall timeout the chat surface
   got (silent-stall symmetry).
 - Adopted tools: OS-level isolated runner (vault track) as the wall
   behind tool_guard's audit-hook tripwire; macOS isolation untested.

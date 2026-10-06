@@ -7,7 +7,7 @@ epoch_emission_rate: 0.0011574074   # 100 / 86400 seconds
 # (dev > prod duration deliberately — less activity needs longer windows).
 epoch_min_seconds: 172800
 epoch_candle_window_seconds: 86400
-orchestrator:
+defaults:
   model: claude-opus-4-6
 blockchain:
   rpc_url: https://node.shadownet.etherlink.com

@@ -35,7 +35,7 @@ _CRASH_LOOP_MAX_FAILURES = 3
 class Scheduler:
     """Manages schedule-based triggers, heartbeats, and inbox watching.
 
-    The orchestrator-era periodic planning review (a 6h digest pushed to the
+    The old periodic planning review (a 6h digest pushed to the
     fleet root's inbox) was removed 2026-08-30: everything it carried is
     pullable via the planning/profile tools, and a fleet that wants the
     impulse gives an agent a heartbeat instead.

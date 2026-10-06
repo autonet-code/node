@@ -282,7 +282,7 @@ async def test_delegate_tool_executor(tmp_path: Path):
     )
 
     mock_provider = AsyncMock()
-    mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+    mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
     mock_provider.close = AsyncMock()
     mock_provider.interrupt = AsyncMock()
 
@@ -329,8 +329,8 @@ async def test_delegate_tool_executor(tmp_path: Path):
     # happens on session reset, not per-run.
     mock_provider.close.assert_not_called()
 
-    # Verify send_orchestrate was called with correct args
-    call_args = mock_provider.send_orchestrate.call_args
+    # Verify run_agent_loop was called with correct args
+    call_args = mock_provider.run_agent_loop.call_args
     assert "Explore the auth system" in call_args.kwargs["message"]
     assert "explore" in call_args.kwargs["system"].lower() or "Exploration" in call_args.kwargs["system"]
     assert call_args.kwargs["max_turns"] == 50
@@ -352,7 +352,7 @@ async def test_delegate_tool_failure(tmp_path: Path):
 
     # Mock BridgeProvider that raises
     mock_provider = AsyncMock()
-    mock_provider.send_orchestrate = AsyncMock(
+    mock_provider.run_agent_loop = AsyncMock(
         side_effect=RuntimeError("Bridge subprocess crashed")
     )
     mock_provider.close = AsyncMock()
@@ -401,12 +401,12 @@ async def test_delegate_status_tool(tmp_path: Path):
         stop_reason="end_turn", model="sonnet",
     )
 
-    async def _slow_orchestrate(**kwargs):
+    async def _slow_agent_loop(**kwargs):
         await proceed.wait()
         return mock_response
 
     mock_provider = AsyncMock()
-    mock_provider.send_orchestrate = _slow_orchestrate
+    mock_provider.run_agent_loop = _slow_agent_loop
     mock_provider.close = AsyncMock()
     mock_provider.interrupt = AsyncMock()
 

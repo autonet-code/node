@@ -79,7 +79,7 @@ def build_provider_from_manifest(cfg: dict[str, Any]) -> Provider:
           "bridge_script": <str>,     # bridge only ("" => worker resolves it)
         }
 
-    Returns a fully-constructed Provider whose ``send_orchestrate`` runs the
+    Returns a fully-constructed Provider whose ``run_agent_loop`` runs the
     generic base-class loop (API providers) or drives the node SDK subprocess
     (bridge). Raises ``UnsupportedProviderError`` for anything that must stay
     in-process.

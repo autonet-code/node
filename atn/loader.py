@@ -334,7 +334,43 @@ def load_agent_file(path: Path) -> tuple[AgentDefinition | None, list[LoadError]
     if not isinstance(raw, dict):
         return None, [LoadError(path, "file must contain a YAML mapping")]
 
+    if _migrate_legacy_orchestrator_agent_yaml(raw, path):
+        try:
+            path.write_text(yaml.safe_dump(raw, sort_keys=False,
+                                           allow_unicode=True),
+                            encoding="utf-8")
+            log.info("Migrated legacy agent definition %s", path)
+        except OSError as exc:
+            log.warning("Could not persist migrated agent definition %s: %s",
+                        path, exc)
+
     return _validate_agent(raw, path)
+
+
+def _migrate_legacy_orchestrator_agent_yaml(raw: dict, path: Path) -> bool:
+    """One-time migration of agent YAML written before the root-agent purge.
+
+    Rewrites, in place, (1) step ``tool_executors: orchestrator`` to the
+    canonical ``atn`` tool set, and (2) the short parent alias
+    ``parent_id: orch``: to ``orchestrator`` when an agent with that id sits
+    beside this one on disk, otherwise to no parent (a top-level agent).
+    Returns True when ``raw`` changed so the caller persists it.
+    """
+    changed = False
+    for step in raw.get("steps") or []:
+        cfg = step.get("config") if isinstance(step, dict) else None
+        if isinstance(cfg, dict) and cfg.get("tool_executors") == "orchestrator":
+            cfg["tool_executors"] = "atn"
+            changed = True
+    if raw.get("parent_id") == "orch":
+        agent_dir = path.parent if path.name == "agent.yaml" else path
+        sibling = agent_dir.parent / "orchestrator" / "agent.yaml"
+        if sibling.exists():
+            raw["parent_id"] = "orchestrator"
+        else:
+            raw.pop("parent_id", None)
+        changed = True
+    return changed
 
 
 def _externalize_step_files(step: StepDefinition, step_index: int, agent_dir: Path) -> dict[str, Any]:

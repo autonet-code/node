@@ -206,11 +206,9 @@ async def test():
                 "provider": "mock",
                 "prompt": "What agents exist?",
                 "max_turns": 10,
-                # LEGACY-DATA: persisted agent defs may still name the old
-                # executor set; it must keep resolving to the ATN tools.
-                "tool_executors": "orchestrator",
+                "tool_executors": "atn",
             },
-            name="orchestrate",
+            name="agent_loop",
         )],
     )
     await rt.register_agent(agent)
@@ -222,11 +220,11 @@ async def test():
     assert rec.status == ExecutionStatus.COMPLETED
     output = rec.step_results[0].output
     assert output["text"] == "There are no agents registered yet."
-    assert output["mode"] == "orchestrate"
+    assert output["mode"] == "agent_loop"
     # Usage is cumulative
     assert output["usage"]["input_tokens"] == 250  # 100 + 150
     assert output["usage"]["output_tokens"] == 50   # 30 + 20
-    # Provider was called twice (via send_orchestrate -> send_stream loop)
+    # Provider was called twice (via run_agent_loop -> send_stream loop)
     assert len(mock.call_log) == 2
     # Second call should have assistant + tool_result messages
     msgs = mock.call_log[1]["messages"]

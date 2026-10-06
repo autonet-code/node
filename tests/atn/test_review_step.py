@@ -1,7 +1,7 @@
 """v3 review step in the agentic loop (docs/tool_substrate.md, 2026-07-08).
 
 When a cognitive run used registered tools (use_tool / register_tool)
-and never called attest_tools, the base orchestrate loop injects ONE
+and never called attest_tools, the base agent loop injects ONE
 closing review turn before finalizing — the harness-enforced beat that
 produces the per-axis review signal routing tool discovery. Covers:
 injection, one-shot behavior, compliance path, self-gating, opt-out.
@@ -80,7 +80,7 @@ class TestReviewInjection:
             # Agent ignores the review prompt → one-shot, finalize anyway.
             _resp(text="still done", stop_reason="end_turn"),
         ])
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go", tools=[], tool_executor=_noop_executor)
         assert p.stream_calls == 3
         assert resp.stop_reason == "end_turn"
@@ -101,7 +101,7 @@ class TestReviewInjection:
                 "context": "csv work"}),
             _resp(text="reviewed and done", stop_reason="end_turn"),
         ])
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go", tools=[], tool_executor=_noop_executor)
         assert p.stream_calls == 4
         assert resp.text == "reviewed and done"
@@ -120,7 +120,7 @@ class TestReviewInjection:
             _tool_turn("register_tool", {"name": "new_tool", "code": "..."}),
             _resp(text="registered", stop_reason="end_turn"),
         ])
-        await p.send_orchestrate(
+        await p.run_agent_loop(
             message="go", tools=[], tool_executor=_noop_executor)
         assert p.stream_calls == 2
         assert not _injected_review(p.seen_messages)
@@ -135,7 +135,7 @@ class TestReviewInjection:
             _resp(text="used it", stop_reason="end_turn"),
             _resp(text="ok", stop_reason="end_turn"),
         ])
-        await p.send_orchestrate(
+        await p.run_agent_loop(
             message="go", tools=[], tool_executor=_noop_executor)
         assert _injected_review(p.seen_messages)
 
@@ -147,7 +147,7 @@ class TestReviewSelfGating:
             _tool_turn("get_snapshot"),
             _resp(text="done", stop_reason="end_turn"),
         ])
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go", tools=[], tool_executor=_noop_executor)
         assert p.stream_calls == 2
         assert resp.text == "done"
@@ -162,7 +162,7 @@ class TestReviewSelfGating:
                 "context": "work"}),
             _resp(text="done", stop_reason="end_turn"),
         ])
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go", tools=[], tool_executor=_noop_executor)
         assert p.stream_calls == 3
         assert resp.text == "done"
@@ -174,7 +174,7 @@ class TestReviewSelfGating:
             _tool_turn("use_tool", {"name": "summarize_csv"}),
             _resp(text="done", stop_reason="end_turn"),
         ])
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go", tools=[], tool_executor=_noop_executor,
             review_tools=False)
         assert p.stream_calls == 2

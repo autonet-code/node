@@ -234,7 +234,7 @@ class Provider(ABC):
     event_bus: Any = None
     source_agent_id: str = ""
 
-    # v3 review step: True when this provider's own orchestrate loop
+    # v3 review step: True when this provider's own agent loop
     # injects the closing attest turn (the generic base loop does). A
     # provider that runs an external loop it can't inject into (the SDK
     # bridge) overrides this to False, and the CALLER runs the review
@@ -256,13 +256,13 @@ class Provider(ABC):
     # counters above — NOT reset per run.
     _total_cost_usd: float = 0.0
 
-    # Live context snapshot (set by send_orchestrate for the duration of a
+    # Live context snapshot (set by run_agent_loop for the duration of a
     # run). The message list is otherwise LOCAL to the loop; these references
     # let an out-of-band inspector (context_inspect / the get_context worker
     # cmd) measure the exact context the loop is working with. _live_messages
     # is the same list object the loop mutates, so compactions and appends are
     # visible to readers. None = no run has populated a snapshot (bridge
-    # providers, which override send_orchestrate, never set one).
+    # providers, which override run_agent_loop, never set one).
     _live_system: str = ""
     _live_tools: Any = None
     _live_messages: Any = None
@@ -345,21 +345,21 @@ class Provider(ABC):
         """
 
     @property
-    def supports_orchestrate(self) -> bool:
-        """Whether this provider supports multi-turn orchestration.
+    def supports_agent_loop(self) -> bool:
+        """Whether this provider supports multi-turn agent loop.
 
         Returns True by default — the base class provides a generic
-        implementation of ``send_orchestrate()`` that uses ``send_stream()``
+        implementation of ``run_agent_loop()`` that uses ``send_stream()``
         in a multi-turn loop.  Providers like BridgeProvider override this
         with a native implementation (e.g. Claude Agent SDK subprocess).
         """
         return True
 
     # Context compaction: the real trigger is the pre-send budget check in
-    # send_orchestrate (window - max_tokens - _reduction_buffer(window)); see
+    # run_agent_loop (window - max_tokens - _reduction_buffer(window)); see
     # compaction_trigger_tokens() below for the single source of truth.
     _compaction_count: int = 0
-    # Compactions within the current send_orchestrate run (spiral guard, §2).
+    # Compactions within the current run_agent_loop run (spiral guard, §2).
     # Reset at the start of each run.
     _compactions_this_run: int = 0
     # Tier-3 hard context resets within the current run (§2). When prune +
@@ -367,11 +367,11 @@ class Provider(ABC):
     # the original task + a tool-call digest instead of aborting the run.
     _hard_resets_this_run: int = 0
 
-    # Interrupt flag — set via interrupt() to stop the orchestration loop.
+    # Interrupt flag — set via interrupt() to stop the agent loop.
     _interrupted: bool = False
 
     # Manual-compaction flag (§15). Set via request_compaction() by the
-    # compact_agent tool while an orchestration is running; the loop honors it
+    # compact_agent tool while an agent-loop run is running; the loop honors it
     # at the next iteration boundary (next to the steering drain) by forcing a
     # context reduction, then clears it. requested_by is threaded onto the
     # emitted CONTEXT_COMPACTION event so the owner sees who asked.
@@ -379,24 +379,24 @@ class Provider(ABC):
     _compact_requested_by: str = ""
 
     # Mid-turn steering queue (§5). Lazily created; only non-None while an
-    # orchestration is active. send_user_message() enqueues onto it; the loop
+    # agent-loop run is active. send_user_message() enqueues onto it; the loop
     # drains it at each iteration boundary and appends each item as a user turn.
     _steering_queue: asyncio.Queue | None = None
 
     async def interrupt(self) -> None:
-        """Signal the orchestration loop to stop after the current turn."""
+        """Signal the agent loop to stop after the current turn."""
         self._interrupted = True
 
     def request_compaction(self, requested_by: str = "") -> bool:
         """Request a manual compaction at the next loop iteration (§15).
 
-        Sets a flag honored by ``send_orchestrate`` at its iteration boundary
+        Sets a flag honored by ``run_agent_loop`` at its iteration boundary
         (right where steering is drained): it forces a ``_reduce_context`` pass
         even if the size estimate is under budget. Returns True if an
-        orchestration is active (``_steering_queue`` is open) to consume the
+        agent-loop run is active (``_steering_queue`` is open) to consume the
         request, False otherwise so the caller can fall back to the idle path.
 
-        BridgeProvider has no honoring loop of its own (its orchestration lives
+        BridgeProvider has no honoring loop of its own (its agent-loop run lives
         in the SDK subprocess); it does not override this, so a running bridge
         agent reports no active generic loop here and the tool answers
         ``unsupported_while_running`` — see the tool handler.
@@ -408,10 +408,10 @@ class Provider(ABC):
         return True
 
     async def send_user_message(self, content: str) -> bool:
-        """Inject a user message mid-orchestration (§5).
+        """Inject a user message mid-run (§5).
 
         Backed by ``_steering_queue`` (created for the duration of a
-        ``send_orchestrate`` run). Returns True if an orchestration is active
+        ``run_agent_loop`` run). Returns True if an agent-loop run is active
         to consume the message (queued), False otherwise so the caller can
         fall back to the inbox.
 
@@ -426,7 +426,7 @@ class Provider(ABC):
         """Pop all queued steering messages (§5). Never blocks."""
         return _drain_queue(getattr(self, "_steering_queue", None))
 
-    async def send_orchestrate(
+    async def run_agent_loop(
         self,
         *,
         message: str,
@@ -444,7 +444,7 @@ class Provider(ABC):
         review_tools: bool = True,
         **_unused: Any,
     ) -> ProviderResponse:
-        """Multi-turn orchestration with tool relay.
+        """Multi-turn agent-loop run with tool relay.
 
         Generic implementation that uses ``send_stream()`` in a loop.
         Each turn: call the LLM, execute any tool calls via ``tool_executor``,
@@ -553,7 +553,7 @@ class Provider(ABC):
 
         for turn in range(max_turns):
             if self._interrupted:
-                return Provider._finalize_orchestrate(self, 
+                return Provider._finalize_agent_loop(self, 
                     ProviderResponse(
                         text="",
                         stop_reason="interrupted",
@@ -588,7 +588,7 @@ class Provider(ABC):
                     )
                 except ContextOverflowError as exc:
                     log.warning("Manual compaction reduction gave up: %s", exc)
-                    return Provider._finalize_orchestrate(self,
+                    return Provider._finalize_agent_loop(self,
                         ProviderResponse(
                             text=f"Aborted: {exc}",
                             stop_reason="context_overflow",
@@ -607,7 +607,7 @@ class Provider(ABC):
                     "for agent %s. Raise AgentDefinition.per_turn_input_max if intended.",
                     estimated_input, effective_per_turn_max, self.source_agent_id or "?",
                 )
-                return Provider._finalize_orchestrate(self, 
+                return Provider._finalize_agent_loop(self, 
                     ProviderResponse(
                         text=(
                             f"Aborted: estimated input {estimated_input} tokens exceeds "
@@ -634,7 +634,7 @@ class Provider(ABC):
                     )
                 except ContextOverflowError as exc:
                     log.warning("Pre-send context reduction gave up: %s", exc)
-                    return Provider._finalize_orchestrate(self, 
+                    return Provider._finalize_agent_loop(self, 
                         ProviderResponse(
                             text=f"Aborted: {exc}",
                             stop_reason="context_overflow",
@@ -664,7 +664,7 @@ class Provider(ABC):
                 # §1/§2: overflow that survived reduction → abort, don't retry.
                 log.warning("Context overflow abort for agent %s: %s",
                             self.source_agent_id or "?", exc)
-                return Provider._finalize_orchestrate(self, 
+                return Provider._finalize_agent_loop(self, 
                     ProviderResponse(
                         text=f"Aborted: context overflow could not be reduced ({exc}).",
                         stop_reason="context_overflow",
@@ -677,7 +677,7 @@ class Provider(ABC):
                 # provider_error abort with orphan repair.
                 log.warning("Provider error abort for agent %s: %s",
                             self.source_agent_id or "?", exc)
-                return Provider._finalize_orchestrate(self, 
+                return Provider._finalize_agent_loop(self, 
                     ProviderResponse(
                         text=f"Aborted: provider error ({exc}).",
                         stop_reason="provider_error",
@@ -742,11 +742,11 @@ class Provider(ABC):
                         )
                         if not ok:
                             log.warning(
-                                "Inner-loop budget exceeded mid-orchestration "
+                                "Inner-loop budget exceeded mid-run "
                                 "(blocker=%s) — aborting cognitive loop for agent %s",
                                 blocker, self.source_agent_id or "?",
                             )
-                            return Provider._finalize_orchestrate(self, 
+                            return Provider._finalize_agent_loop(self, 
                                 ProviderResponse(
                                     text=(
                                         f"Aborted: budget exceeded "
@@ -845,13 +845,13 @@ class Provider(ABC):
                         {"role": "user",
                          "content": format_review_prompt(_owed)})
                     continue
-                return Provider._finalize_orchestrate(self,
+                return Provider._finalize_agent_loop(self,
                     response, messages, cumulative_usage,
                 )
 
             # No executor — return as-is (tool calls visible but not executed)
             if tool_executor is None:
-                return Provider._finalize_orchestrate(self, 
+                return Provider._finalize_agent_loop(self, 
                     response, messages, cumulative_usage,
                 )
 
@@ -938,7 +938,7 @@ class Provider(ABC):
                         kind, self.source_agent_id or "?",
                         (recent_call_signatures or osc_fingerprints)[-1][:200],
                     )
-                    return Provider._finalize_orchestrate(self, 
+                    return Provider._finalize_agent_loop(self, 
                         ProviderResponse(
                             text=(
                                 f"Aborted: {kind} loop detected (agent kept repeating "
@@ -974,7 +974,7 @@ class Provider(ABC):
                     })
                     continue
 
-                log.info("Orchestrate tool %s (turn %d/%d)", tc.name, turn + 1, max_turns)
+                log.info("Agent loop tool %s (turn %d/%d)", tc.name, turn + 1, max_turns)
 
                 # Emit tool use start event
                 if self.event_bus and self.source_agent_id:
@@ -1050,16 +1050,16 @@ class Provider(ABC):
             # the old post-tool compaction is no longer needed here.
 
         # Exhausted max_turns — return last response with accumulated usage
-        return Provider._finalize_orchestrate(self, response, messages, cumulative_usage)
+        return Provider._finalize_agent_loop(self, response, messages, cumulative_usage)
 
-    def _finalize_orchestrate(
+    def _finalize_agent_loop(
         self,
         response: ProviderResponse,
         messages: list[dict[str, Any]],
         cumulative_usage: Usage,
         abort_reason: str = "",
     ) -> ProviderResponse:
-        """Shared exit path for send_orchestrate (§3, §5).
+        """Shared exit path for run_agent_loop (§3, §5).
 
         - Repairs orphaned ``tool_use`` blocks in ``messages`` in place so the
           history replays cleanly against Anthropic-shape APIs.
@@ -1068,7 +1068,7 @@ class Provider(ABC):
           the inbox (never silently dropped).
         - Closes the steering queue.
 
-        Every ``return`` from send_orchestrate goes through here.
+        Every ``return`` from run_agent_loop goes through here.
         """
         _repair_orphan_tool_uses(messages, abort_reason)
         undelivered = _drain_queue(getattr(self, "_steering_queue", None))
@@ -1641,12 +1641,12 @@ _DEFAULT_HISTORY_CHAR_BUDGET = 400_000
 
 
 def output_reserve_tokens(model: str, ctx_window: int = 0) -> int:
-    """Per-request output cap the orchestrate loop reserves for ``model`` (§7).
+    """Per-request output cap the agent loop reserves for ``model`` (§7).
 
     Bounded at 16k so a huge output ceiling doesn't shrink the usable input
     budget, then clamped to a quarter of the window so small-window (local)
     models keep a positive input budget. Single source of truth for the cap
-    applied in send_orchestrate.
+    applied in run_agent_loop.
     """
     from ..model_specs import max_output_tokens as _spec_max_output
     reserve = min(16_384, _spec_max_output(model))
@@ -1661,7 +1661,7 @@ def output_reserve_tokens(model: str, ctx_window: int = 0) -> int:
 def compaction_trigger_tokens(model: str, ctx_window: int = 0) -> int:
     """Estimated input size (tokens) at which pre-send context reduction fires.
 
-    Mirrors the budget check in send_orchestrate: an estimated input above
+    Mirrors the budget check in run_agent_loop: an estimated input above
     ``window - max_tokens - _reduction_buffer(window)`` triggers prune, then
     compaction. Returns 0 when the window is unknown, so consumers (the
     context inspector, the UI's threshold line) can hide the marker rather

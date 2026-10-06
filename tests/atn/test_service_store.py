@@ -442,7 +442,7 @@ def _server(rt):
 def _local_session():
     from atn.ws_server import ClientSession
     return ClientSession(local=True, authed=True, owner=True,
-                         root_agent_id="orchestrator", scope_ids=None)
+                         root_agent_id=None, scope_ids=None)
 
 
 async def _svc_request(rt, spec_digest, request_id, args, client="0xClient",

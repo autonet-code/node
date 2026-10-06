@@ -172,7 +172,7 @@ class GovernanceBridge:
         return True
 
     def receive_heartbeat(self):
-        """Manually record a heartbeat (e.g., from orchestrator in sim mode)."""
+        """Manually record a heartbeat (e.g., from the simulation driver in sim mode)."""
         self._last_heartbeat = time.time()
 
     # =========================================================================

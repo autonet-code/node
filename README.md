@@ -50,7 +50,7 @@ The charter is 6-root: four alignment axes (*life is precious, self-preservation
 
 A tool is cognition crystallized. Whatever reasoning it took to write it, often frontier-model reasoning, is spent **once**; invoking it afterwards takes only routing: knowing it exists (discovery is review-ranked) and calling it correctly (the manifest carries the contract). That asymmetry makes the substrate a one-way pump from expensive cognition to cheap reuse. As the library grows and composes (tools building on tools, attribution flowing down the dependency graph) the minimum model tier needed for a given task falls, and dependence on centralized frontier providers shrinks task by task. This is the decentralization mechanism, not a side effect.
 
-The claim has honest bounds. Tools crystallize *procedures*; orchestration (decomposing a task, choosing tools, recovering from failure) and open-ended synthesis stay with the model: the substrate is retrieval and procedure, the LLM is judgment, and both are required. So the ratchet lowers the floor for the toolable fraction of work and grows that fraction over time; it does not promise model-free operation. The claim is also falsifiable, and the network pre-commits to testing it (experiment phase 11, proposed): measure the minimum model tier that clears a task suite bare versus substrate-assisted. The prediction is that the gap widens as the tool corpus grows.
+The claim has honest bounds. Tools crystallize *procedures*; coordination (decomposing a task, choosing tools, recovering from failure) and open-ended synthesis stay with the model: the substrate is retrieval and procedure, the LLM is judgment, and both are required. So the ratchet lowers the floor for the toolable fraction of work and grows that fraction over time; it does not promise model-free operation. The claim is also falsifiable, and the network pre-commits to testing it (experiment phase 11, proposed): measure the minimum model tier that clears a task suite bare versus substrate-assisted. The prediction is that the gap widens as the tool corpus grows.
 
 ## 4. Consensus and the chain
 
@@ -102,7 +102,7 @@ pip install autonet-computer                       # Full node: agent framework 
 pip install autonet-computer[voice-full]           # + voice: all TTS backends + push-to-talk STT
 ```
 
-The base install is a fully functional node: agent orchestration, on-chain
+The base install is a fully functional node: agent management, on-chain
 registration, and substrate event gossip / federated close all work out of the
 box.
 

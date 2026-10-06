@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autonet-computer"
 version = "0.8.0"
-description = "Decentralized AI alignment network with agent orchestration framework"
+description = "Decentralized AI alignment network with an agent framework"
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
 readme = "README.md"
@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     # ATN core (agent framework + full-node participation). A plain
     # `pip install autonet-computer` gives a functional node: agent
-    # orchestration, chain registration, and substrate/p2p close. Only the
+    # the agent loop, chain registration, and substrate/p2p close. Only the
     # native-training stack is optional (see [training]).
     "rich>=13.0",
     "pyyaml>=6.0",

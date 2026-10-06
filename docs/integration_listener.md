@@ -54,7 +54,7 @@ All take `--data-dir <path>` (default: the configured daemon data dir).
   provenance goes to stderr. Only `sha256(token)` is stored, in
   `<data_dir>/integration_tokens.json` (atomic write, mode 0600 on POSIX).
 - A token is bound to exactly one agent id. Binding to an owner sentinel
-  (`""`, `user`, `orchestrator`) is refused at mint, at load and at dispatch.
+  (`""`, `user`, and the retired root id) is refused at mint, at load and at dispatch.
   `create` also refuses an agent id not found in the agents dir unless
   `--force`; the daemon refuses the token until that agent exists.
 - `revoke` takes effect without a restart: the daemon re-reads the file when it
@@ -246,7 +246,7 @@ further, give its agent a restricted `tools:` bundle list.
 - Keys starting with `_` (for example a forged `_caller_id`) are stripped.
 - Before dispatch the server asserts the bound id is a real agent and
   `is_owner_caller(id)` is false. `is_owner_caller` treats `None`, `""`,
-  `"user"` (`OWNER_ID`) and `"orchestrator"` (`_LEGACY_ROOT_ID`) as the owner;
+  `"user"` (`OWNER_ID`) and the retired root id (`_LEGACY_ROOT_ID`) as the owner;
   none of these can be bound (a test asserts the two sentinel lists agree).
 
 ### Deny-list

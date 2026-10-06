@@ -86,7 +86,7 @@ class SubstrateProvider(Provider):
          appended to the system prompt) to the wrapped renderer.
       6. Return the renderer's ProviderResponse.
 
-    Phase 6.3 ships the orchestration; Phase 6.4 wires ollama.
+    Phase 6.3 ships the pipeline; Phase 6.4 wires ollama.
     """
 
     def __init__(

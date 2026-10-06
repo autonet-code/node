@@ -10,7 +10,7 @@ Trace JSON format (from AGENT_TRACE_TRAINING.md):
     {
         "session_id": "...",
         "agent_id": "...",
-        "agent_type": "orchestrator | solver | probe | ...",
+        "agent_type": "root | solver | probe | ...",
         "timestamp": "...",
         "turns": [
             {

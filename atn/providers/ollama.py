@@ -56,7 +56,7 @@ def _num_ctx_for(model: str) -> int:
 def _normalize_content(content: Any) -> str:
     """Convert Anthropic-style content blocks to plain string.
 
-    The base.py send_orchestrate() loop builds messages with list-of-dict
+    The base.py run_agent_loop() loop builds messages with list-of-dict
     content blocks (Anthropic format).  Ollama expects plain strings.
 
     Used only for plain-text blocks. Structured ``tool_use`` / ``tool_result``
@@ -82,7 +82,7 @@ def _normalize_content(content: Any) -> str:
 def _translate_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Translate canonical (Anthropic-shape) history into ollama /api/chat native.
 
-    The base.py send_orchestrate() loop builds:
+    The base.py run_agent_loop() loop builds:
       - assistant turns as ``{"role":"assistant","content":[{type:text}, {type:tool_use, id, name, input}]}``
       - tool results as ``{"role":"user","content":[{type:tool_result, tool_use_id, content}]}``
 

@@ -105,7 +105,7 @@ def test_breakdown_from_provider_requires_live_snapshot():
     assert bd["measured_last_input_tokens"] == 1234
 
 
-def test_send_orchestrate_publishes_live_snapshot():
+def test_run_agent_loop_publishes_live_snapshot():
     """The base loop must expose the exact list object it mutates."""
     from atn.providers.base import Provider
 
@@ -129,7 +129,7 @@ def test_send_orchestrate_publishes_live_snapshot():
     prov = Stub()
     prov._active_model = "claude-sonnet-5"
     import asyncio
-    resp = asyncio.run(prov.send_orchestrate(
+    resp = asyncio.run(prov.run_agent_loop(
         message="hi", system="SYS", model="claude-sonnet-5",
         tools=[{"name": "t", "description": "", "input_schema": {}}],
     ))

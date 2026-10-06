@@ -32,12 +32,6 @@ from ..store import ExecutionLog, OutputStore
 log = logging.getLogger(__name__)
 
 
-# LEGACY-DATA: persisted agent definitions may still reference the retired
-# root agent id ("orchestrator") or its short parent-id alias ("orch").
-# Kept only so old on-disk hierarchies keep resolving; the role is purged.
-_LEGACY_ROOT_ID = "orchestrator"
-
-
 # Default safeguards for autonomous long-horizon work. Permissive enough
 # that normal use never hits them; tight enough that runaway shapes
 # (one parent spawning hundreds of children, or unbounded recursive
@@ -892,21 +886,12 @@ class AgentRegistry:
     # ------------------------------------------------------------------
 
     def _resolve_parent_agent_id(self, parent_id: str) -> str:
-        if parent_id in self._agents:
-            return parent_id
-        # LEGACY-DATA: "orch" was a persisted short alias for the retired root id.
-        if parent_id == "orch" and _LEGACY_ROOT_ID in self._agents:
-            return _LEGACY_ROOT_ID
         return parent_id
 
     def get_children(self, agent_id: str) -> list[AgentDefinition]:
         children = []
         for defn in self._agents.values():
             if defn.parent_id == agent_id:
-                children.append(defn)
-            elif (agent_id == _LEGACY_ROOT_ID
-                  and defn.parent_id == "orch"):
-                # LEGACY-DATA: persisted children may still point at "orch".
                 children.append(defn)
         return children
 

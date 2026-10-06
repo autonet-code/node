@@ -83,7 +83,6 @@ class Runtime:
         self.inbox = InboxManager()
         self.output_store = OutputStore()
         self.execution_log = ExecutionLog(agents_dir=self._config.agents_dir)
-        self.conversation = ConversationStore(self._config.data_dir)
         self.credential_store = CredentialStore(self._config.data_dir)
         self.user_profile = UserProfileStore(self._config.data_dir)
         self.credit_budget = CreditBudgetStore(self._config.data_dir)
@@ -317,7 +316,6 @@ class Runtime:
         )
 
         self.sessions = SessionManager(
-            conversation=self.conversation,
             registry=self.registry,
             provider_manager=self.providers,
             engine=self.engine,
@@ -910,13 +908,10 @@ class Runtime:
             # No policy supplied → AllowAll (today's pass-through behavior).
             self.voice = VoiceService(
                 self.events, self, self._config.voice, policy=policy)
-            # Both focus fields default to the retired root-agent sentinel, and
-            # STEP_OUTPUT carries real agent ids — left as-is, the speak gate
-            # never matches and nothing is ever spoken. Seed from the fleet
-            # root so voice is on a real agent before the first WS focus call.
-            root = self._default_agent_id()
-            if root:
-                self.voice.set_focus(root)
+            # Voice starts with no focused agent: the app names one (its
+            # explicit voice focus, else the last agent the user interacted
+            # with). Push-to-talk with nothing focused is refused, not routed
+            # to a guessed agent.
             await self.voice.start()
             return {"status": "started", "backend": self._config.voice.backend}
         except Exception as exc:
@@ -970,8 +965,11 @@ class Runtime:
             if excluded_agents is None and cfg is not None and cfg.excluded_agents:
                 excluded_agents = set(cfg.excluded_agents)
             if bound_agent is None:
-                # LEGACY-WIRE: persisted chat threads route by this literal id.
-                bound_agent = (cfg.bound_agent if cfg else "orchestrator")
+                bound_agent = cfg.bound_agent if cfg else ""
+            if not bound_agent:
+                return {"status": "failed",
+                        "error": "chat.bound_agent must name the agent this "
+                                 "channel talks to"}
 
             # If the adapter owns a connection (Discord), bring it online first.
             if hasattr(client, "start") and hasattr(client, "wait_ready"):
@@ -1195,16 +1193,6 @@ class Runtime:
     def get_agent(self, agent_id: str) -> AgentDefinition | None:
         return self.registry.get_agent(agent_id)
 
-    def _default_agent_id(self) -> str | None:
-        """The fleet root: first registered agent with a falsy parent_id.
-
-        Default target for the agent_id=None session APIs. None when no
-        agents are registered."""
-        for aid, defn in self.registry._agents.items():
-            if not defn.parent_id:
-                return aid
-        return None
-
     def _agent_wallet_address(self, agent_id: str) -> str:
         """An agent's own on-chain 0x address, or "" if it has no identity.
 
@@ -1268,23 +1256,9 @@ class Runtime:
     async def interrupt_delegate(self, agent_id: str) -> bool:
         return await self.control.interrupt_delegate(agent_id)
 
-    async def interrupt_root(self) -> bool:
-        """Interrupt the fleet-root agent (the session root)."""
-        root_id = self._default_agent_id()
-        if root_id is None:
-            return False
-        return await self.control.interrupt_delegate(root_id)
-
     # ==================================================================
     # Session management — delegate to sessions
     # ==================================================================
-
-    async def new_conversation(self) -> None:
-        """Reset the fleet root's conversation (legacy wrapper)."""
-        root_id = self._default_agent_id()
-        if root_id is None:
-            return
-        await self.reset_agent_conversation(root_id)
 
     async def reset_agent_conversation(self, agent_id: str) -> None:
         """Reset conversation history for any agent."""
@@ -1316,7 +1290,7 @@ class Runtime:
     def _clear_bridge_session(self) -> None:
         self.sessions.clear_bridge_session()
 
-    def _inject_status_briefing(self, agent_id: str | None = None) -> None:
+    def _inject_status_briefing(self, agent_id: str) -> None:
         self.sessions._inject_status_briefing(agent_id)
 
     # ==================================================================
@@ -1326,14 +1300,10 @@ class Runtime:
     def _resolve_provider_for_model(self, model_name: str, agent_id: str) -> Any:
         return self.providers._resolve_provider_for_model(model_name, agent_id)
 
-    def _get_bridge_provider(self, agent_id: str | None = None) -> Any:
-        return self.providers.get_bridge_provider(
-            agent_id or self._default_agent_id())
-
-    def get_session_stats(self, agent_id: str | None = None) -> dict[str, Any]:
-        target = agent_id or self._default_agent_id()
-        if target is None:
-            return {"error": "no agents registered"}
+    def get_session_stats(self, agent_id: str) -> dict[str, Any]:
+        target = agent_id
+        if not target:
+            return {"error": "Missing 'agent_id'"}
 
         # 1. Live provider (best — real-time data)
         stats = self.providers.get_session_stats(target)
@@ -1349,10 +1319,10 @@ class Runtime:
         # 3. Genuinely no data
         return stats
 
-    async def get_session_context(self, agent_id: str | None = None) -> dict[str, Any]:
+    async def get_session_context(self, agent_id: str) -> dict[str, Any]:
         return await self.providers.get_session_context(agent_id)
 
-    async def get_context_breakdown(self, agent_id: str | None = None) -> dict[str, Any]:
+    async def get_context_breakdown(self, agent_id: str) -> dict[str, Any]:
         """Per-category context-window composition for an agent (the /context surface).
 
         Source fidelity ladder:
@@ -1364,9 +1334,9 @@ class Runtime:
                                 conversation store (idle agents, bridge/SDK).
         """
         from ..context_inspect import breakdown_from_provider, breakdown_reconstructed
-        target = agent_id or self._default_agent_id()
-        if target is None:
-            return {"error": "no agents registered"}
+        target = agent_id
+        if not target:
+            return {"error": "Missing 'agent_id'"}
 
         # 1. Isolated running worker — same channel discovery as compact_agent.
         wi = getattr(self._config, "worker_isolation", None)

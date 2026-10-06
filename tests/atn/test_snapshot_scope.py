@@ -1,7 +1,7 @@
 """Scope-aware snapshot: a connection rooted at agent X sees only X's subtree.
 
 Default (scope_ids=None) must remain the full fleet, byte-compatible with the
-pre-scoping behavior so the localhost / orchestrator-root path is unchanged."""
+pre-scoping behavior so the localhost / full-fleet path is unchanged."""
 from __future__ import annotations
 
 import pytest
@@ -31,11 +31,11 @@ def _agent(agent_id: str, parent_id: str | None) -> AgentDefinition:
 
 
 async def _fleet(tmp_path) -> Runtime:
-    # orchestrator -> a -> {a.1, a.2} ; orchestrator -> b
+    # lead -> a -> {a.1, a.2} ; lead -> b
     rt = _make_runtime(tmp_path)
     for aid, pid in [
-        ("orchestrator", None), ("a", "orchestrator"),
-        ("a.1", "a"), ("a.2", "a"), ("b", "orchestrator"),
+        ("lead", None), ("a", "lead"),
+        ("a.1", "a"), ("a.2", "a"), ("b", "lead"),
     ]:
         await rt.registry.register_agent(_agent(aid, pid))
     return rt
@@ -45,7 +45,7 @@ async def _fleet(tmp_path) -> Runtime:
 async def test_full_fleet_default(tmp_path):
     rt = await _fleet(tmp_path)
     snap = rt.snapshot()
-    assert set(snap["agents"].keys()) == {"orchestrator", "a", "a.1", "a.2", "b"}
+    assert set(snap["agents"].keys()) == {"lead", "a", "a.1", "a.2", "b"}
 
 
 @pytest.mark.asyncio
@@ -54,9 +54,9 @@ async def test_scoped_to_subtree_excludes_others(tmp_path):
     scope = rt.registry.get_subtree_ids("a")  # {a, a.1, a.2}
     snap = rt.snapshot(scope)
     assert set(snap["agents"].keys()) == {"a", "a.1", "a.2"}
-    # The sibling b and the orchestrator are NOT visible to an 'a'-rooted view.
+    # The sibling b and the top-level lead are NOT visible to an 'a'-rooted view.
     assert "b" not in snap["agents"]
-    assert "orchestrator" not in snap["agents"]
+    assert "lead" not in snap["agents"]
 
 
 @pytest.mark.asyncio

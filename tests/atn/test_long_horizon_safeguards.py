@@ -134,7 +134,7 @@ async def test_depth_limit_respects_per_agent_override(tmp_path):
 # ---------------------------------------------------------------------------
 
 class _RepeatingProvider:
-    """Minimal stub that satisfies the BaseProvider.send_orchestrate contract.
+    """Minimal stub that satisfies the BaseProvider.run_agent_loop contract.
 
     Each send_stream() returns the same single tool call. If the loop
     keeps executing past the repeat-call limit, the test will time out
@@ -186,7 +186,7 @@ async def test_repeat_call_limit_aborts_after_default(tmp_path):
     async def tool_executor(name: str, args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True}
 
-    response = await Provider.send_orchestrate(
+    response = await Provider.run_agent_loop(
         provider,
         message="start",
         system="",
@@ -214,7 +214,7 @@ async def test_repeat_call_limit_respects_override(tmp_path):
     async def tool_executor(name: str, args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True}
 
-    response = await Provider.send_orchestrate(
+    response = await Provider.run_agent_loop(
         provider,
         message="start",
         system="",
@@ -251,7 +251,7 @@ async def test_per_turn_input_ceiling_refuses_oversized(tmp_path):
     # Build a message that, at chars/4, comfortably exceeds 1000 tokens.
     big_message = "x" * 8000  # ~2000 estimated tokens
 
-    response = await Provider.send_orchestrate(
+    response = await Provider.run_agent_loop(
         provider,
         message=big_message,
         system="",
@@ -286,7 +286,7 @@ async def test_per_turn_input_ceiling_passes_normal_size(tmp_path):
     async def tool_executor(name: str, args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True}
 
-    response = await Provider.send_orchestrate(
+    response = await Provider.run_agent_loop(
         provider,
         message="hello",
         system="",

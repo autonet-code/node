@@ -8,11 +8,11 @@
  *
  * Request types:
  *   create      — single-turn LLM call (one prompt → one response)
- *   orchestrate — multi-turn with Codex's built-in tools + ATN tool relay via MCP
+ *   agent loop — multi-turn with Codex's built-in tools + ATN tool relay via MCP
  *   shutdown    — graceful exit
  *
  * ATN Tool Relay Architecture:
- *   When tools are provided in an orchestrate request, the bridge:
+ *   When tools are provided in an agent loop request, the bridge:
  *   1. Starts a local TCP relay server on an ephemeral port
  *   2. Passes MCP server config to Codex SDK (--config mcp_servers.atn=...)
  *   3. Codex CLI spawns codex-mcp-relay.ts as its MCP server
@@ -67,7 +67,7 @@ process.on("uncaughtException", (err: Error) => {
 })
 
 // -- ATN tool relay --
-// During orchestrate, ATN tools are relayed to Python for execution.
+// During agent loop, ATN tools are relayed to Python for execution.
 // Tool calls arrive from the MCP relay via TCP, get forwarded to Python
 // via stdout, and results flow back.
 
@@ -235,7 +235,7 @@ interface CodexSession {
 const sessions = new Map<string, CodexSession>()
 
 // -- Codex instance --
-// Created per-orchestration when tools are present (to pass MCP config),
+// Created per-run when tools are present (to pass MCP config),
 // or lazily for simple create requests.
 
 function createCodex(mcpConfig?: Record<string, any>): Codex {
@@ -316,9 +316,9 @@ interface CreateRequest {
   model?: string
 }
 
-interface OrchestrateRequest {
+interface AgentLoopRequest {
   id: string
-  type: "orchestrate"
+  type: "agent_loop"
   message: string
   system?: string
   system_prompt?: string
@@ -345,7 +345,7 @@ interface PingRequest {
   type: "ping"
 }
 
-type BridgeRequest = CreateRequest | OrchestrateRequest | DeleteRequest | ShutdownRequest | PingRequest
+type BridgeRequest = CreateRequest | AgentLoopRequest | DeleteRequest | ShutdownRequest | PingRequest
 
 interface BridgeResponse {
   id: string
@@ -441,14 +441,14 @@ async function handleCreate(req: CreateRequest): Promise<void> {
   }
 }
 
-// -- Handle orchestrate request (multi-turn with native MCP tool relay) --
+// -- Handle agent loop request (multi-turn with native MCP tool relay) --
 
-async function handleOrchestrate(req: OrchestrateRequest): Promise<void> {
+async function handleAgentLoop(req: AgentLoopRequest): Promise<void> {
   try {
     const model = mapModel(req.model || DEFAULT_MODEL)
     const maxTurns = req.max_turns || 20
 
-    log("request.orchestrate", {
+    log("request.agent_loop", {
       model,
       maxTurns,
       toolCount: req.tools.length,
@@ -463,7 +463,7 @@ async function handleOrchestrate(req: OrchestrateRequest): Promise<void> {
       }
       const mcpConfig = buildMcpConfig(req.tools, relayPort)
       codex = createCodex(mcpConfig)
-      log("orchestrate.mcp_config", { port: relayPort, tools: req.tools.length })
+      log("agent_loop.mcp_config", { port: relayPort, tools: req.tools.length })
     } else {
       codex = getSimpleCodex()
     }
@@ -512,12 +512,12 @@ async function handleOrchestrate(req: OrchestrateRequest): Promise<void> {
     const { events } = await thread.runStreamed(prompt)
 
     for await (const event of events) {
-      log("orchestrate.event", { type: event.type })
+      log("agent_loop.event", { type: event.type })
 
       switch (event.type) {
         case "thread.started":
           sessionId = event.thread_id
-          log("orchestrate.thread_started", { threadId: sessionId })
+          log("agent_loop.thread_started", { threadId: sessionId })
           break
 
         case "turn.started":
@@ -537,7 +537,7 @@ async function handleOrchestrate(req: OrchestrateRequest): Promise<void> {
           break
 
         case "turn.failed":
-          log("orchestrate.turn_failed", { error: event.error.message })
+          log("agent_loop.turn_failed", { error: event.error.message })
           break
 
         case "item.started":
@@ -669,8 +669,8 @@ async function handleRequest(req: BridgeRequest): Promise<void> {
       await handleCreate(req)
       break
 
-    case "orchestrate":
-      await handleOrchestrate(req as OrchestrateRequest)
+    case "agent_loop":
+      await handleAgentLoop(req as AgentLoopRequest)
       break
 
     case "delete": {

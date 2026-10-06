@@ -1,8 +1,8 @@
 """Tests for bridge inner-loop budget enforcement (issue #21 / task #18).
 
-The bridge's send_orchestrate runs the entire SDK loop in a subprocess; the
+The bridge's run_agent_loop runs the entire SDK loop in a subprocess; the
 Python side observes per-turn `usage` events on the stream channel and calls
-the recorder. On veto, it issues interrupt() to stop the SDK mid-orchestration.
+the recorder. On veto, it issues interrupt() to stop the SDK mid-run.
 
 These tests drive the event-handling path directly without spinning up a real
 bridge subprocess.
@@ -74,7 +74,7 @@ async def test_usage_event_calls_recorder():
         interrupt_called.append(True)
 
     # Replicate the handler logic directly (it lives inside a closure in
-    # send_orchestrate, so we can't import it; this test exercises the
+    # run_agent_loop, so we can't import it; this test exercises the
     # behavior contract).
     event = {
         "type": "usage",
@@ -127,7 +127,7 @@ async def test_recorder_veto_triggers_interrupt():
 
 def test_budget_blocker_overrides_stop_reason():
     """Confirms the wiring contract: budget_state['blocker'] forces stop_reason."""
-    # Simulate the post-orchestration logic: if budget_state['blocker'] is
+    # Simulate the post-run logic: if budget_state['blocker'] is
     # truthy, the returned ProviderResponse uses stop_reason='budget_exceeded'.
     budget_state = {"blocker": "agent.7"}
     final_resp = {"stop_reason": "end_turn", "text": "all good", "ok": True}

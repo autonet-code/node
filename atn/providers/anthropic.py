@@ -12,7 +12,7 @@ Two paths exist for running Claude models:
 
 1. BridgeProvider (bridge.py) — Claude Agent SDK via TypeScript subprocess
    - Spawns a bun subprocess running bridge/claude-bridge.ts
-   - Uses Claude Agent SDK's native multi-turn orchestration (send_orchestrate)
+   - Uses Claude Agent SDK's native multi-turn agent loop (run_agent_loop)
    - The SDK handles its own agentic loop, context compaction, session resumption
    - Built-in shell tools (Bash, Read, Write, Glob, Grep) live in the SDK process
    - ATN framework tools are relayed as MCP tool_call/tool_result over stdin/stdout
@@ -22,7 +22,7 @@ Two paths exist for running Claude models:
 
 2. AnthropicProvider (this file) — Python REST client via httpx
    - Direct HTTP calls to the Anthropic Messages API
-   - Multi-turn orchestration uses the generic loop in base.py (send_orchestrate)
+   - Multi-turn agent-loop run uses the generic loop in base.py (run_agent_loop)
      which calls send_stream() repeatedly, executing tool calls in Python
    - Shell tools come from atn/shell_tools.py (Python implementations)
    - No subprocess, no SDK dependency — pure Python

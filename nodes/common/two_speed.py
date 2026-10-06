@@ -37,7 +37,7 @@ Components:
   FastPath             — decodes directly from the nearest cached plan.
   SlowPath             — rolls out latent dynamics then decodes.
   NetworkStub          — Phase B shim; Phase C replaces with real net.
-  TwoSpeedEngine       — orchestrates routing, fall-back, cache updates.
+  TwoSpeedEngine       — coordinates routing, fall-back, cache updates.
 
 Usage::
 
@@ -523,7 +523,7 @@ class SlowPath:
 
 
 class TwoSpeedEngine:
-    """Orchestrates fast and slow inference paths for ATN latent reasoning.
+    """Coordinates fast and slow inference paths for ATN latent reasoning.
 
     Routing logic (per ``infer()`` call):
       1. Encode query text → mean-pooled query embedding via VLJEPA text

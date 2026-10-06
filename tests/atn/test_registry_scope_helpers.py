@@ -37,13 +37,13 @@ def _agent(agent_id: str, parent_id: str | None, *, address: str | None = None,
 
 
 async def _fleet(tmp_path) -> Runtime:
-    """orchestrator -> a -> {a.1, a.2}, plus a sibling b. Addresses on a, a.1, b."""
+    """lead -> a -> {a.1, a.2}, plus a sibling b. Addresses on a, a.1, b."""
     rt = _make_runtime(tmp_path)
-    await rt.registry.register_agent(_agent("orchestrator", None))
-    await rt.registry.register_agent(_agent("a", "orchestrator", address="0xAAaa1111111111111111111111111111111111aA"))
+    await rt.registry.register_agent(_agent("lead", None))
+    await rt.registry.register_agent(_agent("a", "lead", address="0xAAaa1111111111111111111111111111111111aA"))
     await rt.registry.register_agent(_agent("a.1", "a", address="0xB1b1000000000000000000000000000000000001"))
     await rt.registry.register_agent(_agent("a.2", "a"))
-    await rt.registry.register_agent(_agent("b", "orchestrator", address="0xCCcc222222222222222222222222222222222222"))
+    await rt.registry.register_agent(_agent("b", "lead", address="0xCCcc222222222222222222222222222222222222"))
     return rt
 
 
@@ -86,10 +86,10 @@ async def test_subtree_root_includes_self_and_all_descendants(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_subtree_orchestrator_is_full_fleet(tmp_path):
+async def test_subtree_of_top_level_agent_is_its_whole_tree(tmp_path):
     rt = await _fleet(tmp_path)
-    assert rt.registry.get_subtree_ids("orchestrator") == {
-        "orchestrator", "a", "a.1", "a.2", "b",
+    assert rt.registry.get_subtree_ids("lead") == {
+        "lead", "a", "a.1", "a.2", "b",
     }
 
 

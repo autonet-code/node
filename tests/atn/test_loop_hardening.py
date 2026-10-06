@@ -1,6 +1,6 @@
 """Tests for the generic-loop hardening spec (docs/agentic_loop.md §1–§6, §8).
 
-Covers the send_orchestrate upgrades on atn/providers/base.py:
+Covers the run_agent_loop upgrades on atn/providers/base.py:
   §1  loop-level retry gate (transient / overflow / fatal routing)
   §2  two-tier context reduction (prune, then compact) + spiral guard + fallback
   §3  orphan repair on every exit path
@@ -9,7 +9,7 @@ Covers the send_orchestrate upgrades on atn/providers/base.py:
   §6  tool-result head+tail truncation (see test_provider_base.py too)
   §8  malformed tool-argument guard ({"raw": ...} -> synthetic error result)
 
-All tests drive Provider.send_orchestrate directly against a mock provider
+All tests drive Provider.run_agent_loop directly against a mock provider
 whose send_stream() is scripted per turn (a response OR an exception to raise).
 """
 from __future__ import annotations
@@ -140,7 +140,7 @@ class TestRetryGate:
             ProviderError("overloaded", status_code=503),   # transient, retry
             _resp(text="recovered", stop_reason="end_turn"),
         ])
-        resp = await p.send_orchestrate(message="go", tools=[], tool_executor=_noop_executor)
+        resp = await p.run_agent_loop(message="go", tools=[], tool_executor=_noop_executor)
         assert resp.text == "recovered"
         assert p.stream_calls == 2
 
@@ -153,14 +153,14 @@ class TestRetryGate:
 
         # 4 transient failures: 1 initial + 3 retries all fail -> abort.
         p = ScriptedProvider([ProviderError("overloaded", status_code=503)] * 4)
-        resp = await p.send_orchestrate(message="go", tools=[], tool_executor=_noop_executor)
+        resp = await p.run_agent_loop(message="go", tools=[], tool_executor=_noop_executor)
         assert resp.stop_reason == "provider_error"
         assert p.stream_calls == 4
 
     @pytest.mark.asyncio
     async def test_fatal_aborts_immediately(self):
         p = ScriptedProvider([ProviderError("invalid api key", status_code=401)])
-        resp = await p.send_orchestrate(message="go", tools=[], tool_executor=_noop_executor)
+        resp = await p.run_agent_loop(message="go", tools=[], tool_executor=_noop_executor)
         assert resp.stop_reason == "provider_error"
         assert p.stream_calls == 1
         assert "provider error" in resp.text.lower()
@@ -188,7 +188,7 @@ class TestOverflowReduction:
             {"role": "user", "content": "old ask " + "a" * 5000},
             {"role": "assistant", "content": "old answer " + "b" * 5000},
         ]
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="now do X", tools=[], tool_executor=_noop_executor,
             history=history,
         )
@@ -210,7 +210,7 @@ class TestOverflowReduction:
             {"role": "user", "content": "x" * 8000},
             {"role": "assistant", "content": "y" * 8000},
         ]
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go", tools=[], tool_executor=_noop_executor, history=history,
         )
         assert resp.stop_reason == "context_overflow"
@@ -231,7 +231,7 @@ class TestVerifyStep:
             _resp(text="done", stop_reason="end_turn"),      # natural end → verify turn
             _resp(text="verified, done", stop_reason="end_turn"),
         ])
-        resp = await p.send_orchestrate(message="fix", tools=[],
+        resp = await p.run_agent_loop(message="fix", tools=[],
                                         tool_executor=_noop_executor)
         assert resp.text == "verified, done"
         assert p.stream_calls == 3
@@ -245,7 +245,7 @@ class TestVerifyStep:
                   tool_calls=[_tc("read_file", path="/repo/mod.py")]),
             _resp(text="done", stop_reason="end_turn"),
         ])
-        resp = await p.send_orchestrate(message="look", tools=[],
+        resp = await p.run_agent_loop(message="look", tools=[],
                                         tool_executor=_noop_executor)
         assert resp.text == "done"
         assert p.stream_calls == 2
@@ -408,7 +408,7 @@ class TestOrphanRepair:
             _resp(tool_calls=[_tc("t")], stop_reason="tool_use"),
             ProviderError("boom", status_code=400),  # fatal on 2nd send
         ])
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go",
             tools=[{"name": "t", "description": "", "input_schema": {"type": "object"}}],
             tool_executor=_noop_executor,
@@ -437,7 +437,7 @@ class TestLoopDetection:
         # loop issues ONE warning turn, then aborts if it repeats again.
         script = [_resp(tool_calls=[_tc("loop")], stop_reason="tool_use") for _ in range(10)]
         p = ScriptedProvider(script)
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go",
             tools=[{"name": "loop", "description": "", "input_schema": {"type": "object"}}],
             tool_executor=_noop_executor,
@@ -461,7 +461,7 @@ class TestLoopDetection:
             _resp(text="ok, concluding", stop_reason="end_turn"),
         ]
         p = ScriptedProvider(script)
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go",
             tools=[{"name": "loop", "description": "", "input_schema": {"type": "object"}}],
             tool_executor=_noop_executor,
@@ -479,7 +479,7 @@ class TestSteering:
     @pytest.mark.asyncio
     async def test_send_user_message_false_when_idle(self):
         p = ScriptedProvider([])
-        # No orchestration running -> queue is None -> returns False.
+        # No agent loop running -> queue is None -> returns False.
         assert await p.send_user_message("hi") is False
 
     @pytest.mark.asyncio
@@ -492,12 +492,12 @@ class TestSteering:
         ])
 
         async def executor(name, inp):
-            # Runs while orchestration is active -> queue exists -> True.
+            # Runs while agent-loop run is active -> queue exists -> True.
             ok = await p.send_user_message("STEER: also check Y")
             assert ok is True
             return {"ok": True}
 
-        await p.send_orchestrate(
+        await p.run_agent_loop(
             message="go",
             tools=[{"name": "t", "description": "", "input_schema": {"type": "object"}}],
             tool_executor=executor,
@@ -516,7 +516,7 @@ class TestSteering:
         # turn) must be surfaced as undelivered_steering, not lost.
         p = ScriptedProvider([_resp(text="done", stop_reason="end_turn")])
 
-        # Kick off an orchestration but pre-seed the queue via a wrapper: we
+        # Kick off an agent-loop run but pre-seed the queue via a wrapper: we
         # enqueue after the queue is created by patching send to enqueue.
         orig_send_stream = p.send_stream
 
@@ -525,7 +525,7 @@ class TestSteering:
             return await orig_send_stream(**kw)
 
         p.send_stream = wrapped  # type: ignore[assignment]
-        resp = await p.send_orchestrate(message="go", tools=[], tool_executor=_noop_executor)
+        resp = await p.run_agent_loop(message="go", tools=[], tool_executor=_noop_executor)
         assert resp.undelivered_steering == ["late steer"]
 
 
@@ -556,7 +556,7 @@ class TestMalformedArgs:
                   stop_reason="tool_use"),
             _resp(text="done", stop_reason="end_turn"),
         ])
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="go",
             tools=[{"name": "t", "description": "", "input_schema": {"type": "object"}}],
             tool_executor=executor,

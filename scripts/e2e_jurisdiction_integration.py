@@ -7,7 +7,7 @@ to serving it as a decentralized inference provider.
 
 Flow:
 1. Deploy all contracts (including InferenceProviderFactory)
-2. Run training cycle via orchestrator nodes
+2. Run training cycle via coordinating nodes
 3. Deploy InferenceProviderBridge for the trained model
 4. Make inference request through the bridge
 5. Simulate inference node submitting result

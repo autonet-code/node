@@ -45,7 +45,7 @@ feature, and then with atn_web regression-tested. Do not change autonet's core
 (agent/session model, event shapes, ws protocol): those are what atn_web depends
 on. (Connectors are outbound-tools-only; NOT the home for chat.)
 
-1. **autonet core**: the agent framework, unchanged. Orchestrator + delegates,
+1. **autonet core**: the agent framework, unchanged. Top-level agents + delegates,
    one (linear) session per agent, EventBus, on-chain registration, jurisdictions.
    **Untouched.** atn_web depends on it.
 2. **Chat-interface layer (`ChatService`)**: platform-neutral. An EXTERNAL
@@ -64,7 +64,7 @@ on. (Connectors are outbound-tools-only; NOT the home for chat.)
    ChatService **input seam** (where a platform message becomes
    `send_agent_message`). Access control, credits, whitelist, AND eventual
    rep-weighted distributed input ALL live here. This is the only dОrg-specific
-   layer. autonet core + the orchestrator model stay pristine.
+   layer. autonet core + the top-level-agent model stay pristine.
 
 ---
 
@@ -98,18 +98,18 @@ thread = one agent. (Not "one agent, many threads.")
 
 ## 4. The interaction model (in-house agents)
 
-Render autonet's own orchestrator+delegates model directly into Discord, in
+Render autonet's own top-level-agent+delegates model directly into Discord, in
 **one dedicated channel** (NOT guild-wide: containment avoids the mess):
 
-- **Channel = the orchestrator's conversation.** You chat with the orchestrator
+- **Channel = a top-level agent's conversation.** You chat with that agent
   in the channel, exactly like autonet's main chat. ChatService binds the
-  channel to the orchestrator agent.
-- **Thread per top-level delegate.** When the orchestrator calls `delegate` /
+  channel to that top-level agent.
+- **Thread per top-level delegate.** When a top-level agent calls `delegate` /
   `create_agent`, a `delegate.spawned` event fires; the **ChatService reacts to
   that event by creating a Discord thread** for the new agent and binding
   thread↔agent. Thread = that delegate's full conversation. (Thread-creation
   logic is NOT bespoke: it falls out of the agent hierarchy + event stream.
-  The orchestrator owns "when to spawn"; ChatService owns "render spawn as
+  The agent owns "when to spawn"; ChatService owns "render spawn as
   thread".)
 - **Nested sub-agents (depth ≥ 2):** Discord threads are one level deep only.
   So a sub-delegate (`orch.1.2`, and any deeper descendant) does NOT get its own
@@ -120,7 +120,7 @@ Render autonet's own orchestrator+delegates model directly into Discord, in
   thread, lineage shown in the label (`orch.1.2.3`).
 
 ### Addressing / routing
-- **Channel (unprefixed)** → orchestrator.
+- **Channel (unprefixed)** → the channel's top-level agent.
 - **In a thread (unprefixed)** → that thread's delegate.
 - **Reply to a pinned sub-agent tile** → routes to that sub-agent. Pins serve
   double duty: easy-to-find AND the addressing handle. Uses `reply_to_id`
@@ -170,9 +170,9 @@ the direction.
 
 **Built (local, working):**
 - Daemon fleet → Discord per-execution threads (read-only): `hackathon/fleet_view.py`, `fleet_bot.py`.
-- Operator-gated control: `>>`/@mention in a channel relays to the orchestrator.
+- Operator-gated control: `>>`/@mention in a channel relays to the channel's top-level agent.
 - Read-only dashboard (`hackathon-app`): both agent populations, physics cards,
-  agent windows (config), search/filter/sort/hierarchy, K3V|N FAB (orchestrator
+  agent windows (config), search/filter/sort/hierarchy, K3V|N FAB (top-level agent
   presented as K3V|N), agent_type icons, daemon pipe (api.py `/daemon/agents` +
   `/daemon/stream` SSE), session-stats enrichment (turns/context).
 - `kevin-support` pipeline agent polling `/support/stats` (support usage:
@@ -185,7 +185,7 @@ the direction.
 **Designed here, NOT built:**
 - `ChatService` (the layer-2 abstraction, VoiceService-shaped).
 - Discord adapter implementing `MessagingClient`.
-- Channel=orchestrator / thread=delegate / pinned-tile=sub-agent rendering.
+- Channel=top-level agent / thread=delegate / pinned-tile=sub-agent rendering.
 - Reply-based addressing.
 - Open-ended conversational member-agent registration.
 

@@ -5,7 +5,7 @@ Claude Agent SDK.  Communication uses NDJSON over stdin/stdout pipes.
 
 Supports two request types:
   - create:      single-turn LLM call (maxTurns=1, no tools).
-  - orchestrate: multi-turn with ATN tools relayed as in-process MCP server.
+  - agent loop: multi-turn with ATN tools relayed as in-process MCP server.
 
 Config keys (in ~/.atn/config.yaml under providers.claude_max):
   model       (str)   "sonnet" | "opus" | "haiku".  Default: "sonnet".
@@ -171,7 +171,7 @@ _BRIDGE_SCRIPT = _BRIDGE_DIR / "claude-bridge.ts"
 
 _EVENT_PREFIX = "@@EVENT@@"
 
-# Wedge guard for the orchestrate stdout loop. The SDK can legitimately go
+# Wedge guard for the agent loop stdout loop. The SDK can legitimately go
 # a long time without stdout traffic (its built-in tools run inside the
 # subprocess), but stderr events keep flowing while it works. "Wedged" is
 # therefore TOTAL silence — no stdout line AND no stderr event — for this
@@ -186,8 +186,8 @@ _STDIN_DRAIN_TIMEOUT = 60.0
 _TOOL_RESULT_CHAR_MAX = 40_000
 
 # §11 first-event watchdog: the bridge must produce its FIRST stream event
-# within this many seconds of an orchestrate request being sent. A model the
-# SDK loop rejects (haiku on the orchestrate path) can otherwise hot-spin at
+# within this many seconds of an agent loop request being sent. A model the
+# SDK loop rejects (haiku on the agent loop path) can otherwise hot-spin at
 # 100% CPU with zero output until the 1800s idle ceiling. On timeout we kill
 # the subprocess and raise so the execution fails loudly. Overridable.
 _FIRST_EVENT_TIMEOUT = float(os.environ.get("ATN_BRIDGE_FIRST_EVENT_TIMEOUT", "120"))
@@ -200,7 +200,7 @@ def _model_is_loop_capable(model: str) -> tuple[bool, str]:
     """§11 model-tier guard — RETIRED for haiku (2026-08-22).
 
     The original block (any haiku-class id, plus the bare "haiku" alias)
-    protected against an SDK orchestrate hot-spin: 100% CPU with zero
+    protected against an SDK agent loop hot-spin: 100% CPU with zero
     output for 20+ min on a haiku model (2026-07). Re-tested empirically on
     the current SDK: both "claude-haiku-4-5" and the bare "haiku" alias run
     the full tool loop in ~4s. The block was ALSO what made a plain
@@ -248,7 +248,7 @@ class BridgeProvider(Provider):
         # and stall the SDK subprocess on its next stderr write.
         self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=10_000)
         # Monotonic timestamp of the last line seen from the subprocess
-        # (stdout or stderr). The orchestrate wedge guard keys off this.
+        # (stdout or stderr). The agent loop wedge guard keys off this.
         self._last_subprocess_activity: float = time.monotonic()
 
         # Optional EventBus for emitting tool use events.
@@ -259,17 +259,17 @@ class BridgeProvider(Provider):
         # §5 delivery-ack (finding 8): injected user_messages, keyed by id.
         # value = content. An entry is present from the moment send_user_message
         # writes it until the bridge acks it (user_message_consumed → removed)
-        # or the orchestration ends (unconsumed → re-posted to the inbox by
+        # or the agent-loop run ends (unconsumed → re-posted to the inbox by
         # execution_control). ``_injection_seq`` mints monotonic ids.
         self._injection_seq: int = 0
         self._pending_injections: dict[str, str] = {}
         self._first_event_timeout: float = _FIRST_EVENT_TIMEOUT
-        # Armed per-orchestration; set on the first bridge event (stdout line
+        # Armed per-run; set on the first bridge event (stdout line
         # or stderr @@EVENT@@) so the watchdog can tell "wedged from the start"
-        # from "busy". None between orchestrations.
+        # from "busy". None between agent-loop runs.
         self._first_event: asyncio.Event | None = None
 
-        # Cumulative session stats — updated after each orchestrate response.
+        # Cumulative session stats — updated after each agent loop response.
         # These track the SDK's view of the session, not our own bookkeeping.
         self._session_id: str = ""
         self._sdk_num_turns: int = 0
@@ -277,7 +277,7 @@ class BridgeProvider(Provider):
         self._total_cost_usd: float = 0.0
         self._context_window: int = 0
         self._max_output_tokens: int = 0
-        # Code files modified by SDK builtins in the LAST orchestrate run —
+        # Code files modified by SDK builtins in the LAST agent loop run —
         # read by callers to gate the §16 verify follow-up turn.
         self.last_modified_code_files: set[str] = set()
         self._cumulative_input_tokens: int = 0
@@ -344,7 +344,7 @@ class BridgeProvider(Provider):
         return "claude_max"
 
     @property
-    def supports_orchestrate(self) -> bool:
+    def supports_agent_loop(self) -> bool:
         return True
 
     async def send(
@@ -549,10 +549,10 @@ class BridgeProvider(Provider):
         )
 
     # ------------------------------------------------------------------
-    # Orchestrate — multi-turn with tool relay
+    # Agent loop — multi-turn with tool relay
     # ------------------------------------------------------------------
 
-    async def send_orchestrate(
+    async def run_agent_loop(
         self,
         *,
         message: str,
@@ -566,12 +566,12 @@ class BridgeProvider(Provider):
         usage_recorder: Any = None,
         **kwargs,
     ) -> ProviderResponse:
-        """Multi-turn orchestrate call through the bridge.
+        """Multi-turn agent loop call through the bridge.
 
         Unlike send()/send_stream() which do one request → one response, this
         method handles a bidirectional conversation on stdout:
 
-        1. Sends an 'orchestrate' request to the bridge.
+        1. Sends an 'agent_loop' request to the bridge.
         2. Reads stdout lines in a loop:
            - tool_call → executes via tool_executor, writes tool_result to stdin
            - Final response JSON (has 'id' field) → parse and return
@@ -590,7 +590,7 @@ class BridgeProvider(Provider):
         # This is a long-running operation that interleaves reads and writes.
         # It CANNOT use _send_request/_send_raw (which assume one-shot).
         # We acquire the lock to prevent concurrent bridge use, but hold it
-        # for the entire orchestration session.
+        # for the entire agent-loop session.
         # §11 model-tier guard: reject non-loop-capable models (haiku)
         # BEFORE acquiring the lock or spawning the SDK loop, since the loop
         # hot-spins on them. Cheap, pure model check.
@@ -611,7 +611,7 @@ class BridgeProvider(Provider):
             self.last_modified_code_files = set()
             request: dict[str, Any] = {
                 "id": request_id,
-                "type": "orchestrate",
+                "type": "agent_loop",
                 "message": message,
                 "system_prompt": system,
                 "model": effective_model,
@@ -638,18 +638,18 @@ class BridgeProvider(Provider):
                 except asyncio.QueueEmpty:
                     break
 
-            # Write the orchestrate request
+            # Write the agent loop request
             line = json.dumps(request) + "\n"
             try:
                 self._process.stdin.write(line.encode())
                 await self._process.stdin.drain()
             except (BrokenPipeError, ConnectionResetError, OSError) as exc:
                 raise ProviderError(
-                    f"Bridge stdin broken during orchestrate: {exc}",
+                    f"Bridge stdin broken during agent loop: {exc}",
                     provider="claude_max",
                 ) from exc
             # Reset the wedge clock: the process may have sat idle since the
-            # previous orchestration, and a stale timestamp would get a
+            # previous agent-loop run, and a stale timestamp would get a
             # healthy-but-thinking bridge killed on the first probe.
             self._last_subprocess_activity = time.monotonic()
 
@@ -661,11 +661,11 @@ class BridgeProvider(Provider):
             self._first_event = asyncio.Event()
             watchdog_task = asyncio.create_task(self._first_event_watchdog())
 
-            log.info("Orchestrate request sent (tools=%d, max_turns=%d)", len(tools), max_turns)
+            log.info("Agent loop request sent (tools=%d, max_turns=%d)", len(tools), max_turns)
 
             # Shared state between the stream-events task and the outer
-            # orchestrate loop. budget_blocker carries the agent_id whose cap
-            # was crossed; if set, we treat the orchestration outcome as
+            # agent loop. budget_blocker carries the agent_id whose cap
+            # was crossed; if set, we treat the agent-loop run outcome as
             # budget-exceeded rather than a normal end_turn.
             budget_state = {"blocker": None}  # type: dict[str, Any]
 
@@ -841,7 +841,7 @@ class BridgeProvider(Provider):
                     raw = await self._read_stdout_guarded()
                     if not raw:
                         raise ProviderError(
-                            "Bridge stdout closed during orchestrate",
+                            "Bridge stdout closed during agent loop",
                             provider="claude_max",
                         )
                     self._last_subprocess_activity = time.monotonic()
@@ -859,7 +859,7 @@ class BridgeProvider(Provider):
                         call_id = msg["call_id"]
                         tool_name = msg["name"]
                         tool_input = msg.get("input", {})
-                        log.info("Orchestrate tool_call: %s (call_id=%s)", tool_name, call_id)
+                        log.info("Agent loop tool_call: %s (call_id=%s)", tool_name, call_id)
 
                         is_error = False
                         try:
@@ -951,20 +951,20 @@ class BridgeProvider(Provider):
                 # that remain (the caller-side fallback owns the re-post).
                 if self._pending_injections:
                     log.warning(
-                        "orchestration ended with %d unconsumed injection(s): %s",
+                        "agent-loop run ended with %d unconsumed injection(s): %s",
                         len(self._pending_injections),
                         list(self._pending_injections.keys()),
                     )
 
             if final_resp is None:
                 raise ProviderError(
-                    "No final response from bridge orchestrate",
+                    "No final response from bridge agent loop",
                     provider="claude_max",
                 )
 
             if not final_resp.get("ok"):
                 raise ProviderError(
-                    f"Bridge orchestrate error: {final_resp.get('error', 'unknown')}",
+                    f"Bridge agent loop error: {final_resp.get('error', 'unknown')}",
                     provider="claude_max",
                 )
 
@@ -1036,7 +1036,7 @@ class BridgeProvider(Provider):
                 blocker = budget_state["blocker"]
                 bridge_text = final_resp.get("text", "")
                 final_text = (
-                    f"Aborted: bridge orchestration budget exceeded "
+                    f"Aborted: bridge agent-loop run budget exceeded "
                     f"(blocked by '{blocker}'). Adjust the budget on that "
                     f"agent or wait for the next period."
                 )
@@ -1061,15 +1061,15 @@ class BridgeProvider(Provider):
             )
 
     # ------------------------------------------------------------------
-    # Mid-session control — bypass the lock (used during orchestrate)
+    # Mid-session control — bypass the lock (used during agent loop)
     # ------------------------------------------------------------------
 
     async def interrupt(self) -> None:
-        """Interrupt the active orchestration session.
+        """Interrupt the active agent-loop session.
 
         Sends an interrupt message to the bridge, which calls q.interrupt()
         on the running SDK query.  The query winds down gracefully and emits
-        its final response.  Safe to call while send_orchestrate() is running.
+        its final response.  Safe to call while run_agent_loop() is running.
 
         Does NOT acquire the lock — the bridge's readline stdin parser
         handles interleaved single-line writes correctly.
@@ -1283,8 +1283,8 @@ class BridgeProvider(Provider):
             self._predicted_tokens_by_class_since_refresh.get(cls, 0) + tokens
         )
 
-    async def reconcile_after_orchestration(self) -> dict[str, Any]:
-        """Reconcile predicted vs actual subscription burn after an orchestration.
+    async def reconcile_after_agent_loop(self) -> dict[str, Any]:
+        """Reconcile predicted vs actual subscription burn after an agent-loop run.
 
         Refreshes subscription headers (which gives us the *actual* util_5h
         delta from Anthropic), compares to ``_predicted_pct_since_refresh``
@@ -1298,7 +1298,7 @@ class BridgeProvider(Provider):
         If predicted < actual, we underestimated, rate too high → bump down.
 
         Adjustment is applied to the class that consumed the most tokens in
-        this orchestration. Conservative: 30% of the discrepancy, blended via
+        this agent-loop run. Conservative: 30% of the discrepancy, blended via
         EMA so a single odd reading can't whipsaw the estimator.
         """
         prev_5h = (self._rate_limits.get("five_hour") or {}).get("utilization")
@@ -1351,7 +1351,7 @@ class BridgeProvider(Provider):
                         predicted_pct, actual_pct_delta, ratio,
                     )
 
-        # Reset per-orchestration counters.
+        # Reset per-run counters.
         self._predicted_pct_since_refresh = 0.0
         self._predicted_tokens_by_class_since_refresh = {
             k: 0 for k in self._predicted_tokens_by_class_since_refresh
@@ -1394,7 +1394,7 @@ class BridgeProvider(Provider):
         return self._tokens_per_pct_by_class.get("sonnet")
 
     async def send_user_message(self, content: str) -> str | None:
-        """Inject a user message into the active orchestration session.
+        """Inject a user message into the active agent-loop session.
 
         Assigns a monotonic injection id, records it in ``_pending_injections``,
         and writes it to the bridge tagged with that id. The bridge acks with
@@ -1449,7 +1449,7 @@ class BridgeProvider(Provider):
     def session_stats(self) -> dict[str, Any]:
         """Return cumulative session stats for the current bridge session.
 
-        These are updated after each orchestrate response.  Includes token
+        These are updated after each agent loop response.  Includes token
         counts, context window size, and a utilisation percentage that tells
         the UI how full the context is.
         """
@@ -1484,7 +1484,7 @@ class BridgeProvider(Provider):
         or {"error": "..."} on failure.
         """
         if not self._session_id:
-            return {"error": "No session ID available (no orchestration has completed yet)"}
+            return {"error": "No session ID available (no agent-loop run has completed yet)"}
 
         try:
             resp = await self._send_request({
@@ -1632,7 +1632,7 @@ class BridgeProvider(Provider):
                 if self._process.returncode is not None:
                     raise ProviderError(
                         f"Bridge process exited ({self._process.returncode}) "
-                        "during orchestrate",
+                        "during agent loop",
                         provider="claude_max",
                     )
                 silent_for = time.monotonic() - self._last_subprocess_activity
@@ -1655,7 +1655,7 @@ class BridgeProvider(Provider):
     async def _first_event_watchdog(self) -> None:
         """§11: kill the subprocess if the FIRST bridge event never arrives.
 
-        Armed on each orchestrate request. If ``_first_event`` is not set
+        Armed on each agent loop request. If ``_first_event`` is not set
         within ``_first_event_timeout`` the SDK loop is wedged from the start
         (the haiku hot-spin) — hard-kill the tracked PID so the blocked
         ``_read_stdout_guarded`` sees the process exit and raises, failing the

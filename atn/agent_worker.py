@@ -7,7 +7,7 @@ runs in its OWN OS process, spawned by the daemon as::
 
 so its kernel PID becomes a real security identity. On "go" the worker rebuilds
 its provider LOCALLY from the run manifest and drives the SAME cognitive loop the
-in-process path drives (``Provider.send_orchestrate`` + the streaming/tool
+in-process path drives (``Provider.run_agent_loop`` + the streaming/tool
 cycle), with one split:
 
   - LOCAL tools (the 5 sandboxed shell executors) execute IN this process.

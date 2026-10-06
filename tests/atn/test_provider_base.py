@@ -1,4 +1,4 @@
-"""Tests for the provider base abstraction — data types, interface, and orchestrate loop."""
+"""Tests for the provider base abstraction — data types, interface, and agent loop."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
@@ -114,9 +114,9 @@ class TestProviderInterface:
         p = ConcreteProvider()
         assert p.name == "test"
 
-    def test_supports_orchestrate_default_true(self):
+    def test_supports_agent_loop_default_true(self):
         p = ConcreteProvider()
-        assert p.supports_orchestrate is True
+        assert p.supports_agent_loop is True
 
     @pytest.mark.asyncio
     async def test_send_stream_falls_back_to_send(self):
@@ -135,10 +135,10 @@ class TestProviderInterface:
 
 
 # ---------------------------------------------------------------------------
-# send_orchestrate multi-turn loop
+# run_agent_loop multi-turn loop
 # ---------------------------------------------------------------------------
 
-class OrchestrateProvider(Provider):
+class AgentLoopProvider(Provider):
     """Provider that returns tool calls on first send, then end_turn."""
 
     def __init__(self, responses: list[ProviderResponse]):
@@ -147,7 +147,7 @@ class OrchestrateProvider(Provider):
 
     @property
     def name(self) -> str:
-        return "orchestrate_test"
+        return "agent_loop_test"
 
     async def send(self, *, messages, system="", model="", max_tokens=1024,
                    tools=None, temperature=0.0) -> ProviderResponse:
@@ -156,15 +156,15 @@ class OrchestrateProvider(Provider):
         return resp
 
 
-class TestSendOrchestrate:
+class TestRunAgentLoop:
     @pytest.mark.asyncio
     async def test_single_turn_no_tools(self):
         """If no tool calls, returns immediately."""
-        p = OrchestrateProvider([
+        p = AgentLoopProvider([
             ProviderResponse(text="Done", stop_reason="end_turn",
                              usage=Usage(input_tokens=10, output_tokens=5)),
         ])
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="hello", tools=[], max_turns=5,
         )
         assert resp.text == "Done"
@@ -174,7 +174,7 @@ class TestSendOrchestrate:
     async def test_multi_turn_with_tool_calls(self):
         """Tool calls trigger executor, results feed back in."""
         tc = ToolCall(id="tc1", name="read_file", input={"path": "/tmp"})
-        p = OrchestrateProvider([
+        p = AgentLoopProvider([
             # Turn 1: LLM asks to call a tool
             ProviderResponse(
                 text="Let me read that.",
@@ -196,7 +196,7 @@ class TestSendOrchestrate:
             executor_calls.append((name, inp))
             return {"content": "hello"}
 
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="Read /tmp",
             tools=[{"name": "read_file", "description": "Read", "input_schema": {"type": "object"}}],
             max_turns=5,
@@ -214,7 +214,7 @@ class TestSendOrchestrate:
     async def test_tool_executor_error_is_caught(self):
         """If tool executor raises, error is returned to LLM."""
         tc = ToolCall(id="tc1", name="bad_tool", input={})
-        p = OrchestrateProvider([
+        p = AgentLoopProvider([
             ProviderResponse(tool_calls=[tc], stop_reason="tool_use",
                              usage=Usage(input_tokens=10, output_tokens=5)),
             ProviderResponse(text="Tool failed", stop_reason="end_turn",
@@ -224,7 +224,7 @@ class TestSendOrchestrate:
         async def failing_executor(name, inp):
             raise RuntimeError("boom")
 
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="try",
             tools=[{"name": "bad_tool", "description": "Fails", "input_schema": {"type": "object"}}],
             tool_executor=failing_executor,
@@ -236,11 +236,11 @@ class TestSendOrchestrate:
     async def test_no_executor_returns_tool_calls(self):
         """Without executor, tool calls are returned but not executed."""
         tc = ToolCall(id="tc1", name="bash", input={"cmd": "ls"})
-        p = OrchestrateProvider([
+        p = AgentLoopProvider([
             ProviderResponse(tool_calls=[tc], stop_reason="tool_use",
                              usage=Usage(input_tokens=10, output_tokens=5)),
         ])
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="run ls",
             tools=[{"name": "bash", "description": "Run", "input_schema": {"type": "object"}}],
             tool_executor=None,
@@ -258,12 +258,12 @@ class TestSendOrchestrate:
                              usage=Usage(input_tokens=5, output_tokens=5))
             for _ in range(3)
         ]
-        p = OrchestrateProvider(responses)
+        p = AgentLoopProvider(responses)
 
         async def executor(name, inp):
             return {"ok": True}
 
-        resp = await p.send_orchestrate(
+        resp = await p.run_agent_loop(
             message="loop forever",
             tools=[{"name": "loop", "description": "Loop", "input_schema": {"type": "object"}}],
             tool_executor=executor,
@@ -327,14 +327,14 @@ class TestNormalizeHistory:
         assert len(out) == 1
 
 
-class TestOrchestrateHistory:
+class TestAgentLoopHistory:
     @pytest.mark.asyncio
     async def test_history_precedes_user_message(self):
         p = RecordingProvider([
             ProviderResponse(text="ok", stop_reason="end_turn",
                              usage=Usage(input_tokens=5, output_tokens=2)),
         ])
-        await p.send_orchestrate(
+        await p.run_agent_loop(
             message="now do X",
             tools=[],
             history=[
@@ -361,7 +361,7 @@ class TestOrchestrateHistory:
         async def executor(name, inp):
             return {"blob": "x" * (_TOOL_RESULT_CHAR_MAX * 2)}
 
-        await p.send_orchestrate(
+        await p.run_agent_loop(
             message="go",
             tools=[{"name": "big", "description": "", "input_schema": {"type": "object"}}],
             tool_executor=executor,
@@ -404,7 +404,7 @@ class TestHeadTailTruncation:
 
     @pytest.mark.asyncio
     async def test_loop_uses_head_tail(self):
-        """The orchestrate loop truncates via head+tail (not tail-chop)."""
+        """The agent loop truncates via head+tail (not tail-chop)."""
         from atn.providers.base import _TOOL_RESULT_HEAD_CHARS
         tc = ToolCall(id="tc1", name="big", input={})
         p = RecordingProvider([
@@ -418,7 +418,7 @@ class TestHeadTailTruncation:
             # A result whose head and tail carry distinct markers.
             return "HEAD_MARKER" + ("z" * 200_000) + "TAIL_MARKER"
 
-        await p.send_orchestrate(
+        await p.run_agent_loop(
             message="go",
             tools=[{"name": "big", "description": "", "input_schema": {"type": "object"}}],
             tool_executor=executor,
@@ -443,7 +443,7 @@ class TestMaxTokensFromSpec:
                              usage=Usage(input_tokens=5, output_tokens=2)),
         ])
         # opus 4.8 has 128k output cap → should be clamped to 16384.
-        await p.send_orchestrate(message="hi", tools=[], model="claude-opus-4-8")
+        await p.run_agent_loop(message="hi", tools=[], model="claude-opus-4-8")
         assert p.seen_max_tokens[0] == 16384
 
     @pytest.mark.asyncio
@@ -454,7 +454,7 @@ class TestMaxTokensFromSpec:
                              usage=Usage(input_tokens=5, output_tokens=2)),
         ])
         # haiku-4-5 has an 8192 output cap.
-        await p.send_orchestrate(message="hi", tools=[], model="claude-haiku-4-5")
+        await p.run_agent_loop(message="hi", tools=[], model="claude-haiku-4-5")
         assert p.seen_max_tokens[0] == 8192
 
 
@@ -614,11 +614,11 @@ class TestSessionCostAccumulation:
     @pytest.mark.asyncio
     async def test_priced_model_accumulates_cost(self):
         from atn.metering import cost_usd
-        p = OrchestrateProvider([
+        p = AgentLoopProvider([
             ProviderResponse(text="ok", stop_reason="end_turn", model="claude-sonnet-4-5",
                              usage=Usage(input_tokens=1000, output_tokens=500)),
         ])
-        await p.send_orchestrate(message="hi", tools=[], model="claude-sonnet-4-5")
+        await p.run_agent_loop(message="hi", tools=[], model="claude-sonnet-4-5")
         expected = cost_usd("claude-sonnet-4-5", input_tokens=1000, output_tokens=500)
         assert expected and expected > 0
         assert p.session_stats["total_cost_usd"] == pytest.approx(expected, rel=1e-6)
@@ -626,9 +626,9 @@ class TestSessionCostAccumulation:
     @pytest.mark.asyncio
     async def test_unpriced_model_stays_zero(self):
         """Local/subscription models have no per-token price — chip stays hidden."""
-        p = OrchestrateProvider([
+        p = AgentLoopProvider([
             ProviderResponse(text="ok", stop_reason="end_turn", model="qwen3.5:4b",
                              usage=Usage(input_tokens=1000, output_tokens=500)),
         ])
-        await p.send_orchestrate(message="hi", tools=[], model="qwen3.5:4b")
+        await p.run_agent_loop(message="hi", tools=[], model="qwen3.5:4b")
         assert p.session_stats["total_cost_usd"] == 0

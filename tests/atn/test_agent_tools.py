@@ -64,7 +64,7 @@ class TestDelegateSpawnAndCollect:
             model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -97,7 +97,7 @@ class TestDelegateSpawnAndCollect:
         rt = _make_runtime(bus, tmp_path)
 
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(side_effect=RuntimeError("crash"))
+        mock_provider.run_agent_loop = AsyncMock(side_effect=RuntimeError("crash"))
         mock_provider.close = AsyncMock()
 
         with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
@@ -132,12 +132,12 @@ class TestDelegateStatus:
             stop_reason="end_turn", model="sonnet",
         )
 
-        async def slow_orchestrate(**kwargs):
+        async def slow_agent_loop(**kwargs):
             await proceed.wait()
             return mock_response
 
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = slow_orchestrate
+        mock_provider.run_agent_loop = slow_agent_loop
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 

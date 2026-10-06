@@ -125,7 +125,7 @@ class TestCognitiveAgentExecution:
             model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -168,7 +168,7 @@ class TestCognitiveAgentExecution:
         rt = _make_runtime(bus, tmp_path)
 
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(side_effect=RuntimeError("bridge exploded"))
+        mock_provider.run_agent_loop = AsyncMock(side_effect=RuntimeError("bridge exploded"))
         mock_provider.close = AsyncMock()
 
         defn = AgentDefinition(
@@ -229,14 +229,14 @@ class TestCognitiveAgentExecution:
             stop_reason="end_turn", model="sonnet",
         )
 
-        async def slow_orchestrate(**kwargs):
+        async def slow_agent_loop(**kwargs):
             # Record that the provider is tracked
             provider_captured["during"] = "cog-track" in rt._active_providers
             proceed.set()
             return mock_response
 
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = slow_orchestrate
+        mock_provider.run_agent_loop = slow_agent_loop
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -288,7 +288,7 @@ class TestInnateWakeUp:
             model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -333,7 +333,7 @@ class TestInnateWakeUp:
             stop_reason="end_turn", model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -385,7 +385,7 @@ class TestInnateWakeUp:
             model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -430,7 +430,7 @@ class TestDelegateToolsUnified:
             model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -470,12 +470,12 @@ class TestDelegateToolsUnified:
             stop_reason="end_turn", model="sonnet",
         )
 
-        async def slow_orchestrate(**kwargs):
+        async def slow_agent_loop(**kwargs):
             await proceed.wait()
             return mock_response
 
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = slow_orchestrate
+        mock_provider.run_agent_loop = slow_agent_loop
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -502,12 +502,12 @@ class TestDelegateToolsUnified:
             stop_reason="end_turn", model="sonnet",
         )
 
-        async def slow_orchestrate(**kwargs):
+        async def slow_agent_loop(**kwargs):
             await proceed.wait()
             return mock_response
 
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = slow_orchestrate
+        mock_provider.run_agent_loop = slow_agent_loop
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
         mock_provider.send_user_message = AsyncMock()
@@ -542,7 +542,7 @@ class TestCompletionCallbacks:
             stop_reason="end_turn", model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -571,7 +571,7 @@ class TestDelegateRegistryBackwardCompat:
             model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -627,7 +627,7 @@ class TestFractality:
             model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -661,7 +661,7 @@ class TestFractality:
             stop_reason="end_turn", model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -723,7 +723,7 @@ class TestFractality:
         captured_calls = []
 
         # Create a mock response that calls delegate tool
-        async def mock_orchestrate(**kwargs):
+        async def mock_agent_loop(**kwargs):
             tool_executor = kwargs.get("tool_executor")
             if tool_executor:
                 # The agent calls get_snapshot — we capture to verify caller_id is passed
@@ -737,7 +737,7 @@ class TestFractality:
             )
 
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = mock_orchestrate
+        mock_provider.run_agent_loop = mock_agent_loop
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -774,7 +774,7 @@ class TestInnateWakeUpInstruction:
             model="sonnet",
         )
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(return_value=mock_response)
+        mock_provider.run_agent_loop = AsyncMock(return_value=mock_response)
         mock_provider.close = AsyncMock()
         mock_provider.interrupt = AsyncMock()
 
@@ -821,7 +821,7 @@ class TestInnateWakeUpInstruction:
         await rt.activate_agent("parent-fail")
 
         mock_provider = AsyncMock()
-        mock_provider.send_orchestrate = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_provider.run_agent_loop = AsyncMock(side_effect=RuntimeError("boom"))
         mock_provider.close = AsyncMock()
 
         child = AgentDefinition(

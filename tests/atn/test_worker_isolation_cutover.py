@@ -138,7 +138,7 @@ async def test_flag_on_api_provider_runs_in_worker(bus, tmp_path, captured):
     await rt.activate_agent(defn.id)
 
     # Pre-seed a real API provider so eligibility passes and no network provider
-    # is resolved. The worker path intercepts BEFORE send_orchestrate.
+    # is resolved. The worker path intercepts BEFORE run_agent_loop.
     rt.engine.provider_manager._active_providers[defn.id] = _api_provider()
 
     done_payload = {

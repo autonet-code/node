@@ -238,7 +238,7 @@ def breakdown_from_parts(
 
 
 def breakdown_from_provider(provider: Any, source: str) -> dict[str, Any] | None:
-    """Breakdown from a provider's live snapshot (set by send_orchestrate).
+    """Breakdown from a provider's live snapshot (set by run_agent_loop).
 
     Returns None when the provider has no live snapshot — e.g. bridge/SDK
     providers, which own their loop elsewhere, or a provider that has

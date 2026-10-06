@@ -14,7 +14,7 @@ import pytest
 import websockets
 
 from atn import ws_auth
-from atn.agent_tools import OWNER_ID, _LEGACY_ROOT_ID, is_owner_caller
+from atn.agent_tools import OWNER_ID, is_owner_caller
 from atn.config import ATNConfig
 from atn.events import EventBus
 from atn.models import AgentDefinition, AgentMode
@@ -66,12 +66,12 @@ _SCHEMA = {"type": "object", "properties": {}}
 
 def test_owner_sentinels_agree_with_is_owner_caller():
     # Every value is_owner_caller trusts as the owner...
-    for s in (None, "", OWNER_ID, _LEGACY_ROOT_ID):
+    for s in (None, "", OWNER_ID):
         assert is_owner_caller(s)
         # ...is never a bindable integration identity.
         assert not ws_auth.is_bindable_agent_id(s)
     # The literal set in ws_auth matches the agent_tools constants.
-    assert ws_auth._OWNER_SENTINELS == {"", OWNER_ID, _LEGACY_ROOT_ID}
+    assert ws_auth._OWNER_SENTINELS == {"", OWNER_ID}
     # Whitespace-padded sentinels are refused too (no strip-then-trust).
     assert not ws_auth.is_bindable_agent_id(" user")
     assert ws_auth.is_bindable_agent_id("guest")
@@ -79,7 +79,7 @@ def test_owner_sentinels_agree_with_is_owner_caller():
 
 def test_store_refuses_sentinel_binding(tmp_path):
     store = ws_auth.IntegrationTokenStore(tmp_path)
-    for s in ("", OWNER_ID, _LEGACY_ROOT_ID, None):
+    for s in ("", OWNER_ID, None):
         with pytest.raises(ValueError):
             store.create(s, "x")
     assert store.list() == []
@@ -224,7 +224,7 @@ async def test_wrong_agent_refused(tmp_path):
     _, rec = bridge._integration_store.create("guest", "g")
     sess = _session(rec)
     for key, val in (("caller_id", "other"), ("caller_id", OWNER_ID),
-                     ("caller_id", _LEGACY_ROOT_ID), ("agent_id", "other"),
+                     ("agent_id", "other"),
                      ("target", "root"), ("author", OWNER_ID)):
         resp = await bridge._handle_integration_message(
             {"type": "list_tools", "msg_id": "1", key: val}, sess)

@@ -147,11 +147,9 @@ class ChatConfig:
     platform: str = "discord"       # adapter to use (discord; more later)
     token_env: str = "DISCORD_BOT_TOKEN"  # env var holding the bot token
     channel_id: str = ""            # THE channel bound to the agent below
-    # LEGACY-WIRE: persisted routing ids and old configs still name the
-    # retired root agent id as the default binding target.
-    # LEGACY-WIRE: agent this channel is bound to; default keeps the retired
-    # root agent id for existing deployments.
-    bound_agent: str = "orchestrator"
+    # The agent this channel talks to. Required when chat is enabled: there
+    # is no implicit default agent.
+    bound_agent: str = ""
     # Input-seam gating policy: "open" (AllowAll), "operator" (only operator_ids),
     # or "credit" (rolling per-user credits; operators unlimited).
     policy: str = "open"
@@ -437,8 +435,8 @@ class ATNConfig:
     data_dir: Path = field(default_factory=lambda: _DEFAULT_DIR)
     agents_dir: Path = field(default_factory=lambda: _default_agents_dir())
     # Daemon-wide defaults for agents that don't specify their own model /
-    # provider. YAML section ``defaults:`` (LEGACY-DATA fallback: the
-    # pre-purge ``orchestrator:`` section is still read on load).
+    # provider. YAML section ``defaults:`` (older config files are rewritten
+    # on load, see the legacy config migration below).
     default_model: str = ""
     default_provider: str = ""
     voice: VoiceConfig = field(default_factory=VoiceConfig)
@@ -829,6 +827,53 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
     return an
 
 
+def _migrate_legacy_orchestrator_config(path: Path) -> bool:
+    """One-time rewrite of a config file written before the root-agent purge.
+
+    Moves the top-level ``orchestrator:`` section (model/provider) to
+    ``defaults:`` and renames ``chat.orchestrator_label`` to
+    ``chat.root_label``. Text-level so comments and layout survive; falls
+    back to a YAML rewrite only when both ``orchestrator:`` and
+    ``defaults:`` exist (``defaults`` wins, the old section is dropped).
+    Returns True when the file was rewritten.
+    """
+    import re as _re
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    new = text
+    has_old = _re.search(r"^orchestrator:", new, _re.M) is not None
+    has_new = _re.search(r"^defaults:", new, _re.M) is not None
+    if has_old and not has_new:
+        new = _re.sub(r"^orchestrator:", "defaults:", new, flags=_re.M)
+    if (_re.search(r"^\s+orchestrator_label:", new, _re.M)
+            and not _re.search(r"^\s+root_label:", new, _re.M)):
+        new = _re.sub(r"^(\s+)orchestrator_label:", r"\1root_label:", new,
+                      flags=_re.M)
+    if has_old and has_new:
+        try:
+            data = yaml.safe_load(new) or {}
+        except Exception:
+            return False
+        if isinstance(data, dict):
+            data.pop("orchestrator", None)
+            chat = data.get("chat")
+            if isinstance(chat, dict):
+                chat.pop("orchestrator_label", None)
+            new = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    if new == text:
+        return False
+    try:
+        path.write_text(new, encoding="utf-8")
+    except OSError as exc:
+        log.warning("config: could not persist migrated config %s: %s",
+                    path, exc)
+        return False
+    log.info("config: migrated legacy config keys in %s", path)
+    return True
+
+
 def load_config(path: Path | None = None) -> ATNConfig:
     """Load configuration from a YAML file.
 
@@ -852,6 +897,7 @@ def load_config(path: Path | None = None) -> ATNConfig:
         config.autonet = _load_autonet_config({})
         return config
 
+    _migrate_legacy_orchestrator_config(path)
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception:
@@ -882,17 +928,6 @@ def load_config(path: Path | None = None) -> ATNConfig:
     if isinstance(defaults_raw, dict) and defaults_raw:
         config.default_provider = str(defaults_raw.get("provider", "") or "")
         config.default_model = str(defaults_raw.get("model", "") or "")
-    else:
-        # LEGACY-DATA: pre-purge configs kept the daemon default under the
-        # retired root agent's section.
-        legacy_raw = raw.get("orchestrator", {})
-        if isinstance(legacy_raw, dict) and (
-                legacy_raw.get("model") or legacy_raw.get("provider")):
-            config.default_provider = str(legacy_raw.get("provider", "") or "")
-            config.default_model = str(legacy_raw.get("model", "") or "")
-            log.info(
-                "config: 'orchestrator.model/provider' is deprecated — "
-                "use 'defaults.model/provider'")
 
     # Voice
     voice_raw = raw.get("voice", {})
@@ -922,15 +957,12 @@ def load_config(path: Path | None = None) -> ATNConfig:
             platform=chat_raw.get("platform", "discord"),
             token_env=chat_raw.get("token_env", "DISCORD_BOT_TOKEN"),
             channel_id=str(chat_raw.get("channel_id", "")),
-            # LEGACY-WIRE: default binding target keeps the retired root id.
-            bound_agent=str(chat_raw.get("bound_agent", "orchestrator")),
+            bound_agent=str(chat_raw.get("bound_agent", "") or ""),
             policy=str(chat_raw.get("policy", "open")),
             operator_ids=[str(x) for x in chat_raw.get("operator_ids", [])],
             credit_window_secs=int(chat_raw.get("credit_window_secs", 86400)),
             credit_default_limit=int(chat_raw.get("credit_default_limit", 5)),
-            # LEGACY-DATA: chat.orchestrator_label was the pre-purge key.
-            root_label=chat_raw.get(
-                "root_label", chat_raw.get("orchestrator_label", "K3V|N")),
+            root_label=chat_raw.get("root_label", "K3V|N"),
             excluded_agents=[str(x) for x in chat_raw.get("excluded_agents", [])],
         )
 

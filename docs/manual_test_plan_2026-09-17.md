@@ -117,7 +117,7 @@ when you need it restarted.
 ## 7. Voice (voice extras installed)
 
 1. Start voice mode, message the root agent. Expected: the reply is spoken;
-   the focus rows in the mic popup name your agents (not "Orchestrator").
+   the focus rows in the mic popup name your agents (not a generic root label).
 2. Push to talk: hold the PTT key (Page Down or Insert). Expected: a red
    Recording chip; release sends the transcript to the selected agent.
 3. Select a different agent to listen to. Expected: only that agent is spoken.

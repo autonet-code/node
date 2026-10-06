@@ -15,7 +15,7 @@ What's in scope here (5.2):
 
   - ``EventBatch`` envelope: rpb, sender_pubkey, batch_seq, events,
     prev_batch_hash, signature.
-  - ``EventGossip`` orchestrator: publish/subscribe API, signing,
+  - ``EventGossip`` coordinator: publish/subscribe API, signing,
     verification, dedupe cache, ingest hook into WorldService.
   - ``Transport`` interface and ``InMemoryTransport`` impl for tests.
 
@@ -341,7 +341,7 @@ class InMemoryHub:
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator
+# Coordinator
 # ---------------------------------------------------------------------------
 
 

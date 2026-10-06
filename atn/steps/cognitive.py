@@ -18,9 +18,8 @@ Config keys:
 
   max_turns   (int)    Maximum LLM turns.  Default: 1 (single turn, no tool loop).
   tool_executors (str) Name of tool executor set.  "atn" uses the built-in
-                       ATN agent tools ("orchestrator" is a legacy alias in
-                       persisted agent defs).  Default: None (tools returned
-                       but not executed).
+                       ATN agent tools.  Default: None (tools returned but
+                       not executed).
 
 File references:
   If system or prompt ends with .md, .txt, or .prompt, it is treated as a
@@ -46,10 +45,10 @@ from .base import StepContext, StepExecutor
 # File extensions that signal "this is a file path, not inline content"
 _PROMPT_FILE_EXTENSIONS = (".md", ".txt", ".prompt")
 
-# tool_executors values that select the built-in ATN agent tools. "atn" is
-# canonical; "orchestrator" is LEGACY-DATA (persisted agent defs predate the
-# rename and must keep loading).
-_ATN_TOOLSET_NAMES = ("atn", "orchestrator")
+# tool_executors value that selects the built-in ATN agent tools. Persisted
+# agent defs that used the pre-rename alias are rewritten on load (see
+# the legacy agent-yaml migration in atn.loader).
+_ATN_TOOLSET_NAMES = ("atn",)
 
 log = logging.getLogger(__name__)
 
@@ -160,27 +159,27 @@ class CognitiveStepExecutor(StepExecutor):
         # --- Build streaming callback ---
         on_chunk, on_thinking = _make_event_emitters(context, step_index, step_name)
 
-        # --- Orchestrate path ---
+        # --- Agent loop path ---
         # When tool_executors selects the ATN toolset, delegate the entire
-        # multi-turn tool loop to the provider's send_orchestrate().
+        # multi-turn tool loop to the provider's run_agent_loop().
         # Every provider supports this: BridgeProvider uses the Claude Agent
         # SDK natively; other providers use the generic base-class loop
         # that drives send_stream() with tool execution.
-        use_orchestrate = (
+        use_agent_loop = (
             tool_executor_set in _ATN_TOOLSET_NAMES
-            and provider.supports_orchestrate
+            and provider.supports_agent_loop
             and context.runtime is not None
         )
 
-        if use_orchestrate:
-            orch_result = await _orchestrate(
+        if use_agent_loop:
+            orch_result = await _run_agent_loop(
                 provider, step, context, result, on_chunk,
             )
             if orch_result.status != ExecutionStatus.FAILED:
                 return orch_result
             # Primary provider failed — try fallback chain
             log.warning(
-                "Orchestrate failed for %s via '%s': %s — trying fallbacks",
+                "Agent loop failed for %s via '%s': %s — trying fallbacks",
                 context.agent_id, provider_name, orch_result.error,
             )
             already_tried = {provider_name}
@@ -191,7 +190,7 @@ class CognitiveStepExecutor(StepExecutor):
                 # Reset result for retry
                 result.status = ExecutionStatus.RUNNING
                 result.error = None
-                orch_result = await _orchestrate(
+                orch_result = await _run_agent_loop(
                     fallback_provider, step, context, result, on_chunk,
                     use_default_model=True,
                 )
@@ -269,10 +268,10 @@ class CognitiveStepExecutor(StepExecutor):
 
 
 # ---------------------------------------------------------------------------
-# Orchestrate — delegates multi-turn tool loop to the provider
+# Agent loop — delegates multi-turn tool loop to the provider
 # ---------------------------------------------------------------------------
 
-async def _orchestrate(
+async def _run_agent_loop(
     provider: Any,
     step: StepDefinition,
     context: StepContext,
@@ -281,7 +280,7 @@ async def _orchestrate(
     *,
     use_default_model: bool = False,
 ) -> StepResult:
-    """Run the agentic tool loop through the provider's send_orchestrate().
+    """Run the agentic tool loop through the provider's run_agent_loop().
 
     Works with ANY provider:
     - BridgeProvider: delegates to the Claude Agent SDK subprocess, which
@@ -336,7 +335,7 @@ async def _orchestrate(
             )
 
         model = "" if use_default_model else step.config.get("model", "")
-        response = await provider.send_orchestrate(
+        response = await provider.run_agent_loop(
             message=user_content,
             system=system,
             model=model,
@@ -362,7 +361,7 @@ async def _orchestrate(
                 "cache_read_tokens": response.usage.cache_read_tokens,
                 "cache_creation_tokens": response.usage.cache_creation_tokens,
             },
-            "mode": "orchestrate",
+            "mode": "agent_loop",
         }
         if response.thinking:
             output["thinking"] = response.thinking
@@ -386,9 +385,10 @@ async def _orchestrate(
                 },
             ))
 
-        # Record assistant turn in conversation history
-        if response.text and runtime is not None and hasattr(runtime, "conversation"):
-            runtime.conversation.add_assistant_turn(
+        # Record the assistant turn in THIS agent's conversation history
+        if (response.text and runtime is not None
+                and hasattr(runtime, "get_agent_conversation_store")):
+            runtime.get_agent_conversation_store(context.agent_id).add_assistant_turn(
                 response.text, execution_id=context.execution_id,
             )
 
@@ -401,10 +401,10 @@ async def _orchestrate(
         result.status = ExecutionStatus.FAILED
         result.error = f"Unexpected error: {exc}"
         result.completed_at = datetime.now(timezone.utc)
-        log.exception("Orchestrate failed for agent %s via %s", context.agent_id, provider.name)
+        log.exception("Agent loop failed for agent %s via %s", context.agent_id, provider.name)
 
     finally:
-        # Unregister the interrupt hook now that orchestration is done
+        # Unregister the interrupt hook now that the agent loop is done
         if has_interrupt and runtime is not None:
             runtime.unregister_interrupt_hook(context.execution_id)
 
@@ -498,7 +498,7 @@ def _build_user_message(
 
     Args:
         skip_history: When True, don't prepend conversation history to the
-            message.  Used by the bridge orchestrate path where the SDK
+            message.  Used by the bridge agent loop path where the SDK
             manages session continuity via ``resume``.
     """
     prompt_template = _resolve_text(config.get("prompt", ""), context.work_dir)
@@ -536,8 +536,10 @@ def _build_user_message(
             # this because it uses resume/systemPrompt for continuity.
             if not skip_history:
                 history = ""
-                if context.runtime and hasattr(context.runtime, "conversation"):
-                    history = context.runtime.conversation.get_history_for_prompt()
+                if context.runtime and hasattr(
+                        context.runtime, "get_agent_conversation_store"):
+                    history = context.runtime.get_agent_conversation_store(
+                        context.agent_id).get_history_for_prompt()
                 if history:
                     inbox_text = history + "\n\nUser: " + inbox_text
             text = text.replace("{inbox}", inbox_text)
@@ -579,7 +581,7 @@ def _build_tools(config: dict[str, Any], context: StepContext) -> list[ToolDefin
     """
     tools: list[ToolDefinition] = []
 
-    # Named tool set ("atn"; "orchestrator" is the legacy alias)
+    # Named tool set ("atn")
     tool_executor_set = config.get("tool_executors")
     if tool_executor_set in _ATN_TOOLSET_NAMES:
         from ..agent_tools import get_tool_definitions

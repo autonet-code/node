@@ -227,7 +227,7 @@ class KubernetesProbe(HostProbe):
     id = "host_kubernetes"
     name = "Kubernetes"
     provider = "kubernetes"
-    description = "Container orchestration for deploying, scaling, and managing containerized workloads."
+    description = "Container management for deploying, scaling, and managing containerized workloads."
     tags = ["devops", "cloud"]
     install_hint = "winget install Kubernetes.kubectl"
     auth_hint = "Configure: kubectl config set-context"
@@ -1334,7 +1334,7 @@ class AnsibleProbe(HostProbe):
     id = "host_ansible"
     name = "Ansible"
     provider = "redhat"
-    description = "Agentless automation — configure servers, deploy apps, and orchestrate IT workflows with YAML."
+    description = "Agentless automation — configure servers, deploy apps, and automate IT workflows with YAML."
     tags = ["devops"]
     install_hint = "pip install ansible"
     auth_hint = ""

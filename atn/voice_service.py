@@ -179,10 +179,10 @@ if _VOICE_CORE_OK:
 # ── Constants ─────────────────────────────────────────────────
 SENTENCE_END = re.compile(r'(?<=[.!?])\s')
 
-# LEGACY-WIRE: atn_web still defaults its focus pickers to the retired root
-# agent id; the voice focus defaults must echo the same literal so the wire
-# shapes stay in parity.
-_LEGACY_ROOT_ID = "orchestrator"
+# Spoken (and emitted) when push-to-talk fires with no focused agent. Voice
+# never guesses a target: the app names one (explicit focus, else the last
+# agent the user interacted with).
+NO_TARGET_MESSAGE = "Pick an agent first: no agent is focused for voice."
 
 # ATN agent tools the shared map has no reason to know about. Registered
 # into voice_core rather than kept in a local dict: make_tool_tone() reads
@@ -498,10 +498,10 @@ class VoiceService:
         self._surface_id = SurfaceId(
             kind="voice", instance="local", label="Local mic", in_process=True)
 
-        # Focus — which agent_id the user is listening to (per channel).
-        # Defaults echo the legacy literal for wire parity (see _LEGACY_ROOT_ID).
-        self.voice_focus: str = _LEGACY_ROOT_ID   # agent whose TTS plays on "voice"
-        self.tools_focus: str = _LEGACY_ROOT_ID   # agent whose narration plays on "tools"
+        # Focus: which agent_id the user is listening to (per channel). None
+        # until the app names one; nothing is spoken and PTT is refused.
+        self.voice_focus: str | None = None   # agent whose TTS plays on "voice"
+        self.tools_focus: str | None = None   # agent whose narration plays on "tools"
 
         # Audio
         self.mixer: AudioMixer | None = None
@@ -1282,9 +1282,18 @@ class VoiceService:
                     data={"text": text, "target": self.voice_focus},
                 )))
 
-                self._run_on_main_loop(
-                    self._send_to_agent(self.voice_focus, text)
-                )
+                target = self.voice_focus
+                if not target:
+                    self._run_on_main_loop(self.events.emit(Event(
+                        type=EventType.VOICE_NO_TARGET,
+                        source="voice",
+                        data={"text": text, "message": NO_TARGET_MESSAGE},
+                    )))
+                    if self._voice_enabled:
+                        self._speak(NO_TARGET_MESSAGE, is_final=True)
+                    continue
+
+                self._run_on_main_loop(self._send_to_agent(target, text))
 
             except Exception as exc:
                 log.warning("[PTT] Error: %s", exc)
@@ -1320,34 +1329,16 @@ class VoiceService:
             agent_id, tagged, surface=self._surface_id)
 
         # If the arbiter denied this surface the mic, the utterance is dropped
-        # here (a different surface holds input) — do NOT reroute to the
-        # root agent, which would just be denied too.
+        # here (a different surface holds input).
         if result.get("code") == "input_not_active":
             log.info("[voice] input not active (mic held by %s); dropping",
                      result.get("holder"))
             return
 
-        # If delivery failed, fall back to the fleet-root agent — but only
-        # when one actually exists (empty fleets have no fallback target).
+        # A failed delivery is reported, never rerouted to another agent.
         if result.get("error"):
-            root_id = self._fleet_root_id()
-            if root_id and root_id != agent_id:
-                log.warning(
-                    "[PTT] Agent '%s' is not available, routing to root agent '%s'",
-                    agent_id, root_id,
-                )
-                await self.runtime.send_agent_message(
-                    root_id, tagged, surface=self._surface_id)
-
-    def _fleet_root_id(self) -> str | None:
-        """The PTT fallback target: the first registered parentless agent."""
-        try:
-            for aid, defn in self.runtime.registry._agents.items():
-                if not getattr(defn, "parent_id", None):
-                    return aid
-        except Exception:
-            pass
-        return None
+            log.warning("[PTT] Could not deliver to agent '%s': %s",
+                        agent_id, result.get("error"))
 
     # ------------------------------------------------------------------
     # Status for WS/UI

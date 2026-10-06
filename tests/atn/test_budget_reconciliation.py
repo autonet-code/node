@@ -1,6 +1,6 @@
-"""Tests for the post-orchestration reconciliation pass (issue #21 / task #19).
+"""Tests for the post-run reconciliation pass (issue #21 / task #19).
 
-After each bridge orchestration we compare the predicted subscription burn
+After each bridge agent-loop run we compare the predicted subscription burn
 (computed turn-by-turn from the per-class estimator) against the actual
 util_5h delta from Anthropic's headers. Discrepancies > 10% nudge the
 dominant class's rate via EMA.
@@ -40,7 +40,7 @@ async def test_reconcile_no_op_when_no_prior_reading(monkeypatch):
         return dict(s._rate_limits)
     monkeypatch.setattr(s, "refresh_usage", _fake_refresh)
 
-    report = await s.reconcile_after_orchestration()
+    report = await s.reconcile_after_agent_loop()
     # No prior reading, so actual_pct is None; no adjustment.
     assert report["actual_pct"] is None
     assert report["adjusted_class"] is None
@@ -59,7 +59,7 @@ async def test_reconcile_no_adjustment_when_within_tolerance(monkeypatch):
         return dict(s._rate_limits)
     monkeypatch.setattr(s, "refresh_usage", _fake_refresh)
 
-    report = await s.reconcile_after_orchestration()
+    report = await s.reconcile_after_agent_loop()
     assert report["predicted_pct"] == pytest.approx(1.0)
     assert report["actual_pct"] == pytest.approx(0.95, rel=0.01)
     # Within 10% → no adjustment.
@@ -79,7 +79,7 @@ async def test_reconcile_adjusts_dominant_class_on_mismatch(monkeypatch):
         return dict(s._rate_limits)
     monkeypatch.setattr(s, "refresh_usage", _fake_refresh)
 
-    report = await s.reconcile_after_orchestration()
+    report = await s.reconcile_after_agent_loop()
     assert report["adjusted_class"] == "sonnet"
     # ratio = 2.0 → target = 60_000 / 2.0 = 30_000
     # adjusted = 0.7 * 60_000 + 0.3 * 30_000 = 51_000
@@ -99,7 +99,7 @@ async def test_reconcile_picks_dominant_class(monkeypatch):
         return dict(s._rate_limits)
     monkeypatch.setattr(s, "refresh_usage", _fake_refresh)
 
-    report = await s.reconcile_after_orchestration()
+    report = await s.reconcile_after_agent_loop()
     assert report["adjusted_class"] == "opus"
 
 
@@ -114,7 +114,7 @@ async def test_reconcile_skips_when_actual_pct_negligible(monkeypatch):
         return dict(s._rate_limits)
     monkeypatch.setattr(s, "refresh_usage", _fake_refresh)
 
-    report = await s.reconcile_after_orchestration()
+    report = await s.reconcile_after_agent_loop()
     # actual_pct < 0.5 threshold → no adjustment.
     assert report["adjusted_class"] is None
 
@@ -130,7 +130,7 @@ async def test_reconcile_resets_counters_after(monkeypatch):
         return dict(s._rate_limits)
     monkeypatch.setattr(s, "refresh_usage", _fake_refresh)
 
-    await s.reconcile_after_orchestration()
+    await s.reconcile_after_agent_loop()
     assert s._predicted_pct_since_refresh == 0
     assert all(v == 0 for v in s._predicted_tokens_by_class_since_refresh.values())
     assert s._last_reconciliation is not None

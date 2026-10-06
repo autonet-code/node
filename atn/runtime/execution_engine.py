@@ -162,7 +162,7 @@ class ExecutionEngine:
         # duplicate that resolution here, the in-worker cutover is driven from
         # INSIDE _execute_cognitive_agent (it builds the shared context — prompt,
         # inbox drain, history, tool surface — then, for an eligible provider,
-        # dispatches to the worker instead of calling send_orchestrate locally).
+        # dispatches to the worker instead of calling run_agent_loop locally).
         # So the task we create is the same one either way; the fork is internal
         # and gated on the resolved provider type + flag.
         if defn.mode == AgentMode.COGNITIVE:
@@ -353,7 +353,7 @@ class ExecutionEngine:
             supervisor's ``_reap`` runs ``_finalize_on_behalf``). The caller MUST
             skip its shared ``finally`` finalize.
           - ``False`` => the worker could not be spawned; the caller falls
-            through to the in-process ``send_orchestrate`` path (a spawn failure
+            through to the in-process ``run_agent_loop`` path (a spawn failure
             must never strand the agent).
 
         This method returns only after finalize has fully completed (it parks on
@@ -367,7 +367,7 @@ class ExecutionEngine:
         provider_name = _provider_name(provider)
 
         # Build the run manifest (all JSON-safe; the worker rebuilds its provider
-        # + drives send_orchestrate from these). Everything shared-context has
+        # + drives run_agent_loop from these). Everything shared-context has
         # already been computed by the caller.
         try:
             provider_config = self._build_provider_config(provider)
@@ -1150,12 +1150,12 @@ class ExecutionEngine:
                     # byte-stable across executions so the provider prompt
                     # cache hits on the static prefix AND on the unchanged
                     # part of the history. Bridge providers (which override
-                    # send_orchestrate and own their session state) keep the
+                    # run_agent_loop and own their session state) keep the
                     # legacy system-prompt append.
                     from ..providers.base import Provider as _BaseProvider
                     _generic_loop = (
-                        type(sub_provider).send_orchestrate
-                        is _BaseProvider.send_orchestrate
+                        type(sub_provider).run_agent_loop
+                        is _BaseProvider.run_agent_loop
                     )
                     # Same model identifier the provider loop resolves its
                     # window from, so the history budget and the pre-send
@@ -1197,8 +1197,8 @@ class ExecutionEngine:
             # user-turn) is built IDENTICALLY for both paths. For a worker-
             # eligible provider under the flag, dispatch the provider loop +
             # local sandboxed tools to the worker process instead of running
-            # send_orchestrate here. Everything below (in-process tool executor,
-            # streaming callback, per-turn recorder, send_orchestrate, result
+            # run_agent_loop here. Everything below (in-process tool executor,
+            # streaming callback, per-turn recorder, run_agent_loop, result
             # block) is the in-process path and is UNTOUCHED when the flag is
             # OFF. The worker path owns finalize, so we skip the shared finally.
             if self._worker_eligible(defn, sub_provider):
@@ -1262,7 +1262,7 @@ class ExecutionEngine:
                 )
 
             # --- Per-turn budget recorder (inner-loop enforcement) ---
-            # Wired into send_orchestrate so each turn's tokens roll into the
+            # Wired into run_agent_loop so each turn's tokens roll into the
             # cascading budget immediately. Returns (ok, blocker_id); on
             # ok=False the provider aborts the loop with stop_reason=budget_exceeded.
             _budget_provider_key = _provider_name(sub_provider)
@@ -1324,7 +1324,7 @@ class ExecutionEngine:
             if defn.repeat_call_limit is not None:
                 send_kwargs["repeat_call_limit"] = defn.repeat_call_limit
 
-            response = await sub_provider.send_orchestrate(**send_kwargs)
+            response = await sub_provider.run_agent_loop(**send_kwargs)
 
             # v3 review step for providers whose loop can't inject it
             # (BridgeProvider — the SDK owns its loop): one follow-up turn
@@ -1345,7 +1345,7 @@ class ExecutionEngine:
             # §16 verify step for providers whose loop can't inject it
             # (BridgeProvider): one follow-up turn on the SAME session when
             # the run modified code files. Capture the set NOW — the
-            # follow-up orchestrate resets the provider's tracking.
+            # follow-up agent loop resets the provider's tracking.
             _modified_code = set(getattr(
                 sub_provider, "last_modified_code_files", None) or ())
             if _review_session and needs_verify_reinvoke(
@@ -1363,7 +1363,7 @@ class ExecutionEngine:
                         max_turns=8,
                         session_id=_review_session,
                     )
-                    await sub_provider.send_orchestrate(**verify_kwargs)
+                    await sub_provider.run_agent_loop(**verify_kwargs)
                 except Exception:
                     log.warning(
                         "verify follow-up turn failed for %s; continuing",
@@ -1382,7 +1382,7 @@ class ExecutionEngine:
                         max_turns=4,
                         session_id=_review_session,
                     )
-                    await sub_provider.send_orchestrate(**review_kwargs)
+                    await sub_provider.run_agent_loop(**review_kwargs)
                 except Exception:
                     log.warning(
                         "review follow-up turn failed for %s; continuing",
@@ -1414,7 +1414,7 @@ class ExecutionEngine:
                 record.error = "Interrupted"
             elif response.stop_reason == "budget_exceeded":
                 # Budget was hit. Distinguish "produced an answer, then went
-                # over" from "aborted mid-orchestration with nothing to show".
+                # over" from "aborted mid-run with nothing to show".
                 # A run that actually answered is COMPLETED — don't bury the
                 # answer in the error field and report it as FAILED. The budget
                 # breach is surfaced separately (BUDGET_EXCEEDED event +
@@ -1503,8 +1503,7 @@ class ExecutionEngine:
                               exc_info=True)
 
             # Record assistant turn to conversation store (unified for all agents).
-            # For the root agent, get_agent_conversation_store returns the
-            # central store visible in the UI.
+            # Each agent has its own store; nothing is shared.
             if result_text:
                 agent_convo.add_assistant_turn(
                     result_text, execution_id=record.execution_id,
@@ -1524,14 +1523,14 @@ class ExecutionEngine:
                 agent_convo.save_session_stats(_stats)
 
             # Reconciliation: subscription providers (bridge) compare predicted
-            # vs actual subscription burn after each orchestration to keep the
+            # vs actual subscription burn after each agent-loop run to keep the
             # tokens-per-pct estimator honest. Best-effort — failures here
             # never affect the user-visible execution result.
-            if hasattr(sub_provider, "reconcile_after_orchestration"):
+            if hasattr(sub_provider, "reconcile_after_agent_loop"):
                 try:
-                    await sub_provider.reconcile_after_orchestration()
+                    await sub_provider.reconcile_after_agent_loop()
                 except Exception:
-                    log.exception("reconcile_after_orchestration failed; continuing")
+                    log.exception("reconcile_after_agent_loop failed; continuing")
 
         except asyncio.CancelledError:
             record.status = ExecutionStatus.KILLED

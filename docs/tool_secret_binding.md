@@ -52,7 +52,7 @@ Three facts, each verified in-tree:
    No `tool_guard.py`, no sandbox cwd, no `ATN_TOOL_POLICY`. Only
    *adopted* (foreign) code is contained.
 
-So the `toolsmith` capability bundle (`atn/orchestrator/tools.py:3628`)
+So the `toolsmith` capability bundle (`atn/agent_tools.py:3628`)
 is a general code-execution primitive, and there is no join between a
 tool and the secrets its caller holds. Grepping `tool_store.py` (1974
 lines) for `secret|allowance|vault|keystore` yields **one** hit — a

@@ -106,7 +106,7 @@ def test_session_defaults():
     s = ClientSession()
     assert s.authed is False
     assert s.owner is False
-    assert s.root_agent_id == "orchestrator"
+    assert s.root_agent_id is None   # unscoped owner, not an agent id
     assert s.scope_ids is None       # full fleet by default
 
 

@@ -30,7 +30,6 @@ class SessionManager:
 
     def __init__(
         self,
-        conversation: ConversationStore,
         registry: "AgentRegistry",
         provider_manager: "ProviderManager",
         engine: "ExecutionEngine",
@@ -39,7 +38,6 @@ class SessionManager:
         config: Any,
         arbiter: "InputArbiter | None" = None,
     ) -> None:
-        self.conversation = conversation
         self.registry = registry
         self.provider_manager = provider_manager
         self.engine = engine
@@ -57,20 +55,6 @@ class SessionManager:
     # ------------------------------------------------------------------
     # Conversation reset
     # ------------------------------------------------------------------
-
-    def _fleet_root_id(self) -> str | None:
-        """The fleet root: first registered agent with no parent, or None."""
-        for aid, defn in self.registry._agents.items():
-            if not defn.parent_id:
-                return aid
-        return None
-
-    async def new_conversation(self) -> None:
-        """Reset the fleet root's conversation (legacy wrapper)."""
-        root_id = self._fleet_root_id()
-        if root_id is None:
-            return
-        await self.reset_agent_conversation(root_id)
 
     async def reset_agent_conversation(self, agent_id: str) -> None:
         """Reset conversation history for any agent.
@@ -102,8 +86,7 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     def get_agent_conversation_store(self, agent_id: str) -> ConversationStore:
-        # Every agent gets its own per-id store; the central self.conversation
-        # store remains for the owner/UI surface only.
+        # Every agent gets its own per-id store; there is no shared store.
         if agent_id not in self._agent_conversations:
             store_dir = self._config.data_dir / "agents" / agent_id
             store_dir.mkdir(parents=True, exist_ok=True)
@@ -207,12 +190,10 @@ class SessionManager:
     # Status briefing
     # ------------------------------------------------------------------
 
-    def _inject_status_briefing(self, agent_id: str | None = None) -> None:
-        """Write a fleet status briefing.
+    def _inject_status_briefing(self, agent_id: str) -> None:
+        """Write a fleet status briefing into ``agent_id``'s conversation.
 
-        ``agent_id`` names the agent being briefed (skipped in its own
-        listing); its conversation store receives the briefing. With no
-        agent named, the central owner/UI store receives it.
+        The briefed agent is skipped in its own listing.
         """
         from datetime import datetime, timezone
 
@@ -250,7 +231,7 @@ class SessionManager:
             line += f"{last_info})"
             agents.append(line)
 
-        briefed_defn = self.registry._agents.get(agent_id) if agent_id else None
+        briefed_defn = self.registry._agents.get(agent_id)
         model = briefed_defn.cognitive_model if briefed_defn else ""
 
         now = datetime.now(timezone.utc)
@@ -264,8 +245,4 @@ class SessionManager:
             lines.append("No agents registered. Clean slate.")
 
         briefing = "\n".join(lines)
-        store = (
-            self.get_agent_conversation_store(agent_id)
-            if agent_id else self.conversation
-        )
-        store.add_system_turn(briefing)
+        self.get_agent_conversation_store(agent_id).add_system_turn(briefing)

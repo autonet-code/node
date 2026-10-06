@@ -10,7 +10,7 @@ Covers the compact_agent tool + the provider-level compact-requested flag:
   - CONTEXT_COMPACTION event emission with manual: true + requested_by
 
 Idle/permission tests use a real Runtime with mocked providers; the
-running-loop test drives Provider.send_orchestrate directly against a
+running-loop test drives Provider.run_agent_loop directly against a
 scripted mock provider (matching tests/atn/test_loop_hardening.py).
 """
 from __future__ import annotations
@@ -482,7 +482,7 @@ class TestRunningLoopHonorsFlag:
     @pytest.mark.asyncio
     async def test_request_compaction_false_when_idle(self):
         p = ScriptedProvider([])
-        # No orchestration active -> steering queue is None -> False.
+        # No agent-loop run active -> steering queue is None -> False.
         assert p.request_compaction(requested_by="owner") is False
 
     @pytest.mark.asyncio
@@ -523,12 +523,12 @@ class TestRunningLoopHonorsFlag:
                 ))
 
         async def executor(name, inp):
-            # Orchestration is active here -> flag accepted.
+            # Agent-loop run is active here -> flag accepted.
             assert p.request_compaction(requested_by="owner") is True
             return {"ok": True}
 
         with patch.object(Provider, "_reduce_context", _spy_reduce):
-            await p.send_orchestrate(
+            await p.run_agent_loop(
                 message="go",
                 tools=[{"name": "t", "description": "",
                         "input_schema": {"type": "object"}}],

@@ -6,7 +6,7 @@ stdin/stdout pipes — same protocol as the Claude Max bridge.
 
 Supports two request types:
   - create:      single-turn LLM call (one prompt → one response).
-  - orchestrate: multi-turn with Codex's built-in tools + ATN tool relay.
+  - agent loop: multi-turn with Codex's built-in tools + ATN tool relay.
 
 Config keys (in ~/.atn/config.yaml under providers.codex_max):
   model       (str)   e.g. "gpt-5.6-terra" | "gpt-5.5".  Default: "gpt-5.6-terra".
@@ -67,7 +67,7 @@ class CodexBridgeProvider(Provider):
 
     Mirrors the BridgeProvider interface but uses the Codex SDK instead
     of the Claude Agent SDK.  Supports single-turn and multi-turn
-    orchestration with ATN tool relay.
+    agent loop with ATN tool relay.
     """
 
     def __init__(
@@ -114,7 +114,7 @@ class CodexBridgeProvider(Provider):
         return "codex_max"
 
     @property
-    def supports_orchestrate(self) -> bool:
+    def supports_agent_loop(self) -> bool:
         return True
 
     async def send(
@@ -303,10 +303,10 @@ class CodexBridgeProvider(Provider):
         )
 
     # ------------------------------------------------------------------
-    # Orchestrate — multi-turn with tool relay
+    # Agent loop — multi-turn with tool relay
     # ------------------------------------------------------------------
 
-    async def send_orchestrate(
+    async def run_agent_loop(
         self,
         *,
         message: str,
@@ -319,10 +319,10 @@ class CodexBridgeProvider(Provider):
         session_id: str = "",
         **kwargs,
     ) -> ProviderResponse:
-        """Multi-turn orchestrate call through the Codex bridge.
+        """Multi-turn agent loop call through the Codex bridge.
 
         Handles the bidirectional tool relay protocol:
-        1. Sends an 'orchestrate' request to the bridge.
+        1. Sends an 'agent_loop' request to the bridge.
         2. Reads stdout lines for tool_call or final response.
         3. Concurrently drains stderr for streaming events.
         """
@@ -339,7 +339,7 @@ class CodexBridgeProvider(Provider):
 
             request: dict[str, Any] = {
                 "id": request_id,
-                "type": "orchestrate",
+                "type": "agent_loop",
                 "message": message,
                 "system_prompt": system,
                 "model": effective_model,
@@ -356,20 +356,20 @@ class CodexBridgeProvider(Provider):
                 except asyncio.QueueEmpty:
                     break
 
-            # Write the orchestrate request
+            # Write the agent loop request
             line = json.dumps(request) + "\n"
             try:
                 self._process.stdin.write(line.encode())
                 await self._process.stdin.drain()
             except (BrokenPipeError, ConnectionResetError, OSError) as exc:
                 raise ProviderError(
-                    f"Codex bridge stdin broken during orchestrate: {exc}",
+                    f"Codex bridge stdin broken during agent loop: {exc}",
                     provider="codex_max",
                 ) from exc
             # Reset the wedge clock — see bridge.py.
             self._last_subprocess_activity = time.monotonic()
 
-            log.info("Codex orchestrate request sent (tools=%d, max_turns=%d)", len(tools), max_turns)
+            log.info("Codex agent loop request sent (tools=%d, max_turns=%d)", len(tools), max_turns)
 
             # Start streaming events
             stream_task: asyncio.Task | None = None
@@ -451,7 +451,7 @@ class CodexBridgeProvider(Provider):
                     raw = await self._read_stdout_guarded()
                     if not raw:
                         raise ProviderError(
-                            "Codex bridge stdout closed during orchestrate",
+                            "Codex bridge stdout closed during agent loop",
                             provider="codex_max",
                         )
                     self._last_subprocess_activity = time.monotonic()
@@ -467,7 +467,7 @@ class CodexBridgeProvider(Provider):
                         call_id = msg["call_id"]
                         tool_name = msg["name"]
                         tool_input = msg.get("input", {})
-                        log.info("Codex orchestrate tool_call: %s (call_id=%s)", tool_name, call_id)
+                        log.info("Codex agent loop tool_call: %s (call_id=%s)", tool_name, call_id)
 
                         is_error = False
                         try:
@@ -534,13 +534,13 @@ class CodexBridgeProvider(Provider):
 
             if final_resp is None:
                 raise ProviderError(
-                    "No final response from Codex bridge orchestrate",
+                    "No final response from Codex bridge agent loop",
                     provider="codex_max",
                 )
 
             if not final_resp.get("ok"):
                 raise ProviderError(
-                    f"Codex bridge orchestrate error: {final_resp.get('error', 'unknown')}",
+                    f"Codex bridge agent loop error: {final_resp.get('error', 'unknown')}",
                     provider="codex_max",
                 )
 
@@ -822,7 +822,7 @@ class CodexBridgeProvider(Provider):
                 if self._process.returncode is not None:
                     raise ProviderError(
                         f"Codex bridge process exited ({self._process.returncode}) "
-                        "during orchestrate",
+                        "during agent loop",
                         provider="codex_max",
                     )
                 silent_for = time.monotonic() - self._last_subprocess_activity

@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from ..models import AgentStatus, StepType, TaskStatus
-from .provider_manager import get_model_tier, get_tier_label
 
 if TYPE_CHECKING:
     from .agent_registry import AgentRegistry
@@ -241,33 +240,6 @@ class SnapshotBuilder:
                 "started_at": rec.started_at.isoformat(),
             }
 
-        # Fleet-root info: the first registered agent with no parent. The WS
-        # payload key stays "orchestrator" (LEGACY-WIRE below) but the data is
-        # derived from the fleet root, not a fixed root-agent id.
-        root_defn = next(
-            (d for d in self.registry._agents.values() if not d.parent_id),
-            None,
-        )
-        root_info = None
-        if root_defn:
-            raw_provider = root_defn.provider or ""
-            if isinstance(raw_provider, list):
-                primary_provider = raw_provider[0] if raw_provider else ""
-                fallback_providers = raw_provider[1:] if len(raw_provider) > 1 else []
-            else:
-                primary_provider = raw_provider
-                fallback_providers = []
-            root_model = root_defn.cognitive_model or ""
-            root_tier = get_model_tier(root_model)
-            root_info = {
-                "provider": primary_provider,
-                "model": root_model,
-                "capability_tier": root_tier,
-                "tier_label": get_tier_label(root_tier),
-                "available_models": self.provider_manager.get_available_models(primary_provider),
-                "fallback_providers": fallback_providers,
-            }
-
         # Connectors
         from ..connectors import get_bundled_specs
         from ..oauth import requires_oauth
@@ -351,13 +323,9 @@ class SnapshotBuilder:
                 "shell": "powershell" if platform.system() == "Windows" else "bash",
             },
             "update": self._update_snapshot(),
-            # LEGACY-WIRE: atn_web model pickers read this key; the value is
-            # now the fleet-root agent's info (None when no agents exist).
-            "orchestrator": root_info,
-            # Rootless fleets have no fleet-root block, but model pickers
-            # still need the catalog — emit it unconditionally. Active-only:
-            # a model the daemon has no registered provider for is not
-            # pickable, so unconfigured providers stay out of the list.
+            # The model catalog for pickers. Active-only: a model the daemon
+            # has no registered provider for is not pickable, so unconfigured
+            # providers stay out of the list.
             "available_models": self.provider_manager.get_available_models(require_active=True),
             "providers": providers_summary,
             # The provider an unpinned new agent runs on (the create form's

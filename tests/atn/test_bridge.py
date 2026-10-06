@@ -296,7 +296,7 @@ async def test_bridge_script_path():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_orchestrate_allows_haiku():
+async def test_agent_loop_allows_haiku():
     """Haiku passes the (retired) tier guard — chatting with a haiku agent is
     supported. Sentinel at _ensure_process proves the guard didn't reject."""
     provider = BridgeProvider(model="claude-haiku-4-5")
@@ -309,14 +309,14 @@ async def test_orchestrate_allows_haiku():
     provider._ensure_process = _sentinel  # type: ignore
 
     with pytest.raises(_Sentinel):
-        await provider.send_orchestrate(
+        await provider.run_agent_loop(
             message="hi", tools=[], tool_executor=AsyncMock(),
             model="claude-haiku-4-5",
         )
 
 
 @pytest.mark.asyncio
-async def test_orchestrate_allows_sonnet():
+async def test_agent_loop_allows_sonnet():
     """A sonnet-class model passes the tier guard (we stop right after by
     making _ensure_process raise a sentinel so no real subprocess spawns)."""
     provider = BridgeProvider(model="claude-sonnet-4-6")
@@ -331,7 +331,7 @@ async def test_orchestrate_allows_sonnet():
     # Passing the guard means we reach _ensure_process (our sentinel), not a
     # ProviderError about the tier.
     with pytest.raises(_Sentinel):
-        await provider.send_orchestrate(
+        await provider.run_agent_loop(
             message="hi", tools=[], tool_executor=AsyncMock(),
             model="claude-sonnet-4-6",
         )

@@ -70,6 +70,7 @@ class EventType(Enum):
     VOICE_SPEAKING = "voice.speaking"
     VOICE_RECORDING = "voice.recording"
     VOICE_TRANSCRIBED = "voice.transcribed"
+    VOICE_NO_TARGET = "voice.no_target"    # PTT with no focused agent: dropped
 
     # Autonet network service
     AUTONET_STARTED = "autonet.started"

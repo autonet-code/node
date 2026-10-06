@@ -763,7 +763,7 @@ async def amain(from_stage: str = "A", to_stage: str = "G") -> int:
     # ==================================================================
     sF = board.stage(6, "F: evidence rail (CON + support > naked CON)")
     try:
-        from atn.orchestrator.tools import execute_tool
+        from atn.agent_tools import execute_tool
         from nodes.common.world_service import WorldService
 
         # Register a deliberately-buggy pinned tool on runtime A.

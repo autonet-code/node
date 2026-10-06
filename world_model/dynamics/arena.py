@@ -1,7 +1,7 @@
 """
 Arena - Where agents compete to define a person's worldview.
 
-The Arena orchestrates the adversarial dynamics:
+The Arena coordinates the adversarial dynamics:
 1. Agents PROPOSE trees (claims about what matters)
 2. Agents STAKE observations (support own claims, undermine others)
 3. RESOLUTION determines winners (whose claims are best supported)

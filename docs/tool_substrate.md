@@ -498,7 +498,7 @@ providers."
 
 Honest bounds, so the claim stays scrutable:
 
-- Tools crystallize **procedures**. Orchestration (decomposing the
+- Tools crystallize **procedures**. Coordination (decomposing the
   task, selecting among thousands of tools, interpreting failure)
   is itself cognition and stays with the model. Discovery ranking
   attacks the selection half; the decomposition half it cannot.
@@ -508,8 +508,8 @@ Honest bounds, so the claim stays scrutable:
   LLM = judgment; the ratchet lowers the floor for the toolable
   fraction of work and grows that fraction, but it never reaches 1.0.
 - Small models are today measurably worse at multi-step tool
-  orchestration; the ratchet bets that shrinking per-step depth
-  outpaces the orchestration burden of a bigger library. That is an
+  coordination; the ratchet bets that shrinking per-step depth
+  outpaces the coordination burden of a bigger library. That is an
   empirical bet, not a theorem.
 
 Which is why it is PRE-COMMITTED AS FALSIFIABLE: phase 11 (proposed,

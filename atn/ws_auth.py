@@ -245,6 +245,30 @@ def new_nonce() -> str:
     return secrets.token_hex(16)
 
 
+DAEMON_ID_FILE = "daemon_id"
+
+
+def load_or_create_daemon_id(data_dir: Path) -> str:
+    """The daemon's stable per-install identity (random, persisted in the data
+    dir on first use). Independent of agents, load order and the owner wallet,
+    so the auth challenge's domain separation never shifts when the fleet
+    changes. Falls back to an in-memory id if the data dir is unwritable."""
+    path = Path(data_dir) / DAEMON_ID_FILE
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    new_id = "atn-daemon-" + secrets.token_hex(16)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_id, encoding="utf-8")
+    except OSError:
+        pass
+    return new_id
+
+
 def build_challenge_text(nonce: str, *, daemon_id: str, chain_id: int,
                          owner_wallet: str, conn_id: str,
                          issued_at: float | None = None) -> str:
@@ -258,7 +282,7 @@ def build_challenge_text(nonce: str, *, daemon_id: str, chain_id: int,
     Domain separation (finding 6 of the security review): a bare host:port is
     identical across every Autonet daemon, so a signature for daemon A would
     replay on daemon B. We bind the signature to:
-      - daemon_id: the daemon's identity address (unique per daemon),
+      - daemon_id: the daemon's persisted per-install id (load_or_create_daemon_id),
       - chain_id: so a testnet signature can't authorize a mainnet daemon,
       - owner_wallet: the address this challenge expects to recover,
       - conn_id: a server-random per-connection id, so a signature lifted from
@@ -316,8 +340,8 @@ class ClientSession:
     is_loopback: bool = False              # TCP peer is loopback (defense-in-depth)
     authed: bool = False
     owner: bool = False
-    # LEGACY-WIRE: atn_web sends/reads this id as "full fleet" scope.
-    root_agent_id: str = "orchestrator"
+    # The agent this session is rooted at; None = unscoped (full-fleet) owner.
+    root_agent_id: str | None = None
     scope_ids: set[str] | None = None      # None = full fleet
     wallet_address: str = ""
     nonce: str | None = None
@@ -372,11 +396,11 @@ DEFAULT_INTEGRATION_PORT = 7710
 DEFAULT_INTEGRATION_HOST = "127.0.0.1"
 
 # Agent ids an integration token may NEVER be bound to: every string that
-# atn.agent_tools.is_owner_caller() treats as the owner ("", "user",
-# "orchestrator"; None is excluded by the str check). Literals rather than an
+# atn.agent_tools.is_owner_caller() treats as the owner ("", "user"; None is
+# excluded by the str check). Literals rather than an
 # import so this module stays import-light; tests/test_integration_listener.py
 # asserts the two agree.
-_OWNER_SENTINELS = frozenset({"", "user", "orchestrator"})
+_OWNER_SENTINELS = frozenset({"", "user"})
 
 
 def hash_integration_token(token: str) -> str:
@@ -529,7 +553,7 @@ class IntegrationTokenStore:
         if not is_bindable_agent_id(agent_id):
             raise ValueError(
                 f"refusing to bind an integration token to {agent_id!r}: "
-                "owner sentinels (empty, 'user', 'orchestrator') are never "
+                "owner sentinels (empty, 'user') are never "
                 "a valid integration identity")
         with self._lock:
             self._reload_if_changed()

@@ -46,14 +46,10 @@ if TYPE_CHECKING:
 # who holds full permissions. This is the root of trust — NOT an agent.
 OWNER_ID = "user"
 
-# LEGACY-WIRE: old clients/persisted data may still name the retired root
-# agent id. Owner-trusted for compatibility; the role itself is purged.
-_LEGACY_ROOT_ID = "orchestrator"
-
 
 def is_owner_caller(caller_id: str | None) -> bool:
     """True when a tool call originates from the human owner's surface."""
-    return caller_id in (None, "", OWNER_ID, _LEGACY_ROOT_ID)
+    return caller_id in (None, "", OWNER_ID)
 
 
 log = logging.getLogger(__name__)
@@ -2439,7 +2435,7 @@ async def _post_message(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 # (available_models alone is ~1k tokens on a daemon with a few providers).
 _SNAPSHOT_UI_ONLY = frozenset({
     "available_models", "providers", "update", "voice", "input",
-    "orchestrator", "user",
+    "user",
 })
 
 
@@ -3320,48 +3316,8 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
 
 
 # ---------------------------------------------------------------------------
-# Conversation management (UI-facing, not exposed to agent LLMs)
+# Per-agent conversations (UI-facing, not exposed to agent LLMs)
 # ---------------------------------------------------------------------------
-
-async def _reset_conversation(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    session_id = runtime.conversation.reset()
-    return {"status": "reset", "archived_session_id": session_id}
-
-
-async def _get_conversation(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    session_id = input.get("session_id")
-    if session_id:
-        turns = runtime.conversation.get_session(session_id)
-        if not turns:
-            return {"error": f"Session '{session_id}' not found."}
-        return {
-            "turns": [t.to_dict() for t in turns],
-            "count": len(turns),
-            "total": len(turns),
-        }
-
-    limit = input.get("limit")
-    offset = input.get("offset")
-
-    if limit is not None:
-        limit = min(int(limit), 200)
-        offset = int(offset) if offset is not None else 0
-        turns, total = runtime.conversation.get_turns_page(limit=limit, offset=offset)
-        return {
-            "turns": [t.to_dict() for t in turns],
-            "count": len(turns),
-            "total": total,
-            "offset": offset,
-            "has_more": (offset + len(turns)) < total,
-        }
-
-    turns = runtime.conversation.get_turns()
-    return {
-        "turns": [t.to_dict() for t in turns],
-        "count": len(turns),
-        "total": len(turns),
-    }
-
 
 async def _get_agent_conversation(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Get conversation history for a cognitive agent."""
@@ -3410,15 +3366,6 @@ async def _send_agent_message(runtime: Runtime, input: dict[str, Any]) -> dict[s
     if not content:
         return {"error": "Missing 'content'"}
     return await runtime.send_agent_message(agent_id, content)
-
-
-async def _list_conversations(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    sessions = runtime.conversation.list_sessions()
-    active_count = runtime.conversation.turn_count()
-    return {
-        "active_turns": active_count,
-        "archived": sessions,
-    }
 
 
 async def _get_history(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -3656,7 +3603,7 @@ async def _get_my_budget_status(runtime: Runtime, input: dict[str, Any]) -> dict
     # tokens_per_pct_by_class) on execution_done; WorkerHost caches it under the
     # agent_id in ``provider_manager._cached_session_stats``. Consult that cache
     # for the CALLER so get_my_budget_status answers for isolated bridge agents.
-    # The snapshot is as-of the last completed orchestration (see WorkerHost).
+    # The snapshot is as-of the last completed agent-loop run (see WorkerHost).
     try:
         pmgr = getattr(runtime, "providers", None)
         cache = getattr(pmgr, "_cached_session_stats", None)
@@ -4544,7 +4491,7 @@ async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     # WORKER process, so it is NOT in _active_providers (provider is None above).
     # Forward the request_compaction over the worker's IPC command channel; the
     # worker sets the flag on its live provider and reports whether an
-    # orchestration was active to consume it. Only bridge/composite providers
+    # agent-loop run was active to consume it. Only bridge/composite providers
     # stay in-process, so a supervised worker is always a generic loop (which
     # honors the flag). If the worker reports the loop wasn't active (race:
     # just ended), fall through to the idle-store path below.
@@ -4562,7 +4509,7 @@ async def _compact_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         from .providers.codex_bridge import CodexBridgeProvider
         if isinstance(provider, (BridgeProvider, CodexBridgeProvider)):
             return {"status": "unsupported_while_running", "agent_id": agent_id}
-        # Generic loop: request_compaction() returns True iff an orchestration
+        # Generic loop: request_compaction() returns True iff an agent-loop run
         # is actively consuming (steering queue open). If the loop just ended
         # (race), fall through to the idle path.
         if hasattr(provider, "request_compaction") and \
@@ -4858,9 +4805,6 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     # Manual compaction (§15)
     "compact_agent": _compact_agent,
     # Conversation management (UI-facing, not in the agent tool list)
-    "reset_conversation": _reset_conversation,
-    "get_conversation": _get_conversation,
-    "list_conversations": _list_conversations,
     # Agent conversation (UI-facing — universal chat for cognitive agents)
     "get_agent_conversation": _get_agent_conversation,
     "send_agent_message": _send_agent_message,

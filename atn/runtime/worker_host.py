@@ -747,7 +747,7 @@ class WorkerHost:
         # the worker's last session_stats (which carries ``rate_limits`` +
         # ``tokens_per_pct_by_class`` for bridge) under this agent_id, reusing the
         # SAME dict the "provider is gone, answer from cache" path already reads.
-        # Tradeoff: this is as-of the last completed orchestration, not live
+        # Tradeoff: this is as-of the last completed agent-loop run, not live
         # mid-run — correct + non-empty, but a long single run shows slightly
         # stale subscription util. A live provider_status RPC per turn would
         # close that gap (heavier); the piggyback is the light correct option.

@@ -606,7 +606,7 @@ async def amain() -> int:
     reg_events_from_ws: List[Dict[str, Any]] = []
     tool_digest = ""
     try:
-        from atn.orchestrator.tools import execute_tool
+        from atn.agent_tools import execute_tool
         from nodes.common.world_service import WorldService
 
         # Wire a WorldService onto runtime A's tool_store, exactly like

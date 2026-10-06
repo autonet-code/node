@@ -640,7 +640,7 @@ async def amain() -> int:  # noqa: C901 — a linear E2E script, staged for read
     s4 = board.stage(4, "parent funds the child's wallet + binds it (parent-only)")
     binding = {"provider_address": seller_addr, "spec_digest": spec_digest}
     try:
-        from atn.orchestrator.tools import execute_tool
+        from atn.agent_tools import execute_tool
 
         s4.note("child_atn_before",
                 substrate.functions.balanceOf(child_addr).call())

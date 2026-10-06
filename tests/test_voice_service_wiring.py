@@ -111,20 +111,38 @@ def test_narrate_tools_setter_exists():
     assert svc.config.narrate_tools is True
 
 
-def test_ws_resolves_the_legacy_focus_sentinel():
-    """'orchestrator' names no agent on a fresh fleet; focus must remap onto
-    the session root or the speak gate never matches."""
+def test_voice_starts_with_no_focused_agent():
+    """Voice never guesses a target: both focus channels start empty until
+    the app names an agent."""
+    import atn.voice_service as vs
+    from atn.config import VoiceConfig
+    from atn.events import EventBus
+    svc = vs.VoiceService(EventBus(), types.SimpleNamespace(), VoiceConfig())
+    assert svc.voice_focus is None
+    assert svc.tools_focus is None
+    assert svc.get_status()["focused_agent"] is None
+
+
+@pytest.mark.asyncio
+async def test_ws_voice_focus_requires_an_agent_id():
+    """The focus handlers take the agent the app names; an omitted id is an
+    error, never a default agent."""
     from atn import ws_server
+    from atn.ws_auth import ClientSession
 
+    calls = []
+    voice = types.SimpleNamespace(
+        set_focus=lambda a: calls.append(("both", a)),
+        set_voice_focus=lambda a: calls.append(("voice", a)),
+        set_tools_focus=lambda a: calls.append(("tools", a)),
+    )
     server = ws_server.WebSocketBridge.__new__(ws_server.WebSocketBridge)
-    runtime = types.SimpleNamespace(get_agent=lambda aid: None)
-    server.runtime = runtime
-    server._session_root_agent = lambda session: "kevin"
-
-    session = object()
-    assert server._resolve_focus_agent(session, "orchestrator") == "kevin"
-    # A real agent id is passed through untouched.
-    assert server._resolve_focus_agent(session, "kevin") == "kevin"
-    # And a fleet that really does carry the legacy id keeps it.
-    runtime.get_agent = lambda aid: object()
-    assert server._resolve_focus_agent(session, "orchestrator") == "orchestrator"
+    server.runtime = types.SimpleNamespace(voice=voice)
+    session = ClientSession(local=True, authed=True, owner=True)
+    for typ in ("voice_focus", "voice_set_voice_focus", "voice_set_tools_focus"):
+        resp = await server._handle_message({"type": typ, "msg_id": "1"}, session)
+        assert resp["ok"] is False and "agent_id" in resp["error"]
+    resp = await server._handle_message(
+        {"type": "voice_set_voice_focus", "agent_id": "kevin", "msg_id": "2"},
+        session)
+    assert resp["ok"] is True and calls == [("voice", "kevin")]

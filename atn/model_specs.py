@@ -144,7 +144,7 @@ _MODELS: tuple[ModelSpec, ...] = (
         display_name="Claude Haiku 4.5",
         context_window=200_000, max_output_tokens=8_192,
         relative_cost=0.2, default_channel="claude_max",
-        # Empirically verified 2026-08-22: runs the SDK orchestrate tool
+        # Empirically verified 2026-08-22: runs the SDK agent loop tool
         # loop cleanly (~4s round-trip). The 2026-07 hot-spin is gone.
         loop_capable=True,
     ),
@@ -377,7 +377,7 @@ def context_window(model_id: str) -> int:
 def loop_capable(model_id: str) -> bool:
     """Whether a model can sustain the multi-turn agentic loop.
 
-    Grants no tools; what it gates at runtime is whether ``send_orchestrate``
+    Grants no tools; what it gates at runtime is whether ``run_agent_loop``
     may start on this model at all — see
     ``providers/bridge.py:_model_is_loop_capable``, the one enforcement site.
     Sub-tier models are refused because they wedge rather than fail: a

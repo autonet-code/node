@@ -68,6 +68,14 @@ class ConversationTurn:
         )
 
 
+def _migrate_legacy_orchestrator_label_dump(content: str) -> bool:
+    """Migration helper for JSONL written before the assistant label rename:
+    those history dumps used "\nOrchestrator: " as the assistant prefix. True
+    when ``content`` carries it (the sanitize pass then rewrites the turn to
+    just the user's message)."""
+    return "\nOrchestrator: " in content
+
+
 class ConversationStore:
     """Manages agent conversation history with JSONL persistence.
 
@@ -353,13 +361,11 @@ class ConversationStore:
             content = turn.content
             # Detect history-embedded user turns: content has role prefixes
             # like "System: ...\nUser: ...\nAssistant: ..." baked in.
-            # LEGACY-DATA: "\nOrchestrator: " matches JSONL persisted before
-            # the assistant label was renamed.
             if turn.role == "user" and "\nUser: " in content and (
                 content.startswith("System: ")
                 or content.startswith("User: ")
                 or "\nAssistant: " in content
-                or "\nOrchestrator: " in content
+                or _migrate_legacy_orchestrator_label_dump(content)
             ):
                 # Extract the last "User: ..." segment as the real message.
                 parts = content.split("\nUser: ")

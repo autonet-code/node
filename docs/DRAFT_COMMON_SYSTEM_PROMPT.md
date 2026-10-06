@@ -182,10 +182,10 @@ navigability.
 - Also update the `DelegateNode.result_preview` field comment (line 44) from "500 chars" to "2000 chars"
 - And `agent_registry.py` line 139: `result_preview[:500]` → `result_preview[:2000]`
 
-### 3. Orchestrator system prompt (in config or hardcoded)
-- The orchestrator's own system prompt should use the same common base, with additional
-  orchestrator-specific guidance (planning, goal management, user interaction)
-- This makes the orchestrator a cognitive agent that happens to be the root, not a
+### 3. Top-level agent system prompt (in config or hardcoded)
+- A top-level agent's own system prompt should use the same common base, with additional
+  top-level-agent-specific guidance (planning, goal management, user interaction)
+- This makes a top-level agent a cognitive agent like any other, not a
   special snowflake with a completely different prompt architecture
 
 ---
@@ -213,8 +213,8 @@ navigability.
    configurable per agent or per parent preference? A research agent's summary
    needs more space than a debug agent's "fixed it, here's the diff."
 
-2. **Orchestrator unification.** Should the orchestrator's system prompt literally
-   use `_COMMON_BASE` + orchestrator-specific additions? Or does it remain separate
+2. **Top-level agent unification.** Should a top-level agent's system prompt literally
+   use `_COMMON_BASE` + top-level-agent-specific additions? Or does it remain separate
    since it's loaded from a different path (Claude Code's system prompt vs.
    delegate_prompts.py)?
 

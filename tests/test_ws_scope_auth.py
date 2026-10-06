@@ -41,10 +41,10 @@ def _agent(agent_id, parent_id, *, address=None, key=None):
 
 async def _fleet(tmp_path, owner_wallet=""):
     rt = _make_runtime(tmp_path, owner_wallet=owner_wallet)
-    await rt.registry.register_agent(_agent("orchestrator", None))
-    await rt.registry.register_agent(_agent("a", "orchestrator", address="0xAaA0000000000000000000000000000000000001"))
+    await rt.registry.register_agent(_agent("lead", None))
+    await rt.registry.register_agent(_agent("a", "lead", address="0xAaA0000000000000000000000000000000000001"))
     await rt.registry.register_agent(_agent("a.1", "a"))
-    await rt.registry.register_agent(_agent("b", "orchestrator"))
+    await rt.registry.register_agent(_agent("b", "lead"))
     # Give a.1 a stored private key so export tests have something to fetch.
     rt.registry._agent_keys["a.1"] = "deadbeef" * 8
     return rt
@@ -56,7 +56,7 @@ def _bridge(rt, owner_wallet=""):
 
 def _local_session():
     return ClientSession(local=True, authed=True, owner=True,
-                         root_agent_id="orchestrator", scope_ids=None)
+                         root_agent_id=None, scope_ids=None)
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ async def test_local_session_snapshot_unrestricted(tmp_path):
     bridge = _bridge(rt)
     resp = await bridge._handle_message({"type": "snapshot", "msg_id": "1"}, _local_session())
     assert resp["ok"] is True
-    assert set(resp["result"]["agents"].keys()) == {"orchestrator", "a", "a.1", "b"}
+    assert set(resp["result"]["agents"].keys()) == {"lead", "a", "a.1", "b"}
 
 
 @pytest.mark.asyncio
@@ -147,7 +147,7 @@ async def test_owner_signature_authorizes_full_fleet(tmp_path):
     resp = await bridge._handle_message(
         {"type": "auth_response", "signature": sig, "msg_id": "1"}, s)
     assert resp["ok"] is True and resp["owner"] is True
-    assert resp["root"] == "orchestrator"
+    assert resp["root"] is None
     assert s.authed and s.scope_ids is None
 
 
@@ -207,11 +207,11 @@ async def test_scoped_session_cannot_target_out_of_subtree(tmp_path):
     rt = await _fleet(tmp_path)
     bridge = _bridge(rt)
     # Session scoped to subtree 'a' = {a, a.1}. caller_id is its own root (would
-    # pass a naive caller_id clamp), but the TARGET is the orchestrator.
+    # pass a naive caller_id clamp), but the TARGET is the out-of-subtree agent 'lead'.
     s = ClientSession(local=False, authed=True, owner=True,
                       root_agent_id="a", scope_ids={"a", "a.1"})
     resp = await bridge._handle_message(
-        {"type": "kill_agent", "agent_id": "orchestrator",
+        {"type": "kill_agent", "agent_id": "lead",
          "caller_id": "a", "msg_id": "1"}, s)
     assert resp["ok"] is False
     assert "outside the authorized subtree" in resp["error"]
