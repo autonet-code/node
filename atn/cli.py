@@ -724,6 +724,11 @@ async def run_cli() -> None:
                 console.print(
                     f"  [green]Integration (bearer token, agent-clamped) WS on "
                     f"ws://{_int_host}:{_int_port}[/]")
+                from .guest_sandbox import boot_warning as _guest_warning
+                _gw = _guest_warning()
+                if _gw:
+                    log.warning("Guest tools: %s", _gw)
+                    console.print(f"  [yellow]Guest tools: {_gw}[/]")
             break
         except OSError as exc:
             ws_bridge = None

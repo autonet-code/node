@@ -20,6 +20,19 @@
 # The local owner WS (:7700) binds 127.0.0.1 inside the container and is
 # deliberately NOT exposed.
 #
+# Guest tools (docs/integration_listener.md, "Guest tool authoring"): tools a
+# guest registers over the integration listener run as SEPARATE uids, one
+# per live run from the pool 10002-10017 (atn-guest is the first), that cannot
+# read /data/atn, the daemon's environment or each other, and are refused by
+# the owner socket's peer-credential check. The entrypoint is therefore a
+# small root launcher (atn/guest_launcher.py) that starts the daemon as `atn`
+# (10001) and runs each guest tool as a pool uid. It needs only
+# CAP_SETUID + CAP_SETGID. Run the container as `atn` instead (--user atn)
+# and the daemon starts directly with guest tools refused (fail closed).
+#
+# `docker exec` defaults to root now: run node commands that touch /data/atn
+# as the daemon user, e.g. `docker exec -u atn <ctr> atn integration-token ...`.
+#
 # Compose snippet (hardened):
 #
 #   services:
@@ -37,6 +50,7 @@
 #         AUTONET_RPC_URL: ${AUTONET_RPC_URL}
 #         AUTONET_SUBSTRATE_ADDRESS: ${AUTONET_SUBSTRATE_ADDRESS}
 #       cap_drop: [ALL]
+#       cap_add: [SETUID, SETGID]  # guest launcher: daemon -> atn, tools -> pool uids
 #       security_opt: ["no-new-privileges:true"]
 #       read_only: true
 #       tmpfs:
@@ -75,12 +89,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ARG ATN_UID=10001
+ARG ATN_GUEST_UID=10002
 RUN groupadd --system --gid ${ATN_UID} atn \
     && useradd --system --uid ${ATN_UID} --gid atn \
        --home-dir /home/atn --create-home --shell /usr/sbin/nologin atn \
+    && groupadd --system --gid ${ATN_GUEST_UID} atn-guest \
+    && useradd --system --uid ${ATN_GUEST_UID} --gid atn-guest \
+       --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin atn-guest \
     && mkdir -p /data/atn \
     && chown atn:atn /data/atn \
-    && chmod 0700 /data/atn \
+    && chmod 0700 /data/atn /home/atn \
     && ln -s /data/atn /home/atn/.atn
 
 COPY --from=build /opt/venv /opt/venv
@@ -101,9 +119,11 @@ ENV PATH=/opt/venv/bin:$PATH \
 VOLUME ["/data/atn"]
 EXPOSE 7710 4001
 
-USER atn
 WORKDIR /home/atn
 
-# tini reaps the tool_guard / worker subprocesses the runtime spawns.
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# Starts as root ONLY for the guest launcher, which drops the daemon to `atn`
+# at once and keeps CAP_SETUID/SETGID solely to start guest tool runs as
+# pool uids 10002-10017. tini reaps the tool_guard / worker subprocesses.
+ENTRYPOINT ["/usr/bin/tini", "--", "python", "-m", "atn.guest_launcher", \
+            "--daemon-uid", "10001", "--guest-uid", "10002",             "--guest-uid-count", "16", "--"]
 CMD ["atn", "--headless"]

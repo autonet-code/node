@@ -2659,6 +2659,12 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         return {"error": "capabilities must be an object "
                          "({net, fs, spawn, env})"}
 
+    # Guest authoring (integration listener): the listener sets _origin AFTER
+    # stripping every "_" key from the guest's request, so only the server can
+    # mark a record "integration". The value can only make execution STRICTER
+    # (the guest containment path), never weaker.
+    origin = "integration" if input.get("_origin") == "integration" else "authored"
+
     try:
         result = runtime.tool_store.register(
             name=name,
@@ -2672,10 +2678,12 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
             publish=bool(input.get("publish", False)),
             dependencies=dependencies,
             capabilities=capabilities or None,
+            origin=origin,
         )
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}
     return {
+        "origin": origin,
         "digest": result["digest"],
         "name": name,
         "trust_class": result["manifest"]["trust_class"],

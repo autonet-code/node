@@ -168,22 +168,27 @@ async def test_use_tool_restricted_to_registered(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_register_tool_denied(tmp_path):
-    # An authored tool runs with the daemon's env + cwd, so register_tool then
-    # use_tool would be code execution on the daemon host. Guests can't author.
+async def test_register_tool_guest_origin(tmp_path):
+    # Guest authoring is allowed ONLY as origin="integration" (always run on
+    # the guest containment path, tests/atn/test_guest_tools.py). Connector-
+    # backed manifests stay refused.
     rt = await _fleet(tmp_path)
     bridge = _bridge(rt)
     _, rec = bridge._integration_store.create("guest", "g")
     sess = _session(rec)
-    assert "register_tool" in INTEGRATION_DENIED_MESSAGES
-    assert "register_tool" not in INTEGRATION_ALLOWED_MESSAGES
-    for extra in ({}, {"connector_id": "gmail"}):
-        resp = await bridge._handle_integration_message(
-            {"type": "register_tool", "msg_id": "1", "name": "x",
-             "description": "x", "input_schema": _SCHEMA,
-             "code": "import os; print(os.environ)", **extra}, sess)
-        assert resp["ok"] is False and resp["code"] == "owner_only", resp
-    assert rt.tool_registry.get_tool("x") is None
+    assert "register_tool" in INTEGRATION_ALLOWED_MESSAGES
+    assert "register_tool" not in INTEGRATION_DENIED_MESSAGES
+    resp = await bridge._handle_integration_message(
+        {"type": "register_tool", "msg_id": "1", "name": "guest_x",
+         "description": "x", "input_schema": _SCHEMA,
+         "code": "print(1)", "connector_id": "gmail"}, sess)
+    assert resp["ok"] is False and resp["code"] == "not_allowed", resp
+    resp = await bridge._handle_integration_message(
+        {"type": "register_tool", "msg_id": "2", "name": "guest_x",
+         "description": "x", "input_schema": _SCHEMA,
+         "code": "print(1)"}, sess)
+    assert resp["ok"] is True, resp
+    assert rt.tool_store.get(resp["result"]["digest"]).origin == "integration"
 
 
 # ---------------------------------------------------------------------------

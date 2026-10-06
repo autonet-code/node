@@ -87,6 +87,11 @@ def build_tool_manifest(
     # lineage
     version_of: Optional[str] = None,
     created_ts: int = 0,
+    # provenance: "integration" when a guest harness holding only an
+    # integration token wrote the code (atn/guest_sandbox.py) and the node
+    # signs it on the guest's behalf. Signed with the rest of the manifest,
+    # so adopters see who really wrote it.
+    authored_via: str = "",
 ) -> Dict[str, Any]:
     """Assemble and validate a tool-manifest payload.
 
@@ -126,6 +131,8 @@ def build_tool_manifest(
         manifest["dependencies"] = list(dependencies)
     if capabilities:
         manifest["capabilities"] = dict(capabilities)
+    if authored_via:
+        manifest["authored_via"] = str(authored_via)
 
     errors = validate_manifest(manifest)
     if errors:
@@ -170,6 +177,10 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
     version_of = payload.get("version_of")
     if version_of is not None and not isinstance(version_of, str):
         errors.append("version_of must be a digest string or null")
+
+    authored_via = payload.get("authored_via")
+    if authored_via is not None and not isinstance(authored_via, str):
+        errors.append("authored_via must be a string")
 
     caps = payload.get("capabilities")
     if caps is not None:

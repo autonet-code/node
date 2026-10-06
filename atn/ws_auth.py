@@ -37,6 +37,7 @@ import ipaddress
 import json
 import os
 import secrets
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -75,6 +76,168 @@ def is_loopback(remote_address) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Local owner listener: peer-credential gate against guest tool processes
+# ---------------------------------------------------------------------------
+
+def _norm_ip(host) -> ipaddress._BaseAddress | None:
+    """Parsed address with IPv4-mapped IPv6 folded to IPv4 (None if bad)."""
+    try:
+        ip = ipaddress.ip_address(str(host).split("%", 1)[0].strip("[]"))
+    except ValueError:
+        return None
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return mapped if mapped is not None else ip
+
+
+def _endpoint(addr) -> tuple[ipaddress._BaseAddress, int] | None:
+    """(ip, port) from a socket address tuple, or None."""
+    try:
+        ip = _norm_ip(addr[0])
+        port = int(addr[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return (ip, port) if ip is not None else None
+
+
+def _proc_endpoint(field: str) -> tuple[ipaddress._BaseAddress, int] | None:
+    """Decode a /proc/net/tcp{,6} ``HEXADDR:HEXPORT`` column. The address is
+    the kernel's raw bytes printed as host-order 32-bit words."""
+    try:
+        hexaddr, hexport = field.rsplit(":", 1)
+        port = int(hexport, 16)
+        raw = bytes.fromhex(hexaddr)
+    except ValueError:
+        return None
+    if len(raw) not in (4, 16):
+        return None
+    packed = b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4))
+    if sys.byteorder == "big":
+        packed = raw
+    ip = ipaddress.ip_address(packed)
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return (mapped if mapped is not None else ip), port
+
+
+def _linux_peer_uid(peer, server) -> int | None:
+    """Uid owning the CLIENT end of a TCP connection (from /proc/net/tcp{,6}).
+
+    ``peer`` is the accepted connection's remote address, ``server`` its local
+    address (both (host, port) tuples). The row must match the full 4-tuple
+    (local == peer, remote == server). Rows whose local port is the server
+    port are skipped: they are the daemon's own accepted sockets and the
+    listener. More than one matching row is ambiguous and resolves to None
+    (the caller refuses)."""
+    want_local = _endpoint(peer)
+    want_remote = _endpoint(server)
+    if want_local is None or want_remote is None:
+        return None
+    found: list[int] = []
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table, encoding="ascii") as fh:
+                next(fh, None)
+                for line in fh:
+                    cols = line.split()
+                    if len(cols) < 8:
+                        continue
+                    local = _proc_endpoint(cols[1])
+                    remote = _proc_endpoint(cols[2])
+                    if local is None or remote is None:
+                        continue
+                    if local[1] == want_remote[1]:
+                        continue
+                    if local == want_local and remote == want_remote:
+                        try:
+                            found.append(int(cols[7]))
+                        except ValueError:
+                            return None
+        except OSError:
+            continue
+    return found[0] if len(found) == 1 else None
+
+
+def _peer_pid(peer, server) -> int | None:
+    """Pid owning the client end of a TCP connection (psutil), matched on the
+    full 4-tuple like _linux_peer_uid. None when it cannot be resolved (another
+    uid's socket, no permission) or when the match is ambiguous."""
+    want_local = _endpoint(peer)
+    want_remote = _endpoint(server)
+    if want_local is None or want_remote is None:
+        return None
+    try:
+        import psutil
+        found: list[int | None] = []
+        for c in psutil.net_connections(kind="tcp"):
+            if not c.laddr or not c.raddr:
+                continue
+            local = _endpoint((c.laddr.ip, c.laddr.port))
+            remote = _endpoint((c.raddr.ip, c.raddr.port))
+            if local is None or remote is None or local[1] == want_remote[1]:
+                continue
+            if local == want_local and remote == want_remote:
+                found.append(c.pid)
+    except Exception:  # noqa: BLE001
+        return None
+    return found[0] if len(found) == 1 else None
+
+
+def local_peer_denied(remote_address, local_address) -> str | None:
+    """Reason to refuse a connection on the privileged local listener, or
+    None to allow it.
+
+    ``remote_address`` / ``local_address`` are the accepted socket's peer and
+    local (host, port) tuples. A bare int ``local_address`` is read as the
+    port on 127.0.0.1 (older callers).
+
+    The local listener pre-auths every connection as the OWNER, so a guest
+    tool process (atn/guest_sandbox.py) must never be served there. Checked by
+    peer credential, never by address (guests connect from loopback too). The
+    client socket is found by the full 4-tuple, never by ports alone:
+
+    - separate-uid guests (ATN_GUEST_UID, set by atn.guest_launcher): the
+      client socket's owning uid, from /proc/net/tcp. Unresolvable or
+      ambiguous while uid isolation is configured => refused (fail closed).
+    - same-uid fallback guests: the client socket's owning pid (psutil) is a
+      tracked guest PID or a descendant of one. Checked only while a guest run
+      is live; unresolvable during one => refused.
+
+    With no guest uid configured and no guest run live, this is a no-op and
+    the listener behaves exactly as before."""
+    from .guest_sandbox import guest_uids, live_guest_pids
+    uids = guest_uids()
+    live = live_guest_pids()
+    if not uids and not live:
+        return None
+    if isinstance(local_address, int):
+        local_address = ("127.0.0.1", local_address)
+    if _endpoint(remote_address) is None:
+        return "peer address unavailable"
+    if _endpoint(local_address) is None:
+        return "listener address unavailable"
+    if uids:
+        if not sys.platform.startswith("linux"):
+            return None if not live else _pid_gate(remote_address, local_address)
+        uid = _linux_peer_uid(remote_address, local_address)
+        if uid is None:
+            return "peer credentials unavailable while guest uid isolation is on"
+        if uid in uids:
+            return f"peer uid {uid} is a guest tool uid"
+    if live:
+        return _pid_gate(remote_address, local_address)
+    return None
+
+
+def _pid_gate(peer, server) -> str | None:
+    from .guest_sandbox import pid_is_guest
+    pid = _peer_pid(peer, server)
+    if pid is None:
+        return "peer process unresolved while a guest tool is running"
+    if pid_is_guest(pid):
+        return f"peer pid {pid} is a guest tool process"
+    return None
 
 
 def new_nonce() -> str:

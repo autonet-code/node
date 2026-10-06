@@ -180,6 +180,9 @@ INTEGRATION_ALLOWED_MESSAGES = frozenset({
     "attest_tools",    # post-use reviews (per-axis scores), as the bound agent
     "publish_tool",    # author-only, and only if the agent holds the grant
     "adopt_tool",      # PROPOSES adoption; approval stays owner-only
+    "register_tool",   # GUEST authoring: pinned code only, origin="integration",
+                       # always run on the guest containment path
+                       # (atn/guest_sandbox.py: separate uid when available)
     # Public reads (see INTEGRATION_PUBLIC_READS): network state any peer can
     # already see. Handled inline; they carry no agent authority.
     "find_services",   # the on-chain services market (read-only)
@@ -194,6 +197,14 @@ INTEGRATION_ALLOWED_MESSAGES = frozenset({
 # `services` bundle, which also carries pay_for_service, just to browse the
 # market). Paying, requesting and every other money action stay denied here
 # and go through the owner's wallet-authed remote listener.
+# Guest register_tool names (enforced here, not only by the client): the
+# prefixes belong to the node's own surfaces (atn_* harness modules, reg_*
+# digest refs, pipelines, connectors, MCP).
+import re as _re
+_GUEST_TOOL_NAME_RE = _re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+_GUEST_RESERVED_PREFIXES = ("atn_", "reg_", "pipeline_", "tool_",
+                            "connector_", "mcp_")
+
 INTEGRATION_PUBLIC_READS = frozenset({"find_services", "tool_reviews",
                                       "network_status"})
 assert INTEGRATION_PUBLIC_READS <= INTEGRATION_ALLOWED_MESSAGES
@@ -219,12 +230,9 @@ INTEGRATION_DENIED_MESSAGES = frozenset({
     "approve_adoption", "reject_adoption", "list_adoption_proposals",
     "grant_tool", "revoke_tool", "set_tool_enabled", "set_tool_published",
     "vet_tool",
-    # Tool AUTHORING. An authored (non-adopted) tool runs with the daemon's
-    # full environment and cwd, so register_tool + use_tool would hand the
-    # token holder code execution on the daemon host (keystore, vault, and
-    # the pre-authenticated owner socket on :7700). Guests use tools; they
-    # don't author them here.
-    "register_tool",
+    # Tool AUTHORING is allowed (register_tool, above) only because guest
+    # records are flagged origin="integration" and never run on the authored
+    # path (daemon env + cwd). See _integration_register_args.
     # Ownership, wallets, chain registration + signing, money movement.
     "set_owner_wallet", "rotate_owner", "owner_binding_status",
     "owner_claim_status", "autonet_wallet_connect", "autonet_wallet_disconnect",
@@ -553,6 +561,24 @@ class WebSocketBridge:
         rooted at the full fleet (today's behavior). A remote session starts
         unauthed and is issued an auth_challenge instead of a snapshot."""
         remote = ws.remote_address
+        if local:
+            # The local listener pre-auths as OWNER, so a guest tool process
+            # (separate guest uid, or a tracked same-uid guest PID) must never
+            # get a session here. Peer credential, not address: every guest
+            # connects from loopback too.
+            local_addr = getattr(ws, "local_address", None) or ()
+            if len(local_addr) < 2:
+                local_addr = ("127.0.0.1", self.port)
+            denied = await asyncio.to_thread(
+                ws_auth.local_peer_denied, remote, tuple(local_addr[:2]))
+            if denied:
+                log.warning("Refused local owner connection from %s: %s",
+                            remote, denied)
+                try:
+                    await ws.close(code=4403, reason="forbidden")
+                except Exception:                          # noqa: BLE001
+                    pass
+                return
         session = ClientSession(
             local=local,
             is_loopback=ws_auth.is_loopback(remote),
@@ -879,24 +905,81 @@ class WebSocketBridge:
         store = getattr(self.runtime, "tool_store", None)
         if store is None or not digest:
             return False
-        seen: set[str] = set()
-        frontier = [digest]
-        for _ in range(8):                    # composition depth is <= 4
-            nxt: list[str] = []
-            for d in frontier:
+        return store.reaches_connector(digest)
+
+    def _integration_register_args(self, args: dict[str, Any],
+                                   agent_id: str) -> tuple[str, str] | None:
+        """Validate (and mark) a guest register_tool request in place.
+
+        Returns None when OK, else ``(code, error)``: "not_allowed" when the
+        request names something a guest may never reach (a connector, an
+        endpoint), "bad_request" otherwise. On success ``args["_origin"]`` is
+        set to "integration" AFTER the "_"-key strip, so a guest cannot choose
+        its own origin and the record always runs on the guest containment
+        path."""
+        from .guest_sandbox import GUEST_CAPABILITY_KEYS, GUEST_ORIGIN
+        for key in ("connector_id", "provider", "entrypoint", "endpoint"):
+            if args.get(key):
+                return ("not_allowed", "guest tools are pinned code only; "
+                        "connector-, provider- and endpoint-backed tools are "
+                        "refused")
+        if args.get("publish"):
+            return ("bad_request", "register_tool never publishes; call publish_tool")
+        code = args.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return ("bad_request", "Missing required field: 'code' (guest tools are pinned code)")
+        for key in ("name", "description"):
+            if not isinstance(args.get(key), str) or not args[key].strip():
+                return ("bad_request", f"Missing required field: '{key}'")
+        name = args["name"]
+        if not _GUEST_TOOL_NAME_RE.match(name):
+            return ("bad_request", "name must be snake_case, 3-64 chars, "
+                    "starting with a letter")
+        if name.startswith(_GUEST_RESERVED_PREFIXES):
+            return ("bad_request", "name may not start with "
+                    + ", ".join(_GUEST_RESERVED_PREFIXES))
+        # A name another author already uses would make ToolStore.resolve
+        # ambiguous and break that author's use_tool-by-name.
+        store = getattr(self.runtime, "tool_store", None)
+        if store is not None:
+            for rec in list(getattr(store, "_records", {}).values()):
+                if rec.name == name and rec.author_id != agent_id:
+                    return ("not_allowed", f"tool name {name!r} is taken")
+        registry = getattr(self.runtime, "tool_registry", None)
+        if registry is not None:
+            from .tool_registry import ToolCategory
+            existing = registry.get_tool(name)
+            if existing is not None and existing.category != ToolCategory.REGISTERED:
+                return ("not_allowed", f"tool name {name!r} is taken")
+        if not isinstance(args.get("input_schema"), dict):
+            return ("bad_request", "input_schema must be a JSON-schema object")
+        caps = args.get("capabilities")
+        if caps is not None:
+            if not isinstance(caps, dict):
+                return ("bad_request", "capabilities must be an object {net, fs, spawn}")
+            extra = set(caps) - GUEST_CAPABILITY_KEYS
+            if extra:
+                return ("bad_request",
+                        "guest tools may declare only net, fs and spawn "
+                        f"(not {', '.join(sorted(extra))})")
+            if not all(isinstance(v, bool) for v in caps.values()):
+                return ("bad_request", "capabilities values must be booleans")
+        deps = args.get("dependencies")
+        if deps is not None:
+            if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+                return ("bad_request", "dependencies must be a list of manifest digests")
+            store = self.runtime.tool_store
+            for d in deps:
                 rec = store.resolve(d)
-                if rec is None or rec.digest in seen:
-                    continue
-                seen.add(rec.digest)
-                manifest = rec.manifest or {}
-                if manifest.get("connector_id"):
-                    return True
-                nxt.extend(x for x in (manifest.get("dependencies") or [])
-                           if isinstance(x, str))
-            if not nxt:
-                break
-            frontier = nxt
-        return False
+                if rec is None or not store.allowed(agent_id, rec):
+                    return ("bad_request", f"Unknown dependency: {d[:16]}")
+                if self._integration_reaches_connector(rec.digest):
+                    return ("not_allowed", "guest tools may not depend on a "
+                            "connector-backed tool")
+        if not isinstance(args.get("version_of"), str):
+            args.pop("version_of", None)
+        args["_origin"] = GUEST_ORIGIN
+        return None
 
     def _integration_bucket(self, token_hash: str) -> ws_auth.TokenBucket:
         bucket = self._integration_buckets.get(token_hash)
@@ -1021,6 +1104,10 @@ class WebSocketBridge:
             # Only registered tools are callable here; do not advertise the
             # daemon's connectors / pipelines / core surface.
             args["category"] = "registered"
+        elif msg_type == "register_tool":
+            refusal = self._integration_register_args(args, agent_id)
+            if refusal is not None:
+                return _err(refusal[1], refusal[0])
         elif msg_type == "use_tool":
             # use_tool can name ANY unified tool, including core tools
             # (create_agent, pay_for_service, ...) and the owner's MCP
@@ -1062,7 +1149,8 @@ class WebSocketBridge:
             for row in result.get("tools") or []:
                 rec = store.get(str(row.get("digest") or "")) if isinstance(row, dict) else None
                 if rec is not None:
-                    row["mine"] = rec.author_id == agent_id and rec.origin == "authored"
+                    row["mine"] = (rec.author_id == agent_id
+                                   and rec.origin in ("authored", "integration"))
                     row["origin"] = rec.origin
                     row["published"] = bool(rec.published)
         return {"msg_id": msg_id, "ok": True, "result": result}

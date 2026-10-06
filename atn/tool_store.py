@@ -111,10 +111,14 @@ class ToolRecord:
     # lineage while manifest.author (the original 0x) keeps earning.
     local_author: str = ""
     registered_ts: int = 0
-    # "authored" (default) | "adopted". Adopted records carry foreign
-    # code: they execute ONLY under the capability guard
+    # "authored" (default) | "adopted" | "integration". Adopted records
+    # carry foreign code: they execute ONLY under the capability guard
     # (atn/tool_guard.py — scrubbed env, sandbox cwd, deny-by-default
     # audit hook) and can never be re-published by the adopter.
+    # "integration" records were authored by a guest harness over the
+    # integration listener: untrusted code that ALWAYS runs on the guest
+    # containment path (atn/guest_sandbox.py: separate uid when the
+    # launcher is present), whoever calls it. Their author may publish.
     origin: str = "authored"
 
     @property
@@ -221,6 +225,7 @@ class ToolStore:
         publish: bool = False,
         dependencies: list[str] | None = None,
         capabilities: dict[str, Any] | None = None,
+        origin: str = "authored",
     ) -> dict[str, Any]:
         """Build, sign, store, and index a tool manifest. Returns
         ``{"digest", "manifest"}`` or raises ValueError on bad input.
@@ -243,6 +248,36 @@ class ToolStore:
         from nodes.common.world_model_substrate.tool_manifest import (
             build_tool_manifest,
         )
+        from .guest_sandbox import GUEST_CAPABILITY_KEYS, GUEST_ORIGIN
+
+        if origin not in ("authored", GUEST_ORIGIN):
+            raise ValueError(f"unknown tool origin {origin!r}")
+        if origin == GUEST_ORIGIN:
+            # Guest authoring (docs/integration_listener.md): pinned code
+            # only, deny-by-default net/fs/spawn, nothing that reaches the
+            # owner's connectors, env or vault.
+            if not code:
+                raise ValueError("guest tools must be pinned code (`code`)")
+            if connector_id or provider or entrypoint:
+                raise ValueError("guest tools cannot be connector- or "
+                                 "provider-backed")
+            if publish:
+                raise ValueError("registration is private; publish separately")
+            extra = set(capabilities or {}) - GUEST_CAPABILITY_KEYS
+            if extra:
+                raise ValueError(
+                    "guest tools may declare only net, fs and spawn "
+                    f"capabilities (not {', '.join(sorted(extra))})")
+            for dep in dependencies or []:
+                if self.reaches_connector(dep):
+                    raise ValueError("guest tools may not depend on a "
+                                     "connector-backed tool")
+                dep_rec = self.resolve(dep)
+                dep_caps = (dep_rec.manifest.get("capabilities") or {}
+                            if dep_rec is not None else {})
+                if dep_caps.get("secrets") or dep_caps.get("env"):
+                    raise ValueError("guest tools may not depend on a tool "
+                                     "that declares secrets or env")
 
         blobs = self._blob_store()
 
@@ -336,7 +371,7 @@ class ToolStore:
             m = existing.manifest
             if (existing.local_author == author
                     and (m.get("author") or "") == consensus_author
-                    and existing.origin == "authored"
+                    and existing.origin == origin
                     and m.get("name") == name
                     and m.get("trust_class") == trust_class
                     and (m.get("code_digest") or "") == code_digest
@@ -375,6 +410,7 @@ class ToolStore:
             dependencies=deps or None,
             capabilities=capabilities,
             created_ts=int(time.time()),
+            authored_via=GUEST_ORIGIN if origin == GUEST_ORIGIN else "",
         )
         self._sign(author, manifest)
 
@@ -385,6 +421,7 @@ class ToolStore:
             published=bool(publish),
             local_author=author,
             registered_ts=int(time.time()),
+            origin=origin,
         )
         self._records[digest] = record
         self._persist()
@@ -436,6 +473,28 @@ class ToolStore:
                  len(stale), name, keep_digest[:16])
         return len(stale)
 
+    def reaches_connector(self, digest: str | None) -> bool:
+        """True if ``digest`` is connector-backed or (transitively, bounded)
+        declares a connector-backed dependency."""
+        seen: set[str] = set()
+        frontier = [digest] if digest else []
+        for _ in range(8):                    # composition depth is <= 4
+            nxt: list[str] = []
+            for d in frontier:
+                rec = self.resolve(d)
+                if rec is None or rec.digest in seen:
+                    continue
+                seen.add(rec.digest)
+                manifest = rec.manifest or {}
+                if manifest.get("connector_id"):
+                    return True
+                nxt.extend(x for x in (manifest.get("dependencies") or [])
+                           if isinstance(x, str))
+            if not nxt:
+                break
+            frontier = nxt
+        return False
+
     def set_published(self, digest: str, published: bool) -> bool:
         """Owner-gated publish/unpublish. Publishing pushes the manifest
         to the substrate; unpublishing only stops future pushes (the
@@ -447,6 +506,13 @@ class ToolStore:
             return False
         if record.origin == "adopted":
             return False
+        from .guest_sandbox import GUEST_ORIGIN
+        if (published and record.origin == GUEST_ORIGIN
+                and record.manifest.get("authored_via") != GUEST_ORIGIN):
+            # A guest record from before the provenance stamp would go out
+            # looking node-authored. Re-registering stamps it.
+            raise ValueError("this guest tool predates the authored_via "
+                             "provenance stamp; register it again to publish")
         if published and not _is_claimable_identity(
                 str(record.manifest.get("author") or "")):
             # Baked orphan author (pre-identity registration). Blocked —
@@ -783,6 +849,9 @@ class ToolStore:
         if raw is None:
             return {"error": f"code blob {code_digest[:16]}... not in local store"}
 
+        if self._is_guest(record):
+            return await self._call_guest(record, raw, arguments)
+
         cache_dir = self._dir / "code_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         script = cache_dir / f"{code_digest}.py"
@@ -832,6 +901,61 @@ class ToolStore:
         except json.JSONDecodeError:
             return {"result": out_text[:8000]}
 
+    # ---- guest (origin="integration") containment -------------------
+
+    @staticmethod
+    def _is_guest(record: ToolRecord) -> bool:
+        from .guest_sandbox import GUEST_ORIGIN
+        return record.origin == GUEST_ORIGIN
+
+    def _exec_timeout(self, record: ToolRecord) -> float:
+        if self._is_guest(record):
+            from .guest_sandbox import guest_limits, uid_isolation_available
+            t = float(guest_limits()["timeout"])
+            # Under the launcher the stage enforces the limit itself; give it
+            # a moment to report before the daemon-side kill.
+            return t + 2.0 if uid_isolation_available() else t
+        return float(_PINNED_EXEC_TIMEOUT_S)
+
+    def _guest_data_dir(self) -> Path:
+        cfg = getattr(self._runtime, "_config", None)
+        data_dir = getattr(cfg, "data_dir", None)
+        return Path(data_dir) if data_dir else self._dir.parent
+
+    async def _call_guest(self, record: ToolRecord, raw: bytes,
+                          arguments: dict[str, Any]) -> dict[str, Any]:
+        """Sealed run of a guest-authored tool (atn/guest_sandbox.py): no
+        tool secrets, no daemon env, separate uid when available."""
+        from .guest_sandbox import GuestIsolationUnavailable, spawn_guest
+        timeout = self._exec_timeout(record)
+        try:
+            proc = await spawn_guest(
+                raw, record.manifest.get("capabilities") or {},
+                data_dir=self._guest_data_dir())
+        except GuestIsolationUnavailable as exc:
+            return {"error": str(exc)}
+        except Exception as exc:
+            return {"error": f"tool subprocess failed to start: {exc}"}
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(json.dumps(arguments).encode("utf-8")),
+                timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {"error": f"tool timed out after {timeout:g}s"}
+        finally:
+            await proc.aclose()
+        out_text = stdout.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            err_text = stderr.decode("utf-8", errors="replace").strip()
+            if proc.returncode == 124 and "timed out" in err_text:
+                return {"error": f"tool timed out after {timeout:g}s"}
+            return {"error": f"tool exited {proc.returncode}: {err_text[:2000]}"}
+        try:
+            return {"result": json.loads(out_text)}
+        except json.JSONDecodeError:
+            return {"result": out_text[:8000]}
+
     async def _call_pinned_interactive(
         self,
         record: ToolRecord,
@@ -871,32 +995,50 @@ class ToolStore:
         if depth >= _COMPOSITE_MAX_DEPTH:
             return {"error": f"composition depth exceeded {_COMPOSITE_MAX_DEPTH}"}
 
-        cache_dir = self._dir / "code_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        script = cache_dir / f"{code_digest}.py"
-        if not script.exists():
-            script.write_bytes(raw)
+        guest = self._is_guest(record)
+        session, services = None, frozenset()
+        timeout = self._exec_timeout(record)
+        if guest:
+            # Guest composites: same line protocol, guest containment, no
+            # tool secrets. Their deps run on their OWN containment path and
+            # as the guest author, not the caller (_dispatch_dep_call).
+            from .guest_sandbox import GuestIsolationUnavailable, spawn_guest
+            try:
+                proc = await spawn_guest(
+                    raw, record.manifest.get("capabilities") or {},
+                    data_dir=self._guest_data_dir())
+            except GuestIsolationUnavailable as exc:
+                return {"error": str(exc)}
+            except Exception as exc:
+                return {"error": f"tool subprocess failed to start: {exc}"}
+        else:
+            cache_dir = self._dir / "code_cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            script = cache_dir / f"{code_digest}.py"
+            if not script.exists():
+                script.write_bytes(raw)
 
-        # Same tool-secret binding as the sealed path. Nested dep calls run
-        # under the ORIGINAL caller's authority (see the frame handler below),
-        # so each tool in a composition gets its own clamp against the same
-        # L_agent — a composite cannot lend its secrets to a dependency.
-        session, services = self._tool_secret_session(record, caller_id)
-        argv, env, cwd = self._exec_spec(record, script, services)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env, cwd=cwd,
-            )
-            if session is not None:
-                session.bind(proc.pid)
-        except Exception as exc:
-            if session is not None:
-                session.release()
-            return {"error": f"tool subprocess failed to start: {exc}"}
+            # Same tool-secret binding as the sealed path. Nested dep calls
+            # run under the ORIGINAL caller's authority (see the frame handler
+            # below), so each tool in a composition gets its own clamp against
+            # the same L_agent — a composite cannot lend its secrets to a
+            # dependency.
+            session, services = self._tool_secret_session(record, caller_id)
+            argv, env, cwd = self._exec_spec(record, script, services)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env, cwd=cwd,
+                )
+                if session is not None:
+                    session.bind(proc.pid)
+            except Exception as exc:
+                if session is not None:
+                    session.release()
+                return {"error": f"tool subprocess failed to start: {exc}"}
 
         async def _pump() -> dict[str, Any]:
             # Feed arguments as the first line; keep stdin open for the
@@ -968,13 +1110,13 @@ class ToolStore:
                 return {"result": out_text[:8000]}
 
         try:
-            return await asyncio.wait_for(_pump(), timeout=_PINNED_EXEC_TIMEOUT_S)
+            return await asyncio.wait_for(_pump(), timeout=timeout)
         except asyncio.TimeoutError:
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
-            return {"error": f"tool timed out after {_PINNED_EXEC_TIMEOUT_S}s"}
+            return {"error": f"tool timed out after {timeout:g}s"}
         except Exception as exc:
             try:
                 proc.kill()
@@ -986,6 +1128,8 @@ class ToolStore:
             # session so no raw value outlives the composite subprocess.
             if session is not None:
                 session.release()
+            if guest:
+                await proc.aclose()
 
     async def _dispatch_dep_call(
         self,
@@ -1006,6 +1150,10 @@ class ToolStore:
              that invoked the composite, never the composite author. A
              composite must not launder access its caller lacks. Reject →
              error frame.
+          3. GUEST composites (origin="integration") additionally need the
+             composite's author (the guest agent) to be allowed the dep, and
+             the dep then runs AS that author, so guest code never borrows
+             the caller's tool-secret binding.
         """
         target = frame.get("call")
         if not isinstance(target, str) or not target:
@@ -1017,12 +1165,23 @@ class ToolStore:
             return {"error": "undeclared dependency"}
         if not self.allowed(caller_id, dep_record):
             return {"error": "caller not authorized for dependency"}
+        effective = caller_id
+        if self._is_guest(composite):
+            # Guest-written code must not drive tools with the CALLER's
+            # authority (the owner's tool-secret binding, the owner's grants).
+            # Its deps run as the composite's author, the guest agent, and only
+            # when that agent may call them itself: the intersection.
+            author = composite.author_id
+            if not author or not self.allowed(author, dep_record):
+                return {"error": "composite author not authorized for "
+                                 "dependency"}
+            effective = author
         args = frame.get("args")
         if not isinstance(args, dict):
             args = {}
         return await self.call(
             dep_record, args,
-            caller_id=caller_id,
+            caller_id=effective,
             via=composite.digest,
             _depth=depth + 1,
         )
@@ -1451,11 +1610,15 @@ class ToolStore:
                 log.warning("vet status lookup failed: %s", exc)
 
         caps = dict(payload.get("capabilities") or {})
+        authored_via = str(payload.get("authored_via") or "")
         proposal = {
             "digest": digest,
             "name": str(payload.get("name") or ""),
             "description": str(payload.get("description") or ""),
             "author": str(payload.get("author") or ""),
+            # "integration": a token-holding guest harness wrote the code and
+            # the author node signed it for them. Shown on the owner's card.
+            "authored_via": authored_via,
             "proposed_by": caller,
             "reason": str(reason or ""),
             "ts": int(time.time()),
@@ -1470,6 +1633,7 @@ class ToolStore:
                 "vets": (len(vet_status.get("vets") or {})
                          if vet_status else None),
                 "dependencies": len(payload.get("dependencies") or []),
+                "authored_via": authored_via,
             },
         }
         self._proposals[digest] = proposal
