@@ -1124,8 +1124,9 @@ is the agent-facing daemon flow; the on-chain greenlight
   replacing the host's handler.
   **FLAG-DAY:** the payload schema change (4, new `carry_cid` field)
   changes the anchored payload bytes and hash, so every daemon must run
-  the new build and the network must start from a fresh genesis (bundled
-  with the next shadownet reset); mixed builds fork on payloadHash.
+  the new build before the next close; mixed builds fork on payloadHash.
+  No contract change or redeploy: Substrate stores only the payload hash
+  and never parses the payload.
   **Known gap (keyless daemons):** the bundle (like the world checkpoint)
   is published, and the joiner's blob resolver is obtained, through the
   chain-submission driver, which only attaches when the daemon has a
