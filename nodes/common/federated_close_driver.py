@@ -204,6 +204,10 @@ class FederatedCloseDriver:
         # voice_source refresh. None = no pinned read (no DAO Registry
         # configured, genesis, or never written).
         self.pinned_charter_text: Optional[str] = None
+        # Households under a DAO sanction at the snapshot anchor
+        # (docs/accountability.md), by the same voice_source refresh. Their
+        # mint is withheld and their estimates carry no drift weight.
+        self.sanctioned_households: List[str] = []
         # Set to the new charter text once a pinned charter differs from
         # the active one: the close must not run on the old axes. The host
         # restarts the daemon onto the new charter (on_charter_change).
@@ -498,6 +502,10 @@ class FederatedCloseDriver:
             if "charter_text" in state:
                 text = state.get("charter_text")
                 self.pinned_charter_text = str(text) if text else None
+            houses = state.get("sanctioned_households")
+            if isinstance(houses, list):
+                self.sanctioned_households = sorted(
+                    str(h).lower() for h in houses)
         except Exception as e:
             logger.warning(
                 "voice-state refresh failed (keeping previous maps): %s", e)
@@ -606,6 +614,7 @@ class FederatedCloseDriver:
                             if self.rep_shares else None),
                 review_snapshot=(dict(self.review_snapshot)
                                  if self.review_snapshot else None),
+                sanctioned_households=list(self.sanctioned_households),
             )
         except Exception as e:
             logger.error(

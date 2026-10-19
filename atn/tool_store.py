@@ -210,6 +210,11 @@ class ToolStore:
         # reading the federated close's vetting carry-over — feeds the
         # provenance block on adoption proposals. Absent = "unknown".
         self.vet_status_provider: Any = None
+        # Optional sanction lookup (callable: address -> entry | None, may
+        # block on a chain read): an agent may not propose adopting a tool
+        # whose author's household the DAO has sanctioned; the owner sees
+        # the sanction on the proposal instead (docs/accountability.md).
+        self.sanction_check: Any = None
         # Optional support-post sink (callable: (con_node_id, claim) ->
         # dict). Wired to WorldService.submit_support so a validator that
         # replays an evidence-CON and CONFIRMS it can post a PRO support
@@ -1885,6 +1890,17 @@ class ToolStore:
                              "tools lean on connectors/credentials that "
                              "don't transfer between daemons"}
 
+        sanction: dict[str, Any] | None = None
+        author = str(payload.get("author") or "")
+        if self.sanction_check is not None and author:
+            try:
+                sanction = await asyncio.to_thread(self.sanction_check, author)
+            except Exception as exc:
+                log.warning("sanction lookup failed: %s", exc)
+        if sanction is not None and caller != OWNER_AUTHOR:
+            from .sanctions import refusal
+            return refusal(author, sanction, "adopt the tools of")
+
         vet_status: dict[str, Any] | None = None
         if self.vet_status_provider is not None:
             try:
@@ -1913,6 +1929,9 @@ class ToolStore:
             # the owner must approve with core_replacement_ack (a distinct,
             # explicit act; the UI shows an extra warning).
             "core_replacement": replaces,
+            # The author's household is under a DAO sanction (owner-made
+            # proposals only; agents are refused above).
+            "sanction": sanction,
             "provenance": {
                 "signed": self._verify_manifest_sig(payload),
                 "greenlit": (bool(vet_status.get("greenlit"))

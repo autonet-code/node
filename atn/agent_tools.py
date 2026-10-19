@@ -3568,6 +3568,22 @@ async def _register_service(runtime: Runtime, input: dict[str, Any]) -> dict[str
     }
 
 
+async def _sanctioned(runtime: Runtime, address: str, what: str) -> dict[str, Any] | None:
+    """The refusal when ``address`` belongs to a household the DAO has
+    sanctioned (docs/accountability.md); None when clear or unknown."""
+    bridge = getattr(runtime, "autonet", None)
+    if bridge is None:
+        return None
+    try:
+        entry = await asyncio.to_thread(bridge.sanctions.check, address)
+    except Exception:
+        return None
+    if entry is None:
+        return None
+    from .sanctions import refusal
+    return refusal(address, entry, what)
+
+
 async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Sign a Substrate.payForService transfer from the caller's key; returns
     {tx_hash, request_id} for the consumer to hand to the provider.
@@ -3587,6 +3603,9 @@ async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
         return {"error": "Missing required field: 'recipient'"}
     if input.get("amount") is None:
         return {"error": "Missing required field: 'amount'"}
+    blocked = await _sanctioned(runtime, recipient, "pay")
+    if blocked:
+        return blocked
 
     return await service_client.pay_for_service(
         runtime._config.rpb,
@@ -3620,6 +3639,9 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     if not tx_hash or not request_id:
         return {"error": "Missing payment proof: both 'tx_hash' and "
                          "'request_id' are required (from pay_for_service)."}
+    blocked = await _sanctioned(runtime, provider_address, "buy services from")
+    if blocked:
+        return blocked
 
     caller_id = input.get("_caller_id")
     defn = runtime.get_agent(caller_id) if caller_id else None

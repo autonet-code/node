@@ -260,7 +260,7 @@ INTEGRATION_DENIED_MESSAGES = frozenset({
     "add_connector", "remove_connector", "use_connector", "oauth_start",
     "oauth_status", "daemon_restart", "update_status", "skip_onboarding",
     "autonet_publish_standards", "autonet_set_capture_config",
-    "autonet_switch", "autonet_jurisdictions",
+    "autonet_switch", "autonet_jurisdictions", "sanctions",
     "claude_sessions", "claude_session_import",
     "robot_status", "robot_export_packs", "robot_attest",
     # Whole-fleet reads (snapshot carries owner-global sections).
@@ -2860,6 +2860,15 @@ class WebSocketBridge:
         if msg_type == "autonet_jurisdictions":
             return {"msg_id": msg_id, "ok": True,
                     "result": self._jurisdictions_view()}
+
+        if msg_type == "sanctions":
+            # The jurisdiction's sanctions in force (docs/accountability.md):
+            # household -> {until?, reason?, ...}, for the app's badges.
+            import asyncio as _asyncio
+            entries = await _asyncio.to_thread(
+                self.runtime.autonet.sanctions.entries)
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"sanctions": entries}}
 
         if msg_type == "autonet_switch":
             # Switch the daemon to another jurisdiction (docs/

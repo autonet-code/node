@@ -1221,6 +1221,11 @@ def federated_epoch_close(
     # (same snapshot as voice_weights / rep_shares / emission_pool). None =
     # no ratings (zero heads) and no reviewer shares.
     review_snapshot: Optional[Dict[str, Any]] = None,
+    # Households under a DAO sanction at the same snapshot
+    # (docs/accountability.md): their mint is withheld (left unminted, not
+    # passed to others) and their estimates carry no drift weight. Their
+    # reviews are already dropped from the ratings in ``review_snapshot``.
+    sanctioned_households: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -1357,6 +1362,12 @@ def federated_epoch_close(
     # manifest's claim node. Pure function of the replayed world +
     # canonical events + explicitly-passed carry-over registrations,
     # so the bit-identical guarantee holds.
+    sanctioned = sorted({str(h).lower() for h in (sanctioned_households or ())})
+    if sanctioned and rep_shares is not None:
+        # No drift weight: a sanctioned household's own_share estimates
+        # move nothing (zero rep share, like any zero-rep household).
+        rep_shares = {h: w for h, w in rep_shares.items()
+                      if str(h).lower() not in set(sanctioned)}
     tool_result = compute_tool_mint(
         world, all_events,
         registrations=tool_registrations,
@@ -1398,6 +1409,29 @@ def federated_epoch_close(
                                        output_decimals)}
             for d, e in sorted(per_digest.items())
         }
+    # Sanctions: withhold the mint of every agent whose household is
+    # sanctioned. Applied AFTER the pool split, so the withheld amount stays
+    # unminted instead of raising everyone else's share: a sanction never
+    # pays the households that voted for it.
+    withheld: Dict[str, float] = {}
+    if sanctioned:
+        house_set = set(sanctioned)
+        owners = {str(k).lower(): str(v).lower()
+                  for k, v in (agent_owner_map or {}).items()}
+        kept: Dict[str, float] = {}
+        for agent in sorted(result.get("agent_mint", {}) or {}):
+            amount = result["agent_mint"][agent]
+            a = str(agent).lower()
+            if owners.get(a, a) in house_set or a in house_set:
+                if amount:
+                    withheld[agent] = amount
+            else:
+                kept[agent] = amount
+        result["agent_mint"] = kept
+        result["total_mint"] = round(sum(kept.values()), output_decimals)
+    result["sanctioned_households"] = sanctioned
+    result["withheld_mint"] = dict(sorted(withheld.items()))
+
     result["tool_mint"] = per_digest
     result["tool_registrations"] = tool_result["registrations_next"]
     result["tool_vetting"] = tool_result["vetting_next"]
@@ -1442,6 +1476,8 @@ def federated_epoch_close(
         "gate_applied": result.get("gate_applied", False),
         "pricing": pricing,
         "charter_hash": _charter_hash(),
+        # The sanction list this close ran against (docs/accountability.md).
+        "sanctioned_households": result["sanctioned_households"],
         "n_batches": result["n_batches"],
         "n_events": result["n_events"],
     }

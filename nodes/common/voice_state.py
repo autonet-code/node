@@ -60,8 +60,9 @@ address configured => empty rep (genesis regime), pool still fees-only.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .federated_reconcile import VOICE_EPSILON
 
@@ -338,9 +339,15 @@ def tool_review_snapshot_from_logs(
     accuracies: Dict[Tuple[str, int, int], Optional[int]],
     axis_ids: List[str],
     default_bps: int = REVIEWER_SHARE_BPS_DEFAULT,
+    excluded_reviewers: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Fold ToolBond records into the close's review snapshot. Pure, so it is
     testable without a chain.
+
+    ``excluded_reviewers``: reviewer addresses whose reviews move no rating
+    (sanctioned households, docs/accountability.md). Their reviews still
+    appear in ``rounds``, so the reviewer-share split is unchanged and their
+    share is withheld at the mint instead of passing to other reviewers.
 
     ``records``: ``{"block", "index", "event", "args"}`` dicts (any order;
     folded in (block, logIndex) order). ``epochs``: epoch -> {"axis_ids":
@@ -393,6 +400,7 @@ def tool_review_snapshot_from_logs(
                 "axis_ids": [_hex32(x) for x in a["axisIds"]],
                 "supply": int(a["supply"])})
 
+    excluded = {str(a).lower() for a in (excluded_reviewers or ())}
     tools: Dict[str, Dict[str, Any]] = {}
     rounds: Dict[str, List[Dict[str, Any]]] = {}
     for digest, epoch, fin_block in finalized:
@@ -402,7 +410,7 @@ def tool_review_snapshot_from_logs(
         sums: Dict[str, List[int]] = {}
         h_sum = h_mass = 0
         for v in revs:
-            w = v["weight"]
+            w = 0 if v["reviewer"] in excluded else v["weight"]
             for i, b in enumerate(v["scores"][:len(keys)]):
                 s = _int8(b)
                 axis = key_to_axis.get(keys[i])
@@ -455,6 +463,7 @@ def tool_review_snapshot_from_logs(
 def read_tool_review_snapshot(
     w3: Any, tool_bond_address: str, block: int, *, since_block: int = 0,
     axis_ids: Optional[List[str]] = None,
+    excluded_reviewers: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """ToolBond review snapshot as of ``block`` (the snapshot anchor's
     block), with the reviewer-share rounds finalized after ``since_block``
@@ -505,7 +514,8 @@ def read_tool_review_snapshot(
             accuracies[(digest, e, i)] = int(v[3])
     return tool_review_snapshot_from_logs(
         records, block=block, since_block=since_block, epochs=epochs,
-        accuracies=accuracies, axis_ids=axis_ids)
+        accuracies=accuracies, axis_ids=axis_ids,
+        excluded_reviewers=excluded_reviewers)
 
 
 # ---------------------------------------------------------------------------
@@ -553,20 +563,18 @@ def charter_text_from_logs(
     return last
 
 
-def read_pinned_charter_text(
+def _registry_records(
     w3: Any, dao_registry_address: str, block: int,
-    key: str = CHARTER_REGISTRY_KEY,
-) -> Optional[str]:
-    """The jurisdiction's charter text as of ``block`` (the snapshot
-    anchor's block), from the DAO Registry's RegistryUpdated logs. Raises
-    on RPC failure, like the rest of the voice read."""
+) -> List[Dict[str, Any]]:
+    """Every RegistryUpdated write up to ``block``, as
+    ``{"block", "index", "key", "value"}``. Raises on RPC failure."""
     from web3 import Web3
 
     contract = w3.eth.contract(
         address=Web3.to_checksum_address(dao_registry_address),
         abi=_REGISTRY_EVENTS_ABI,
     )
-    records = [
+    return [
         {
             "block": int(log["blockNumber"]),
             "index": int(log["logIndex"]),
@@ -576,7 +584,93 @@ def read_pinned_charter_text(
         for log in _get_logs(
             contract.events.RegistryUpdated, w3, contract.address, block)
     ]
+
+
+def read_pinned_charter_text(
+    w3: Any, dao_registry_address: str, block: int,
+    key: str = CHARTER_REGISTRY_KEY,
+) -> Optional[str]:
+    """The jurisdiction's charter text as of ``block`` (the snapshot
+    anchor's block), from the DAO Registry's RegistryUpdated logs. Raises
+    on RPC failure, like the rest of the voice read."""
+    records = _registry_records(w3, dao_registry_address, block)
     return charter_text_from_logs(records, block, key)
+
+
+# ---------------------------------------------------------------------------
+# Sanctions (docs/accountability.md). A DAO proposal writes
+# ``sanction.<household 0x>`` = JSON ``{"until": <unix seconds>, "reason":
+# <uri>, ...}`` into the Registry; an empty value lifts it. A sanction is in
+# force while the snapshot anchor's timestamp is before ``until`` (no
+# ``until`` = until lifted). The key names the household (the proven owner
+# wallet); naming one of its agents sanctions the same household, so a fresh
+# agent key does not escape it. Pinned to the snapshot anchor like the
+# charter, so every daemon's close reads the same list.
+# ---------------------------------------------------------------------------
+
+SANCTION_KEY_PREFIX = "sanction."
+
+
+def parse_sanction(value: str) -> Optional[Dict[str, Any]]:
+    """The sanction a Registry value describes, or None when it is empty
+    (lifted). A non-empty value that is not a JSON object still sanctions,
+    with no end and the raw text as its note: the DAO voted for it. A
+    non-integer ``until`` is ignored (no end)."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        return {"note": text}
+    out = dict(data)
+    until = out.get("until")
+    if isinstance(until, bool) or not isinstance(until, int):
+        out.pop("until", None)
+    return out
+
+
+def sanction_in_force(entry: Dict[str, Any], at_timestamp: int) -> bool:
+    until = entry.get("until")
+    return until is None or int(at_timestamp) < int(until)
+
+
+def sanctions_from_records(
+    records: List[Dict[str, Any]], block: int, at_timestamp: int,
+) -> Dict[str, Dict[str, Any]]:
+    """Sanctions in force as of ``block`` and ``at_timestamp``: address
+    (lowercased 0x) -> parsed entry, from the last write of each
+    ``sanction.<address>`` key at or before ``block``."""
+    last: Dict[str, str] = {}
+    for rec in sorted(records, key=lambda r: (int(r["block"]), int(r["index"]))):
+        if int(rec["block"]) > int(block):
+            break
+        key = str(rec.get("key") or "")
+        if key.startswith(SANCTION_KEY_PREFIX):
+            addr = key[len(SANCTION_KEY_PREFIX):].strip().lower()
+            if addr:
+                last[addr] = str(rec.get("value") or "")
+    out: Dict[str, Dict[str, Any]] = {}
+    for addr in sorted(last):
+        entry = parse_sanction(last[addr])
+        if entry is not None and sanction_in_force(entry, at_timestamp):
+            out[addr] = entry
+    return out
+
+
+def sanctioned_households(
+    sanctions: Iterable[str], owner_of: Dict[str, str],
+) -> List[str]:
+    """The households the sanctioned addresses name: an agent's owner when
+    it is bound, the address itself otherwise. Sorted, lowercased."""
+    out = set()
+    for addr in sanctions:
+        a = str(addr).lower()
+        owner = str(owner_of.get(a, "") or "").lower()
+        out.add(owner if owner and owner != _ZERO else a)
+    return sorted(out)
 
 
 def read_voice_state(
@@ -648,6 +742,8 @@ def read_voice_state(
                 "reviewer_share_bps": REVIEWER_SHARE_BPS_DEFAULT,
                 "tools": {}, "rounds": {}, "supply": 0},
             "charter_text": None,
+            "sanctions": {},
+            "sanctioned_households": [],
         }
     anchor = contract.functions.getAnchor(anchor_count - 1).call()
     block = int(anchor[7])       # Anchor.blockNumber (struct field 7)
@@ -748,6 +844,22 @@ def read_voice_state(
             voice_weights[house] = round(epsilon + share, 9)
             rep_shares[house] = round(share, 9)
 
+    # The DAO Registry pinned to the same anchor block: the charter in force
+    # and the sanctions in force at the anchor's timestamp.
+    charter_text: Optional[str] = None
+    sanctions: Dict[str, Dict[str, Any]] = {}
+    if dao_registry_address:
+        reg_records = _registry_records(w3, dao_registry_address, block)
+        charter_text = charter_text_from_logs(reg_records, block)
+        sanctions = sanctions_from_records(reg_records, block, timestamp)
+    houses = sanctioned_households(sanctions, owner_of)
+    house_set = set(houses)
+    # Every address whose household is sanctioned: its reviews move no
+    # rating.
+    excluded_reviewers = sorted(
+        {a for a in agents if (owner_of.get(a) or a) in house_set}
+        | house_set | set(sanctions))
+
     # ToolBond review snapshot, pinned to the same anchor block; the
     # reviewer-share window opens at the anchor before it (block 0 = since
     # deployment when this is the first anchor).
@@ -759,14 +871,9 @@ def read_voice_state(
         if anchor_count >= 2:
             since_block = int(contract.functions.getAnchor(anchor_count - 2).call()[7])
         review_snapshot = read_tool_review_snapshot(
-            w3, tool_bond_address, block, since_block=since_block)
+            w3, tool_bond_address, block, since_block=since_block,
+            excluded_reviewers=excluded_reviewers)
     review_snapshot["supply"] = int(supply)
-
-    # The charter in force, pinned to the same anchor block.
-    charter_text: Optional[str] = None
-    if dao_registry_address:
-        charter_text = read_pinned_charter_text(
-            w3, dao_registry_address, block)
 
     return {
         "owner_map": owner_map,
@@ -788,4 +895,9 @@ def read_voice_state(
         "weight_source": "reputation",
         "review_snapshot": review_snapshot,
         "charter_text": charter_text,
+        # Sanctions in force at the snapshot (docs/accountability.md): the
+        # raw entries, and the households they name. The close withholds
+        # those households' mint and their drift weight.
+        "sanctions": sanctions,
+        "sanctioned_households": houses,
     }

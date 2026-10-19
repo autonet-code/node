@@ -33,25 +33,53 @@ An agent needs something at stake for punishment to mean anything.
 | Services an agent sold | Buyers hold signed receipts and set the price; no consensus verdict on remote execution, by design ([services_market.md](services_market.md)) | Built |
 | Governance votes and proposals | Never judged. Reputation is the member's to use; the DAO can vote to take it back | Nothing to build |
 
+## Sanctions (built, 2026-10-20)
+
+A DAO proposal writes one Registry entry per sanctioned household, at the
+top level because a sanction is the DAO's ruling, not a setting of its
+Autonet:
+
+```
+sanction.<household 0x> = {"until": <unix seconds>, "reason": "<link to the ruling>", ...}
+```
+
+- **One key per household**, not one bundled list: an edit costs only that
+  entry, and two proposals in flight cannot overwrite each other. One
+  proposal can still sanction several households (`batchEditRegistry`).
+- **`until` ends it on its own**, so lifting it takes no second vote; the
+  DAO can end it early by writing an empty value, or extend it by rewriting
+  it. No `until` means until lifted. Any other fields are free-form; a value
+  that is not JSON still sanctions, with the text as its note.
+- **The household is the unit.** The key is an owner wallet; naming one of
+  its agents sanctions the same household, so a fresh agent key does not
+  escape it. A fresh owner wallet does, but starts with no reputation and no
+  history, which is the punishment.
+- **The record is permanent** either way: every write emits
+  `RegistryUpdated`, so the chain keeps who, when, why and when it ended.
+
+What it does:
+
+| Where | Effect | Code |
+|-------|--------|------|
+| Epoch close (consensus) | The household's mint is withheld after the pool is split, so it stays unminted instead of raising everyone else's share: a sanction never pays the households that voted for it. Its reviews move no tool rating and its composition estimates carry no weight. The payload commits the list (`sanctioned_households`). | `voice_state.py` (`sanctions_from_records`, pinned to the snapshot anchor's block and timestamp), `federated_reconcile.py` |
+| Agents | May not pay, buy services from, or propose adopting the tools of a sanctioned household. | `atn/sanctions.py`, `agent_tools.py`, `tool_store.py` |
+| Owner | Sees the sanction on adoption proposals (a second approval) and on service listings and purchases. The owner may still go ahead. | WS `sanctions`; app `SanctionNotice` |
+
+The close reads the list pinned to the previous anchor like the charter, so
+every daemon withholds the same mint. The daemon's live checks read the
+current Registry at most once a minute. Other jurisdictions may choose to
+honor the list. Not built: refusing a sanctioned household's group posts.
+
 ## Direction
 
-1. **Sanctions list.** A DAO proposal writes `household → until epoch` into
-   the jurisdiction's Registry, for a period proportional to the harm.
-   Honest daemons read it and warn before buying from or adopting the tools
-   of a sanctioned household, refuse its reviews and group posts, and can
-   anchor zero mint for it until the sanction expires. Keying on the
-   household (the proven owner wallet) means fresh agent keys do not escape
-   it; a fresh owner wallet does, but starts with no reputation and no
-   history, which is the punishment. Other jurisdictions may choose to honor
-   the list.
-2. **Reach of a DAO over ATN.** The DAO timelock cannot touch ATN in a
+1. **Reach of a DAO over ATN.** The DAO timelock cannot touch ATN in a
    wallet: its powers over Substrate are anchoring epochs and setting the
    service fee, and the contract has no admin keys. What a DAO can reach is
    escrowed stake (ToolBond, project escrow) and future earnings (it can
    anchor zero mint for an agent). So bonds should be sized to the role,
    with withheld mint for harm beyond the bond. Seizing wallet ATN would be
    a breaking change and is not proposed.
-3. **Between jurisdictions.** Each jurisdiction is a party with a treasury
+2. **Between jurisdictions.** Each jurisdiction is a party with a treasury
    and reputation behind it, so relations between them use the trustless
    business contracts, where contractor, arbiter and backers can all be
    DAOs. Besides services and goods, a project can be a **conduct treaty**:
@@ -62,7 +90,7 @@ An agent needs something at stake for punishment to mean anything.
    is a pull request; later it is the daemon blob store, content addressed
    across jurisdictions, with the arbiter pinning the evidence when the
    dispute is filed. The terms must say what counts as evidence of breach.
-4. **Subordinate bodies.** Public services are DAOs under a larger DAO, the
+3. **Subordinate bodies.** Public services are DAOs under a larger DAO, the
    same fractal block (state DAO, then a police DAO, then its daemons, then
    their fleets). Subordinates are funded by transfer proposals or by
    tranche drips with a halt vote; trustless projects are kept for peers.

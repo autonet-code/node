@@ -87,7 +87,9 @@ No network can look inside a daemon and check that an agent did what it says, so
 - **Services:** buyers hold signed receipts and set the price; by design there is no consensus verdict on remote execution.
 - **Governance:** never judged. A member's reputation is theirs to use, and the DAO can vote to take it back.
 
-Designed, not yet built: a sanctions list (a DAO proposal names a household and an end epoch; honest daemons decline its business and its mint is withheld until then), and conduct treaties between jurisdictions on trustless business contracts, with escrow, an arbiter DAO, renewal every term, and evidence posted to content-addressed storage. Two things stay out of scope on purpose: harm nobody witnessed, and claims from outside parties with nothing at stake. An outside claim enters only through a member willing to stake on it.
+**Sanctions:** a DAO proposal writes `sanction.<household>` into its Registry, with an end date and a link to the reason. Until it ends, the household's mint is withheld (left unminted, so no one profits from a sanction), its reviews move no tool rating, agents may not pay it, buy from it or adopt its tools, and the app flags it to the owner. The chain keeps the record.
+
+Designed, not yet built: conduct treaties between jurisdictions on trustless business contracts, with escrow, an arbiter DAO, renewal every term, and evidence posted to content-addressed storage. Two things stay out of scope on purpose: harm nobody witnessed, and claims from outside parties with nothing at stake. An outside claim enters only through a member willing to stake on it.
 
 ## 8. Agents with a body
 

@@ -192,6 +192,10 @@ class AutonetBridge:
         self._user_contract_address: str = ""
         # Training data feed (Story 3.2) — ATN data dir for JSONL files
         self._data_dir = data_dir
+        # The jurisdiction's sanctions in force (atn/sanctions.py), built
+        # on first use from the resolved chain addresses.
+        self._sanctions: Any = None
+        self._sanctions_key: tuple[str, str, str] | None = None
 
         # Apply config values to state
         if config.wallet_address:
@@ -234,6 +238,20 @@ class AutonetBridge:
         self._constitution_loaded = False
         # Raw constitution text (loaded once, cached for prompt injection)
         self._constitution_text: str = ""
+
+    @property
+    def sanctions(self) -> Any:
+        """The jurisdiction's sanction list (atn/sanctions.py), rebuilt when
+        the chain addresses change (a jurisdiction switch restarts anyway)."""
+        from .sanctions import SanctionList
+        c = self.config
+        key = (str(getattr(c, "rpc_url", "") or ""),
+               str(getattr(c, "dao_registry_address", "") or ""),
+               str(getattr(c, "substrate_address", "") or ""))
+        if self._sanctions is None or self._sanctions_key != key:
+            self._sanctions = SanctionList.from_config(c)
+            self._sanctions_key = key
+        return self._sanctions
 
     @property
     def network_joined(self) -> bool:
@@ -1222,6 +1240,9 @@ class AutonetBridge:
                     return (vetting.get("manifests") or {}).get(digest)
                 return None
             tool_store.vet_status_provider = _vet_status
+            # Sanctioned authors (docs/accountability.md): agents may not
+            # propose adopting their tools.
+            tool_store.sanction_check = lambda addr: self.sanctions.check(addr)
 
             # Tools registered while the substrate was down get their
             # verdict-layer claims now (content-addressed, so re-pushes
