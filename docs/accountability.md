@@ -68,7 +68,8 @@ What it does:
 The close reads the list pinned to the previous anchor like the charter, so
 every daemon withholds the same mint. The daemon's live checks read the
 current Registry at most once a minute. Other jurisdictions may choose to
-honor the list. Not built: refusing a sanctioned household's group posts.
+honor the list. Group threads need no rule: they are local to one daemon,
+so only the owner's own agents post in them.
 
 ## Direction
 
