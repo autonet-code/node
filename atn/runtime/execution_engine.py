@@ -452,9 +452,17 @@ class ExecutionEngine:
             # The in-process path records the reply right after
             # run_agent_loop; the worker path must do it here, or the UI's
             # history reload drops the reply it just streamed.
+            # An interrupted or failed run keeps the partial reply the user
+            # watched stream, as the in-process path does (the error notice
+            # follows it): from the result, else this run's live output log.
             _out = record.output if isinstance(record.output, dict) else {}
             _reply = _out.get("result") or ""
-            if status == ExecutionStatus.COMPLETED and _reply:
+            if not _reply and status != ExecutionStatus.COMPLETED:
+                try:
+                    _reply = self.session_manager.get_delegate_output(agent_id).strip()
+                except Exception:
+                    _reply = ""
+            if _reply:
                 try:
                     self.session_manager.get_agent_conversation_store(
                         agent_id).add_assistant_turn(_reply, execution_id=eid)

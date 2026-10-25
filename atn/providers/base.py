@@ -663,6 +663,10 @@ class Provider(ABC):
         # enter consensus, and only those owe a review.
         called_tool_calls: list[tuple[str, dict]] = []
         review_injected = False
+        # The agent's answer from before the review turn: the review is
+        # bookkeeping, never the answer (same rule as the bridge path), so
+        # every exit returns this text when it was set.
+        self._answer_before_review = None
         # Verification step (§16): code files the run wrote/edited. If any,
         # inject ONE closing verify turn at the natural end (same pattern as
         # the review step) — agents that never touched code are unaffected.
@@ -1009,6 +1013,7 @@ class Provider(ABC):
                 )
                 if _owed:
                     review_injected = True
+                    self._answer_before_review = response.text or None
                     log.info(
                         "Review step: injecting closing attest turn for "
                         "agent %s (%s)", self.source_agent_id or "?",
@@ -1331,9 +1336,15 @@ class Provider(ABC):
           the inbox (never silently dropped).
         - Closes the steering queue.
 
+        - Keeps the agent's answer from before a review turn as the text.
+
         Every ``return`` from run_agent_loop goes through here.
         """
         _repair_orphan_tool_uses(messages, abort_reason)
+        answer = getattr(self, "_answer_before_review", None)
+        if answer:
+            response.text = answer
+        self._answer_before_review = None
         undelivered = _drain_queue(getattr(self, "_steering_queue", None))
         self._steering_queue = None
         if undelivered:

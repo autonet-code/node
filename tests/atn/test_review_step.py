@@ -84,7 +84,8 @@ class TestReviewInjection:
             message="go", tools=[], tool_executor=_noop_executor)
         assert p.stream_calls == 3
         assert resp.stop_reason == "end_turn"
-        assert resp.text == "still done"
+        # The review turn is bookkeeping: the answer stays the answer.
+        assert resp.text == "done"
         assert _injected_review(p.seen_messages)
         # The agent's pre-review answer stayed in history.
         assert any(m.get("content") == "done"
@@ -104,7 +105,7 @@ class TestReviewInjection:
         resp = await p.run_agent_loop(
             message="go", tools=[], tool_executor=_noop_executor)
         assert p.stream_calls == 4
-        assert resp.text == "reviewed and done"
+        assert resp.text == "done"   # the answer, not the review turn
 
     @pytest.mark.asyncio
     async def test_register_tool_does_not_trigger(self):
