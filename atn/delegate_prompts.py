@@ -3,7 +3,8 @@
 Four-layer architecture:
 0. Constitutional preamble — jurisdiction constitution (registered agents only)
 1. Common base — framework operations, reporting, communication (every agent)
-2. Type specialization — general/explore/implement/research/debug/review
+2. The generalist section (every agent is general purpose; there are no
+   agent types)
 3. Task message — specific work assignment (provided as first user message)
 
 Root agents use the common base too, with their own specialization layer.
@@ -58,8 +59,7 @@ Delegate when it genuinely pays:
 - Independent pieces that can run in parallel.
 - Broad sweeps where you want the conclusion without the raw output \
 flooding your context (a child reads twenty files, you get one summary).
-- A specialty fit (agent_type: general, explore, implement, research, \
-debug, review) or work too large for your remaining context.
+- Work too large for your remaining context.
 
 Do it yourself when the work is sequential and each step informs the next, \
 when you could finish in a handful of tool calls, or when writing the brief \
@@ -365,12 +365,11 @@ _TYPE_GUIDANCE = {
     "general": """\
 ## Generalist Focus
 
-You handle the task end-to-end: understand, act, verify, report. Borrow the \
-specialist disciplines as needed — read before you touch anything (explore), \
-keep edits minimal and verified (implement), root-cause instead of \
-symptom-patch (debug). Doing the whole task in your own context is a \
-perfectly good outcome; reach for typed sub-agents only where the \
-delegation calculus above actually favors them.
+You handle the task end-to-end: understand, act, verify, report. Read \
+before you touch anything, keep edits minimal and verified, root-cause \
+instead of symptom-patch. Doing the whole task in your own context is a \
+perfectly good outcome; reach for sub-agents only where the delegation \
+calculus above actually favors them.
 """,
 
     "explore": """\
@@ -521,7 +520,6 @@ def build_identity_header(
     header = (
         "Your identity in the ATN framework:\n"
         f"Agent ID: {agent_id or 'unknown'}\n"
-        f"Agent Type: {agent_type or 'general'}\n"
         f"Parent: {parent_id or 'none (you are a root agent)'}"
     )
     small_window = (policy.small_context_window if policy is not None
@@ -533,11 +531,11 @@ def build_identity_header(
     return header
 
 
-def build_type_layer(agent_type: str, policy=None) -> str:
-    """Build the type-specialization layer (layer 2) for a given agent type."""
+def build_type_layer(agent_type: str = "", policy=None) -> str:
+    """The generalist section (layer 2). Every agent gets it: there are no
+    agent types any more, and ``agent_type`` is ignored (kept for callers)."""
     guidance = policy.type_guidance if policy is not None else _TYPE_GUIDANCE
-    return guidance.get(agent_type, guidance.get("general")
-                        or _TYPE_GUIDANCE["general"])
+    return guidance.get("general") or _TYPE_GUIDANCE["general"]
 
 
 def build_system_prompt(

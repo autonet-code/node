@@ -1724,6 +1724,22 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": result["error"]}
             return {"msg_id": msg_id, "ok": True, "result": result}
 
+        # The system prompt an agent runs with (atn/system_prompt.py), so the
+        # app shows the real one before the owner changes it. With no
+        # agent_id: what a new agent granted ``tools`` would get.
+        if msg_type == "agent_system_prompt":
+            from .system_prompt import system_prompt_parts
+            agent_id = msg.get("agent_id") or ""
+            defn = None
+            if agent_id:
+                defn = self.runtime.get_agent(agent_id)
+                if defn is None:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": f"Agent not found: {agent_id}"}
+            tools = msg.get("tools") if isinstance(msg.get("tools"), list) else None
+            return {"msg_id": msg_id, "ok": True,
+                    "result": system_prompt_parts(self.runtime, defn, tools=tools)}
+
         # The canonical agent tool surface — everything an agent can be
         # granted, grouped by the same bundle ids the create-agent flow
         # uses, with each tool's endpoints (name / description / params).

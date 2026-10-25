@@ -983,7 +983,6 @@ class ExecutionEngine:
         record: ExecutionRecord,
         cancel: asyncio.Event,
     ) -> None:
-        from ..delegate_prompts import build_delegate_prompt
         from ..agent_tools import resolve_tool_surface
         from ..harness_policy import policy_for_agent
 
@@ -1050,42 +1049,18 @@ class ExecutionEngine:
                     record.error = f"Dollar cap exceeded ({dreason})"
                     raise _BudgetExceeded()
 
-            # --- System prompt ---
-            # When we build the prompt from the delegate template, identity is
-            # NOT in the (cacheable) system prompt — it's delivered in the first
-            # user message so the prefix stays byte-identical across agents and
-            # hits the prompt cache. Agents with a custom system_prompt own
-            # their identity, so we don't inject for them.
-            _inject_identity = False
-            # An imported Claude Code session keeps Claude Code's own system
-            # prompt, its folder and its settings (the bridge loads them);
-            # ATN adds nothing to its messages.
+            # --- System prompt (atn/system_prompt.py) ---
+            # The jurisdiction's constitution (registered agents only) plus the
+            # owner's custom prompt or ATN's. Identity is never in the system
+            # prompt, custom or not: it rides the first user message, so ATN's
+            # prompt stays byte-identical across agents and hits the cache.
+            # An imported Claude Code session keeps Claude Code's own prompt,
+            # folder and settings (the bridge loads them); ATN adds nothing.
+            from ..system_prompt import system_prompt_parts
             _imported = getattr(defn, "claude_session", None) or None
-            if _imported:
-                system_prompt = ""
-            elif defn.system_prompt:
-                system_prompt = defn.system_prompt
-            else:
-                system_prompt = build_delegate_prompt(
-                    defn.agent_type, defn.id, defn.parent_id,
-                    tool_categories=_agent_tool_cats,
-                    policy=_policy,
-                )
-                _inject_identity = True
-
-            # --- Constitutional preamble (registered agents only) ---
-            # Injected by the runtime, not user-modifiable.  The constitution
-            # text comes from the on-chain Registry and is cached by the
-            # AutonetBridge.  Only agents with registered_on_chain=True get
-            # the preamble — unregistered agents operate without it.
-            if (defn.identity and defn.identity.registered_on_chain
-                    and not _imported
-                    and hasattr(self, '_autonet_bridge') and self._autonet_bridge):
-                constitution = self._autonet_bridge.constitution_text
-                if constitution:
-                    from ..delegate_prompts import build_constitutional_preamble
-                    preamble = build_constitutional_preamble(constitution)
-                    system_prompt = preamble + system_prompt
+            system_prompt = system_prompt_parts(
+                getattr(self, "_runtime_ref", None), defn)["prompt"]
+            _inject_identity = not _imported
 
             # --- Tool surface ---
             agent_tools = resolve_tool_surface(_agent_tool_cats)

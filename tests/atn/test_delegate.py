@@ -184,18 +184,17 @@ class TestDelegateRegistry:
 
 class TestDelegatePrompts:
     def test_all_agent_types(self):
-        # The type specialization layer is still in the system prompt; agent
-        # IDENTITY (agent_id/parent) is deliberately NOT — it moved to the
-        # first user message (build_identity_header) so the system-prompt
-        # prefix stays byte-identical across agents and hits the prompt cache.
+        # Every agent is general purpose: an old definition's type changes
+        # nothing. Agent IDENTITY (agent_id/parent) is deliberately NOT in the
+        # system prompt: it rides the first user message (build_identity_header)
+        # so the prefix stays byte-identical across agents and hits the cache.
         from atn.delegate_prompts import build_identity_header
+        general = build_delegate_prompt("general", "orch.1", "orch")
+        assert "Generalist Focus" in general and "orch.1" not in general
         for agent_type in ("explore", "implement", "research", "debug", "review"):
-            prompt = build_delegate_prompt(agent_type, "orch.1", "orch")
-            assert agent_type in prompt.lower() or agent_type.title() in prompt
-            assert "orch.1" not in prompt  # identity is no longer in the prefix
-            header = build_identity_header(
-                agent_id="orch.1", agent_type=agent_type, parent_id="orch")
-            assert "orch.1" in header and agent_type in header
+            assert build_delegate_prompt(agent_type, "orch.1", "orch") == general
+        header = build_identity_header(agent_id="orch.1", parent_id="orch")
+        assert "orch.1" in header and "orch" in header
 
     def test_includes_common_tools(self):
         prompt = build_delegate_prompt("implement", "orch.1", "orch")
@@ -332,7 +331,7 @@ async def test_delegate_tool_executor(tmp_path: Path):
     # Verify run_agent_loop was called with correct args
     call_args = mock_provider.run_agent_loop.call_args
     assert "Explore the auth system" in call_args.kwargs["message"]
-    assert "explore" in call_args.kwargs["system"].lower() or "Exploration" in call_args.kwargs["system"]
+    assert "Generalist Focus" in call_args.kwargs["system"]   # no agent types
     assert call_args.kwargs["max_turns"] == 50
 
 

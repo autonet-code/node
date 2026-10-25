@@ -452,7 +452,7 @@ class TestDelegateToolsUnified:
             assert defn is not None
             assert defn.mode == AgentMode.COGNITIVE
             assert defn.parent_id == "orch"
-            assert defn.agent_type == "explore"
+            assert defn.agent_type == "general"   # types are gone; "explore" is ignored
 
             # Wait for execution
             collect = await _delegate_collect(rt, {"agent_id": agent_id})

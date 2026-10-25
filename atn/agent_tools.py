@@ -344,12 +344,6 @@ _TOOLS: list[ToolDefinition] = [
                     "description": "Agent mode. Default: 'cognitive'.",
                     "default": "cognitive",
                 },
-                "agent_type": {
-                    "type": "string",
-                    "enum": ["general", "explore", "implement", "research", "debug", "review"],
-                    "description": "Cognitive agent type — determines system prompt focus.",
-                    "default": "general",
-                },
                 "model": {
                     "type": "string",
                     "description": (
@@ -2208,7 +2202,7 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     if mode_str == "cognitive":
         # --- Cognitive mode: autonomous LLM session ---
         prompt = input.get("prompt", "")
-        agent_type = input.get("agent_type", "general")
+        agent_type = "general"   # every agent is general purpose
         model = input.get("model", "")
         # parent_id is ALWAYS derived from the caller — not a user choice
         parent_id = caller_id or None
@@ -2280,12 +2274,12 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 
         model_tier = get_model_tier(effective_model)
 
-        # Warn if model tier seems low for agent_type
+        # Warn if the model tier seems low for autonomous work
         tier_warning = None
-        if effective_model and agent_type in ("general",) and model_tier < 3:
+        if effective_model and model_tier < 3:
             tier_warning = (
                 f"Model '{effective_model}' is tier {model_tier} ({get_tier_label(model_tier)}). "
-                f"Agent type '{agent_type}' works best with tier 3+ (autonomous) models."
+                "Autonomous agents work best with tier 3+ models."
             )
             log.warning("Low capability tier for agent: %s", tier_warning)
 
