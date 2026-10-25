@@ -4,13 +4,14 @@ Autonet's design specs, experiment records, and reference material. For
 agent/machine onboarding start at the repo-root `CLAUDE.md`; for the
 one-paragraph "what is this" start at the repo-root `README.md`.
 
-**Status (v0.7.0, 2026-07-10): beta on testnet.** `Substrate.sol` and the
+**Status (v0.8.0): beta on testnet.** `Substrate.sol` and the
 DAO/economy suite are deployed on Etherlink Shadownet; the canonical
-jurisdiction is a werule-platform DAO (governor `0xD5691B7c…`) with the
+jurisdiction is a werule-platform DAO (`0x9660…8005`) with the
 addresses of record in `registry.json` (each release ships a copy as
 package data, `atn/registry.json`, read when the daemon joins the network
 by registering an agent or `autonet.enabled`; never fetched at boot). The tool-economy paradigm is the shipped system: `tool_substrate.md`
-is the core spec (read its `Decision (2026-07-10)` section first). The
+is the core spec (read its dated `Decision` sections, latest first, together
+with `multi_jurisdiction.md` decision 10, staked reviews on ToolBond). The
 architecture-reference set and the two guides below still describe the
 retired pre-substrate paradigm and are banner-marked historical.
 
@@ -29,10 +30,10 @@ Status conventions used below:
 | [`tool_substrate.md`](tool_substrate.md) | **The core spec: start here.** Tools as the primary substrate item: manifest, mint formula, combo damper, review-driven position drift, adoption rail. Read the `Decision (2026-07-10)` section first: fees-only emission, money-only close, REP claimed DAO-side, vet gate retired (tools mint from first attested third-party use). Phase-10 amendment inline. |
 | [`resilience.md`](resilience.md) | **The network-level threat model.** Why the equilibrium holds under sybils, collusion, and wash trading (what's prevented vs priced), the consensus-gated migration escape hatch (chain compromise → governance redeploys, daemons carry the state), and the layer split vs daemon-local security (`secrets.md` / isolation). |
 | [`services_market.md`](services_market.md) | The remote-API market rail (`ServiceMarket.sol`): registry + EIP-712 payment channels, behavioral trust, ATN-only pricing (2.5% fee taken at settlement through `Substrate.payForService`), no substrate standing. |
-| [`charter_anchor.md`](charter_anchor.md) | Charter version as DAO Registry keys (`jurisdiction.<id>.charter` / `charter_uri`; CharterAnchor.sol retired 2026-10-16); drift detection built, migration deferred. |
+| [`charter_anchor.md`](charter_anchor.md) | Historical: the 2026-10-16 charter-hash-and-URI design. Superseded by `multi_jurisdiction.md` decision 5 (the Registry holds the charter itself). |
 | [`multi_jurisdiction.md`](multi_jurisdiction.md) | One daemon, switchable jurisdictions: key `<chain_id>:<DAO>`, Registry-resolved prerequisites, charter as data (own axes, correctness + simplicity mandatory), owner-bound registration, ε = 0, merging by genesis, and **staked reviews** (decision 10: one review type with per-axis scores + harm, commit-reveal per epoch on ToolBond, REP-settled). |
 | [`accountability.md`](accountability.md) | Alignment through interaction: counterparties report, the REP crowd judges, stakes and bonds pay. What is covered today, and the direction (sanctions list, conduct treaties between DAOs, subordinate public-service DAOs). Design ledger, partly built. |
-| [`robots.md`](robots.md) | Agents with a body: robot daemon as the household's sponsored dependent, safety packs (pinned tools) enforced by a ROS 2 filter at the actuation boundary, fail-closed rules, worklog challenges. MVP built, sim E2E 10/10. |
+| [`robots.md`](robots.md) | Agents with a body: robot daemon as the household's sponsored dependent, safety packs (pinned tools) enforced by a ROS 2 filter at the actuation boundary, fail-closed rules, worklog challenges; the poll rail (polls, witnesses, signed worklog chain), standards from the Registry, scene summaries. MVP built, sim E2E 11/11; poll rail 9/9; scene 6/6. |
 | [`../atn/external_agents.md`](../atn/external_agents.md) | **Harness-facing.** How an outside harness (e.g. a Claude Code session) drives a daemon as its own external agent: `atn send`, self-owned registration, authoring, using and reviewing tools. Printed by `atn guide`. |
 | [`local_e2e.md`](local_e2e.md) | The two economy proof-of-life scripts (`scripts/local_e2e_tool_economy.py`, `local_e2e_venture_loop.py`); also the reference walk-through of the venture loop. |
 | [`ledger_pricing.md`](ledger_pricing.md) | Post-phase8 default: ledger (net_score tree recursion) replaces geometric equilibration for mint pricing; the arm-B context-render rule. |
@@ -44,9 +45,9 @@ Status conventions used below:
 | [`providers.md`](providers.md) | **Owner-facing.** Inference providers: the three auth shapes (bridge / api key / local), adding an OpenAI-compatible endpoint (validation, credential storage), loop capability as a per-model property, and the model-routing gotchas. Linked from the app's "Add Provider" dialog. |
 | [`sponsored_inference.md`](sponsored_inference.md) | **Owner-facing.** Work-AI: a sponsor daemon paying for a dependent's inference. The dependent is the OWNER WALLET (one 0x per daemon, ratified 2026-07-25), at most one sponsor, sponsor-held authorization and token budgets. Linked from the app's RPB Network card. |
 | [`epoch_economics.md`](epoch_economics.md) · [`ledger_pricing.md`](ledger_pricing.md) | (see above) the economic core as shipped. |
-| [`auto_update_design.md`](auto_update_design.md) | Daemon auto-update: stage-on-poll, apply-on-next-boot (running daemon never self-restarts). Implementing. |
+| [`auto_update_design.md`](auto_update_design.md) | Daemon auto-update: stage-on-poll, apply-on-next-boot (running daemon never self-restarts). Built (`atn/update_boot.py`). |
 | [`anti_tamper_design.md`](anti_tamper_design.md) | Consensus-node anti-tamper: the "other half" of auto-update. Designed, pre-implementation. |
-| [`unified_agent_design.md`](unified_agent_design.md) | Fractal agent unification (former root agent ≡ child agent): the definitive design that drove the `atn/` runtime shape. |
+| [`unified_agent_design.md`](unified_agent_design.md) | Fractal agent unification (former root agent ≡ child agent). Historical: the runtime took the fractal shape but not its agent types or its prompt layout (agents are general purpose; the prompt is resolved by `atn/system_prompt.py`). |
 
 ## Experiment records (pre-registered, DO NOT EDIT)
 
@@ -65,7 +66,7 @@ Status conventions used below:
 | [`jurisdiction_wiring_map.md`](jurisdiction_wiring_map.md) | Read-only survey (2026-07-05): how the tokenized-project → on-chain surface wires together. Nothing built by the doc itself. |
 | [`value_props_head_to_head.md`](value_props_head_to_head.md) | Pre-merge comparison: text-claim substrate vs tool substrate, and what each promised and delivered. |
 | [`DORG_CHAT_INTERFACE_DESIGN.md`](DORG_CHAT_INTERFACE_DESIGN.md) | dOrg deployment + chat-interface layer design (mostly not yet built). |
-| [`DRAFT_COMMON_SYSTEM_PROMPT.md`](DRAFT_COMMON_SYSTEM_PROMPT.md) | Draft shared base system prompt for cognitive agents (final lives in `delegate_prompts.py`). |
+| [`DRAFT_COMMON_SYSTEM_PROMPT.md`](DRAFT_COMMON_SYSTEM_PROMPT.md) | Draft shared base system prompt for cognitive agents (the prompt agents run with is resolved by `atn/system_prompt.py`, built from `delegate_prompts.py`). |
 | [`TRIMMED_MEAN_USAGE.md`](TRIMMED_MEAN_USAGE.md) | Byzantine-resistant trimmed-mean aggregation usage guide (aggregator-era). |
 | [`BACKLOG_TRAINING_DATA.md`](BACKLOG_TRAINING_DATA.md) | Training-data pipeline analysis. **Stale (pre-substrate)**: references the VL-JEPA path. |
 | [`architecture/OVERVIEW.md`](architecture/OVERVIEW.md) · [`CONTRACTS.md`](architecture/CONTRACTS.md) · [`NODES.md`](architecture/NODES.md) | Architecture reference set. **Historical (pre-substrate)**: each carries a dated banner; the current architecture is this README + `tool_substrate.md` + `CLAUDE.md`. |

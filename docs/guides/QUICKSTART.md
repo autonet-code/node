@@ -17,8 +17,9 @@ participates in the federated epoch close.
 By default the daemon stays fully local: it does nothing on-chain until you
 enable autonet or register an agent. The network it resolves to is the
 canonical jurisdiction in `registry.json` (Etherlink Shadownet testnet;
-governor DAO `0xD5691B7c…`), fetched from GitHub-raw and cached under
-`~/.atn/`, or read from a repo-root `registry.json` in a source checkout.
+DAO `0x9660…8005`), read from the copy packaged with the release
+(`atn/registry.json`) when the daemon joins the network, never at boot. An
+`ATN_REGISTRY_URL` or an on-chain DAO Registry can override it.
 
 ## Prerequisites
 

@@ -1,6 +1,6 @@
 # Robots: Autonet agents with a body
 
-Status: MVP built (2026-10-19), sim only, E2E 10/10. Design decided in conversation with the
+Status: MVP built (2026-10-19), sim only, E2E 11/11. Design decided in conversation with the
 owner; this file is the ledger. Nothing here touches contracts.
 
 ## The three layers

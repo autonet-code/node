@@ -32,7 +32,7 @@ npx hardhat compile
 
 ### Economy proof-of-life
 ```bash
-python scripts/local_e2e_tool_economy.py    # register → publish → adopt → epoch mint
+python scripts/local_e2e_tool_economy.py    # register → publish → invoke → attest → close → on-chain mint
 python scripts/local_e2e_venture_loop.py    # venture funding + service revenue loop
 ```
 

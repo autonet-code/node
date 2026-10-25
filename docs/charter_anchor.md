@@ -1,6 +1,13 @@
 # Charter version (DAO Registry keys)
 
-**Status: live design, decided 2026-10-16 with the DAO side.** The standalone
+> **Superseded by `multi_jurisdiction.md` decision 5 (2026-10-17).** The
+> Registry's `jurisdiction.<id>.charter` now holds the charter itself (JSON
+> axes), read pinned to the previous anchor (`voice_state.charter_text_from_logs`)
+> and installed at join; a legacy `0x` hash value is ignored, and
+> `charter_uri` is legacy. Below is the 2026-10-16 hash-and-URI design, kept
+> as history.
+
+**Status (historical): decided 2026-10-16 with the DAO side.** The standalone
 `CharterAnchor.sol` is retired. The jurisdiction's charter version now lives in
 two keys of the jurisdiction's DAO Registry:
 
