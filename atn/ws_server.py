@@ -624,6 +624,7 @@ class WebSocketBridge:
                 # Remote, unauthed: withhold the snapshot, issue a challenge.
                 await self._send_auth_challenge(ws, session)
 
+            snapshot_sent = session.authed
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
@@ -633,6 +634,13 @@ class WebSocketBridge:
 
                 response = await self._handle_message(msg, session)
                 await ws.send(json.dumps(response, default=str))
+                if session.authed and not snapshot_sent:
+                    # Remote sign-in just succeeded: send the (scoped) fleet
+                    # now, as a local connection gets at connect. Without it
+                    # a remote session showed an empty fleet until something
+                    # asked for a snapshot.
+                    snapshot_sent = True
+                    await self._send_snapshot(ws, session)
 
         except websockets.ConnectionClosed:
             pass

@@ -95,6 +95,14 @@ async def test_live_two_listener_handshake(tmp_path):
             assert ok["type"] == "auth_ok" and ok["ok"] is True
             assert ok["root"] == "a"
 
+            # Sign-in success pushes the scoped fleet at once, as a local
+            # connection gets at connect.
+            pushed = await _recv_json(ws)
+            assert pushed["type"] == "snapshot"
+            assert set(pushed["data"]["agents"].keys()) == {"a", "a.1"}
+            for secret in ("providers", "budget", "user", "connectors", "autonet"):
+                assert secret not in pushed["data"]
+
             # Now a scoped snapshot request returns only the 'a' subtree, with
             # owner-global sections redacted.
             await ws.send(json.dumps({"type": "snapshot", "msg_id": "3"}))
@@ -153,6 +161,9 @@ async def test_live_agent_self_auth_no_owner(tmp_path):
             assert ok["type"] == "auth_ok" and ok["ok"] is True
             assert ok["owner"] is False               # agent, not owner
             assert ok["root"] == "a"                  # rooted at itself
+            pushed = await _recv_json(ws)
+            assert pushed["type"] == "snapshot"
+            assert set(pushed["data"]["agents"].keys()) == {"a", "a.1"}
             await ws.send(json.dumps({"type": "snapshot", "msg_id": "2"}))
             snap = await _recv_json(ws)
             assert set(snap["result"]["agents"].keys()) == {"a", "a.1"}
