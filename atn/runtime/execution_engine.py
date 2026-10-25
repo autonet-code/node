@@ -1309,6 +1309,12 @@ class ExecutionEngine:
                         system_prompt = self._append_history_to_prompt(
                             system_prompt, prior_turns, _hist_model)
 
+            # The live output log holds THIS run's text only. Clients show it as
+            # the streaming reply (snapshot, get_delegate_output) and agents read
+            # it as a child's output preview; left to grow, every earlier run
+            # replayed as live text whenever a chat opened or reconnected.
+            self.session_manager.clear_delegate_output(defn.id)
+
             # --- Inject UTC time + budget status ---
             # Both ride the newest incoming message ONLY (never the system prompt
             # or older history) so the moving prompt-cache breakpoint isn't

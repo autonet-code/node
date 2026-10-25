@@ -166,8 +166,14 @@ class SessionManager:
 
     def clear_delegate_output(self, agent_id: str) -> None:
         path = self._delegate_output_dir / f"{agent_id}.log"
-        if path.exists():
-            path.unlink()
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            # Held open elsewhere (Windows): empty it instead.
+            try:
+                path.write_text("", encoding="utf-8")
+            except OSError:
+                log.warning("could not clear the output log of %s", agent_id)
 
     # ------------------------------------------------------------------
     # Bridge session helpers

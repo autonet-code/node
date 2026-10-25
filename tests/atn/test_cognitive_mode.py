@@ -849,3 +849,28 @@ class TestInnateWakeUpInstruction:
         assert "failed" in data["instruction"]
         assert data["status"] == "failed"
         assert child_msgs[0].priority == MessagePriority.HIGH
+
+
+@pytest.mark.asyncio
+async def test_each_run_starts_a_fresh_output_log(bus, tmp_path):
+    """The live output log is one run's text. It used to grow forever, so a
+    chat opened (or reconnected) mid-run replayed every earlier run."""
+    rt = _make_runtime(bus, tmp_path)
+    rt.append_delegate_output("child", "TEXT FROM AN OLD RUN")
+
+    async def loop(**kw):
+        await kw["on_text_chunk"]("new run text")
+        return ProviderResponse(text="new run text", usage=Usage(input_tokens=1, output_tokens=1),
+                                stop_reason="end_turn", model="sonnet")
+    mock_provider = AsyncMock()
+    mock_provider.run_agent_loop = AsyncMock(side_effect=loop)
+    mock_provider.close = AsyncMock()
+    mock_provider.interrupt = AsyncMock()
+    with patch("atn.runtime.provider_manager.BridgeProvider", return_value=mock_provider):
+        from atn.agent_tools import _create_agent, _delegate_collect
+        out = await _create_agent(rt, {"provider": "claude_max", "model": "sonnet",
+                                       "mode": "cognitive", "prompt": "go", "id": "child",
+                                       "name": "child", "_caller_id": "orch"})
+        await _delegate_collect(rt, {"agent_id": out["agent_id"]})
+    log_text = rt.get_delegate_output(out["agent_id"])
+    assert "OLD RUN" not in log_text
