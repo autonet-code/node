@@ -15,6 +15,8 @@ Run: pytest tests/test_service_payment_gate.py
 """
 from __future__ import annotations
 
+import asyncio
+
 from pathlib import Path
 
 import pytest
@@ -291,9 +293,13 @@ class TestEdgeCases:
         server = WebSocketBridge(rt)
 
         out = await server._validate_service_payment(
-            {"tx_hash": "0xabc", "request_id": "0xdead"}, record)
+            {"tx_hash": "0xabc", "request_id": "0xdead"}, record, local=True)
         assert out["ok"] is True
         assert "not configured" in out["reason"] or "dev" in out["reason"]
+        # The remote listener fails closed instead (payment is the credential).
+        remote = await server._validate_service_payment(
+            {"tx_hash": "0xabc", "request_id": "0xdead"}, record)
+        assert remote["ok"] is False and "cannot verify" in remote["reason"]
 
     @pytest.mark.asyncio
     async def test_missing_proof_rejected(self, tmp_path, monkeypatch):
@@ -338,3 +344,76 @@ class TestPaymentStatePersistence:
         reloaded = ServiceStore(rt, rt._config.data_dir / "services")
         assert reloaded.last_channel_cumulative(5) == 900
         assert reloaded.get_channel_voucher(5)["signature"] == "0xsigB"
+
+
+# ---------------------------------------------------------------------------
+# Holes found by the 2026-10-26 survey (economy report, findings 1, 3, 4, 5)
+# ---------------------------------------------------------------------------
+
+class TestSurveyHoles:
+    @pytest.mark.asyncio
+    async def test_one_payment_cannot_be_respelled_into_many_requests(self, tmp_path,
+                                                                     monkeypatch):
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt)
+        _patch_chain(monkeypatch, verify={"verified": True, "reason": "ok"})
+        server = WebSocketBridge(rt)
+        rid = "0x" + "07" * 32
+        first = await server._validate_service_payment(
+            {"tx_hash": "0xabc", "request_id": rid}, record)
+        assert first["ok"] is True
+        # The chain pads or cuts to 32 bytes, so these all name one payment.
+        for spelling in (rid + "0", rid + "00", rid.upper().replace("0X", "0x"),
+                         rid.removeprefix("0x"), "0xab"):
+            out = await server._validate_service_payment(
+                {"tx_hash": "0xabc", "request_id": spelling}, record)
+            assert out["ok"] is False, spelling
+
+    @pytest.mark.asyncio
+    async def test_two_copies_sent_at_once_are_served_once(self, tmp_path, monkeypatch):
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt)
+        import threading
+        gate = threading.Event()   # the check runs off-loop, in a worker thread
+
+        async def slow_verify(self, *, request_id, recipient, min_amount, tx_hash=None,
+                              payer=None):
+            while not gate.is_set():
+                await asyncio.sleep(0.01)
+            return {"verified": True, "reason": "ok"}
+        monkeypatch.setattr(oc.OnChainService, "verify_service_payment", slow_verify)
+        server = WebSocketBridge(rt)
+        req = {"tx_hash": "0xabc", "request_id": "0x" + "08" * 32}
+        a = asyncio.create_task(server._validate_service_payment(dict(req), record))
+        b = asyncio.create_task(server._validate_service_payment(dict(req), record))
+        await asyncio.sleep(0.05)
+        gate.set()
+        results = await asyncio.gather(a, b)
+        assert sorted(r["ok"] for r in results) == [False, True]
+
+    @pytest.mark.asyncio
+    async def test_voucher_beyond_the_deposit_is_refused(self, tmp_path, monkeypatch):
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt)
+        _patch_chain(monkeypatch, voucher={
+            "valid": True, "status": 1, "provider": PROVIDER_ADDR,
+            "deposit": "1", "exceeds_deposit": True})
+        server = WebSocketBridge(rt)
+        out = await server._validate_service_payment(
+            {"channel_id": 3, "cumulative_amount": ASK_AMOUNT * 50,
+             "signature": "0xsig"}, record)
+        assert out["ok"] is False and "deposit" in out["reason"]
+        assert rt.service_store.last_channel_cumulative(3) == 0
+
+    @pytest.mark.asyncio
+    async def test_free_service_needs_no_proof(self, tmp_path, monkeypatch):
+        rt = _make_runtime(tmp_path, chain=True)
+        res = rt.service_store.register(
+            name="free_svc", description="Free.", input_schema=SCHEMA,
+            author="user", ask={"amount": "0", "unit": "per_item"},
+            backing_tool="deadbeef")
+        record = rt.service_store.get(res["digest"])
+        record.spec["author_pubkey"] = PROVIDER_ADDR
+        server = WebSocketBridge(rt)
+        out = await server._validate_service_payment({}, record)
+        assert out["ok"] is True and "free" in out["reason"]

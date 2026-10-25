@@ -5325,6 +5325,11 @@ class WebSocketBridge:
                 record.name or record.digest[:16])
             return {"ok": True, "reason": "chain not configured (dev degrade)"}
 
+        # A free service needs no payment proof (payForService accepts zero,
+        # but a zero ask has nothing to pay; the client sends no proof).
+        if ask_amount <= 0:
+            return {"ok": True, "reason": "free service"}
+
         store = self.runtime.service_store
         tx_hash = str(request.get("tx_hash") or "").strip()
         request_id = str(request.get("request_id") or "").strip()
@@ -5334,30 +5339,46 @@ class WebSocketBridge:
 
         # --- Direct payForService path --------------------------------------
         if tx_hash and request_id:
-            if store.has_served_request(request_id):
+            # One spelling for the replay key AND the on-chain match: the
+            # chain pads or cuts any hex to 32 bytes, so "R", "R0", "R00" all
+            # matched one payment while each counted as a new request id.
+            rid = request_id.lower().removeprefix("0x")
+            if len(rid) != 64 or any(c not in "0123456789abcdef" for c in rid):
                 return {"ok": False,
-                        "reason": f"request_id {request_id[:16]} already served "
+                        "reason": "request_id must be 32 bytes of hex (64 hex digits)"}
+            request_id = "0x" + rid
+            inflight = self.__dict__.setdefault("_payments_in_flight", set())
+            if store.has_served_request(request_id) or request_id in inflight:
+                return {"ok": False,
+                        "reason": f"request_id {request_id[:18]} already served "
                                   "(replay)"}
             if not recipient:
                 return {"ok": False,
                         "reason": "service has no on-chain provider address "
                                   "(author_pubkey) to verify payment against"}
-            # Off-loop: verify_service_payment is `async def` but synchronous
-            # inside (web3 HTTP receipt fetch + log decode). Awaited directly it
-            # occupies the event loop for the whole read, and a buyer's
-            # connection — plus every other client of this daemon — starves on
-            # the websocket keepalive and gets dropped mid-request. Same fix
-            # `invoke_service` and `owner_binding_status` already carry.
-            res = await self._offload(lambda: oc.verify_service_payment(
-                request_id=request_id,
-                recipient=recipient,
-                min_amount=ask_amount,
-                tx_hash=tx_hash,
-            ))
-            if not res.get("verified"):
-                return {"ok": False, "reason": res.get("reason", "unverified")}
-            # Consume the request_id AFTER a positive verify (replay guard).
-            store.mark_request_served(request_id)
+            # Reserved while the chain is read, so two copies of one request
+            # sent at once cannot both pass the replay check.
+            inflight.add(request_id)
+            try:
+                # Off-loop: verify_service_payment is `async def` but
+                # synchronous inside (web3 HTTP receipt fetch + log decode).
+                # Awaited directly it occupies the event loop for the whole
+                # read, and a buyer's connection — plus every other client of
+                # this daemon — starves on the websocket keepalive and gets
+                # dropped mid-request. Same fix `invoke_service` and
+                # `owner_binding_status` already carry.
+                res = await self._offload(lambda: oc.verify_service_payment(
+                    request_id=request_id,
+                    recipient=recipient,
+                    min_amount=ask_amount,
+                    tx_hash=tx_hash,
+                ))
+                if not res.get("verified"):
+                    return {"ok": False, "reason": res.get("reason", "unverified")}
+                # Consume the request_id AFTER a positive verify (replay guard).
+                store.mark_request_served(request_id)
+            finally:
+                inflight.discard(request_id)
             return {"ok": True, "reason": "ok"}
 
         # --- Voucher (PaymentChannel) path ----------------------------------
@@ -5372,24 +5393,35 @@ class WebSocketBridge:
             if not smc.channel_available:
                 return {"ok": False,
                         "reason": "PaymentChannel not configured on this daemon"}
-            # Off-loop for the same reason as the direct path above: the
-            # voucher check reads on-chain channel state synchronously.
-            res = await self._offload(
-                lambda: smc.verify_voucher(cid, cum, signature))
-            if not res.get("valid"):
-                return {"ok": False, "reason": res.get("reason", "invalid voucher")}
-            # The channel's provider must be the serving agent.
-            if recipient and str(res.get("provider", "")).lower() != recipient.lower():
-                return {"ok": False,
-                        "reason": "voucher channel provider is not this service's "
-                                  "provider"}
-            last = store.last_channel_cumulative(cid)
-            if cum - last < ask_amount:
-                return {"ok": False,
-                        "reason": f"voucher increment {cum - last} < ask "
-                                  f"{ask_amount}"}
-            # Accept: record the latest cumulative + store the voucher to settle.
-            store.record_channel_voucher(cid, cum, str(signature))
+            # One voucher check per channel at a time: two vouchers raced
+            # through the cumulative check before either was recorded.
+            locks = self.__dict__.setdefault("_channel_locks", {})
+            async with locks.setdefault(cid, asyncio.Lock()):
+                # Off-loop for the same reason as the direct path above: the
+                # voucher check reads on-chain channel state synchronously.
+                res = await self._offload(
+                    lambda: smc.verify_voucher(cid, cum, signature))
+                if not res.get("valid"):
+                    return {"ok": False, "reason": res.get("reason", "invalid voucher")}
+                # The channel's provider must be the serving agent.
+                if recipient and str(res.get("provider", "")).lower() != recipient.lower():
+                    return {"ok": False,
+                            "reason": "voucher channel provider is not this service's "
+                                      "provider"}
+                # Settlement pays at most the deposit: a voucher above it is
+                # work the provider can never collect.
+                if res.get("exceeds_deposit"):
+                    return {"ok": False,
+                            "reason": f"voucher cumulative {cum} exceeds the channel "
+                                      f"deposit {res.get('deposit')}"}
+                last = store.last_channel_cumulative(cid)
+                if cum - last < ask_amount:
+                    return {"ok": False,
+                            "reason": f"voucher increment {cum - last} < ask "
+                                      f"{ask_amount}"}
+                # Accept: record the latest cumulative + store the voucher to
+                # settle.
+                store.record_channel_voucher(cid, cum, str(signature))
             return {"ok": True, "reason": "ok"}
 
         return {"ok": False,
