@@ -36,6 +36,19 @@ from nodes.common.p2p import (
 from nodes.common.config import P2PConfig, load_config
 
 
+def trio_test(fn):
+    """Run an async test under trio. The suite runs pytest-asyncio in auto
+    mode, which claims every ``async def`` test (``@pytest.mark.trio``
+    included) and fails these with "a coroutine was expected, got None"; a
+    plain function that calls trio.run is left alone."""
+    import functools
+
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        trio.run(functools.partial(fn, *args, **kwargs))
+    return run
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -136,7 +149,7 @@ class TestP2PConfig:
 
 
 class TestAutonetHostLifecycle:
-    @pytest.mark.trio
+    @trio_test
     async def test_host_starts_and_stops(self):
         """Host starts, gets peer ID and addresses, then stops."""
         host = AutonetHost(node_id="test-0", listen_host="127.0.0.1")
@@ -146,7 +159,7 @@ class TestAutonetHostLifecycle:
             assert host._running is True
         assert host._running is False
 
-    @pytest.mark.trio
+    @trio_test
     async def test_host_summary(self):
         """Host summary returns correct info."""
         host = AutonetHost(node_id="test-1", listen_host="127.0.0.1")
@@ -157,7 +170,7 @@ class TestAutonetHostLifecycle:
             assert summary["running"] is True
             assert isinstance(summary["addrs"], list)
 
-    @pytest.mark.trio
+    @trio_test
     async def test_two_hosts_connect(self):
         """Two hosts can connect to each other."""
         host1 = AutonetHost(node_id="node-1", listen_host="127.0.0.1")
@@ -173,7 +186,7 @@ class TestAutonetHostLifecycle:
                 peers = host1.get_connected_peers()
                 assert len(peers) >= 1
 
-    @pytest.mark.trio
+    @trio_test
     async def test_connect_failure(self):
         """Connecting to a non-existent peer returns False."""
         host = AutonetHost(node_id="test-fail", listen_host="127.0.0.1")
@@ -190,7 +203,7 @@ class TestAutonetHostLifecycle:
 
 
 class TestWeightDeltaTransfer:
-    @pytest.mark.trio
+    @trio_test
     async def test_send_receive_weight_delta(self):
         """Weight deltas are sent and received with hash verification."""
         host1 = AutonetHost(node_id="solver-0", listen_host="127.0.0.1")
@@ -233,7 +246,7 @@ class TestWeightDeltaTransfer:
 
 
 class TestActivationRelay:
-    @pytest.mark.trio
+    @trio_test
     async def test_send_receive_activation(self):
         """Activation tensors are relayed between hosts with metadata."""
         host1 = AutonetHost(node_id="module-a", listen_host="127.0.0.1")
@@ -282,7 +295,7 @@ class TestActivationRelay:
 
 
 class TestCapabilityAdvertisement:
-    @pytest.mark.trio
+    @trio_test
     async def test_advertise_and_discover(self):
         """Node advertises capability, peer discovers it."""
         cap1 = NodeCapability(
@@ -379,7 +392,7 @@ class TestCapabilityAdvertisement:
 
 
 class TestPeerLatencyTracker:
-    @pytest.mark.trio
+    @trio_test
     async def test_ping_peer(self):
         """Ping measures RTT to a connected peer."""
         host1 = AutonetHost(node_id="pinger", listen_host="127.0.0.1")
