@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -129,8 +130,22 @@ def read_heartbeat(bundle_dir: str | Path) -> dict[str, Any]:
 
 
 def _valid_cmd(cmd: Any) -> bool:
+    """Every field a finite number. NaN slips past every comparison a pack
+    makes (``NaN > 0`` is False), so a NaN speed must be malformed, not
+    motion."""
     return (isinstance(cmd, dict)
-            and all(isinstance(cmd.get(k), (int, float)) for k in STOP_CMD))
+            and all(isinstance(cmd.get(k), (int, float))
+                    and not isinstance(cmd.get(k), bool)
+                    and math.isfinite(cmd.get(k)) for k in STOP_CMD))
+
+
+def _fresh(stamp: Any, now: float, max_age_s: float) -> bool:
+    """Written as "not older than", so a NaN or missing stamp is stale."""
+    try:
+        age = now - float(stamp or 0)
+    except (TypeError, ValueError):
+        return False
+    return age <= max_age_s
 
 
 def evaluate(packs: list[Pack], obs: dict[str, Any], cmd: dict[str, Any], *,
@@ -146,12 +161,11 @@ def evaluate(packs: list[Pack], obs: dict[str, Any], cmd: dict[str, Any], *,
     if not packs:
         return {**_stop("no packs loaded"), "packs": []}
     if heartbeat is not None:
-        age = now - float(heartbeat.get("ts") or 0)
-        if age > heartbeat_max_age_s:
+        if not _fresh(heartbeat.get("ts"), now, heartbeat_max_age_s):
             return {**_stop("daemon heartbeat stale"), "packs": []}
         if not heartbeat.get("sponsor_ok"):
             return {**_stop("sponsor unreachable"), "packs": []}
-    if now - float(obs.get("stamp") or 0) > obs_max_age_s:
+    if not _fresh(obs.get("stamp"), now, obs_max_age_s):
         return {**_stop("sensor data stale"), "packs": []}
     if not _valid_cmd(cmd):
         return {**_stop("malformed command"), "packs": []}

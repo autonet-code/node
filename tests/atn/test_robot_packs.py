@@ -239,3 +239,27 @@ async def test_registry_standards_switch_packs_and_fail_closed(tmp_path):
     assert not res["ok"] and svc.exported == []
     loaded = P.load_bundle(config.robot.bundle_dir)
     assert not loaded.ok and loaded.errors == ["no required packs"]
+
+
+def test_nan_command_and_nan_stamps_stop_the_robot(tmp_path):
+    """NaN passes every comparison a pack makes (NaN > 0 is False): a NaN
+    forward speed came out as a full-speed clip, and a NaN stamp read as
+    fresh. Both must stop (docs/robots.md decision 5)."""
+    packs = _loaded(tmp_path)
+    now = time.time()
+    nan = float("nan")
+    v = P.evaluate(packs, _obs(5.0, now), {"linear": nan, "angular": 0.0},
+                   now=now, heartbeat=_hb(now))
+    assert v["verdict"] == "stop" and v["cmd"]["linear"] == 0.0
+    v = P.evaluate(packs, _obs(0.3, now), {"linear": nan, "angular": 0.0},
+                   now=now, heartbeat=_hb(now))
+    assert v["verdict"] == "stop" and v["cmd"]["linear"] == 0.0
+    v = P.evaluate(packs, {"stamp": nan, "scan": {"front_min": 5.0}},
+                   {"linear": 0.2, "angular": 0.0}, now=now, heartbeat=_hb(now))
+    assert v["verdict"] == "stop"
+    v = P.evaluate(packs, _obs(5.0, now), {"linear": 0.2, "angular": 0.0},
+                   now=now, heartbeat={"ts": nan, "sponsor_ok": True})
+    assert v["verdict"] == "stop"
+    v = P.evaluate(packs, _obs(5.0, now), {"linear": True, "angular": 0.0},
+                   now=now, heartbeat=_hb(now))
+    assert v["verdict"] == "stop"
