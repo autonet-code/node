@@ -352,8 +352,8 @@ the fleet witnesses every other, which suits a small territory only.
 
 ### Build order
 
-Phase A is **built** (2026-10-25). Phase B is next, with a staged violation:
-one robot breaks a rule while the others watch.
+Phase A is **built** (2026-10-25). Phase B steps 1 to 3 are built (below);
+the rest follows, with a staged rule violation the others watch.
 
 | Piece | Where |
 |-------|-------|
@@ -404,3 +404,64 @@ Known limits of Phase A:
   archive. Pollers hold hashes only and cannot check it live.
 - Reports are signed and gossiped; nothing consumes them yet (Phase B and
   the accountability rail).
+
+### Phase B, steps 1 to 3: built (2026-10-25)
+
+Scene summaries, the automatic trigger and proximity witnesses are built.
+Still to come in Phase B: anonymized dual camera streams, opening archives on
+a trigger, the perception tool, consolidation and rule predicates.
+
+- **Samples.** A ROS node on each robot (`robot/ros/scene_summary.py`)
+  writes one sample a second to the bundle (`scene.jsonl`) and records it
+  on `autonet/scene`: its world pose (GPS on a real robot; spawn pose plus
+  odometry in the sim), speed, lidar objects in world coordinates (long
+  runs such as walls cut into pieces of at most 0.5 m, so a robot touching
+  scenery still shows), the nearest return in each of 36 sectors, and its
+  pack verdicts. No images. The logic is stdlib (`atn/robot/scene.py`), so
+  the robot and the daemon run the same code.
+- **In the chain.** The daemon (`atn/robot/scene_source.py`) commits every
+  sample not yet committed into its next signed link (`scene`), so a
+  robot's claims about where it was are as tamper-evident as its worklog.
+- **The trigger.** Every robot checks each link it receives against its own
+  samples from the same moments. A claimed position within
+  `witness_range_m` with a clear line of sight (nothing nearer in that
+  sector) must show an object within 0.4 m; `scene_min_run` (3) such misses
+  in a row are signed and gossiped as `scene_conflict`, with the claimed and
+  the witness's positions. Out of range or behind something is no evidence,
+  and a single missed frame is noise.
+- **Proximity witnesses.** A poll goes to the robot and to the fleet members
+  within `witness_range_m` of its last claimed position (a member whose
+  position the poller has not seen is included).
+
+The E2E (`python scripts/local_e2e_robot_scene.py`, needs Docker) passes
+6/6: three robots write samples at their true positions; each sees its near
+neighbour 8 cm from where it is; the samples travel in the signed links and
+every watcher learns each position; with a 1.8 m range a poll of r1 goes to
+r2 (1.0 m) and not r3 (2.1 m), and r3 has no witnesses; r1 driving out and
+back honestly raises no report; r1's daemon then claims r1 stayed put while
+it drives away, and r2 reports a conflict (16 claimed positions it could see
+were empty) while r3, out of range, reports nothing.
+
+Sim fix the E2E needed: the model's lidar visual sits 3 cm below its sensor,
+so no robot's scan plane crossed another robot and robots could not see each
+other. `run_fleet.sh` gives each robot a turret on the scan plane, as a real
+one has, and loads the robots with the world.
+
+Known limits:
+
+- Witnessing uses one sensor (lidar) and one check (position). A robot
+  feeding its daemon fabricated sensor data live still contradicts only
+  where witnesses can see it, as designed.
+- Every robot still receives every fleet member's links; proximity only
+  chooses who answers polls and who can judge. A large fleet needs pushes
+  routed by proximity too.
+- `scene.jsonl` grows without rotation.
+
+Two poll-rail races the fleet runs surfaced, fixed with regression tests:
+a link pushed to a poller while its poll was in flight made the answer look
+like a chain break (the answer is now judged against the head held when
+asking); and a poll due in a round's last moment could land after the robot
+had already judged who never came (it now waits out the slack). One run saw
+a committed chunk whose bytes later differed from its leaf; it has not
+recurred in three runs since, and the E2E now logs the leaf, the host copy
+and the robot's file if it does.

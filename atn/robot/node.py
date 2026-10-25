@@ -23,12 +23,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from . import crypto as C
 from . import poll as P
+from . import scene as S
 from . import worklog as W
 
 log = logging.getLogger(__name__)
@@ -42,6 +45,8 @@ class PollParams:
     commit_gap_s: float = 30.0  # a robot silent this long is reported
     early_slack_s: float = 2.0  # clock skew allowed on a poll's due time
     tick_s: float = 0.5
+    witness_range_m: float = 3.0  # who can witness whom (provisional)
+    scene_min_run: int = 3      # unseen claims in a row before a conflict
 
 
 class Transport(Protocol):
@@ -57,6 +62,7 @@ class PollNode:
                  state_dir: str | Path, worklog: W.Worklog | None = None,
                  packs: Callable[[], list[str]] = list,
                  write_challenge: Callable[[str], None] | None = None,
+                 scene: Any = None,
                  clock: Callable[[], float] = time.time) -> None:
         self.address = address.lower()
         self._key = private_key
@@ -68,6 +74,7 @@ class PollNode:
         self.worklog = worklog
         self.packs = packs
         self.write_challenge = write_challenge
+        self.scene = scene                # this robot's SceneSource, if a robot
         self.clock = clock
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -80,6 +87,7 @@ class PollNode:
         self.receipts: list[dict] = self._load("receipts.jsonl")
         self._polled_by: dict[int, set[str]] = {}
         self._absent_done: set[int] = set()
+        self._first_full_round: int | None = None
         # poller state
         self._done: set[tuple[int, str, int]] = set()
         self._my_receipts: dict[int, list[dict]] = {}
@@ -89,6 +97,9 @@ class PollNode:
         self.reports_sent: list[dict] = []
         self._draws: dict[tuple, list[str]] = {}
         self._pending_push: list[dict] = []     # poll-answer links not yet pushed
+        # Latest claimed position per robot, from the scene in its links.
+        self.positions: dict[str, tuple[float, float]] = {}
+        self._conflicts_done: set[tuple[str, int]] = set()
         self._task: asyncio.Task | None = None
 
     def _draw(self, rnd: P.Round, robot: str) -> list[str]:
@@ -158,7 +169,8 @@ class PollNode:
         if subject == self.address:
             self._polled_by.setdefault(rnd.index, set()).add(poll["poller"])
         link = self.worklog.commit(packs=self.packs(), challenge=challenge,
-                                   poll=P.poll_id(poll), force=True, now=self.clock())
+                                   poll=P.poll_id(poll), scene=self._new_scene(),
+                                   force=True, now=self.clock())
         links = self.worklog.links_since(since) if since >= 0 else [link]
         return {"links": links}
 
@@ -190,6 +202,51 @@ class PollNode:
                                seq=link.get("seq"), errors=errs)
             return
         self.heads[robot] = (link, self.clock())
+        pos = S.latest_position(link.get("scene") or [])
+        if pos is not None:
+            self.positions[robot] = pos
+        await self._check_scene(robot, link)
+
+    async def _check_scene(self, robot: str, link: dict) -> None:
+        """The automatic trigger: does what this robot saw contradict where
+        the other robot says it was?"""
+        claims = link.get("scene") or []
+        if self.scene is None or not claims or (robot, link["seq"]) in self._conflicts_done:
+            return
+        t0 = min(s["t"] for s in claims) - 1.0
+        t1 = max(s["t"] for s in claims) + 1.0
+        own = self.scene.between(t0, t1)
+        checks = S.check_claims(claims, own, range_m=self.params.witness_range_m)
+        runs = S.conflict_runs(checks, min_run=self.params.scene_min_run)
+        if not runs:
+            return
+        self._conflicts_done.add((robot, link["seq"]))
+        await self._report(
+            "scene_conflict", robot=robot, seq=link["seq"], link=C.obj_hash(link),
+            unseen=[{"t": c["t"], "claimed": c["claimed"], "witness": c["witness_pose"]}
+                    for run in runs for c in run],
+            judged=len(checks))
+
+    def _new_scene(self) -> list[dict]:
+        """Own scene samples not yet committed."""
+        if self.scene is None or self.worklog is None:
+            return []
+        return self.scene.between(self.worklog.scene_until, self.clock())
+
+    def _witnesses(self, robot: str) -> list[str]:
+        """The robot's witnesses for a poll: the fleet members near it. A
+        member whose position this node has not seen yet is included."""
+        fleet = [w for w in self.roster(robot) if w != robot]
+        here = self.positions.get(robot)
+        if here is None:
+            return fleet
+        out = []
+        for w in fleet:
+            there = self.positions.get(w)
+            if there is None or math.hypot(there[0] - here[0], there[1] - here[1]) \
+                    <= self.params.witness_range_m:
+                out.append(w)
+        return out
 
     def _watching(self) -> set[str]:
         """Robots that push their links here right now: those we witness
@@ -228,7 +285,8 @@ class PollNode:
     async def _commit_and_push(self) -> None:
         if self.worklog is None:
             return
-        link = self.worklog.commit(packs=self.packs(), now=self.clock())
+        link = self.worklog.commit(packs=self.packs(), scene=self._new_scene(),
+                                   now=self.clock())
         links, self._pending_push = self._pending_push, []
         if link is not None:
             links.append(link)
@@ -245,13 +303,22 @@ class PollNode:
         return sorted({*self.roster(self.address), *pollers} - {self.address})
 
     async def _check_absent(self) -> None:
-        """At the end of a round, report drawn pollers that never polled."""
+        """Once a round has been over for its slack (a poll due in its last
+        moment may still be on the way), report drawn pollers that never
+        polled."""
         if self.worklog is None:
             return
         now = self.clock()
-        rnd = self.round_at(now - self.params.early_slack_s - self.params.tick_s * 2)
-        cur = self.round_at(now)
-        if rnd is None or cur is None or cur.index == rnd.index or rnd.index in self._absent_done:
+        if self._first_full_round is None:
+            # Only rounds this node watched from their start can be judged.
+            cur = self.round_at(now)
+            if cur is None:
+                return
+            joined_late = now > cur.start + self.params.early_slack_s
+            self._first_full_round = cur.index + (1 if joined_late else 0)
+        settled = self.round_at(now - self.params.early_slack_s - self.params.tick_s * 2)
+        rnd = self.round_at(settled.start - 1e-3) if settled is not None else None
+        if rnd is None or rnd.index < self._first_full_round or rnd.index in self._absent_done:
             return
         self._absent_done.add(rnd.index)
         drawn = self._draw(rnd, self.address)
@@ -301,11 +368,14 @@ class PollNode:
         """Send one poll to the robot and its witnesses at once. Returns the
         errors per answerer (empty list = countersigned)."""
         robot = poll["robot"]
-        targets = [robot] + [w for w in self.roster(robot) if w != robot]
+        targets = [robot] + self._witnesses(robot)
 
-        async def ask(peer: str) -> tuple[str, dict | None, float, float]:
+        async def ask(peer: str) -> tuple[str, dict | None, dict | None, float, float]:
+            # The answer is checked against the head held when asking: a link
+            # pushed while the poll is in flight must not move it.
             held = self.heads.get(peer)
-            since = held[0]["seq"] if held else -1
+            head = held[0] if held else None
+            since = head["seq"] if head else -1
             sent = self.clock()
             try:
                 ans = await self.transport.request(
@@ -313,11 +383,11 @@ class PollNode:
                     timeout=self.params.deadline_s * 3)
             except Exception as exc:  # noqa: BLE001
                 ans = {"error": f"no answer: {exc}"}
-            return peer, ans, sent, self.clock()
+            return peer, ans, head, sent, self.clock()
 
         results = await asyncio.gather(*(ask(t) for t in targets))
         out: dict[str, list[str]] = {}
-        for peer, ans, sent, received in results:
+        for peer, ans, head, sent, received in results:
             role = "subject" if peer == robot else "witness"
             if not ans or "links" not in ans:
                 err = (ans or {}).get("error", "no answer")
@@ -325,9 +395,8 @@ class PollNode:
                 await self._report("no_answer", robot=peer, subject=robot, role=role,
                                    poll=P.poll_id(poll), error=err)
                 continue
-            held = self.heads.get(peer)
             errs = P.verify_answer(ans["links"], poll, rnd, answerer=peer,
-                                   known_head=held[0] if held else None,
+                                   known_head=head,
                                    sent_at=sent, received_at=received,
                                    deadline_s=self.params.deadline_s,
                                    required_packs=list(rnd.standards) or None)
@@ -341,7 +410,9 @@ class PollNode:
                                    poll=P.poll_id(poll), errors=errs)
                 continue
             link = ans["links"][-1]
-            self.heads[peer] = (link, self.clock())
+            now_held = self.heads.get(peer)
+            if now_held is None or now_held[0]["seq"] < link["seq"]:
+                self.heads[peer] = (link, self.clock())
             receipt = P.make_receipt(poll, link, role=role, received_at=received,
                                      poller=self.address, private_key=self._key)
             self._my_receipts.setdefault(rnd.index, []).append(receipt)

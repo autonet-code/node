@@ -37,7 +37,7 @@ WRONG_PACKS = "active packs differ from the required set"
 
 # Exceptions a report can name.
 REPORT_KINDS = ("no_answer", "late", "invalid", "chain_break", "wrong_packs",
-                "missing_commit", "poller_absent", "challenge_missing")
+                "missing_commit", "poller_absent", "challenge_missing", "scene_conflict")
 
 
 @dataclass(frozen=True)

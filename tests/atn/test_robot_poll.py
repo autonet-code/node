@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -471,3 +472,47 @@ def test_unfinished_chunk_is_not_committed(tmp_path):
     link = wl.commit(packs=[], now=11)
     assert [lf["name"] for lf in link["leaves"]] == ["pose/worklog/worklog_0.mcap",
                                                      "pose/worklog/worklog_1.mcap"]
+
+
+def test_link_pushed_while_a_poll_is_in_flight_is_not_a_break(tmp_path):
+    """A robot commits and pushes a link between receiving a poll and
+    answering it: the poller must judge the answer against the head it held
+    when it asked."""
+    w = World(tmp_path)
+    subject = w.robots[0]
+    node = w.nodes[subject]
+    real = node.handle_request
+
+    async def push_then_answer(msg):
+        link = node.worklog.commit(packs=["pack"], force=True, now=w.now[0])
+        for m in w.members:
+            await w.nodes[m.agent].handle_push(json.loads(json.dumps(link)))
+        return await real(msg)
+    node.handle_request = push_then_answer
+    _run(w.run_until(1000 + 100 + 5))
+    reps = [g for g in w.net.gossip_log if g.get("type") == P.REPORT_TYPE]
+    assert reps == [], reps
+
+
+def test_poll_landing_in_the_slack_after_the_round_is_not_absent(tmp_path):
+    """A poller held up until just after the round ends still polls within
+    the slack; the robot waits for that before calling it absent."""
+    w = World(tmp_path)
+    subject = w.robots[0]
+    late = P.draw_pollers(w.rnd, subject, k=3, percentile=0)[0]
+
+    async def run():
+        while w.now[0] < 1000 + 100 + 6:
+            w.now[0] += 1
+            if int(w.now[0]) % 5 == 0:
+                w.record()
+            for n in list(w.nodes.values()):
+                if n.address == late and w.now[0] < 1100 + 1:
+                    continue                      # busy until 1 s after the end
+                await n.step()
+    _run(run())
+    absent = [g for g in w.net.gossip_log if g.get("type") == P.REPORT_TYPE
+              and g["kind"] == "poller_absent"]
+    assert absent == [], absent
+    assert any(r["poller"] == late and r["round"] == w.rnd.index
+               for r in w.nodes[subject].receipts)

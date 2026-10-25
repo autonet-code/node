@@ -83,11 +83,16 @@ def closed_chunks(bag_dir: str | Path) -> list[tuple[str, str, Path]]:
 
 def build_link(*, robot: str, seq: int, prev: str, leaves: list[dict[str, Any]],
                packs: list[str], challenge: str = "", poll: str = "",
+               scene: list[dict[str, Any]] | None = None,
                now: float | None = None) -> dict[str, Any]:
+    """``scene``: the robot's scene samples since its previous link
+    (``atn/robot/scene.py``), signed with the rest so witnesses can check
+    them against what they saw."""
     return {"type": LINK_TYPE, "robot": robot.lower(), "seq": seq, "prev": prev,
             "ts": time.time() if now is None else now, "packs": list(packs),
             "challenge": challenge, "poll": poll, "leaves": leaves,
-            "root": C.merkle_root([leaf_hash(lf) for lf in leaves])}
+            "root": C.merkle_root([leaf_hash(lf) for lf in leaves]),
+            "scene": list(scene or [])}
 
 
 def verify_link(link: dict[str, Any], *, robot: str,
@@ -165,6 +170,14 @@ class Worklog:
         self._committed = {lf["name"] for lk in self.links for lf in lk["leaves"]}
 
     @property
+    def scene_until(self) -> float:
+        """Time of the newest scene sample already committed (0 = none)."""
+        for link in reversed(self.links):
+            if link.get("scene"):
+                return max(s["t"] for s in link["scene"])
+        return 0.0
+
+    @property
     def head(self) -> dict[str, Any] | None:
         return self.links[-1] if self.links else None
 
@@ -174,6 +187,7 @@ class Worklog:
                 for s, n, p in closed_chunks(self.bag_dir) if n not in self._committed]
 
     def commit(self, *, packs: list[str], challenge: str = "", poll: str = "",
+               scene: list[dict[str, Any]] | None = None,
                force: bool = False, now: float | None = None) -> dict[str, Any] | None:
         """Sign a link over the chunks closed since the last one. Returns
         None when nothing closed, unless ``force`` (a poll answer always
@@ -185,7 +199,7 @@ class Worklog:
         link = C.sign(build_link(
             robot=self.robot, seq=(head["seq"] + 1) if head else 0,
             prev=C.obj_hash(head) if head else C.ZERO, leaves=leaves,
-            packs=packs, challenge=challenge, poll=poll, now=now), self._key)
+            packs=packs, challenge=challenge, poll=poll, scene=scene, now=now), self._key)
         self.links.append(link)
         self._committed.update(lf["name"] for lf in leaves)
         with self._path.open("a", encoding="utf-8") as f:

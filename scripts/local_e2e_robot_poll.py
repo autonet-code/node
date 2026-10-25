@@ -270,6 +270,28 @@ async def wait_until(t: float) -> None:
         await asyncio.sleep(min(1.0, t - time.time()))
 
 
+def explain(fleet: "Fleet", reports: list[dict]) -> None:
+    """Log what a failing stage needs to tell a real fault from a timing one."""
+    name = {**fleet.ns, **{m: f"m{i}" for i, m in enumerate(fleet.members)}}
+    for g in reports:
+        who = name.get(g.get("robot", ""), "?")
+        if g["kind"] != "poller_absent":
+            log(f"report {g['kind']} robot={who} by {name.get(g['reporter'], '?')} "
+                f"{ {k: v for k, v in g.items() if k in ('error', 'errors', 'role')} }")
+            continue
+        rr = fleet.rounds.round_at(fleet.round_start(g["round"]) + 1)
+        poll = P.make_poll(rr, g["robot"], g["slot"], poller=g["poller"],
+                           private_key=fleet.keys[g["poller"]])
+        due, _ = P.poll_timing(poll, rr)
+        pn = fleet.nodes[g["poller"]]
+        got = [x for x in pn._my_receipts.get(g["round"], []) if x["robot"] == g["robot"]]
+        log(f"absent: {who} round {g['round']} [{rr.start:.1f}, "
+            f"{rr.start + rr.period_s:.1f}) poller {name[g['poller']]} slot {g['slot']} "
+            f"due {due:.1f} reported {g['ts']:.1f}; poller done="
+            f"{(g['round'], g['robot'], g['slot']) in pn._done} receipts={len(got)}; "
+            f"robot polled_by={[name.get(p) for p in fleet.nodes[g['robot']]._polled_by.get(g['round'], set())]}")
+
+
 async def wait_for(pred, timeout: float, step: float = 1.0) -> bool:
     end = time.time() + timeout
     while time.time() < end:
@@ -358,6 +380,7 @@ async def amain() -> int:
         rnd_R = fleet.rounds.round_at(time.time())
         await wait_until(fleet.round_start(R + 1) + fleet.params.early_slack_s + 4)
         reports_R = [g for g in fleet.reports() if g.get("round", R) == R]
+        explain(fleet, reports_R)
         check(reports_R == [], f"reports in a clean round: {reports_R[:3]}")
         for r in fleet.robots:
             drawn = P.draw_pollers(rnd_R, r, k=3, percentile=90)
@@ -408,8 +431,19 @@ async def amain() -> int:
         check(P.verify_receipt(rc, link) == [], "receipt does not match the link")
         names = [lf["name"] for lk in window for lf in lk["leaves"]]
         files = wl.produce(names)
-        check(files and all(W.verify_chunks(lk, files) == [] for lk in window),
-              "produced chunks do not match")
+        bad_leaves = [lf for lk in window for lf in lk["leaves"] if lf["name"] in files
+                      and hashlib.sha256(files[lf["name"]]).hexdigest() != lf["sha256"]]
+        for lf in bad_leaves:
+            # Diagnostics: the committed leaf, the host copy, the robot's file.
+            remote = docker("exec", CONTAINER, "sh", "-c",
+                            f"stat -c '%s %Y' /var/worklog/{fleet.ns[r1]}/{lf['name']}; "
+                            f"sha256sum /var/worklog/{fleet.ns[r1]}/{lf['name']}",
+                            check_rc=False)
+            host = files[lf["name"]]
+            log(f"mismatch {lf['name']}: leaf {lf['bytes']}B {lf['sha256'][:12]}, host "
+                f"{len(host)}B {hashlib.sha256(host).hexdigest()[:12]} ends-magic="
+                f"{host.endswith(W.MCAP_MAGIC)}, robot {remote.split()[:3]}")
+        check(files and not bad_leaves, "produced chunks do not match")
         victim = BAGS / fleet.ns[r1] / names[0]
         original = victim.read_bytes()
         victim.write_bytes(original[:-8] + b"\x00" * 8)
@@ -455,6 +489,7 @@ async def amain() -> int:
             (g["kind"] in ("missing_commit", "no_answer") and g.get("robot") == silent)
             or (g["kind"] == "poller_absent" and g.get("poller") == lazy)
             or (g["kind"] == "wrong_packs" and g.get("robot") == stale))]
+        explain(fleet, unexpected)
         check(unexpected == [], f"unexpected reports: {unexpected[:3]}")
         check(all(C.signer(g) == g["reporter"] for g in reps), "unsigned report")
         passed(f"{len(reps)} reports: {fleet.ns[silent]} silent, the absent poller, "
