@@ -75,6 +75,7 @@ class PollNode:
         self.heads: dict[str, tuple[dict, float]] = {}
         self._gap_reported: set[tuple[str, int]] = set()
         self._watch_from: dict[str, float] = {}
+        self.missed: dict[str, int] = {}    # robot -> links skipped between pushes
         # robot state
         self.receipts: list[dict] = self._load("receipts.jsonl")
         self._polled_by: dict[int, set[str]] = {}
@@ -87,6 +88,7 @@ class PollNode:
         self.gossip_log: list[dict] = []
         self.reports_sent: list[dict] = []
         self._draws: dict[tuple, list[str]] = {}
+        self._pending_push: list[dict] = []     # poll-answer links not yet pushed
         self._task: asyncio.Task | None = None
 
     def _draw(self, rnd: P.Round, robot: str) -> list[str]:
@@ -117,7 +119,12 @@ class PollNode:
 
     async def handle_request(self, msg: dict) -> dict:
         if msg.get("type") == "poll":
-            return self._answer(msg["poll"], int(msg.get("since", -1)))
+            ans = self._answer(msg["poll"], int(msg.get("since", -1)))
+            if ans.get("links"):
+                # The answer's link goes to every watcher too, not only to
+                # this poller, so their heads and chain checks stay current.
+                self._pending_push.append(ans["links"][-1])
+            return ans
         return {"error": f"unknown request {msg.get('type')!r}"}
 
     async def handle_push(self, msg: dict) -> None:
@@ -174,6 +181,9 @@ class PollNode:
         if prev is not None and link.get("seq", -1) <= prev["seq"]:
             return  # old or duplicate
         follows = prev is not None and link.get("seq") == prev["seq"] + 1
+        if prev is not None and not follows:
+            # Links we never saw; chain continuity across them goes unchecked.
+            self.missed[robot] = self.missed.get(robot, 0) + link["seq"] - prev["seq"] - 1
         errs = W.verify_link(link, robot=robot, prev=prev if follows else None)
         if errs:
             await self._report("chain_break" if follows else "invalid", robot=robot,
@@ -219,13 +229,15 @@ class PollNode:
         if self.worklog is None:
             return
         link = self.worklog.commit(packs=self.packs(), now=self.clock())
-        if link is None:
-            return
-        for peer in self._subscribers():
-            try:
-                await self.transport.push(peer, link)
-            except Exception:  # noqa: BLE001
-                log.debug("push to %s failed", peer, exc_info=True)
+        links, self._pending_push = self._pending_push, []
+        if link is not None:
+            links.append(link)
+        for link in sorted(links, key=lambda lk: lk["seq"]):
+            for peer in self._subscribers():
+                try:
+                    await self.transport.push(peer, link)
+                except Exception:  # noqa: BLE001
+                    log.debug("push to %s failed", peer, exc_info=True)
 
     def _subscribers(self) -> list[str]:
         rnd = self.round_at(self.clock())
@@ -317,10 +329,12 @@ class PollNode:
             errs = P.verify_answer(ans["links"], poll, rnd, answerer=peer,
                                    known_head=held[0] if held else None,
                                    sent_at=sent, received_at=received,
-                                   deadline_s=self.params.deadline_s)
+                                   deadline_s=self.params.deadline_s,
+                                   required_packs=list(rnd.standards) or None)
             out[peer] = errs
             if errs:
                 kind = ("late" if all(e.startswith("late") for e in errs)
+                        else "wrong_packs" if errs == [P.WRONG_PACKS]
                         else "chain_break" if any(e.startswith("link ") for e in errs)
                         else "invalid")
                 await self._report(kind, robot=peer, subject=robot, role=role,

@@ -33,8 +33,10 @@ RECEIPT_TYPE = "autonet.robot.receipt/1"
 AGGREGATE_TYPE = "autonet.robot.aggregate/1"
 REPORT_TYPE = "autonet.robot.report/1"
 
+WRONG_PACKS = "active packs differ from the required set"
+
 # Exceptions a report can name.
-REPORT_KINDS = ("no_answer", "late", "invalid", "chain_break",
+REPORT_KINDS = ("no_answer", "late", "invalid", "chain_break", "wrong_packs",
                 "missing_commit", "poller_absent", "challenge_missing")
 
 
@@ -47,15 +49,17 @@ class Member:
 
 @dataclass(frozen=True)
 class Round:
-    """One poll round. It starts at an anchor (``index``, ``start`` = that
-    anchor's timestamp) and lasts ``period_s``. ``seed`` is the epoch root
-    of the anchor two before it."""
+    """One poll round, ``index``, from ``start`` for ``period_s``. ``seed``
+    is the epoch root of the anchor two before the one in force at its start.
+    ``standards`` are the safety-pack digests every robot must run this round
+    (its jurisdiction's and every ancestor's); empty means none are set."""
     index: int
     start: float
     seed: str
     period_s: float
     members: tuple[Member, ...]
     sanctioned: frozenset[str] = field(default_factory=frozenset)
+    standards: tuple[str, ...] = ()
 
     def household_of(self, agent: str) -> str:
         agent = agent.lower()
@@ -188,7 +192,7 @@ def verify_answer(links: list[dict[str, Any]], poll: dict[str, Any], rnd: Round,
     if received_at - sent_at > deadline_s:
         errors.append(f"late: {received_at - sent_at:.2f}s > {deadline_s:.2f}s")
     if required_packs is not None and sorted(last.get("packs") or []) != sorted(required_packs):
-        errors.append("active packs differ from the required set")
+        errors.append(WRONG_PACKS)
     return errors
 
 

@@ -209,23 +209,39 @@ def write_heartbeat(bundle_dir: str | Path, *, sponsor_ok: bool,
     _replace(tmp, root / "heartbeat.json")
 
 
+CHALLENGE_QUEUE = 32
+
+
 def write_challenge(bundle_dir: str | Path, challenge: str,
                     now: float | None = None) -> None:
     """Hand a poll's challenge to the filter node, which publishes it on
-    ``autonet/challenge`` so the next worklog chunk records it."""
+    ``autonet/challenge`` so the next worklog chunk records it. The file
+    keeps the last few challenges, so polls arriving together all land."""
     root = Path(bundle_dir)
     root.mkdir(parents=True, exist_ok=True)
+    queue = read_challenges(root)[-(CHALLENGE_QUEUE - 1):]
+    queue.append({"ts": time.time() if now is None else now, "challenge": challenge})
     tmp = root / "challenge.json.tmp"
-    tmp.write_text(json.dumps({"ts": time.time() if now is None else now,
-                               "challenge": challenge}), "utf-8")
+    tmp.write_text(json.dumps({"challenges": queue}), "utf-8")
     _replace(tmp, root / "challenge.json")
 
 
-def read_challenge(bundle_dir: str | Path) -> dict[str, Any]:
+def read_challenges(bundle_dir: str | Path) -> list[dict[str, Any]]:
     try:
-        return json.loads((Path(bundle_dir) / "challenge.json").read_text("utf-8"))
+        data = json.loads((Path(bundle_dir) / "challenge.json").read_text("utf-8"))
     except Exception:  # noqa: BLE001
-        return {}
+        return []
+    queue = data.get("challenges") if isinstance(data, dict) else None
+    return [c for c in queue or [] if isinstance(c, dict) and c.get("challenge")]
+
+
+def clear_bundle(bundle_dir: str | Path) -> None:
+    """Require nothing loadable: the filter then refuses to move."""
+    root = Path(bundle_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = root / "required.json.tmp"
+    tmp.write_text(json.dumps({"packs": []}), "utf-8")
+    _replace(tmp, root / "required.json")
 
 
 def write_bundle(bundle_dir: str | Path,

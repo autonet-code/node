@@ -151,7 +151,7 @@ def _bags(tmp_path: Path, n: int = 3) -> Path:
     now = time.time()
     for i in range(n):
         f = bag / f"worklog_{i}.mcap"
-        f.write_bytes(os.urandom(64))
+        f.write_bytes(os.urandom(64) + W.MCAP_MAGIC)
         os.utime(f, (now - (n - i), now - (n - i)))
     return bag
 
@@ -197,8 +197,11 @@ async def test_service_exports_packs_and_attests(tmp_path):
     assert W.verify_link(link, robot=out["address"]) == []
     assert link["challenge"] == "nonce-1" and link["packs"] == [reg["digest"]]
     assert [lf["name"] for lf in link["leaves"]] == ["worklog_0.mcap", "worklog_1.mcap"]
-    assert P.read_challenge(config.robot.bundle_dir)["challenge"] == "nonce-1"
+    assert [c["challenge"] for c in P.read_challenges(config.robot.bundle_dir)] == ["nonce-1"]
     assert svc.attest("nonce-2")["prev"] != link["prev"]
+    # Polls arriving together all reach the filter, oldest first.
+    assert [c["challenge"] for c in P.read_challenges(config.robot.bundle_dir)] == \
+        ["nonce-1", "nonce-2"]
 
 
 @pytest.mark.asyncio
@@ -212,3 +215,27 @@ async def test_service_refuses_a_tool_with_capabilities(tmp_path):
     res = RobotService(rt, config).export_packs()
     assert not res["ok"] and len(res["errors"]) == 2
     assert not (Path(config.robot.bundle_dir) / "required.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_registry_standards_switch_packs_and_fail_closed(tmp_path):
+    from atn.agent_tools import _create_agent
+    from atn.robot.service import RobotService
+    rt, config = _robot_runtime(tmp_path)
+    reg = rt.tool_store.register(name="proximity_stop", description="stop pack",
+                                 input_schema={"type": "object"}, author="user",
+                                 code=PACK_SRC)
+    await _create_agent(rt, {"id": "rover", "provider": "external"})
+    config.robot.required_packs = []                 # nothing from config
+    config.robot.agent_id = "rover"
+    svc = RobotService(rt, config)
+    res = svc.apply_standards([reg["digest"]])
+    assert res["ok"] and svc.exported == [reg["digest"]]
+    assert svc.status()["required_from"] == "registry"
+    assert P.load_bundle(config.robot.bundle_dir).ok
+    assert svc.apply_standards([reg["digest"]]) is None          # unchanged
+    # The jurisdiction adds a pack this daemon does not have: the robot stops.
+    res = svc.apply_standards([reg["digest"], "e" * 64])
+    assert not res["ok"] and svc.exported == []
+    loaded = P.load_bundle(config.robot.bundle_dir)
+    assert not loaded.ok and loaded.errors == ["no required packs"]

@@ -10,8 +10,10 @@ chain, so every daemon sees the same rounds, pollers and witnesses:
   pinned to the anchor in force at its start: REP and households from that
   anchor's voice snapshot, the seed from the epoch root two anchors before
   it, sanctions and territories from the DAO Registry at the same anchor.
-- **Rosters**: the Registry's ``territory.<name>`` keys. Robots in one
-  territory witness each other.
+- **The fleet and its standards**: one jurisdiction is one territory. The
+  Registry lists its robots (``jurisdiction.<id>.robots``), which witness
+  each other until witnesses come from proximity (Phase B), and the safety
+  packs they must run, cascaded from every jurisdiction it is nested in.
 - **Peers**: agent address to libp2p peer from the on-chain registry.
 
 Transport is the ``/autonet/robot/1.0.0`` protocol for requests and pushes,
@@ -100,16 +102,18 @@ class ChainRounds:
             for agent, rep in sorted((voice.get("agent_rep") or {}).items()))
         return P.Round(index=r, start=float(start), seed=seed.removeprefix("0x").lower(),
                        period_s=self.period_s, members=members,
-                       sanctioned=frozenset(voice.get("sanctioned_households") or ()))
+                       sanctioned=frozenset(voice.get("sanctioned_households") or ()),
+                       standards=tuple(voice.get("robot_standards") or ()))
 
-    def territories(self, t: float) -> dict[str, list[str]]:
+    def fleet(self, t: float) -> list[str]:
+        """The jurisdiction's robots for the round containing t."""
         with self._lock:
             idx = self._anchor_for(t)
             voice = self._voices.get(idx) if idx is not None else None
-        return dict((voice or {}).get("territories") or {})
+        return list((voice or {}).get("robots") or [])
 
 
-def chain_sources(cfg: Any) -> tuple[Callable, Callable]:
+def chain_sources(cfg: Any, jurisdiction_id: str = "autonet") -> tuple[Callable, Callable]:
     """(anchors, voice) readers over the configured Substrate, RepToken and
     DAO Registry. Blocking; call off the event loop."""
     from web3 import Web3
@@ -134,7 +138,8 @@ def chain_sources(cfg: Any) -> tuple[Callable, Callable]:
 
     def voice(i: int) -> dict[str, Any]:
         return read_voice_state(substrate, rpc, rep_token_address=rep,
-                                dao_registry_address=registry, web3=w3, anchor_index=i)
+                                dao_registry_address=registry, web3=w3, anchor_index=i,
+                                jurisdiction_id=jurisdiction_id)
     return anchors, voice
 
 
@@ -236,14 +241,24 @@ class RailService:
 
     def _roster(self, robot: str) -> list[str]:
         robot = robot.lower()
-        for robots in (self.rounds.territories(time.time()) if self.rounds else {}).values():
-            if robot in robots:
-                return [r for r in robots if r != robot]
-        return []
+        fleet = self._robots()
+        return [r for r in fleet if r != robot] if robot in fleet else []
 
     def _robots(self) -> list[str]:
-        terr = self.rounds.territories(time.time()) if self.rounds else {}
-        return sorted({r for robots in terr.values() for r in robots})
+        return self.rounds.fleet(time.time()) if self.rounds else []
+
+    async def _standards_loop(self) -> None:
+        """Keep the robot on the round's required packs. The next round's
+        snapshot is read ahead, so the switch lands as the round starts."""
+        robot = getattr(self._runtime, "robot", None)
+        while robot is not None:
+            rnd = self.rounds.round_at(time.time()) if self.rounds else None
+            if rnd is not None and rnd.standards:
+                try:
+                    robot.apply_standards(list(rnd.standards))
+                except Exception:  # noqa: BLE001
+                    log.warning("robot standards update failed", exc_info=True)
+            await asyncio.sleep(0.5)
 
     def _build_nodes(self, host: Any) -> None:
         rt = self._runtime
@@ -317,12 +332,14 @@ class RailService:
             log.warning("robot rail: %s", self.error, exc_info=True)
 
     async def _start_on(self, autonet: Any, host: Any) -> None:
-        anchors, voice = chain_sources(autonet.config)
+        jid = getattr(getattr(self._config, "autonet", None), "jurisdiction_id", "") or "autonet"
+        anchors, voice = chain_sources(autonet.config, jid)
         self.rounds = ChainRounds(period_s=self.cfg.period_s, anchors=anchors, voice=voice)
         self._build_nodes(host)
         self._install_host_handlers(host)
         self._tasks += [asyncio.create_task(self._refresh_loop()),
-                        asyncio.create_task(self._prune_loop())]
+                        asyncio.create_task(self._prune_loop()),
+                        asyncio.create_task(self._standards_loop())]
         for node in self.nodes.values():
             node.start()
         log.info("robot rail: %d local agents", len(self.nodes))

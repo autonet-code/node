@@ -661,45 +661,77 @@ def sanctions_from_records(
 
 
 # ---------------------------------------------------------------------------
-# Territories (docs/robots.md, 2026-10-25). A DAO proposal writes
-# ``territory.<name>`` = JSON ``{"robots": ["0x...", ...]}`` (or a comma
-# list of addresses) into the Registry: the robots operating in that shared
-# space, which witness each other. An empty value removes the territory.
+# Robot policy (docs/robots.md, 2026-10-25). One jurisdiction is one
+# territory. Its DAO Registry holds, by proposal:
+#   jurisdiction.<id>.robots           its robots: JSON list (or comma list)
+#   jurisdiction.<id>.robot_standards  required safety-pack digests: JSON list
+#   jurisdiction.<id>.parent           the jurisdiction it is nested in:
+#                                      JSON {"registry": "0x...", "id": "<id>"}
+# Standards cascade: a robot must run its own jurisdiction's packs plus every
+# ancestor's. Parents must live on the same chain; each is read at the SAME
+# snapshot block, so every daemon derives the same set. A level can add
+# standards, never drop an inherited one.
 # ---------------------------------------------------------------------------
 
-TERRITORY_KEY_PREFIX = "territory."
+ROBOT_POLICY_MAX_DEPTH = 8
 
 
-def territories_from_records(
-    records: List[Dict[str, Any]], block: int,
-) -> Dict[str, List[str]]:
-    """Territory name -> its robots (lowercased, sorted), from the last
-    write of each ``territory.<name>`` key at or before ``block``."""
+def _last_writes(records: List[Dict[str, Any]], block: int) -> Dict[str, str]:
     last: Dict[str, str] = {}
     for rec in sorted(records, key=lambda r: (int(r["block"]), int(r["index"]))):
         if int(rec["block"]) > int(block):
             break
-        key = str(rec.get("key") or "")
-        name = key[len(TERRITORY_KEY_PREFIX):]
-        if key.startswith(TERRITORY_KEY_PREFIX) and name:
-            last[name] = str(rec.get("value") or "")
-    out: Dict[str, List[str]] = {}
-    for name in sorted(last):
-        text = last[name].strip()
-        if not text:
-            continue
+        last[str(rec.get("key") or "")] = str(rec.get("value") or "")
+    return last
+
+
+def _json_list(text: str, field: str) -> List[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+        items = data.get(field, []) if isinstance(data, dict) else data
+    except ValueError:
+        items = text.split(",")
+    return [str(x).strip().lower() for x in items] if isinstance(items, list) else []
+
+
+def robot_policy(
+    fetch: Any, registry: str, block: int, jurisdiction_id: str = "autonet",
+) -> Dict[str, Any]:
+    """``{"robots", "robot_standards", "jurisdiction_lineage"}`` as of
+    ``block``. ``fetch(registry_address)`` returns that Registry's records
+    (``_registry_records``). The lineage is the jurisdiction ids from this
+    one up, as walked (stops at a loop or ROBOT_POLICY_MAX_DEPTH)."""
+    robots: List[str] = []
+    standards: set = set()
+    lineage: List[str] = []
+    seen: set = set()
+    reg, jid = str(registry).lower(), jurisdiction_id
+    while reg and reg not in seen and len(lineage) < ROBOT_POLICY_MAX_DEPTH:
+        seen.add(reg)
+        lineage.append(jid)
+        last = _last_writes(fetch(reg), block)
+        prefix = f"jurisdiction.{jid}."
+        if len(lineage) == 1:
+            robots = sorted({a for a in _json_list(last.get(prefix + "robots", ""), "robots")
+                             if a.startswith("0x")})
+        standards |= {d.removeprefix("0x") for d in
+                      _json_list(last.get(prefix + "robot_standards", ""), "packs")
+                      if len(d.removeprefix("0x")) == 64}
         try:
-            data = json.loads(text)
-            robots = data.get("robots", []) if isinstance(data, dict) else data
+            parent = json.loads(last.get(prefix + "parent", "") or "null")
         except ValueError:
-            robots = text.split(",")
-        if not isinstance(robots, list):
-            continue
-        addrs = sorted({str(a).strip().lower() for a in robots
-                        if str(a).strip().startswith("0x")})
-        if addrs:
-            out[name] = addrs
-    return out
+            parent = None
+        if not isinstance(parent, dict):
+            break
+        reg = str(parent.get("registry") or "").lower()
+        jid = str(parent.get("id") or "")
+        if not reg.startswith("0x") or not jid:
+            break
+    return {"robots": robots, "robot_standards": sorted(standards),
+            "jurisdiction_lineage": lineage}
 
 
 def sanctioned_households(
@@ -725,6 +757,7 @@ def read_voice_state(
     dao_registry_address: str = "",
     web3: Any = None,
     anchor_index: Optional[int] = None,
+    jurisdiction_id: str = "autonet",
 ) -> Dict[str, Any]:
     """Read {owner_map, voice_weights, rep_shares, rep_supply, supply,
     snapshot_block, emission_pool, recycled, weight_source,
@@ -792,7 +825,9 @@ def read_voice_state(
             "sanctions": {},
             "sanctioned_households": [],
             "agent_rep": {},
-            "territories": {},
+            "robots": [],
+            "robot_standards": [],
+            "jurisdiction_lineage": [],
         }
     anchor = contract.functions.getAnchor(anchor_count - 1).call()
     block = int(anchor[7])       # Anchor.blockNumber (struct field 7)
@@ -899,12 +934,16 @@ def read_voice_state(
     # and the sanctions in force at the anchor's timestamp.
     charter_text: Optional[str] = None
     sanctions: Dict[str, Dict[str, Any]] = {}
-    territories: Dict[str, List[str]] = {}
+    policy: Dict[str, Any] = {"robots": [], "robot_standards": [],
+                              "jurisdiction_lineage": []}
     if dao_registry_address:
         reg_records = _registry_records(w3, dao_registry_address, block)
         charter_text = charter_text_from_logs(reg_records, block)
         sanctions = sanctions_from_records(reg_records, block, timestamp)
-        territories = territories_from_records(reg_records, block)
+        own = str(dao_registry_address).lower()
+        policy = robot_policy(
+            lambda reg: reg_records if reg == own else _registry_records(w3, reg, block),
+            own, block, jurisdiction_id)
     houses = sanctioned_households(sanctions, owner_of)
     house_set = set(houses)
     # Every address whose household is sanctioned: its reviews move no
@@ -953,9 +992,10 @@ def read_voice_state(
         # those households' mint and their drift weight.
         "sanctions": sanctions,
         "sanctioned_households": houses,
-        # Per-agent REP (raw base units) and the territories' robot rosters
-        # (docs/robots.md, 2026-10-25): the robot poll rail draws pollers
-        # and witnesses from these, at the same snapshot.
+        # Per-agent REP (raw base units) and the robot policy (docs/robots.md,
+        # 2026-10-25): the robot poll rail draws pollers from the REP, takes
+        # witnesses from the fleet and checks packs against the cascaded
+        # standards, all at the same snapshot.
         "agent_rep": agent_rep,
-        "territories": territories,
+        **policy,
     }

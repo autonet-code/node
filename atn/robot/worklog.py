@@ -15,6 +15,9 @@ dispute opens the chunks, which must hash to the leaves their link signed.
 A thinned (deleted) chunk only removes evidence, it never breaks the chain.
 
 The chunk still being written is left out: its bytes are still changing.
+So is a chunk the recorder has moved past but not yet finished (it flushes
+the old file after opening the next): a chunk counts as closed only once it
+ends with the MCAP magic, which the writer appends last.
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ from . import crypto as C
 
 LINK_TYPE = "autonet.robot.link/1"
 CHUNK_SUFFIX = ".mcap"
+MCAP_MAGIC = b"\x89MCAP0\r\n"
 MAIN_STREAM = "main"
 
 
@@ -43,10 +47,24 @@ def leaf_hash(leaf: dict[str, Any]) -> str:
     return C.sha256_hex(json.dumps(leaf, sort_keys=True, separators=(",", ":")).encode())
 
 
+def _finished(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+        if size < len(MCAP_MAGIC):
+            return False
+        with path.open("rb") as f:
+            f.seek(size - len(MCAP_MAGIC))
+            return f.read() == MCAP_MAGIC
+    except OSError:
+        return False
+
+
 def closed_chunks(bag_dir: str | Path) -> list[tuple[str, str, Path]]:
     """(stream, name, path) of every closed chunk, oldest first per stream.
     A stream is the first directory under ``bag_dir`` (files directly in it
-    are the ``main`` stream); its newest chunk is the one being written."""
+    are the ``main`` stream); its newest chunk is the one being written, and
+    an older one is closed once the writer finished it. Chunks are taken in
+    order, so an unfinished one holds back the ones after it."""
     root = Path(bag_dir)
     by_stream: dict[str, list[Path]] = {}
     for p in root.rglob(f"*{CHUNK_SUFFIX}"):
@@ -57,6 +75,8 @@ def closed_chunks(bag_dir: str | Path) -> list[tuple[str, str, Path]]:
     for stream in sorted(by_stream):
         files = sorted(by_stream[stream], key=lambda p: (p.stat().st_mtime, p.name))
         for p in files[:-1]:
+            if not _finished(p):
+                break
             out.append((stream, p.relative_to(root).as_posix(), p))
     return out
 

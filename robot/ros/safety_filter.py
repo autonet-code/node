@@ -73,8 +73,8 @@ class SafetyFilter(Node):
             TwistStamped if self.out_stamped else Twist, out_topic, 10)
         self.events = self.create_publisher(String, "safety/events", 10)
         self.challenges = self.create_publisher(String, "autonet/challenge", 10)
-        self._challenge_ts = None
-        self._challenge_left = 0
+        self._challenge_sent: set[str] = set()
+        self._challenge_out: list[list] = []
         # Announce the topic at once, so recorders subscribe before a poll.
         self.challenges.publish(String(data="{}"))
         self.create_timer(1.0 / self.rate_hz, self._tick)
@@ -133,15 +133,18 @@ class SafetyFilter(Node):
                      "verdict": (self.last_verdict or {}).get("verdict")})
 
     def _challenge(self) -> None:
-        # Repeat each challenge for a second: a recorder that only just
-        # discovered the topic may miss the first message.
-        c = self.packs_rt.read_challenge(self.bundle_dir)
-        if c.get("challenge") and c.get("ts") != self._challenge_ts:
-            self._challenge_ts = c.get("ts")
-            self._challenge_left = 5
-        if self._challenge_left > 0:
-            self._challenge_left -= 1
-            self.challenges.publish(String(data=json.dumps(c)))
+        # Publish every challenge not yet sent, each for a second: a recorder
+        # that only just discovered the topic may miss the first message.
+        queue = self.packs_rt.read_challenges(self.bundle_dir)
+        self._challenge_sent &= {c["challenge"] for c in queue}
+        for c in queue:
+            if c["challenge"] not in self._challenge_sent:
+                self._challenge_sent.add(c["challenge"])
+                self._challenge_out.append([c, 5])
+        for item in self._challenge_out:
+            self.challenges.publish(String(data=json.dumps(item[0])))
+            item[1] -= 1
+        self._challenge_out = [i for i in self._challenge_out if i[1] > 0]
 
     # -- output -------------------------------------------------------------
 

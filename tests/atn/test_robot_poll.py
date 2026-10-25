@@ -130,7 +130,7 @@ def test_high_s_signature_is_rejected():
 def _chunk(bag: Path, stream: str, i: int, data: bytes, t: float) -> Path:
     p = bag / stream / "worklog" / f"worklog_{i}.mcap"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(data)
+    p.write_bytes(data + W.MCAP_MAGIC)
     os.utime(p, (t, t))
     return p
 
@@ -167,7 +167,7 @@ def test_chain_detects_tampering_and_dropped_links(tmp_path):
     assert W.verify_chain([links[0], links[2]], robot=addr)          # gap
     files = wl.produce(lf["name"] for lf in links[1]["leaves"])
     assert W.verify_chunks(links[1], files) == []
-    bad = {k: v + b"!" for k, v in files.items()}
+    bad = {k: b"!" + v for k, v in files.items()}
     assert W.verify_chunks(links[1], bad)
     forged = C.sign({**links[1], "leaves": []}, key)
     assert "root does not match the leaves" in W.verify_link(forged, robot=addr)
@@ -207,7 +207,9 @@ class World:
     """Three robots in one territory (each witnesses the other two) and five
     member households that poll. One fake clock."""
 
-    def __init__(self, tmp_path: Path, period: float = 100.0):
+    def __init__(self, tmp_path: Path, period: float = 100.0, standards=("pack",)):
+        self.standards = tuple(standards)
+        self.packs = {}
         self.now = [1000.0]
         self.net = LocalNetwork()
         members, self.keys = _members(n_houses=5, agents_per_house=1)
@@ -234,7 +236,7 @@ class World:
                 state_dir=tmp_path / m.agent / "state",
                 worklog=W.Worklog(bag, tmp_path / m.agent / "wl", m.agent,
                                   self.keys[m.agent]) if is_robot else None,
-                packs=lambda: ["pack"],
+                packs=lambda a=m.agent: self.packs.get(a, ["pack"]),
                 write_challenge=(lambda c, a=m.agent: self.challenges[a].append(c))
                 if is_robot else None,
                 clock=lambda: self.now[0])
@@ -247,7 +249,8 @@ class World:
             return None
         k = int((t - self.rnd.start) // self.rnd.period_s)
         return P.Round(index=self.rnd.index + k, start=self.rnd.start + k * self.rnd.period_s,
-                       seed=SEED, period_s=self.rnd.period_s, members=self.rnd.members)
+                       seed=SEED, period_s=self.rnd.period_s, members=self.rnd.members,
+                       standards=self.standards)
 
     def roster(self, robot):
         return [r for r in self.robots if r != robot.lower()] if robot.lower() in self.robots else []
@@ -296,6 +299,11 @@ def test_full_round_receipts_aggregates_and_witnesses(tmp_path):
     for receipt in robot_node.receipts:
         if receipt["round"] == rnd.index:
             assert any(P.receipt_in_aggregate(receipt, a) for a in aggs)
+    # Every witness holds each robot's newest link, poll answers included.
+    for r in w.robots:
+        for wit in w.roster(r):
+            assert w.nodes[wit].heads[r][0]["seq"] == w.nodes[r].worklog.head["seq"]
+            assert w.nodes[wit].missed.get(r, 0) == 0
     # The chain each robot built is intact, and no reports were filed.
     for r in w.robots:
         assert W.verify_chain(w.nodes[r].worklog.links, robot=r) == []
@@ -356,7 +364,7 @@ def test_chain_rounds_pin_to_the_anchor_in_force():
         asked.append(i)
         return {"agent_rep": {"0xa": 10 * (i + 1), "0xb": 5},
                 "owner_map": {"0xa": "0xhouse"}, "sanctioned_households": ["0xbad"],
-                "territories": {"dock": ["0xr1", "0xr2"]}}
+                "robots": ["0xr1", "0xr2"], "robot_standards": ["d" * 64]}
     rounds = ChainRounds(period_s=100, anchors=lambda: anchors, voice=voice)
     rounds.refresh(now=1250)
     # Round 1 starts at 1100: anchors 0 and 1 precede it, too few for a seed.
@@ -366,7 +374,8 @@ def test_chain_rounds_pin_to_the_anchor_in_force():
     assert rnd.index == 2 and rnd.start == 1200 and rnd.seed == "01" * 32
     assert P.Member("0xa", "0xhouse", 30) in rnd.members
     assert rnd.sanctioned == frozenset({"0xbad"})
-    assert rounds.territories(1250) == {"dock": ["0xr1", "0xr2"]}
+    assert rounds.fleet(1250) == ["0xr1", "0xr2"]
+    assert rnd.standards == ("d" * 64,)
     # The next anchor (ts 1310) lands inside round 3, so only round 4 uses it.
     rounds.refresh(now=1350)
     assert rounds.round_at(1350).seed == "01" * 32
@@ -374,19 +383,40 @@ def test_chain_rounds_pin_to_the_anchor_in_force():
     assert rounds.round_at(1420).seed == "02" * 32
 
 
-def test_territories_from_registry_records():
-    from nodes.common.voice_state import territories_from_records
-    recs = [
-        {"block": 1, "index": 0, "key": "territory.dock",
-         "value": '{"robots": ["0xAA", "0xbb"]}'},
-        {"block": 2, "index": 0, "key": "territory.yard", "value": "0xcc, 0xdd"},
-        {"block": 3, "index": 0, "key": "territory.dock", "value": ""},
-        {"block": 9, "index": 0, "key": "territory.late", "value": "0xee"},
-        {"block": 2, "index": 1, "key": "sanction.0x11", "value": "x"},
-    ]
-    assert territories_from_records(recs, 2) == {"dock": ["0xaa", "0xbb"],
-                                                 "yard": ["0xcc", "0xdd"]}
-    assert territories_from_records(recs, 3) == {"yard": ["0xcc", "0xdd"]}
+def _reg(block, **keys):
+    return [{"block": block, "index": i, "key": k, "value": v}
+            for i, (k, v) in enumerate(keys.items())]
+
+
+def test_robot_policy_cascades_standards_up_the_nesting():
+    from nodes.common.voice_state import robot_policy
+    A, B, C = "a" * 64, "b" * 64, "c" * 64
+    regs = {
+        "0xdistrict": _reg(1, **{
+            "jurisdiction.district.robots": '["0xR1", "0xr2"]',
+            "jurisdiction.district.robot_standards": f'["{A}"]',
+            "jurisdiction.district.parent": '{"registry": "0xCity", "id": "city"}'}),
+        "0xcity": _reg(1, **{
+            "jurisdiction.city.robots": '["0xcityrobot"]',
+            "jurisdiction.city.robot_standards": f'{{"packs": ["0x{B}"]}}',
+            "jurisdiction.city.parent": '{"registry": "0xstate", "id": "state"}'}),
+        "0xstate": _reg(1, **{"jurisdiction.state.robot_standards": f'["{C}", "{A}"]'}),
+    }
+    pol = robot_policy(lambda r: regs[r], "0xDistrict", 5, "district")
+    assert pol["robots"] == ["0xr1", "0xr2"]                 # own fleet only
+    assert pol["robot_standards"] == sorted({A, B, C})
+    assert pol["jurisdiction_lineage"] == ["district", "city", "state"]
+    # Pinned: a parent's later write is invisible at the snapshot block.
+    regs["0xcity"] += _reg(9, **{"jurisdiction.city.robot_standards": "[]"})
+    assert B in robot_policy(lambda r: regs[r], "0xdistrict", 5, "district")["robot_standards"]
+    assert B not in robot_policy(lambda r: regs[r], "0xdistrict", 9, "district")["robot_standards"]
+
+
+def test_robot_policy_stops_at_a_loop():
+    from nodes.common.voice_state import robot_policy
+    regs = {"0xa": _reg(1, **{"jurisdiction.a.parent": '{"registry": "0xb", "id": "b"}'}),
+            "0xb": _reg(1, **{"jurisdiction.b.parent": '{"registry": "0xa", "id": "a"}'})}
+    assert robot_policy(lambda r: regs[r], "0xa", 2, "a")["jurisdiction_lineage"] == ["a", "b"]
 
 
 def test_robot_protocol_round_trip_between_two_hosts():
@@ -412,3 +442,32 @@ def test_robot_protocol_round_trip_between_two_hosts():
     out, none, seen = trio.run(main)
     assert out == {"echo": 42} and seen == [{"n": 41}]
     assert "error" in none          # a host with no handler answers with an error
+
+
+def test_wrong_packs_are_reported(tmp_path):
+    w = World(tmp_path)
+    stale = w.robots[1]
+    w.packs[stale] = ["an-old-pack"]
+    _run(w.run_until(1000 + 100 + 5))
+    kinds = {(g["kind"], g["robot"]) for g in w.net.gossip_log
+             if g.get("type") == P.REPORT_TYPE}
+    assert kinds == {("wrong_packs", stale)}
+
+
+def test_unfinished_chunk_is_not_committed(tmp_path):
+    """The recorder finishes the old chunk after opening the next: until the
+    closing magic lands, the chunk (and any after it) waits."""
+    bag = tmp_path / "bags"
+    addr, key = _acct()
+    wl = W.Worklog(bag, tmp_path / "state", addr, key)
+    first = _chunk(bag, "pose", 0, b"p0", 1)
+    first.write_bytes(b"p0-half-written")
+    os.utime(first, (1, 1))
+    _chunk(bag, "pose", 1, b"p1", 2)
+    _chunk(bag, "pose", 2, b"p2", 3)
+    assert wl.commit(packs=[], now=10) is None
+    first.write_bytes(b"p0" + W.MCAP_MAGIC)
+    os.utime(first, (1, 1))
+    link = wl.commit(packs=[], now=11)
+    assert [lf["name"] for lf in link["leaves"]] == ["pose/worklog/worklog_0.mcap",
+                                                     "pose/worklog/worklog_1.mcap"]

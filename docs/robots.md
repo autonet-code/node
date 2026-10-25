@@ -87,9 +87,10 @@ beats `pass`; clips apply in order.
 
 Pinning: the daemon exports each required pack as `<digest>.json` (the signed
 manifest) plus `<code_digest>.py`. The filter recomputes both sha256 digests
-before loading. The required set lives in the robot daemon's config for the
-MVP (`robot.required_packs`); reading it from the jurisdiction's Registry
-(`jurisdiction.<id>.robot_standards`) is a follow-up.
+before loading. The required set comes from the jurisdiction's Registry
+(`jurisdiction.<id>.robot_standards`, cascaded from every parent; see the
+2026-10-25 decision below) when the poll rail runs, and from
+`robot.required_packs` in config otherwise.
 
 ## MVP
 
@@ -119,14 +120,16 @@ robot:
   bag_dir: /robot/bags       # MCAP worklog chunks
 ```
 
-The E2E (`python scripts/local_e2e_robot.py`, needs Docker) passes 10/10:
+The E2E (`python scripts/local_e2e_robot.py`, needs Docker) passes 11/11:
 sim up; pack exported and loaded; driving at an obstacle is slowed then
 stopped (from 1.27 m to 0.46 m, peak 0.46 m/s under a 0.5 cap); reversing
 away is allowed; a tampered pack is refused and nothing moves; re-export
 restores motion; a stale daemon heartbeat stops the robot; an unreachable
 sponsor stops it; a challenge answer verifies, and a tampered chunk, a wrong
 key and a late answer all fail; the agent's ros-mcp connector pushing forward
-for 6 s is clipped and never gets closer than the stop distance.
+for 6 s is clipped and never gets closer than the stop distance; a Registry
+standard the daemon cannot meet empties the bundle and stops the robot, and
+meeting the standards again restores motion.
 
 Known limits of the MVP:
 
@@ -149,7 +152,7 @@ Known limits of the MVP:
   robot agent would run on `rpb` through its sponsor.
 
 Out of the MVP: beacon, sanctions list, TPM quotes, witness cross-checks,
-Registry-backed standards, public-service DAOs, Nav2 skills. Polls and
+public-service DAOs, Nav2 skills. Polls and
 witnesses are designed below (2026-10-25); the poll rail (Phase A) is built,
 consolidation (Phase B) is not. The worklog statement of the MVP is replaced
 by the signed link chain: `robot_attest` now commits a link carrying the
@@ -320,6 +323,33 @@ independent observers in each place.
   would put the blur on a separate compute unit attached to the camera,
   outside the robot's main operating system, so raw frames never reach it.
 
+### One jurisdiction, one territory; standards cascade
+
+Decided with the owner. A jurisdiction is the domain where it holds
+authority, which may be entirely digital; when it is physical, its territory
+is one territory. Jurisdictions nest (a district DAO under a city DAO), and
+each nested one is its own jurisdiction and territory. The Registry holds,
+by proposal:
+
+| Key | Value |
+|-----|-------|
+| `jurisdiction.<id>.robots` | the jurisdiction's robots (JSON list) |
+| `jurisdiction.<id>.robot_standards` | required safety-pack digests (JSON list) |
+| `jurisdiction.<id>.parent` | `{"registry": "0x...", "id": "<parent id>"}` |
+
+A robot must run its own jurisdiction's standards plus every ancestor's: a
+level can add standards, never drop an inherited one, and each level still
+manages only its direct children. Parents must be on the same chain, so
+every level is read at the same snapshot block as the round's anchor and
+every daemon derives the same set. The walk stops at a loop or eight levels.
+
+The robot daemon takes the set from the poll round, so a change lands for
+everyone as the round starts: the robot exports the new packs, and a
+required pack it cannot export empties its bundle and the filter stops it.
+Pollers check every answer's active packs against the same set and report
+`wrong_packs`. Until witnesses come from proximity (Phase B), every robot in
+the fleet witnesses every other, which suits a small territory only.
+
 ### Build order
 
 Phase A is **built** (2026-10-25). Phase B is next, with a staged violation:
@@ -333,7 +363,7 @@ one robot breaks a rule while the others watch.
 | One daemon's roles: robot, witness, poller, watcher | `atn/robot/node.py` |
 | In the daemon: rounds from anchors, rosters from the Registry, libp2p | `atn/robot/rail.py`, `robot_poll:` in config.yaml (off by default) |
 | Wire | `/autonet/robot/1.0.0` (`nodes/common/p2p.py`), gossip topic `autonet/robot/1` |
-| Chain inputs | `read_voice_state(..., anchor_index=i)` gives `agent_rep` and `territories` (Registry `territory.<name>` = `{"robots": [...]}`) |
+| Chain inputs | `read_voice_state(..., anchor_index=i)` gives `agent_rep`, the fleet (`robots`) and the cascaded `robot_standards` (`robot_policy` in `nodes/common/voice_state.py`) |
 | Challenge into the worklog | daemon writes `challenge.json` in the bundle; the filter publishes `autonet/challenge` |
 | Three-robot sim | `robot/sim/run_fleet.sh` (pose and scan streams per robot) |
 | Unit tests | `tests/atn/test_robot_poll.py` |
@@ -354,8 +384,16 @@ answered by the subject and both witnesses (27 countersigned answers); every
 challenge is found in the chunks each of the three worklogs closed after the
 poll; 3 aggregates cover all 27 receipts; a dispute's chunks match their
 links and a tampered chunk is caught; pruning the scan stream leaves the pose
-leaves and the chain verifying; a silent robot and an absent poller produce
-missing-commit, unanswered-poll and absent-poller reports and nothing else.
+leaves and the chain verifying; a silent robot, an absent poller and a robot
+on a stale pack produce missing-commit, unanswered-poll, absent-poller and
+wrong-packs reports and nothing else. Every poll checks the active packs
+against the Registry standard.
+
+Two recorder details the E2E surfaced, both handled in the worklog: the
+recorder finishes a chunk after it opens the next, so a chunk is committed
+only once it ends with the MCAP magic; and several polls can arrive within
+one filter tick, so the bundle hands over a short queue of challenges, not
+one.
 
 Known limits of Phase A:
 
@@ -364,8 +402,5 @@ Known limits of Phase A:
   multi-daemon run.
 - The challenge-in-the-next-chunk check runs at dispute time, from the
   archive. Pollers hold hashes only and cannot check it live.
-- Whether the robot's packs match the jurisdiction's required set is not
-  checked by pollers yet (`verify_answer` takes the set; the daemon does not
-  pass it until standards move to the Registry).
 - Reports are signed and gossiped; nothing consumes them yet (Phase B and
   the accountability rail).

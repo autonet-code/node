@@ -18,6 +18,9 @@ Stages
   9  challenge: the signed link verifies, the challenge lands in the next
      chunk; a tampered chunk and a wrong key fail
  10  the agent's ROS connector (ros-mcp) drives through the same filter
+ 11  the jurisdiction's standards (from the Registry, via the poll rail):
+     a required pack this daemon lacks stops the robot; restoring the
+     standards it can meet restores motion
 
 Run: python scripts/local_e2e_robot.py   (needs Docker; builds the image once)
 """
@@ -419,6 +422,22 @@ async def amain() -> int:
         stage(10, "agent connector drives through the filter")
         res = await connector_drive(rt, ros)
         passed(res)
+
+        stage(11, "Registry standards: a missing pack stops the robot")
+        t11 = time.time()
+        res = rt.robot.apply_standards([reg["digest"], "e" * 64])
+        check(res is not None and not res["ok"], "an unavailable standard was accepted")
+        check(await wait_for(lambda: bool(ros.events_since(t11, "packs_refused")), 10),
+              "the filter did not refuse the emptied bundle")
+        check(await ros.hold(-0.15, 0.0, 2.5) < 0.03, "robot moved without its standards")
+        t11b = time.time()
+        check(rt.robot.apply_standards([reg["digest"]])["ok"], "restoring standards failed")
+        check(await wait_for(lambda: bool(ros.events_since(t11b, "packs_loaded")), 10),
+              "pack not reloaded")
+        check(await ros.hold(-0.15, 0.0, 2.5) > 0.05, "still blocked after the standards were met")
+        await ros.hold(0, 0, 1.0)
+        check(rt.robot.status()["required_from"] == "registry", "status does not name the source")
+        passed("missing pack stops, met standards move")
         return 0
     except Exception as exc:  # noqa: BLE001
         RESULTS.append((stage_no, stage_name, f"FAIL {type(exc).__name__}: {exc}"))

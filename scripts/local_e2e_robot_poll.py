@@ -6,8 +6,9 @@ Three simulated TurtleBot3s share one Gazebo world in Docker
 two-stream MCAP worklog (pose, scan). Their daemons and five member
 households run in this process as poll-rail nodes over the in-process
 transport; rounds come from :class:`atn.robot.rail.ChainRounds` over a
-fixed anchor history. The three robots form one territory, so each
-witnesses the other two.
+fixed anchor history. The three robots are the jurisdiction's fleet (one
+jurisdiction, one territory), so each witnesses the other two, and every
+poll checks the robot runs the jurisdiction's required pack.
 
 Stages
   1  sim up: three robots, both worklog streams growing
@@ -22,9 +23,9 @@ Stages
   7  a dispute opens a countersigned window: chunks match, a tampered chunk
      is caught
   8  thinning: the scan stream is pruned; the pose leaves still verify
-  9  a robot goes silent and a poller stays away for a round: missing
-     commitment, unanswered polls and the absent poller are all reported,
-     and nothing else is
+  9  a robot goes silent, a poller stays away and another robot runs a
+     stale pack for a round: missing commitment, unanswered polls, the
+     absent poller and the wrong packs are all reported, and nothing else
 
 Run: python scripts/local_e2e_robot_poll.py   (needs Docker and the sim image)
 """
@@ -207,9 +208,10 @@ class Fleet:
         self.t0 = now - 3 * PERIOD_S - 5
         self.anchors = [(int(self.t0 + 10 * i), "0x" + hashlib.sha256(b"root%d" % i).hexdigest())
                         for i in range(3)]
-        voice = {"agent_rep": {a: r for a, r in members} | {r: 0 for r in self.robots},
-                 "owner_map": {}, "sanctioned_households": [],
-                 "territories": {"yard": sorted(self.robots)}}
+        self.voice = {"agent_rep": {a: r for a, r in members} | {r: 0 for r in self.robots},
+                      "owner_map": {}, "sanctioned_households": [],
+                      "robots": sorted(self.robots), "robot_standards": []}
+        voice = self.voice
         self.rounds = ChainRounds(period_s=PERIOD_S, anchors=lambda: self.anchors,
                                   voice=lambda i: voice)
         self.rounds.refresh()
@@ -225,13 +227,15 @@ class Fleet:
                 robots=lambda: list(self.robots), state_dir=TMP / "state" / addr,
                 worklog=W.Worklog(BAGS / ns, TMP / "chain" / addr, addr, self.keys[addr])
                 if is_robot else None,
-                packs=(lambda: [self.pack_digest]) if is_robot else list,
+                packs=(lambda a=addr: self.stale.get(a, [self.pack_digest]))
+                if is_robot else list,
                 write_challenge=(lambda c, ns=ns: PK.write_challenge(SHARED / ns / "bundle", c))
                 if is_robot else None)
             self.nodes[addr] = node
             self.net.add(node)
         self.members = [a for a, _ in members]
         self.pack_digest = ""
+        self.stale: dict[str, list[str]] = {}
 
     def roster(self, robot: str) -> list[str]:
         robot = robot.lower()
@@ -300,6 +304,8 @@ async def amain() -> int:
         for i in range(N_ROBOTS):
             digests = PK.write_bundle(SHARED / f"r{i + 1}" / "bundle", [(manifest, pack_src)])
         fleet.pack_digest = digests[0]
+        fleet.voice["robot_standards"] = [fleet.pack_digest]     # the Registry's standard
+        fleet.rounds.refresh()
         tasks.append(asyncio.create_task(heartbeat_loop()))
         ros = Ros()
         await ros.connect()
@@ -338,6 +344,8 @@ async def amain() -> int:
                 held = fleet.nodes[w].heads.get(r)
                 check(held is not None and held[0]["seq"] >= wl.links[-2]["seq"],
                       f"witness {fleet.ns[w]} lags {fleet.ns[r]}")
+                check(fleet.nodes[w].missed.get(r, 0) == 0,
+                      f"witness {fleet.ns[w]} missed links of {fleet.ns[r]}")
         passed(", ".join(f"{fleet.ns[r]} {len(fleet.nodes[r].worklog.links)} links"
                          for r in fleet.robots))
 
@@ -361,6 +369,10 @@ async def amain() -> int:
                       if x["round"] == R and x["subject"] == r and x["role"] == "witness"]
                 check(len(wg) == len(drawn), f"witness {fleet.ns[w]} answered "
                       f"{len(wg)} of {len(drawn)} polls of {fleet.ns[r]}")
+        for r in fleet.robots:
+            for w in fleet.roster(r):
+                check(fleet.nodes[w].missed.get(r, 0) == 0,
+                      f"witness {fleet.ns[w]} missed links of {fleet.ns[r]}")
         passed(f"round {R}: 3 robots x 3 pollers, each answered by 3 worklogs")
 
         stage(5, "challenges recorded after the poll")
@@ -422,8 +434,10 @@ async def amain() -> int:
         silent = fleet.robots[2]
         rnd_next = fleet.rounds.round_at(fleet.round_start(R + 2) + 1)
         lazy = P.draw_pollers(rnd_next, fleet.robots[0], k=3, percentile=90)[0]
+        stale = fleet.robots[1]
         fleet.net.down |= {silent, lazy}
         sync.paused.add(fleet.ns[silent])
+        fleet.stale[stale] = ["0" * 64]
         t_cut = time.time()
         await wait_until(fleet.round_start(R + 3) + fleet.params.early_slack_s + 4)
         reps = fleet.reports(since=t_cut)
@@ -435,12 +449,16 @@ async def amain() -> int:
         for r in fleet.robots[:2]:
             check(("poller_absent", r, lazy) in kinds,
                   f"{fleet.ns[r]} did not report the absent poller")
+        check(any(k == "wrong_packs" and rb == stale for k, rb, _ in kinds),
+              "no wrong-packs report for the robot on a stale pack")
         unexpected = [g for g in reps if not (
             (g["kind"] in ("missing_commit", "no_answer") and g.get("robot") == silent)
-            or (g["kind"] == "poller_absent" and g.get("poller") == lazy))]
+            or (g["kind"] == "poller_absent" and g.get("poller") == lazy)
+            or (g["kind"] == "wrong_packs" and g.get("robot") == stale))]
         check(unexpected == [], f"unexpected reports: {unexpected[:3]}")
         check(all(C.signer(g) == g["reporter"] for g in reps), "unsigned report")
-        passed(f"{len(reps)} reports, all about {fleet.ns[silent]} or the absent poller")
+        passed(f"{len(reps)} reports: {fleet.ns[silent]} silent, the absent poller, "
+               f"{fleet.ns[stale]} on a stale pack")
         return 0
     except Exception as exc:  # noqa: BLE001
         RESULTS.append((stage_no, stage_name, f"FAIL {type(exc).__name__}: {exc}"))

@@ -40,6 +40,7 @@ class RobotService:
                             Path(config.data_dir) / "robot" / "bags")
         self.chain_dir = Path(config.data_dir) / "robot" / "chain"
         self._worklog: W.Worklog | None = None
+        self.standards: list[str] = []      # from the Registry, via the poll rail
         self.sponsor_ok = False
         self.exported: list[str] = []
         self.export_errors: list[str] = []
@@ -47,13 +48,33 @@ class RobotService:
 
     # -- packs --------------------------------------------------------------
 
-    def export_packs(self) -> dict[str, Any]:
-        """Resolve ``robot.required_packs`` in the tool store and write the
-        bundle. On any error nothing is exported and the old bundle stays."""
+    def apply_standards(self, digests: list[str]) -> dict[str, Any] | None:
+        """Switch to the jurisdiction's required packs (the poll rail reads
+        them from the Registry, cascaded). A required pack this daemon cannot
+        export stops the robot: the bundle is emptied, so the filter refuses
+        to move. Returns the export result, or None when nothing changed."""
+        digests = sorted(digests)
+        if digests == self.standards:
+            return None
+        self.standards = digests
+        res = self.export_packs(digests)
+        if not res["ok"]:
+            P.clear_bundle(self.bundle_dir)
+            self.exported = []
+            log.warning("robot stopped: required packs unavailable: %s", res["errors"])
+        return res
+
+    def export_packs(self, refs: list[str] | None = None) -> dict[str, Any]:
+        """Resolve the required packs in the tool store and write the
+        bundle: ``refs``, else the Registry standards in force, else
+        ``robot.required_packs``. On any error nothing is exported and the
+        old bundle stays."""
         store = self._runtime.tool_store
         blobs = store._blob_store()
         pairs, errors = [], []
-        for ref in self._config.robot.required_packs:
+        if refs is None:
+            refs = self.standards or list(self._config.robot.required_packs)
+        for ref in refs:
             rec = store.resolve(ref)
             if rec is None:
                 errors.append(f"{ref}: not in the tool store")
@@ -157,7 +178,8 @@ class RobotService:
         hb = P.read_heartbeat(self.bundle_dir)
         return {"bundle_dir": str(self.bundle_dir), "bag_dir": str(self.bag_dir),
                 "agent_id": self._config.robot.agent_id,
-                "required": list(self._config.robot.required_packs),
+                "required": self.standards or list(self._config.robot.required_packs),
+                "required_from": "registry" if self.standards else "config",
                 "exported": self.exported, "export_errors": self.export_errors,
                 "sponsor_ok": self.sponsor_ok,
                 "heartbeat_age_s": (time.time() - float(hb["ts"])) if hb.get("ts") else None}
