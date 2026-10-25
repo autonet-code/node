@@ -1265,8 +1265,17 @@ class ExecutionEngine:
                           or (_imported or {}).get("session_id", "") or "")
             # Record the user message (skip if already recorded by
             # ws_server or prior path to avoid duplicates).
+            # A message recorded when it was injected, then re-posted as a
+            # steering fallback because the loop ended before reading it, is
+            # already in the history.
+            _instructions = [str((m.data or {}).get("instruction", ""))
+                             for m in work_messages]
+            _already_recorded = bool(_instructions) and all(
+                self.session_manager.take_recorded_injection(defn.id, t)
+                for t in _instructions)
             existing_turns = agent_convo.get_turns()
-            if (not existing_turns
+            if not _already_recorded and (
+                    not existing_turns
                     or existing_turns[-1].role != "user"
                     or existing_turns[-1].content != user_message):
                 agent_convo.add_user_turn(user_message)

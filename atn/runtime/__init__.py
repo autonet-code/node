@@ -342,6 +342,9 @@ class Runtime:
         )
         # Wire session_manager into engine (circular dep resolved here)
         self.engine.session_manager = self.sessions
+        # Chat messages to a running agent take the same delivery path as
+        # delegate messages (worker routing, consumption check, inbox fallback).
+        self.sessions.deliver = self.control.send_delegate_message
 
         # Wire the registry's live-injection hook for child->parent completion
         # pushes (Task B). The registry is constructed before SessionManager,
@@ -355,13 +358,17 @@ class Runtime:
         async def _inject_parent(parent_id: str, text: str) -> bool:
             if self.registry._running_count.get(parent_id, 0) <= 0:
                 return False
-            provider = self.providers._active_providers.get(parent_id)
-            if provider is None:
-                return False
-            store = self.sessions.get_agent_conversation_store(parent_id)
-            store.add_user_turn(text)
-            await provider.send_user_message(text)
-            return True
+            # Same delivery as chat messages (worker routing, consumption
+            # check): injecting into the idle daemon-side provider of a worker
+            # run reported success and lost the notice.
+            outcome = await self.control.send_delegate_message(parent_id, text)
+            if outcome == "injected":
+                self.sessions.get_agent_conversation_store(parent_id).add_user_turn(text)
+                self.sessions.note_recorded_injection(parent_id, text)
+                return True
+            # "inbox_fallback": already queued for the next run, which records
+            # it. Falsy: nothing delivered, the caller queues it.
+            return outcome == "inbox_fallback"
         self.registry._live_injector = _inject_parent
 
         self.scheduler = Scheduler(

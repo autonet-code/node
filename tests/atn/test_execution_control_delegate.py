@@ -236,9 +236,11 @@ async def test_delegate_message_legacy_provider_reports_injected():
     pm._active_providers["delegate-1"] = prov
 
     status = await control.send_delegate_message("delegate-1", "hi")
-    assert status == "injected"
+    # No ack means no loop took it (an idle provider): queue it for the next
+    # run. It used to be reported "injected" and was lost.
+    assert status == "inbox_fallback"
     assert prov.sent == ["hi"]
-    assert engine.inbox.posted == []
+    assert len(engine.inbox.posted) == 1
 
 
 @pytest.mark.asyncio

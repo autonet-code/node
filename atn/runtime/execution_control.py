@@ -247,10 +247,15 @@ class ExecutionControl:
 
         inj_id = await provider.send_user_message(content)
 
-        # Providers whose send_user_message doesn't report an id (older / non-
-        # bridge) can't be verified — treat as injected (prior behavior).
-        if not isinstance(inj_id, str) or not inj_id:
+        # True: queued into a running generic loop (which re-posts anything it
+        # never read as a steering fallback). False/None: no loop took it (an
+        # idle provider, a Codex loop without a steering queue, a bridge with
+        # no process): queue it for the next run instead of reporting it
+        # delivered.
+        if inj_id is True:
             return "injected"
+        if not isinstance(inj_id, str) or not inj_id:
+            return self._inbox_fallback(agent_id, content) or False
 
         # Wait briefly for the consumption ack. The bridge acks as soon as the
         # SDK loop dequeues the message; if the turn was already ending it will

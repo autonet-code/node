@@ -463,7 +463,7 @@ async def test_completion_live_injects_into_running_parent(tmp_path):
 
     # Simulate a running parent with a live provider.
     provider = AsyncMock()
-    provider.send_user_message = AsyncMock()
+    provider.send_user_message = AsyncMock(return_value=True)   # queued into a running loop
     rt.providers._active_providers["parent"] = provider
     rt.registry._running_count["parent"] = 1
 

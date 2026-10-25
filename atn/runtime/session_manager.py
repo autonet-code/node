@@ -51,6 +51,26 @@ class SessionManager:
         self._agent_conversations: dict[str, ConversationStore] = {}
         self._delegate_output_dir = self._config.data_dir / "delegates"
         self._delegate_output_dir.mkdir(parents=True, exist_ok=True)
+        # Mid-run delivery: ExecutionControl.send_delegate_message, set by the
+        # Runtime once both exist. Returns "injected", "inbox_fallback" or a
+        # falsy value (nothing delivered).
+        self.deliver = None
+        # Texts recorded as user turns when injected: a steering fallback that
+        # re-posts one of them must not record it again.
+        self._recorded_injections: dict[str, list[str]] = {}
+
+    def note_recorded_injection(self, agent_id: str, text: str) -> None:
+        pending = self._recorded_injections.setdefault(agent_id, [])
+        pending.append(text)
+        del pending[:-20]
+
+    def take_recorded_injection(self, agent_id: str, text: str) -> bool:
+        """True (and forgotten) if ``text`` was already recorded at injection."""
+        pending = self._recorded_injections.get(agent_id) or []
+        if text in pending:
+            pending.remove(text)
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Conversation reset
@@ -113,16 +133,27 @@ class SessionManager:
 
         store = self.get_agent_conversation_store(agent_id)
 
-        # Mid-session injection — only if actually running
+        # Mid-session injection — only if actually running. Delivery goes
+        # through ExecutionControl.send_delegate_message (``deliver``), which
+        # routes to the worker under isolation and checks the loop consumed
+        # it; an undelivered message falls back to the inbox, where the
+        # engine records it when it drains. The daemon-side provider of a
+        # worker run is idle, so injecting into it directly lost the message.
         is_running = self.registry._running_count.get(agent_id, 0) > 0
-        if is_running:
-            provider = self.provider_manager._active_providers.get(agent_id)
-            if provider is not None:
-                # Record in conversation store here — the execution engine
-                # won't see this message (it goes directly to the provider).
+        if is_running and self.deliver is not None:
+            outcome = await self.deliver(agent_id, text)
+            if outcome == "injected":
+                # Recorded here: the engine never sees an injected message.
+                # Noted, so that if the loop ends before reading it and it is
+                # re-posted as a steering fallback, it is not recorded twice.
                 store.add_user_turn(text)
-                await provider.send_user_message(text)
+                self.note_recorded_injection(agent_id, text)
                 return {"status": "injected", "agent_id": agent_id}
+            if outcome == "inbox_fallback":
+                # Queued for the next run, which records it when it drains.
+                return {"status": "queued", "agent_id": agent_id}
+            # Nothing delivered or queued (the run ended in between): fall
+            # through to the inbox path below.
 
         # Not running — post to inbox.  Do NOT add_user_turn here;
         # the execution engine records it when it drains the inbox
