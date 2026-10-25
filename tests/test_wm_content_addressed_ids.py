@@ -41,15 +41,10 @@ def _make_tendency(
 
 def test_identical_children_same_id() -> None:
     """Two distinct tendency instances with the same id sprouting the
-    same child produce the same node id, despite their roots having
-    different local UUIDs."""
+    same child produce the same node id. (Roots are deterministic too:
+    root_<tendency id>, world_model/generalized/tendency.py.)"""
     t1 = _make_tendency()
     t2 = _make_tendency()
-
-    # Sanity: their root UUIDs differ.
-    assert t1.tree.root_node.id != t2.tree.root_node.id, (
-        "roots should have distinct UUIDs"
-    )
 
     child_anchor = (1.0, 0.5, 0.0)
     child_axis = (1.0, 0.0, 0.0)

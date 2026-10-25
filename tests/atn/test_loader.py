@@ -168,7 +168,9 @@ async def test():
     # ===== Test 10: Config loading with defaults =====
     config = load_config(TEST_DIR / "nonexistent.yaml")
     assert config.data_dir == Path.home() / ".atn"
-    assert config.agents_dir == Path("agents")
+    # ./agents when it exists in the CWD (a dev checkout), else under the data dir.
+    from atn.config import _default_agents_dir
+    assert config.agents_dir == _default_agents_dir(config.data_dir)
     assert config.providers == {}
     print("Test 10 PASS: Default config")
 

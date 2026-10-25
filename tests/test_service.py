@@ -66,7 +66,7 @@ class TestResourceMonitor(unittest.TestCase):
         cfg = self._make_config(max_mem=4096, interval=0.0)
         mon = ResourceMonitor(config=cfg)
         self.assertFalse(mon.should_train())
-        self.assertIn("Memory", mon.paused_reason)
+        self.assertIn("memory", mon.paused_reason.lower())
 
     @patch("nodes.common.resource_monitor.ResourceMonitor.snapshot")
     def test_within_limits(self, mock_snap):
@@ -106,7 +106,12 @@ class TestUpdateInfo(unittest.TestCase):
 
 
 class TestAutonetUpdater(unittest.TestCase):
-    """Tests for AutonetUpdater."""
+    """Tests for AutonetUpdater. Each test gets its own data dir: the updater
+    persists last_check.json there, and the default is the real ~/.atn."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp(prefix="updater_test_")
 
     def _make_config(self, source="git", interval=3600):
         cfg = AutonetConfig()
@@ -116,27 +121,27 @@ class TestAutonetUpdater(unittest.TestCase):
     def test_should_check_initially(self):
         """Should check on first call."""
         cfg = self._make_config()
-        u = AutonetUpdater(config=cfg)
+        u = AutonetUpdater(config=cfg, data_dir=self._tmp)
         self.assertTrue(u.should_check())
 
     def test_should_check_respects_interval(self):
         """Should not check again within interval."""
         cfg = self._make_config(interval=3600)
-        u = AutonetUpdater(config=cfg)
+        u = AutonetUpdater(config=cfg, data_dir=self._tmp)
         u._last_check = time.time()  # Just checked
         self.assertFalse(u.should_check())
 
     def test_unknown_source(self):
         """Unknown source returns None."""
         cfg = self._make_config(source="floppy_disk")
-        u = AutonetUpdater(config=cfg)
+        u = AutonetUpdater(config=cfg, data_dir=self._tmp)
         result = u.check_update()
         self.assertIsNone(result)
 
     def test_apply_no_update(self):
         """Apply returns True when no update needed."""
         cfg = self._make_config()
-        u = AutonetUpdater(config=cfg)
+        u = AutonetUpdater(config=cfg, data_dir=self._tmp)
         info = UpdateInfo(current_version="0.1.0", available_version="0.1.0", source="git")
         self.assertTrue(u.apply_update(info))
 
@@ -149,7 +154,7 @@ class TestAutonetUpdater(unittest.TestCase):
             MagicMock(returncode=0, stdout="abc12345\n", stderr=""),  # remote HEAD
         ]
         cfg = self._make_config(source="git")
-        u = AutonetUpdater(config=cfg)
+        u = AutonetUpdater(config=cfg, data_dir=self._tmp)
         info = u.check_update()
         self.assertIsNotNone(info)
         self.assertFalse(info.has_update)
@@ -164,7 +169,7 @@ class TestAutonetUpdater(unittest.TestCase):
             MagicMock(returncode=0, stdout="New feature\n"),  # changelog
         ]
         cfg = self._make_config(source="git")
-        u = AutonetUpdater(config=cfg)
+        u = AutonetUpdater(config=cfg, data_dir=self._tmp)
         info = u.check_update()
         self.assertIsNotNone(info)
         self.assertTrue(info.has_update)

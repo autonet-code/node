@@ -228,6 +228,8 @@ def test_inprocess_route_refuses_secret_tools():
         # any self.* dependency, so a bare object is enough.
         class _E:
             route_tool_call = ExecutionEngine.route_tool_call
+            # route_tool_call is a thin wrapper; the guard lives in the inner one.
+            _route_tool_call = ExecutionEngine._route_tool_call
         e = _E()
         for name in ("secret_request_secret", "secret_list_services", "secret_release"):
             res = await e.route_tool_call(name, {"service": "openai_key"}, "agent-A")
