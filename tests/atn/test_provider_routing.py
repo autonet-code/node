@@ -98,6 +98,7 @@ class TestUpdateAgentEviction:
         pmgr._active_providers = {}
         pmgr._cached_session_stats = {}
         runtime.providers = pmgr
+        runtime._model_switch = None   # the fallback path (no ModelSwitch on a mock)
         return runtime, defn, pmgr
 
     async def test_model_change_evicts_and_closes(self, monkeypatch):

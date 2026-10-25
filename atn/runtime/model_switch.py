@@ -65,38 +65,43 @@ class ModelSwitch:
                     f"Invalid model {model!r}. Available: {', '.join(available_ids)}"
                 )
 
-        # Build an updated definition preserving all existing config.
-        from dataclasses import replace
-        new_defn = replace(old_defn, cognitive_model=model)
-
-        # Re-register: unregister old, register new
-        await self.registry.unregister_agent(agent_id)
-        await self.registry.register_agent(new_defn)
+        # Change the definition in place. Never re-register: unregistering
+        # deletes the agent's wallet key from the vault, its inbox, budget
+        # usage and execution log, and register_agent does not bring the key
+        # back for a definition that already has an identity.
+        old_defn.cognitive_model = model
 
         # Persist to agent.yaml — without this the switch is RAM-only and
         # every daemon restart silently reverts the agent to whatever model
         # it was created with.
         try:
             from ..loader import save_agent
-            save_agent(new_defn, self._config.agents_dir)
+            save_agent(old_defn, self._config.agents_dir)
         except Exception as exc:
             log.warning("Model changed but YAML save failed for '%s': %s", agent_id, exc)
 
-        # Reactivate if it was active/running before
-        await self.registry.activate_agent(agent_id)
+        await self.model_changed(agent_id)
+        log.info("Agent '%s' model changed to '%s'", agent_id, model)
+        return agent_id
 
-        # Close old provider so next execution gets a fresh one with new model
+    async def model_changed(self, agent_id: str) -> None:
+        """Make an agent's new model live: close its cached provider (the
+        next run builds one on the new model), stamp the stats the UI reads,
+        and tell every client. Shared with update_agent."""
+        defn = self.registry._agents.get(agent_id)
         old_provider = self.provider_manager._active_providers.pop(agent_id, None)
         if old_provider is not None:
             try:
                 await old_provider.close()
             except Exception:
-                pass
-
-        self._stamp_active_model(agent_id, model)
-
-        log.info("Agent '%s' model changed to '%s'", agent_id, model)
-        return agent_id
+                log.debug("closing the old provider of %s failed", agent_id, exc_info=True)
+        if defn is not None and defn.cognitive_model:
+            self._stamp_active_model(agent_id, defn.cognitive_model)
+        try:
+            await self.registry.emit_agent_updated(
+                agent_id, getattr(defn, "parent_id", None))
+        except Exception:
+            log.warning("agent.updated emit failed for %s", agent_id, exc_info=True)
 
     def _stamp_active_model(self, agent_id: str, model: str) -> None:
         """Sync the stats surfaces to a just-changed model.

@@ -204,6 +204,46 @@ async def test_set_agent_model_rejects_empty_and_unpinned(tmp_path):
         await rt.set_agent_model("loose", "echo-2")
 
 
+@pytest.mark.asyncio
+async def test_model_change_keeps_the_wallet_key_and_the_agent_state(tmp_path):
+    """A model change edits the agent in place. It used to unregister and
+    re-register it, which deleted the agent's wallet key from the vault
+    (never restored), its inbox and budget usage, and reactivated it."""
+    rt = _runtime(tmp_path)
+    await _create_agent(rt, {"id": "a", "name": "a",
+                             "provider": STUB, "model": "echo-1"})
+    key = rt.registry.get_agent_key("a")
+    address = rt.get_agent("a").identity.address
+    assert key
+    status_before = rt.registry._status.get("a")
+    events = []
+
+    async def seen(e):
+        events.append(e.type)
+    rt.events.subscribe(None, seen)
+    await rt.set_agent_model("a", "echo-2")
+    assert rt.registry.get_agent_key("a") == key
+    assert rt.get_agent("a").identity.address == address
+    assert rt.registry._status.get("a") == status_before
+    assert rt.get_agent("a").cognitive_model == "echo-2"
+    assert "agent.unregistered" not in [str(getattr(t, "value", t)) for t in events]
+
+
+@pytest.mark.asyncio
+async def test_update_agent_model_moves_the_stats_the_picker_reads(tmp_path):
+    """update_agent used to leave the saved session stats on the old model,
+    so the chat picker snapped back to it."""
+    rt = _runtime(tmp_path)
+    await _create_agent(rt, {"id": "a", "name": "a",
+                             "provider": STUB, "model": "echo-1"})
+    convo = rt.get_agent_conversation_store("a")
+    convo.save_session_stats({"active_model": "echo-1"})
+    r = await _update_agent(rt, {"agent_id": "a", "model": "echo-2"})
+    assert r.get("status") == "updated", r
+    assert convo.get_session_stats()["active_model"] == "echo-2"
+    assert rt.registry.get_agent_key("a")
+
+
 # ---------------------------------------------------------------------------
 # Kevin seeding
 # ---------------------------------------------------------------------------

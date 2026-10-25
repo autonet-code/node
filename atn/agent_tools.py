@@ -2101,38 +2101,38 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
                 log.debug("budget key migration failed for %s", agent_id,
                           exc_info=True)
 
-    # §10: a provider/model change must be LIVE. The resolved provider instance
-    # is cached in ``providers._active_providers[agent_id]``; without eviction
-    # the cached instance keeps serving the OLD model (execution_engine.py:847
-    # class of bug — inert update_agent). Evict + close so the next run rebuilds
-    # against the new config. Mirrors unregister_agent's provider cleanup
-    # (runtime/__init__.py:912-918) minus the file deletion.
-    if provider_or_model_changed:
-        pmgr = getattr(runtime, "providers", None)
-        active = getattr(pmgr, "_active_providers", None) if pmgr else None
-        if isinstance(active, dict):
-            old_provider = active.pop(agent_id, None)
-            if old_provider is not None and hasattr(old_provider, "close"):
-                try:
-                    await old_provider.close()
-                except Exception as exc:
-                    log.warning("Failed to close evicted provider for %s: %s", agent_id, exc)
-            if hasattr(pmgr, "_cached_session_stats"):
-                pmgr._cached_session_stats.pop(agent_id, None)
-
     # Persist to YAML
     try:
         save_agent(defn, runtime._config.agents_dir)
     except Exception as exc:
         log.warning("Agent updated in memory but YAML save failed: %s", exc)
 
+    # A provider/model change must be LIVE: the cached provider instance would
+    # keep serving the OLD model. The one model-change path (set_agent_model
+    # uses it too) closes it, stamps the stats the UI's picker reads (or the
+    # picker snaps back to the old model), and emits agent.updated so every
+    # client refreshes without a reload.
     if provider_or_model_changed:
-        # Same event the reparent path emits; carries model + provider so
-        # every connected client refreshes its pickers without a reload.
-        try:
-            await runtime.registry.emit_agent_updated(agent_id, defn.parent_id)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("agent.updated emit failed for %s: %s", agent_id, exc)
+        switch = getattr(runtime, "_model_switch", None)
+        if switch is not None:
+            await switch.model_changed(agent_id)
+        else:
+            pmgr = getattr(runtime, "providers", None)
+            active = getattr(pmgr, "_active_providers", None) if pmgr else None
+            if isinstance(active, dict):
+                old_provider = active.pop(agent_id, None)
+                if old_provider is not None and hasattr(old_provider, "close"):
+                    try:
+                        await old_provider.close()
+                    except Exception as exc:
+                        log.warning("Failed to close evicted provider for %s: %s",
+                                    agent_id, exc)
+            if pmgr is not None and hasattr(pmgr, "_cached_session_stats"):
+                pmgr._cached_session_stats.pop(agent_id, None)
+            try:
+                await runtime.registry.emit_agent_updated(agent_id, defn.parent_id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("agent.updated emit failed for %s: %s", agent_id, exc)
 
     return {"agent_id": agent_id, "status": "updated", "changed": changed}
 
