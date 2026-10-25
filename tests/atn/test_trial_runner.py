@@ -87,9 +87,13 @@ class TestRunTrial:
         assert out["verdict"] == "pass"
         assert out["passed"] == 3 and out["total"] == 3
         assert out["report_digest"]
-        # attestTrial calldata: selector + 3 packed 32-byte args.
-        assert out["attest_calldata"].startswith("0x")
-        assert len(out["attest_calldata"]) == 2 + (4 + 32 * 3) * 2
+        # attestTrial(bool,bytes32) calldata: the contract's own signature.
+        from atn.trial_runner import _keccak_selector
+        cd = out["attest_calldata"]
+        assert cd.startswith("0x" + _keccak_selector("attestTrial(bool,bytes32)").hex())
+        assert len(cd) == 2 + (4 + 32 * 2) * 2
+        assert cd[10:74].endswith("01")                      # pass = true
+        assert cd[74:].lstrip("0") in out["report_digest"].removeprefix("0x")
         # Report is blob-stored and reviewable.
         report = rt.tool_store._blob_store().get_json(out["report_digest"])
         assert report["kind"] == "venture_trial_report"
@@ -114,8 +118,8 @@ class TestRunTrial:
         out = await rt.trial_runner.run_trial("validator", pdigest)
         assert out["verdict"] == "fail"
         assert out["passed"] == 0
-        # calldata's last arg byte encodes passed=False.
-        assert out["attest_calldata"].endswith("00")
+        # The first argument (pass) is false.
+        assert out["attest_calldata"][10:74] == "0" * 64
 
     @pytest.mark.asyncio
     async def test_pass_threshold_partial_credit(self, tmp_path):

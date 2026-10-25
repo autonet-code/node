@@ -23,13 +23,14 @@ The daemon-facing flow (this module):
      bar before any validator runs it).
   4. BLOB-STORE a trial report (reviewable evidence a later dispute
      argues against) and RETURN the verdict + report digest + the
-     ``attestTrial`` calldata the owner surface submits on-chain.
+     ``attestTrial`` calldata the validator agent submits on chain.
 
 The on-chain ``VentureVault.attestTrial`` tx is built in parallel by the
 contracts workstream; this module returns the calldata (no generic
 contract-call seam exists on OnChainService yet — the pattern there is
-per-method builders), so the owner surface can submit it once the vault
-is deployed.
+per-method builders). The vault takes it only from the registered verifier
+agent itself (msg.sender), so the validator agent's key must send it, not
+the owner wallet.
 """
 
 from __future__ import annotations
@@ -149,8 +150,9 @@ class TrialRunner:
             "cases": cases,
             "report_digest": report_digest,
             "attest_calldata": attest_calldata,
-            "note": ("submit attest_calldata via the owner on-chain surface "
-                     "to record this trial on VentureVault.attestTrial"),
+            "note": ("send attest_calldata to the VentureVault from this "
+                     "validator agent's own key (the vault checks msg.sender "
+                     "is the registered verifier) to record the trial"),
         }
 
     # ------------------------------------------------------------------
@@ -263,25 +265,22 @@ class TrialRunner:
 
     def _build_attest_calldata(self, prospectus_digest: str,
                                report_digest: str, passed: bool) -> str:
-        """ABI-encode ``VentureVault.attestTrial(bytes32 prospectus,
-        bytes32 report, bool passed)`` calldata for the owner to submit.
+        """ABI-encode ``VentureVault.attestTrial(bool pass, bytes32
+        reportDigest)`` calldata (VentureVault.sol). The vault is one per
+        venture, so the prospectus is not an argument.
 
         Encoded WITHOUT web3/a live node — the selector is keccak of the
-        signature and the three 32-byte args are packed directly, so this
-        works on a daemon with no RPC configured (the owner submits it
-        wherever the vault is deployed). Returns '' if keccak is
+        signature and the two 32-byte args are packed directly, so this
+        works on a daemon with no RPC configured. Returns '' if keccak is
         unavailable (never blocks the verdict)."""
         try:
-            selector = _keccak_selector(
-                "attestTrial(bytes32,bytes32,bool)")
+            selector = _keccak_selector("attestTrial(bool,bytes32)")
         except Exception as exc:
             log.debug("attestTrial calldata skipped (no keccak): %s", exc)
             return ""
-        arg_prospectus = _hex_to_bytes32(prospectus_digest)
-        arg_report = _hex_to_bytes32(report_digest)
         arg_passed = (b"\x00" * 31) + (b"\x01" if passed else b"\x00")
-        return "0x" + (selector + arg_prospectus + arg_report
-                       + arg_passed).hex()
+        arg_report = _hex_to_bytes32(report_digest)
+        return "0x" + (selector + arg_passed + arg_report).hex()
 
     def _consensus_identity(self, caller: str) -> str:
         try:
