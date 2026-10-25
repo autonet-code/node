@@ -186,6 +186,19 @@ def evaluate(packs: list[Pack], obs: dict[str, Any], cmd: dict[str, Any], *,
             "packs": trail}
 
 
+def _replace(tmp: Path, dest: Path, attempts: int = 20) -> None:
+    """Atomic rename, retried: on Windows it fails while another process
+    (the robot's filter, through a bind mount) has the target open."""
+    for i in range(attempts):
+        try:
+            tmp.replace(dest)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.01)
+
+
 def write_heartbeat(bundle_dir: str | Path, *, sponsor_ok: bool,
                     now: float | None = None) -> None:
     root = Path(bundle_dir)
@@ -193,7 +206,26 @@ def write_heartbeat(bundle_dir: str | Path, *, sponsor_ok: bool,
     tmp = root / "heartbeat.json.tmp"
     tmp.write_text(json.dumps({"ts": time.time() if now is None else now,
                                "sponsor_ok": bool(sponsor_ok)}), "utf-8")
-    tmp.replace(root / "heartbeat.json")
+    _replace(tmp, root / "heartbeat.json")
+
+
+def write_challenge(bundle_dir: str | Path, challenge: str,
+                    now: float | None = None) -> None:
+    """Hand a poll's challenge to the filter node, which publishes it on
+    ``autonet/challenge`` so the next worklog chunk records it."""
+    root = Path(bundle_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = root / "challenge.json.tmp"
+    tmp.write_text(json.dumps({"ts": time.time() if now is None else now,
+                               "challenge": challenge}), "utf-8")
+    _replace(tmp, root / "challenge.json")
+
+
+def read_challenge(bundle_dir: str | Path) -> dict[str, Any]:
+    try:
+        return json.loads((Path(bundle_dir) / "challenge.json").read_text("utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def write_bundle(bundle_dir: str | Path,
@@ -217,5 +249,5 @@ def write_bundle(bundle_dir: str | Path,
         digests.append(digest)
     tmp = root / "required.json.tmp"
     tmp.write_text(json.dumps({"packs": digests}), "utf-8")
-    tmp.replace(root / "required.json")
+    _replace(tmp, root / "required.json")
     return digests

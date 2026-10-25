@@ -449,7 +449,8 @@ class RobotConfig:
     writes its heartbeat for the robot's filter node. ``required_packs`` are
     tool names or digests in this daemon's tool store (the jurisdiction's
     standards, from config until they move to the Registry). ``bag_dir`` holds
-    the robot's MCAP worklog chunks, which ``robot_attest`` hashes.
+    the robot's MCAP worklog chunks, one directory per stream, which its
+    signed worklog chain commits.
     ``agent_id`` is the robot's own agent; its key signs attestations.
     """
     enabled: bool = False
@@ -458,6 +459,28 @@ class RobotConfig:
     bag_dir: str = ""
     required_packs: list[str] = field(default_factory=list)
     heartbeat_interval_s: float = 1.0
+
+
+@dataclass
+class RobotPollConfig:
+    """The robot poll rail (docs/robots.md, Decision 2026-10-25). Off
+    unless ``enabled``; needs the autonet network (p2p and chain). Every
+    local agent may then be drawn as a poller, and the robot agent (when
+    ``robot.enabled``) commits its worklog and answers polls.
+
+    All values are provisional defaults for the jurisdiction to set:
+    ``pollers`` per robot per round, the REP ``percentile`` floor, the
+    round length, the answer deadline, how long a watched robot may stay
+    silent, and per-stream retention in rounds (a stream not listed is
+    kept).
+    """
+    enabled: bool = False
+    period_s: float = 3600.0
+    pollers: int = 3
+    percentile: int = 90
+    deadline_s: float = 2.0
+    commit_gap_s: float = 30.0
+    retention_rounds: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -481,6 +504,7 @@ class ATNConfig:
     worker_isolation: WorkerIsolationConfig = field(default_factory=WorkerIsolationConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
     robot: RobotConfig = field(default_factory=RobotConfig)
+    robot_poll: "RobotPollConfig" = field(default_factory=lambda: RobotPollConfig())
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     connectors: dict[str, ConnectorConfig] = field(default_factory=dict)
     # Seconds an MCP connector may sit idle before the daemon stops it.
@@ -1030,6 +1054,19 @@ def _load_worker_isolation(wi_raw: dict[str, Any]) -> WorkerIsolationConfig:
     return WorkerIsolationConfig(enabled=wi_enabled, memory_cap_mb=memory_cap_mb)
 
 
+def _load_robot_poll(raw: dict[str, Any]) -> RobotPollConfig:
+    ret = raw.get("retention_rounds") or {}
+    return RobotPollConfig(
+        enabled=bool(raw.get("enabled", False)),
+        period_s=float(raw.get("period_s", 3600.0) or 3600.0),
+        pollers=int(raw.get("pollers", 3) or 3),
+        percentile=int(raw.get("percentile", 90)),
+        deadline_s=float(raw.get("deadline_s", 2.0) or 2.0),
+        commit_gap_s=float(raw.get("commit_gap_s", 30.0) or 30.0),
+        retention_rounds={str(k): int(v) for k, v in ret.items()} if isinstance(ret, dict) else {},
+    )
+
+
 def _load_robot(raw: dict[str, Any]) -> RobotConfig:
     packs = raw.get("required_packs") or []
     return RobotConfig(
@@ -1338,6 +1375,8 @@ def load_config(path: Path | None = None) -> ATNConfig:
         secrets_raw if isinstance(secrets_raw, dict) else {})
     robot_raw = raw.get("robot", {})
     config.robot = _load_robot(robot_raw if isinstance(robot_raw, dict) else {})
+    poll_raw = raw.get("robot_poll", {})
+    config.robot_poll = _load_robot_poll(poll_raw if isinstance(poll_raw, dict) else {})
 
     # Idle-connector reaping. Top-level (not per-connector): the cost being
     # managed is the daemon's total resident footprint, not any one server's.

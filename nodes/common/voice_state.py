@@ -660,6 +660,48 @@ def sanctions_from_records(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Territories (docs/robots.md, 2026-10-25). A DAO proposal writes
+# ``territory.<name>`` = JSON ``{"robots": ["0x...", ...]}`` (or a comma
+# list of addresses) into the Registry: the robots operating in that shared
+# space, which witness each other. An empty value removes the territory.
+# ---------------------------------------------------------------------------
+
+TERRITORY_KEY_PREFIX = "territory."
+
+
+def territories_from_records(
+    records: List[Dict[str, Any]], block: int,
+) -> Dict[str, List[str]]:
+    """Territory name -> its robots (lowercased, sorted), from the last
+    write of each ``territory.<name>`` key at or before ``block``."""
+    last: Dict[str, str] = {}
+    for rec in sorted(records, key=lambda r: (int(r["block"]), int(r["index"]))):
+        if int(rec["block"]) > int(block):
+            break
+        key = str(rec.get("key") or "")
+        name = key[len(TERRITORY_KEY_PREFIX):]
+        if key.startswith(TERRITORY_KEY_PREFIX) and name:
+            last[name] = str(rec.get("value") or "")
+    out: Dict[str, List[str]] = {}
+    for name in sorted(last):
+        text = last[name].strip()
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+            robots = data.get("robots", []) if isinstance(data, dict) else data
+        except ValueError:
+            robots = text.split(",")
+        if not isinstance(robots, list):
+            continue
+        addrs = sorted({str(a).strip().lower() for a in robots
+                        if str(a).strip().startswith("0x")})
+        if addrs:
+            out[name] = addrs
+    return out
+
+
 def sanctioned_households(
     sanctions: Iterable[str], owner_of: Dict[str, str],
 ) -> List[str]:
@@ -682,6 +724,7 @@ def read_voice_state(
     tool_bond_address: str = "",
     dao_registry_address: str = "",
     web3: Any = None,
+    anchor_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Read {owner_map, voice_weights, rep_shares, rep_supply, supply,
     snapshot_block, emission_pool, recycled, weight_source,
@@ -724,6 +767,10 @@ def read_voice_state(
     )
 
     anchor_count = contract.functions.anchorCount().call()
+    if anchor_index is not None:
+        # Read as if the chain ended at that anchor (the robot poll rail
+        # pins a round to the anchor in force when the round started).
+        anchor_count = max(0, min(int(anchor_count), int(anchor_index) + 1))
     if anchor_count == 0:
         # No agreed snapshot yet (epoch 1): no voices, empty fees-only pool.
         return {
@@ -744,6 +791,8 @@ def read_voice_state(
             "charter_text": None,
             "sanctions": {},
             "sanctioned_households": [],
+            "agent_rep": {},
+            "territories": {},
         }
     anchor = contract.functions.getAnchor(anchor_count - 1).call()
     block = int(anchor[7])       # Anchor.blockNumber (struct field 7)
@@ -806,6 +855,7 @@ def read_voice_state(
             owner_map[agent] = owner
 
     supply = 0
+    agent_rep: Dict[str, int] = {}
     voice_weights: Dict[str, float] = {}
     rep_shares: Dict[str, float] = {}
     if rep_token_address:
@@ -828,6 +878,7 @@ def read_voice_state(
         for agent in agents:
             owner = owner_of.get(agent, "")
             r = _reputation_at(agent)
+            agent_rep[agent] = r
             if owner and owner != _ZERO:
                 # Bound agent: REP rolls up to the owner household. NO
                 # separate owner-wallet term — a bare owner never earns REP;
@@ -848,10 +899,12 @@ def read_voice_state(
     # and the sanctions in force at the anchor's timestamp.
     charter_text: Optional[str] = None
     sanctions: Dict[str, Dict[str, Any]] = {}
+    territories: Dict[str, List[str]] = {}
     if dao_registry_address:
         reg_records = _registry_records(w3, dao_registry_address, block)
         charter_text = charter_text_from_logs(reg_records, block)
         sanctions = sanctions_from_records(reg_records, block, timestamp)
+        territories = territories_from_records(reg_records, block)
     houses = sanctioned_households(sanctions, owner_of)
     house_set = set(houses)
     # Every address whose household is sanctioned: its reviews move no
@@ -900,4 +953,9 @@ def read_voice_state(
         # those households' mint and their drift weight.
         "sanctions": sanctions,
         "sanctioned_households": houses,
+        # Per-agent REP (raw base units) and the territories' robot rosters
+        # (docs/robots.md, 2026-10-25): the robot poll rail draws pollers
+        # and witnesses from these, at the same snapshot.
+        "agent_rep": agent_rep,
+        "territories": territories,
     }

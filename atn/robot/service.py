@@ -38,6 +38,8 @@ class RobotService:
                                Path(config.data_dir) / "robot" / "bundle")
         self.bag_dir = Path(config.robot.bag_dir or
                             Path(config.data_dir) / "robot" / "bags")
+        self.chain_dir = Path(config.data_dir) / "robot" / "chain"
+        self._worklog: W.Worklog | None = None
         self.sponsor_ok = False
         self.exported: list[str] = []
         self.export_errors: list[str] = []
@@ -131,14 +133,25 @@ class RobotService:
             raise ValueError(f"agent {agent_id!r} has no signing key")
         return address, key
 
-    def attest(self, challenge: str, window_s: float = 60.0) -> dict[str, Any]:
+    @property
+    def worklog(self) -> W.Worklog:
+        """The robot's signed worklog chain, opened on first use (it needs
+        the robot agent's key)."""
+        if self._worklog is None:
+            address, key = self._robot_key()
+            self._worklog = W.Worklog(self.bag_dir, self.chain_dir, address, key)
+        return self._worklog
+
+    def write_challenge(self, challenge: str) -> None:
+        P.write_challenge(self.bundle_dir, challenge)
+
+    def attest(self, challenge: str) -> dict[str, Any]:
+        """An owner's own poll: record the challenge and commit a link that
+        carries it. Returns the signed link."""
         if not challenge or len(challenge) > 256:
             raise ValueError("challenge must be 1 to 256 characters")
-        address, key = self._robot_key()
-        statement = W.build_statement(robot=address, challenge=challenge,
-                                      packs=self.exported, bag_dir=self.bag_dir,
-                                      window_s=float(window_s))
-        return W.sign_statement(statement, key)
+        self.write_challenge(challenge)
+        return self.worklog.commit(packs=self.exported, challenge=challenge, force=True)
 
     def status(self) -> dict[str, Any]:
         hb = P.read_heartbeat(self.bundle_dir)

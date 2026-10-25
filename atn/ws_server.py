@@ -2851,8 +2851,7 @@ class WebSocketBridge:
                 elif msg_type == "robot_export_packs":
                     result = robot.export_packs()
                 else:
-                    result = robot.attest(str(msg.get("challenge") or ""),
-                                          float(msg.get("window_s") or 60.0))
+                    result = robot.attest(str(msg.get("challenge") or ""))
             except ValueError as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
             return {"msg_id": msg_id, "ok": True, "result": result}

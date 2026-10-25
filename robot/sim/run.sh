@@ -27,7 +27,7 @@ python3 /autonet/robot/ros/safety_filter.py --ros-args \
 # disk (/var/worklog). Writing it through a Windows bind mount is unreliable,
 # so on a Windows host the daemon side copies it out (docker cp) to read it.
 rm -rf /var/worklog
-ros2 bag record -s mcap -o /var/worklog --max-bag-duration 10     --topics /scan /odom /cmd_vel /cmd_vel_safe /safety/events &
+ros2 bag record -s mcap -o /var/worklog --max-bag-duration 10     --topics /scan /odom /cmd_vel /cmd_vel_safe /safety/events /autonet/challenge &
 wait -n || true
 echo "run.sh: a robot process exited, shutting down" >&2
 jobs -l >&2

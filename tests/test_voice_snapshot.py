@@ -297,6 +297,27 @@ class TestVoiceStateSnapshot:
         assert state_1b["voice_weights"] == state_1["voice_weights"]
         assert state_1b["snapshot_block"] == state_1["snapshot_block"]
 
+    def test_pinned_to_an_earlier_anchor_and_per_agent_rep(self, fx):
+        """``anchor_index`` reads as if the chain ended at that anchor (the
+        robot poll rail pins each round to one); ``agent_rep`` carries the
+        raw REP of every agent at that snapshot."""
+        w3 = fx["w3"]
+        agents = fx["agent_addrs"]
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], agents[0], 1000)
+        _anchor_epoch(fx, agents, "e_p1", "rpb_p1")
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], agents[1], 3000)
+        _anchor_epoch(fx, agents, "e_p2", "rpb_p2")
+        first = read_voice_state(fx["addr"], web3=w3, rep_token_address=fx["rep_addr"],
+                                 anchor_index=0)
+        latest = read_voice_state(fx["addr"], web3=w3, rep_token_address=fx["rep_addr"])
+        assert first["snapshot_anchor_count"] == 1
+        assert latest["snapshot_anchor_count"] == 2
+        assert first["agent_rep"][agents[0].lower()] == 1000
+        assert first["agent_rep"][agents[1].lower()] == 0
+        assert latest["agent_rep"][agents[1].lower()] == 3000
+        assert read_voice_state(fx["addr"], web3=w3, rep_token_address=fx["rep_addr"],
+                                anchor_index=-1)["agent_rep"] == {}
+
     def test_revoked_agent_and_child_drop_out(self, fx):
         """A revoked agent and its descendant (via OwnerBound parent links)
         are absent from the snapshot; unrelated agents stay."""

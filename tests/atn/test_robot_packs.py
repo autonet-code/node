@@ -161,53 +161,6 @@ def _robot() -> str:
     return Account.from_key(KEY).address
 
 
-def test_attestation_round_trip(tmp_path):
-    bag = _bags(tmp_path)
-    st = W.sign_statement(W.build_statement(robot=_robot(), challenge="c1",
-                                            packs=["d1"], bag_dir=bag,
-                                            window_s=30), KEY)
-    assert [c["name"] for c in st["chunks"]] == ["worklog_0.mcap", "worklog_1.mcap"]
-    files = {p.name: p.read_bytes() for p in bag.iterdir()}
-    sent = time.time()
-    assert W.verify_statement(st, robot=_robot(), challenge="c1", sent_at=sent,
-                              received_at=sent + 0.5, deadline_s=2,
-                              required_packs=["d1"], chunk_files=files) == []
-
-
-def test_attestation_failures(tmp_path):
-    bag = _bags(tmp_path)
-    st = W.sign_statement(W.build_statement(robot=_robot(), challenge="c1",
-                                            packs=["d1"], bag_dir=bag,
-                                            window_s=30), KEY)
-    sent = time.time()
-    late = W.verify_statement(st, robot=_robot(), challenge="c1", sent_at=sent,
-                              received_at=sent + 5, deadline_s=2)
-    assert any(e.startswith("late") for e in late)
-    wrong = W.verify_statement(st, robot=_robot(), challenge="c2", sent_at=sent,
-                               received_at=sent, deadline_s=2)
-    assert "challenge mismatch" in wrong
-    forged = dict(st, packs=["d2"])
-    assert "signed by a different key" in W.verify_statement(
-        forged, robot=_robot(), challenge="c1", sent_at=sent,
-        received_at=sent, deadline_s=2)
-    tampered = {"worklog_0.mcap": b"not the original"}
-    assert any("does not match" in e for e in W.verify_statement(
-        st, robot=_robot(), challenge="c1", sent_at=sent, received_at=sent,
-        deadline_s=2, chunk_files=tampered))
-
-
-def test_attestation_needs_recent_chunks(tmp_path):
-    bag = _bags(tmp_path)
-    st = W.sign_statement(W.build_statement(robot=_robot(), challenge="c",
-                                            packs=[], bag_dir=bag,
-                                            window_s=30,
-                                            now=time.time() + 3600), KEY)
-    sent = time.time()
-    errs = W.verify_statement(st, robot=_robot(), challenge="c", sent_at=sent,
-                              received_at=sent, deadline_s=2)
-    assert any("worklog chunks" in e for e in errs)
-
-
 # --- daemon side -------------------------------------------------------------
 
 def _robot_runtime(tmp_path):
@@ -240,11 +193,12 @@ async def test_service_exports_packs_and_attests(tmp_path):
     assert svc.export_packs() == {"ok": True, "packs": [reg["digest"]]}
     loaded = P.load_bundle(config.robot.bundle_dir)
     assert loaded.ok and loaded.packs[0].digest == reg["digest"]
-    st = svc.attest("nonce-1")
-    sent = time.time()
-    assert W.verify_statement(st, robot=out["address"], challenge="nonce-1",
-                              sent_at=sent, received_at=sent, deadline_s=2,
-                              required_packs=[reg["digest"]]) == []
+    link = svc.attest("nonce-1")
+    assert W.verify_link(link, robot=out["address"]) == []
+    assert link["challenge"] == "nonce-1" and link["packs"] == [reg["digest"]]
+    assert [lf["name"] for lf in link["leaves"]] == ["worklog_0.mcap", "worklog_1.mcap"]
+    assert P.read_challenge(config.robot.bundle_dir)["challenge"] == "nonce-1"
+    assert svc.attest("nonce-2")["prev"] != link["prev"]
 
 
 @pytest.mark.asyncio

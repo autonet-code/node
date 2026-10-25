@@ -5,8 +5,10 @@ through its MCP connector) publishes on ``in_topic``; only this node publishes
 ``out_topic``, the topic the motors listen on. At a fixed rate it takes the
 latest proposed command (zero once it is older than ``cmd_timeout_s``), runs
 the required safety packs from the daemon's bundle, and publishes the result.
-Every non-pass verdict and a once-a-second status go out on ``/safety/events``
-as JSON, so they land in the worklog.
+Every non-pass verdict and a once-a-second status go out on ``safety/events``
+as JSON, so they land in the worklog. A poll's challenge, handed over by the
+daemon in the bundle, goes out on ``autonet/challenge`` for the same reason:
+the next chunk then proves the robot recorded it after the poll.
 
 The pack runtime is ``atn/robot/packs.py``, loaded by path: it is stdlib only
 and this node runs under the robot's ROS Python, not the daemon's.
@@ -69,8 +71,14 @@ class SafetyFilter(Node):
                                  qos_profile_sensor_data)
         self.pub = self.create_publisher(
             TwistStamped if self.out_stamped else Twist, out_topic, 10)
-        self.events = self.create_publisher(String, "/safety/events", 10)
+        self.events = self.create_publisher(String, "safety/events", 10)
+        self.challenges = self.create_publisher(String, "autonet/challenge", 10)
+        self._challenge_ts = None
+        self._challenge_left = 0
+        # Announce the topic at once, so recorders subscribe before a poll.
+        self.challenges.publish(String(data="{}"))
         self.create_timer(1.0 / self.rate_hz, self._tick)
+        self.create_timer(0.2, self._challenge)
         self.create_timer(1.0, self._refresh)
         self._refresh()
         self.get_logger().info(
@@ -102,7 +110,7 @@ class SafetyFilter(Node):
         sig = []
         for root, _dirs, files in os.walk(self.bundle_dir):
             for f in sorted(files):
-                if f.startswith("heartbeat"):
+                if f.startswith(("heartbeat", "challenge")):
                     continue
                 try:
                     st = os.stat(os.path.join(root, f))
@@ -123,6 +131,17 @@ class SafetyFilter(Node):
                      "errors": self.load_errors,
                      "heartbeat": self.heartbeat,
                      "verdict": (self.last_verdict or {}).get("verdict")})
+
+    def _challenge(self) -> None:
+        # Repeat each challenge for a second: a recorder that only just
+        # discovered the topic may miss the first message.
+        c = self.packs_rt.read_challenge(self.bundle_dir)
+        if c.get("challenge") and c.get("ts") != self._challenge_ts:
+            self._challenge_ts = c.get("ts")
+            self._challenge_left = 5
+        if self._challenge_left > 0:
+            self._challenge_left -= 1
+            self.challenges.publish(String(data=json.dumps(c)))
 
     # -- output -------------------------------------------------------------
 

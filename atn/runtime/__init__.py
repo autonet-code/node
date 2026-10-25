@@ -769,6 +769,13 @@ class Runtime:
             from ..robot.service import RobotService
             self.robot = RobotService(self, self._config)
             self.robot.start()
+        # The robot poll rail (docs/robots.md, 2026-10-25): polls, witnesses
+        # and receipts between daemons. Off unless robot_poll.enabled.
+        self.robot_rail = None
+        if self._config.robot_poll.enabled:
+            from ..robot.rail import RailService
+            self.robot_rail = RailService(self, self._config)
+            await self.robot_rail.start()
 
         # Start voice service if configured
         if self._config.voice.enabled:
@@ -858,6 +865,8 @@ class Runtime:
         self._shutdown_event.set()
         await self.control.kill_all()
 
+        if getattr(self, "robot_rail", None) is not None:
+            await self.robot_rail.stop()
         if getattr(self, "robot", None) is not None:
             await self.robot.stop()
 

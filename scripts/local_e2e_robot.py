@@ -15,7 +15,8 @@ Stages
   6  re-export restores motion
   7  daemon heartbeat goes stale: the robot stops
   8  sponsor unreachable: the robot stops
-  9  challenge: valid answer verifies; tampered chunk, wrong key, late all fail
+  9  challenge: the signed link verifies, the challenge lands in the next
+     chunk; a tampered chunk and a wrong key fail
  10  the agent's ROS connector (ros-mcp) drives through the same filter
 
 Run: python scripts/local_e2e_robot.py   (needs Docker; builds the image once)
@@ -393,31 +394,27 @@ async def amain() -> int:
         await asyncio.sleep(12)                     # let a bag chunk close
         sync_worklog()
         nonce = uuid.uuid4().hex
-        sent = time.time()
-        resp = await ws_call(rt, {"type": "robot_attest", "challenge": nonce,
-                                  "window_s": 120})
-        received = time.time()
+        resp = await ws_call(rt, {"type": "robot_attest", "challenge": nonce})
         check(resp["ok"], f"attest failed: {resp}")
-        st = resp["result"]
-        files = {p.name: p.read_bytes() for p in BAGS.rglob("*.mcap")}
-        errs = W.verify_statement(st, robot=rover["address"], challenge=nonce,
-                                  sent_at=sent, received_at=received, deadline_s=2,
-                                  required_packs=[reg["digest"]], chunk_files=files)
-        check(errs == [], f"valid statement rejected: {errs}")
-        bad_files = dict(files)
-        first = st["chunks"][0]["name"]
-        bad_files[first] = files[first][:-1] + b"\x00"
-        check(any("does not match" in e for e in W.verify_statement(
-            st, robot=rover["address"], challenge=nonce, sent_at=sent,
-            received_at=received, deadline_s=2, chunk_files=bad_files)),
-            "tampered chunk passed")
-        check("signed by a different key" in W.verify_statement(
-            st, robot="0x" + "00" * 20, challenge=nonce, sent_at=sent,
-            received_at=received, deadline_s=2), "wrong key passed")
-        check(any(e.startswith("late") for e in W.verify_statement(
-            st, robot=rover["address"], challenge=nonce, sent_at=sent,
-            received_at=sent + 10, deadline_s=2)), "late answer passed")
-        passed(f"{len(st['chunks'])} chunks, answered in {received - sent:.3f}s")
+        link = resp["result"]
+        check(W.verify_link(link, robot=rover["address"]) == [], "valid link rejected")
+        check(link["challenge"] == nonce and link["packs"] == [reg["digest"]],
+              "link does not carry the challenge and the active pack")
+        files = rt.robot.worklog.produce(lf["name"] for lf in link["leaves"])
+        check(files and W.verify_chunks(link, files) == [], "chunks do not match the link")
+        first = link["leaves"][0]["name"]
+        bad = dict(files)
+        bad[first] = files[first][:-1] + b"\x00"
+        check(W.verify_chunks(link, bad), "tampered chunk passed")
+        check("signed by a different key" in W.verify_link(link, robot="0x" + "00" * 20),
+              "wrong key passed")
+        # The filter publishes the challenge; the next closed chunk records it.
+        await asyncio.sleep(12)
+        sync_worklog()
+        later = [p.read_bytes() for p in BAGS.rglob("*.mcap") if p.name not in
+                 {Path(lf["name"]).name for lf in link["leaves"]}]
+        check(W.challenge_recorded(nonce, later), "challenge not recorded after the poll")
+        passed(f"{len(link['leaves'])} chunks committed, challenge recorded")
 
         stage(10, "agent connector drives through the filter")
         res = await connector_drive(rt, ros)

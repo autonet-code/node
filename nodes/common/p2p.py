@@ -140,6 +140,9 @@ CAPABILITY_PROTOCOL = TProtocol("/autonet/capability/1.0.0")
 BLOB_PROTOCOL = TProtocol("/autonet/blob/1.0.0")
 EMBEDDING_PROTOCOL = TProtocol("/autonet/embeddings/1.0.0")
 INFERENCE_REQUEST_PROTOCOL = TProtocol("/rpb/inference/1.0.0")
+# Robot poll rail (docs/robots.md, 2026-10-25): polls, link pushes and
+# receipts between daemons, one JSON request and one JSON response a stream.
+ROBOT_PROTOCOL = TProtocol("/autonet/robot/1.0.0")
 GUILD_GOSSIP_TOPIC_PREFIX = "/autonet/guild/"
 PROVIDER_REGISTRY_TOPIC = "/rpb/provider-registry/"
 
@@ -1404,6 +1407,54 @@ class AutonetHost:
 
         return {"error": "This node has no inference handler registered"}
 
+    # =========================================================================
+    # Robot poll rail (docs/robots.md, 2026-10-25)
+    # =========================================================================
+
+    def set_robot_handler(
+        self,
+        handler: Callable[[dict], Awaitable[dict]],
+    ) -> None:
+        """Register the coroutine (run in the host's trio loop) that serves
+        incoming /autonet/robot/1.0.0 messages: dict in, dict out."""
+        self._robot_handler = handler
+
+    async def request_robot(self, target_peer_id: Any, message: dict,
+                            timeout: float = 10.0) -> dict:
+        """Send one robot-rail message to a peer and return its response.
+        Raises on a connection failure or timeout."""
+        import json
+
+        if isinstance(target_peer_id, str):
+            target_peer_id = PeerID.from_base58(target_peer_id)
+        with trio.fail_after(timeout):
+            stream = await self._host.new_stream(target_peer_id, [ROBOT_PROTOCOL])
+            # Same framing as inference: write without closing, read, close.
+            await _write_frame_no_close(stream, json.dumps(message).encode("utf-8"))
+            resp = await _read_frame_no_close(stream)
+        try:
+            await stream.close()
+        except Exception:
+            pass
+        return json.loads(resp.decode("utf-8"))
+
+    async def _handle_robot_stream(self, stream):
+        import json
+
+        try:
+            request = json.loads((await _read_frame_no_close(stream)).decode("utf-8"))
+            handler = getattr(self, "_robot_handler", None)
+            response = (await handler(request)) if handler else {
+                "error": "this node does not run the robot rail"}
+        except Exception as e:
+            self.logger.warning("robot rail request failed: %s", e)
+            response = {"error": str(e)}
+        try:
+            await _write_frame_no_close(stream, json.dumps(response).encode("utf-8"))
+            await stream.close()
+        except Exception:
+            pass
+
     def set_inference_advertisement(
         self,
         *,
@@ -1687,6 +1738,9 @@ class AutonetHost:
         )
         self._host.set_stream_handler(
             INFERENCE_REQUEST_PROTOCOL, self._handle_inference_stream
+        )
+        self._host.set_stream_handler(
+            ROBOT_PROTOCOL, self._handle_robot_stream
         )
 
     # =========================================================================
