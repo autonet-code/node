@@ -73,6 +73,9 @@ class HashingEmbedder:
     seed: int = 42
 
     def __call__(self, text: str) -> Tuple[float, ...]:
+        if self.dim <= 0:
+            # Pure-charter mode (embedding_dim=0): there is no tail to fill.
+            return ()
         if not text:
             return tuple([0.0] * self.dim)
         tokens = _tokenize(text)
