@@ -3661,6 +3661,18 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
+        if msg_type in ("owner_binding_status", "rotate_owner") and (
+                not session.owner or session.scope_ids is not None):
+            # Owner, full fleet only. rotate_owner signs rotateOwner with each
+            # named agent's daemon-held key, and Substrate needs nothing more
+            # than that plus the new owner's own signature: a scoped session
+            # (an agent's exported key, signed in remotely) could otherwise
+            # move every agent on the daemon to a wallet of its choosing. The
+            # status call hands out the nonces those signatures need.
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"'{msg_type}' is for the daemon owner's full-fleet "
+                             "session only"}
+
         if msg_type == "owner_binding_status":
             # Report on-chain owner-binding state for every LOCAL agent, so
             # the Owner page can show which agents are bound / to whom / at
