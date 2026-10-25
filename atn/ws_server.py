@@ -3798,12 +3798,15 @@ class WebSocketBridge:
                                         "error": "no daemon-held key for that agent"})
                         continue
                     try:
-                        r = await svc.rotate_owner(
-                            private_key=key,
-                            new_owner=new_owner,
-                            new_owner_sig=sig,
-                            new_parent=parent,
-                        )
+                        # Off-loop: the call waits up to 120 s for a receipt.
+                        r = await self._offload(
+                            lambda key=key, new_owner=new_owner, sig=sig,
+                            parent=parent: svc.rotate_owner(
+                                private_key=key,
+                                new_owner=new_owner,
+                                new_owner_sig=sig,
+                                new_parent=parent,
+                            ))
                     except Exception as e:
                         results.append({"address": addr, "ok": False, "error": str(e)})
                         continue
@@ -5582,20 +5585,22 @@ class WebSocketBridge:
             from eth_account import Account
             owner = Account.from_key(owner_key).address
             parent = ""
-            nonce = await svc.binding_nonce(identity.address)
+            nonce = await self._offload(lambda: svc.binding_nonce(identity.address))
             owner_sig = svc.sign_binding(owner_key, identity.address, "", nonce)
         if owner_sig:
             if not owner:
                 return {"success": False,
                         "error": "owner_sig present but 'owner' address missing"}
-            result = await svc.register_agent_bound(
+            # Off-loop: registration waits for its receipt (up to 120 s), which
+            # froze every connection and every agent's streaming meanwhile.
+            result = await self._offload(lambda: svc.register_agent_bound(
                 identity=identity,
                 private_key=key,
                 peer_id=peer_id,
                 owner=owner,
                 owner_sig=owner_sig,
                 parent=parent,
-            )
+            ))
         else:
             from .agent_tools import register_parent_signed
             result = await register_parent_signed(
