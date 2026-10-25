@@ -36,7 +36,6 @@ from nodes.common.world_model_substrate.adapter import (
     build_charter_world,
 )
 from nodes.common.world_model_substrate.aggregate import apply_events
-from nodes.common.world_model_substrate.mint_gate import charter_violation_score
 from nodes.common.world_model_substrate.reconcile import (
     EpochSnapshots,
     scale_node_agent_mint_by_violation,
@@ -140,22 +139,6 @@ def _charter_con(seq: int, author: str, charter_tendency: str,
 # Change 1 — ledger mode replays without equilibration
 # ---------------------------------------------------------------------------
 
-
-def test_ledger_mode_mints_from_net_score_no_equilibration():
-    """A PRO sprout with an authored post under a charter root moves
-    that root's net_score in ledger mode (no equilibrate needed) and
-    the author mints."""
-    rpb = "rpb_ledger_a"
-    kp = Keypair.generate()
-    chain = _chain(rpb, kp, [
-        [_sprout(1, "alice", "correctness", 4, 0, "c1",
-                 parent_id="root_correctness")],
-        [_sprout(1, "alice", "simplicity", 5, 1, "s1",
-                 parent_id="root_simplicity")],
-    ])
-    result = federated_epoch_close(canonical_order(chain), embedding_dim=EMBED)
-    assert result["pricing"] == "ledger"
-    assert result["agent_mint"].get("alice", 0.0) > 0.0
 
 
 def test_ledger_default_and_equilibrated_are_distinct_paths():
@@ -312,52 +295,6 @@ def _reconcile_over(events, *, apply_gate, emission_pool=None):
     )
 
 
-def test_violator_pays_honest_rises_violator_drops_after_pool():
-    """Fixed pool. One flagged node (authored by the violator). After
-    the gate + pool: violator's absolute mint DROPS vs no-gate, honest
-    agent's absolute mint RISES vs no-gate."""
-    events, _ = _two_author_events()
-
-    # Need the flag to reference eve's live node id, which is content-
-    # addressed. Compute it, then append a charter CON that wins standing.
-    world = build_charter_world(embedding_dim=EMBED)
-    apply_events(world, events, equilibrate_after=False)
-    tend = world.tendencies["simplicity"]
-    eve_node_id = tend._content_address(  # type: ignore[attr-defined]
-        tuple(_coords(5, 1)), tuple(_coords(5, 1)))
-
-    # A charter CON (under 'correctness') flagging eve's node, with an
-    # authored post so it has positive net_score => real violation.
-    con = _charter_con(2, "watchdog", "correctness", 4, 3,
-                       eve_node_id, "flag_eve")
-    flagged_events = events + [con]
-
-    POOL = 100.0
-
-    no_gate = _reconcile_over(flagged_events, apply_gate=False,
-                              emission_pool=POOL)
-    gated = _reconcile_over(flagged_events, apply_gate=True,
-                            emission_pool=POOL)
-
-    # Sanity: the gate saw a real violation on eve's node.
-    world2 = build_charter_world(embedding_dim=EMBED)
-    apply_events(world2, flagged_events, equilibrate_after=False)
-    v = charter_violation_score(world2, eve_node_id)
-    assert v > 0.0, "test setup failed to produce a real violation flag"
-
-    honest_before = no_gate["agent_mint"].get("alice", 0.0)
-    honest_after = gated["agent_mint"].get("alice", 0.0)
-    violator_before = no_gate["agent_mint"].get("eve", 0.0)
-    violator_after = gated["agent_mint"].get("eve", 0.0)
-
-    assert violator_before > 0.0 and honest_before > 0.0
-    # Violator strictly down, honest strictly up (absolute, post-pool).
-    assert violator_after < violator_before
-    assert honest_after > honest_before
-    # Pool is conserved (both close to POOL; equal since raw_total>0).
-    assert gated["total_mint"] == pytest.approx(POOL)
-    assert no_gate["total_mint"] == pytest.approx(POOL)
-
 
 def test_zero_violations_identical_to_no_gate():
     """No charter CON => no violation => gated result equals no-gate
@@ -403,3 +340,9 @@ def test_scale_helper_only_hits_flagged_nodes_author():
         node_agent_mint, node_violation, gate_strength=1.0)
     assert out["alice"] == pytest.approx(4.0)   # untouched
     assert out.get("eve", 0.0) == pytest.approx(0.0)   # fully suppressed
+
+
+# Two tests that checked prose claim sprouts minting (net-score mint, and the
+# violator-pays gate moving mint between authors) were removed 2026-10-26:
+# since fa22e32 (2026-07-04) agent_mint is tool usage only, so they tested a
+# retired path.

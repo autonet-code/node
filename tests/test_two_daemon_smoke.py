@@ -156,12 +156,10 @@ def test_two_daemons_reach_identical_federated_payload(tmp_path: Path):
         # (one batch per daemon's submitted observation).
         assert fed_a.n_batches == fed_b.n_batches >= 2
 
-        # Per-agent mint should attribute to both 0x addresses, not
-        # to "default" / "daemon".
-        agent_mint = payload_a.get("agent_mint", {})
-        keys = set(agent_mint.keys())
-        assert "0xAAA" in keys, f"missing 0xAAA mint: {keys}"
-        assert "0xBBB" in keys, f"missing 0xBBB mint: {keys}"
+        # Observations no longer mint (the mint is tool usage only, since
+        # fa22e32), so the agents are not checked in agent_mint; nothing may
+        # be attributed to a daemon-level placeholder either way.
+        keys = set(payload_a.get("agent_mint", {}).keys())
         assert "default" not in keys
         assert "daemon" not in keys
     finally:
@@ -196,12 +194,12 @@ def test_isolated_daemons_dont_cross_contaminate(tmp_path: Path):
         # topic.
         assert fed_a is not None
         assert fed_b is not None
-        agents_a = set(fed_a.close_result["authoritative_payload"]["agent_mint"].keys())
-        agents_b = set(fed_b.close_result["authoritative_payload"]["agent_mint"].keys())
-        assert "0xAAA" in agents_a
-        assert "0xBBB" not in agents_a
-        assert "0xBBB" in agents_b
-        assert "0xAAA" not in agents_b
+        # (Counted by batches: observations no longer mint, so the
+        # agent_mint keys cannot show it.)
+        assert fed_a.n_batches == 1
+        assert fed_b.n_batches == 1
+        assert (fed_a.close_result["authoritative_payload"]
+                != fed_b.close_result["authoritative_payload"])
     finally:
         svc_a.shutdown()
         svc_b.shutdown()
