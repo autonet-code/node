@@ -5606,6 +5606,19 @@ class WebSocketBridge:
             save_agent(defn, self.runtime._config.agents_dir)
         except Exception as e:
             return {"ok": False, "error": str(e)}
+        # Show the session's conversation so far, as Claude Code does. Display
+        # only: the run resumes Claude Code's own session, never this store.
+        try:
+            from .claude_sessions import project_dir, transcript_turns
+            store = self.runtime.get_agent_conversation_store(agent_id)
+            if store.turn_count() == 0:
+                for role, text in transcript_turns(project_dir(folder) / f"{sid}.jsonl"):
+                    if role == "user":
+                        store.add_user_turn(text)
+                    else:
+                        store.add_assistant_turn(text)
+        except Exception:
+            log.warning("could not load the history of session %s", sid, exc_info=True)
         return {"ok": True, "result": {
             "agent_id": agent_id, "name": name, "model": model,
             "claude_session": defn.claude_session}}

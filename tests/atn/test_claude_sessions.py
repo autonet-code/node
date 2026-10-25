@@ -111,3 +111,52 @@ async def test_import_makes_a_claude_max_agent(project, tmp_path, monkeypatch):
     from atn.loader import load_agents_dir
     loaded = {d.id: d for d in load_agents_dir(agents_dir)[0]}
     assert loaded[defn.id].claude_session == defn.claude_session
+
+
+def test_transcript_turns_keep_the_conversation_only(tmp_path):
+    rows = [
+        {"type": "user", "message": {"content": "<command-name>/model</command-name>"}},
+        {"type": "user", "message": {"content": [
+            {"type": "text", "text": "check the logs<system-reminder>noise</system-reminder>"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Looking."}]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "x"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Found it."}]}},
+        {"type": "user", "isSidechain": True, "message": {"content": "subagent brief"}},
+        {"type": "user", "isMeta": True, "message": {"content": "meta"}},
+        {"type": "user", "message": {"content": "thanks"}},
+    ]
+    p = tmp_path / "t.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n", encoding="utf-8")
+    assert cs.transcript_turns(p) == [
+        ("user", "check the logs"), ("assistant", "Looking.\n\nFound it."), ("user", "thanks")]
+    assert cs.transcript_turns(p, limit=1) == [("user", "thanks")]
+
+
+@pytest.mark.asyncio
+async def test_import_shows_the_sessions_history(project, tmp_path, monkeypatch):
+    from atn.config import ATNConfig
+    from atn.events import EventBus
+    from atn.runtime import Runtime
+    from atn.ws_server import WebSocketBridge
+
+    p = cs.project_dir(project) / f"{SID}.jsonl"
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "assistant", "message": {
+            "content": [{"type": "text", "text": "Fixed."}]}}) + "\n")
+    old = time.time() - 3600
+    os.utime(p, (old, old))
+    monkeypatch.setattr(cs, "claude_processes", lambda: [])
+    data_dir, agents_dir = tmp_path / "data", tmp_path / "agents"
+    data_dir.mkdir()
+    agents_dir.mkdir()
+    config = ATNConfig(data_dir=data_dir, agents_dir=agents_dir)
+    config.autonet.enabled = False
+    config.voice.enabled = False
+    rt = Runtime(EventBus(), data_dir=data_dir, config=config)
+    out = await WebSocketBridge(rt)._import_claude_session(
+        {"folder": str(project), "session_id": SID})
+    assert out["ok"], out
+    turns = rt.get_agent_conversation_store(out["result"]["agent_id"]).get_turns()
+    assert [(t.role, t.content) for t in turns] == [
+        ("user", "please fix the parser"), ("assistant", "Fixed.")]

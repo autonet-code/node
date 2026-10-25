@@ -40,6 +40,55 @@ def _norm(path: str) -> str:
     return os.path.normcase(os.path.normpath(str(path)))
 
 
+_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+# Transcript lines the chat should not show: Claude Code's own bookkeeping
+# around slash commands, and command output already summarised elsewhere.
+_HIDDEN_PREFIXES = ("<local-command-caveat>", "<local-command-stdout>",
+                    "<command-name>", "<command-message>", "<command-args>")
+
+
+def _text_of(content: Any) -> str:
+    if isinstance(content, str):
+        parts = [content]
+    elif isinstance(content, list):
+        parts = [str(p.get("text", "")) for p in content
+                 if isinstance(p, dict) and p.get("type") == "text"]
+    else:
+        parts = []
+    text = _REMINDER_RE.sub("", "\n\n".join(parts)).strip()
+    return "" if text.startswith(_HIDDEN_PREFIXES) else text
+
+
+def transcript_turns(path: Path, limit: int = 2000) -> list[tuple[str, str]]:
+    """The conversation a Claude Code transcript shows, as (role, text):
+    the user's own messages and the assistant's text, oldest first, the
+    newest ``limit`` of them. Tool calls and results, subagent sidechains,
+    meta lines and compaction summaries are left out; consecutive assistant
+    lines (one per content block) merge into one reply."""
+    turns: list[tuple[str, str]] = []
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                kind = d.get("type")
+                if kind not in ("user", "assistant") or d.get("isSidechain") \
+                        or d.get("isMeta") or d.get("isCompactSummary"):
+                    continue
+                text = _text_of((d.get("message") or {}).get("content"))
+                if not text:
+                    continue
+                if kind == "assistant" and turns and turns[-1][0] == "assistant":
+                    turns[-1] = ("assistant", turns[-1][1] + "\n\n" + text)
+                else:
+                    turns.append((kind, text))
+    except OSError:
+        return []
+    return turns[-limit:]
+
+
 def read_session(path: Path) -> dict[str, Any]:
     """Summary of one transcript: title, first prompt, model, cwd."""
     out: dict[str, Any] = {"session_id": path.stem, "title": "", "first_prompt": "",
