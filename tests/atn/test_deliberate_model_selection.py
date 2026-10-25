@@ -495,12 +495,17 @@ def test_bridge_sources_carry_no_default_model():
     assert "req.model ||" not in codex and "req.model ||" not in claude
 
 
-# Live bridge subprocess checks (skipped without a JS runtime). They never
-# reach a model: ping needs none, and a bad model is rejected before any
-# service call.
+# Live bridge subprocess checks. Opt-in (RUN_BRIDGE_LIVE=1, as the other live
+# bridge tests), and skipped without a JS runtime. They spawn the STAGED
+# bridge (~/.atn/bridge), not this checkout's: the checks below expect a bad
+# model to be rejected before any model call, but an older staged copy
+# without that check sent the prompts to the real account.
+import os
 import shutil
 
-_live = pytest.mark.skipif(not shutil.which("bun"), reason="bun not installed")
+_live = pytest.mark.skipif(
+    os.environ.get("RUN_BRIDGE_LIVE") != "1" or not shutil.which("bun"),
+    reason="live bridge test: set RUN_BRIDGE_LIVE=1 (needs bun and a current staged bridge)")
 
 
 @_live

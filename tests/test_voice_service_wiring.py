@@ -17,6 +17,7 @@ import pytest
 
 def test_voice_core_is_vendored():
     """The primitives ship inside the wheel, so `[voice]` is self-contained."""
+    pytest.importorskip("sounddevice")   # the [voice] extra
     mod = importlib.import_module("atn._vendor.voice_core")
     for name in (
         "MIXER_SR", "AudioMixer", "AudioChannel", "PushToTalkRecorder",
@@ -31,6 +32,7 @@ def test_voice_core_is_vendored():
 
 def test_voice_service_falls_back_to_the_vendored_copy():
     """With no separately installed voice_core, the import still resolves."""
+    pytest.importorskip("sounddevice")   # the [voice] extra
     blocked = {"voice_core"}
 
     class _Block:
