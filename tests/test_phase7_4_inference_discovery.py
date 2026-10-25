@@ -302,7 +302,7 @@ def test_advertise_models_shim_wires_into_new_path():
     h = AutonetHost(node_id="shim", listen_host="127.0.0.1")
     # advertise_capability tries to push to peers; when _host is None
     # it returns early without raising. So we can run the coroutine.
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         h.advertise_models(models=["qwen3:4b", "phi-3-mini"], agent_address="0xabc")
     )
     assert "inference-provider" in h._capability.roles

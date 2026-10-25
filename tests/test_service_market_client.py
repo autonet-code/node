@@ -160,7 +160,7 @@ def _craft_service_payment_receipt(payer, recipient, amount, request_id_b):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _client_with_receipt(receipt):
