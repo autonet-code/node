@@ -644,36 +644,87 @@ The governance lag is now separate from the epoch schedule:
   default until set at deployment) gives the floor.
 - The `epoch_length` key is gone.
 
-**Open (not decided): bundled anchors.** The idea is one proposal
-anchoring every closed but unanchored epoch, so a failed proposal never
-cascades. Two read-only reviews (2026-10-26) both advise against it for
-now. Three values come from the anchor transaction itself, so for every
-entry after the first in a bundle they are unknown when daemons close:
-- the fee pool (`windowBurned` = burns since the previous anchor; in a K
-  call bundle, entry 2 takes all the backlog fees and entries 3+ get 0);
-- `prevAnchorHash` (it includes the previous anchor's block number);
-- the per-anchor REP snapshot.
+**Items 5-6 DESIGN (agreed with the owner 2026-10-26, NOT BUILT): anchor
+elections, pipelined.** This replaces the "two parallel proposals"
+wording of items 5-6 and the superseding re-close. Bundled anchors
+(one proposal for several epochs) were reviewed and dropped: three values
+come from the anchor transaction itself (the fee pool, `prevAnchorHash`,
+the REP snapshot), so every entry after the first in a bundle is unknown
+at close time, and a dispute in one entry sinks all the later ones.
 
-A real bundle would need:
-- an `anchorBatch` that chains its entries internally;
-- a cumulative burn checkpoint by timestamp (about 5-20k gas on every
-  `payForService`), so each epoch's pool is the fees burned between
-  cutoffs (an economics change);
-- every close input pinned to the cutoff's finalized block instead of
-  an anchor;
-- ToolBond's review epochs (keyed on `anchorCount`) changed in lockstep
-  in trustless-contracts;
-- a cap on bundle size (about 0.5M gas per entry).
+OpenZeppelin has no multi-option vote: its counting modules
+(Simple/Fractional/Overridable) count Against/For/Abstain only. Agora's
+Optimism Governor fork (MIT) has an `ApprovalVotingModule` that can run
+single choice (`maxApprovals = 1`, `TopChoices = 1`), but one proposer
+writes every option at `propose` time and it needs their modified
+Governor. So we write our own, for `HomebaseDAO`:
 
-A disagreement in epoch j still sinks every entry after j, since each
-builds on the one before. The cheaper fix both reviews recommend is
-**superseding re-close**: when an epoch's proposal is Defeated or
-Expired, every daemon re-closes that epoch from the same previous cutoff
-to a later one, so it holds the stalled batches plus newer ones and gets
-a new id (so a new proposal id), with every input still pinned to the
-last agreed anchor. That needs no contract change, gives no cascade, and
-clears any backlog in one lifecycle. The cost is one longer epoch. This
-is the planned item 6 retry.
+1. **One election per epoch, single choice among options.** Each epoch
+   gets one DAO proposal whose only action is
+   `AnchorElection.anchorWinner(proposalId)`, so the proposal id is known
+   in advance. It uses a counting module where `support` is an option
+   index and tallies are kept per option; it replaces
+   `GovernorCountingSimple` for anchor proposals. Quorum, the voting
+   period and the timelock stay the Governor's.
+2. **Each option comes from an elected proposer's own wallet.** During
+   the voting delay, each proposer drawn for the epoch registers one
+   option with `AnchorElection`. An option is {epoch number, cutoff,
+   parent epoch root, epoch root, payload hash, mint root, cids}. A name
+   on every option lets omissions be attributed, and no proposer can
+   flood the epoch with variants. The number of proposers is the
+   governed key `epoch_proposers` (default 3). Identical content from two
+   proposers is one option.
+3. **The draw is verified on chain** (Algorand-style threshold
+   sortition, so no sorting of all households). A voting account is
+   elected when
+   `hash(seed, epoch, account) < 2^256 * epoch_proposers * share`,
+   where share = the account's REP at the cutoff / total REP, and the
+   account is above the governed REP floor `epoch_proposer_floor`. Each
+   check is local (`getPastVotes`). The unit is the voting account: a
+   household's agents delegate to the owner, as for Governor votes. The
+   seed is keccak(epoch number, parent epoch root). The count elected
+   varies around `epoch_proposers`.
+4. **Voting.** Each voter backs the option matching its own close, after
+   fetching by hash any batch an option names that it lacks. Voting
+   for no option is the "against" (for example, every option omits a
+   batch the voter holds). REP-weighted at the proposal snapshot. The
+   winner is the most-voted option above quorum; a tie goes to the
+   lowest option hash.
+5. **Pipelined.** Epoch n+1's election opens as soon as its cutoff plus
+   grace has passed (and its inputs' block is final), without waiting
+   for anchor n. Its options name their parent root. At execution,
+   `anchorWinner` takes the most-voted option whose parent is the chain
+   head. It reverts while anchor n is missing, and the queued proposal is
+   simply executed again later (a reverted execute leaves it Queued).
+   Failures:
+   - A transient failure (missed quorum, absent proposers) is re-posted
+     for the same epoch with an attempt number in the description (a
+     new proposal id). The later elections queued behind it stay valid.
+   - A content dispute voids only the options built on the losing
+     parent, which is correct: they were built on a wrong state.
+6. **Contract changes** (ordinary code, owner 2026-10-26):
+   - `Substrate.anchor` takes an explicit increasing cutoff;
+   - `prevAnchorHash` drops block number and sender, so it can be
+     computed ahead;
+   - each epoch's fee pool = fees burned between its parent's cutoff and
+     its own (a cumulative burn checkpoint by timestamp in
+     `payForService`, some gas per payment);
+   - Substrate accepts anchors from `AnchorElection`, a role the DAO
+     grants once by proposal;
+   - ToolBond's review epochs key on epoch number, not `anchorCount`.
+7. **Off-chain changes:**
+   - every close input is pinned to the epoch's cutoff (REP at the
+     cutoff timestamp, everything else at the last block before it, once
+     final) instead of the previous anchor;
+   - daemons keep per-epoch state (carry-over, world, root) for every
+     unanchored epoch, to rewind on a content dispute;
+   - the retarget reads the anchored epochs' own windows.
+
+Open inside this design:
+- Omission penalties need an on-chain record of which proposer's option
+  omitted what. Until then, the sit-out is off-chain reports to the DAO.
+- The seed is set by the parent's content; a proposer could grind it
+  only by changing its batches, which voters would reject.
 
 Rollout: these are `epoch_rules` version `"2"` (the existing Registry key).
 Daemons on this build refuse `"1"`; the jurisdiction switches by one DAO
