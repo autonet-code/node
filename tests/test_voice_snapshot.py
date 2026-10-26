@@ -297,6 +297,27 @@ class TestVoiceStateSnapshot:
         assert state_1b["voice_weights"] == state_1["voice_weights"]
         assert state_1b["snapshot_block"] == state_1["snapshot_block"]
 
+    def test_delegation_does_not_move_substrate_weight(self, fx):
+        """Decision 2026-10-26: the substrate reads REP BALANCES. An agent
+        delegating its votes away keeps its household's weight, and votes
+        delegated in add none."""
+        w3 = fx["w3"]
+        agents = fx["agent_addrs"]
+        rep = fx["rep_contract"]
+        _set_votes(w3, rep, fx["deployer"], agents[0], 1000)
+        _set_votes(w3, rep, fx["deployer"], agents[1], 1000)
+        # agents[0] delegates everything to agents[1].
+        for account, votes in ((agents[0], 0), (agents[1], 2000)):
+            tx = rep.functions.setDelegatedVotes(account, votes).transact(
+                {"from": fx["deployer"], "gas": 300_000})
+            assert w3.eth.wait_for_transaction_receipt(tx).status == 1
+        _anchor_epoch(fx, agents, "e_d1", "rpb_d1")
+        state = read_voice_state(
+            fx["addr"], web3=w3, rep_token_address=fx["rep_addr"])
+        assert state["rep_shares"][agents[0].lower()] == pytest.approx(0.5)
+        assert state["rep_shares"][agents[1].lower()] == pytest.approx(0.5)
+        assert state["agent_rep"][agents[0].lower()] == 1000
+
     def test_pinned_to_an_earlier_anchor_and_per_agent_rep(self, fx):
         """``anchor_index`` reads as if the chain ended at that anchor (the
         robot poll rail pins each round to one); ``agent_rep`` carries the

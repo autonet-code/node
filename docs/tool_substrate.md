@@ -720,6 +720,14 @@ Governor. So we write our own, for `HomebaseDAO`:
      unanchored epoch, to rewind on a content dispute;
    - the retarget reads the anchored epochs' own windows.
 
+REP readings split (BUILT 2026-10-26):
+- The substrate (mint weight, drift, robot polls) reads REP **balances**
+  per household (`RepToken.getPastBalance`, which existed already), so
+  delegation never moves substrate weight.
+- Governor votes and the anchor election read delegated votes.
+- Only registered agents can be drawn as proposers: members without a
+  daemon vote, but cannot compute a close.
+
 Open inside this design:
 - Omission penalties need an on-chain record of which proposer's option
   omitted what. Until then, the sit-out is off-chain reports to the DAO.

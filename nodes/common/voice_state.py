@@ -22,15 +22,13 @@ lives DAO-side in RepToken, claimed by agents on their ratified ATN
 earnings. We read each household's REP share from RepToken pinned to the
 previous epoch's anchor. RepToken is TIMESTAMP-clocked (ERC20Votes,
 ``mode=timestamp``), so we pin on the anchor's ``timestamp`` (Anchor
-struct field 8), not its block number, using the standard vote
-checkpoints ``getPastVotes(addr, ts)`` / ``getPastTotalSupply(ts)``.
-NOTE (judgment call, flagged): RepToken exposes no public historical
-per-account BALANCE getter; the only public pinned per-account surface is
-``getPastVotes``, i.e. delegated VOTING POWER. That is the correct voice
-semantic — REP is the governance/voice token, and voice == voting power —
-but a holder who auto-delegates to a default delegate rolls their voice
-into that delegate. If per-holder rep share (independent of delegation)
-is ever required, RepToken needs a public ``getPastBalance``.
+struct field 8), not its block number, using RepToken's balance
+checkpoints ``getPastBalance(addr, ts)`` / ``getPastTotalSupply(ts)``.
+BALANCES, not votes (Decision 2026-10-26): the substrate weighs what a
+household holds, so delegation (a governance act) never moves substrate
+weight. An agent delegating out keeps its household's weight; an outsider
+delegating in adds none. Governor votes and the anchor election keep
+reading delegated ``getVotes``.
 
 OWNER-WALLET REPUTATION NOTE: there is NO separate owner-wallet term. A
 bare owner wallet that never earned/claimed REP has zero votes; if the
@@ -75,7 +73,7 @@ _REP_ABI = [
             {"internalType": "address", "name": "account",   "type": "address"},
             {"internalType": "uint256", "name": "timepoint", "type": "uint256"},
         ],
-        "name": "getPastVotes",
+        "name": "getPastBalance",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function",
@@ -1181,10 +1179,9 @@ def read_voice_state(
         supply = int(rep.functions.getPastTotalSupply(timestamp).call())
 
         def _reputation_at(addr: str) -> int:
-            # getPastVotes = delegated VOTING POWER at the pinned timestamp
-            # (the only public historical per-account surface RepToken has;
-            # voice == voting power — see module docstring).
-            return int(rep.functions.getPastVotes(
+            # The agent's own REP balance at the pinned timestamp, whatever
+            # it delegated (see module docstring).
+            return int(rep.functions.getPastBalance(
                 Web3.to_checksum_address(addr), timestamp).call())
 
         # household key -> raw reputation sum (int, exact — floats only at
