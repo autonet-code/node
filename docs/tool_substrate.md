@@ -1597,36 +1597,15 @@ retained on its own merits, with the discipline phase 10 demands:
 The lesson encoded: evidence changes WHO gets recruited to a dispute (the
 verifiers who reproduced it), not how much any single post is worth.
 
-## Verifier trials (venture vault rail, daemon side, 2026-07-05)
+## Decision (2026-10-26): the venture vault is scrapped
 
-The vetting pipeline generalizes from "read the code" to "probe the
-moat". A venture's value terminates in a moat (credentials, data,
-hardware, state) that, unlike pinned tool code, cannot be READ, so it
-is exercised: a validator runs the venture's own pre-committed black-box
-trial battery against the live service and attests what it observed. This
-is the agent-facing daemon flow; the on-chain greenlight
-(`VentureVault.attestTrial`) is built in parallel.
-
-- `run_trial` (vetting bundle) takes a **venture prospectus** digest: a
-  published `{kind: "venture_prospectus", service_digest, endpoint,
-  credentials, battery: [...], pass_threshold}` artifact. `TrialRunner`
-  fetches it (digest-verified blob rail), executes each declared case
-  against the service's MCP surface via an injected **transport seam**
-  (live service-request client in production; a fake in tests, since live
-  invocation plumbing is still thin), scores pass/fail per the
-  prospectus's OWN criteria (`expect_digest` / `expect_error` /
-  `expect_contains`), blob-stores a `venture_trial_report`, and returns
-  the verdict + report digest + **attestTrial calldata** for the owner
-  surface to submit.
-- The prospectus PRE-COMMITS `pass_threshold` (fraction, default 1.0):
-  the venture sets the bar before any validator runs it, making it a black-box
-  trial the author can't move after the fact. Trials are author-funded:
-  the prospectus's `credentials` are threaded into each call so the
-  validator probes at no personal cost.
-- Same doctrine as tool vetting: containment is not replaced (the
-  service runs on the provider's machine, so receipts + reviews, not
-  verdicts), and the trial report is reviewable evidence a later dispute
-  argues against.
+The venture vault (`contracts/core/VentureVault.sol`), its verifier-trial
+rail (`atn/trial_runner.py`, the `run_trial` tool, `attestTrial`) and the
+venture-loop E2E are removed. Reason: no real use case. Capital in ATN is
+not anyone's bottleneck (an agent's costs are mostly fiat inference bills),
+no market of backers for small agent businesses exists, and the
+jurisdiction's trustless projects already fund work. The design history is
+in git (the 2026-07-05 "Verifier trials" section and the contract NatSpec).
 
 ## Consensus mechanics (v3)
 

@@ -38,7 +38,6 @@ branch. Everything else is temporary.
    |--------------|--------|
    | Tool store, mint, close, reviews | `scripts/local_e2e_tool_economy.py`, `scripts/local_e2e_tool_security.py` |
    | Jurisdiction resolution, switching, charter | `scripts/local_e2e_jurisdiction_switch.py` |
-   | Ventures, vault, service revenue | `scripts/local_e2e_venture_loop.py` |
    | Services market, inference across daemons | `scripts/local_e2e_cross_daemon_inference.py` |
    | Robot side, packs, worklog | `scripts/local_e2e_robot.py` |
 

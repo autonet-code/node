@@ -842,29 +842,6 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
-        name="run_trial",
-        description=(
-            "Run a venture's service verifier trial battery (validator role "
-            "— vetting bundle). Given a venture prospectus digest (a "
-            "published artifact declaring the service's expected behavior, a "
-            "pre-committed black-box trial battery, and free-inference "
-            "credentials), this fetches the prospectus, executes each "
-            "declared trial case against the service's MCP surface, scores "
-            "pass/fail against the prospectus's OWN criteria, blob-stores a "
-            "trial report, and returns the verdict plus the report digest. "
-            "A moat can't be read, so it is PROBED: you attest what you "
-            "observed. Submit the returned attestTrial calldata/verdict "
-            "on-chain to record your trial (the vault greenlight reads it)."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "prospectus_digest": {"type": "string", "description": "64-hex digest of the published venture_prospectus artifact."},
-            },
-            "required": ["prospectus_digest"],
-        },
-    ),
-    ToolDefinition(
         name="attest_tools",
         description=(
             "Review which registered tools contributed to a piece of work you "
@@ -3175,28 +3152,6 @@ async def _check_evidence(runtime: Runtime, input: dict[str, Any]) -> dict[str, 
         return {"error": str(exc)}
 
 
-async def _run_trial(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Service verifier trial (docs/tool_substrate.md — Verifier trials;
-    venture_vault_design memory).
-
-    Fetches a venture prospectus, executes its declared black-box trial
-    battery against the service's MCP surface, scores pass/fail per the
-    prospectus's pre-committed criteria, blob-stores a trial report, and
-    returns the verdict + report digest + attestTrial calldata so the
-    owner surface can submit the on-chain trial record. Caller derived.
-    """
-    from .tool_store import OWNER_AUTHOR
-    prospectus_digest = str(input.get("prospectus_digest") or "").strip()
-    if not prospectus_digest:
-        return {"error": "Missing required field: 'prospectus_digest'"}
-    caller_id = input.get("_caller_id")
-    caller = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
-    try:
-        return await runtime.trial_runner.run_trial(caller, prospectus_digest)
-    except Exception as exc:
-        return {"error": str(exc)}
-
-
 async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Record cognitive attestations for a closed work item.
 
@@ -4308,10 +4263,9 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # its own case-by-case grant, same doctrine as publishing: reading
     # foreign code and moving a tool's public rating with your reputation
     # is not implied by authoring or publishing. It also carries the two
-    # evidence-grade validator flows: check_evidence (replay an evidence-CON and back it
-    # — Evidence section) and run_trial (probe a venture's service moat
-    # against its prospectus battery — Verifier trials).
-    "vetting": {"vet_tool", "check_evidence", "run_trial"},
+    # evidence-grade validator flow: check_evidence (replay an evidence-CON
+    # and back it, Evidence section).
+    "vetting": {"vet_tool", "check_evidence"},
     # Adoption (spec: Adoption rail) — the agent may PROPOSE installing
     # network tools; the owner approves per tool. Case-by-case grant:
     # publishing risks reputation, adoption risks the host.
@@ -5357,7 +5311,6 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "publish_tool": _publish_tool,
     "vet_tool": _vet_tool,
     "check_evidence": _check_evidence,
-    "run_trial": _run_trial,
     "adopt_tool": _adopt_tool,
     "attest_tools": _attest_tools,
     "get_history": _get_history,

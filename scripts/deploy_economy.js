@@ -6,7 +6,6 @@
  * NOT deployed here:
  *   - PaymentChannel: its challengeWindow constructor arg is an
  *     unblessed economics parameter (docs/BACKLOG.md decision #4).
- *   - VentureVault: deploy-per-venture by design.
  *
  * The charter version is NOT deployed here: it lives in the DAO Registry keys
  * jurisdiction.<id>.charter / .charter_uri (docs/charter_anchor.md).

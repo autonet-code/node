@@ -1211,7 +1211,7 @@ contract Substrate is EIP712 {
     // ATN has exactly two mint origins: tool-pool EARNINGS via
     // recordTrainingForEpoch (which also accrues the REP claim ledger),
     // and PURCHASED money via mintFromVault (which does not). The two are
-    // kept strictly separate on purpose: a venture backer who buys ATN
+    // kept strictly separate on purpose: a holder who buys ATN
     // through the DAO-repo AutonetVault accrues NO service/pool earnings
     // and therefore no REP claim — money can be bought, voice must be
     // earned (Decision 2026-07-10).

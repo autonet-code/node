@@ -62,7 +62,7 @@ pipe is the same channel"). Any wallet holding ATN can buy cognition;
 no sponsor relationship required. Strategically this is the piece that
 makes the token economy self-contained: agent burn is mostly inference,
 so on-rail inference gives the fees-only emission pool its heartbeat,
-and a venture agent can pay for its own thinking out of revenue.
+and an agent can pay for its own thinking out of revenue.
 
 The v1 slice, costs eaten deliberately:
 

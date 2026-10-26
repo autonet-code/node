@@ -30,7 +30,7 @@ flutter test integration_test/live -d windows --dart-define=DAEMON_WS=ws://127.0
 | Piece | Where | Notes |
 |---|---|---|
 | hardhat node | `127.0.0.1:18545`, chain 1337 | started with `node node_modules/hardhat/.../cli.js node`. No `hardhat run`, so `deployments/*.json` is never written |
-| contracts | deployed with web3.py from `artifacts/`, signed by hardhat account 0 | Substrate, ServiceRegistry, PaymentChannel, VentureVaultFactory (charter hash goes in the registry as `charter`, no contract) |
+| contracts | deployed with web3.py from `artifacts/`, signed by hardhat account 0 | Substrate, ServiceRegistry, PaymentChannel (charter hash goes in the registry as `charter`, no contract) |
 | stub | `127.0.0.1:18080` (`stub_server.py`) | `POST /v1/chat/completions` (JSON and SSE) replies `E2E-STUB-REPLY <last user message>`; trigger words in the newest user message switch it: `E2E-TOOL` (or `E2E-TOOL:<name>`) makes one tool call then finishes in text, `E2E-STALL` never answers, `E2E-FAIL` returns a 503. `GET /registry.json` is the `ATN_REGISTRY_URL` target and lists local addresses only. `GET /health` |
 | daemon | `ws://127.0.0.1:7799` | `python -m atn --headless`. Home is `<state>/home`. Remote and integration listeners are off |
 

@@ -7,7 +7,7 @@ Quick reference for common operations.
 > task / commit-reveal / verification / dispute contract calls, the role
 > stake table, and the task-status flow) describes contracts **deleted in
 > Phase 5.6a** and is kept only for history. The live on-chain surface is
-> `Substrate.sol` + `ServiceMarket.sol` + `VentureVault.sol`; see `docs/tool_substrate.md` and `docs/README.md`.
+> `Substrate.sol` + `ServiceMarket.sol` + `AnchorElection.sol`; see `docs/tool_substrate.md` and `docs/README.md`.
 
 ## Current Operations
 
@@ -33,7 +33,6 @@ npx hardhat compile
 ### Economy proof-of-life
 ```bash
 python scripts/local_e2e_tool_economy.py    # register → publish → invoke → attest → close → on-chain mint
-python scripts/local_e2e_venture_loop.py    # venture funding + service revenue loop
 ```
 
 ### Tests (never run the whole suite: 1700+ tests, slow)
@@ -47,7 +46,7 @@ python tests/test_world_model_substrate_e2e.py
 |------|---------|
 | `contracts/core/Substrate.sol` | Epoch anchoring, agent registry, money-only training records, ATN token, service payments |
 | `contracts/core/ServiceMarket.sol` | Remote-API market rail (registry + EIP-712 channels) |
-| `contracts/core/VentureVault.sol` | Agent-as-venture funding |
+| `contracts/core/AnchorElection.sol` | Epoch anchors as single-choice DAO elections |
 | `registry.json` | Network + contract addresses of record (jurisdiction resolution) |
 | `atn/cli.py` | Daemon CLI entry point (`atn`) |
 | `nodes/common/world_model_substrate/` | Substrate protocol layer (reconcile / mint, infer) |

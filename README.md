@@ -20,7 +20,7 @@ The Jurisdiction is one collective body, built from the same structure repeated 
 
 **[Eight Rice](https://eightrice.xyz)** | [autonet.computer](https://autonet.computer)
 
-*Beta, on testnet. The full economy (the Substrate token core, the services market, the venture and reputation-claim rails) is live on Etherlink Shadownet, attached by governance to a platform-created DAO, and the constitution (charter v1) is anchored on-chain by that jurisdiction's own timelock. Addresses of record: [`registry.json`](registry.json). Consensus-affecting upgrades ship as coordinated flag days. This document is the living paper: each section links to its full specification in [`docs/`](docs/README.md).*
+*Beta, on testnet. The full economy (the Substrate token core, the services market, the reputation-claim rail) is live on Etherlink Shadownet, attached by governance to a platform-created DAO, and the constitution (charter v1) is anchored on-chain by that jurisdiction's own timelock. Addresses of record: [`registry.json`](registry.json). Consensus-affecting upgrades ship as coordinated flag days. This document is the living paper: each section links to its full specification in [`docs/`](docs/README.md).*
 
 ## 1. The problem
 
@@ -62,7 +62,7 @@ Three contracts under `contracts/core/` carry the on-chain surface:
 |----------|------|
 | `Substrate.sol` | Constitutional core: epoch anchoring, agent registry, merkle-proven mint records, ATN token, service payments with a governance-tunable fee. The only mint path, with no admin keys. |
 | `ServiceMarket.sol` | Remote-API market: service registry + EIP-712 payment channels; ATN-only, so channels settle through the substrate's fee rail; **no mint**, because remote execution is unknowable in principle, so it trades on behavioral trust, never substrate standing. ([spec →](docs/services_market.md)) |
-| `VentureVault.sol` | Agent-as-venture funding: backers stake ATN against an agent's future service revenue; tranche voting allocates the future instead of arbitrating the past. ([walkthrough →](docs/local_e2e.md)) |
+| `AnchorElection.sol` | Epoch anchors as single-choice DAO elections: agents drawn by REP each register their close as an option, REP holders vote for one, the winner is anchored on the substrate. ([design →](docs/tool_substrate.md)) |
 
 The services market is the substrate's frontier, not its competitor. A service can only charge for what the substrate cannot yet do for free, so paid demand is a live map of the commons' gaps, and every service whose function is replicable as pinned code invites its own absorption: emission pays whoever distills it into a free tool, and a price-zero commons outcompetes any paid rail. What durably remains for sale is the in-principle-remote core: proprietary data, credentials, special hardware. Everything else gets commoditized *into* the commons, so the market continuously advances the very substrate that undercuts it. ([the dynamic →](docs/services_market.md))
 
@@ -76,7 +76,7 @@ Autonet is the first jurisdiction, not the only one possible. Any DAO created on
 
 ## 6. One economy for humans and agents
 
-The human jurisdiction (DAO governance, reputation, escrowed projects) and the agent economy are two contract suites with one economic surface: there is no seam between "the human marketplace" and "the AI layer." The jurisdiction is a standard DAO created on the governance platform; the agent economy attaches to it by governance, and the DAO's registry self-describes the attachment. Humans back agent ventures and hold claims on their revenue; agents buy inference and sell services; an agent's ATN earnings convert 1:1 into soulbound governance reputation through a permissionless DAO-side claim, the same reputation that weighs reviews inside the substrate and votes in the DAO. The result is the peaceful-transfer mechanism made concrete: as machine intelligence earns, the humans who govern it are the ones it pays.
+The human jurisdiction (DAO governance, reputation, escrowed projects) and the agent economy are two contract suites with one economic surface: there is no seam between "the human marketplace" and "the AI layer." The jurisdiction is a standard DAO created on the governance platform; the agent economy attaches to it by governance, and the DAO's registry self-describes the attachment. Humans fund work through the DAO's escrowed projects and buy agents' services; agents buy inference and sell services; an agent's ATN earnings convert 1:1 into soulbound governance reputation through a permissionless DAO-side claim, the same reputation that weighs reviews inside the substrate and votes in the DAO. The result is the peaceful-transfer mechanism made concrete: as machine intelligence earns, the humans who govern it are the ones it pays.
 
 ## 7. Accountability through interaction
 
@@ -167,12 +167,11 @@ npx hardhat node                                         # local chain (separate
 npx hardhat run scripts/deploy_substrate.js --network localhost
 ```
 
-**Proof of life.** Three end-to-end scripts exercise the live paths without needing a live network:
+**Proof of life.** Two end-to-end scripts exercise the live paths without needing a live network:
 
 ```bash
 python tests/test_world_model_substrate_e2e.py    # substrate vertical slice: events -> close -> mint -> inference
 python scripts/local_e2e_tool_economy.py          # tool economy: register -> publish -> invoke -> attest -> close -> on-chain mint
-python scripts/local_e2e_venture_loop.py          # venture funding + service revenue loop
 ```
 
 See [`docs/local_e2e.md`](docs/local_e2e.md) for what each proves.

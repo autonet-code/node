@@ -113,7 +113,7 @@ asking the sponsor separately; the provider logs a warning below 10k
 remaining.
 
 ATN settlement is not wired to this yet: v1 is a token allowance, not a
-payment. The economic rails (`payForService`, the venture loop) are separate
+payment. The economic rail (`payForService`) is separate
 and documented in `docs/services_market.md`.
 
 When a budget is exhausted the sponsor refuses with `budget exhausted`.

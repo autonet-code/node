@@ -26,7 +26,6 @@ module.exports = {
       [
         "contracts/core/Substrate.sol",
         "contracts/core/ServiceMarket.sol",
-        "contracts/core/VentureVault.sol",
         "contracts/test/MockERC20.sol",
         "contracts/test/MockRepToken.sol",
         "contracts/test/ServicePayerMock.sol",

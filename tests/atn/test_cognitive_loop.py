@@ -255,7 +255,7 @@ async def test():
         "register_tool", "attest_tools", "publish_tool", "vet_tool",
         "adopt_tool", "probe_tools",
         # Validator rail (vetting bundle)
-        "check_evidence", "run_trial",
+        "check_evidence",
         # Planning & goal tools
         "get_goals", "add_goal", "update_goal",
         "get_projects", "add_project", "update_project",

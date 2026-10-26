@@ -11,8 +11,8 @@ One command up, one down, one status:
 ``<state dir>/state.json``:
 
   1. a hardhat node on 127.0.0.1:E2E_LIVE_RPC_PORT (default 18545, chain 1337)
-     with Substrate, ServiceRegistry, PaymentChannel and
-     VentureVaultFactory deployed from the compiled artifacts (web3.py, signed
+     with Substrate, ServiceRegistry and PaymentChannel
+     deployed from the compiled artifacts (web3.py, signed
      by hardhat account 0 — no ``hardhat run``, no deployments/*.json written);
   2. the deterministic stub (``stub_server.py``) on E2E_LIVE_STUB_PORT (default
      18080): the daemon's model provider AND the ``ATN_REGISTRY_URL`` target;
@@ -295,8 +295,7 @@ def _artifact(name: str, sol: str) -> Dict[str, Any]:
 
 def deploy(w3) -> Dict[str, str]:
     """Deploy the contract set the local E2E scripts use, signed by hardhat
-    account 0. Same constructor args as local_e2e_tool_economy.py /
-    local_e2e_venture_loop.py."""
+    account 0. Same constructor args as local_e2e_tool_economy.py."""
     from eth_account import Account
     acct = Account.from_key(DEPLOYER[1])
     zero = "0x" + "00" * 20
@@ -326,8 +325,6 @@ def deploy(w3) -> Dict[str, str]:
         "substrate": sub,
         "service_registry": _deploy("ServiceRegistry", "ServiceMarket", sub),
         "payment_channel": _deploy("PaymentChannel", "ServiceMarket", sub, 3600),
-        "venture_vault_factory": _deploy("VentureVaultFactory", "VentureVault",
-                                         sub),
     }
     log("deployed " + ", ".join(f"{k}={v}" for k, v in out.items()))
     return out

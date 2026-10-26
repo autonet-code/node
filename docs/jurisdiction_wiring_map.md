@@ -264,12 +264,13 @@ deliberately deferred (`tool_substrate.md:262-264`).
 
 ### B.2 Attaching the venture vault as a "tokenized project"
 
-**BUILT since this survey.** The venture vault shipped as
-`contracts/core/VentureVault.sol` (deploy-per-venture via `VentureVaultFactory`,
-ATN-only, no arbiter, halt vote instead of appeals), exercised end to end by
-`scripts/local_e2e_venture_loop.py`. The port analysis below is the historical
-design reasoning; the arbiter WAS deleted and tranche-gating WAS adopted as
-described. The following is the survey as written.
+**BUILT, then SCRAPPED (2026-10-26).** The venture vault shipped as
+`contracts/core/VentureVault.sol` (deploy-per-venture, ATN-only, no arbiter,
+halt vote instead of appeals) and was later removed with its E2E script: no
+real use case, since capital in ATN is not anyone's bottleneck and the
+jurisdiction's trustless projects already fund work (`tool_substrate.md`,
+"Decision (2026-10-26): the venture vault is scrapped"). The survey below is
+kept as written, for history.
 
 The venture vault (`venture_vault_design.md`) is the boats CoinOffering's
 successor instrument. Attaching it under the jurisdiction is mostly a **port from

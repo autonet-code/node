@@ -86,11 +86,10 @@ removed with its contracts.
 
 ## Economy proof-of-life
 
-Two scripts exercise the full loops end to end (see `docs/local_e2e.md`):
+One script exercises the full tool-economy loop end to end (see `docs/local_e2e.md`):
 
 ```bash
 python scripts/local_e2e_tool_economy.py    # register → publish → adopt → epoch mint
-python scripts/local_e2e_venture_loop.py    # venture funding + service revenue loop
 ```
 
 ## Running tests

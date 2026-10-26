@@ -8,7 +8,8 @@
 > - **Substrate paradigm, tool economy.** The on-chain surface is three
 >   contracts under `contracts/core/`: `Substrate.sol` (epoch anchoring,
 >   agent registry, money-only training records, ATN token, service
->   payments), `ServiceMarket.sol`, and `VentureVault.sol`.
+>   payments), `ServiceMarket.sol`, and `AnchorElection.sol` (epoch anchors
+>   as DAO elections).
 > - **Fees-only emission, money-only close** (v0.7.0, 2026-07-10): the epoch
 >   pool = burned service fees only; REP is claimed DAO-side from ATN
 >   earnings 1:1 (no reputation surface in `Substrate.sol`).

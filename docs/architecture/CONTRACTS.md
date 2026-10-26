@@ -15,7 +15,8 @@
 >   claimed DAO-side (RepToken, 1:1 on ATN earnings).
 > - **`ServiceMarket.sol`**: remote-API market (registry + EIP-712 payment
 >   channels), ATN-only, settling through `Substrate.payForService`.
-> - **`VentureVault.sol`**: agent-as-venture funding.
+> - **`AnchorElection.sol`**: epoch anchors as single-choice DAO elections
+>   (the venture vault was scrapped 2026-10-26).
 > - The charter version has no contract: it is two DAO Registry keys.
 > - **Read instead:** `docs/README.md`, `docs/tool_substrate.md`,
 >   `docs/services_market.md`, `docs/charter_anchor.md`, and the contract

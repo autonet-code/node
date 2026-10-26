@@ -170,12 +170,8 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   coin-offering-shaped satellite slot; then the genesis event chains
   #7 (charter anchor, now registry keys) + #10 (ReputationMirror
   activation) + the ParityVault minter grant.
-- Tokenized vault shares (2026-07-06): ERC20 per vault, book-value
-  redemption (burn → unvested principal + accrued revenue),
-  checkpointed halt votes, CoinOffering dividend pattern ported.
-  Boats project re-conceived as the flagship venture agent.
-- Verifier rewards migration: mint-funded bootstrap → bps-of-raise
-  fee once volume exists.
+- (Dropped 2026-10-26 with the venture vault: tokenized vault shares and
+  the verifier-rewards migration.)
 - Capability-gap pricing: coverage-atlas gaps as mint multiplier
   (doctrine only, never implemented).
 
@@ -203,17 +199,14 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
   registerAgentBound; Owner page gets a "rebind fleet to this wallet"
   surface (rotateOwner), which is also the key-loss recovery UI.
 - Rename `payForInference` → `payForService` (next redeploy): it settles
-  services/venture revenue generally; "inference" is residue from the
+  services revenue generally; "inference" is residue from the
   decentralized-inference framing and invites conflation with the
   sponsor/dependent provider pipe (which never touches ATN).
-- TrialRunner: transport seam → wire to live WS service-request
-  client; OnChainService needs a generic contract-call so attestTrial
-  submits directly (currently returns calldata).
 - Agent drawer: add the 120s stall timeout the chat surface
   got (silent-stall symmetry).
 - Adopted tools: OS-level isolated runner (vault track) as the wall
   behind tool_guard's audit-hook tripwire; macOS isolation untested.
-- Indexer: mirror the new events (ToolRegistered, VentureCreated,
+- Indexer: mirror the new events (ToolRegistered,
   service registry) into Firestore collections
   (`tools`/`services` collections are documented as future, not
   implemented).
@@ -249,7 +242,6 @@ Recursive Principial Body") now serving both app whitepaper surfaces.
 **THE ACTUAL CRITICAL PATH (non-code):** one real customer / demand
 beachhead: a paid service category with real buyers where crypto
 settlement is an advantage (hardware/compute rental for agents = best
-named candidate). Show one other human the venture-loop E2E; fund one
-tiny real venture. The v3 flywheel (reviews → ranking → usage → mint)
+named candidate). The v3 flywheel (reviews → ranking → usage → mint)
 cannot spin with one participant. The network begins the moment it
 isn't just its author.

@@ -197,104 +197,14 @@ is a real observation about where the pieces don't yet click cleanly.
    change as long as a hash view is exposed.
 ```
 
-# Local end-to-end: the venture loop composes
+# Local end-to-end: the venture loop (scrapped)
 
-`scripts/local_e2e_venture_loop.py` is the sibling capstone for the
-venture-loop contracts + rails (VentureVault + factory,
-TrialRunner, the evidence CON rail). It **reuses the tool-economy
-harness** wholesale (`start_hardhat`, `deploy_contracts`,
-`resolve_binding_shape`/`sponsored_register`, `send_agent_tx`,
-`make_runtime`, `register_local_agent`, the `Board` scoreboard and
-`_fake_embedder`) and bolts VentureVaultFactory onto the
-base deploy. It stands up ONE daemon runtime, registers a fleet of
-owner-bound agents against a live Hardhat chain, and drives the whole
-venture lifecycle end-to-end.
-
-## Run
-
-```bash
-python scripts/local_e2e_venture_loop.py
-```
-
-Same prerequisites as the tool-economy e2e (`npm install`,
-`npx hardhat compile`, Python deps). `--from-stage` / `--to-stage`
-letter flags exist for iteration, but stages A-F share on-chain + daemon
-state, so a real green run uses no flags.
-
-## What it proves
-
-Eight stages (0 bootstrap + A-G), each verified:
-
-- **0 chain up**: base deploy (Substrate + ServiceMarket; ATN-only
-  settlement, no MockERC20) plus a second inline deployer for
-  `VentureVaultFactory`.
-- **A charter check**: assert the daemon's pure `verify_charter`
-  MATCHES `"0x" + charter_hash()` (the registry-key value), detects
-  drift against a bogus hash (`match=False`), and reports `match=None`
-  for an empty hash. No contract involved.
-- **B venture**: the venture agent publishes a `venture_prospectus` blob
-  (echo battery, `pass_threshold=1.0`); a VentureVault is deployed via the
-  factory bound to that agent (`termsBps=6000`, the 60% backer split).
-- **C backers**: two funded accounts mint ATN via the substrate's only
-  mint path (single-leaf `recordTrainingForEpoch`), approve + contribute
-  to `raiseMin`, `openTrials`.
-- **D trials**: two verifier agents (distinct owners) run
-  `TrialRunner.run_trial` against the prospectus through a local echo
-  transport, submit `attestTrial` on chain from their own keys;
-  greenlight; a verifier claims its fee slice.
-- **E tranches + revenue**: agent claims tranche 1; a customer pays via
-  `payForService(vault, …)`, which takes the 2.5% service fee at payment
-  time so the vault receives the net (975 of 1000); `claimRevenue` splits
-  that net 60/40; backers claim pro-rata within the 60% (351/234, asserted
-  to the wei); a ≥1/3 backer halts the next tranche (asserted
-  unclaimable), un-halts, and the tranche is claimable again.
-- **F evidence rail**: the author publishes a deliberately-buggy pinned
-  tool; a disputer files an evidence-bearing CON; a third daemon runs
-  `check_evidence` → confirms → posts support. Two mini-closes (with vs
-  without recruited support) show the supported CON's standing is double
-  the naked CON's (52 vs 26) and drags the disputed tool's net_score
-  strictly further negative (+2 → −24): the close prices the CON above
-  the naked equivalent.
-- **G**: totals + teardown (Hardhat killed, tmp + deploy records removed).
-
-## Seams this e2e revealed
-
-Additional to the tool-economy seams above:
-
-8. **`close_epoch(apply_gate=False)` leaves `node_mint` empty for a
-   single-epoch evidence comparison.** The reliable pricing signal for
-   "did the recruited support move standing" is the LIVE `net_score` read
-   via `WorldService.read_node_scores()` (equilibrated state), not the
-   close record's `node_mint` diagnostic, which stays 0.0 for a graph
-   that has not accumulated an emission-priced usage term. The script
-   asserts on `read_node_scores()` (CON node standing and the disputed
-   tool's net_score) and keeps the mini-close `node_mint` figures as
-   labeled diagnostics only.
-
-9. **Tranche auto-vesting from tx latency makes the halt boundary
-   nondeterministic.** With a short `tranchePeriod` (seconds), the real
-   block-time that elapses across the greenlight → claim → halt tx
-   sequence silently vests a second tranche, so `haltPeriodVested`
-   snapshots past the tranche the test wants to freeze. The script uses a
-   large `tranchePeriod` (100_000s) and drives vesting purely with
-   `evm_increaseTime`, so the halt boundary is exact.
-
-10. **`submit_tool_manifest` fails SILENTLY (`{"error": …}`, no
-    `manifest_digest`) on an incomplete manifest.** Seeding a fresh
-    WorldService with the disputed tool's claim node needs a FULLY valid
-    manifest (`kind: "tool_manifest"` and, for pinned, a non-empty
-    `code_digest`) or `validate_manifest` rejects it and the receipt has
-    no `manifest_digest` key. Easy to miss because the daemon path builds
-    the manifest for you; hand-building one for a direct
-    `submit_tool_manifest` call must satisfy `_REQUIRED_FIELDS`.
-
-11. **The scoreboard's arrow/box glyphs crash a cp1252 Windows console.**
-    The final `print(board.render())` carries `→` and `═`; on a stock
-    Windows console (`cp1252`) that raises `UnicodeEncodeError`. The
-    script reconfigures `sys.stdout`/`sys.stderr` to utf-8 before running.
-```
-
----
+`scripts/local_e2e_venture_loop.py` exercised the VentureVault, its verifier
+trials and the evidence CON rail. The venture vault was scrapped on
+2026-10-26 (no real use case: capital in ATN is not anyone's bottleneck, and
+the jurisdiction's trustless projects already fund work), so the script, the
+contract and the trial rail are gone. See `docs/tool_substrate.md`,
+"Decision (2026-10-26): the venture vault is scrapped".
 
 # Local end-to-end: cross-daemon inference, nothing mocked
 

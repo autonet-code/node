@@ -36,7 +36,6 @@ REPO_ARTIFACTS_DIR = _PACKAGE_DIR.parent.parent / "artifacts"
 _CONTRACT_SOURCES = {
     "Substrate": "core",
     "ServiceMarket": "core",
-    "VentureVault": "core",
 }
 
 
