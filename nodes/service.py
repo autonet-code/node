@@ -1104,6 +1104,8 @@ class AutonetService:
             chain_id=bc.chain_id,
             daemon_private_key=bc.private_key or "",
             governor_address=getattr(bc, "governor_address", "") or "",
+            anchor_election_address=getattr(
+                bc, "anchor_election_address", "") or "",
         )
         try:
             driver = ChainSubmissionDriver(

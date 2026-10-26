@@ -47,6 +47,7 @@ from .epoch_anchorer import (
     EpochAnchorerConfig,
 )
 from .federated_close_driver import FederatedCloseResult
+from .anchor_election import Election, ElectionAnchorer
 from .governed_anchor import AnchorProposal, GovernedAnchorer, Voter
 
 
@@ -69,6 +70,9 @@ class ChainSubmissionConfig:
     # The DAO Governor anchor proposals go through. Empty => only direct
     # anchoring (dev networks whose Substrate governor is this daemon's key).
     governor_address: str = ""
+    # The AnchorElection (Decision 2026-10-26). Set => anchors go through
+    # single-choice elections (anchor_election.ElectionAnchorer).
+    anchor_election_address: str = ""
 
 
 # Resolver: local agent_id (YAML id) -> (address, private_key) or None.
@@ -100,6 +104,7 @@ class ChainSubmissionDriver:
         blob_resolver: Optional[BlobResolver] = None,
         anchorer: Optional[EpochAnchorer] = None,
         governed: Optional[GovernedAnchorer] = None,
+        election: Optional[ElectionAnchorer] = None,
         gossip: Optional[Any] = None,
         tick_interval: float = 15.0,
         **_ignored: Any,
@@ -118,6 +123,9 @@ class ChainSubmissionDriver:
         # anchorer with eth_tester.
         self._anchorer = anchorer or self._build_anchorer()
         self._governed = governed
+        self._election = election
+        # epoch_id -> the epoch's election (election path).
+        self._elections: "OrderedDict[str, Election]" = OrderedDict()
         # epoch_id -> pending anchor proposal (governed path).
         self.tick_interval = float(tick_interval)
         self._pending: "OrderedDict[str, AnchorProposal]" = OrderedDict()
@@ -137,6 +145,22 @@ class ChainSubmissionDriver:
                 logger.warning("governed anchorer unavailable: %s", e)
                 return None
         return self._governed
+
+    def election_anchorer(self) -> Optional[ElectionAnchorer]:
+        """The election path, when an AnchorElection is configured."""
+        if self._election is None and self._anchorer is not None                 and self.config.anchor_election_address:
+            try:
+                contract = self._anchorer._get_contract()
+                self._election = ElectionAnchorer(
+                    w3=self._anchorer._w3, substrate=contract,
+                    election_address=self.config.anchor_election_address,
+                    governor_address=self.config.governor_address,
+                    chain_id=self.config.chain_id,
+                    daemon_key=self.config.daemon_private_key)
+            except Exception as e:
+                logger.warning("anchor election unavailable: %s", e)
+                return None
+        return self._election
 
     def _build_anchorer(self) -> Optional[EpochAnchorer]:
         if not self.config.substrate_address:
@@ -209,8 +233,26 @@ class ChainSubmissionDriver:
         prepared = self._prepare(fed, out)
         if prepared is not None:
             self._publish_anchor_blobs(prepared.result)
-            ga = self.governed_anchorer()
-            if ga is not None and ga.direct:
+            ea = self.election_anchorer()
+            ga = None if ea is not None else self.governed_anchorer()
+            if ea is not None:
+                try:
+                    election = ea.open(fed.epoch_id, prepared.fields.as_args())
+                except Exception as e:
+                    logger.warning("anchor election open failed for %s: %s",
+                                   fed.epoch_id, e)
+                    out["anchor_error"] = f"election open failed: {e}"
+                else:
+                    out["anchor_election"] = election.epoch_number
+                    out["anchor_state"] = self._step_election(election)
+                    if out["anchor_state"] == "executed":
+                        out["anchored"] = True
+                    else:
+                        with self._lock:
+                            self._elections[fed.epoch_id] = election
+                        self._ensure_ticker()
+                        return out
+            elif ga is not None and ga.direct:
                 if fed.is_winner:
                     anchor_result = self._anchor_direct(prepared)
                     out["anchored"] = anchor_result.success
@@ -328,9 +370,44 @@ class ChainSubmissionDriver:
                     hex(proposal.proposal_id)[:12], state)
         return state
 
+    def _step_election(self, election: Election) -> str:
+        try:
+            state = self._election.step(election, self._voters())
+        except Exception as e:
+            logger.warning("epoch %s: anchor election step failed: %s",
+                           election.epoch_id, e)
+            return election.last_state
+        logger.info("epoch %s: anchor election (attempt %d) is %s",
+                    election.epoch_id, election.attempt, state)
+        return state
+
+    def _tick_elections(self) -> None:
+        with self._lock:
+            elections = list(self._elections.items())
+        for epoch_id, election in elections:
+            try:
+                anchored = self._anchorer.is_anchored(epoch_id)
+            except Exception:
+                anchored = False
+            if not anchored:
+                anchored = self._step_election(election) == "executed"
+            done = anchored
+            if not anchored and time.monotonic() - election.created > _MAX_PROPOSAL_AGE_S:
+                logger.warning("epoch %s: anchor election open too long, "
+                               "giving up", epoch_id)
+                done = True
+            if anchored:
+                logger.info("epoch %s anchored by election; submitting mints",
+                            epoch_id)
+                self._submit_agents(epoch_id)
+            if done:
+                with self._lock:
+                    self._elections.pop(epoch_id, None)
+
     def tick(self) -> None:
-        """Advance every pending anchor proposal one step; submit agent
-        mints for the ones whose anchor landed."""
+        """Advance every pending anchor proposal and election one step;
+        submit agent mints for the ones whose anchor landed."""
+        self._tick_elections()
         with self._lock:
             pending = list(self._pending.items())
         for epoch_id, proposal in pending:
@@ -373,7 +450,7 @@ class ChainSubmissionDriver:
             except Exception:
                 logger.warning("anchor proposal tick failed", exc_info=True)
             with self._lock:
-                if not self._pending:
+                if not self._pending and not self._elections:
                     self._ticker = None
                     return
 
@@ -383,7 +460,9 @@ class ChainSubmissionDriver:
     @property
     def pending_proposals(self) -> Dict[str, str]:
         with self._lock:
-            return {e: p.last_state for e, p in self._pending.items()}
+            out = {e: p.last_state for e, p in self._pending.items()}
+            out.update({e: el.last_state for e, el in self._elections.items()})
+            return out
 
     def _submit_agents(self, epoch_id: str) -> List[Dict[str, Any]]:
         """Run AuthoritativeChainSubmitter.submit_for_epoch for each

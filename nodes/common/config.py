@@ -65,6 +65,11 @@ class BlockchainConfig:
     # from reads a non-archive node may fail. 0 = find it by search
     # (needs an archive node). Seeded from registry.json ("deploy_block").
     deploy_block: int = 0
+    # The jurisdiction's AnchorElection (Decision 2026-10-26): epoch anchors
+    # are single-choice elections among drawn agents' options. Empty =>
+    # the older yes/no anchor proposal. Seeded from registry.json
+    # ("anchor_election"; on chain jurisdiction.<id>.anchor_election).
+    anchor_election_address: str = ""
 
 
 @dataclass
@@ -281,6 +286,7 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_DAO_REGISTRY_ADDRESS": ("blockchain.dao_registry_address", str),
         "AUTONET_GOVERNOR_ADDRESS": ("blockchain.governor_address", str),
         "AUTONET_DEPLOY_BLOCK": ("blockchain.deploy_block", int),
+        "AUTONET_ANCHOR_ELECTION_ADDRESS": ("blockchain.anchor_election_address", str),
         "AUTONET_BLOB_DIR": ("blob_store.data_dir", str),
         "AUTONET_DATA_DIR": ("data_dir", str),
         "AUTONET_LOG_LEVEL": ("log_level", str),
@@ -415,6 +421,9 @@ def load_config(path: Optional[str] = None) -> AutonetConfig:
     if not cfg.blockchain.governor_address:
         cfg.blockchain.governor_address = _registry_substrate_address(
             path, key="dao")
+    if not cfg.blockchain.anchor_election_address:
+        cfg.blockchain.anchor_election_address = _registry_substrate_address(
+            path, key="anchor_election")
     if not cfg.blockchain.deploy_block:
         try:
             cfg.blockchain.deploy_block = int(

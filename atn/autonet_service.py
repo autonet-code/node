@@ -932,6 +932,8 @@ class AutonetBridge:
             for atn_key, node_key in (("substrate_address", "substrate_address"),
                                       ("rep_token_address", "rep_token_address"),
                                       ("tool_bond_address", "tool_bond_address"),
+                                      ("anchor_election_address",
+                                       "anchor_election_address"),
                                       ("dao_registry_address", "dao_registry_address"),
                                       ("dao_address", "governor_address")):
                 value = getattr(self.config, atn_key, "") or ""
