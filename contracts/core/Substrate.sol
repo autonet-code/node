@@ -102,6 +102,7 @@ contract Substrate is EIP712 {
         vaultMinter = vaultMinter_;
         governor = governor_;
         deployedAt = block.timestamp;
+        latestCutoff = block.timestamp;
     }
 
     // =========================================================================
@@ -135,6 +136,11 @@ contract Substrate is EIP712 {
         uint256 windowBurned;
         uint256 mintPool;
         uint256 minted;
+        // The epoch's cutoff (Decision 2026-10-26): its batches are those
+        // signed after the previous anchor's cutoff and at or before this
+        // one, and windowBurned is the fees burned in that same span.
+        // Appended last so prior tuple indexes hold.
+        uint256 cutoff;
     }
 
     /// @dev Sequential storage of anchors as submitted.
@@ -161,6 +167,9 @@ contract Substrate is EIP712 {
     error PrevEpochRootMismatch(bytes32 expected, bytes32 got);
     error PrevAnchorHashMismatch(bytes32 expected, bytes32 got);
     error NoAnchorAuthority();
+    error CutoffOutOfOrder(uint256 latest, uint256 got);
+
+    event AnchorerSet(address indexed oldAnchorer, address indexed newAnchorer);
 
     // =========================================================================
     // Anchor authority (Decision 2026-10-16)
@@ -176,8 +185,52 @@ contract Substrate is EIP712 {
     /// @notice Deployment timestamp: the REP snapshot for the first anchor.
     uint256 public immutable deployedAt;
 
-    /// @notice ATN burned by payForService fees since the last anchor.
-    uint256 public burnedSinceAnchor;
+    /// @notice The contract allowed to anchor besides the governor: the
+    ///         jurisdiction's AnchorElection (Decision 2026-10-26). Set by
+    ///         the governor; address(0) = governor only.
+    address public anchorer;
+
+    /// @notice The latest anchored epoch's cutoff (deployedAt before any).
+    uint256 public latestCutoff;
+
+    /// @dev Cumulative ATN burned by payForService fees, checkpointed by
+    ///      block timestamp, so the fees burned between any two cutoffs
+    ///      are known before either epoch is anchored.
+    Checkpoints.Trace208 private _burnedHistory;
+
+    /// @notice All ATN burned by payForService fees so far.
+    uint256 public totalBurned;
+
+    /// @notice Cumulative fees burned at the latest cutoff, as counted when
+    ///         that epoch was anchored. The next window starts here, so a
+    ///         fee burned later in the cutoff's own second lands in the next
+    ///         window instead of in neither.
+    uint256 public burnedAtLatestCutoff;
+
+    /// @notice Set the anchorer (the AnchorElection). Governor only.
+    function setAnchorer(address newAnchorer) external {
+        if (msg.sender != governor) revert NotGovernor();
+        emit AnchorerSet(anchorer, newAnchorer);
+        anchorer = newAnchorer;
+    }
+
+    /// @notice Cumulative fees burned at or before `timestamp`.
+    function burnedUpTo(uint256 timestamp) public view returns (uint256) {
+        return _burnedHistory.upperLookup(uint48(timestamp));
+    }
+
+    /// @notice Fees burned after `fromTs` and at or before `toTs`.
+    function burnedBetween(uint256 fromTs, uint256 toTs)
+        external view returns (uint256)
+    {
+        if (toTs <= fromTs) return 0;
+        return burnedUpTo(toTs) - burnedUpTo(fromTs);
+    }
+
+    /// @notice ATN burned by payForService fees since the latest cutoff.
+    function burnedSinceAnchor() external view returns (uint256) {
+        return totalBurned - burnedAtLatestCutoff;
+    }
 
     /// @notice The REP timepoint the close weighs the NEXT epoch at (the
     ///         previous anchor's timestamp; deployedAt before any anchor).
@@ -193,11 +246,13 @@ contract Substrate is EIP712 {
         return n == 0 ? 0 : anchors[n - 1].windowBurned;
     }
 
-    /// @notice Anchor a network epoch close. Governor only: the call
-    ///         arrives through a DAO proposal executed by the timelock.
+    /// @notice Anchor a network epoch close. Governor or the anchorer (the
+    ///         AnchorElection) only: the call arrives through a DAO decision.
     /// @param agentMintRoot Merkle root over the epoch's
     ///        (agent, scaledAmount) mint map; sorted-pair hashing,
     ///        double-hashed leaves (see recordTrainingForEpoch).
+    /// @param cutoff The epoch's cutoff: after the latest one and not in
+    ///        the future.
     function anchor(
         string calldata epochId,
         bytes32 epochRoot,
@@ -205,9 +260,16 @@ contract Substrate is EIP712 {
         bytes32 prevAnchorHash,
         string calldata agentMintCid,
         bytes32 payloadHash,
-        bytes32 agentMintRoot
+        bytes32 agentMintRoot,
+        uint256 cutoff
     ) external {
-        if (msg.sender != governor) revert NotGovernor();
+        if (msg.sender != governor
+                && (anchorer == address(0) || msg.sender != anchorer)) {
+            revert NotGovernor();
+        }
+        if (cutoff <= latestCutoff || cutoff > block.timestamp) {
+            revert CutoffOutOfOrder(latestCutoff, cutoff);
+        }
         if (bytes(epochId).length == 0) revert EpochIdEmpty();
         if (anchorIndexByEpochId[epochId] != 0) {
             revert EpochAlreadyAnchored(epochId);
@@ -221,11 +283,13 @@ contract Substrate is EIP712 {
 
         bytes32 epochIdHash = keccak256(bytes(epochId));
         // On-chain conservation: this anchor's mint pool is the previous
-        // fee window (lag-1, fees-only); its own window closes now.
+        // epoch's fee window (lag-1, fees-only); its own window is the fees
+        // burned between the previous cutoff and its own.
         uint256 mintPool = nextMintPool();
-        uint256 windowBurned = burnedSinceAnchor;
-
-        burnedSinceAnchor = 0;
+        uint256 burnedAtCutoff = burnedUpTo(cutoff);
+        uint256 windowBurned = burnedAtCutoff - burnedAtLatestCutoff;
+        burnedAtLatestCutoff = burnedAtCutoff;
+        latestCutoff = cutoff;
 
         anchors.push(Anchor({
             epochId: epochId,
@@ -240,22 +304,16 @@ contract Substrate is EIP712 {
             agentMintRoot: agentMintRoot,
             windowBurned: windowBurned,
             mintPool: mintPool,
-            minted: 0
+            minted: 0,
+            cutoff: cutoff
         }));
         anchorIndexByEpochId[epochId] = anchors.length;
         epochIdByHash[epochIdHash] = epochId;
 
-        bytes32 newAnchorHash = keccak256(abi.encode(
-            epochId,
-            epochRoot,
-            prevEpochRoot,
-            prevAnchorHash,
-            agentMintCid,
-            payloadHash,
-            agentMintRoot,
-            msg.sender,
-            block.number
-        ));
+        // Content only (Decision 2026-10-26): no sender or block number,
+        // so the next epoch's prevAnchorHash is known before this anchor
+        // lands and elections can run ahead.
+        bytes32 newAnchorHash = _hashStored(anchors[anchors.length - 1]);
         latestAnchorHash = newAnchorHash;
         latestEpochRoot = epochRoot;
 
@@ -270,6 +328,28 @@ contract Substrate is EIP712 {
             msg.sender,
             block.number
         );
+    }
+
+    /// @notice The hash an anchor with these fields chains to.
+    function anchorHashOf(
+        string calldata epochId,
+        bytes32 epochRoot,
+        bytes32 prevEpochRoot,
+        bytes32 prevAnchorHash,
+        string calldata agentMintCid,
+        bytes32 payloadHash,
+        bytes32 agentMintRoot,
+        uint256 cutoff
+    ) public pure returns (bytes32) {
+        return keccak256(abi.encode(
+            epochId, epochRoot, prevEpochRoot, prevAnchorHash, agentMintCid,
+            payloadHash, agentMintRoot, cutoff));
+    }
+
+    function _hashStored(Anchor storage a) private view returns (bytes32) {
+        return keccak256(abi.encode(
+            a.epochId, a.epochRoot, a.prevEpochRoot, a.prevAnchorHash,
+            a.agentMintCid, a.payloadHash, a.agentMintRoot, a.cutoff));
     }
 
     function anchorCount() external view returns (uint256) {
@@ -1217,8 +1297,9 @@ contract Substrate is EIP712 {
         }
         if (burned > 0) {
             atnTotalSupply -= burned;
-            // Feeds the current anchor window (on-chain conservation).
-            burnedSinceAnchor += burned;
+            // Feeds the fee windows between cutoffs (on-chain conservation).
+            totalBurned += burned;
+            _burnedHistory.push(uint48(block.timestamp), uint208(totalBurned));
             _atnSupplyHistory.push(
                 uint48(block.number), uint208(atnTotalSupply)
             );

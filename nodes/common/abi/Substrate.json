@@ -59,6 +59,22 @@
    "type": "error"
   },
   {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "latest",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "got",
+     "type": "uint256"
+    }
+   ],
+   "name": "CutoffOutOfOrder",
+   "type": "error"
+  },
+  {
    "inputs": [],
    "name": "ECDSAInvalidSignature",
    "type": "error"
@@ -409,6 +425,25 @@
     }
    ],
    "name": "AgentRevoked",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "oldAnchorer",
+     "type": "address"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "newAnchorer",
+     "type": "address"
+    }
+   ],
+   "name": "AnchorerSet",
    "type": "event"
   },
   {
@@ -950,6 +985,11 @@
      "internalType": "bytes32",
      "name": "agentMintRoot",
      "type": "bytes32"
+    },
+    {
+     "internalType": "uint256",
+     "name": "cutoff",
+     "type": "uint256"
     }
    ],
    "name": "anchor",
@@ -971,6 +1011,60 @@
    "type": "function"
   },
   {
+   "inputs": [
+    {
+     "internalType": "string",
+     "name": "epochId",
+     "type": "string"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "epochRoot",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "prevEpochRoot",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "prevAnchorHash",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "string",
+     "name": "agentMintCid",
+     "type": "string"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "payloadHash",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "agentMintRoot",
+     "type": "bytes32"
+    },
+    {
+     "internalType": "uint256",
+     "name": "cutoff",
+     "type": "uint256"
+    }
+   ],
+   "name": "anchorHashOf",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "pure",
+   "type": "function"
+  },
+  {
    "inputs": [],
    "name": "anchorSnapshotTime",
    "outputs": [
@@ -978,6 +1072,19 @@
      "internalType": "uint256",
      "name": "",
      "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "anchorer",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
     }
    ],
    "stateMutability": "view",
@@ -1151,7 +1258,63 @@
   },
   {
    "inputs": [],
+   "name": "burnedAtLatestCutoff",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "fromTs",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "toTs",
+     "type": "uint256"
+    }
+   ],
+   "name": "burnedBetween",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
    "name": "burnedSinceAnchor",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "timestamp",
+     "type": "uint256"
+    }
+   ],
+   "name": "burnedUpTo",
    "outputs": [
     {
      "internalType": "uint256",
@@ -1370,6 +1533,11 @@
        "internalType": "uint256",
        "name": "minted",
        "type": "uint256"
+      },
+      {
+       "internalType": "uint256",
+       "name": "cutoff",
+       "type": "uint256"
       }
      ],
      "internalType": "struct Substrate.Anchor",
@@ -1455,6 +1623,11 @@
       {
        "internalType": "uint256",
        "name": "minted",
+       "type": "uint256"
+      },
+      {
+       "internalType": "uint256",
+       "name": "cutoff",
        "type": "uint256"
       }
      ],
@@ -1625,6 +1798,19 @@
      "internalType": "bytes32",
      "name": "",
      "type": "bytes32"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "latestCutoff",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
     }
    ],
    "stateMutability": "view",
@@ -1936,6 +2122,19 @@
   {
    "inputs": [
     {
+     "internalType": "address",
+     "name": "newAnchorer",
+     "type": "address"
+    }
+   ],
+   "name": "setAnchorer",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
      "internalType": "uint16",
      "name": "newBps",
      "type": "uint16"
@@ -1993,6 +2192,19 @@
     }
    ],
    "name": "toolRegisteredAt",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "totalBurned",
    "outputs": [
     {
      "internalType": "uint256",

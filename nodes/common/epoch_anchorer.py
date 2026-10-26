@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AnchorFields:
-    """The seven arguments of ``Substrate.anchor``."""
+    """The eight arguments of ``Substrate.anchor``."""
     epoch_id: str
     epoch_root: bytes
     prev_epoch_root: bytes
@@ -69,11 +69,14 @@ class AnchorFields:
     agent_mint_cid: str
     payload_hash: bytes
     agent_mint_root: bytes
+    # The epoch's cutoff (Decision 2026-10-26): the one its id carries, or
+    # for an id without one (local/library use) the chain head's timestamp.
+    cutoff: int = 0
 
     def as_args(self) -> tuple:
         return (self.epoch_id, self.epoch_root, self.prev_epoch_root,
                 self.prev_anchor_hash, self.agent_mint_cid,
-                self.payload_hash, self.agent_mint_root)
+                self.payload_hash, self.agent_mint_root, int(self.cutoff))
 
 
 @dataclass
@@ -258,6 +261,14 @@ class EpochAnchorer:
             # 2-field (agent, amount) leaf.
             mint_root = mint_merkle_root(agent_mint)
 
+            from .voice_state import epoch_id_cutoff
+            cutoff = epoch_id_cutoff(epoch_id)
+            if cutoff is None:
+                contract = self._get_contract()
+                cutoff = max(
+                    int(self._w3.eth.get_block("latest")["timestamp"]),
+                    int(contract.functions.latestCutoff().call()) + 1)
+
             fields = AnchorFields(
                 epoch_id=epoch_id,
                 epoch_root=bytes.fromhex(epoch_root_hex),
@@ -266,6 +277,7 @@ class EpochAnchorer:
                 agent_mint_cid=cid,
                 payload_hash=ph,
                 agent_mint_root=mint_root,
+                cutoff=cutoff,
             )
             result = AnchorResult(
                 success=False,
@@ -330,6 +342,7 @@ class EpochAnchorer:
         agent_mint_cid: str,
         payload_hash_bytes: bytes,
         agent_mint_root: bytes,
+        cutoff: int,
         *,
         from_address: Optional[str] = None,
     ) -> str:
@@ -371,6 +384,7 @@ class EpochAnchorer:
                 agent_mint_cid,
                 payload_hash_bytes,
                 agent_mint_root,
+                int(cutoff),
             ).transact({"from": sender})
             receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
             if receipt.status != 1:
@@ -393,6 +407,7 @@ class EpochAnchorer:
                 agent_mint_cid,
                 payload_hash_bytes,
                 agent_mint_root,
+                int(cutoff),
             ).estimate_gas({"from": sender})
             gas_limit = max(int(estimated * 12 // 10), 1_500_000)
         except Exception:
@@ -405,6 +420,7 @@ class EpochAnchorer:
             agent_mint_cid,
             payload_hash_bytes,
             agent_mint_root,
+            int(cutoff),
         ).build_transaction({
             "from": sender,
             "nonce": w3.eth.get_transaction_count(sender),

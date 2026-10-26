@@ -160,7 +160,9 @@ def test_hash_chain_still_binds_the_governor(chain):
     def submit(epoch_id, prev_root, prev_hash):
         tx = c.functions.anchor(
             epoch_id, b"\x03" * 32, prev_root, prev_hash, "cid-2",
-            b"\x04" * 32, b"\x00" * 32).transact({"from": gov, "gas": 3_000_000})
+            b"\x04" * 32, b"\x00" * 32,
+            int(w3.eth.get_block("latest")["timestamp"])).transact(
+                {"from": gov, "gas": 3_000_000})
         return w3.eth.wait_for_transaction_receipt(tx)
 
     # Stale prevEpochRoot (genesis zero) and stale prevAnchorHash revert.

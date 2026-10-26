@@ -354,7 +354,8 @@ def anchor_epoch(w3, substrate, epoch_id: str) -> int:
     root = keccak(text=f"root:{epoch_id}")
     rcpt = send(w3, substrate.functions.anchor(
         epoch_id, root, prev_root, prev_hash, f"cid-{epoch_id}",
-        keccak(text=f"payload:{epoch_id}"), b"\x00" * 32), HH_DEPLOYER_PK)
+        keccak(text=f"payload:{epoch_id}"), b"\x00" * 32,
+        int(w3.eth.get_block("latest")["timestamp"])), HH_DEPLOYER_PK)
     return int(rcpt.blockNumber)
 
 

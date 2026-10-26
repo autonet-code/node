@@ -60,7 +60,7 @@ from nodes.common.governed_anchor import anchor_description  # noqa: E402
 SEED_EPOCH_ID = "seed"
 ZERO32 = "00" * 32
 SEED_ROOT_DOMAIN = b"autonet:genesis-seed:v1"
-ANCHOR_SIGNATURE = "anchor(string,bytes32,bytes32,bytes32,string,bytes32,bytes32)"
+ANCHOR_SIGNATURE = "anchor(string,bytes32,bytes32,bytes32,string,bytes32,bytes32,uint256)"
 
 
 @dataclass
@@ -160,8 +160,15 @@ def seed_epoch_root(carry_cid: str, chain_id: int) -> str:
     return h.hexdigest()
 
 
-def build_seed(carry: Dict[str, Any], *, chain_id: int) -> Dict[str, Any]:
-    """Encode the bundle + seed payload and derive the anchor arguments."""
+def build_seed(carry: Dict[str, Any], *, chain_id: int,
+               cutoff: Optional[int] = None) -> Dict[str, Any]:
+    """Encode the bundle + seed payload and derive the anchor arguments.
+
+    ``cutoff`` (Decision 2026-10-26) must be after the new Substrate's
+    deployedAt and before the seed proposal executes; default: now."""
+    if cutoff is None:
+        import time
+        cutoff = int(time.time())
     bundle = encode_carry_bundle(carry, epoch_id=SEED_EPOCH_ID)
     carry_cid = cid_for_blob(bundle)
     root = seed_epoch_root(carry_cid, chain_id)
@@ -184,6 +191,7 @@ def build_seed(carry: Dict[str, Any], *, chain_id: int) -> Dict[str, Any]:
         "agentMintCid": "",
         "payloadHash": "0x" + payload_cid,
         "agentMintRoot": "0x" + ZERO32,
+        "cutoff": int(cutoff),
     }
     return {
         "bundle": bundle, "carry_cid": carry_cid,
@@ -191,7 +199,7 @@ def build_seed(carry: Dict[str, Any], *, chain_id: int) -> Dict[str, Any]:
         "anchor_args": args,
         "anchor_args_ordered": [args[k] for k in (
             "epochId", "epochRoot", "prevEpochRoot", "prevAnchorHash",
-            "agentMintCid", "payloadHash", "agentMintRoot")],
+            "agentMintCid", "payloadHash", "agentMintRoot", "cutoff")],
         "description": anchor_description(SEED_EPOCH_ID, bytes.fromhex(root)),
         "calldata": _anchor_calldata(args),
     }
@@ -205,10 +213,11 @@ def _anchor_calldata(args: Dict[str, str]) -> Optional[str]:
         return None
     b = lambda h: bytes.fromhex(h[2:])  # noqa: E731
     body = encode(
-        ["string", "bytes32", "bytes32", "bytes32", "string", "bytes32", "bytes32"],
+        ["string", "bytes32", "bytes32", "bytes32", "string", "bytes32",
+         "bytes32", "uint256"],
         [args["epochId"], b(args["epochRoot"]), b(args["prevEpochRoot"]),
          b(args["prevAnchorHash"]), args["agentMintCid"],
-         b(args["payloadHash"]), b(args["agentMintRoot"])])
+         b(args["payloadHash"]), b(args["agentMintRoot"]), int(args["cutoff"])])
     return "0x" + (keccak(text=ANCHOR_SIGNATURE)[:4] + body).hex()
 
 
@@ -359,12 +368,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="also write both blobs into this daemon blob store dir")
     ap.add_argument("--substrate", default="",
                     help="the new DAO's Substrate address (recorded only)")
+    ap.add_argument("--cutoff", type=int, default=None,
+                    help="the seed epoch's cutoff (unix seconds): after the "
+                         "new Substrate's deployedAt; default now")
     args = ap.parse_args(argv)
 
     blob_dirs = [Path(d).expanduser() for d in args.source_blobs]
     sources = [_load_source(s, blob_dirs) for s in args.source]
     merged = merge_carry(sources)
-    seed = build_seed(merged.carry, chain_id=args.chain_id)
+    seed = build_seed(merged.carry, chain_id=args.chain_id, cutoff=args.cutoff)
     report = write_outputs(
         Path(args.out), seed, chain_id=args.chain_id, sources=sources,
         merged=merged, substrate=args.substrate,

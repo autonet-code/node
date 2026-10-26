@@ -127,6 +127,7 @@ _VOICE_ABI = [
                 {"internalType": "uint256", "name": "windowBurned",  "type": "uint256"},
                 {"internalType": "uint256", "name": "mintPool",      "type": "uint256"},
                 {"internalType": "uint256", "name": "minted",        "type": "uint256"},
+                {"internalType": "uint256", "name": "cutoff",        "type": "uint256"},
             ],
             "internalType": "struct Substrate.Anchor",
             "name": "",

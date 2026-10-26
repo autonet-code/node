@@ -1,0 +1,735 @@
+{
+ "contractName": "AnchorElection",
+ "abi": [
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "substrate_",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "governor_",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "repToken_",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "nonpayable",
+   "type": "constructor"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "account",
+     "type": "address"
+    }
+   ],
+   "name": "AlreadyRegistered",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "BadParams",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "optionHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "DuplicateOption",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "account",
+     "type": "address"
+    }
+   ],
+   "name": "NotDrawn",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "account",
+     "type": "address"
+    }
+   ],
+   "name": "NotLiveAgent",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "proposalId",
+     "type": "uint256"
+    }
+   ],
+   "name": "NotPending",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "NotTimelock",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "SnapshotNotPast",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "TooManyOptions",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "proposalId",
+     "type": "uint256"
+    }
+   ],
+   "name": "Undecided",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "expected",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "got",
+     "type": "uint256"
+    }
+   ],
+   "name": "WrongEpoch",
+   "type": "error"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "uint256",
+     "name": "proposalId",
+     "type": "uint256"
+    },
+    {
+     "indexed": true,
+     "internalType": "uint256",
+     "name": "epochNumber",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "proposer",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "bytes32",
+     "name": "optionHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "OptionRegistered",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "proposers",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "proposerFloorPpm",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "maxOptions",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "openAfterAttempts",
+     "type": "uint256"
+    }
+   ],
+   "name": "ParamsSet",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "uint256",
+     "name": "proposalId",
+     "type": "uint256"
+    },
+    {
+     "indexed": true,
+     "internalType": "uint256",
+     "name": "epochNumber",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "bytes32",
+     "name": "optionHash",
+     "type": "bytes32"
+    }
+   ],
+   "name": "WinnerAnchored",
+   "type": "event"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "epochNumber",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "attempt",
+     "type": "uint256"
+    }
+   ],
+   "name": "anchorWinner",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "epochNumber",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "attempt",
+     "type": "uint256"
+    }
+   ],
+   "name": "callOf",
+   "outputs": [
+    {
+     "internalType": "bytes",
+     "name": "",
+     "type": "bytes"
+    }
+   ],
+   "stateMutability": "pure",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "epochNumber",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "attempt",
+     "type": "uint256"
+    }
+   ],
+   "name": "descriptionOf",
+   "outputs": [
+    {
+     "internalType": "string",
+     "name": "",
+     "type": "string"
+    }
+   ],
+   "stateMutability": "pure",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "proposalId",
+     "type": "uint256"
+    }
+   ],
+   "name": "drawTimepoint",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "proposalId",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    }
+   ],
+   "name": "getOption",
+   "outputs": [
+    {
+     "components": [
+      {
+       "internalType": "string",
+       "name": "epochId",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "epochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevEpochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevAnchorHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "string",
+       "name": "agentMintCid",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "payloadHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "agentMintRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "uint256",
+       "name": "cutoff",
+       "type": "uint256"
+      }
+     ],
+     "internalType": "struct AnchorElection.Option",
+     "name": "option",
+     "type": "tuple"
+    },
+    {
+     "internalType": "address",
+     "name": "proposer",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "governor",
+   "outputs": [
+    {
+     "internalType": "contract IOptionGovernor",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "epochNumber",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "attempt",
+     "type": "uint256"
+    },
+    {
+     "internalType": "address",
+     "name": "account",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "timepoint",
+     "type": "uint256"
+    }
+   ],
+   "name": "isDrawn",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "maxOptions",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "openAfterAttempts",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "proposalId",
+     "type": "uint256"
+    }
+   ],
+   "name": "optionCount",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "proposalId",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "index",
+     "type": "uint256"
+    }
+   ],
+   "name": "optionHash",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "components": [
+      {
+       "internalType": "string",
+       "name": "epochId",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "epochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevEpochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevAnchorHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "string",
+       "name": "agentMintCid",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "payloadHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "agentMintRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "uint256",
+       "name": "cutoff",
+       "type": "uint256"
+      }
+     ],
+     "internalType": "struct AnchorElection.Option",
+     "name": "o",
+     "type": "tuple"
+    }
+   ],
+   "name": "optionHashOf",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "stateMutability": "pure",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "epochNumber",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "attempt",
+     "type": "uint256"
+    }
+   ],
+   "name": "proposalIdOf",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "proposerFloorPpm",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "proposers",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "epochNumber",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "attempt",
+     "type": "uint256"
+    },
+    {
+     "components": [
+      {
+       "internalType": "string",
+       "name": "epochId",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "epochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevEpochRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "prevAnchorHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "string",
+       "name": "agentMintCid",
+       "type": "string"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "payloadHash",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "bytes32",
+       "name": "agentMintRoot",
+       "type": "bytes32"
+      },
+      {
+       "internalType": "uint256",
+       "name": "cutoff",
+       "type": "uint256"
+      }
+     ],
+     "internalType": "struct AnchorElection.Option",
+     "name": "option",
+     "type": "tuple"
+    }
+   ],
+   "name": "registerOption",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "repToken",
+   "outputs": [
+    {
+     "internalType": "contract IPastVotes",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "proposers_",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "proposerFloorPpm_",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "maxOptions_",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "openAfterAttempts_",
+     "type": "uint256"
+    }
+   ],
+   "name": "setParams",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "substrate",
+   "outputs": [
+    {
+     "internalType": "contract ISubstrateAnchor",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  }
+ ]
+}

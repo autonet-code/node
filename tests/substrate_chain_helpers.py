@@ -75,10 +75,15 @@ def anchor_direct(
     *,
     sender: Optional[str] = None,
     gas: int = 3_000_000,
+    cutoff: Optional[int] = None,
 ):
     """Chain onto the current head and anchor from ``sender`` (default:
-    Substrate's governor). Returns the receipt."""
+    Substrate's governor). ``cutoff`` defaults to the head block's
+    timestamp (the anchoring block is later). Returns the receipt."""
     sender = sender or contract.functions.governor().call()
+    if cutoff is None:
+        cutoff = max(int(w3.eth.get_block("latest")["timestamp"]),
+                     int(contract.functions.latestCutoff().call()) + 1)
     tx = contract.functions.anchor(
         epoch_id,
         bytes(epoch_root),
@@ -87,6 +92,7 @@ def anchor_direct(
         agent_mint_cid,
         bytes(payload_hash),
         bytes(agent_mint_root),
+        int(cutoff),
     ).transact({"from": sender, "gas": gas})
     return w3.eth.wait_for_transaction_receipt(tx)
 
