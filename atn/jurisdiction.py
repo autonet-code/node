@@ -1,6 +1,8 @@
-"""Autonet jurisdiction constants — hardcoded network identity.
+"""Packaged jurisdiction constants — hardcoded network identity.
 
-These values define the Autonet jurisdiction on Etherlink Shadownet.
+These values define the default jurisdiction (the DAO a fresh install
+joins) on Etherlink Shadownet. Autonet is the automation branch it
+attaches, not the jurisdiction's name.
 The Governor address is the single root from which all other contract
 addresses are discovered at runtime via the contract discovery chain:
 

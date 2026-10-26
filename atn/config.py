@@ -165,13 +165,14 @@ class RPBConfig:
     and network participation.  All fields are optional — the framework
     works fully without any network participation.
 
-    Previously named AutonetConfig; "Autonet" is the first jurisdiction.
+    Previously named AutonetConfig. Autonet is the automation branch a
+    jurisdiction attaches, not a jurisdiction itself.
 
-    Defaults to the Autonet jurisdiction on Etherlink Shadownet.  The
+    Defaults to the packaged jurisdiction on Etherlink Shadownet.  The
     Governor address, RPC URL, and chain ID are hardcoded in
     ``atn.jurisdiction`` and used when no user override is provided.
     This means a fresh ``pip install autonet-computer`` connects to the
-    Autonet jurisdiction automatically — no configuration required for
+    packaged jurisdiction automatically — no configuration required for
     contract discovery.
     """
     enabled: bool = False               # Whether the autonet service starts
@@ -235,7 +236,7 @@ class RPBConfig:
     # Jurisdiction entry point — defaults from atn.jurisdiction
     dao_address: str = ""               # Defaults to jurisdiction.GOVERNOR_ADDRESS
     # RPB-specific fields
-    jurisdiction_id: str = "autonet"    # First jurisdiction
+    jurisdiction_id: str = "autonet"    # Registry key namespace (jurisdiction.<id>.*)
     rpb_contract_address: str = ""      # Legacy: pre-substrate RPB address (kept
                                         # so existing configs still parse). New
                                         # configs should use substrate_address.
