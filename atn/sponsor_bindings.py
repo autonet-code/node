@@ -87,6 +87,10 @@ class SponsorBindingStore:
         self._path = Path(data_dir) / "sponsor_bindings.json"
         Path(data_dir).mkdir(parents=True, exist_ok=True)
         self._bindings: dict[str, SponsorBinding] = {}
+        # Tokens held by requests in flight, per dependent (memory only):
+        # concurrent requests must share what is left, not each be clamped
+        # to all of it.
+        self._reserved: dict[str, int] = {}
         self._load()
 
     # ------------------------------------------------------------------
@@ -112,6 +116,38 @@ class SponsorBindingStore:
         if b is None:
             return 0
         return b.remaining()
+
+    def available(self, dependent_address: str) -> int:
+        """Remaining minus what requests in flight hold."""
+        b = self.get(dependent_address)
+        if b is None:
+            return 0
+        return max(0, b.remaining() - self._reserved.get(_norm(dependent_address), 0))
+
+    def reserve(self, dependent_address: str, tokens: int) -> bool:
+        """Hold ``tokens`` of a limited grant for one request; False when
+        they are not available. Unlimited bindings always succeed (and hold
+        nothing). Callers are on one event loop, so check-and-hold is
+        atomic."""
+        b = self.get(dependent_address)
+        if b is None:
+            return False
+        if b.unlimited:
+            return True
+        key = _norm(dependent_address)
+        tokens = max(0, int(tokens))
+        if tokens > self.available(dependent_address):
+            return False
+        self._reserved[key] = self._reserved.get(key, 0) + tokens
+        return True
+
+    def release(self, dependent_address: str, tokens: int) -> None:
+        key = _norm(dependent_address)
+        left = self._reserved.get(key, 0) - max(0, int(tokens))
+        if left > 0:
+            self._reserved[key] = left
+        else:
+            self._reserved.pop(key, None)
 
     # ------------------------------------------------------------------
     # Write

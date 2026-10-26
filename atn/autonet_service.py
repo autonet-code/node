@@ -567,16 +567,27 @@ class AutonetBridge:
             # the next request is refused. Cap the ceiling at what is actually
             # granted, and refuse outright when the prompt alone already
             # overruns the grant (rough 4-chars-per-token estimate).
+            # Concurrent requests share what is left: each reserves its worst
+            # case (prompt estimate + ceiling) before the call and releases it
+            # after, so two in flight can't each be clamped to all of it.
+            reservation = 0
             if not binding.unlimited:
-                rem = binding.remaining()
-                max_tokens = max(1, min(max_tokens, rem))
-                prompt_chars = sum(len(str(m)) for m in messages) + len(str(system))
-                if prompt_chars // 4 > rem:
-                    return {"error": "request exceeds remaining grant"}
+                rem = bindings.available(dependent)
+                prompt_tokens = (sum(len(str(m)) for m in messages)
+                                 + len(str(system))) // 4
+                if prompt_tokens >= rem:
+                    return {"error": "request exceeds remaining grant"
+                            if prompt_tokens >= binding.remaining()
+                            else "budget exhausted (held by requests in flight)"}
+                max_tokens = max(1, min(max_tokens, rem - prompt_tokens))
+                reservation = prompt_tokens + max_tokens
+                if not bindings.reserve(dependent, reservation):
+                    return {"error": "budget exhausted (held by requests in flight)"}
 
             # Resolve provider — use configured sponsor provider or auto-resolve
             provider = service._resolve_sponsor_provider(rpb_cfg, model)
             if provider is None:
+                bindings.release(dependent, reservation)
                 return {"error": "Sponsor node has no provider configured for this model"}
 
             # Convert tool dicts to ToolDefinition
@@ -634,6 +645,8 @@ class AutonetBridge:
             except Exception as e:
                 log.warning("Sponsor inference failed: %s", e)
                 return {"error": f"Sponsor inference failed: {e}"}
+            finally:
+                bindings.release(dependent, reservation)
 
         return _handle_sponsor_inference
 

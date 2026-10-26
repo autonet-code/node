@@ -257,7 +257,8 @@ def test_max_tokens_clamped_to_remaining_grant(tmp_path: Path):
         "max_tokens": 64000,
     }))
 
-    assert llm.calls[0]["max_tokens"] == 500
+    # Clamped to what is left after the prompt's own estimate.
+    assert 480 <= llm.calls[0]["max_tokens"] < 500
 
 
 def test_prompt_larger_than_grant_is_refused(tmp_path: Path):
@@ -291,3 +292,38 @@ def test_unlimited_binding_is_not_clamped(tmp_path: Path):
     }))
 
     assert llm.calls[0]["max_tokens"] == 64000
+
+
+def test_concurrent_requests_share_what_is_left(tmp_path: Path):
+    """Survey 2026-10-26: two requests in flight were each clamped to the
+    whole remaining grant, so together they could spend twice it. Each now
+    reserves its worst case; the sum of ceilings never exceeds the grant,
+    and the hold is released when a request finishes."""
+    gate = asyncio.Event()
+
+    class _SlowLLM(_RecordingLLM):
+        async def send(self, **kwargs):
+            self.calls.append(kwargs)
+            await gate.wait()
+            return await _FakeLLM.send(self, **kwargs)
+
+    llm = _SlowLLM()
+    bridge, store = _build_sponsor(tmp_path, llm)
+    store.add(DEPENDENT_ADDRESS, budget_tokens=500)
+    handler = bridge._create_sponsor_handler(bridge.config)
+    req = {"agent_address": DEPENDENT_ADDRESS,
+           "messages": [{"role": "user", "content": "hi"}], "max_tokens": 400}
+
+    async def run():
+        a = asyncio.create_task(handler(dict(req)))
+        b = asyncio.create_task(handler(dict(req)))
+        await asyncio.sleep(0.05)
+        held = store.available(DEPENDENT_ADDRESS)
+        gate.set()
+        return await a, await b, held
+
+    ra, rb, held = asyncio.run(run())
+    ceilings = sum(c["max_tokens"] for c in llm.calls)
+    assert ceilings <= 500
+    assert held < 500
+    assert store.available(DEPENDENT_ADDRESS) == store.remaining(DEPENDENT_ADDRESS)
