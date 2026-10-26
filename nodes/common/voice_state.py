@@ -91,6 +91,13 @@ _REP_ABI = [
 
 _VOICE_ABI = [
     {
+        "inputs": [{"internalType": "uint256", "name": "blockNumber", "type": "uint256"}],
+        "name": "atnTotalSupplyAt",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
         "inputs": [],
         "name": "deployedAt",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
@@ -748,22 +755,34 @@ def robot_policy(
 
 
 # ---------------------------------------------------------------------------
-# Epoch window (Decision 2026-10-26, items 1-3 and 7).
+# Epoch window (Decision 2026-10-26, items 1-4 and 7).
 #
-# The epoch being closed is the one after anchor N. Its batches are those
-# whose signed timestamp is after the previous epoch's cutoff and at or
-# before this one's: cutoff = base + length, where base is anchor N's
-# timestamp (Substrate.deployedAt before any anchor). An empty window slides
-# the cutoff forward one grace step at a time until a batch falls in it.
-# The cutoff each epoch closed at is part of its id, so the next window's
-# start is read from the chain (anchor N's epochId), not from local state.
+# Cutoffs run on their own schedule: epoch n+1 ends at epoch n's cutoff
+# plus its length (Substrate.deployedAt stands in for the cutoff before
+# epoch 1). Its batches are those signed after epoch n's cutoff and at or
+# before its own. An empty window slides the cutoff forward one grace step
+# at a time until a batch falls in it. Each epoch's cutoff is part of its
+# id, so the next window's start is read from the chain (the last anchor's
+# epochId), not from local state.
+#
+# The length is retargeted Bitcoin style from anchored history only: over
+# the last ``epoch_retarget_window`` anchors, the fees burned per second,
+# and the length at which one epoch burns ``epoch_target_share`` of the ATN
+# supply. Bounded below by one DAO proposal lifecycle (voting delay + voting
+# period + timelock delay: an epoch cannot be anchored faster) and above by
+# ``epoch_ceiling_votes`` voting periods, so a quiet network still pays out.
+# Every input is pinned to the last anchor's block, integer arithmetic.
 # ---------------------------------------------------------------------------
 
 EPOCH_RULE_DEFAULTS: Dict[str, int] = {
-    # Seconds added after the base. 0 = the epoch ends at the previous
-    # anchor's own timestamp, so an epoch lasts one anchor lifecycle (the
-    # floor, since one epoch is in flight at a time).
-    "epoch_length": 0,
+    # Share of the ATN supply one epoch should burn in fees, in parts per
+    # million. 0 = unset (set by the DAO at deployment): the length stays
+    # at the floor.
+    "epoch_target_share": 0,
+    # Anchors the retarget averages over.
+    "epoch_retarget_window": 4,
+    # Ceiling on the length, in voting periods.
+    "epoch_ceiling_votes": 10,
     # Seconds a daemon waits past the cutoff before closing, so batches
     # signed just before it can arrive.
     "epoch_grace": 120,
@@ -774,6 +793,36 @@ EPOCH_RULE_DEFAULTS: Dict[str, int] = {
 }
 
 EPOCH_ID_PREFIX = "epoch"
+SHARE_SCALE = 1_000_000
+
+_GOVERNOR_EVENTS_ABI = list((
+        {"anonymous": False, "type": "event", "name": "VotingDelaySet",
+         "inputs": [
+             {"indexed": False, "internalType": "uint256",
+              "name": "oldVotingDelay", "type": "uint256"},
+             {"indexed": False, "internalType": "uint256",
+              "name": "newVotingDelay", "type": "uint256"}]},
+        {"anonymous": False, "type": "event", "name": "VotingPeriodSet",
+         "inputs": [
+             {"indexed": False, "internalType": "uint256",
+              "name": "oldVotingPeriod", "type": "uint256"},
+             {"indexed": False, "internalType": "uint256",
+              "name": "newVotingPeriod", "type": "uint256"}]},
+        {"anonymous": False, "type": "event", "name": "TimelockChange",
+         "inputs": [
+             {"indexed": False, "internalType": "address",
+              "name": "oldTimelock", "type": "address"},
+             {"indexed": False, "internalType": "address",
+              "name": "newTimelock", "type": "address"}]},
+))
+_TIMELOCK_EVENTS_ABI = [
+    {"anonymous": False, "type": "event", "name": "MinDelayChange",
+     "inputs": [
+         {"indexed": False, "internalType": "uint256",
+          "name": "oldDuration", "type": "uint256"},
+         {"indexed": False, "internalType": "uint256",
+          "name": "newDuration", "type": "uint256"}]},
+]
 
 
 def epoch_rule_params(
@@ -781,8 +830,8 @@ def epoch_rule_params(
     jurisdiction_id: str = "autonet",
 ) -> Dict[str, int]:
     """The governed epoch rules in force at ``block`` (Registry keys
-    ``jurisdiction.<id>.epoch_length`` / ``epoch_grace`` / ``epoch_skew``,
-    whole seconds). Unset, malformed or negative values fall back to the
+    ``jurisdiction.<id>.<name>`` for each ``EPOCH_RULE_DEFAULTS`` name,
+    whole numbers). Unset, malformed or negative values fall back to the
     defaults; ``block`` None (no anchor yet) means the defaults."""
     writes = _last_writes(records, int(block)) if block is not None else {}
     out: Dict[str, int] = {}
@@ -814,40 +863,143 @@ def epoch_id_cutoff(epoch_id: str) -> Optional[int]:
         return None
 
 
+def governor_lifecycle(
+    w3: Any, governor_address: str, block: Optional[int],
+    start_block: Optional[int] = None,
+) -> Dict[str, int]:
+    """{voting_delay, voting_period, min_delay} in seconds (the DAO clock
+    is timestamp mode) as of ``block`` (None = latest), rebuilt from the
+    governor's and timelock's settings events: they fire at construction
+    and on every change, so no archive read is needed. Zeros when no
+    governor is configured (a dev network anchoring from an EOA)."""
+    out = {"voting_delay": 0, "voting_period": 0, "min_delay": 0}
+    if not governor_address:
+        return out
+    from web3 import Web3
+
+    to_block = int(block) if block is not None else int(w3.eth.block_number)
+    gov = w3.eth.contract(address=Web3.to_checksum_address(governor_address),
+                          abi=_GOVERNOR_EVENTS_ABI)
+
+    def _last(event, address, field):
+        logs = sorted(
+            _get_logs(event, w3, address, to_block, start_block),
+            key=lambda log: (int(log["blockNumber"]), int(log["logIndex"])))
+        return logs[-1]["args"][field] if logs else None
+
+    delay = _last(gov.events.VotingDelaySet, gov.address, "newVotingDelay")
+    period = _last(gov.events.VotingPeriodSet, gov.address, "newVotingPeriod")
+    timelock = _last(gov.events.TimelockChange, gov.address, "newTimelock")
+    out["voting_delay"] = int(delay or 0)
+    out["voting_period"] = int(period or 0)
+    if timelock and str(timelock).lower() != _ZERO:
+        tl = w3.eth.contract(address=Web3.to_checksum_address(timelock),
+                             abi=_TIMELOCK_EVENTS_ABI)
+        out["min_delay"] = int(
+            _last(tl.events.MinDelayChange, tl.address, "newDuration") or 0)
+    return out
+
+
+def retarget_length(
+    *, floor: int, ceiling: int, target_share_ppm: int,
+    span_seconds: int, burned: int, supply: int,
+) -> int:
+    """Epoch length (seconds) at which one epoch burns the target share of
+    the supply, given ``burned`` fees over ``span_seconds`` of anchored
+    history. Integer arithmetic, so every daemon gets the same number.
+
+    Unset target => the floor. No fees burned (or no history) => the
+    ceiling: a quiet network still closes epochs. Always within
+    [floor, max(floor, ceiling)]."""
+    floor = max(0, int(floor))
+    ceiling = max(floor, int(ceiling))
+    if target_share_ppm <= 0:
+        return floor
+    if burned <= 0 or span_seconds <= 0 or supply <= 0:
+        return ceiling
+    length = (int(target_share_ppm) * int(supply) * int(span_seconds)) // (
+        SHARE_SCALE * int(burned))
+    return max(floor, min(ceiling, length))
+
+
 def epoch_window(contract: Any, anchor_count: int, anchor: Any,
                  records: List[Dict[str, Any]],
-                 jurisdiction_id: str = "autonet") -> Dict[str, Any]:
+                 jurisdiction_id: str = "autonet", *,
+                 lifecycle: Optional[Dict[str, int]] = None,
+                 history: Optional[List[Any]] = None,
+                 supply: int = 0) -> Dict[str, Any]:
     """The window of the epoch after anchor ``anchor_count``.
 
     ``anchor`` is ``getAnchor(anchor_count - 1)`` (None at genesis);
-    ``records`` the DAO Registry writes (empty when none is configured).
-    Returns {number, prev_root, base, start, length, grace, skew}: the
-    epoch's number, the hex root of the anchor before it, the timestamp the
-    length counts from, the previous cutoff (None at genesis), and the
-    governed rules pinned to that anchor."""
+    ``records`` the DAO Registry writes (empty when none is configured);
+    ``lifecycle`` the governor settings at the anchor block
+    (``governor_lifecycle``); ``history`` the anchors the retarget reads,
+    oldest first, ending with ``anchor``; ``supply`` the ATN supply at the
+    anchor block. Returns {number, prev_root, start, base, length, floor,
+    ceiling, grace, skew}: the epoch number, the hex root of the anchor
+    before it, the previous cutoff (None at genesis), the time the length
+    counts from, the retargeted length and its bounds, and the rules."""
+    deployed_at = int(contract.functions.deployedAt().call())
+    lc = lifecycle or {}
     if anchor_count == 0 or anchor is None:
-        base = int(contract.functions.deployedAt().call())
         start = None
+        base = deployed_at
         prev_root = "00" * 32
         params = epoch_rule_params([], None, jurisdiction_id)
     else:
-        base = int(anchor[8])
         prev_root = bytes(anchor[1]).hex()
         params = epoch_rule_params(records, int(anchor[7]), jurisdiction_id)
         start = epoch_id_cutoff(str(anchor[0]))
         if start is None:
             # An anchor from before epoch ids carried a cutoff: nothing
             # signed before it can still be pending.
-            start = base
+            start = int(anchor[8])
+        base = start
+    floor = (int(lc.get("voting_delay", 0)) + int(lc.get("voting_period", 0))
+             + int(lc.get("min_delay", 0)))
+    ceiling = params["epoch_ceiling_votes"] * int(lc.get("voting_period", 0))
+    burned, span = 0, 0
+    if history:
+        window = params["epoch_retarget_window"]
+        recent = list(history)[-window:] if window > 0 else []
+        burned = sum(int(a[10]) for a in recent)
+        first_ts = (int(history[-window - 1][8])
+                    if window > 0 and len(history) > window else deployed_at)
+        span = int(history[-1][8]) - first_ts
+    length = retarget_length(
+        floor=floor, ceiling=ceiling,
+        target_share_ppm=params["epoch_target_share"],
+        span_seconds=span, burned=burned, supply=int(supply))
     return {
         "number": int(anchor_count) + 1,
         "prev_root": prev_root,
-        "base": base,
         "start": start,
-        "length": params["epoch_length"],
+        "base": base,
+        "length": length,
+        "floor": floor,
+        "ceiling": max(floor, ceiling),
         "grace": params["epoch_grace"],
         "skew": params["epoch_skew"],
     }
+
+
+def _window_after(w3: Any, contract: Any, anchor_count: int, anchor: Any,
+                  records: List[Dict[str, Any]], jurisdiction_id: str,
+                  governor_address: str,
+                  start_block: Optional[int]) -> Dict[str, Any]:
+    """``epoch_window`` with its chain inputs read, all pinned to the last
+    anchor's block."""
+    block = int(anchor[7])
+    params = epoch_rule_params(records, block, jurisdiction_id)
+    window = params["epoch_retarget_window"]
+    first = max(0, anchor_count - window - 1)
+    history = [contract.functions.getAnchor(i).call()
+               for i in range(first, anchor_count - 1)] + [anchor]
+    return epoch_window(
+        contract, anchor_count, anchor, records, jurisdiction_id,
+        lifecycle=governor_lifecycle(w3, governor_address, block, start_block),
+        history=history,
+        supply=int(contract.functions.atnTotalSupplyAt(block).call()))
 
 
 def sanctioned_households(
@@ -875,6 +1027,7 @@ def read_voice_state(
     anchor_index: Optional[int] = None,
     jurisdiction_id: str = "autonet",
     deploy_block: Optional[int] = None,
+    governor_address: str = "",
 ) -> Dict[str, Any]:
     """Read {owner_map, voice_weights, rep_shares, rep_supply, supply,
     snapshot_block, emission_pool, recycled, weight_source,
@@ -928,7 +1081,10 @@ def read_voice_state(
     if anchor_count == 0:
         # No agreed snapshot yet (epoch 1): no voices, empty fees-only pool.
         return {
-            "epoch_window": epoch_window(contract, 0, None, [], jurisdiction_id),
+            "epoch_window": epoch_window(
+                contract, 0, None, [], jurisdiction_id,
+                lifecycle=governor_lifecycle(
+                    w3, governor_address, None, start)),
             "owner_map": {},
             "voice_weights": {},
             "rep_shares": {},
@@ -1095,8 +1251,9 @@ def read_voice_state(
     review_snapshot["supply"] = int(supply)
 
     return {
-        "epoch_window": epoch_window(
-            contract, anchor_count, anchor, reg_records, jurisdiction_id),
+        "epoch_window": _window_after(
+            w3, contract, anchor_count, anchor, reg_records, jurisdiction_id,
+            governor_address, start),
         "owner_map": owner_map,
         "voice_weights": voice_weights,
         # Raw rep share per household (un-floored) + supply alias.

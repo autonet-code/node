@@ -946,11 +946,15 @@ class AutonetService:
             # (docs/multi_jurisdiction.md decision 5).
             dao_registry_addr = getattr(bc, "dao_registry_address", "") or ""
             deploy_block = int(getattr(bc, "deploy_block", 0) or 0) or None
+            # The DAO Governor: its proposal lifecycle bounds the epoch
+            # length (Decision 2026-10-26, item 4).
+            governor_addr = getattr(bc, "governor_address", "") or ""
         except Exception:
             substrate_addr, rpc_url, rep_token_addr = "", "", ""
             tool_bond_addr = ""
             dao_registry_addr = ""
             deploy_block = None
+            governor_addr = ""
         if substrate_addr and rpc_url:
             def _voice_source():
                 from .common.voice_state import read_voice_state
@@ -959,6 +963,7 @@ class AutonetService:
                     tool_bond_address=tool_bond_addr,
                     dao_registry_address=dao_registry_addr,
                     deploy_block=deploy_block,
+                    governor_address=governor_addr,
                 )
 
             self._federated_close_driver.voice_source = _voice_source

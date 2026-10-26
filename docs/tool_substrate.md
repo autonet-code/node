@@ -625,6 +625,56 @@ fired, and the proposer from each daemon's own list of senders.
 - Known gap until item 6: if an epoch's anchor never lands, the network
   waits. Item 6's retry and vote rules resolve it.
 
+**Item 4 BUILT, cutoffs on their own schedule** (same branch, 2026-10-26).
+The governance lag is now separate from the epoch schedule:
+- Each cutoff is the previous cutoff plus the length, starting from
+  `deployedAt`. A slow anchor no longer stretches the next epoch;
+  closing epoch n+1 just waits for anchor n.
+- The length is retargeted from the last `epoch_retarget_window` anchors
+  (default 4): the fees burned per second over that span (the anchors'
+  `windowBurned`), against `epoch_target_share` (parts per million of
+  the ATN supply, `atnTotalSupplyAt` at the last anchor's block).
+  Integer arithmetic.
+- The floor is one DAO proposal lifecycle: voting delay + voting period
+  + timelock delay, rebuilt from the governor's `VotingDelaySet` /
+  `VotingPeriodSet` / `TimelockChange` and the timelock's
+  `MinDelayChange` logs up to the anchor block.
+- The ceiling is `epoch_ceiling_votes` (default 10) voting periods.
+- No fees burned gives the ceiling. An unset target share (0, the
+  default until set at deployment) gives the floor.
+- The `epoch_length` key is gone.
+
+**Open (not decided): bundled anchors.** The idea is one proposal
+anchoring every closed but unanchored epoch, so a failed proposal never
+cascades. Two read-only reviews (2026-10-26) both advise against it for
+now. Three values come from the anchor transaction itself, so for every
+entry after the first in a bundle they are unknown when daemons close:
+- the fee pool (`windowBurned` = burns since the previous anchor; in a K
+  call bundle, entry 2 takes all the backlog fees and entries 3+ get 0);
+- `prevAnchorHash` (it includes the previous anchor's block number);
+- the per-anchor REP snapshot.
+
+A real bundle would need:
+- an `anchorBatch` that chains its entries internally;
+- a cumulative burn checkpoint by timestamp (about 5-20k gas on every
+  `payForService`), so each epoch's pool is the fees burned between
+  cutoffs (an economics change);
+- every close input pinned to the cutoff's finalized block instead of
+  an anchor;
+- ToolBond's review epochs (keyed on `anchorCount`) changed in lockstep
+  in trustless-contracts;
+- a cap on bundle size (about 0.5M gas per entry).
+
+A disagreement in epoch j still sinks every entry after j, since each
+builds on the one before. The cheaper fix both reviews recommend is
+**superseding re-close**: when an epoch's proposal is Defeated or
+Expired, every daemon re-closes that epoch from the same previous cutoff
+to a later one, so it holds the stalled batches plus newer ones and gets
+a new id (so a new proposal id), with every input still pinned to the
+last agreed anchor. That needs no contract change, gives no cascade, and
+clears any backlog in one lifecycle. The cost is one longer epoch. This
+is the planned item 6 retry.
+
 Rollout: these are `epoch_rules` version `"2"` (the existing Registry key).
 Daemons on this build refuse `"1"`; the jurisdiction switches by one DAO
 proposal, after the owner confirms the whole loop on local hardhat.
