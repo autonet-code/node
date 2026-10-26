@@ -46,6 +46,7 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 ///      bool returns are checked only defensively.
 interface ISubstrate {
     function isRegistered(address agent) external view returns (bool);
+    function isLive(address agent) external view returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
     function payForService(address recipient, uint256 amount, bytes32 requestId)
@@ -100,7 +101,9 @@ contract ServiceRegistry {
     }
 
     modifier onlyAgent() {
-        if (!substrate.isRegistered(msg.sender)) revert NotRegisteredAgent();
+        // Live, not just registered: a revoked agent (or one under a revoked
+        // ancestor) may not list or change services.
+        if (!substrate.isLive(msg.sender)) revert NotRegisteredAgent();
         _;
     }
 

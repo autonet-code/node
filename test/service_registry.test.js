@@ -35,6 +35,15 @@ describe("ServiceRegistry", function () {
     expect(await registry.serviceCount()).to.equal(1n);
   });
 
+  it("a revoked agent cannot register a service", async function () {
+    // Self-owned: the agent's own wallet revokes it.
+    await substrate.connect(provider).revokeAgent(provider.address, "0x");
+    expect(await substrate.isLive(provider.address)).to.equal(false);
+    await expect(
+      registry.connect(provider).registerService(digest("s"), 1n)
+    ).to.be.revertedWithCustomError(registry, "NotRegisteredAgent");
+  });
+
   it("non-agent cannot register a service", async function () {
     await expect(
       registry.connect(stranger).registerService(digest("s"), 1n)

@@ -55,6 +55,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///      verified owner wallet), NOT on a self-declared field.
 interface ISubstrateVault {
     function isRegistered(address agent) external view returns (bool);
+    function isLive(address agent) external view returns (bool);
     function getAgentOwner(address agent) external view returns (address);
 }
 
@@ -263,7 +264,8 @@ contract VentureVault is ReentrancyGuard {
         if (prospectusDigest_ == bytes32(0)) revert ZeroAddress();
 
         ISubstrateVault sub = ISubstrateVault(substrateAddr);
-        if (!sub.isRegistered(agentAddr)) revert AgentNotRegistered();
+        // Live, not just registered: no venture for a revoked agent.
+        if (!sub.isLive(agentAddr)) revert AgentNotRegistered();
         address o = sub.getAgentOwner(agentAddr);
         if (o == address(0)) revert AgentOwnerUnset();
 
@@ -349,7 +351,8 @@ contract VentureVault is ReentrancyGuard {
         if (block.timestamp > trialDeadline) revert DeadlinePassed();
         if (trials[msg.sender].attested) revert AlreadyAttested();
 
-        if (!substrate.isRegistered(msg.sender)) revert VerifierNotRegistered();
+        // A revoked agent's trial attestation counts for nothing.
+        if (!substrate.isLive(msg.sender)) revert VerifierNotRegistered();
         address vowner = substrate.getAgentOwner(msg.sender);
         if (vowner == address(0)) revert VerifierOwnerUnset();
         if (vowner == agentOwner) revert VerifierIsVentureOwner();
