@@ -318,6 +318,7 @@ class ServiceProvider(Provider):
             request_id=proof.get("request_id", ""),
             client_address=self._client_address,
             endpoint=self._endpoint,
+            payer_key=self._owner_key,
             **kwargs,
         )
         # Cache the resolved endpoint for subsequent calls.

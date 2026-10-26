@@ -1266,7 +1266,8 @@ class TestInvokeServicePayment:
 
         verified: list[str] = []
 
-        async def _verify(self, *, request_id, recipient, min_amount, tx_hash):
+        async def _verify(self, *, request_id, recipient, min_amount, tx_hash,
+                          payer=None):
             verified.append(recipient)
             return {"verified": True}
 

@@ -89,6 +89,25 @@ def _patch_chain(monkeypatch, *, verify=None, voucher=None):
                         _verify_voucher)
 
 
+PAYER_KEY = "0x" + "11" * 32
+
+
+def _payer() -> str:
+    from eth_account import Account
+    return Account.from_key(PAYER_KEY).address
+
+
+def _signed(req: dict, record, key: str = PAYER_KEY) -> dict:
+    """A direct-path request signed by the paying key, as a buyer sends it."""
+    from atn.service_client import sign_request
+    provider = record.spec.get("author_pubkey") or PROVIDER_ADDR
+    try:
+        sig = sign_request(key, req["request_id"], record.digest, {}, provider)
+    except ValueError:
+        return dict(req)   # a malformed id the gate refuses before any signature
+    return {**req, "payer_signature": sig}
+
+
 # ---------------------------------------------------------------------------
 # Direct payForService path
 # ---------------------------------------------------------------------------
@@ -104,7 +123,7 @@ class TestDirectPath:
         server = WebSocketBridge(rt)
 
         out = await server._validate_service_payment(
-            {"tx_hash": "0x" + "ab" * 32, "request_id": "0x" + "01" * 32},
+            _signed({"tx_hash": "0x" + "ab" * 32, "request_id": "0x" + "01" * 32}, record),
             record)
         assert out["ok"] is True, out
         # Replay guard consumed the request_id.
@@ -120,7 +139,7 @@ class TestDirectPath:
         server = WebSocketBridge(rt)
 
         out = await server._validate_service_payment(
-            {"tx_hash": "0xabc", "request_id": "0x" + "02" * 32}, record)
+            _signed({"tx_hash": "0xabc", "request_id": "0x" + "02" * 32}, record), record)
         assert out["ok"] is False
         assert "min_amount" in out["reason"]
         # A rejected request_id is NOT consumed (payer can retry with a fix).
@@ -136,7 +155,7 @@ class TestDirectPath:
         server = WebSocketBridge(rt)
 
         out = await server._validate_service_payment(
-            {"tx_hash": "0xabc", "request_id": "0x" + "03" * 32}, record)
+            _signed({"tx_hash": "0xabc", "request_id": "0x" + "03" * 32}, record), record)
         assert out["ok"] is False
         assert "matched" in out["reason"] or "recipient" in out["reason"]
 
@@ -150,12 +169,12 @@ class TestDirectPath:
 
         rid = "0x" + "04" * 32
         first = await server._validate_service_payment(
-            {"tx_hash": "0xabc", "request_id": rid}, record)
+            _signed({"tx_hash": "0xabc", "request_id": rid}, record), record)
         assert first["ok"] is True
         # Second time with the SAME request_id -> replay rejected, even though
         # the (patched) chain would still verify it.
         second = await server._validate_service_payment(
-            {"tx_hash": "0xabc", "request_id": rid}, record)
+            _signed({"tx_hash": "0xabc", "request_id": rid}, record), record)
         assert second["ok"] is False
         assert "replay" in second["reason"]
 
@@ -167,7 +186,7 @@ class TestDirectPath:
         server = WebSocketBridge(rt)
 
         out = await server._validate_service_payment(
-            {"tx_hash": "0xabc", "request_id": "0x" + "05" * 32}, record)
+            _signed({"tx_hash": "0xabc", "request_id": "0x" + "05" * 32}, record), record)
         assert out["ok"] is False
         assert "provider address" in out["reason"]
 
@@ -298,7 +317,7 @@ class TestEdgeCases:
         assert "not configured" in out["reason"] or "dev" in out["reason"]
         # The remote listener fails closed instead (payment is the credential).
         remote = await server._validate_service_payment(
-            {"tx_hash": "0xabc", "request_id": "0xdead"}, record)
+            _signed({"tx_hash": "0xabc", "request_id": "0xdead"}, record), record)
         assert remote["ok"] is False and "cannot verify" in remote["reason"]
 
     @pytest.mark.asyncio
@@ -360,13 +379,13 @@ class TestSurveyHoles:
         server = WebSocketBridge(rt)
         rid = "0x" + "07" * 32
         first = await server._validate_service_payment(
-            {"tx_hash": "0xabc", "request_id": rid}, record)
+            _signed({"tx_hash": "0xabc", "request_id": rid}, record), record)
         assert first["ok"] is True
         # The chain pads or cuts to 32 bytes, so these all name one payment.
         for spelling in (rid + "0", rid + "00", rid.upper().replace("0X", "0x"),
                          rid.removeprefix("0x"), "0xab"):
             out = await server._validate_service_payment(
-                {"tx_hash": "0xabc", "request_id": spelling}, record)
+                _signed({"tx_hash": "0xabc", "request_id": spelling}, record), record)
             assert out["ok"] is False, spelling
 
     @pytest.mark.asyncio
@@ -383,13 +402,46 @@ class TestSurveyHoles:
             return {"verified": True, "reason": "ok"}
         monkeypatch.setattr(oc.OnChainService, "verify_service_payment", slow_verify)
         server = WebSocketBridge(rt)
-        req = {"tx_hash": "0xabc", "request_id": "0x" + "08" * 32}
+        req = _signed({"tx_hash": "0xabc", "request_id": "0x" + "08" * 32}, record)
         a = asyncio.create_task(server._validate_service_payment(dict(req), record))
         b = asyncio.create_task(server._validate_service_payment(dict(req), record))
         await asyncio.sleep(0.05)
         gate.set()
         results = await asyncio.gather(a, b)
         assert sorted(r["ok"] for r in results) == [False, True]
+
+    @pytest.mark.asyncio
+    async def test_only_the_payer_redeems_its_payment(self, tmp_path, monkeypatch):
+        """A request id read off the chain is worthless without the payer's
+        key: unsigned requests are refused, and the gate checks the payment
+        against whoever signed (the chain says who paid)."""
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt)
+        seen_payers: list = []
+
+        async def _verify(self, *, request_id, recipient, min_amount,
+                          tx_hash=None, payer=None):
+            seen_payers.append(payer)
+            if payer != _payer():
+                return {"verified": False, "reason": "payer mismatch"}
+            return {"verified": True, "reason": "ok"}
+
+        monkeypatch.setattr(oc.OnChainService, "verify_service_payment", _verify)
+        server = WebSocketBridge(rt)
+        rid = "0x" + "0a" * 32
+        unsigned = await server._validate_service_payment(
+            {"tx_hash": "0xabc", "request_id": rid}, record)
+        assert unsigned["ok"] is False and "signature" in unsigned["reason"]
+        thief = await server._validate_service_payment(
+            _signed({"tx_hash": "0xabc", "request_id": rid}, record,
+                    key="0x" + "22" * 32), record)
+        assert thief["ok"] is False
+        # The thief's attempt did not burn the payer's request id.
+        assert not rt.service_store.has_served_request(rid)
+        owner = await server._validate_service_payment(
+            _signed({"tx_hash": "0xabc", "request_id": rid}, record), record)
+        assert owner["ok"] is True
+        assert seen_payers[-1] == _payer()
 
     @pytest.mark.asyncio
     async def test_voucher_beyond_the_deposit_is_refused(self, tmp_path, monkeypatch):

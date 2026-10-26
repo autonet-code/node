@@ -5073,6 +5073,10 @@ class WebSocketBridge:
         }
         if tx_hash:
             frame["tx_hash"] = tx_hash
+            key = self._owner_signing_key()
+            if key:
+                frame["payer_signature"] = service_client.sign_request(
+                    key, request_id, record.digest, args, recipient)
         # The owner buying from their own daemon: `_pay_for_invoke` already
         # degraded open in the same no-chain condition, so the gate must
         # match or the owner pays nothing and is then refused.
@@ -5169,6 +5173,7 @@ class WebSocketBridge:
             tx_hash=tx_hash, request_id=request_id,
             client_address=self._owner_client_address(),
             endpoint=str(endpoint or ""),
+            payer_key=self._owner_signing_key() or "",
         )
         return self._invoke_result(
             {"ok": bool(reply.get("ok")), "result": reply.get("result"),
@@ -5379,6 +5384,23 @@ class WebSocketBridge:
                 return {"ok": False,
                         "reason": "service has no on-chain provider address "
                                   "(author_pubkey) to verify payment against"}
+            # Only the payer may redeem its payment: the request must be
+            # signed by the key that paid (service_client.sign_request). A
+            # request id copied off the chain carries no such signature.
+            from .service_client import recover_request_signer
+            sig = str(request.get("payer_signature") or "").strip()
+            if not sig:
+                return {"ok": False,
+                        "reason": "unsigned request: a paid request must carry "
+                                  "the payer's signature (payer_signature)"}
+            try:
+                payer = recover_request_signer(
+                    sig, request_id,
+                    str(request.get("spec_digest") or record.digest),
+                    request.get("args") if isinstance(request.get("args"), dict)
+                    else {}, recipient)
+            except Exception:
+                return {"ok": False, "reason": "payer_signature is malformed"}
             # Reserved while the chain is read, so two copies of one request
             # sent at once cannot both pass the replay check.
             inflight.add(request_id)
@@ -5395,6 +5417,7 @@ class WebSocketBridge:
                     recipient=recipient,
                     min_amount=ask_amount,
                     tx_hash=tx_hash,
+                    payer=payer,
                 ))
                 if not res.get("verified"):
                     return {"ok": False, "reason": res.get("reason", "unverified")}

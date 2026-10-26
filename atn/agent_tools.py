@@ -3641,6 +3641,11 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     defn = runtime.get_agent(caller_id) if caller_id else None
     client_addr = (defn.identity.address
                    if defn and defn.identity else "")
+    # The payment came from this agent's key (pay_for_service): sign the
+    # request with it so the provider can tell the payer from a copier.
+    payer_key = ""
+    if caller_id and not is_owner_caller(caller_id):
+        payer_key = runtime.registry.get_agent_key(caller_id) or ""
 
     return await service_client.request_service(
         runtime._config.rpb,
@@ -3650,6 +3655,7 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
         tx_hash=tx_hash,
         request_id=request_id,
         client_address=client_addr,
+        payer_key=payer_key,
     )
 
 

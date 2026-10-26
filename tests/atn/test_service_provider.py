@@ -78,7 +78,7 @@ class _Recorder:
     async def request_service(self, config, provider_address, spec_digest,
                               args, *, tx_hash="", request_id="",
                               client_address="", endpoint="",
-                              timeout=None):  # noqa: ARG002
+                              timeout=None, payer_key=""):  # noqa: ARG002
         self.request_calls.append({
             "provider_address": provider_address,
             "spec_digest": spec_digest,

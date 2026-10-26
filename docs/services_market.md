@@ -323,6 +323,17 @@ were two different keys, and **one payment bought two real inferences**
 bookkeeping: with pre-auth dispatch it is the whole of the access
 control, and any spelling it fails to collapse is free work.
 
+The receipt alone also did not say who may redeem it: a `request_id` read
+off the chain (the `ServicePayment` event is public) could be sent by
+anyone before the payer, who then got "replay". Since 2026-10-26 a paid
+request carries `payer_signature`: the paying key's signature over
+keccak(`autonet:service_request:v1`, request id, spec digest, sha256 of
+the args' canonical JSON, provider address)
+(`service_client.sign_request`). The gate recovers the signer and
+requires it to be the event's payer, so a copied id is worthless and the
+args are bound to the payment. Unsigned paid requests are refused. A
+failed signature check does not consume the id.
+
 ### 4. Reviews (SPECIFIED, NOT BUILT)
 
 Nothing below this paragraph is implemented. There is no review event,

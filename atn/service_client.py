@@ -34,6 +34,54 @@ import time
 import uuid
 from typing import Any
 
+# The buyer signs each paid request with the key that paid for it, so the
+# provider serves a payment only to its payer: a request id read off the
+# chain is worthless without that key, and the signature binds the args.
+REQUEST_AUTH_DOMAIN = "autonet:service_request:v1"
+
+
+def request_auth_hash(request_id: str, spec_digest: str,
+                      args: dict[str, Any], provider: str) -> bytes:
+    """keccak over (domain, request id, spec digest, sha256 of the args'
+    canonical JSON, provider address): what the payer signs."""
+    import hashlib
+
+    from eth_abi import encode
+    from eth_utils import keccak, to_checksum_address
+
+    rid_hex = str(request_id).lower().removeprefix("0x")
+    if len(rid_hex) > 64:
+        raise ValueError("request_id longer than 32 bytes")
+    rid = bytes.fromhex(rid_hex.rjust(64, "0"))
+    args_hash = hashlib.sha256(json.dumps(
+        args, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False).encode("utf-8")).digest()
+    return keccak(encode(
+        ["string", "bytes32", "string", "bytes32", "address"],
+        [REQUEST_AUTH_DOMAIN, rid, str(spec_digest), args_hash,
+         to_checksum_address(provider)]))
+
+
+def sign_request(private_key: str, request_id: str, spec_digest: str,
+                 args: dict[str, Any], provider: str) -> str:
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    msg = encode_defunct(primitive=request_auth_hash(
+        request_id, spec_digest, args, provider))
+    key = private_key if private_key.startswith("0x") else "0x" + private_key
+    return "0x" + bytes(Account.sign_message(msg, key).signature).hex()
+
+
+def recover_request_signer(signature: str, request_id: str, spec_digest: str,
+                           args: dict[str, Any], provider: str) -> str:
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    msg = encode_defunct(primitive=request_auth_hash(
+        request_id, spec_digest, args, provider))
+    return Account.recover_message(msg, signature=signature)
+
 log = logging.getLogger(__name__)
 
 # Default wait for a provider daemon's reply to a service_request.
@@ -108,6 +156,7 @@ async def request_service(
     client_address: str = "",
     timeout: float = DEFAULT_REQUEST_TIMEOUT,
     endpoint: str = "",
+    payer_key: str = "",
 ) -> dict[str, Any]:
     """Cross-daemon ``service_request``: resolve endpoint, dial, send, read.
 
@@ -150,8 +199,11 @@ async def request_service(
         "client_address": client_address,
     }
     if tx_hash:
-        # Payment proof (direct payForService path).
+        # Payment proof (direct payForService path), signed by the payer.
         frame["tx_hash"] = tx_hash
+        if payer_key and request_id:
+            frame["payer_signature"] = sign_request(
+                payer_key, request_id, spec_digest, args, provider_address)
 
     try:
         async with websockets.connect(endpoint, open_timeout=10) as ws:
