@@ -753,6 +753,8 @@ class WorkerHost:
         # close that gap (heavier); the piggyback is the light correct option.
         sstats = payload.get("session_stats")
         if isinstance(sstats, dict):
+            # The SDK session this run ended on, for the next run's resume.
+            self.last_session_id = str(sstats.get("session_id") or "")
             try:
                 pmgr = getattr(self._engine, "provider_manager", None)
                 cache = getattr(pmgr, "_cached_session_stats", None)

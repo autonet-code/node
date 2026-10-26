@@ -449,6 +449,17 @@ class ExecutionEngine:
         # _booked_by_execution tally is authoritative (P0 risk #1).
         async def _on_done(status: ExecutionStatus, error: str | None,
                            tool_calls: list) -> None:
+            # Resume the worker's SDK session next run (survey 2026-10-26: a
+            # worker's provider is rebuilt every run, so the session id it
+            # ended on never reached the daemon-side provider, every run
+            # started a fresh session and the prompt cache went cold). An
+            # imported Claude Code session keeps its own id.
+            _sid = getattr(host, "last_session_id", "")
+            if _sid and not getattr(defn, "claude_session", None):
+                try:
+                    provider._session_id = _sid
+                except Exception:   # noqa: BLE001 — a provider without one
+                    pass
             # The in-process path records the reply right after
             # run_agent_loop; the worker path must do it here, or the UI's
             # history reload drops the reply it just streamed.

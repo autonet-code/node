@@ -322,3 +322,38 @@ async def test_flag_off_never_eligible(bus, tmp_path):
     defn = _cog_defn("cog-off")
     prov = _api_provider()
     assert rt.engine._worker_eligible(defn, prov) is False
+
+
+@pytest.mark.asyncio
+async def test_worker_run_hands_its_sdk_session_to_the_next_run(bus, tmp_path):
+    """Survey 2026-10-26: a worker's provider is rebuilt every run, so the
+    session it ended on never reached the daemon side and every run started
+    a fresh SDK session (cold prompt cache). The run's session_stats now
+    carry it back: the next manifest resumes it."""
+    rt = _make_runtime(bus, tmp_path, isolation=True)
+    defn = _cog_defn("cog-sess")
+    await rt.register_agent(defn)
+    await rt.activate_agent(defn.id)
+    prov = _api_provider()
+    rt.engine.provider_manager._active_providers[defn.id] = prov
+
+    done_payload = {
+        "status": "completed", "error": None,
+        "output": {"result": "ok", "tokens_used": 1,
+                   "usage": {"input_tokens": 1, "output_tokens": 0,
+                             "cache_read_tokens": 0,
+                             "cache_creation_tokens": 0}},
+        "token_usage": {}, "tool_calls": [], "streamed_text": True,
+        "session_stats": {"session_id": "sdk-session-1"},
+    }
+    mgr = _FakeWorkerManager(done_payload)
+    rt.engine._worker_mgr = mgr
+    rt.supervisor._worker_manager = mgr
+
+    await rt.trigger_run(defn.id, source="test")
+    await asyncio.wait(list(rt.engine._tasks.values()), timeout=10)
+    assert getattr(prov, "_session_id", "") == "sdk-session-1"
+
+    await rt.trigger_run(defn.id, source="test")
+    await asyncio.wait(list(rt.engine._tasks.values()), timeout=10)
+    assert mgr.manifest["session_id"] == "sdk-session-1"
