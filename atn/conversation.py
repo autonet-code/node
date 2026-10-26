@@ -133,6 +133,18 @@ class ConversationStore:
             return [], total
         return list(self._turns[start:end]), total
 
+    def get_turns_before(self, before: int | None, limit: int = 50
+                         ) -> tuple[list[ConversationTurn], int, int]:
+        """Return up to ``limit`` turns ending just before position
+        ``before`` (an index from the START, so it stays put while new turns
+        are appended; None = the newest). Returns (turns_oldest_first,
+        start index of the page, total). Paging by ``offset`` from the end
+        shifted under every new turn and repeated or skipped turns."""
+        total = len(self._turns)
+        end = total if before is None else max(0, min(int(before), total))
+        start = max(0, end - max(0, int(limit)))
+        return list(self._turns[start:end]), start, total
+
     def get_history_for_prompt(self, exclude_last: int = 0) -> str:
         """Build a conversation history string that fits within the token budget.
 

@@ -3634,6 +3634,24 @@ async def _get_agent_conversation(runtime: Runtime, input: dict[str, Any]) -> di
     limit = input.get("limit")
     offset = input.get("offset")
 
+    # Cursor paging (survey 2026-10-26): ``before`` is a turn index from the
+    # start, stable while turns are appended. Each turn carries its
+    # ``index``; the next older page is ``before=<returned start>``.
+    if limit is not None and (input.get("before") is not None
+                              or input.get("cursor")):
+        before = input.get("before")
+        turns, start, total = store.get_turns_before(
+            None if before is None else int(before), min(int(limit), 200))
+        return {
+            "agent_id": agent_id,
+            "turns": [{**t.to_dict(), "index": start + i}
+                      for i, t in enumerate(turns)],
+            "count": len(turns),
+            "total": total,
+            "before": start,
+            "has_more": start > 0,
+        }
+
     if limit is not None:
         limit = min(int(limit), 200)
         offset = int(offset) if offset is not None else 0
