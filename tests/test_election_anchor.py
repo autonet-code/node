@@ -183,3 +183,29 @@ def test_split_vote_resolves_to_one_anchor(stack):
         tuple(sub.functions.getAnchor(0).call()[i] for i in
               (0, 1, 2, 3, 4, 5, 9, 13))).call())
     assert got == winner
+
+
+def test_pipelined_elections_land_in_order(stack):
+    """Epoch 2's election runs before epoch 1 is anchored: its option
+    chains onto epoch 1's option (root + content-only anchor hash), its
+    execution waits for epoch 1, then both land in order."""
+    sub = stack["substrate"]
+    (ea_a, v_a), (ea_b, v_b) = stack["daemon_a"], stack["daemon_b"]
+    opt1 = _option(stack, "one")
+    c2 = opt1[7] + 300
+    opt2 = (f"epoch-2-{opt1[1].hex()[:16]}-{c2}", keccak(text="root-two"),
+            bytes(opt1[1]), bytes(sub.functions.anchorHashOf(*opt1).call()),
+            "cid-two", keccak(text="payload-two"), bytes(32), c2)
+    elections = []
+    for ea, voters in ((ea_a, v_a), (ea_b, v_b)):
+        elections.append(((ea, voters), ea.open(opt1[0], opt1)))
+        elections.append(((ea, voters), ea.open(opt2[0], opt2)))
+    w3 = stack["w3"]
+    for _ in range(60):
+        for (ea, voters), e in elections:
+            ea.step(e, voters)
+        if sub.functions.anchorCount().call() >= 2:
+            break
+        _travel(w3, 20)
+    assert sub.functions.anchorCount().call() == 2
+    assert [sub.functions.getAnchor(i).call()[0] for i in (0, 1)] == [opt1[0], opt2[0]]

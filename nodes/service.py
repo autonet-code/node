@@ -956,7 +956,7 @@ class AutonetService:
             deploy_block = None
             governor_addr = ""
         if substrate_addr and rpc_url:
-            def _voice_source():
+            def _voice_source(pin=None):
                 from .common.voice_state import read_voice_state
                 return read_voice_state(
                     substrate_addr, rpc_url, rep_token_address=rep_token_addr,
@@ -964,9 +964,31 @@ class AutonetService:
                     dao_registry_address=dao_registry_addr,
                     deploy_block=deploy_block,
                     governor_address=governor_addr,
+                    pin=pin,
                 )
 
             self._federated_close_driver.voice_source = _voice_source
+
+            # Pipelined elections (Decision 2026-10-26): the latest anchors,
+            # so the driver can close ahead of them and rewind on a
+            # different winner.
+            def _chain_source(tail: int = 16):
+                from web3 import Web3
+                from .common.voice_state import _VOICE_ABI, _anchor_cutoff
+                w3 = Web3(Web3.HTTPProvider(rpc_url))
+                c = w3.eth.contract(
+                    address=Web3.to_checksum_address(substrate_addr),
+                    abi=_VOICE_ABI)
+                n = int(c.functions.anchorCount().call())
+                anchors = []
+                for i in range(max(0, n - tail), n):
+                    a = c.functions.getAnchor(i).call()
+                    anchors.append({"number": i + 1, "epoch_id": str(a[0]),
+                                    "root": bytes(a[1]).hex(),
+                                    "cutoff": _anchor_cutoff(a)})
+                return {"anchor_count": n, "anchors": anchors}
+
+            self._federated_close_driver.chain_source = _chain_source
 
             # Cheap anchorCount read: the voice refresh (every input pinned
             # to the latest anchor) reruns only when a new anchor lands.

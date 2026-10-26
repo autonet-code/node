@@ -602,6 +602,17 @@ class EventGossip:
                          and float(b.timestamp) <= drop_at_or_before)
             ]
 
+    def restore_epoch_batches(self, batches: List[EventBatch]) -> None:
+        """Put batches back in the buffer (an epoch that was not anchored
+        as this daemon closed it, or a close that did not complete), once
+        each."""
+        with self._lock:
+            have = {b.content_hash() for b in self._epoch_batches}
+            for b in batches:
+                if b.content_hash() not in have:
+                    self._epoch_batches.append(b)
+                    have.add(b.content_hash())
+
     def known_senders(self) -> List[bytes]:
         """All distinct sender pubkeys we've seen in this lifetime.
 

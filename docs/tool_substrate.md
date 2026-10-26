@@ -728,11 +728,41 @@ REP readings split (BUILT 2026-10-26):
 - Only registered agents can be drawn as proposers: members without a
   daemon vote, but cannot compute a close.
 
+BUILT (branch `epoch-rules-2`, 2026-10-26):
+- **Contracts.** Substrate anchors take an explicit cutoff, use a
+  content-only anchor hash (`anchorHashOf`), keep fee windows between
+  cutoffs, and take the anchorer at construction. `AnchorElection` is
+  live. HomebaseDAO's options counting and the AutonetSetup wiring are on
+  the DAO side (trustless-contracts 6d1a5c6, 368e0ff, 5504969).
+- **Daemon election driver** (`nodes/common/anchor_election.py`). It
+  proposes, registers this daemon's option from a drawn agent, votes for
+  the matching option, then queues and executes. A failed election is
+  re-posted as the next attempt.
+- **Inputs pinned to the previous cutoff.** `read_voice_state(pin=...)`
+  reads REP at the cutoff, logs up to the last block before it, the pool
+  as `burnedBetween` of the two cutoffs before it (equal to the on-chain
+  `windowBurned`), and the retarget over the cutoff chain.
+- **Pipelined closes** (`FederatedCloseDriver.chain_source`). Each epoch
+  closes on this daemon's own view of the unanchored ones before it,
+  kept in `epoch_chain.json` with their batches. An epoch anchored as
+  closed here is pruned. One anchored differently rewinds: its batches go
+  back to the buffer, and the anchored carry-over and world are installed
+  before the next close. A joiner starts from the chain the same way.
+- **Chain submission.** A pipelined option chains onto the parent's
+  prepared fields, and elections for epochs settled by another option are
+  dropped.
+
 Open inside this design:
 - Omission penalties need an on-chain record of which proposer's option
   omitted what. Until then, the sit-out is off-chain reports to the DAO.
 - The seed is set by the parent's content; a proposer could grind it
   only by changing its batches, which voters would reject.
+- A batch an anchored option left out is dropped once the next window
+  opens (it is signed before that window's start). Decision item 6 says
+  it rolls into the next epoch; that needs a rule for admitting
+  backdated batches named by an omission report.
+- Fetching a missing batch by hash before voting is not built: a daemon
+  missing a batch votes for no option.
 
 Rollout: these are `epoch_rules` version `"2"` (the existing Registry key).
 Daemons on this build refuse `"1"`; the jurisdiction switches by one DAO

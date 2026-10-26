@@ -126,6 +126,9 @@ class ChainSubmissionDriver:
         self._election = election
         # epoch_id -> the epoch's election (election path).
         self._elections: "OrderedDict[str, Election]" = OrderedDict()
+        # Pipelined elections: epoch number -> the anchor fields this daemon
+        # prepared for it, so the next epoch's option chains onto them.
+        self._fields_by_number: Dict[int, Any] = {}
         # epoch_id -> pending anchor proposal (governed path).
         self.tick_interval = float(tick_interval)
         self._pending: "OrderedDict[str, AnchorProposal]" = OrderedDict()
@@ -298,6 +301,9 @@ class ChainSubmissionDriver:
             if anchorer.is_anchored(fed.epoch_id):
                 out["anchor_skipped"] = "already anchored"
                 return None
+            number = getattr(fed, "epoch_number", None)
+            if number is not None:
+                return self._prepare_pipelined(fed, int(number), out)
             snap = getattr(fed, "snapshot_anchor_count", None)
             if snap is not None:
                 count_fn = getattr(anchorer, "anchor_count", None)
@@ -320,6 +326,39 @@ class ChainSubmissionDriver:
                            fed.epoch_id, e)
             out["anchor_skipped"] = f"prepare failed: {e}"
             return None
+
+    def _prepare_pipelined(self, fed: FederatedCloseResult, number: int,
+                           out: Dict[str, Any]) -> Optional[Any]:
+        """An epoch closed ahead of its parent's anchor: its option chains
+        onto the parent as this daemon prepared it, or onto the chain head
+        when the parent is anchored. Never for a number already settled,
+        or a parent the chain anchored differently."""
+        anchorer = self._anchorer
+        contract = anchorer._get_contract()
+        count = int(contract.functions.anchorCount().call())
+        if number <= count:
+            out["anchor_skipped"] = f"epoch {number} already settled on chain"
+            return None
+        prev_root = prev_hash = None
+        if number - 1 > count:
+            parent = self._fields_by_number.get(number - 1)
+            if parent is None:
+                out["anchor_skipped"] = f"parent epoch {number - 1} not prepared here"
+                return None
+            prev_root = bytes(parent.epoch_root)
+            prev_hash = bytes(contract.functions.anchorHashOf(*parent.as_args()).call())
+        else:
+            head = bytes(contract.functions.latestEpochRoot().call()).hex()
+            if number > 1 and fed.parent_root and head != fed.parent_root:
+                out["anchor_skipped"] = (f"parent root {fed.parent_root[:16]} "
+                                         f"is not the chain head {head[:16]}")
+                return None
+        prepared = anchorer.prepare_anchor(
+            fed.close_result, prev_epoch_root=prev_root, prev_anchor_hash=prev_hash)
+        self._fields_by_number[number] = prepared.fields
+        for n in [n for n in self._fields_by_number if n < count]:
+            del self._fields_by_number[n]
+        return prepared
 
     def _publish_anchor_blobs(self, result: AnchorResult) -> None:
         """Every daemon computed the identical anchor blobs; serve them so
@@ -390,6 +429,17 @@ class ChainSubmissionDriver:
             except Exception:
                 anchored = False
             if not anchored:
+                try:
+                    count = int(self._anchorer.anchor_count())
+                except Exception:
+                    count = -1
+                if election.epoch_number <= count:
+                    # Settled with another option: this one is void.
+                    logger.info("epoch %s: settled on chain by another option; "
+                                "dropping this daemon's election", epoch_id)
+                    with self._lock:
+                        self._elections.pop(epoch_id, None)
+                    continue
                 anchored = self._step_election(election) == "executed"
             done = anchored
             if not anchored and time.monotonic() - election.created > _MAX_PROPOSAL_AGE_S:

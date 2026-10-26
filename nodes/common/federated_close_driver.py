@@ -79,6 +79,11 @@ class FederatedCloseResult:
     # snapshot_anchor_count; signers refuse to sign otherwise. None = no
     # chain source (local/test).
     snapshot_anchor_count: Optional[int] = None
+    # Pipelined elections (Decision 2026-10-26): this epoch's number and the
+    # root of the epoch before it as THIS daemon closed it (its parent),
+    # which may not be anchored yet. None/"" outside the pipelined mode.
+    epoch_number: Optional[int] = None
+    parent_root: str = ""
 
 
 def pick_submitter(
@@ -168,6 +173,19 @@ class FederatedCloseDriver:
         # lands. Persisted so a restart mid-flight does not close the
         # same epoch again with a different batch set.
         self._closed_epoch_number: Optional[int] = None
+        # Pipelined mode (Decision 2026-10-26, items 5-6), on when this
+        # zero-arg hook is wired. It returns {"anchor_count": N, "anchors":
+        # [{"number", "epoch_id", "root", "cutoff"}, ...]} for the latest
+        # anchors (oldest first). Epochs then close on their own schedule,
+        # each built on this daemon's own view of the unanchored ones
+        # before it, every input pinned to the previous epoch's cutoff.
+        self.chain_source: Optional[Callable[[], Dict[str, Any]]] = None
+        # This daemon's closed but unanchored epochs, oldest first:
+        # {"number", "epoch_id", "cutoff", "root"} plus their member batches
+        # (in memory only), so a rewind can put them back in the buffer.
+        self._local_epochs: List[Dict[str, Any]] = []
+        self._rewind_pending = False
+        self._pin_key: Optional[tuple] = None
         # Tool-substrate carry-over (docs/tool_substrate.md v2): the
         # accumulated digest -> manifest_meta registration map, so a
         # tool registered in epoch 1 still attributes mint in epoch 5.
@@ -288,6 +306,7 @@ class FederatedCloseDriver:
         # pre-seed local state would fork from peers that adopted it.
         self._seed_blocker: Optional[str] = None
         self._closed_epoch_number = self._load_in_flight()
+        self._local_epochs = self._load_local_epochs()
 
     def _in_flight_path(self) -> Optional[Path]:
         base = self._tool_registrations_path or self._canonical_world_path
@@ -316,6 +335,134 @@ class FederatedCloseDriver:
         except OSError as e:
             logger.warning("failed to persist the in-flight epoch: %s", e)
 
+    # ---- pipelined elections: the local epoch chain -------------------
+
+    def _local_chain_path(self) -> Optional[Path]:
+        base = self._tool_registrations_path or self._canonical_world_path
+        return None if base is None else base.parent / "epoch_chain.json"
+
+    def _load_local_epochs(self) -> List[Dict[str, Any]]:
+        path = self._local_chain_path()
+        if path is None or not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return [{"number": int(e["number"]), "epoch_id": str(e["epoch_id"]),
+                     "cutoff": int(e["cutoff"]), "root": str(e["root"]),
+                     "members": []} for e in data]
+        except (OSError, ValueError, KeyError, TypeError):
+            return []
+
+    def _save_local_epochs(self) -> None:
+        path = self._local_chain_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps([
+                {k: e[k] for k in ("number", "epoch_id", "cutoff", "root")}
+                for e in self._local_epochs]), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist the local epoch chain: %s", e)
+
+    @property
+    def local_epochs(self) -> List[Dict[str, Any]]:
+        return [{k: e[k] for k in ("number", "epoch_id", "cutoff", "root")}
+                for e in self._local_epochs]
+
+    def _reconcile(self, anchor_count: int,
+                   anchored: Dict[int, Dict[str, Any]]) -> None:
+        """Drop local epochs the chain anchored as this daemon closed them;
+        on the first one it anchored differently, rewind: every local epoch
+        is void (each was built on the one before), its batches go back to
+        the buffer, and the anchored state is installed before closing."""
+        while self._local_epochs and self._local_epochs[0]["number"] <= anchor_count:
+            mine = self._local_epochs[0]
+            got = anchored.get(mine["number"])
+            if got is not None and str(got["root"]) == mine["root"] \
+                    and str(got["epoch_id"]) == mine["epoch_id"]:
+                self._local_epochs.pop(0)
+                continue
+            logger.warning(
+                "federated close: epoch %d was anchored as %s, not as this "
+                "daemon closed it (%s); rewinding %d local epoch(s) onto the "
+                "anchored state", mine["number"],
+                (got or {}).get("epoch_id", "?"), mine["epoch_id"],
+                len(self._local_epochs))
+            restore = getattr(self.gossip, "restore_epoch_batches", None)
+            for e in self._local_epochs:
+                if restore is not None and e.get("members"):
+                    restore(e["members"])
+            self._local_epochs = []
+            self._rewind_pending = True
+            break
+        self._save_local_epochs()
+
+    def _install_anchored_state(self, anchor_count: int,
+                                anchored: Dict[int, Dict[str, Any]]) -> bool:
+        """Install the carry-over and canonical world of the latest anchor
+        (hash-verified against the chain), as the base of the next close.
+        Returns False while they are not retrievable."""
+        if anchor_count == 0:
+            self.install_carry_over({k: {} for k in CARRY_KEYS})
+            if self.canonical_tracker is not None:
+                from .state_sync import CanonicalWorldTracker
+                t = self.canonical_tracker
+                self.canonical_tracker = CanonicalWorldTracker(
+                    bandwidth=t.bandwidth, embedding_dim=t.embedding_dim,
+                    equilibrate_rounds=t.equilibrate_rounds,
+                    equilibrate_tolerance=t.equilibrate_tolerance)
+                self._tracker_restored = True
+            self._rewind_pending = False
+            return True
+        head = anchored.get(anchor_count) or {}
+        if self.carry_source is None:
+            logger.warning("federated close: no carry-over source to rewind with")
+            return False
+        try:
+            fetch = self.carry_source()
+        except Exception as e:
+            logger.warning("federated close: anchored carry-over fetch failed: %s", e)
+            return False
+        if getattr(fetch, "status", "") != "ok" or \
+                str(getattr(fetch, "epoch_id", "")) != str(head.get("epoch_id")):
+            logger.info("federated close: anchored carry-over for epoch %s not "
+                        "retrievable yet; waiting", head.get("epoch_id"))
+            return False
+        if self.canonical_tracker is not None:
+            try:
+                world = self.world_source() if self.world_source else None
+            except Exception as e:
+                logger.warning("federated close: anchored world fetch failed: %s", e)
+                world = None
+            if world is None or str(getattr(world, "epoch_root_hex", "")) != \
+                    str(head.get("root")):
+                logger.info("federated close: anchored world for epoch %s not "
+                            "retrievable yet; waiting", head.get("epoch_id"))
+                return False
+            self._install_world(world)
+        self.install_carry_over(fetch.carry)
+        self._rewind_pending = False
+        logger.info("federated close: installed the anchored state of epoch %s",
+                    head.get("epoch_id"))
+        return True
+
+    def _pin_for_next(self, anchor_count: int,
+                      anchored: Dict[int, Dict[str, Any]]) -> Dict[str, Any]:
+        number = anchor_count + len(self._local_epochs) + 1
+        cutoffs = [int(anchored[k]["cutoff"]) for k in sorted(anchored)
+                   if k <= anchor_count]
+        cutoffs += [int(e["cutoff"]) for e in self._local_epochs]
+        if self._local_epochs:
+            prev_root = self._local_epochs[-1]["root"]
+        elif anchor_count:
+            prev_root = str(anchored[anchor_count]["root"])
+        else:
+            prev_root = "00" * 32
+        return {"number": number, "cutoffs": cutoffs, "prev_root": prev_root}
+
     def _refresh_voice_for_anchor(self) -> None:
         """Refresh only when a new anchor landed (or the last one failed):
         every input is pinned to the latest anchor."""
@@ -342,7 +489,7 @@ class FederatedCloseDriver:
 
         win = self.epoch_window
         number = int(win["number"])
-        if self._closed_epoch_number is not None and \
+        if self.chain_source is None and self._closed_epoch_number is not None and \
                 self._closed_epoch_number >= number:
             logger.debug("federated close: epoch %d in flight, waiting for "
                          "its anchor", self._closed_epoch_number)
@@ -364,8 +511,9 @@ class FederatedCloseDriver:
         members = [b for b in live if float(b.timestamp) <= cutoff]
         self.gossip.take_epoch_batches(members, drop_at_or_before=cutoff)
         epoch_id = make_epoch_id(number, str(win["prev_root"]), cutoff)
-        self._closed_epoch_number = number
-        self._save_in_flight(number, epoch_id)
+        if self.chain_source is None:
+            self._closed_epoch_number = number
+            self._save_in_flight(number, epoch_id)
         return members, epoch_id
 
     def _restore_canonical_tracker(self) -> bool:
@@ -429,6 +577,12 @@ class FederatedCloseDriver:
                 "epoch observed just before this close; observing",
                 getattr(result, "epoch_id", "?"))
             return
+        self._install_world(result)
+        logger.info("federated close: installed the anchored canonical world "
+                    "(epoch %s)", result.epoch_id)
+
+    def _install_world(self, result: Any) -> None:
+        """Make an anchored, hash-verified world checkpoint the tracker's."""
         from .state_sync import CanonicalWorldTracker, encode_world_checkpoint
         tracker = self.canonical_tracker
         self.canonical_tracker = CanonicalWorldTracker(
@@ -445,8 +599,6 @@ class FederatedCloseDriver:
             self._save_canonical_world(blob)
         self._tracker_restored = True
         self._tracker_failed = None
-        logger.info("federated close: installed the anchored canonical world "
-                    "(epoch %s)", result.epoch_id)
 
     def carry_over_paths(self) -> Dict[str, Optional[Path]]:
         """The on-disk carry-over files every close reads as INPUTS."""
@@ -679,14 +831,15 @@ class FederatedCloseDriver:
                 blockers.append(f"no canonical world checkpoint ({why})")
         return blockers
 
-    def _refresh_voice(self) -> None:
+    def _refresh_voice(self, pin: Optional[Dict[str, Any]] = None) -> None:
         """Read this close's chain inputs. All-or-nothing: on any failure
         nothing is replaced and the close is blocked (Decision 2026-10-26),
         since the previous snapshot is not what peers price against."""
         if self.voice_source is None:
             return
         try:
-            state = self.voice_source() or {}
+            state = (self.voice_source(pin=pin) if pin is not None
+                     else self.voice_source()) or {}
             updates: Dict[str, Any] = {}
             if "snapshot_block" in state:
                 # read_voice_state reports snapshot_block=None exactly
@@ -778,6 +931,8 @@ class FederatedCloseDriver:
         batches in the gossip buffer). Otherwise returns the
         deterministic federated result + which sender should anchor.
         """
+        if self.voice_source is not None and self.chain_source is not None:
+            return self._run_pipelined(local_close_result)
         if self.voice_source is not None:
             self._refresh_voice_for_anchor()
         if self.voice_source is not None and self.epoch_window is not None:
@@ -798,6 +953,12 @@ class FederatedCloseDriver:
             # No chain window (library/local use): the local epoch id.
             epoch_id = str(local_close_result.get("epoch_id") or "")
 
+        return self._close(batches, epoch_id, local_close_result)
+
+    def _close(self, batches: List[EventBatch], epoch_id: str,
+               local_close_result: Dict[str, Any], *,
+               join_from_chain: bool = True) -> Optional[FederatedCloseResult]:
+        """Close one epoch over ``batches`` (shared by both modes)."""
         if self._charter_changed():
             return None
 
@@ -814,8 +975,9 @@ class FederatedCloseDriver:
         self._last_observed_root = canonical.epoch_root().hex()
 
         if self.enforce_preconditions:
-            self._maybe_join_from_chain(prev_root)
-            self._maybe_join_world(prev_root)
+            if join_from_chain:
+                self._maybe_join_from_chain(prev_root)
+                self._maybe_join_world(prev_root)
             blockers = self.participation_blockers()
             if blockers:
                 # Batches are already drained, so they don't leak into
@@ -973,6 +1135,58 @@ class FederatedCloseDriver:
             carry_bundle_blob=carry_blob,
             snapshot_anchor_count=self.snapshot_anchor_count,
         )
+
+    def _run_pipelined(self, local_close_result: Dict[str, Any]
+                       ) -> Optional[FederatedCloseResult]:
+        """One tick of the pipelined mode: reconcile with the chain, rewind
+        if an epoch was anchored differently, then close the next epoch
+        once its cutoff plus grace has passed."""
+        try:
+            head = self.chain_source() or {}
+            anchor_count = int(head.get("anchor_count", 0))
+            anchored = {int(a["number"]): a for a in head.get("anchors", [])}
+        except Exception as e:
+            logger.warning("federated close: chain read failed, not closing: %s", e)
+            return None
+        self._chain_at_genesis = anchor_count == 0
+        self._reconcile(anchor_count, anchored)
+        if anchor_count and not self._local_epochs and self._carry_files_missing():
+            self._rewind_pending = True   # a joiner: start from the chain
+        if self._rewind_pending and not self._install_anchored_state(
+                anchor_count, anchored):
+            return None
+        pin = self._pin_for_next(anchor_count, anchored)
+        key = (pin["number"], tuple(pin["cutoffs"][-1:]), pin["prev_root"])
+        if key != self._pin_key or self._voice_refresh_error:
+            self._refresh_voice(pin=pin)
+            if self._voice_refresh_error:
+                logger.warning("federated close: voice-state refresh failed, "
+                               "not closing: %s", self._voice_refresh_error)
+                return None
+            self._pin_key = key
+        if self.epoch_window is None:
+            return None
+        picked = self._select_window()
+        if picked is None:
+            return None
+        batches, epoch_id = picked
+        fed = self._close(batches, epoch_id, local_close_result,
+                          join_from_chain=False)
+        if fed is None:
+            # Nothing advanced: the batches wait for the next attempt.
+            restore = getattr(self.gossip, "restore_epoch_batches", None)
+            if restore is not None:
+                restore(batches)
+            return None
+        fed.epoch_number = int(pin["number"])
+        fed.parent_root = str(pin["prev_root"])
+        self._local_epochs.append({
+            "number": int(pin["number"]), "epoch_id": epoch_id,
+            "cutoff": int(epoch_id.rsplit("-", 1)[1]),
+            "root": str(fed.close_result.get("epoch_root", "")),
+            "members": list(batches)})
+        self._save_local_epochs()
+        return fed
 
     # ---- tool-registration carry-over persistence -------------------
 

@@ -1018,7 +1018,10 @@ def _window_pinned(w3: Any, contract: Any, pin: Dict[str, Any], block: int,
     params = epoch_rule_params(records, block, jurisdiction_id)
     window = params["epoch_retarget_window"]
     deployed_at = int(contract.functions.deployedAt().call())
-    chain = [deployed_at] + cutoffs
+    # Epoch 1 counts from deployedAt; a tail that does not reach it
+    # starts at its own oldest cutoff.
+    full = len(cutoffs) == int(pin["number"]) - 1
+    chain = ([deployed_at] if full else []) + cutoffs
     keep = chain[-(window + 2):] if window > 0 else chain[-2:]
     history = [(keep[i], int(contract.functions.burnedBetween(
         keep[i - 1], keep[i]).call())) for i in range(1, len(keep))]
@@ -1182,15 +1185,18 @@ def read_voice_state(
     if pinned:
         cutoffs = [int(c) for c in pin["cutoffs"]]
         number = int(pin["number"])
-        if len(cutoffs) != number - 1:
-            raise ValueError(f"pin for epoch {number} needs {number - 1} "
-                             f"cutoffs, got {len(cutoffs)}")
+        if not cutoffs or len(cutoffs) > number - 1:
+            raise ValueError(f"pin for epoch {number} needs 1..{number - 1} "
+                             f"cutoffs (the latest ones), got {len(cutoffs)}")
         anchor = None
         anchor_count = number - 1
         timestamp = cutoffs[-1]
         block = block_at_or_before(w3, timestamp, start or 0)
         deployed_at = int(contract.functions.deployedAt().call())
-        prev = cutoffs[-2] if len(cutoffs) > 1 else deployed_at
+        prev = (cutoffs[-2] if len(cutoffs) > 1 else
+                deployed_at if number == 2 else None)
+        if prev is None:
+            raise ValueError("pin needs the two latest cutoffs past epoch 2")
         # The pool this epoch may mint: what the chain records as epoch
         # number-1's windowBurned (fees between its two cutoffs).
         burned_raw = int(contract.functions.burnedBetween(prev, timestamp).call())

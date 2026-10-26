@@ -214,7 +214,9 @@ class EpochAnchorer:
         self._chain_id_cache = cid
         return cid
 
-    def prepare_anchor(self, close_result: Dict[str, Any]) -> PreparedAnchor:
+    def prepare_anchor(self, close_result: Dict[str, Any], *,
+                       prev_epoch_root: Optional[bytes] = None,
+                       prev_anchor_hash: Optional[bytes] = None) -> PreparedAnchor:
         """Encode a federated close result into the anchor arguments. Reads
         the chain head (latestEpochRoot / latestAnchorHash), so honest
         daemons reading the same head derive the identical anchor (and so
@@ -233,8 +235,13 @@ class EpochAnchorer:
             if not epoch_root_hex:
                 raise ValueError("authoritative_payload missing epoch_root")
 
-            prev_root_bytes = self.latest_epoch_root()
-            prev_anchor_bytes = self.latest_anchor_hash()
+            # A pipelined epoch chains onto its parent as this daemon closed
+            # it (not anchored yet): the caller passes that parent's root and
+            # its content-only anchor hash. Otherwise, the chain head.
+            prev_root_bytes = (bytes(prev_epoch_root) if prev_epoch_root is not None
+                               else self.latest_epoch_root())
+            prev_anchor_bytes = (bytes(prev_anchor_hash) if prev_anchor_hash is not None
+                                 else self.latest_anchor_hash())
             prev_root_hex = prev_root_bytes.hex()
 
             # Encode the authoritative payload canonically.
