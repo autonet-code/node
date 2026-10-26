@@ -297,6 +297,41 @@ class TestVoiceStateSnapshot:
         assert state_1b["voice_weights"] == state_1["voice_weights"]
         assert state_1b["snapshot_block"] == state_1["snapshot_block"]
 
+    def test_pinned_read_matches_the_chain_cap(self, fx):
+        """Decision 2026-10-26 (pipelined elections): epoch n+1's inputs
+        are read at epoch n's CUTOFF. The pinned pool equals the mintPool
+        the chain gives the anchor after n (n's windowBurned), and REP is
+        the balance at the cutoff, before anything the anchor's own landing
+        time would see."""
+        w3, sub = fx["w3"], fx["contract"]
+        agents = fx["agent_addrs"]
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], agents[0], 1000)
+        _seed(fx)                       # epoch 1, cut at its anchoring
+        c1 = int(sub.functions.getAnchor(0).call()[13])
+        _seed(fx)                       # epoch 2: burns fees, then cuts
+        a2 = sub.functions.getAnchor(1).call()
+        c2 = int(a2[13])
+        # REP moving after the cutoff does not reach epoch 3's inputs.
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], agents[1], 9000)
+        state = read_voice_state(
+            fx["addr"], web3=w3, rep_token_address=fx["rep_addr"],
+            pin={"number": 3, "cutoffs": [c1, c2],
+                 "prev_root": bytes(a2[1]).hex()})
+        assert state["emission_pool_raw"] == int(a2[10]) > 0
+        assert state["snapshot_anchor_count"] == 2
+        assert state["rep_shares"][agents[0].lower()] == pytest.approx(1.0)
+        assert state["rep_shares"][agents[1].lower()] == 0.0
+        win = state["epoch_window"]
+        assert win["number"] == 3 and win["start"] == c2
+        assert win["prev_root"] == bytes(a2[1]).hex()
+        # A pin whose chain head is not past the cutoff is refused.
+        future = int(w3.eth.get_block("latest")["timestamp"]) + 100
+        with pytest.raises(ValueError):
+            read_voice_state(fx["addr"], web3=w3,
+                             rep_token_address=fx["rep_addr"],
+                             pin={"number": 4, "cutoffs": [c1, c2, future],
+                                  "prev_root": "00" * 32})
+
     def test_delegation_does_not_move_substrate_weight(self, fx):
         """Decision 2026-10-26: the substrate reads REP BALANCES. An agent
         delegating its votes away keeps its household's weight, and votes

@@ -96,6 +96,14 @@ _VOICE_ABI = [
         "type": "function",
     },
     {
+        "inputs": [{"internalType": "uint256", "name": "fromTs", "type": "uint256"},
+                   {"internalType": "uint256", "name": "toTs", "type": "uint256"}],
+        "name": "burnedBetween",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
         "inputs": [],
         "name": "deployedAt",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
@@ -921,39 +929,28 @@ def retarget_length(
     return max(floor, min(ceiling, length))
 
 
-def epoch_window(contract: Any, anchor_count: int, anchor: Any,
+def epoch_window(contract: Any, *, number: int, prev_root: str,
+                 start: Optional[int], params_block: Optional[int],
                  records: List[Dict[str, Any]],
-                 jurisdiction_id: str = "autonet", *,
+                 jurisdiction_id: str = "autonet",
                  lifecycle: Optional[Dict[str, int]] = None,
-                 history: Optional[List[Any]] = None,
+                 history: Optional[List[Tuple[int, int]]] = None,
                  supply: int = 0) -> Dict[str, Any]:
-    """The window of the epoch after anchor ``anchor_count``.
+    """The window of epoch ``number``.
 
-    ``anchor`` is ``getAnchor(anchor_count - 1)`` (None at genesis);
-    ``records`` the DAO Registry writes (empty when none is configured);
-    ``lifecycle`` the governor settings at the anchor block
-    (``governor_lifecycle``); ``history`` the anchors the retarget reads,
-    oldest first, ending with ``anchor``; ``supply`` the ATN supply at the
-    anchor block. Returns {number, prev_root, start, base, length, floor,
-    ceiling, grace, skew}: the epoch number, the hex root of the anchor
-    before it, the previous cutoff (None at genesis), the time the length
-    counts from, the retargeted length and its bounds, and the rules."""
+    ``prev_root`` is the hex root of epoch number-1 and ``start`` its
+    cutoff (None for epoch 1, which counts from ``Substrate.deployedAt``);
+    ``params_block`` the block the governed rules are read at (None = the
+    defaults); ``records`` the DAO Registry writes; ``lifecycle`` the
+    governor settings (``governor_lifecycle``); ``history`` the earlier
+    epochs as (cutoff, fees burned in that epoch's window), oldest first,
+    ending with epoch number-1; ``supply`` the ATN supply at the pin.
+    Returns {number, prev_root, start, base, length, floor, ceiling, grace,
+    skew}."""
     deployed_at = int(contract.functions.deployedAt().call())
     lc = lifecycle or {}
-    if anchor_count == 0 or anchor is None:
-        start = None
-        base = deployed_at
-        prev_root = "00" * 32
-        params = epoch_rule_params([], None, jurisdiction_id)
-    else:
-        prev_root = bytes(anchor[1]).hex()
-        params = epoch_rule_params(records, int(anchor[7]), jurisdiction_id)
-        start = epoch_id_cutoff(str(anchor[0]))
-        if start is None:
-            # An anchor from before epoch ids carried a cutoff: nothing
-            # signed before it can still be pending.
-            start = int(anchor[8])
-        base = start
+    params = epoch_rule_params(records, params_block, jurisdiction_id)
+    base = deployed_at if start is None else int(start)
     floor = (int(lc.get("voting_delay", 0)) + int(lc.get("voting_period", 0))
              + int(lc.get("min_delay", 0)))
     ceiling = params["epoch_ceiling_votes"] * int(lc.get("voting_period", 0))
@@ -961,18 +958,18 @@ def epoch_window(contract: Any, anchor_count: int, anchor: Any,
     if history:
         window = params["epoch_retarget_window"]
         recent = list(history)[-window:] if window > 0 else []
-        burned = sum(int(a[10]) for a in recent)
-        first_ts = (int(history[-window - 1][8])
+        burned = sum(int(b) for _, b in recent)
+        first_ts = (int(history[-window - 1][0])
                     if window > 0 and len(history) > window else deployed_at)
-        span = int(history[-1][8]) - first_ts
+        span = int(history[-1][0]) - first_ts
     length = retarget_length(
         floor=floor, ceiling=ceiling,
         target_share_ppm=params["epoch_target_share"],
         span_seconds=span, burned=burned, supply=int(supply))
     return {
-        "number": int(anchor_count) + 1,
-        "prev_root": prev_root,
-        "start": start,
+        "number": int(number),
+        "prev_root": str(prev_root),
+        "start": None if start is None else int(start),
         "base": base,
         "length": length,
         "floor": floor,
@@ -982,23 +979,83 @@ def epoch_window(contract: Any, anchor_count: int, anchor: Any,
     }
 
 
+def _anchor_cutoff(anchor: Any) -> int:
+    """An anchor's cutoff: its own field, else the one its id carries,
+    else (an anchor from before cutoffs) its timestamp."""
+    if len(anchor) > 13 and int(anchor[13]) > 0:
+        return int(anchor[13])
+    c = epoch_id_cutoff(str(anchor[0]))
+    return int(anchor[8]) if c is None else c
+
+
 def _window_after(w3: Any, contract: Any, anchor_count: int, anchor: Any,
                   records: List[Dict[str, Any]], jurisdiction_id: str,
                   governor_address: str,
                   start_block: Optional[int]) -> Dict[str, Any]:
-    """``epoch_window`` with its chain inputs read, all pinned to the last
-    anchor's block."""
+    """The window after the latest anchor, every input pinned to it."""
     block = int(anchor[7])
     params = epoch_rule_params(records, block, jurisdiction_id)
     window = params["epoch_retarget_window"]
     first = max(0, anchor_count - window - 1)
-    history = [contract.functions.getAnchor(i).call()
+    anchors = [contract.functions.getAnchor(i).call()
                for i in range(first, anchor_count - 1)] + [anchor]
     return epoch_window(
-        contract, anchor_count, anchor, records, jurisdiction_id,
+        contract, number=anchor_count + 1, prev_root=bytes(anchor[1]).hex(),
+        start=_anchor_cutoff(anchor), params_block=block, records=records,
+        jurisdiction_id=jurisdiction_id,
+        lifecycle=governor_lifecycle(w3, governor_address, block, start_block),
+        history=[(_anchor_cutoff(a), int(a[10])) for a in anchors],
+        supply=int(contract.functions.atnTotalSupplyAt(block).call()))
+
+
+def _window_pinned(w3: Any, contract: Any, pin: Dict[str, Any], block: int,
+                   records: List[Dict[str, Any]], jurisdiction_id: str,
+                   governor_address: str,
+                   start_block: Optional[int]) -> Dict[str, Any]:
+    """The window of epoch ``pin["number"]``, every input pinned to the
+    previous epoch's cutoff (``block`` = the last block at or before it)."""
+    cutoffs = [int(c) for c in pin["cutoffs"]]
+    params = epoch_rule_params(records, block, jurisdiction_id)
+    window = params["epoch_retarget_window"]
+    deployed_at = int(contract.functions.deployedAt().call())
+    chain = [deployed_at] + cutoffs
+    keep = chain[-(window + 2):] if window > 0 else chain[-2:]
+    history = [(keep[i], int(contract.functions.burnedBetween(
+        keep[i - 1], keep[i]).call())) for i in range(1, len(keep))]
+    return epoch_window(
+        contract, number=int(pin["number"]), prev_root=str(pin["prev_root"]),
+        start=cutoffs[-1], params_block=block, records=records,
+        jurisdiction_id=jurisdiction_id,
         lifecycle=governor_lifecycle(w3, governor_address, block, start_block),
         history=history,
         supply=int(contract.functions.atnTotalSupplyAt(block).call()))
+
+
+_BLOCK_AT_CACHE: Dict[Any, int] = {}
+
+
+def block_at_or_before(w3: Any, timestamp: int, lo: int = 0) -> int:
+    """The last block whose timestamp is at or before ``timestamp`` (binary
+    search over headers, which any node serves). Raises when the chain head
+    is not yet past ``timestamp``: the block could still change."""
+    key = (id(w3.provider), int(timestamp))
+    hit = _BLOCK_AT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    hi = int(w3.eth.block_number)
+    if int(w3.eth.get_block(hi)["timestamp"]) <= int(timestamp):
+        raise ValueError(f"chain head not past {timestamp} yet")
+    lo = max(0, int(lo))
+    if int(w3.eth.get_block(lo)["timestamp"]) > int(timestamp):
+        raise ValueError(f"no block at or before {timestamp}")
+    while lo < hi - 1:
+        mid = (lo + hi) // 2
+        if int(w3.eth.get_block(mid)["timestamp"]) <= int(timestamp):
+            lo = mid
+        else:
+            hi = mid
+    _BLOCK_AT_CACHE[key] = lo
+    return lo
 
 
 def sanctioned_households(
@@ -1027,6 +1084,7 @@ def read_voice_state(
     jurisdiction_id: str = "autonet",
     deploy_block: Optional[int] = None,
     governor_address: str = "",
+    pin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Read {owner_map, voice_weights, rep_shares, rep_supply, supply,
     snapshot_block, emission_pool, recycled, weight_source,
@@ -1063,6 +1121,16 @@ def read_voice_state(
 
     ``deploy_block`` (the jurisdiction's configured deployment block)
     starts every log scan; None finds each contract's creation block.
+
+    ``pin`` (Decision 2026-10-26, pipelined elections) reads the inputs of
+    epoch ``pin["number"]`` as of the previous epoch's CUTOFF instead of
+    the latest anchor, so an epoch can close before the anchor before it
+    lands. ``pin["cutoffs"]`` are the cutoffs of epochs 1..number-1 (the
+    agreed ones plus this daemon's own view of any unanchored ones) and
+    ``pin["prev_root"]`` the root of epoch number-1. REP is read at that
+    cutoff, logs up to the last block at or before it, and the pool is the
+    fees burned between the two cutoffs before it (lag-1, the window the
+    chain records as that epoch's windowBurned).
     """
     start = int(deploy_block) if deploy_block else None
     from web3 import Web3
@@ -1073,6 +1141,9 @@ def read_voice_state(
     )
 
     anchor_count = contract.functions.anchorCount().call()
+    pinned = pin is not None and int(pin["number"]) > 1
+    if pin is not None and not pinned:
+        anchor_count = 0
     if anchor_index is not None:
         # Read as if the chain ended at that anchor (the robot poll rail
         # pins a round to the anchor in force when the round started).
@@ -1081,7 +1152,9 @@ def read_voice_state(
         # No agreed snapshot yet (epoch 1): no voices, empty fees-only pool.
         return {
             "epoch_window": epoch_window(
-                contract, 0, None, [], jurisdiction_id,
+                contract, number=1, prev_root="00" * 32, start=None,
+                params_block=None, records=[],
+                jurisdiction_id=jurisdiction_id,
                 lifecycle=governor_lifecycle(
                     w3, governor_address, None, start)),
             "owner_map": {},
@@ -1106,16 +1179,31 @@ def read_voice_state(
             "robot_standards": [],
             "jurisdiction_lineage": [],
         }
-    anchor = contract.functions.getAnchor(anchor_count - 1).call()
-    block = int(anchor[7])       # Anchor.blockNumber (struct field 7)
-    timestamp = int(anchor[8])   # Anchor.timestamp (struct field 8)
-
-    # Fees-only emission, read from the SAME on-chain quantity Substrate
-    # caps mints with (2026-10-12): the snapshot anchor's windowBurned =
-    # fees burned between the previous anchor and it (tx-order exact).
-    # Substrate sets the next anchor's mintPool to exactly this value, so
-    # the close's pool and the on-chain cap cannot disagree.
-    burned_raw = int(anchor[10]) if len(anchor) > 10 else 0
+    if pinned:
+        cutoffs = [int(c) for c in pin["cutoffs"]]
+        number = int(pin["number"])
+        if len(cutoffs) != number - 1:
+            raise ValueError(f"pin for epoch {number} needs {number - 1} "
+                             f"cutoffs, got {len(cutoffs)}")
+        anchor = None
+        anchor_count = number - 1
+        timestamp = cutoffs[-1]
+        block = block_at_or_before(w3, timestamp, start or 0)
+        deployed_at = int(contract.functions.deployedAt().call())
+        prev = cutoffs[-2] if len(cutoffs) > 1 else deployed_at
+        # The pool this epoch may mint: what the chain records as epoch
+        # number-1's windowBurned (fees between its two cutoffs).
+        burned_raw = int(contract.functions.burnedBetween(prev, timestamp).call())
+    else:
+        anchor = contract.functions.getAnchor(anchor_count - 1).call()
+        block = int(anchor[7])       # Anchor.blockNumber (struct field 7)
+        timestamp = int(anchor[8])   # Anchor.timestamp (struct field 8)
+        # Fees-only emission, read from the SAME on-chain quantity
+        # Substrate caps mints with (2026-10-12): the snapshot anchor's
+        # windowBurned. Substrate sets the next anchor's mintPool to
+        # exactly this value, so the close's pool and the on-chain cap
+        # cannot disagree.
+        burned_raw = int(anchor[10]) if len(anchor) > 10 else 0
     recycled = burned_raw / _ATN_SCALE
 
     # Agent set + owner map from event logs up to the snapshot block —
@@ -1241,7 +1329,10 @@ def read_voice_state(
         "tools": {}, "rounds": {}}
     if tool_bond_address:
         since_block = 0
-        if anchor_count >= 2:
+        if pinned and len(pin["cutoffs"]) >= 2:
+            since_block = block_at_or_before(
+                w3, int(pin["cutoffs"][-2]), start or 0)
+        elif not pinned and anchor_count >= 2:
             since_block = int(contract.functions.getAnchor(anchor_count - 2).call()[7])
         review_snapshot = read_tool_review_snapshot(
             w3, tool_bond_address, block, since_block=since_block,
@@ -1249,9 +1340,12 @@ def read_voice_state(
     review_snapshot["supply"] = int(supply)
 
     return {
-        "epoch_window": _window_after(
-            w3, contract, anchor_count, anchor, reg_records, jurisdiction_id,
-            governor_address, start),
+        "epoch_window": (
+            _window_pinned(w3, contract, pin, block, reg_records,
+                           jurisdiction_id, governor_address, start)
+            if pinned else _window_after(
+                w3, contract, anchor_count, anchor, reg_records,
+                jurisdiction_id, governor_address, start)),
         "owner_map": owner_map,
         "voice_weights": voice_weights,
         # Raw rep share per household (un-floored) + supply alias.

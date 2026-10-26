@@ -237,13 +237,13 @@ class TestRules:
     def test_window_from_chain(self):
         contract = MagicMock()
         contract.functions.deployedAt.return_value.call.return_value = 777
-        gen = epoch_window(contract, 0, None, [])
+        gen = epoch_window(contract, number=1, prev_root="00" * 32,
+                           start=None, params_block=None, records=[])
         assert gen["number"] == 1 and gen["base"] == 777
         assert gen["start"] is None and gen["prev_root"] == "00" * 32
-        anchor = [make_epoch_id(3, ROOT, 4242), bytes.fromhex(ROOT), b"", b"",
-                  "", b"", "0x0", 50, 5000, b"", 0]
         lc = {"voting_delay": 10, "voting_period": 100, "min_delay": 20}
-        win = epoch_window(contract, 3, anchor, [], lifecycle=lc)
+        win = epoch_window(contract, number=4, prev_root=ROOT, start=4242,
+                           params_block=50, records=[], lifecycle=lc)
         # Cutoffs run on their own schedule: the next one counts from the
         # previous cutoff, not from when its anchor happened to land.
         assert win["number"] == 4 and win["base"] == 4242
@@ -251,10 +251,6 @@ class TestRules:
         # No target share set: the length is the floor, one lifecycle.
         assert win["floor"] == 130 and win["length"] == 130
         assert win["ceiling"] == 1000
-
-
-def _anchor(ts, burned):
-    return ["epoch-x", bytes(32), b"", b"", "", b"", "0x0", 1, ts, b"", burned]
 
 
 class TestRetarget:
@@ -282,18 +278,14 @@ class TestRetarget:
                  "key": "jurisdiction.autonet.epoch_retarget_window",
                  "value": "2"}]
         lc = {"voting_delay": 0, "voting_period": 1_000, "min_delay": 0}
-        # Anchors at t=1000 (huge burn, outside the window), 2000, 3000.
-        history = [_anchor(1000, 10**12), _anchor(2000, 9_000),
-                   _anchor(3000, 9_000)]
-        head = list(history[-1])
-        head[0] = make_epoch_id(3, ROOT, 2900)
-        head[7] = 1
-        history[-1] = head
-        win = epoch_window(contract, 3, head, recs, lifecycle=lc,
+        # Epochs cut at t=1000 (huge burn, outside the window), 2000, 3000.
+        history = [(1000, 10**12), (2000, 9_000), (3000, 9_000)]
+        win = epoch_window(contract, number=4, prev_root=ROOT, start=3000,
+                           params_block=1, records=recs, lifecycle=lc,
                            history=history, supply=10**9)
         # 18_000 burned over 2000 s; 10_000 per epoch takes 1111 s.
         assert win["length"] == 1111
-        assert win["base"] == 2900
+        assert win["base"] == 3000
 
     def test_lifecycle_from_settings_events(self):
         from nodes.common import voice_state
