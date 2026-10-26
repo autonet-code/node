@@ -49,6 +49,7 @@ def deploy_substrate(
     treasury: Optional[str] = None,
     vault_minter: Optional[str] = None,
     governor: Optional[str] = None,
+    anchorer: str = ZERO,
 ) -> str:
     """Deploy Substrate. ``governor`` defaults to ``deployer``: the
     account the tests anchor from."""
@@ -57,7 +58,7 @@ def deploy_substrate(
     vault_minter = accts[SLOT_VAULT] if vault_minter is None else vault_minter
     governor = deployer if governor is None else governor
     factory = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = factory.constructor(treasury, vault_minter, governor).transact(
+    tx = factory.constructor(treasury, vault_minter, governor, anchorer).transact(
         {"from": deployer, "gas": 12_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1

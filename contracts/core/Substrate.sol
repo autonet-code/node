@@ -90,10 +90,16 @@ contract Substrate is EIP712 {
     ///        (Decision 2026-10-16), so the DAO's REP vote is the anchor
     ///        authority and the DAO can cancel a bad anchor in the timelock.
     ///        Immutable and non-zero.
+    /// @param anchorer_ The jurisdiction's AnchorElection, or address(0).
+    ///        Set at construction so a jurisdiction launched in one go
+    ///        (werule's JurisdictionFactory, which predicts the election's
+    ///        address) anchors from its first epoch; changed later by the
+    ///        governor (setAnchorer).
     constructor(
         address treasury_,
         address vaultMinter_,
-        address governor_
+        address governor_,
+        address anchorer_
     )
         EIP712("AutonetSubstrate", "1")
     {
@@ -103,6 +109,8 @@ contract Substrate is EIP712 {
         governor = governor_;
         deployedAt = block.timestamp;
         latestCutoff = block.timestamp;
+        anchorer = anchorer_;
+        emit AnchorerSet(address(0), anchorer_);
     }
 
     // =========================================================================

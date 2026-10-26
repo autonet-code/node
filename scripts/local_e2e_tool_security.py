@@ -461,7 +461,7 @@ async def amain() -> int:
                                       [], [], False])
         # (treasury, vaultMinter, governor): the deployer is the governor,
         # so it anchors directly (an EOA governor, as on a dev network).
-        substrate = deploy(w3, "Substrate", [treasury, deployer, deployer])
+        substrate = deploy(w3, "Substrate", [treasury, deployer, deployer, "0x" + "00" * 20])
         bond = deploy(w3, "ToolBond", [substrate.address, rep.address, registry.address,
                                        deployer, timelock, tuple(PARAMS.values())])
         send(w3, rep.functions.setSlasher(bond.address, True), HH_DEPLOYER_PK)

@@ -60,6 +60,7 @@ def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
         deployer,  # treasury
         "0x0000000000000000000000000000000000000000",  # vaultMinter (off)
         deployer,  # governor (anchors directly)
+        "0x0000000000000000000000000000000000000000",  # anchorer (none)
     ).transact(
         {"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)

@@ -61,7 +61,8 @@ async function main() {
   const substrate = await Substrate.deploy(
     treasury,
     vaultMinter,
-    governor
+    governor,
+    process.env.ANCHORER || ethers.ZeroAddress
   );
   await substrate.waitForDeployment();
   const address = await substrate.getAddress();

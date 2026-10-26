@@ -243,7 +243,7 @@ async function main() {
   // production uses the DAO timelock) and the test vaultMinter (faucet for
   // the purchased ATN that pays the fees which fund the mint pool).
   const substrate = await Substrate.deploy(
-    deployer.address, governor.address, governor.address);
+    deployer.address, governor.address, governor.address, ethers.ZeroAddress);
   await substrate.waitForDeployment();
   const substrateAddr = await substrate.getAddress();
 

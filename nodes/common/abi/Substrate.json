@@ -17,6 +17,11 @@
      "internalType": "address",
      "name": "governor_",
      "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "anchorer_",
+     "type": "address"
     }
    ],
    "stateMutability": "nonpayable",

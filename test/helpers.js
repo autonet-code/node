@@ -30,7 +30,7 @@ async function deploySubstrateWith(opts = {}) {
   const governor =
     opts.governor !== undefined ? opts.governor : signers[SLOT_GOVERNOR].address;
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy(treasury, vaultMinter, governor);
+  const substrate = await Substrate.deploy(treasury, vaultMinter, governor, ethers.ZeroAddress);
   await substrate.waitForDeployment();
   _ctx[(await substrate.getAddress()).toLowerCase()] = {
     vaultFaucet: vaultMinter === vaultSigner.address ? vaultSigner : null,
@@ -127,6 +127,13 @@ async function anchorFields(substrate, epochId, agentMintRoot) {
     agentMintCid: "cid-" + epochId,
     payloadHash: digest("payload-" + epochId),
     agentMintRoot: agentMintRoot || ethers.ZeroHash,
+    // The head block's timestamp (the anchoring block is later), and after
+    // the latest cutoff.
+    cutoff: await (async () => {
+      const head = BigInt((await ethers.provider.getBlock("latest")).timestamp);
+      const next = (await substrate.latestCutoff()) + 1n;
+      return head > next ? head : next;
+    })(),
   };
 }
 
@@ -140,7 +147,8 @@ function anchorTx(substrate, sender, f) {
       f.prevAnchorHash,
       f.agentMintCid,
       f.payloadHash,
-      f.agentMintRoot
+      f.agentMintRoot,
+      f.cutoff
     );
 }
 

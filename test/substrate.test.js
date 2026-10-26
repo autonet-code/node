@@ -263,7 +263,7 @@ describe("Substrate — fees-only emission + REP-from-earnings (2026-07-10)", fu
     it("zero-address governor is rejected at deploy", async function () {
       const Substrate = await ethers.getContractFactory("Substrate");
       await expect(
-        Substrate.deploy(deployer.address, ZERO, ZERO)
+        Substrate.deploy(deployer.address, ZERO, ZERO, ZERO)
       ).to.be.revertedWithCustomError(Substrate, "NoAnchorAuthority");
     });
   });

@@ -88,7 +88,7 @@ async function main() {
   const Substrate = await ethers.getContractFactory("Substrate");
   // (treasury, vaultMinter, governor): Decision 2026-10-16.
   const substrate = await Substrate.deploy(
-    deployer.address, deployer.address, deployer.address
+    deployer.address, deployer.address, deployer.address, ethers.ZeroAddress
   );
   _vaultMinter = deployer;
   await substrate.waitForDeployment();

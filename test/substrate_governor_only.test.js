@@ -39,7 +39,7 @@ describe("Substrate governor-only anchoring + conservation", function () {
 
     it("rejects a zero governor at deploy", async function () {
       const F = await ethers.getContractFactory("Substrate");
-      await expect(F.deploy(ZERO, ZERO, ZERO)).to.be.revertedWithCustomError(
+      await expect(F.deploy(ZERO, ZERO, ZERO, ZERO)).to.be.revertedWithCustomError(
         F, "NoAnchorAuthority");
     });
 
