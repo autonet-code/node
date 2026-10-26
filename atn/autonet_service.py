@@ -937,6 +937,8 @@ class AutonetBridge:
                 value = getattr(self.config, atn_key, "") or ""
                 if value:
                     setattr(bc, node_key, value)
+            if getattr(self.config, "deploy_block", 0):
+                bc.deploy_block = int(self.config.deploy_block)
             # The jurisdiction's identity keys its gossip topic and its
             # parked substrate data (docs/multi_jurisdiction.md decision 2).
             self._autonet_config.jurisdiction_key = self.state.jurisdiction_key

@@ -31,6 +31,7 @@ import numpy as np
 from .grow import propose_growth
 from .world import World
 from . import lindblad as _lb
+from . import detmath
 
 
 def equilibrate(
@@ -150,14 +151,14 @@ def _alpha_from_score(score: float) -> float:
         return 1.0
     if score < -30:
         return 0.0
-    return 1.0 / (1.0 + math.exp(-score))
+    return 1.0 / (1.0 + detmath.exp(-score))
 
 
 def _score_from_alpha(alpha: float) -> float:
     """Inverse: alpha -> logit-mapped substrate score."""
     eps = 1e-6
     a = max(eps, min(1.0 - eps, alpha))
-    return math.log(a / (1.0 - a))
+    return detmath.log(a / (1.0 - a))
 
 
 def _avg_child_n(world: World, tid: str) -> float:
@@ -225,7 +226,7 @@ def _observation_jump_ops(
             anchor = tendency.anchor
             polarity = tendency.polarity_axis
             d = math.sqrt(sum((a - b) ** 2 for a, b in zip(obs.coords, anchor)))
-            kernel = math.exp(-d * d / (2.0 * bandwidth * bandwidth + 1e-12))
+            kernel = detmath.exp(-d * d / (2.0 * bandwidth * bandwidth + 1e-12))
             gamma = base_gamma * kernel
             if gamma < 1e-4:
                 continue
@@ -446,7 +447,7 @@ def _emit_cross_link_stakes(
                 d = math.sqrt(sum(
                     (x - y) ** 2 for x, y in zip(coords_i, coords_j)
                 ))
-                kern = math.exp(-d * d / (2.0 * bandwidth * bandwidth + 1e-12))
+                kern = detmath.exp(-d * d / (2.0 * bandwidth * bandwidth + 1e-12))
                 contrib = abs(s_i * s_j) * c_i * c_j * kern
                 if contrib > best_score:
                     best_score = contrib

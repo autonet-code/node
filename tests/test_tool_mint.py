@@ -646,6 +646,34 @@ class TestMoneyOnlyMint:
         assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
             expected, rel=1e-6)
 
+    def test_checksummed_callers_find_lowercase_voice_and_owner(self):
+        """Decision 2026-10-26: chain-read maps key by lowercase 0x while
+        events carry checksummed ids. The lookup must be case-insensitive:
+        before the fix every checksummed caller fell to the epsilon weight
+        and escaped its owner's household (same-owner exclusion)."""
+        world = self._world()
+        caller = "0xAbCdEf0000000000000000000000000000000001"
+        sibling = "0xAbCdEf0000000000000000000000000000000002"
+        owner = "0x00000000000000000000000000000000000000Aa"
+        events = [_receipt_event(1, caller)]
+        voice_weights = {caller.lower(): 0.5}
+        out = compute_tool_mint(
+            world, events, registrations=self.REGS,
+            voice_weights=voice_weights,
+        )
+        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
+            math.log1p(1) * 0.5, rel=1e-9)
+        # The owner map is lowercase too: a checksummed author and caller
+        # under one owner are one household, so the caller mints nothing.
+        regs = {DIGEST: {"trust_class": "pinned", "author": sibling}}
+        out = compute_tool_mint(
+            world, events, registrations=regs,
+            agent_owner_map={caller.lower(): owner.lower(),
+                             sibling.lower(): owner.lower()},
+            voice_weights={owner.lower(): 0.5},
+        )
+        assert DIGEST not in out["per_digest"]
+
     def test_close_emits_no_agent_rep(self):
         """Through the full close, there is no agent_rep map (money only)."""
         kp_author = Keypair.generate()
@@ -659,7 +687,7 @@ class TestMoneyOnlyMint:
         )
         assert result["agent_mint"].get(AUTHOR, 0) > 0
         assert "agent_rep" not in result
-        assert result["authoritative_payload"]["schema"] == 4
+        assert result["authoritative_payload"]["schema"] == 5
         assert "agent_rep" not in result["authoritative_payload"]
 
 

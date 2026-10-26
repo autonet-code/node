@@ -68,6 +68,7 @@ import math
 from typing import Sequence
 
 import numpy as np
+from . import detmath
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +249,7 @@ def _normalized_tension(stakes_caps: Sequence[tuple[float, float]]) -> float:
 
 
 def _gaussian_kernel(d: float, bandwidth: float) -> float:
-    return math.exp(-d * d / (2.0 * bandwidth * bandwidth + 1e-12))
+    return detmath.exp(-d * d / (2.0 * bandwidth * bandwidth + 1e-12))
 
 
 def hamiltonian_params_from_subclaims(

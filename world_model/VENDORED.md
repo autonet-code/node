@@ -25,3 +25,12 @@ git commit -m "vendor: sync world-model from upstream"
 
 Long-term plan: publish `world-model` to PyPI and reference it as a
 normal dependency, then remove this vendored copy.
+
+## Local patches (not yet upstream)
+
+- `generalized/detmath.py` (2026-10-26): platform-independent `exp`,
+  `log`, `log1p` built from IEEE basic operations only. The kernels in
+  `coordinate_frame.py`, `equilibrate.py` and `lindblad.py` call it
+  instead of `math.exp` / `math.log`, so the canonical world checkpoint
+  (`world_cid`) hashes the same on every C library. Port this upstream
+  before the next sync, or the sync reverts it.

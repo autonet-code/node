@@ -232,7 +232,7 @@ def test_decode_rejects_non_canonical_or_malformed():
         decode_carry_bundle(b"not json")
 
 
-def test_payload_encodes_carry_cid_last_and_schema_4():
+def test_payload_encodes_carry_cid_charter_and_sanctions_schema_5():
     payload = {
         "epoch_root": ROOT_B,
         "agent_mint": {"bob": 1.0, "alice": 2.0},
@@ -241,14 +241,28 @@ def test_payload_encodes_carry_cid_last_and_schema_4():
         "total_novelty": 0.0,
         "world_cid": "aa" * 32,
         "carry_cid": "cc" * 32,
+        "charter_hash": "AB" * 32,
+        "sanctioned_households": ["0xBEEF", "0xaaaa", "0xbeef"],
     }
     raw = encode_authoritative_payload(
         payload, epoch_id="e1", epoch_root_hex=ROOT_B, prev_epoch_root_hex=ROOT_A)
     decoded = json.loads(raw)
-    assert SCHEMA_VERSION == 4
-    assert decoded["schema"] == 4
+    assert SCHEMA_VERSION == 5
+    assert decoded["schema"] == 5
     assert decoded["carry_cid"] == "cc" * 32
-    assert list(decoded)[-2:] == ["world_cid", "carry_cid"]
+    assert list(decoded)[-4:] == [
+        "world_cid", "carry_cid", "charter_hash", "sanctioned_households"]
+    assert decoded["charter_hash"] == "ab" * 32
+    assert decoded["sanctioned_households"] == ["0xaaaa", "0xbeef"]
+    # A different sanction list or charter is a different payload hash.
+    other = dict(payload, sanctioned_households=[])
+    assert encode_authoritative_payload(
+        other, epoch_id="e1", epoch_root_hex=ROOT_B,
+        prev_epoch_root_hex=ROOT_A) != raw
+    other = dict(payload, charter_hash="cd" * 32)
+    assert encode_authoritative_payload(
+        other, epoch_id="e1", epoch_root_hex=ROOT_B,
+        prev_epoch_root_hex=ROOT_A) != raw
     # Absent carry_cid encodes as "" (no tracker / library use).
     del payload["carry_cid"]
     raw2 = encode_authoritative_payload(
@@ -432,7 +446,7 @@ def test_fetch_reports_anchor_and_carry(network):
         network["chain"]["contract"], network["resolver"])
     assert fetch.status == "ok"
     assert fetch.epoch_id == "e3"
-    assert fetch.payload_schema == 4
+    assert fetch.payload_schema == 5
     assert fetch.carry == {
         k: json.loads(json.dumps(v))
         for k, v in network["always_on"].carry_over_maps().items()

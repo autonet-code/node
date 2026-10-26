@@ -506,6 +506,8 @@ def compute_tool_mint(
     """
     import math
 
+    # Platform-independent log1p: the mint must not depend on the C library.
+    from world_model.generalized import detmath as _detmath
     from .world_model_substrate.infer import _artifact_standing
     from .world_model_substrate.tool_manifest import TRUST_PINNED
     from .world_model_substrate.tool_usage import tool_usage_from_events
@@ -548,7 +550,19 @@ def compute_tool_mint(
     #      nothing — the risk window is the incentive).
     # ------------------------------------------------------------------
     vet_state = _normalize_vetting(vetting)
-    owner_map_all = agent_owner_map or {}
+    # Addresses are case-insensitive: the chain-read maps key by lowercase
+    # 0x while events carry whatever spelling the agent used (often
+    # checksummed). Every household lookup lowercases both sides, so a
+    # checksummed caller still finds its owner, weight and rep share.
+    owner_map_all = _lower_map(agent_owner_map or {}, values=True)
+    if voice_weights is not None:
+        voice_weights = _lower_map(voice_weights)
+    if rep_shares is not None:
+        rep_shares = _lower_map(rep_shares)
+
+    def _owner(agent_id: str) -> str:
+        return owner_map_all.get(str(agent_id).lower(), "")
+
     for digest in sorted(set(usage) & set(known_regs)):
         vets_by_caller = usage[digest].get("vets_by_caller") or {}
         if not vets_by_caller:
@@ -556,7 +570,7 @@ def compute_tool_mint(
         meta = known_regs[digest]
         author = str(meta.get("author") or "")
         reg_sender = str(meta.get("sender") or "")
-        author_owner = owner_map_all.get(author, "")
+        author_owner = _owner(author)
         m = vet_state["manifests"].setdefault(digest, {
             "vets": {}, "greenlit": False, "royalty_left": 0,
             "validators": [], "busted": False,
@@ -564,7 +578,7 @@ def compute_tool_mint(
         for vetter in sorted(vets_by_caller.keys()):
             if vetter == author:
                 continue
-            if author_owner and owner_map_all.get(vetter, "") == author_owner:
+            if author_owner and _owner(vetter) == author_owner:
                 continue
             senders = usage[digest].get("vet_senders", {}).get(vetter, [])
             if reg_sender and reg_sender in senders:
@@ -588,7 +602,7 @@ def compute_tool_mint(
             continue
         fleets: Dict[str, float] = {}
         for vetter in sorted(m["vets"].keys()):
-            fleet_key = owner_map_all.get(vetter, "") or vetter
+            fleet_key = _owner(vetter) or str(vetter).lower()
             weight = 1.0 / (1.0 + vet_state["busts"].get(vetter, 0))
             fleets[fleet_key] = max(fleets.get(fleet_key, 0.0), weight)
         total_weight = round(
@@ -621,7 +635,7 @@ def compute_tool_mint(
     # Household collapse (voice addendum): the economic unit behind a
     # caller is its proven owner wallet; unbound callers stand alone.
     def _household(agent_id: str) -> str:
-        return owner_map_all.get(agent_id, "") or agent_id
+        return _owner(agent_id) or str(agent_id).lower()
 
     rep_share_map = rep_shares or {}
 
@@ -710,7 +724,7 @@ def compute_tool_mint(
                     base_w = _rep_share(house)
                     if base_w <= 0.0:
                         continue
-                w = math.log1p(n) * base_w
+                w = _detmath.log1p(n) * base_w
                 o_sum += w * (cells[house]["sum"] / n)
                 o_mass += w
         if o_mass > 0.0:
@@ -737,7 +751,7 @@ def compute_tool_mint(
             house_senders.setdefault(house, set()).update(
                 entry["attester_senders"].get(caller, []))
         for house in sorted(counts.keys()):
-            damped = math.log1p(counts[house])
+            damped = _detmath.log1p(counts[house])
             for target in sorted(shares.keys()):
                 bucket = eff.setdefault(target, {})
                 bucket[house] = bucket.get(house, 0.0) + damped * shares[target]
@@ -768,7 +782,7 @@ def compute_tool_mint(
             pooled = house_senders.setdefault(fleet_key, set())
             for member in fleets[fleet_key]:
                 pooled.update(entry["senders"].get(member, []))
-            damped = math.log1p(1)
+            damped = _detmath.log1p(1)
             for target in sorted(shares.keys()):
                 bucket = eff.setdefault(target, {})
                 bucket[fleet_key] = (bucket.get(fleet_key, 0.0)
@@ -799,7 +813,7 @@ def compute_tool_mint(
     reviewer_bps = int(rev_snap["reviewer_share_bps"])
     id_index: Dict[str, str] = {}
     if rev_snap["rounds"]:
-        known_ids: set = set(owner_map_all.keys())
+        known_ids: set = set((agent_owner_map or {}).keys())
         for m in known_regs.values():
             if m.get("author"):
                 known_ids.add(str(m["author"]))
@@ -1466,7 +1480,9 @@ def federated_epoch_close(
         # 3-field agent_rep shape; not reused for this different shape.)
         # schema 4: + carry_cid (set by FederatedCloseDriver, like
         # world_cid) committing the next close's carry-over bundle.
-        "schema": 4,
+        # schema 5 (Decision 2026-10-26): the encoding also commits
+        # charter_hash and sanctioned_households.
+        "schema": 5,
         "epoch_root": result["epoch_root"],
         "agent_mint": result["agent_mint"],
         "agent_novelty": result["agent_novelty"],
@@ -1562,6 +1578,16 @@ def floor_mint_to_pool(
             if i > 10 * len(order) + excess * len(order):  # pragma: no cover
                 break
     return {a: ks[a] / mint_scale for a in keys}
+
+
+def _lower_map(d: Dict[str, Any], *, values: bool = False) -> Dict[str, Any]:
+    """Lowercase a map's keys (and string values when ``values``), in
+    sorted key order so a case collision resolves the same everywhere."""
+    out: Dict[str, Any] = {}
+    for k in sorted(d, key=str):
+        v = d[k]
+        out[str(k).lower()] = str(v).lower() if values else v
+    return out
 
 
 def _round_dict(d: Dict[str, float], decimals: int) -> Dict[str, float]:

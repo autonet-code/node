@@ -183,7 +183,12 @@ _DEPLOY_BLOCK_CACHE: Dict[Any, int] = {}
 def _deployment_block(w3, address: str) -> int:
     """Lowest block at which the contract has code (binary search on
     eth_getCode, ~log2(head) RPC calls, cached). Event scans start
-    here instead of block 0 — public RPCs cap eth_getLogs ranges."""
+    here instead of block 0 — public RPCs cap eth_getLogs ranges.
+
+    Only used when no deployment block is configured. A failed read
+    raises (Decision 2026-10-26): a non-archive node that cannot serve old
+    state used to count as "no code yet", which started the scan late and
+    silently dropped early events, so the close disagreed with peers."""
     key = (id(w3.provider), address.lower())
     hit = _DEPLOY_BLOCK_CACHE.get(key)
     if hit is not None:
@@ -193,13 +198,7 @@ def _deployment_block(w3, address: str) -> int:
         return hi  # no code at head — nothing to scan anyway
     while lo < hi:
         mid = (lo + hi) // 2
-        try:
-            has_code = bool(w3.eth.get_code(address, block_identifier=mid))
-        except Exception:
-            # Non-archive node can't serve old getCode — assume no code
-            # there and keep moving up; worst case we start the scan a
-            # little late, never early.
-            has_code = False
+        has_code = bool(w3.eth.get_code(address, block_identifier=mid))
         if has_code:
             hi = mid
         else:
@@ -215,11 +214,15 @@ def _get_logs_range(event, from_block: int, to_block: int):
         return event.get_logs(fromBlock=from_block, toBlock=to_block)
 
 
-def _get_logs(event, w3, address: str, to_block: int):
+def _get_logs(event, w3, address: str, to_block: int,
+              start_block: Optional[int] = None):
     """Fetch an event's logs [deployment, to_block], splitting the
     range adaptively when the RPC rejects it as too large (public
-    endpoints cap eth_getLogs spans)."""
-    start = _deployment_block(w3, address)
+    endpoints cap eth_getLogs spans). ``start_block`` is the configured
+    deployment block of the jurisdiction; without it the start is found
+    by ``_deployment_block``."""
+    start = (int(start_block) if start_block is not None
+             else _deployment_block(w3, address))
     if start > to_block:
         return []
     spans = [(start, to_block)]
@@ -464,6 +467,7 @@ def read_tool_review_snapshot(
     w3: Any, tool_bond_address: str, block: int, *, since_block: int = 0,
     axis_ids: Optional[List[str]] = None,
     excluded_reviewers: Optional[Iterable[str]] = None,
+    start_block: Optional[int] = None,
 ) -> Dict[str, Any]:
     """ToolBond review snapshot as of ``block`` (the snapshot anchor's
     block), with the reviewer-share rounds finalized after ``since_block``
@@ -481,7 +485,7 @@ def read_tool_review_snapshot(
     records: List[Dict[str, Any]] = []
     for spec in _TOOL_BOND_EVENTS_ABI:
         event = getattr(contract.events, spec["name"])
-        for log in _get_logs(event, w3, contract.address, block):
+        for log in _get_logs(event, w3, contract.address, block, start_block):
             records.append({
                 "block": int(log["blockNumber"]),
                 "index": int(log["logIndex"]),
@@ -565,6 +569,7 @@ def charter_text_from_logs(
 
 def _registry_records(
     w3: Any, dao_registry_address: str, block: int,
+    start_block: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Every RegistryUpdated write up to ``block``, as
     ``{"block", "index", "key", "value"}``. Raises on RPC failure."""
@@ -582,7 +587,8 @@ def _registry_records(
             "value": log["args"]["value"],
         }
         for log in _get_logs(
-            contract.events.RegistryUpdated, w3, contract.address, block)
+            contract.events.RegistryUpdated, w3, contract.address, block,
+            start_block)
     ]
 
 
@@ -758,6 +764,7 @@ def read_voice_state(
     web3: Any = None,
     anchor_index: Optional[int] = None,
     jurisdiction_id: str = "autonet",
+    deploy_block: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Read {owner_map, voice_weights, rep_shares, rep_supply, supply,
     snapshot_block, emission_pool, recycled, weight_source,
@@ -790,8 +797,12 @@ def read_voice_state(
     agents with a bound owner at the snapshot. ``voice_weights``:
     household key -> epsilon + household_reputation/supply, rounded to 9
     decimals. Raises on RPC failure — the driver's refresh hook catches
-    and keeps the previous maps.
+    it and blocks the close.
+
+    ``deploy_block`` (the jurisdiction's configured deployment block)
+    starts every log scan; None finds each contract's creation block.
     """
+    start = int(deploy_block) if deploy_block else None
     from web3 import Web3
 
     w3 = web3 if web3 is not None else Web3(Web3.HTTPProvider(rpc_url))
@@ -848,10 +859,12 @@ def read_voice_state(
     agents = sorted({
         str(log["args"]["agent"]).lower()
         for log in _get_logs(
-            contract.events.AgentRegistered, w3, contract.address, block)
+            contract.events.AgentRegistered, w3, contract.address, block,
+            start)
     })
     bindings = sorted(
-        _get_logs(contract.events.OwnerBound, w3, contract.address, block),
+        _get_logs(contract.events.OwnerBound, w3, contract.address, block,
+                  start),
         key=lambda log: (int(log["blockNumber"]), int(log["logIndex"])),
     )
     owner_of: Dict[str, str] = {}
@@ -866,7 +879,7 @@ def read_voice_state(
     revoked = {
         str(log["args"]["agent"]).lower()
         for log in _get_logs(
-            contract.events.AgentRevoked, w3, contract.address, block)
+            contract.events.AgentRevoked, w3, contract.address, block, start)
     }
     if revoked:
         def _live(agent: str) -> bool:
@@ -937,12 +950,14 @@ def read_voice_state(
     policy: Dict[str, Any] = {"robots": [], "robot_standards": [],
                               "jurisdiction_lineage": []}
     if dao_registry_address:
-        reg_records = _registry_records(w3, dao_registry_address, block)
+        reg_records = _registry_records(
+            w3, dao_registry_address, block, start)
         charter_text = charter_text_from_logs(reg_records, block)
         sanctions = sanctions_from_records(reg_records, block, timestamp)
         own = str(dao_registry_address).lower()
         policy = robot_policy(
-            lambda reg: reg_records if reg == own else _registry_records(w3, reg, block),
+            lambda reg: reg_records if reg == own
+            else _registry_records(w3, reg, block, start),
             own, block, jurisdiction_id)
     houses = sanctioned_households(sanctions, owner_of)
     house_set = set(houses)
@@ -964,7 +979,7 @@ def read_voice_state(
             since_block = int(contract.functions.getAnchor(anchor_count - 2).call()[7])
         review_snapshot = read_tool_review_snapshot(
             w3, tool_bond_address, block, since_block=since_block,
-            excluded_reviewers=excluded_reviewers)
+            excluded_reviewers=excluded_reviewers, start_block=start)
     review_snapshot["supply"] = int(supply)
 
     return {

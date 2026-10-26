@@ -259,6 +259,9 @@ class RPBConfig:
                                         # JSON {"axes":[{"id","thesis"}]}, exact
                                         # registry bytes (charter_hash = their
                                         # sha256). docs/multi_jurisdiction.md 5.
+    deploy_block: int = 0               # Block the jurisdiction's contracts
+                                        # were deployed at; every close log
+                                        # scan starts here. 0 = search.
     epoch_rules: str = ""               # jurisdiction.<id>.epoch_rules: the
                                         # epoch computation version the DAO's
                                         # network runs. Empty = "1".
@@ -587,6 +590,8 @@ def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str
         seed["substrate_address"] = contracts["substrate"]
     if contracts.get("rep_token"):
         seed["rep_token_address"] = contracts["rep_token"]
+    if contracts.get("deploy_block"):
+        seed["deploy_block"] = int(contracts["deploy_block"])
     charter = contracts.get("charter") or ""
     if charter.lstrip().startswith("{"):
         # The charter text itself (2026-10-17). Hash the exact registry
@@ -1155,6 +1160,7 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
         charter_uri=resolved.get("charter_uri", ""),
         charter_text=resolved.get("charter_text", ""),
         epoch_rules=str(resolved.get("epoch_rules", "") or ""),
+        deploy_block=int(resolved.get("deploy_block", 0) or 0),
         dao_registry_address=resolved.get("dao_registry_address", ""),
         tool_bond_address=resolved.get("tool_bond_address", ""),
         registry_address=resolved.get("registry_address", ""),

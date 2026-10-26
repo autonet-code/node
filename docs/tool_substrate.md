@@ -588,7 +588,20 @@ fired, and the proposer from each daemon's own list of senders.
    restored at boot, not rebuilt; a failed voice refresh blocks the close
    instead of persisting carry state; the log scan starts at the configured
    deployment block, never inferred from failed reads; the charter hash and
-   sanctioned households in the payload encoding.
+   sanctioned households in the payload encoding. Added with them: the
+   kernels behind `world_cid` and the mint's `log1p` use platform-
+   independent exp/log (`world_model/generalized/detmath.py`), since C
+   libraries round some inputs differently.
+
+   **Item 8 BUILT** (branch `epoch-rules-2`): household lookups in
+   `compute_tool_mint` lowercase both sides; the driver persists the
+   tracker checkpoint (`canonical_world.json`), restores it at boot and
+   otherwise installs the anchored `world_cid` (same rule as the
+   carry-over), and a tracker failure blocks; the voice refresh is
+   all-or-nothing and a failure blocks; `blockchain.deploy_block` (registry
+   key `deploy_block`, 0 = search, which now raises on a failed read)
+   starts every log scan; payload schema 5 commits `charter_hash` and
+   `sanctioned_households`.
 
 Rollout: these are `epoch_rules` version `"2"` (the existing Registry key).
 Daemons on this build refuse `"1"`; the jurisdiction switches by one DAO

@@ -60,6 +60,11 @@ class BlockchainConfig:
     # The jurisdiction's DAO Governor. Epoch anchors go through it as
     # proposals (Decision 2026-10-16). Seeded from registry.json ("dao").
     governor_address: str = ""
+    # The block the jurisdiction's contracts were deployed at: every close
+    # log scan starts here (Decision 2026-10-26), so no daemon infers it
+    # from reads a non-archive node may fail. 0 = find it by search
+    # (needs an archive node). Seeded from registry.json ("deploy_block").
+    deploy_block: int = 0
 
 
 @dataclass
@@ -275,6 +280,7 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_REP_TOKEN_ADDRESS": ("blockchain.rep_token_address", str),
         "AUTONET_DAO_REGISTRY_ADDRESS": ("blockchain.dao_registry_address", str),
         "AUTONET_GOVERNOR_ADDRESS": ("blockchain.governor_address", str),
+        "AUTONET_DEPLOY_BLOCK": ("blockchain.deploy_block", int),
         "AUTONET_BLOB_DIR": ("blob_store.data_dir", str),
         "AUTONET_DATA_DIR": ("data_dir", str),
         "AUTONET_LOG_LEVEL": ("log_level", str),
@@ -409,6 +415,12 @@ def load_config(path: Optional[str] = None) -> AutonetConfig:
     if not cfg.blockchain.governor_address:
         cfg.blockchain.governor_address = _registry_substrate_address(
             path, key="dao")
+    if not cfg.blockchain.deploy_block:
+        try:
+            cfg.blockchain.deploy_block = int(
+                _registry_substrate_address(path, key="deploy_block") or 0)
+        except (TypeError, ValueError):
+            cfg.blockchain.deploy_block = 0
 
     logger.info(
         f"Config: device={cfg.device}, arch={cfg.model.architecture}, "

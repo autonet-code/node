@@ -119,6 +119,7 @@ class FederatedCloseDriver:
         tool_registrations_path: Optional[Any] = None,
         tool_vetting_path: Optional[Any] = None,
         tool_positions_path: Optional[Any] = None,
+        canonical_world_path: Optional[Any] = None,
     ):
         self.gossip = gossip
         self.pricing = pricing
@@ -130,6 +131,26 @@ class FederatedCloseDriver:
         # Must be constructed with the SAME bandwidth/embedding_dim so
         # the tracker's replay matches the federated kernel.
         self.canonical_tracker = canonical_tracker
+        # The tracker's latest checkpoint blob, persisted after every close
+        # and restored at boot (Decision 2026-10-26): a tracker rebuilt from
+        # a fresh charter after a restart emits a world_cid no peer shares.
+        self._canonical_world_path: Optional[Path] = (
+            Path(canonical_world_path) if canonical_world_path else None
+        )
+        # True once the tracker holds the network's canonical world: a
+        # restored or chain-fetched checkpoint, or a fresh charter at
+        # genesis. A failed tracker update clears it (its world is then
+        # half-advanced).
+        self._tracker_restored = self._restore_canonical_tracker()
+        self._tracker_failed: Optional[str] = None
+        # Optional zero-arg hook returning a state_sync.CatchUpResult for
+        # the latest anchor's world_cid (None when not retrievable), used
+        # while the tracker has no checkpoint past genesis. Same install
+        # rule as the carry-over: only the epoch observed just before.
+        self.world_source: Optional[Callable[[], Any]] = None
+        # Set when the latest voice refresh failed: closing on the previous
+        # snapshot would price this epoch on state peers have moved past.
+        self._voice_refresh_error: Optional[str] = None
         # Tool-substrate carry-over (docs/tool_substrate.md v2): the
         # accumulated digest -> manifest_meta registration map, so a
         # tool registered in epoch 1 still attributes mint in epoch 5.
@@ -249,6 +270,86 @@ class FederatedCloseDriver:
         # not installed (bundle unretrievable or rejected): closing on the
         # pre-seed local state would fork from peers that adopted it.
         self._seed_blocker: Optional[str] = None
+
+    def _restore_canonical_tracker(self) -> bool:
+        """Load the persisted checkpoint into the tracker. Returns True
+        when one was restored."""
+        path = self._canonical_world_path
+        if self.canonical_tracker is None or path is None or not path.exists():
+            return False
+        from .state_sync import CanonicalWorldTracker, decode_world_checkpoint
+        try:
+            blob = path.read_bytes()
+            checkpoint = decode_world_checkpoint(blob)
+            tracker = self.canonical_tracker
+            self.canonical_tracker = CanonicalWorldTracker.from_checkpoint(
+                checkpoint, cid_for_blob(blob),
+                bandwidth=tracker.bandwidth,
+                embedding_dim=tracker.embedding_dim,
+                equilibrate_rounds=tracker.equilibrate_rounds,
+                equilibrate_tolerance=tracker.equilibrate_tolerance,
+            )
+        except Exception as e:
+            logger.error(
+                "canonical world checkpoint unreadable (%s); this daemon "
+                "will not close until it fetches the anchored one", e)
+            return False
+        logger.info("canonical world tracker restored from %s (epoch %s)",
+                    path.name, checkpoint.get("epoch_id"))
+        return True
+
+    def _save_canonical_world(self, blob: bytes) -> None:
+        path = self._canonical_world_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_bytes(blob)
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist canonical world: %s", e)
+
+    def _maybe_join_world(self, prev_root: Optional[str]) -> None:
+        """Install the anchored canonical world when the tracker has none
+        past genesis, under the same rule as the carry-over: the anchor
+        must be the epoch observed immediately before this close."""
+        if (self.canonical_tracker is None or self._tracker_restored
+                or self._chain_at_genesis is not False
+                or self.world_source is None or prev_root is None):
+            return
+        try:
+            result = self.world_source()
+        except Exception as e:
+            logger.warning(
+                "federated close: anchored world fetch failed (observing): %s", e)
+            return
+        if result is None:
+            return
+        if str(getattr(result, "epoch_root_hex", "") or "") != prev_root:
+            logger.warning(
+                "federated close: latest anchored world (epoch %s) is not the "
+                "epoch observed just before this close; observing",
+                getattr(result, "epoch_id", "?"))
+            return
+        from .state_sync import CanonicalWorldTracker, encode_world_checkpoint
+        tracker = self.canonical_tracker
+        self.canonical_tracker = CanonicalWorldTracker(
+            world=result.world, prev_world_cid=result.world_cid,
+            bandwidth=tracker.bandwidth, embedding_dim=tracker.embedding_dim,
+            equilibrate_rounds=tracker.equilibrate_rounds,
+            equilibrate_tolerance=tracker.equilibrate_tolerance,
+        )
+        blob = encode_world_checkpoint(
+            result.world, epoch_id=result.epoch_id,
+            epoch_root_hex=result.epoch_root_hex,
+            prev_world_cid=result.prev_world_cid)
+        if cid_for_blob(blob) == result.world_cid:
+            self._save_canonical_world(blob)
+        self._tracker_restored = True
+        self._tracker_failed = None
+        logger.info("federated close: installed the anchored canonical world "
+                    "(epoch %s)", result.epoch_id)
 
     def carry_over_paths(self) -> Dict[str, Optional[Path]]:
         """The on-disk carry-over files every close reads as INPUTS."""
@@ -466,49 +567,72 @@ class FederatedCloseDriver:
                 f"missing carry-over files ({why}): " + ", ".join(missing))
         if self._seed_blocker:
             blockers.append(self._seed_blocker)
+        if self._voice_refresh_error:
+            blockers.append(
+                "voice-state refresh failed: " + self._voice_refresh_error)
+        if self.canonical_tracker is not None:
+            if self._tracker_failed:
+                blockers.append(
+                    "canonical world tracker failed: " + self._tracker_failed)
+            elif (not self._tracker_restored
+                  and self._chain_at_genesis is not True):
+                why = ("chain has prior anchors"
+                       if self._chain_at_genesis is False
+                       else "genesis status unknown")
+                blockers.append(f"no canonical world checkpoint ({why})")
         return blockers
 
     def _refresh_voice(self) -> None:
+        """Read this close's chain inputs. All-or-nothing: on any failure
+        nothing is replaced and the close is blocked (Decision 2026-10-26),
+        since the previous snapshot is not what peers price against."""
         if self.voice_source is None:
             return
         try:
             state = self.voice_source() or {}
+            updates: Dict[str, Any] = {}
             if "snapshot_block" in state:
                 # read_voice_state reports snapshot_block=None exactly
                 # when anchorCount == 0.
-                self._chain_at_genesis = state.get("snapshot_block") is None
+                updates["_chain_at_genesis"] = (
+                    state.get("snapshot_block") is None)
             owner_map = state.get("owner_map")
             weights = state.get("voice_weights")
             if isinstance(owner_map, dict):
-                self.agent_owner_map = {
+                updates["agent_owner_map"] = {
                     str(k): str(v) for k, v in owner_map.items()}
             if isinstance(weights, dict):
-                self.voice_weights = {
+                updates["voice_weights"] = {
                     str(k): float(v) for k, v in weights.items()}
             # Raw rep shares for drift weight (same read, no extra call).
             shares = state.get("rep_shares")
             if isinstance(shares, dict):
-                self.rep_shares = {
+                updates["rep_shares"] = {
                     str(k): float(v) for k, v in shares.items()}
             pool = state.get("emission_pool")
             if pool is not None:
-                self.emission_pool = float(pool)
+                updates["emission_pool"] = float(pool)
             if state.get("snapshot_anchor_count") is not None:
-                self.snapshot_anchor_count = int(
+                updates["snapshot_anchor_count"] = int(
                     state["snapshot_anchor_count"])
             reviews = state.get("review_snapshot")
             if isinstance(reviews, dict):
-                self.review_snapshot = reviews
+                updates["review_snapshot"] = reviews
             if "charter_text" in state:
                 text = state.get("charter_text")
-                self.pinned_charter_text = str(text) if text else None
+                updates["pinned_charter_text"] = str(text) if text else None
             houses = state.get("sanctioned_households")
             if isinstance(houses, list):
-                self.sanctioned_households = sorted(
+                updates["sanctioned_households"] = sorted(
                     str(h).lower() for h in houses)
         except Exception as e:
+            self._voice_refresh_error = str(e) or type(e).__name__
             logger.warning(
-                "voice-state refresh failed (keeping previous maps): %s", e)
+                "voice-state refresh failed (this close is blocked): %s", e)
+            return
+        for name, value in updates.items():
+            setattr(self, name, value)
+        self._voice_refresh_error = None
 
     def _charter_changed(self) -> bool:
         """True when the jurisdiction's pinned charter differs from the
@@ -574,6 +698,7 @@ class FederatedCloseDriver:
 
         if self.enforce_preconditions:
             self._maybe_join_from_chain(prev_root)
+            self._maybe_join_world(prev_root)
             blockers = self.participation_blockers()
             if blockers:
                 # Batches are already drained, so they don't leak into
@@ -692,10 +817,18 @@ class FederatedCloseDriver:
                 payload = close_result.get("authoritative_payload")
                 if payload is not None:
                     payload["world_cid"] = world_cid
+                self._save_canonical_world(world_blob)
+                self._tracker_restored = True
             except Exception as e:
+                # The tracker's world is now half-advanced and this
+                # payload has no world_cid: neither matches any peer.
+                self._tracker_failed = str(e) or type(e).__name__
+                self._tracker_restored = False
                 logger.error(
-                    "canonical world tracker failed: %s", e, exc_info=True,
+                    "canonical world tracker failed (closes blocked until "
+                    "the anchored world is fetched): %s", e, exc_info=True,
                 )
+                return None
 
         senders = self.gossip.known_senders()
         canonical_root = canonical.epoch_root() if hasattr(canonical, "epoch_root") else b""

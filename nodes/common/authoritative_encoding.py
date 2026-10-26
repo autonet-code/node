@@ -9,7 +9,7 @@ Spec
 
 The authoritative payload is a dict with these fields, in this order:
 
-  1. schema:           int (currently 4)
+  1. schema:           int (currently 5)
   2. epoch_id:         str
   3. epoch_root:       64-char lowercase hex string (sha256 digest)
   4. prev_epoch_root:  64-char lowercase hex string (sha256 digest)
@@ -32,7 +32,13 @@ The authoritative payload is a dict with these fields, in this order:
                        fetch + verify the carry-over instead of trusting a
                        peer. Added in schema 4; schema <= 3 anchors on
                        chain predate it (and cannot be joined trustlessly).
-  15. seed:            true, ONLY on a genesis seed anchor
+  15. charter_hash:    str, sha256 hex of the charter the close ran
+                       against (a charter change is a fork boundary). Added
+                       in schema 5.
+  16. sanctioned_households: list[str], sorted lowercase households under
+                       a DAO sanction at the snapshot (their mint is
+                       withheld). Added in schema 5.
+  17. seed:            true, ONLY on a genesis seed anchor
                        (docs/multi_jurisdiction.md decision 9): the
                        carry bundle is an adopted snapshot, not the output
                        of an observed epoch. Omitted entirely otherwise, so
@@ -82,6 +88,9 @@ import math
 from typing import Any, Dict, List, Tuple
 
 
+# Schema 5 (Decision 2026-10-26): the payload commits ``charter_hash`` and
+# ``sanctioned_households``; both decide the mint, so two daemons that ran
+# against different charters or sanction lists must not sign the same hash.
 # Schema 4 (verifiable carry-over): the payload gains ``carry_cid``, the
 # cid of the canonical carry-over bundle (see ``encode_carry_bundle``), so
 # a joiner can verify the five tool maps against the anchor. FLAG DAY:
@@ -91,7 +100,7 @@ from typing import Any, Dict, List, Tuple
 # ``agent_rep`` key (REP is claimed DAO-side now, never anchored). Schema 2
 # was the v4.1 era (3-field merkle leaf + agent_rep blob key); bumped so the
 # blob shape change is explicit, not silently reusing a different-shape number.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_DECIMALS = 10
 
 # The fixed top-level field order. Encoding will lay these out in
@@ -111,6 +120,8 @@ _FIELD_ORDER = [
     "n_events",
     "world_cid",
     "carry_cid",
+    "charter_hash",
+    "sanctioned_households",
 ]
 
 
@@ -179,6 +190,9 @@ def encode_authoritative_payload(
         "n_events": int(payload.get("n_events", 0)),
         "world_cid": str(payload.get("world_cid", "")),
         "carry_cid": str(payload.get("carry_cid", "")),
+        "charter_hash": str(payload.get("charter_hash", "")).lower(),
+        "sanctioned_households": sorted(
+            {str(h).lower() for h in payload.get("sanctioned_households") or ()}),
     }
 
     # Canonical order: NOT alphabetical, but the explicit _FIELD_ORDER.
@@ -207,7 +221,7 @@ def encode_agent_mint_blob(
 
     Format:
       {
-        "schema": 4,
+        "schema": 5,
         "agent_mint": {agent_id: float-as-str (sorted keys)}
       }
 

@@ -53,6 +53,7 @@ from ..novelty.core import (
     Termination,
 )
 from .observation import Observation
+from . import detmath
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +98,7 @@ def _euclid_sq(a: Tuple[float, ...], b: Tuple[float, ...]) -> float:
 def _gaussian_sim(a: Tuple[float, ...], b: Tuple[float, ...], bandwidth: float) -> float:
     """Gaussian kernel similarity in [0, 1]. 1 when a == b, decays with distance."""
     d_sq = _euclid_sq(a, b)
-    return math.exp(-d_sq / (2.0 * bandwidth * bandwidth + 1e-12))
+    return detmath.exp(-d_sq / (2.0 * bandwidth * bandwidth + 1e-12))
 
 
 def _dimensional_overlap_sim(obs: Tuple[float, ...], anchor: Tuple[float, ...]) -> float:

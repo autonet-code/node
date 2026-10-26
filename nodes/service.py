@@ -877,6 +877,7 @@ class AutonetService:
         tool_regs_path = None
         tool_vetting_path = None
         tool_positions_path = None
+        canonical_world_path = None
         try:
             state_dir = getattr(
                 getattr(self._world_service, "_persistence", None), "_dir", None,
@@ -890,10 +891,14 @@ class AutonetService:
                 # (a deterministic fork). Same rebuildable-cache contract
                 # as the registration map above.
                 tool_positions_path = state_dir / "tool_positions.json"
+                # The canonical world tracker's latest checkpoint, restored
+                # at boot so world_cid keeps matching peers after a restart.
+                canonical_world_path = state_dir / "canonical_world.json"
         except Exception:
             tool_regs_path = None
             tool_vetting_path = None
             tool_positions_path = None
+            canonical_world_path = None
         self._federated_close_driver = FederatedCloseDriver(
             gossip=self._event_gossip,
             embedding_dim=embedding_dim,
@@ -902,6 +907,7 @@ class AutonetService:
             tool_registrations_path=tool_regs_path,
             tool_vetting_path=tool_vetting_path,
             tool_positions_path=tool_positions_path,
+            canonical_world_path=canonical_world_path,
         )
         # Refuse (log + skip) any close this daemon can't compute
         # identically to its peers: no chain read access below, or no
@@ -939,10 +945,12 @@ class AutonetService:
             # DAO Registry: the charter in force, pinned to the same anchor
             # (docs/multi_jurisdiction.md decision 5).
             dao_registry_addr = getattr(bc, "dao_registry_address", "") or ""
+            deploy_block = int(getattr(bc, "deploy_block", 0) or 0) or None
         except Exception:
             substrate_addr, rpc_url, rep_token_addr = "", "", ""
             tool_bond_addr = ""
             dao_registry_addr = ""
+            deploy_block = None
         if substrate_addr and rpc_url:
             def _voice_source():
                 from .common.voice_state import read_voice_state
@@ -950,6 +958,7 @@ class AutonetService:
                     substrate_addr, rpc_url, rep_token_address=rep_token_addr,
                     tool_bond_address=tool_bond_addr,
                     dao_registry_address=dao_registry_addr,
+                    deploy_block=deploy_block,
                 )
 
             self._federated_close_driver.voice_source = _voice_source
@@ -983,6 +992,25 @@ class AutonetService:
                 return fetch_carry_over_from_chain(contract, resolver)
 
             self._federated_close_driver.carry_source = _carry_source
+
+            # Same bootstrap for the canonical world tracker: the latest
+            # anchor's world_cid checkpoint, hash-verified against the chain.
+            def _world_source():
+                from web3 import Web3
+                from .common.state_sync import catch_up_from_chain
+                from .common.voice_state import _VOICE_ABI
+                csd = getattr(self, "_chain_submission_driver", None)
+                resolver = getattr(csd, "blob_resolver", None)
+                if resolver is None:
+                    return None
+                w3 = Web3(Web3.HTTPProvider(rpc_url))
+                contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(substrate_addr),
+                    abi=_VOICE_ABI,
+                )
+                return catch_up_from_chain(contract, resolver)
+
+            self._federated_close_driver.world_source = _world_source
             logger.info(
                 "Voice/emission source wired (substrate=%s, rep_token=%s)",
                 substrate_addr, rep_token_addr or "(none)",
