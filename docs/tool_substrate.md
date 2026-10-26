@@ -539,6 +539,62 @@ anchoring agents hold a REP majority; up to the full voting period
 otherwise. **FLAG-DAY:** constructor and anchor ABI change; fresh Substrate
 with the timelock as governor.
 
+## Decision (2026-10-26): epochs the network agrees on
+
+Decided with the owner after the 2026-10-26 survey found that no two honest
+daemons could produce the same anchor: epoch ids came from each daemon's
+clock (`epoch_<time_ns>`), batch membership from when each daemon's timer
+fired, and the proposer from each daemon's own list of senders.
+
+1. **Epoch id = the anchor count.** The epoch being closed is the one after
+   anchor N (`anchorCount` = N, read from the chain), named from N and that
+   anchor's epoch root. Every daemon derives the same id, so the same
+   proposal.
+2. **One epoch in flight.** No daemon closes epoch N+1 until anchor N has
+   landed. Events stay buffered meanwhile; the floor on an epoch's length is
+   the anchor proposal's own lifecycle.
+3. **Membership by agreed time.** Epoch N contains every batch whose signed
+   timestamp is at or before the cutoff W = (anchor N's on-chain timestamp)
+   + (epoch length), not already in an earlier epoch. A daemon closes at
+   W + grace. A batch whose timestamp is further than the skew from its
+   arrival is refused (no backdating into a closing epoch).
+4. **Length set by activity, Bitcoin style.** The length is retargeted from
+   the previous epochs, never the current one (its batch set is only agreed
+   at its close): the average over the retarget window of the burned fees
+   each recent epoch carried, as a share of total ATN supply, scaled so an
+   epoch reaches the target share. Bounded below by the anchor lifecycle and
+   above by a ceiling (a multiple of the vote duration), so a quiet network
+   still pays out. All inputs are anchored, so every daemon computes the same
+   length.
+5. **The proposer is drawn by REP.** One ticket per household, REP-weighted,
+   among households above a REP percentile, seeded from the chain (as the
+   robot poll lottery). The first two drawn propose in parallel; each voter
+   backs the one matching its own view, so a bad proposal costs no time.
+6. **No censorship by the proposer.** The proposal commits to the epoch's
+   batch set. A voter missing a batch it names fetches it by hash from peers
+   and recomputes. A voter holding an eligible batch the proposal leaves out
+   votes Against. A batch in no proposal rolls into the next epoch. An
+   omitting proposer sits out the proposer draw for some epochs, and repeat
+   omissions become a report to the DAO (which can take REP): "never reached
+   me" and "dropped it" look the same, so the automatic penalty is mild.
+7. **Every rule is a governed Registry key** (`jurisdiction.<id>.*`), with
+   these defaults: target share (set at deployment), retarget window 4
+   epochs, ceiling 10x the vote duration, grace 120 s, skew 60 s, the
+   proposer percentile and sit-out epochs. Every daemon reads them pinned to
+   the same anchor.
+8. **The other consensus findings ship in the same flag day:** addresses
+   lowercased at the close's entry (checksummed event ids against the
+   lowercase voice maps zeroed every mint); the canonical world tracker
+   restored at boot, not rebuilt; a failed voice refresh blocks the close
+   instead of persisting carry state; the log scan starts at the configured
+   deployment block, never inferred from failed reads; the charter hash and
+   sanctioned households in the payload encoding.
+
+Rollout: these are `epoch_rules` version `"2"` (the existing Registry key).
+Daemons on this build refuse `"1"`; the jurisdiction switches by one DAO
+proposal, after the owner confirms the whole loop on local hardhat.
+**FLAG-DAY:** payload encoding, epoch ids and close timing all change.
+
 ## Decision (2026-10-13): staked tools, flagged audits, REP-settled verdicts
 
 > **Audit half superseded (2026-10-17).** The flagged audits, the vetted
