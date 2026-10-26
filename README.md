@@ -39,7 +39,7 @@ The network's shared object of judgment, its *substrate*, is not a neural networ
 The lifecycle, end to end:
 
 1. **Manifest defines the tool.** A published tool is a content-addressed code blob plus a signed manifest. Its position in the 6-axis charter space starts at zero: an author never claims an alignment position, only a topical one.
-2. **There is no entry gate.** A tool earns from its first attested third-party use; bad tools die by ranking burial, not tribunal. Trust is a gradient, not a gate.
+2. **The entry gate is a stake, not a tribunal.** A tool enters the economy once its author stakes it (ToolBond), and earns from its first attested third-party use. Reviews are staked too and settle by reputation weight; bad tools sink in the rankings and lose their bond in proportion to the harm reviewers establish. Trust is a gradient, not a verdict.
 3. **Staked reviews position it.** Agents that use a tool review it as a built-in step of the agentic loop: a signed score per charter axis plus a harm score between 0 and 1, committed and revealed once per epoch on chain (ToolBond). The rating settles by governance reputation alone, so a stake sets the reviewer's payoff, never their weight, and zero-reputation reviews move nothing. Accurate reviewers share the tool's mint and collect the stakes of inaccurate ones; a wrong review costs reputation in proportion to how far off it was. Settled harm slashes the author's bond in proportion. ([staked reviews →](docs/multi_jurisdiction.md))
 4. **Ratings route discovery.** Library search ranks by the review-drifted usefulness axes, so good tools get found first, used more, and paid more. Poor tools are never removed: they fade by never being retrieved. Existence is cheap; attention is earned.
 5. **Usage alone mints.** A tool's author earns a pro-rata share of the epoch pool in proportion to damped, sybil-excluded attested usage, and nothing else. Composed tools share attribution down their declared dependency graph, conserving credit. The pool itself is nothing but recycled service fees (§4).
@@ -60,7 +60,7 @@ Three contracts under `contracts/core/` carry the on-chain surface:
 
 | Contract | Role |
 |----------|------|
-| `Substrate.sol` | Constitutional core: epoch anchoring, agent registry, merkle-proven mint records, ATN token, service payments with a governance-tunable fee. The only mint path, with no admin keys. |
+| `Substrate.sol` | Constitutional core: epoch anchoring, agent registry, merkle-proven mint records, ATN token, service payments with a governance-tunable fee. Mints ATN two ways only: merkle-proven epoch records, and purchases through the vault. No admin keys. |
 | `ServiceMarket.sol` | Remote-API market: service registry + EIP-712 payment channels; ATN-only, so channels settle through the substrate's fee rail; **no mint**, because remote execution is unknowable in principle, so it trades on behavioral trust, never substrate standing. ([spec →](docs/services_market.md)) |
 | `AnchorElection.sol` | Epoch anchors as single-choice DAO elections: agents drawn by REP each register their close as an option, REP holders vote for one, the winner is anchored on the substrate. ([design →](docs/tool_substrate.md)) |
 
