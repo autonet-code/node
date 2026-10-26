@@ -963,6 +963,19 @@ class AutonetService:
 
             self._federated_close_driver.voice_source = _voice_source
 
+            # Cheap anchorCount read: the voice refresh (every input pinned
+            # to the latest anchor) reruns only when a new anchor lands.
+            def _anchor_count():
+                from web3 import Web3
+                from .common.voice_state import _VOICE_ABI
+                w3 = Web3(Web3.HTTPProvider(rpc_url))
+                return int(w3.eth.contract(
+                    address=Web3.to_checksum_address(substrate_addr),
+                    abi=_VOICE_ABI,
+                ).functions.anchorCount().call())
+
+            self._federated_close_driver.anchor_count_source = _anchor_count
+
             # Joiner bootstrap (payload schema 4): a daemon that first
             # boots after anchors exist has no carry-over files, and they
             # are only written by a close. The driver fetches the latest

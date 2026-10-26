@@ -92,6 +92,13 @@ _REP_ABI = [
 _VOICE_ABI = [
     {
         "inputs": [],
+        "name": "deployedAt",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
         "name": "anchorCount",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
@@ -740,6 +747,109 @@ def robot_policy(
             "jurisdiction_lineage": lineage}
 
 
+# ---------------------------------------------------------------------------
+# Epoch window (Decision 2026-10-26, items 1-3 and 7).
+#
+# The epoch being closed is the one after anchor N. Its batches are those
+# whose signed timestamp is after the previous epoch's cutoff and at or
+# before this one's: cutoff = base + length, where base is anchor N's
+# timestamp (Substrate.deployedAt before any anchor). An empty window slides
+# the cutoff forward one grace step at a time until a batch falls in it.
+# The cutoff each epoch closed at is part of its id, so the next window's
+# start is read from the chain (anchor N's epochId), not from local state.
+# ---------------------------------------------------------------------------
+
+EPOCH_RULE_DEFAULTS: Dict[str, int] = {
+    # Seconds added after the base. 0 = the epoch ends at the previous
+    # anchor's own timestamp, so an epoch lasts one anchor lifecycle (the
+    # floor, since one epoch is in flight at a time).
+    "epoch_length": 0,
+    # Seconds a daemon waits past the cutoff before closing, so batches
+    # signed just before it can arrive.
+    "epoch_grace": 120,
+    # Largest gap allowed between a batch's signed timestamp and its
+    # arrival; anything further off is refused (no backdating into a
+    # closing epoch). Must stay below the grace.
+    "epoch_skew": 60,
+}
+
+EPOCH_ID_PREFIX = "epoch"
+
+
+def epoch_rule_params(
+    records: List[Dict[str, Any]], block: Optional[int],
+    jurisdiction_id: str = "autonet",
+) -> Dict[str, int]:
+    """The governed epoch rules in force at ``block`` (Registry keys
+    ``jurisdiction.<id>.epoch_length`` / ``epoch_grace`` / ``epoch_skew``,
+    whole seconds). Unset, malformed or negative values fall back to the
+    defaults; ``block`` None (no anchor yet) means the defaults."""
+    writes = _last_writes(records, int(block)) if block is not None else {}
+    out: Dict[str, int] = {}
+    for name, default in EPOCH_RULE_DEFAULTS.items():
+        raw = writes.get(f"jurisdiction.{jurisdiction_id}.{name}")
+        try:
+            value = int(str(raw).strip()) if raw is not None else default
+        except ValueError:
+            value = default
+        out[name] = value if value >= 0 else default
+    return out
+
+
+def make_epoch_id(number: int, prev_root_hex: str, cutoff: int) -> str:
+    """``epoch-<n>-<first 16 hex of anchor n-1's root>-<cutoff>``."""
+    root = str(prev_root_hex or "").lower().removeprefix("0x")
+    return f"{EPOCH_ID_PREFIX}-{int(number)}-{root[:16]:0<16}-{int(cutoff)}"
+
+
+def epoch_id_cutoff(epoch_id: str) -> Optional[int]:
+    """The cutoff an epoch id carries, or None for an id not in the
+    ``make_epoch_id`` form."""
+    parts = str(epoch_id).split("-")
+    if len(parts) != 4 or parts[0] != EPOCH_ID_PREFIX:
+        return None
+    try:
+        return int(parts[3])
+    except ValueError:
+        return None
+
+
+def epoch_window(contract: Any, anchor_count: int, anchor: Any,
+                 records: List[Dict[str, Any]],
+                 jurisdiction_id: str = "autonet") -> Dict[str, Any]:
+    """The window of the epoch after anchor ``anchor_count``.
+
+    ``anchor`` is ``getAnchor(anchor_count - 1)`` (None at genesis);
+    ``records`` the DAO Registry writes (empty when none is configured).
+    Returns {number, prev_root, base, start, length, grace, skew}: the
+    epoch's number, the hex root of the anchor before it, the timestamp the
+    length counts from, the previous cutoff (None at genesis), and the
+    governed rules pinned to that anchor."""
+    if anchor_count == 0 or anchor is None:
+        base = int(contract.functions.deployedAt().call())
+        start = None
+        prev_root = "00" * 32
+        params = epoch_rule_params([], None, jurisdiction_id)
+    else:
+        base = int(anchor[8])
+        prev_root = bytes(anchor[1]).hex()
+        params = epoch_rule_params(records, int(anchor[7]), jurisdiction_id)
+        start = epoch_id_cutoff(str(anchor[0]))
+        if start is None:
+            # An anchor from before epoch ids carried a cutoff: nothing
+            # signed before it can still be pending.
+            start = base
+    return {
+        "number": int(anchor_count) + 1,
+        "prev_root": prev_root,
+        "base": base,
+        "start": start,
+        "length": params["epoch_length"],
+        "grace": params["epoch_grace"],
+        "skew": params["epoch_skew"],
+    }
+
+
 def sanctioned_households(
     sanctions: Iterable[str], owner_of: Dict[str, str],
 ) -> List[str]:
@@ -818,6 +928,7 @@ def read_voice_state(
     if anchor_count == 0:
         # No agreed snapshot yet (epoch 1): no voices, empty fees-only pool.
         return {
+            "epoch_window": epoch_window(contract, 0, None, [], jurisdiction_id),
             "owner_map": {},
             "voice_weights": {},
             "rep_shares": {},
@@ -949,6 +1060,7 @@ def read_voice_state(
     sanctions: Dict[str, Dict[str, Any]] = {}
     policy: Dict[str, Any] = {"robots": [], "robot_standards": [],
                               "jurisdiction_lineage": []}
+    reg_records: List[Dict[str, Any]] = []
     if dao_registry_address:
         reg_records = _registry_records(
             w3, dao_registry_address, block, start)
@@ -983,6 +1095,8 @@ def read_voice_state(
     review_snapshot["supply"] = int(supply)
 
     return {
+        "epoch_window": epoch_window(
+            contract, anchor_count, anchor, reg_records, jurisdiction_id),
         "owner_map": owner_map,
         "voice_weights": voice_weights,
         # Raw rep share per household (un-floored) + supply alias.

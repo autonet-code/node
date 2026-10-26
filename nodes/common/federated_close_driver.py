@@ -29,7 +29,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -151,6 +153,21 @@ class FederatedCloseDriver:
         # Set when the latest voice refresh failed: closing on the previous
         # snapshot would price this epoch on state peers have moved past.
         self._voice_refresh_error: Optional[str] = None
+        # The epoch window after the latest anchor (Decision 2026-10-26),
+        # from the voice refresh (voice_state.epoch_window). None = no
+        # chain window: the library/local behavior (every buffered batch,
+        # the local epoch id).
+        self.epoch_window: Optional[Dict[str, Any]] = None
+        # Optional zero-arg hook returning the chain's anchorCount. Every
+        # voice-refresh input is pinned to the latest anchor, so while the
+        # count is unchanged the refresh is skipped.
+        self.anchor_count_source: Optional[Callable[[], int]] = None
+        self.clock: Callable[[], float] = time.time
+        # One epoch in flight: the number of the epoch this daemon last
+        # closed. It closes no other until the anchor before the next one
+        # lands. Persisted so a restart mid-flight does not close the
+        # same epoch again with a different batch set.
+        self._closed_epoch_number: Optional[int] = None
         # Tool-substrate carry-over (docs/tool_substrate.md v2): the
         # accumulated digest -> manifest_meta registration map, so a
         # tool registered in epoch 1 still attributes mint in epoch 5.
@@ -270,6 +287,86 @@ class FederatedCloseDriver:
         # not installed (bundle unretrievable or rejected): closing on the
         # pre-seed local state would fork from peers that adopted it.
         self._seed_blocker: Optional[str] = None
+        self._closed_epoch_number = self._load_in_flight()
+
+    def _in_flight_path(self) -> Optional[Path]:
+        base = self._tool_registrations_path or self._canonical_world_path
+        return None if base is None else base.parent / "epoch_in_flight.json"
+
+    def _load_in_flight(self) -> Optional[int]:
+        path = self._in_flight_path()
+        if path is None or not path.exists():
+            return None
+        try:
+            return int(json.loads(path.read_text(encoding="utf-8"))["number"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _save_in_flight(self, number: int, epoch_id: str) -> None:
+        path = self._in_flight_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps({"number": int(number),
+                                       "epoch_id": str(epoch_id)}),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as e:
+            logger.warning("failed to persist the in-flight epoch: %s", e)
+
+    def _refresh_voice_for_anchor(self) -> None:
+        """Refresh only when a new anchor landed (or the last one failed):
+        every input is pinned to the latest anchor."""
+        src = self.anchor_count_source
+        if (src is not None and self._voice_refresh_error is None
+                and self.snapshot_anchor_count is not None):
+            try:
+                if int(src()) == self.snapshot_anchor_count:
+                    return
+            except Exception as e:
+                logger.debug("anchorCount read failed, refreshing: %s", e)
+        self._refresh_voice()
+
+    def _select_window(self) -> Optional[tuple]:
+        """Pick this epoch's batches, or None when it is not time.
+
+        Members are the buffered batches signed after the previous cutoff
+        (``start``) and at or before this one. The cutoff is base + length;
+        if no pending batch is signed by then, it slides forward in grace
+        steps to the first slot that holds one. The daemon closes once its
+        clock passes cutoff + grace, and closes nothing while the epoch it
+        last closed is still unanchored. Returns (members, epoch_id)."""
+        from .voice_state import make_epoch_id
+
+        win = self.epoch_window
+        number = int(win["number"])
+        if self._closed_epoch_number is not None and \
+                self._closed_epoch_number >= number:
+            logger.debug("federated close: epoch %d in flight, waiting for "
+                         "its anchor", self._closed_epoch_number)
+            return None
+        start = win.get("start")
+        pending = self.gossip.pending_epoch_batches()
+        live = [b for b in pending
+                if start is None or float(b.timestamp) > float(start)]
+        if not live:
+            return None
+        grace = int(win["grace"])
+        step = max(1, grace)
+        cutoff = int(win["base"]) + int(win["length"])
+        earliest = min(float(b.timestamp) for b in live)
+        if earliest > cutoff:
+            cutoff += step * math.ceil((earliest - cutoff) / step)
+        if float(self.clock()) < cutoff + grace:
+            return None
+        members = [b for b in live if float(b.timestamp) <= cutoff]
+        self.gossip.take_epoch_batches(members, drop_at_or_before=cutoff)
+        epoch_id = make_epoch_id(number, str(win["prev_root"]), cutoff)
+        self._closed_epoch_number = number
+        self._save_in_flight(number, epoch_id)
+        return members, epoch_id
 
     def _restore_canonical_tracker(self) -> bool:
         """Load the persisted checkpoint into the tracker. Returns True
@@ -625,6 +722,9 @@ class FederatedCloseDriver:
             if isinstance(houses, list):
                 updates["sanctioned_households"] = sorted(
                     str(h).lower() for h in houses)
+            window = state.get("epoch_window")
+            if isinstance(window, dict):
+                updates["epoch_window"] = dict(window)
         except Exception as e:
             self._voice_refresh_error = str(e) or type(e).__name__
             logger.warning(
@@ -633,6 +733,10 @@ class FederatedCloseDriver:
         for name, value in updates.items():
             setattr(self, name, value)
         self._voice_refresh_error = None
+        # Refuse batches signed further from now than the governed skew.
+        if self.epoch_window is not None and hasattr(
+                self.gossip, "max_skew_seconds"):
+            self.gossip.max_skew_seconds = float(self.epoch_window["skew"])
 
     def _charter_changed(self) -> bool:
         """True when the jurisdiction's pinned charter differs from the
@@ -674,12 +778,25 @@ class FederatedCloseDriver:
         batches in the gossip buffer). Otherwise returns the
         deterministic federated result + which sender should anchor.
         """
-        batches = self.gossip.drain_epoch_batches()
-        if not batches:
-            logger.debug("federated close: no batches buffered, skipping")
-            return None
-
-        self._refresh_voice()
+        if self.voice_source is not None:
+            self._refresh_voice_for_anchor()
+        if self.voice_source is not None and self.epoch_window is not None:
+            if self._voice_refresh_error:
+                logger.warning(
+                    "federated close: voice-state refresh failed, not "
+                    "closing: %s", self._voice_refresh_error)
+                return None
+            picked = self._select_window()
+            if picked is None:
+                return None
+            batches, epoch_id = picked
+        else:
+            batches = self.gossip.drain_epoch_batches()
+            if not batches:
+                logger.debug("federated close: no batches buffered, skipping")
+                return None
+            # No chain window (library/local use): the local epoch id.
+            epoch_id = str(local_close_result.get("epoch_id") or "")
 
         if self._charter_changed():
             return None
@@ -783,9 +900,8 @@ class FederatedCloseDriver:
         except Exception as e:
             logger.warning("applying federated tool positions failed: %s", e)
 
-        # Inherit epoch_id from the local close so on-chain dedup
-        # (isAnchored(epoch_id)) can reject duplicate submissions.
-        epoch_id = str(local_close_result.get("epoch_id") or "")
+        # The agreed epoch id (Decision 2026-10-26): every daemon closing
+        # this window names it the same, so they build the same proposal.
         close_result["epoch_id"] = epoch_id
 
         # Verifiable carry-over (payload schema 4): commit the three maps

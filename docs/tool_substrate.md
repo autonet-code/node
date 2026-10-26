@@ -603,6 +603,28 @@ fired, and the proposer from each daemon's own list of senders.
    starts every log scan; payload schema 5 commits `charter_hash` and
    `sanctioned_households`.
 
+**Items 1-3 BUILT** (same branch), with these specifics:
+- The epoch id is `epoch-<n>-<16 hex of anchor n-1's root>-<cutoff>`. The
+  cutoff rides in the id, so the next window's start is read from the
+  chain (anchor n's `epochId`), never from local state.
+- The cutoff is base + `epoch_length`. The base is the last anchor's
+  timestamp, or `Substrate.deployedAt` before any anchor. When no pending
+  batch is signed by the cutoff, it slides forward one grace step at a
+  time to the first slot that holds one, so an empty epoch never stalls
+  the chain.
+- The rules are Registry keys `jurisdiction.<id>.epoch_length` (default
+  0: an epoch lasts one anchor lifecycle), `.epoch_grace` (120) and
+  `.epoch_skew` (60), pinned to the last anchor's block. Step 3 replaces
+  the fixed length with the retarget.
+- One epoch in flight: the driver persists the number it last closed
+  (`epoch_in_flight.json`) and closes nothing until the next anchor
+  lands.
+- The voice refresh reruns only when `anchorCount` changes.
+- Gossip refuses batches signed further than the skew from their
+  arrival.
+- Known gap until item 6: if an epoch's anchor never lands, the network
+  waits. Item 6's retry and vote rules resolve it.
+
 Rollout: these are `epoch_rules` version `"2"` (the existing Registry key).
 Daemons on this build refuse `"1"`; the jurisdiction switches by one DAO
 proposal, after the owner confirms the whole loop on local hardhat.

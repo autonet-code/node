@@ -352,6 +352,7 @@ class GossipStats:
     batches_invalid_signature: int = 0
     batches_duplicate: int = 0
     events_ingested: int = 0
+    batches_skewed: int = 0
 
 
 class EventGossip:
@@ -389,6 +390,11 @@ class EventGossip:
         # by the federated-close driver at epoch boundaries to build
         # the canonical order. Held under self._lock.
         self._epoch_batches: List[EventBatch] = []
+        # Largest allowed gap (seconds) between a batch's signed timestamp
+        # and its arrival (Decision 2026-10-26, the governed epoch_skew,
+        # set by the close driver from the pinned rules). None = no check.
+        self.max_skew_seconds: Optional[float] = None
+        self.clock = time.time
 
         # Subscribe to the topic so peers' batches reach us.
         self.transport.subscribe(self.topic, self._on_message)
@@ -412,6 +418,7 @@ class EventGossip:
                 batches_invalid_signature=self._stats.batches_invalid_signature,
                 batches_duplicate=self._stats.batches_duplicate,
                 events_ingested=self._stats.events_ingested,
+                batches_skewed=self._stats.batches_skewed,
             )
 
     # ------------------------------------------------------------------
@@ -498,6 +505,20 @@ class EventGossip:
             )
             return
 
+        # A batch signed further from now than the skew could be backdated
+        # into an epoch that is closing (or post-dated into a later one).
+        skew = self.max_skew_seconds
+        if skew is not None and abs(
+                float(signed.batch.timestamp) - float(self.clock())) > skew:
+            with self._lock:
+                self._stats.batches_skewed += 1
+            logger.warning(
+                "batch from %s dropped: signed %.0fs from now (skew limit %ss)",
+                signed.batch.sender_pubkey.hex()[:16],
+                float(signed.batch.timestamp) - float(self.clock()), skew,
+            )
+            return
+
         h = signed.batch.content_hash()
         with self._lock:
             if h in self._seen:
@@ -558,6 +579,28 @@ class EventGossip:
             out = list(self._epoch_batches)
             self._epoch_batches.clear()
         return out
+
+    def pending_epoch_batches(self) -> List[EventBatch]:
+        """A copy of the per-epoch batch buffer, left in place."""
+        with self._lock:
+            return list(self._epoch_batches)
+
+    def take_epoch_batches(
+        self, selected: List[EventBatch], *,
+        drop_at_or_before: Optional[float] = None,
+    ) -> None:
+        """Remove ``selected`` (an epoch's members) from the buffer, plus
+        any batch signed at or before ``drop_at_or_before`` (the epoch's
+        cutoff: such a batch can no longer join any epoch). The rest stay
+        buffered for the next epoch."""
+        chosen = {b.content_hash() for b in selected}
+        with self._lock:
+            self._epoch_batches = [
+                b for b in self._epoch_batches
+                if b.content_hash() not in chosen
+                and not (drop_at_or_before is not None
+                         and float(b.timestamp) <= drop_at_or_before)
+            ]
 
     def known_senders(self) -> List[bytes]:
         """All distinct sender pubkeys we've seen in this lifetime.
