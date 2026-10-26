@@ -177,12 +177,13 @@ decision 9 (merging by genesis) and the `jurisdiction.<id>.parent` key.
 5. **Money migrates at a parity.** Each child's ATN converts at a ratio
    set in the federation's Registry (a key per child token, set and
    changed by proposal like any other parity). Households exchange
-   themselves, when they choose: an exchange contract takes child ATN and
-   mints federation ATN at that ratio (a bridge only when the federation
-   lives on another chain). No snapshot and no forced migration: daemons
-   switch to the federation's contracts, and the old token simply stops
-   being used once its holders have exchanged. The new supply is backed one
-   for one by the child ATN the exchange locks.
+   themselves, when they choose, through the federation's existing buy
+   rail: `AutonetVault.buy(childAtn, amount)` mints federation ATN at the
+   Registry parity `jurisdiction.parity.<child ATN address>` and sends the
+   child ATN to the federation's treasury. No new contract, no snapshot,
+   no forced migration: daemons switch to the federation's contracts, and
+   the old token simply stops being used once its holders have exchanged.
+   (A federation on another chain would need a real bridge.)
 6. **Holdouts stay put.** A household that voted against its child
    joining is not forced across: the child's old Substrate keeps running,
    and whoever stays transacts there.
@@ -191,9 +192,6 @@ decision 9 (merging by genesis) and the `jurisdiction.<id>.parent` key.
    seeding a new autonet from the federation's carry-over, the same way.
 
 Open:
-- The migration contract. On the federation's Substrate the only mint
-  paths are training records and the vault minter, so migration either
-  is the vault minter or routes through AutonetVault.
 - REP. Each DAO has its own RepToken. The federation's members list sets
   its REP; whether children's REP should map across, and how, is open.
 - When a child that merged fully should stop anchoring on its old
