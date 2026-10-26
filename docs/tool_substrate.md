@@ -769,6 +769,17 @@ Daemons on this build refuse `"1"`; the jurisdiction switches by one DAO
 proposal, after the owner confirms the whole loop on local hardhat.
 **FLAG-DAY:** payload encoding, epoch ids and close timing all change.
 
+**Rollout BUILT (2026-10-26):** this build computes `epoch_rules` `"2"`
+(`atn/config.py` `SUPPORTED_EPOCH_RULES`, `CURRENT_EPOCH_RULES`). An
+unset key means `"2"`; a jurisdiction still on `"1"` is refused at join.
+`tests/test_epoch_rules_v2_e2e.py` runs the loop end to end: two daemon
+stacks (gossip, pipelined close driver, election chain submission) on
+the real contracts (the DAO's HomebaseDAO with options counting,
+AnchorElection, Substrate), several epochs anchored in order, then a
+divergent epoch one daemon rewinds out of. Open on the DAO side: werule's
+factory default `epochRules` is `"1"` today and must become `"2"`, or new
+jurisdictions are refused by this build.
+
 ## Decision (2026-10-13): staked tools, flagged audits, REP-settled verdicts
 
 > **Audit half superseded (2026-10-17).** The flagged audits, the vetted

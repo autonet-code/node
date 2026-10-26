@@ -308,7 +308,7 @@ def test_read_pinned_charter_text_via_logs(monkeypatch):
     ]
     seen = {}
 
-    def fake_get_logs(event, w3, address, to_block):
+    def fake_get_logs(event, w3, address, to_block, start_block=None):
         seen["to_block"] = to_block
         return [lg for lg in logs if lg["blockNumber"] <= to_block]
 

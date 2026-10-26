@@ -107,6 +107,7 @@ class ChainSubmissionDriver:
         election: Optional[ElectionAnchorer] = None,
         gossip: Optional[Any] = None,
         tick_interval: float = 15.0,
+        submitter_web3: Optional[Any] = None,
         **_ignored: Any,
     ):
         self.config = config
@@ -117,6 +118,9 @@ class ChainSubmissionDriver:
             blob_resolver if blob_resolver is not None else InMemoryBlobResolver()
         )
         self._lock = threading.RLock()
+        # Optional shared Web3 for the per-agent submitters (tests and
+        # in-process chains); None = each submitter dials config.rpc_url.
+        self._submitter_web3 = submitter_web3
         # Cache: agent_address -> AuthoritativeChainSubmitter.
         self._submitter_cache: Dict[str, AuthoritativeChainSubmitter] = {}
         # Anchor side. Configurable so tests can pass an in-process
@@ -545,6 +549,12 @@ class ChainSubmissionDriver:
             })
         return results
 
+    def _submitter_chain(self) -> Dict[str, Any]:
+        if self._submitter_web3 is None:
+            return {}
+        from .contract_artifacts import load_abi
+        return {"web3": self._submitter_web3, "substrate_abi": load_abi("Substrate")}
+
     def _get_submitter(
         self, ident: AgentChainIdentity,
     ) -> AuthoritativeChainSubmitter:
@@ -562,6 +572,7 @@ class ChainSubmissionDriver:
                     chain_id=self.config.chain_id,
                     private_key=ident.private_key,
                 ),
+                **self._submitter_chain(),
             )
             self._submitter_cache[ident.address] = sub
             return sub

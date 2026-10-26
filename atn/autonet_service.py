@@ -300,7 +300,8 @@ class AutonetBridge:
         st.token_address = c.token_address
         st.economy_address = c.economy_address
         st.timelock_address = c.timelock_address
-        st.epoch_rules = (getattr(c, "epoch_rules", "") or "1")
+        from .config import CURRENT_EPOCH_RULES
+        st.epoch_rules = (getattr(c, "epoch_rules", "") or CURRENT_EPOCH_RULES)
         st.jurisdiction_key = jurisdiction_key(c)
 
         errors: list[str] = []

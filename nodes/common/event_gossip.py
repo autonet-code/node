@@ -451,7 +451,7 @@ class EventGossip:
             batch_seq=seq,
             events=list(events),
             prev_batch_hash=prev_hash,
-            timestamp=time.time(),
+            timestamp=float(self.clock()),
         )
         payload = batch.canonical_payload()
         signature = _sign(self.keypair.private_key, payload)

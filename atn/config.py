@@ -646,7 +646,11 @@ REQUIRED_JURISDICTION_FIELDS = (
 
 # Epoch rules versions this build computes (decision 4). Bumped only when
 # the epoch computation changes; feature releases leave it alone.
-SUPPORTED_EPOCH_RULES = frozenset({"1"})
+# "2" (Decision 2026-10-26): epochs cut by agreed cutoffs, the length
+# retargeted, anchors elected (AnchorElection), closes pipelined. An unset
+# key means this build's rules; a jurisdiction still on "1" is refused.
+SUPPORTED_EPOCH_RULES = frozenset({"2"})
+CURRENT_EPOCH_RULES = "2"
 
 
 def missing_prerequisites(an: "RPBConfig") -> list[str]:
@@ -657,7 +661,7 @@ def missing_prerequisites(an: "RPBConfig") -> list[str]:
 
 def epoch_rules_error(an: "RPBConfig") -> str:
     """Why this build can't join ``an``'s jurisdiction, or "" if it can."""
-    rules = (getattr(an, "epoch_rules", "") or "1").strip()
+    rules = (getattr(an, "epoch_rules", "") or CURRENT_EPOCH_RULES).strip()
     if rules not in SUPPORTED_EPOCH_RULES:
         return (f"the jurisdiction runs epoch rules version {rules}; this "
                 f"daemon computes {sorted(SUPPORTED_EPOCH_RULES)}. Upgrade to "

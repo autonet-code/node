@@ -19,7 +19,7 @@ V1 = json.dumps({"axes": [{"id": c["id"], "thesis": c["thesis"]} for c in CHARTE
 
 FULL = {
     "dao": "0xDA0", "timelock": "0x71", "rep_token": "0x2E9", "tool_bond": "0xB0",
-    "substrate": "0x5B", "registry": "0x2E6", "epoch_rules": "1", "charter": V1,
+    "substrate": "0x5B", "registry": "0x2E6", "epoch_rules": "2", "charter": V1,
 }
 
 
@@ -47,7 +47,7 @@ def test_seed_keeps_timelock_registry_rules_and_charter_text():
     seed = _parse_registry_data(_registry(FULL), "autonet")
     assert seed["timelock_address"] == "0x71"
     assert seed["dao_registry_address"] == "0x2E6"
-    assert seed["epoch_rules"] == "1"
+    assert seed["epoch_rules"] == "2"
     assert seed["charter_text"] == V1
     # The exact registry bytes are hashed, never a re-serialization.
     assert seed["charter_hash"] == "0x" + hashlib.sha256(V1.encode()).hexdigest()
@@ -67,8 +67,10 @@ def test_missing_prerequisites_named():
 
 def test_epoch_rules():
     assert epoch_rules_error(_config(FULL)) == ""
-    assert epoch_rules_error(_config({**FULL, "epoch_rules": ""})) == ""   # "1"
-    assert "version 2" in epoch_rules_error(_config({**FULL, "epoch_rules": "2"}))
+    # Unset means this build's rules ("2"); a jurisdiction still on "1" is
+    # refused (Decision 2026-10-26 flag day).
+    assert epoch_rules_error(_config({**FULL, "epoch_rules": ""})) == ""
+    assert "version 1" in epoch_rules_error(_config({**FULL, "epoch_rules": "1"}))
 
 
 def test_jurisdiction_key_is_chain_and_dao():

@@ -1151,8 +1151,10 @@ def read_voice_state(
         # Read as if the chain ended at that anchor (the robot poll rail
         # pins a round to the anchor in force when the round started).
         anchor_count = max(0, min(int(anchor_count), int(anchor_index) + 1))
-    if anchor_count == 0:
+    if anchor_count == 0 and not pinned:
         # No agreed snapshot yet (epoch 1): no voices, empty fees-only pool.
+        # (A pinned read of a later epoch never takes this branch: it may
+        # run before any anchor has landed.)
         return {
             "epoch_window": epoch_window(
                 contract, number=1, prev_root="00" * 32, start=None,

@@ -13,6 +13,7 @@ import {GovernorVotes} from "@openzeppelin/contracts/governance/extensions/Gover
 import {GovernorVotesQuorumFraction} from "@openzeppelin/contracts/governance/extensions/GovernorVotesQuorumFraction.sol";
 import {GovernorTimelockControl} from "@openzeppelin/contracts/governance/extensions/GovernorTimelockControl.sol";
 import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
+import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol";
 
 /// @dev TEST ONLY (tests/test_governed_anchor.py). Never deployed to a real
 ///      network. A minimal stand-in for the DAO stack that anchors epochs
@@ -21,7 +22,18 @@ import {TimelockController} from "@openzeppelin/contracts/governance/TimelockCon
 ///      and a stock OZ Governor wired to both.
 
 contract TestRepVotes is ERC20, ERC20Permit, ERC20Votes {
+    using Checkpoints for Checkpoints.Trace208;
+
+    // Balance history, as the DAO's RepToken keeps it (getPastBalance):
+    // the substrate reads holdings, governance reads delegated votes.
+    mapping(address => Checkpoints.Trace208) private _balanceHistory;
+
     constructor() ERC20("Test REP", "tREP") ERC20Permit("Test REP") {}
+
+    function getPastBalance(address account, uint256 timepoint) external view returns (uint256) {
+        require(timepoint < block.timestamp, "future lookup");
+        return _balanceHistory[account].upperLookup(uint48(timepoint));
+    }
 
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
@@ -41,6 +53,8 @@ contract TestRepVotes is ERC20, ERC20Permit, ERC20Votes {
         override(ERC20, ERC20Votes)
     {
         super._update(from, to, value);
+        if (from != address(0)) _balanceHistory[from].push(clock(), uint208(balanceOf(from)));
+        if (to != address(0)) _balanceHistory[to].push(clock(), uint208(balanceOf(to)));
     }
 
     function nonces(address owner)
