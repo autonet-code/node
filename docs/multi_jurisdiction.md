@@ -145,6 +145,59 @@ pre-seed local carry state. A seed flag on any later anchor is ignored.
 6. Vote. Members who don't take part simply didn't merge. Tokens move by
    ordinary treasury transfer proposals.
 
+Since 2026-10-26 every anchor carries an explicit cutoff, the seed
+included: `build_genesis_seed.py --cutoff <unix seconds>` (default: now)
+sets it, and it must fall after the new Substrate's `deployedAt`.
+
+## Federation and merging (design, 2026-10-26, not built)
+
+Agreed with the owner. A network can fuse from jurisdictions that started
+separately, and split again, entirely through proposals. It builds on
+decision 9 (merging by genesis) and the `jurisdiction.<id>.parent` key.
+
+1. **The federation comes first.** A new DAO, the federation, is created
+   with its members list, either at origination or later in a mint
+   proposal. It can be fully set up (charter, standards, the new autonet)
+   before any child joins, so each child can inspect everything before it
+   votes.
+2. **Joining is a vote in each child.** A child joins by an ordinary
+   proposal that sets its `jurisdiction.<id>.parent` to the federation
+   and accepts the federation's charter. A child whose charter differs,
+   or whose members don't want to join, simply doesn't. Nothing is
+   absorbed without the child's own vote.
+3. **Federation without a merge is cheap.** Once children name it as
+   parent, the federation's standards cascade down (robot standards do
+   today). Taxes go up by transfer proposals, or accrue at the
+   federation's level. Each child keeps its own autonet: Substrate, ATN,
+   epochs.
+4. **A full merge is a new autonet.** The federation's Substrate starts
+   from a genesis seed built from the children's carry-over bundles
+   (`scripts/build_genesis_seed.py` already merges several, with conflict
+   rules). From then on the children's agents close epochs there.
+5. **Money migrates at a parity.** Each child's ATN converts at a ratio
+   set in the federation's Registry (a key per child token, set and
+   changed by proposal like any other parity). A migration contract takes
+   child ATN and mints federation ATN at that ratio. The new supply is
+   backed one for one by the child ATN it locks.
+6. **Holdouts stay put.** A household that voted against its child
+   joining is not forced across: the child's old Substrate keeps running,
+   and whoever stays transacts there.
+7. **Splitting is the same path in reverse.** A child leaves by a proposal
+   that clears its parent key. A child that merged fully leaves by
+   seeding a new autonet from the federation's carry-over, the same way.
+
+Open:
+- The migration contract. On the federation's Substrate the only mint
+  paths are training records and the vault minter, so migration either
+  is the vault minter or routes through AutonetVault.
+- REP. Each DAO has its own RepToken. The federation's members list sets
+  its REP; whether children's REP should map across, and how, is open.
+- When a child that merged fully should stop anchoring on its old
+  Substrate, or whether it simply winds down as its households leave.
+- A split caused by a network partition (a region cut off from the
+  chain) is not covered: such a region keeps working locally but cannot
+  anchor until it reconnects or seeds a new autonet of its own.
+
 ## Backlog
 
 Contracts (must land before the Shadownet redeploy):
