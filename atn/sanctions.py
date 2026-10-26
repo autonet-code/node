@@ -41,6 +41,22 @@ _OWNER_ABI = [
 ]
 
 
+def _chain_past_owners(rpc_url: str, substrate: str) -> Callable[[str], list[str]]:
+    """Every owner an agent was rotated away from (OwnerBound prevOwner)."""
+    def past_owners(agent: str) -> list[str]:
+        from web3 import Web3
+        from nodes.common.voice_state import _VOICE_ABI
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+        c = w3.eth.contract(address=Web3.to_checksum_address(substrate),
+                            abi=_VOICE_ABI)
+        logs = c.events.OwnerBound.get_logs(
+            from_block=0, argument_filters={
+                "agent": Web3.to_checksum_address(agent)})
+        return [str(lg["args"]["prevOwner"]).lower() for lg in logs
+                if str(lg["args"]["prevOwner"]).lower() != _ZERO]
+    return past_owners
+
+
 def _chain_reader(rpc_url: str, dao_registry: str) -> Callable[[], dict[str, str]]:
     def read() -> dict[str, str]:
         from web3 import Web3
@@ -70,10 +86,13 @@ class SanctionList:
 
     def __init__(self, read_registry: Callable[[], dict[str, str]] | None,
                  owner_of: Callable[[str], str] | None = None, *,
+                 past_owners: Callable[[str], list[str]] | None = None,
                  clock: Callable[[], float] = time.time,
                  refresh_s: float = _REFRESH_S) -> None:
         self._read = read_registry
         self._owner_of = owner_of
+        self._past_owners = past_owners
+        self._history: dict[str, list[str]] = {}
         self._clock = clock
         self._refresh_s = refresh_s
         self._raw: dict[str, dict[str, Any]] = {}
@@ -89,7 +108,9 @@ class SanctionList:
         if not rpc or not registry:
             return cls(None)
         return cls(_chain_reader(rpc, registry),
-                   _chain_owner_lookup(rpc, substrate) if substrate else None)
+                   _chain_owner_lookup(rpc, substrate) if substrate else None,
+                   past_owners=(_chain_past_owners(rpc, substrate)
+                                if substrate else None))
 
     def _refresh(self) -> None:
         if self._read is None:
@@ -152,7 +173,22 @@ class SanctionList:
         owner = self._owner(addr)
         if owner and owner in active:
             return {**active[owner], "household": owner}
+        # Rotating an agent to a fresh wallet does not lift its sanction.
+        for prev in self._past(addr):
+            if prev in active:
+                return {**active[prev], "household": prev}
         return None
+
+    def _past(self, address: str) -> list[str]:
+        if self._past_owners is None:
+            return []
+        if address not in self._history:
+            try:
+                self._history[address] = [
+                    str(p).lower() for p in self._past_owners(address)]
+            except Exception:
+                return []
+        return self._history[address]
 
 
 def refusal(address: str, entry: dict[str, Any], what: str) -> dict[str, Any]:

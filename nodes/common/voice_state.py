@@ -1061,16 +1061,56 @@ def block_at_or_before(w3: Any, timestamp: int, lo: int = 0) -> int:
     return lo
 
 
+def sanction_since_blocks(records: List[Dict[str, Any]],
+                          block: int) -> Dict[str, int]:
+    """The block each sanction in the records was last written at (at or
+    before ``block``): address -> block."""
+    out: Dict[str, int] = {}
+    for rec in sorted(records, key=lambda r: (int(r["block"]), int(r["index"]))):
+        if int(rec["block"]) > int(block):
+            break
+        key = str(rec.get("key") or "")
+        if key.startswith(SANCTION_KEY_PREFIX):
+            out[key[len(SANCTION_KEY_PREFIX):].strip().lower()] = int(rec["block"])
+    return out
+
+
 def sanctioned_households(
     sanctions: Iterable[str], owner_of: Dict[str, str],
+    rotations: Optional[List[Tuple[int, str, str, str]]] = None,
+    since_block: Optional[Dict[str, int]] = None,
 ) -> List[str]:
     """The households the sanctioned addresses name: an agent's owner when
-    it is bound, the address itself otherwise. Sorted, lowercased."""
+    it is bound, the address itself otherwise. Sorted, lowercased.
+
+    ``rotations`` (block, agent, previous owner, new owner) close the
+    rotation escape
+    (survey 2026-10-26): an agent rotated away from a sanctioned household
+    at or after its sanction was written carries the sanction to the
+    household it moved to. Rotation needs the new owner's signature, so
+    that household accepted a sanctioned agent; it is sanctioned from the
+    rotation on, and the rule repeats for agents it rotates on."""
+    since: Dict[str, int] = {}
     out = set()
     for addr in sanctions:
         a = str(addr).lower()
         owner = str(owner_of.get(a, "") or "").lower()
-        out.add(owner if owner and owner != _ZERO else a)
+        house = owner if owner and owner != _ZERO else a
+        out.add(house)
+        start = int((since_block or {}).get(a, 0))
+        since[house] = min(since.get(house, start), start)
+    changed = bool(rotations)
+    while changed:
+        changed = False
+        for blk, agent, prev, new in rotations or ():
+            prev = str(prev).lower()
+            if prev not in out or int(blk) < since.get(prev, 0):
+                continue
+            cur = str(new).lower() or str(agent).lower()
+            if cur not in out:
+                out.add(cur)
+                since[cur] = int(blk)
+                changed = True
     return sorted(out)
 
 
@@ -1321,7 +1361,15 @@ def read_voice_state(
             lambda reg: reg_records if reg == own
             else _registry_records(w3, reg, block, start),
             own, block, jurisdiction_id)
-    houses = sanctioned_households(sanctions, owner_of)
+    rotations = [
+        (int(log["blockNumber"]), str(log["args"]["agent"]).lower(),
+         str(log["args"]["prevOwner"]).lower(),
+         str(log["args"]["owner"]).lower())
+        for log in bindings
+        if str(log["args"].get("prevOwner") or _ZERO).lower() != _ZERO]
+    houses = sanctioned_households(
+        sanctions, owner_of, rotations,
+        sanction_since_blocks(reg_records, block) if dao_registry_address else {})
     house_set = set(houses)
     # Every address whose household is sanctioned: its reviews move no
     # rating.

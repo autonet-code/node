@@ -62,7 +62,8 @@ What it does:
 | Where | Effect | Code |
 |-------|--------|------|
 | Epoch close (consensus) | The household's mint is withheld after the pool is split, so it stays unminted instead of raising everyone else's share: a sanction never pays the households that voted for it. Its reviews move no tool rating and its composition estimates carry no weight. The payload commits the list (`sanctioned_households`). | `voice_state.py` (`sanctions_from_records`, pinned to the snapshot anchor's block and timestamp), `federated_reconcile.py` |
-| Agents | May not pay, buy services from, or propose adopting the tools of a sanctioned household. | `atn/sanctions.py`, `agent_tools.py`, `tool_store.py` |
+| Agents | May not pay, buy services from, or propose adopting the tools of a sanctioned household. The `service` inference provider (an agent buying cognition) applies the same check before paying. | `atn/sanctions.py`, `agent_tools.py`, `tool_store.py`, `providers/service.py` |
+| Owner rotation | Rotating an agent to a fresh wallet does not lift a sanction. An agent rotated away from a sanctioned household at or after the sanction was written carries it to the household it moved to (that wallet signed for the agent), from the rotation on, and on through further rotations. The live check also refuses an agent whose past owner is sanctioned. | `voice_state.sanctioned_households` (rotations from `OwnerBound`), `atn/sanctions.py` |
 | Owner | Sees the sanction on adoption proposals (a second approval) and on service listings and purchases. The owner may still go ahead. | WS `sanctions`; app `SanctionNotice` |
 
 The close reads the list pinned to the previous anchor like the charter, so

@@ -128,3 +128,30 @@ def test_adoption_refused_for_agents_and_flagged_for_the_owner(tmp_path):
         assert store._proposals[digest]["proposed_by"] == OWNER_AUTHOR
     finally:
         tm.is_tool_manifest = orig
+
+
+def test_rotating_an_agent_away_does_not_lift_its_sanction():
+    """Survey 2026-10-26: an agent rotated from a sanctioned household to a
+    fresh wallet is still sanctioned."""
+    fresh = "0x" + "dd" * 20
+    sl = SanctionList(lambda: {f"sanction.{HOUSE}": "trial-1"},
+                      {AGENT: fresh}.get, clock=Clock(),
+                      past_owners=lambda a: [HOUSE] if a == AGENT else [])
+    entry = sl.check(AGENT)
+    assert entry is not None and entry["household"] == HOUSE
+    assert sl.check(OTHER) is None
+
+
+def test_the_service_inference_provider_refuses_a_sanctioned_provider():
+    import pytest
+
+    from atn.providers.service import ProviderError, ServiceProvider
+
+    prov = ServiceProvider.__new__(ServiceProvider)
+    prov._provider_address = AGENT
+    prov._sanctions = SanctionList(lambda: {f"sanction.{HOUSE}": "x"},
+                                   {AGENT: HOUSE}.get, clock=Clock())
+    with pytest.raises(ProviderError, match="sanctioned"):
+        asyncio.run(prov._refuse_if_sanctioned())
+    prov._provider_address = OTHER
+    asyncio.run(prov._refuse_if_sanctioned())

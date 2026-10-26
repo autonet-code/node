@@ -76,6 +76,23 @@ class TestRegistryRead:
         assert sanctioned_households([AGENT], owner_of) == [HOUSE]
         assert sanctioned_households([AUD_B], owner_of) == [AUD_B]
 
+    def test_rotating_away_from_a_sanction_carries_it(self):
+        """Survey 2026-10-26: rotating a sanctioned household's agent to a
+        fresh wallet used to lift the sanction. The new owner signed for
+        the agent, so its household is sanctioned from the rotation on,
+        and so is the next one it rotates to. A rotation before the
+        sanction was written carries nothing."""
+        fresh, third = "0x" + "bb" * 20, "0x" + "cc" * 20
+        # AGENT moved HOUSE -> fresh at block 20, then fresh -> third at 30.
+        owner_of = {AGENT: third}
+        rotations = [(20, AGENT, HOUSE, fresh), (30, AGENT, fresh, third)]
+        got = sanctioned_households([HOUSE], owner_of, rotations, {HOUSE: 10})
+        assert got == sorted({HOUSE, fresh, third})
+        # Sold before the sanction was written: nothing carries.
+        sold_before = sanctioned_households([HOUSE], owner_of, rotations,
+                                            {HOUSE: 40})
+        assert sold_before == [HOUSE]
+
 
 class TestReviews:
     def test_sanctioned_reviews_move_no_rating_but_keep_their_round(self):

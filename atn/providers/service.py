@@ -50,6 +50,7 @@ its own substrate, and there is no self-set surface anywhere on this rail.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -183,6 +184,24 @@ class ServiceProvider(Provider):
                     self._ask_amount, found.get("service_id"))
         return self._ask_amount
 
+    async def _refuse_if_sanctioned(self) -> None:
+        """Raise when the provider belongs to a household the DAO sanctioned
+        (same rule the pay_for_service / request_service tools apply)."""
+        sanctions = getattr(self, "_sanctions", None)
+        if sanctions is None:
+            from ..sanctions import SanctionList
+            sanctions = self._sanctions = SanctionList.from_config(self._config)
+        try:
+            entry = await asyncio.to_thread(sanctions.check, self._provider_address)
+        except Exception:
+            entry = None
+        if entry is not None:
+            from ..sanctions import refusal
+            raise ProviderError(
+                "service provider: " + refusal(
+                    self._provider_address, entry, "buy services from")["error"],
+                provider=self.name)
+
     async def _pay(self, max_tokens: int) -> dict[str, Any]:
         """Pay this call's ask. Returns the payment proof, or {} when the
         payment was legitimately skipped (no chain config).
@@ -220,6 +239,10 @@ class ServiceProvider(Provider):
                 "its own wallet, set a per-agent service_provider binding.",
                 provider=self.name,
             )
+
+        # Agents may not buy from a sanctioned household
+        # (docs/accountability.md); this path pays like pay_for_service does.
+        await self._refuse_if_sanctioned()
 
         ask = await self._resolve_ask()
         if ask <= 0:
