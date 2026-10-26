@@ -423,6 +423,7 @@ class ServiceStore:
         channel_id: str | int,
         cumulative: int,
         signature: str,
+        provider: str = "",
     ) -> None:
         """Store the latest accepted voucher for a channel so the provider can
         settle later via close_channel. Monotone: a lower cumulative than the
@@ -434,9 +435,19 @@ class ServiceStore:
         self._channel_vouchers[cid] = {
             "cumulative": int(cumulative),
             "signature": str(signature),
+            "provider": str(provider or ""),
             "ts": int(time.time()),
         }
         self._persist_vouchers()
+
+    def channel_vouchers(self) -> dict[str, dict[str, Any]]:
+        """Every channel this provider holds a voucher for (settlement)."""
+        return {k: dict(v) for k, v in self._channel_vouchers.items()}
+
+    def forget_channel_voucher(self, channel_id: str | int) -> None:
+        """Drop a settled channel's voucher."""
+        if self._channel_vouchers.pop(str(channel_id), None) is not None:
+            self._persist_vouchers()
 
     def get_channel_voucher(self, channel_id: str | int) -> dict[str, Any] | None:
         """Return the latest stored voucher for a channel, or None."""

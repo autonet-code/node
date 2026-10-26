@@ -140,6 +140,37 @@ describe("PaymentChannel (v1.5 prepaid credits, ATN-only + fee at settlement)", 
     expect(await substrate.balanceOf(await channel.getAddress())).to.equal(0n);
   });
 
+  it("a vanished provider never locks the deposit: the client closes and takes it all back", async function () {
+    const id = await openChannel(5000n);
+    await expect(channel.connect(provider).startClose(id))
+      .to.be.revertedWithCustomError(channel, "NotClient");
+    await expect(channel.connect(client).startClose(id))
+      .to.emit(channel, "ChannelCloseStarted");
+    await expect(channel.withdrawRemainder(id))
+      .to.be.revertedWithCustomError(channel, "WindowNotElapsed");
+    await time.increase(CHALLENGE_WINDOW + 1);
+    await expect(channel.withdrawRemainder(id))
+      .to.emit(channel, "RemainderWithdrawn")
+      .withArgs(id, client.address, 5000n);
+    expect(await substrate.balanceOf(client.address)).to.equal(10_000n);
+  });
+
+  it("the provider can still settle inside the client's close window, not after", async function () {
+    const id = await openChannel(5000n);
+    const sig = await signVoucher(channel, client, id, 3000n);
+    await channel.connect(client).startClose(id);
+    await expect(channel.connect(provider).closeChannel(id, 3000n, sig))
+      .to.emit(channel, "ChannelClosed");
+    expect(await substrate.balanceOf(provider.address)).to.equal(netOf(3000n));
+
+    const id2 = await openChannel(1000n);
+    const sig2 = await signVoucher(channel, client, id2, 500n);
+    await channel.connect(client).startClose(id2);
+    await time.increase(CHALLENGE_WINDOW + 1);
+    await expect(channel.connect(provider).closeChannel(id2, 500n, sig2))
+      .to.be.revertedWithCustomError(channel, "ChannelNotOpen");
+  });
+
   it("remainder refund is fee-free (no ServiceFee on withdraw)", async function () {
     const id = await openChannel(5000n);
     const sig = await signVoucher(channel, client, id, 1000n);

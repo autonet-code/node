@@ -481,6 +481,13 @@ PAYMENT_CHANNEL_ABI = [
     },
     {
         "inputs": [{"internalType": "uint256", "name": "channelId", "type": "uint256"}],
+        "name": "startClose",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "uint256", "name": "channelId", "type": "uint256"}],
         "name": "withdrawRemainder",
         "outputs": [],
         "stateMutability": "nonpayable",
@@ -494,7 +501,8 @@ PAYMENT_CHANNEL_ABI = [
         "type": "function",
     },
     # Auto-generated public getter for `mapping(uint256 => Channel) channels`.
-    # Status enum surfaces as uint8 (0 None, 1 Open, 2 Closing, 3 Settled).
+    # Status enum surfaces as uint8 (0 None, 1 Open, 2 Closing, 3 Settled,
+    # 4 ClientClosing).
     {
         "inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "name": "channels",
@@ -2170,6 +2178,34 @@ class ServiceMarketClient:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
             log.exception("Failed to close channel on chain")
+            return {"success": False, "error": str(e)}
+
+    async def start_close(
+        self,
+        private_key: str,
+        channel_id: int,
+    ) -> dict[str, Any]:
+        """``PaymentChannel.startClose(channelId)``, by the CLIENT: the
+        provider gets one challenge window to settle, then the client
+        withdraws the whole deposit (withdraw_remainder)."""
+        try:
+            from eth_account import Account
+
+            w3 = self._get_web3()
+            channel = self._channel_contract(w3)
+            account = Account.from_key(private_key)
+            chain_id = self.config.chain_id or w3.eth.chain_id
+            func = channel.functions.startClose(int(channel_id))
+            receipt, tx_hex = self._send_signed(
+                w3, account, func, chain_id, 120_000)
+            if receipt.status == 1:
+                return {"success": True, "tx_hash": tx_hex}
+            return {"success": False, "error": "Transaction reverted",
+                    "tx_hash": tx_hex}
+        except ImportError:
+            return {"success": False, "error": "web3/eth-account not installed"}
+        except Exception as e:
+            log.exception("Failed to start a channel close on chain")
             return {"success": False, "error": str(e)}
 
     async def withdraw_remainder(

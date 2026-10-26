@@ -5552,7 +5552,8 @@ class WebSocketBridge:
                                       f"{ask_amount}"}
                 # Accept: record the latest cumulative + store the voucher to
                 # settle.
-                store.record_channel_voucher(cid, cum, str(signature))
+                store.record_channel_voucher(cid, cum, str(signature),
+                                             provider=str(res.get("provider", "")))
             return {"ok": True, "reason": "ok"}
 
         return {"ok": False,

@@ -129,6 +129,7 @@ class Runtime:
         # Periodic idle-connector reaper task (started in start(), cancelled
         # in stop()). None until start().
         self._connector_reaper: asyncio.Task | None = None
+        self._channel_settler: asyncio.Task | None = None
         # Bridge npm-dependency updater loop (providers.bridge_auto_update).
         self._bridge_update_task: asyncio.Task | None = None
         self._model_catalog_task: asyncio.Task | None = None
@@ -666,6 +667,51 @@ class Runtime:
             self._pending_grants.pop(agent_id, None)
         return None
 
+    def _channel_key_for(self, provider: str) -> str | None:
+        """The key that closes a channel as ``provider``: the serving agent's
+        own key, or the daemon's owner key for an owner-authored service."""
+        addr = str(provider or "").lower()
+        agent_id = self.registry.get_agent_id_by_address(provider)
+        if agent_id:
+            return self.registry.get_agent_key(agent_id) or None
+        rpb = getattr(self._config, "rpb", None)
+        if addr and addr == str(getattr(rpb, "owner_wallet", "") or "").lower():
+            return str(getattr(rpb, "private_key", "") or "") or None
+        return None
+
+    async def _settle_channels_loop(self) -> None:
+        """Sweep payment channels a client started closing, at a quarter of
+        the challenge window (bounded to [30 s, 300 s]). Idle when no
+        PaymentChannel is configured. Never lets an exception kill it."""
+        from ..channel_settlement import settle_closing_channels
+        from ..on_chain import ServiceMarketClient
+
+        interval = 60.0
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                rpb = getattr(self._config, "rpb", None)
+                smc = ServiceMarketClient(rpb) if rpb is not None else None
+                if smc is None or not smc.channel_available:
+                    interval = 300.0
+                    continue
+                store = getattr(self, "service_store", None)
+                if store is None or not store.channel_vouchers():
+                    interval = 300.0
+                    continue
+                try:
+                    window = float(await asyncio.to_thread(
+                        lambda: smc._channel_contract().functions
+                        .challengeWindow().call()))
+                    interval = max(30.0, min(300.0, window / 4.0))
+                except Exception:   # noqa: BLE001
+                    interval = 60.0
+                await settle_closing_channels(store, smc, self._channel_key_for)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — never let the sweep die
+                log.debug("channel settlement sweep failed", exc_info=True)
+
     async def _reap_connectors_loop(self) -> None:
         """Sweep idle MCP connectors until cancelled.
 
@@ -706,6 +752,10 @@ class Runtime:
         if self.connectors.idle_timeout_s > 0:
             self._connector_reaper = asyncio.create_task(
                 self._reap_connectors_loop())
+
+        # Payment-channel settlement: answer every client-started close with
+        # the best voucher before the window ends (atn/channel_settlement.py).
+        self._channel_settler = asyncio.create_task(self._settle_channels_loop())
 
         # Recover crashed executions
         recovered = self.execution_log.recover_running()
@@ -910,6 +960,13 @@ class Runtime:
 
         # Cancel the reaper BEFORE stop_all so a sweep cannot race the
         # shutdown teardown (both call ConnectorManager.stop).
+        if self._channel_settler is not None:
+            self._channel_settler.cancel()
+            try:
+                await self._channel_settler
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._channel_settler = None
         if self._connector_reaper is not None:
             self._connector_reaper.cancel()
             try:

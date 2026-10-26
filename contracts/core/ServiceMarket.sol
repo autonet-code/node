@@ -234,7 +234,11 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
     ///         open channel's deadline.
     uint256 public challengeWindow;
 
-    enum Status { None, Open, Closing, Settled }
+    /// ClientClosing (appended, so earlier values keep their numbers): the
+    /// client started a close. The provider may still settle with its best
+    /// voucher until closesAt; after that the client takes the whole deposit
+    /// back, so a vanished provider never locks it.
+    enum Status { None, Open, Closing, Settled, ClientClosing }
 
     struct Channel {
         address client;
@@ -266,6 +270,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         uint256 closesAt
     );
     event RemainderWithdrawn(uint256 indexed channelId, address indexed client, uint256 amount);
+    event ChannelCloseStarted(uint256 indexed channelId, address indexed client, uint256 closesAt);
     event ChallengeWindowSet(uint256 previous, uint256 current);
 
     error ProviderRequired();
@@ -273,6 +278,7 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
     error ChannelNotOpen();
     error ChannelNotClosing();
     error NotProvider();
+    error NotClient();
     error BadVoucherSignature();
     error WindowNotElapsed();
     error DepositTransferFailed();
@@ -334,6 +340,19 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         );
     }
 
+    /// @notice Client starts closing an open channel. The provider has one
+    ///         challenge window to settle with its best voucher
+    ///         (closeChannel); if it does not, the client withdraws the whole
+    ///         deposit after the window (withdrawRemainder).
+    function startClose(uint256 channelId) external nonReentrant {
+        Channel storage c = channels[channelId];
+        if (c.status != Status.Open) revert ChannelNotOpen();
+        if (msg.sender != c.client) revert NotClient();
+        c.status = Status.ClientClosing;
+        c.closesAt = block.timestamp + c.window;
+        emit ChannelCloseStarted(channelId, msg.sender, c.closesAt);
+    }
+
     /// @notice Provider closes the channel with its highest voucher. Pays the
     ///         provider min(cumulativeAmount, deposit) NET of the service fee
     ///         (routed through payForService); the rest becomes the client's
@@ -346,7 +365,9 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
         bytes calldata signature
     ) external nonReentrant {
         Channel storage c = channels[channelId];
-        if (c.status != Status.Open) revert ChannelNotOpen();
+        // Open, or inside the window of a close the client started.
+        if (c.status != Status.Open && !(c.status == Status.ClientClosing
+                && block.timestamp < c.closesAt)) revert ChannelNotOpen();
         if (msg.sender != c.provider) revert NotProvider();
 
         // Recover the client's signature over the typed voucher.
@@ -375,7 +396,11 @@ contract PaymentChannel is ReentrancyGuard, EIP712 {
     ///         to the client. A refund is not a service payment — no fee.
     function withdrawRemainder(uint256 channelId) external nonReentrant {
         Channel storage c = channels[channelId];
-        if (c.status != Status.Closing) revert ChannelNotClosing();
+        // A provider close (remainder) or a client close the provider never
+        // answered (claimed stays 0: the whole deposit).
+        if (c.status != Status.Closing && c.status != Status.ClientClosing) {
+            revert ChannelNotClosing();
+        }
         if (block.timestamp < c.closesAt) revert WindowNotElapsed();
         uint256 remainder = c.deposit - c.claimed;
         address client = c.client;
