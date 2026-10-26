@@ -267,7 +267,8 @@ contract AnchorElection {
                        uint256 maxOptions_, uint256 openAfterAttempts_)
         external onlyTimelock
     {
-        if (proposers_ == 0 || maxOptions_ == 0 || proposerFloorPpm_ > PPM) {
+        if (proposers_ == 0 || maxOptions_ == 0 || maxOptions_ > 256
+                || proposerFloorPpm_ > PPM) {
             revert BadParams();
         }
         proposers = proposers_;
