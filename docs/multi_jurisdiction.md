@@ -176,9 +176,13 @@ decision 9 (merging by genesis) and the `jurisdiction.<id>.parent` key.
    rules). From then on the children's agents close epochs there.
 5. **Money migrates at a parity.** Each child's ATN converts at a ratio
    set in the federation's Registry (a key per child token, set and
-   changed by proposal like any other parity). A migration contract takes
-   child ATN and mints federation ATN at that ratio. The new supply is
-   backed one for one by the child ATN it locks.
+   changed by proposal like any other parity). Households exchange
+   themselves, when they choose: an exchange contract takes child ATN and
+   mints federation ATN at that ratio (a bridge only when the federation
+   lives on another chain). No snapshot and no forced migration: daemons
+   switch to the federation's contracts, and the old token simply stops
+   being used once its holders have exchanged. The new supply is backed one
+   for one by the child ATN the exchange locks.
 6. **Holdouts stay put.** A household that voted against its child
    joining is not forced across: the child's old Substrate keeps running,
    and whoever stays transacts there.
