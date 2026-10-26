@@ -155,6 +155,45 @@ OWNER_ONLY_TOOLS = frozenset({
     "group_take_seat", "group_release_seat", "group_delete",
 })
 
+# Inline handlers a SCOPED session (a delegated, non-full-fleet remote
+# session, root_agent_id set) may reach (survey 2026-10-26). Every other
+# message handled inline in _handle_message is refused for such a session:
+# providers, OAuth, budgets, sponsors, wallets and ownership, chain
+# registration, services that spend the owner's wallet, robots, sanctions,
+# Claude sessions, voice, daemon control. Agent tools still fall through to
+# execute_tool, where _authorize_tool_call clamps them to the subtree. The
+# set of inline handlers is read from _handle_message's own source
+# (_inline_message_types), so a handler added later is denied by default
+# until it is listed here.
+SCOPED_INLINE_ALLOWED = frozenset({
+    # Handshake, the scoped snapshot, the mic.
+    "auth_response", "auth_status", "snapshot", "input_request",
+    "input_status", "service_request",
+    # The subtree's own agents: chat, delegates, processes, context, prompt.
+    "send_agent_message", "delegate_message", "interrupt_delegate",
+    "get_delegates", "get_delegate_output", "reset_agent_conversation",
+    "agent_processes_list", "agent_process_output", "agent_process_stop",
+    "session_stats", "session_context", "context_breakdown",
+    "agent_system_prompt", "attachment_upload", "post_message",
+    # Public network and library reads (no owner state, no authority).
+    "probe_tools", "tool_reviews", "tool_surface", "list_registered_tools",
+    "autonet_status", "epoch_status", "epoch_history", "economy_graph",
+    "market_services", "list_services", "service_topics",
+    "autonet_standards", "autonet_alignment", "rpb_state",
+    "rpb_substrate_distribution", "rpb_substrate_nodes",
+    "rpb_substrate_subtree_projection",
+})
+
+# Allowed inline messages that act on ONE agent: a scoped session must name
+# it (and it must be in the subtree). Without one they act fleet-wide.
+SCOPED_REQUIRES_AGENT = frozenset({
+    "send_agent_message", "delegate_message", "interrupt_delegate",
+    "get_delegates", "get_delegate_output", "reset_agent_conversation",
+    "agent_processes_list", "agent_process_output", "agent_process_stop",
+    "session_stats", "session_context", "context_breakdown",
+    "agent_system_prompt",
+})
+
 # For scoped sessions, the message keys that name a target agent. Every one
 # present must resolve to an agent inside the session's subtree, else the call
 # is refused — clamping caller_id alone is insufficient because these tools read
@@ -1334,6 +1373,47 @@ class WebSocketBridge:
                 return f"target '{val}' is outside the authorized subtree"
         return None
 
+    @staticmethod
+    def _inline_message_types() -> frozenset:
+        """Every message type _handle_message answers inline, before the
+        execute_tool fall-through: read once from its source, so the
+        scoped-session gate denies a new handler until it is allowlisted."""
+        cached = getattr(WebSocketBridge, "_INLINE_TYPES", None)
+        if cached is not None:
+            return cached
+        import inspect
+        import re
+
+        src = inspect.getsource(WebSocketBridge._handle_message)
+        src = src.split("# --- Gate 3", 1)[0]
+        types = set(re.findall(r'msg_type == "([a-z_0-9]+)"', src))
+        for grp in re.findall(r'msg_type in \(([^)]*)\)', src):
+            types |= set(re.findall(r'"([a-z_0-9]+)"', grp))
+        for grp in re.findall(r'msg_type in \{([^}]*)\}', src):
+            types |= set(re.findall(r'"([a-z_0-9]+)"', grp))
+        g = globals()
+        for name in set(re.findall(r'msg_type in ([A-Z_][A-Z_0-9]*)', src)):
+            if isinstance(g.get(name), (set, frozenset)):
+                types |= set(g[name])
+        WebSocketBridge._INLINE_TYPES = frozenset(types)
+        return WebSocketBridge._INLINE_TYPES
+
+    def _authorize_scoped_inline(self, msg_type: str, msg: dict,
+                                 session: ClientSession) -> str | None:
+        """Gate 2b: a scoped session reaches only SCOPED_INLINE_ALLOWED
+        among the inline handlers, each clamped to its subtree."""
+        if session.scope_ids is None:
+            return None
+        if msg_type in SCOPED_INLINE_ALLOWED:
+            if msg_type in SCOPED_REQUIRES_AGENT and not msg.get("agent_id"):
+                return (f"'{msg_type}' needs an agent_id inside the "
+                        "authorized subtree")
+            return self._authorize_tool_call(msg_type, msg, session)
+        if msg_type in self._inline_message_types():
+            return (f"'{msg_type}' is owner-only: not available to a scoped "
+                    "session (it needs the owner's full-fleet session)")
+        return None   # an agent tool: gate 3 clamps it in the fall-through
+
     async def _handle_message(self, msg: dict[str, Any],
                               session: ClientSession) -> dict[str, Any]:
         """Route an incoming message to the appropriate handler.
@@ -1382,6 +1462,11 @@ class WebSocketBridge:
         # --- Gate 2: everything else requires an authed session ------------
         if not session.authed:
             return {"msg_id": msg_id, "ok": False, "error": "unauthenticated"}
+
+        # --- Gate 2b: scoped sessions are default-deny on the inline surface
+        scoped_err = self._authorize_scoped_inline(msg_type, msg, session)
+        if scoped_err:
+            return {"msg_id": msg_id, "ok": False, "error": scoped_err}
 
         # Special case: snapshot request (scoped + redacted per session)
         if msg_type == "snapshot":
