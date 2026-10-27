@@ -56,6 +56,16 @@ from .governed_anchor import AnchorProposal, GovernedAnchorer, Voter
 
 logger = logging.getLogger(__name__)
 
+# AutonetRepClaim (trustless-contracts): claimable(earner) / claim(earner),
+# REP minted to the earner's household.
+_REP_CLAIM_ABI = [
+    {"name": "claimable", "type": "function", "stateMutability": "view",
+     "inputs": [{"name": "earner", "type": "address"}],
+     "outputs": [{"name": "", "type": "uint256"}]},
+    {"name": "claim", "type": "function", "stateMutability": "nonpayable",
+     "inputs": [{"name": "earner", "type": "address"}], "outputs": []},
+]
+
 # A pending anchor proposal is dropped after this long (the reference
 # DAO's voting period is 7 days; the timelock adds minutes).
 _MAX_PROPOSAL_AGE_S = 9 * 24 * 3600
@@ -76,6 +86,9 @@ class ChainSubmissionConfig:
     # The AnchorElection (Decision 2026-10-26). Set => anchors go through
     # single-choice elections (anchor_election.ElectionAnchorer).
     anchor_election_address: str = ""
+    # AutonetRepClaim. Set => after the ATN claims the operator also
+    # claims each household's REP (1:1 on ratified earnings).
+    rep_claim_address: str = ""
     # The household this daemon serves (Decision 2026-10-27). Claimed for
     # alongside the on-chain owners of the local agents.
     owner_wallet: str = ""
@@ -612,7 +625,38 @@ class ChainSubmissionDriver:
                 "raw_mint": r.raw_mint,
                 "error": r.error,
             })
+        self._claim_rep([r["claimant"] for r in results], op)
         return results
+
+    def _claim_rep(self, claimants: List[str], op: Voter) -> None:
+        """REP follows the ATN (Decision 2026-10-27): claim each
+        household's REP on its new earnings, operator-signed. A household
+        with nothing claimable costs one read."""
+        if not self.config.rep_claim_address:
+            return
+        w3 = self._submitter_web3
+        if w3 is None:
+            from web3 import Web3
+            w3 = Web3(Web3.HTTPProvider(self.config.rpc_url))
+        rc = w3.eth.contract(address=w3.to_checksum_address(self.config.rep_claim_address),
+                             abi=_REP_CLAIM_ABI)
+        from eth_account import Account
+        acct = Account.from_key(op.private_key)
+        for claimant in claimants:
+            who = w3.to_checksum_address(claimant)
+            try:
+                if int(rc.functions.claimable(who).call()) == 0:
+                    continue
+                tx = rc.functions.claim(who).build_transaction({
+                    "from": acct.address, "chainId": int(self.config.chain_id or w3.eth.chain_id),
+                    "nonce": w3.eth.get_transaction_count(acct.address, "pending")})
+                signed = acct.sign_transaction(tx)
+                h = w3.eth.send_raw_transaction(signed.raw_transaction)
+                receipt = w3.eth.wait_for_transaction_receipt(h, timeout=120)
+                logger.info("REP claimed for %s: tx=%s status=%s",
+                            who[:10], h.hex()[:18], receipt.status)
+            except Exception as e:
+                logger.warning("REP claim for %s failed: %s", who[:10], e)
 
     def _submitter_chain(self) -> Dict[str, Any]:
         if self._submitter_web3 is None:

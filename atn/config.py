@@ -262,6 +262,8 @@ class RPBConfig:
                                         # sha256). docs/multi_jurisdiction.md 5.
     anchor_election_address: str = ""   # AnchorElection: epoch anchors are
                                         # elections (registry anchor_election).
+    rep_claim_address: str = ""         # AutonetRepClaim: REP claimed on the
+                                        # household's ATN earnings (rep_claim).
     deploy_block: int = 0               # Block the jurisdiction's contracts
                                         # were deployed at; every close log
                                         # scan starts here. 0 = search.
@@ -647,6 +649,8 @@ def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str
         seed["payment_channel_address"] = contracts["payment_channel"]
     if contracts.get("anchor_election"):
         seed["anchor_election_address"] = contracts["anchor_election"]
+    if contracts.get("rep_claim"):
+        seed["rep_claim_address"] = contracts["rep_claim"]
     if contracts.get("tool_bond"):
         # ToolBond (publish stakes, core-replacement bond gate).
         seed["tool_bond_address"] = contracts["tool_bond"]
@@ -1197,6 +1201,7 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
         containment_trust_mass_bps=resolved.get("containment_trust_mass_bps"),
         deploy_block=int(resolved.get("deploy_block", 0) or 0),
         anchor_election_address=resolved.get("anchor_election_address", ""),
+        rep_claim_address=resolved.get("rep_claim_address", ""),
         dao_registry_address=resolved.get("dao_registry_address", ""),
         tool_bond_address=resolved.get("tool_bond_address", ""),
         registry_address=resolved.get("registry_address", ""),

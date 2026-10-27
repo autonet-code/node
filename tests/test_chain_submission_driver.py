@@ -342,3 +342,34 @@ def test_governed_build_failure_reports_error():
     out = driver.handle_federated_close(_fed("e1", is_winner=True))
     assert "proposal build failed" in out["anchor_error"]
     assert driver.pending_proposals == {}
+
+
+def test_operator_claims_rep_after_atn_for_households_with_earnings():
+    """REP follows the ATN (Decision 2026-10-27): after the claims, the
+    operator calls AutonetRepClaim.claim for each household with REP
+    claimable, and skips the ones with none."""
+    from nodes.common.chain_submission_driver import Voter
+    d = _make_driver()
+    d.config.rep_claim_address = "0x" + "3" * 40
+    claimable = {"0x" + "a" * 40: 5, "0x" + "b" * 40: 0}
+    claimed = []
+    rc = MagicMock()
+    rc.functions.claimable.side_effect = lambda who: MagicMock(
+        call=lambda: claimable[who.lower()])
+
+    def _claim(who):
+        claimed.append(who.lower())
+        return MagicMock(build_transaction=lambda tx: {
+            **tx, "to": "0x" + "3" * 40, "value": 0, "gas": 100_000,
+            "gasPrice": 1, "data": "0x"})
+    rc.functions.claim.side_effect = _claim
+    w3 = MagicMock()
+    w3.to_checksum_address.side_effect = lambda a: a
+    w3.eth.contract.return_value = rc
+    w3.eth.get_transaction_count.return_value = 0
+    w3.eth.wait_for_transaction_receipt.return_value = MagicMock(status=1)
+    d._submitter_web3 = w3
+    d._claim_rep(list(claimable), Voter(address="0x" + "c" * 40,
+                                        private_key="0x" + "4" * 64))
+    assert claimed == ["0x" + "a" * 40]
+    assert w3.eth.send_raw_transaction.call_count == 1

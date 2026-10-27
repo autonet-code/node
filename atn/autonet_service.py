@@ -965,6 +965,7 @@ class AutonetBridge:
                                       ("tool_bond_address", "tool_bond_address"),
                                       ("anchor_election_address",
                                        "anchor_election_address"),
+                                      ("rep_claim_address", "rep_claim_address"),
                                       ("dao_registry_address", "dao_registry_address"),
                                       ("dao_address", "governor_address")):
                 value = getattr(self.config, atn_key, "") or ""

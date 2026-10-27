@@ -70,6 +70,9 @@ class BlockchainConfig:
     # the older yes/no anchor proposal. Seeded from registry.json
     # ("anchor_election"; on chain jurisdiction.<id>.anchor_election).
     anchor_election_address: str = ""
+    # AutonetRepClaim (jurisdiction.<id>.rep_claim): the operator claims
+    # the household's REP after its ATN. Empty => no REP claims.
+    rep_claim_address: str = ""
 
 
 @dataclass
@@ -305,6 +308,7 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_GOVERNOR_ADDRESS": ("blockchain.governor_address", str),
         "AUTONET_DEPLOY_BLOCK": ("blockchain.deploy_block", int),
         "AUTONET_ANCHOR_ELECTION_ADDRESS": ("blockchain.anchor_election_address", str),
+        "AUTONET_REP_CLAIM_ADDRESS": ("blockchain.rep_claim_address", str),
         "AUTONET_BLOB_DIR": ("blob_store.data_dir", str),
         "AUTONET_DATA_DIR": ("data_dir", str),
         "AUTONET_LOG_LEVEL": ("log_level", str),
