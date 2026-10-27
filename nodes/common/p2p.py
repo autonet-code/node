@@ -456,6 +456,7 @@ class AutonetHost:
         auto_reach: bool = False,
         reach_interval: float = 300.0,
         key_seed: Optional[bytes] = None,
+        transport: str = "tcp",
     ):
         self.node_id = node_id
         self._listen_port = listen_port
@@ -471,6 +472,17 @@ class AutonetHost:
         # A 32-byte ed25519 seed gives a stable peer id across restarts (a
         # seed node's bootstrap address embeds it); None = a fresh id.
         self._key_seed = key_seed
+        # "tcp" or "ws". py-libp2p runs ONE transport per host, picked from
+        # its listen address, so every node of a network must share it. "ws"
+        # lets a relay sit behind an HTTPS proxy (wss on 443) and lets
+        # HTTPS-only machines dial out (docs/p2p_networking.md).
+        if transport not in ("tcp", "ws"):
+            raise ValueError(f"unknown p2p transport {transport!r}")
+        self._transport = transport
+        if transport == "ws":
+            # HTTP CONNECT proxies (HTTPS-only egress) for the ws dialer.
+            from .ws_proxy import install as _install_ws_proxy
+            _install_ws_proxy()
         self._bootstrap_redial_interval = bootstrap_redial_interval
         self._enable_quic = enable_quic
         self._enable_upnp = enable_upnp
@@ -522,13 +534,14 @@ class AutonetHost:
                 # host is now listening and discoverable
                 await host.send_weight_delta(...)
         """
+        suffix = "/ws" if self._transport == "ws" else ""
         listen_addrs = [
-            Multiaddr(f"/ip4/{self._listen_host}/tcp/{self._listen_port}")
+            Multiaddr(f"/ip4/{self._listen_host}/tcp/{self._listen_port}{suffix}")
         ]
         # py-libp2p's TCP transport dials only /ip4 and /ip6 (its bootstrap
         # resolves /dnsaddr only), so /dns4 tunnel hostnames resolve here.
         # The configured names are kept and resolved again on every redial.
-        bootstrap = [resolve_dns_multiaddr(a) for a in self._bootstrap_peers]
+        bootstrap = [self._resolve(a) for a in self._bootstrap_peers]
 
         key_pair = None
         if self._key_seed is not None:
@@ -603,11 +616,18 @@ class AutonetHost:
                 self._running = False
                 self.logger.info("P2P host shutting down")
 
+    def _resolve(self, addr: str) -> str:
+        """TCP dials only IPs, so names resolve here. The ws transport keeps
+        names: TLS (SNI) and the HTTP Host header must carry them (an HTTPS
+        proxy in front of a relay routes on them), and behind an HTTP proxy
+        the proxy resolves them."""
+        return addr if self._transport == "ws" else resolve_dns_multiaddr(addr)
+
     def _resolve_announce_addrs(self) -> List[Multiaddr]:
         """The announce addresses with DNS names resolved, /p2p stripped."""
         announce = []
         for addr in self._announce_addrs:
-            addr = resolve_dns_multiaddr(addr).split("/p2p/")[0]
+            addr = self._resolve(addr).split("/p2p/")[0]
             try:
                 announce.append(Multiaddr(addr))
             except Exception as e:
@@ -639,7 +659,7 @@ class AutonetHost:
                 pid = addr.split("/p2p/")[-1] if "/p2p/" in addr else ""
                 if not pid or pid == self.peer_id or pid in connected:
                     continue
-                addr = await trio.to_thread.run_sync(resolve_dns_multiaddr, addr)
+                addr = await trio.to_thread.run_sync(self._resolve, addr)
                 # Drop cached addresses so a peer that moved is dialled
                 # only at its current address, not the stale one first.
                 try:

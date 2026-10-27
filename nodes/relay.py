@@ -77,6 +77,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "(repeatable; env AUTONET_RELAY_JURISDICTIONS)")
     ap.add_argument("--data-dir", default=env("AUTONET_RELAY_DIR",
                                               str(Path.home() / ".autonet-relay")))
+    ap.add_argument("--transport", choices=("tcp", "ws"),
+                    default=env("AUTONET_P2P_TRANSPORT", "tcp"),
+                    help="ws: serve WebSocket, e.g. behind an HTTPS proxy as wss on 443")
     ap.add_argument("--no-upnp", action="store_true")
     ap.add_argument("--advertise-interval", type=float, default=60.0)
     args = ap.parse_args(argv)
@@ -110,6 +113,7 @@ async def run(args: argparse.Namespace) -> None:
         enable_upnp=not args.no_upnp,
         auto_reach=not args.announce,
         key_seed=load_key_seed(data / "relay.key"),
+        transport=args.transport,
         capability=NodeCapability(peer_id="", node_id="relay", roles=["relay"]),
     )
     async with host.run():

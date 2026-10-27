@@ -117,6 +117,10 @@ class P2PConfig:
     # advertise (a NAT'd or tunneled daemon's public /ip4 or /dns4 addr).
     announce_addrs: list = field(default_factory=list)
     bootstrap_redial_interval: int = 30      # seconds; 0 = dial once at start
+    # "tcp" or "ws": one transport per network (py-libp2p runs one per host).
+    # "ws" lets relays sit behind an HTTPS proxy and HTTPS-only machines
+    # dial out through HTTP_PROXY / HTTPS_PROXY (nodes/common/ws_proxy.py).
+    transport: str = "tcp"
     enable_quic: bool = False
     # Without announce_addrs: map the listen port on the home router (UPnP)
     # and announce our public address once a peer confirms it can connect.
@@ -303,6 +307,7 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_LOG_LEVEL": ("log_level", str),
         "AUTONET_P2P_PORT": ("p2p.listen_port", int),
         "AUTONET_P2P_HOST": ("p2p.listen_host", str),
+        "AUTONET_P2P_TRANSPORT": ("p2p.transport", str),
         "AUTONET_P2P_BOOTSTRAP": ("p2p.bootstrap_peers", _csv_list),
         "AUTONET_P2P_ANNOUNCE": ("p2p.announce_addrs", _csv_list),
         "AUTONET_SEED": ("seed", int),

@@ -484,6 +484,7 @@ class AutonetBridge:
             enable_upnp=cfg.p2p.enable_upnp if cfg else True,
             auto_reach=cfg.p2p.auto_reach if cfg else True,
             reach_interval=cfg.p2p.reach_interval if cfg else 300,
+            transport=cfg.p2p.transport if cfg else "tcp",
         )
         self._p2p_host = host
         self._p2p_stop.clear()

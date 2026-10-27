@@ -78,6 +78,28 @@ join; pass `--jurisdiction <chain_id>:<DAO>` (repeatable) to choose. To make
 a relay a seed, the DAO writes its printed multiaddr into
 `jurisdiction.<id>.bootstrap` by proposal.
 
+## The ws transport (relays behind an HTTPS proxy)
+
+`p2p.transport` (`AUTONET_P2P_TRANSPORT`, `atn relay --transport`) is `tcp`
+(default) or `ws`. py-libp2p runs ONE transport per host, so every node of a
+network must use the same one.
+
+- **Hiding a relay's address.** A `ws` relay can sit behind an HTTPS proxy
+  such as Cloudflare: the relay serves plain WebSocket on the origin, the
+  proxy terminates `wss` on 443, and the published seed is
+  `/dns4/<relay hostname>/tcp/443/wss/p2p/<peer id>`. Peers see the proxy's
+  address, not the server's. Firewall the origin to the proxy's ranges.
+- **HTTPS-only machines.** A `ws` daemon dials through `HTTP_PROXY` /
+  `HTTPS_PROXY`: SOCKS5 natively, HTTP CONNECT via
+  `nodes/common/ws_proxy.py`. The proxy resolves names, so the dialer needs no
+  DNS of its own (cloud sandboxes, corporate networks).
+- **Names stay names.** In `ws` mode `/dns4` addresses are not resolved
+  locally: TLS (SNI) and the HTTP Host header must carry the hostname for the
+  proxy in front of a relay to route the connection.
+- **Peer authentication is libp2p's,** not the TLS certificate's: the
+  connection is still authenticated by the peer id (Noise), whoever
+  terminates TLS.
+
 ## Blob fetch
 
 - A resolver miss asks every connected peer and every peer known from
