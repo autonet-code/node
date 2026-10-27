@@ -280,6 +280,7 @@ INTEGRATION_DENIED_MESSAGES = frozenset({
     # Ownership, wallets, chain registration + signing, money movement.
     "set_owner_wallet", "rotate_owner", "owner_binding_status",
     "operator_status", "register_operator", "export_operator_key",
+    "sweep_to_owner",
     "owner_claim_status", "autonet_wallet_connect", "autonet_wallet_disconnect",
     "autonet_set_chain", "autonet_start", "autonet_stop",
     "register_agent_on_chain", "confirm_agent_registration",
@@ -3277,6 +3278,16 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": False,
                     "error": f"'{msg_type}' is for the daemon owner's full-fleet "
                              "session only"}
+        if msg_type == "sweep_to_owner":
+            if not session.owner or session.scope_ids is not None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "'sweep_to_owner' is for the daemon owner's "
+                                 "full-fleet session only"}
+            try:
+                return {"msg_id": msg_id, "ok": True,
+                        "result": await self._sweep_to_owner(msg.get("agent_ids"))}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
         if msg_type == "operator_status":
             try:
                 return {"msg_id": msg_id, "ok": True,
@@ -5820,6 +5831,88 @@ class WebSocketBridge:
 
         out.update(await self._offload(_reads))
         return out
+
+    async def _sweep_to_owner(self, agent_ids: Any = None) -> dict[str, Any]:
+        """Move local agents' ATN to their on-chain owner (the configured
+        owner wallet when unbound). The owner asks for it explicitly; the
+        operator first sends each agent just enough gas for the transfer,
+        since ATN has no permit. Substrate never moves agent funds itself."""
+        from eth_account import Account
+        from .on_chain import OnChainService
+        config = self.runtime.autonet.config
+        svc = OnChainService(config)
+        if not svc.available:
+            return {"swept": [], "error": "Substrate not configured on this daemon"}
+        op_key = self._operator_key()
+        wanted = set(agent_ids) if isinstance(agent_ids, list) and agent_ids else None
+        agents = []
+        for defn, _status in self.runtime.list_agents():
+            ident = getattr(defn, "identity", None)
+            addr = getattr(ident, "address", "") or ""
+            key = self.runtime.registry.get_agent_key(defn.id)
+            if addr and key and (wanted is None or defn.id in wanted):
+                agents.append((defn.id, addr, key))
+        fallback_owner = getattr(config, "owner_wallet", "") or ""
+
+        async def _sweep() -> list[dict[str, Any]]:
+            w3 = svc._get_web3()
+            sub = svc._get_contract(w3)
+            transfer_abi = [{"name": "transfer", "type": "function",
+                             "stateMutability": "nonpayable",
+                             "inputs": [{"name": "to", "type": "address"},
+                                        {"name": "amount", "type": "uint256"}],
+                             "outputs": [{"name": "", "type": "bool"}]}]
+            atn = w3.eth.contract(address=sub.address, abi=transfer_abi)
+            chain_id = int(w3.eth.chain_id)
+            op = Account.from_key(op_key)
+
+            def _send(tx: dict, key: str) -> str:
+                signed = Account.from_key(key).sign_transaction(tx)
+                raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+                h = w3.eth.send_raw_transaction(raw)
+                rcpt = w3.eth.wait_for_transaction_receipt(h, timeout=120)
+                if rcpt.status != 1:
+                    raise RuntimeError(f"tx reverted: {h.hex()}")
+                return h.hex()
+
+            out: list[dict[str, Any]] = []
+            for agent_id, addr, key in agents:
+                a = w3.to_checksum_address(addr)
+                row: dict[str, Any] = {"agent_id": agent_id, "address": a}
+                try:
+                    bal = int(sub.functions.balanceOf(a).call())
+                    if bal == 0:
+                        row["skipped"] = "no ATN"
+                        out.append(row)
+                        continue
+                    owner = sub.functions.agentOwner(a).call()
+                    if not int(owner, 16):
+                        owner = fallback_owner
+                    if not owner:
+                        row["error"] = "agent has no owner to sweep to"
+                        out.append(row)
+                        continue
+                    owner = w3.to_checksum_address(owner)
+                    gas_price = int(w3.eth.gas_price)
+                    call = atn.functions.transfer(owner, bal)
+                    gas = int(call.estimate_gas({"from": a}) * 12 // 10)
+                    need = gas * gas_price - int(w3.eth.get_balance(a))
+                    if need > 0:
+                        row["gas_tx"] = _send({
+                            "to": a, "value": need, "gas": 21_000,
+                            "gasPrice": gas_price, "chainId": chain_id,
+                            "nonce": w3.eth.get_transaction_count(op.address)}, op_key)
+                    row["tx"] = _send(call.build_transaction({
+                        "from": a, "gas": gas, "gasPrice": gas_price,
+                        "chainId": chain_id,
+                        "nonce": w3.eth.get_transaction_count(a)}), key)
+                    row.update(amount=bal, owner=owner)
+                except Exception as e:
+                    row["error"] = str(e)
+                out.append(row)
+            return out
+
+        return {"swept": await self._offload(lambda: _sweep())}
 
     async def _handle_register_operator(self, owner: str = "", owner_sig: str = "",
                                         self_owned: bool = False) -> dict[str, Any]:
