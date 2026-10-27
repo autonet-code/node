@@ -273,6 +273,25 @@ the allowlist is also refused (`not_allowed`). Denied groups:
 - providers, connectors, OAuth, daemon control, profile, model setters
 - whole-fleet reads: `snapshot`, `get_snapshot`, `list_agents`
 
+## Using it from an MCP client (Claude Code and others)
+
+The ATN MCP proxy (`python -m atn.mcp_server`) has a guest mode. Set
+`ATN_MCP_TOKEN` to an integration token and it connects to this listener
+(default `ws://127.0.0.1:7710`, or `ATN_MCP_URL`) instead of the owner
+socket, acting as the token's agent. It offers only the allowlist the
+`integration_ready` frame names, so a client never sees owner or money
+tools. `ATN_MCP_URL` also selects one daemon when several run on a machine.
+
+```json
+{"mcpServers": {"atn": {"command": "python", "args": ["-m", "atn.mcp_server"],
+  "env": {"ATN_MCP_TOKEN": "atn_it_..."}}}}
+```
+
+Bind the token to an external agent (`create_agent` with
+`provider: "external"`, see `atn/external_agents.md`): such agents have no
+injected review turn, so `use_tool` and `attest_tools` results carry a
+`review_due` list of the tools used since the agent last reviewed them.
+
 ## Owner actions go through the remote listener
 
 Money and owner decisions (approve adoption, register on chain, owner

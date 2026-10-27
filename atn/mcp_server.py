@@ -17,12 +17,21 @@ Claude Code config (.mcp.json):
         }
       }
     }
+
+Guest mode: with ``ATN_MCP_TOKEN`` set (an integration token from
+``atn integration-token create --agent <id>``), the proxy connects to the
+daemon's integration listener instead (docs/integration_listener.md,
+default ``ws://127.0.0.1:7710``) and acts as that one agent: only the
+listener's allowlist is offered (probe, use, review, author, publish
+tools), and what it earns is that agent's. ``ATN_MCP_URL`` overrides the
+daemon URL in either mode (e.g. several daemons on one machine).
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import sys
 import uuid
 from typing import Any
@@ -36,7 +45,9 @@ from .ws_server import DEFAULT_PORT
 
 log = logging.getLogger(__name__)
 
-DAEMON_URL = f"ws://localhost:{DEFAULT_PORT}"
+GUEST_TOKEN = os.environ.get("ATN_MCP_TOKEN", "").strip()
+DAEMON_URL = os.environ.get("ATN_MCP_URL", "").strip() or (
+    "ws://127.0.0.1:7710" if GUEST_TOKEN else f"ws://localhost:{DEFAULT_PORT}")
 _CALL_TIMEOUT = 300.0  # seconds; some tools (trigger_run, delegate) run long
 
 _NOT_RUNNING = (
@@ -59,7 +70,7 @@ async def _call_daemon(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     payload["msg_id"] = mid
 
     try:
-        async with websockets.connect(DAEMON_URL, max_size=None, open_timeout=5) as ws:
+        async with _connect(websockets) as ws:
             await ws.send(json.dumps(payload))
             async with asyncio.timeout(_CALL_TIMEOUT):
                 async for frame in ws:
@@ -81,20 +92,62 @@ async def _call_daemon(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"error": f"daemon connection failed: {exc}"}
 
 
+def _connect(websockets: Any):
+    """A connection to the daemon; in guest mode it carries the bearer token."""
+    headers = {"Authorization": f"Bearer {GUEST_TOKEN}"} if GUEST_TOKEN else None
+    return websockets.connect(DAEMON_URL, max_size=None, open_timeout=5,
+                              additional_headers=headers)
+
+
+async def _guest_allowed() -> list[str]:
+    """The message types the integration listener allows this token (its
+    first frame, ``integration_ready``)."""
+    import websockets
+    try:
+        async with _connect(websockets) as ws:
+            async with asyncio.timeout(10):
+                async for frame in ws:
+                    msg = json.loads(frame)
+                    if isinstance(msg, dict) and msg.get("type") == "integration_ready":
+                        return list(msg.get("allowed") or [])
+    except Exception as exc:
+        log.warning("guest handshake with %s failed: %s", DAEMON_URL, exc)
+    return []
+
+
+# Allowlisted guest calls with no agent-tool definition of their own.
+_GUEST_EXTRA = {
+    "status": "Who this connection acts as and what it may call.",
+    "network_status": "Node, chain, epoch and peer summary of the network.",
+    "tool_reviews": "Reviews and the drifted position of a tool, by digest.",
+}
+
+
+def _tool_list(allowed: list[str] | None) -> list[types.Tool]:
+    defs = get_tool_definitions()
+    if allowed is None:
+        return [types.Tool(name=t.name, description=t.description,
+                           inputSchema=t.input_schema) for t in defs]
+    keep = set(allowed)
+    tools = [types.Tool(name=t.name, description=t.description,
+                        inputSchema=t.input_schema)
+             for t in defs if t.name in keep]
+    known = {t.name for t in tools}
+    for name, desc in _GUEST_EXTRA.items():
+        if name in keep and name not in known:
+            tools.append(types.Tool(name=name, description=desc,
+                                    inputSchema={"type": "object",
+                                                 "additionalProperties": True}))
+    return tools
+
+
 def create_server() -> Server:
     """Create the MCP server (pure proxy — no runtime state)."""
     server = Server("atn")
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name=t.name,
-                description=t.description,
-                inputSchema=t.input_schema,
-            )
-            for t in get_tool_definitions()
-        ]
+        return _tool_list(await _guest_allowed() if GUEST_TOKEN else None)
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
@@ -117,8 +170,8 @@ async def run_server() -> None:
     )
 
     log.info(
-        "ATN MCP proxy ready — %d tools, forwarding to %s (daemon not started here)",
-        len(get_tool_definitions()), DAEMON_URL,
+        "ATN MCP proxy ready (%s), forwarding to %s (daemon not started here)",
+        "guest agent" if GUEST_TOKEN else "owner", DAEMON_URL,
     )
 
     server = create_server()
