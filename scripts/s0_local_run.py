@@ -553,6 +553,10 @@ class Activity:
             canary = self.published[digest]["name"] == CANARY
             if canary:
                 self.note("canary_result", h, result=r)
+            # Every tool's tier as the network sets it (the honest control
+            # should end "declared").
+            self.note("tier", h, tool=self.published[digest]["name"],
+                      tier=(r.get("containment") or {}).get("tier") or r.get("error"))
             harm = 1.0 if canary and h.name in HARM_REVIEWERS else 0.0
             judgments.append({"tool": name, "ok": "error" not in r and harm == 0,
                               "axes": {"correctness": 0.8 if harm == 0 else -0.8,
