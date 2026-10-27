@@ -63,6 +63,27 @@ DEFAULT_PORT = 7700
 # payload would cross the wire in plaintext. Checked at the top of
 # _handle_message, before any dispatch — so the execute_tool fallthrough cannot
 # bypass it.
+# RepToken (OpenZeppelin ERC20Votes + ERC20Permit) surface the operator
+# flow uses: delegation state and delegateBySig.
+_REP_DELEGATION_ABI = [
+    {"name": "delegates", "type": "function", "stateMutability": "view",
+     "inputs": [{"name": "account", "type": "address"}],
+     "outputs": [{"name": "", "type": "address"}]},
+    {"name": "name", "type": "function", "stateMutability": "view",
+     "inputs": [], "outputs": [{"name": "", "type": "string"}]},
+    {"name": "nonces", "type": "function", "stateMutability": "view",
+     "inputs": [{"name": "owner", "type": "address"}],
+     "outputs": [{"name": "", "type": "uint256"}]},
+    {"name": "delegateBySig", "type": "function", "stateMutability": "nonpayable",
+     "inputs": [{"name": "delegatee", "type": "address"},
+                {"name": "nonce", "type": "uint256"},
+                {"name": "expiry", "type": "uint256"},
+                {"name": "v", "type": "uint8"},
+                {"name": "r", "type": "bytes32"},
+                {"name": "s", "type": "bytes32"}],
+     "outputs": []},
+]
+
 # Gas budget per operator transaction (claimFor / castVote / registerOption)
 # for the operator's low-gas estimate; generous on purpose.
 _OPERATOR_TX_GAS = 500_000
@@ -280,7 +301,7 @@ INTEGRATION_DENIED_MESSAGES = frozenset({
     # Ownership, wallets, chain registration + signing, money movement.
     "set_owner_wallet", "rotate_owner", "owner_binding_status",
     "operator_status", "register_operator", "export_operator_key",
-    "sweep_to_owner",
+    "sweep_to_owner", "submit_delegation",
     "owner_claim_status", "autonet_wallet_connect", "autonet_wallet_disconnect",
     "autonet_set_chain", "autonet_start", "autonet_stop",
     "register_agent_on_chain", "confirm_agent_registration",
@@ -3288,6 +3309,21 @@ class WebSocketBridge:
                         "result": await self._sweep_to_owner(msg.get("agent_ids"))}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
+        if msg_type == "submit_delegation":
+            # The owner's signed EIP-712 Delegation to the operator; the
+            # operator submits delegateBySig and pays the gas.
+            if not session.owner or session.scope_ids is not None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "'submit_delegation' is for the daemon owner's "
+                                 "full-fleet session only"}
+            try:
+                result = await self._submit_delegation(
+                    int(msg.get("nonce", 0)), int(msg.get("expiry", 0)),
+                    str(msg.get("signature", "")))
+                return {"msg_id": msg_id, "ok": bool(result.get("success")),
+                        "result": result, "error": result.get("error", "")}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
         if msg_type == "operator_status":
             try:
                 return {"msg_id": msg_id, "ok": True,
@@ -5817,20 +5853,60 @@ class WebSocketBridge:
             rep_addr = getattr(config, "rep_token_address", "") or ""
             owner = r["bound_owner"] if int(r["bound_owner"], 16) else out["owner_wallet"]
             if rep_addr and owner:
-                rep = w3.eth.contract(
-                    address=w3.to_checksum_address(rep_addr),
-                    abi=[{"name": "delegates", "type": "function",
-                          "stateMutability": "view",
-                          "inputs": [{"name": "account", "type": "address"}],
-                          "outputs": [{"name": "", "type": "address"}]}])
-                delegatee = rep.functions.delegates(
-                    w3.to_checksum_address(owner)).call()
+                rep = w3.eth.contract(address=w3.to_checksum_address(rep_addr),
+                                      abi=_REP_DELEGATION_ABI)
+                owner_cs = w3.to_checksum_address(owner)
+                delegatee = rep.functions.delegates(owner_cs).call()
                 r["owner_delegatee"] = delegatee
                 r["delegated_to_operator"] = delegatee.lower() == address.lower()
+                # What the owner signs for delegateBySig (EIP-712 domain of
+                # the token: ERC20Permit(name), version "1").
+                r["rep_token_address"] = rep.address
+                r["rep_token_name"] = rep.functions.name().call()
+                r["owner_rep_nonce"] = int(rep.functions.nonces(owner_cs).call())
             return r
 
         out.update(await self._offload(_reads))
         return out
+
+    async def _submit_delegation(self, nonce: int, expiry: int,
+                                 signature: str) -> dict[str, Any]:
+        """Submit the owner's delegateBySig (delegatee = the operator)."""
+        from eth_account import Account
+        from .on_chain import OnChainService
+        config = self.runtime.autonet.config
+        rep_addr = getattr(config, "rep_token_address", "") or ""
+        svc = OnChainService(config)
+        if not svc.available or not rep_addr:
+            return {"success": False, "error": "RepToken not configured on this daemon"}
+        sig = bytes.fromhex(signature.removeprefix("0x"))
+        if len(sig) != 65:
+            return {"success": False, "error": "signature must be 65 bytes"}
+        r, s_, v = sig[:32], sig[32:64], sig[64]
+        if v < 27:
+            v += 27
+        op_key = self._operator_key()
+        op = Account.from_key(op_key)
+
+        async def _send() -> dict[str, Any]:
+            w3 = svc._get_web3()
+            rep = w3.eth.contract(address=w3.to_checksum_address(rep_addr),
+                                  abi=_REP_DELEGATION_ABI)
+            call = rep.functions.delegateBySig(op.address, nonce, expiry, v, r, s_)
+            gas = int(call.estimate_gas({"from": op.address}) * 12 // 10)
+            tx = call.build_transaction({
+                "from": op.address, "gas": gas, "gasPrice": int(w3.eth.gas_price),
+                "chainId": int(w3.eth.chain_id),
+                "nonce": w3.eth.get_transaction_count(op.address)})
+            signed = op.sign_transaction(tx)
+            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            h = w3.eth.send_raw_transaction(raw)
+            if w3.eth.wait_for_transaction_receipt(h, timeout=120).status != 1:
+                return {"success": False, "error": "delegateBySig reverted",
+                        "tx_hash": h.hex()}
+            return {"success": True, "tx_hash": h.hex(), "delegatee": op.address}
+
+        return await self._offload(lambda: _send())
 
     async def _sweep_to_owner(self, agent_ids: Any = None) -> dict[str, Any]:
         """Move local agents' ATN to their on-chain owner (the configured
