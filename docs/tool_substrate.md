@@ -1102,6 +1102,27 @@ Ratified in discussion 2026-10-27 after the S0 local run
    household's earliest commit (commits are hidden, so their order carries
    no information); REP slashes land on the household. Before this, every
    review weighed nothing, so ratings, harm and containment never settled.
+3. **A receipt is signed by the agent it names.** An attested `tool_used`
+   event credits a tool's author with the calling household's weight, so
+   the calling agent's own key signs it (EIP-191 over the jurisdiction,
+   agent, tool, seq, outcome; `nodes/common/tool_receipts.py`), and a
+   chain-backed close counts only receipts whose signature recovers to
+   their `author_agent`, each (agent, seq) once. Before this any daemon
+   could publish receipts claiming any REP holder used its tools. The
+   owner has no agent key, so its own direct use does not mint.
+4. **Only bonded tools mint, to the bond's author.** The close reads
+   ToolBond's bonds at the pinned snapshot (`Bonded`, `UnbondRequested`,
+   `Unbonded`, slashes): a tool without `minStake` bonded, or unbonding,
+   mints nothing, and its mint goes to the bond's author (Substrate's
+   `toolAuthor`), not to whoever gossiped the registration first.
+5. **Decided, not yet built: a tool breaks through before it mints.** Its
+   users this epoch must together hold at least A of REP supply and be at
+   least B of the REP-holding households (DAO-set shares, so the bar rises
+   with the network). Until then it earns nothing (no escrow). Households
+   without REP do not count toward B, so free wallets cannot fill it, and
+   no household is treated differently for its size. A and B are to be
+   chosen from the GPU sim (`experiments/econ_gpu`) before the close
+   changes.
 
 ## Doctrine (2026-07-08): the capability ratchet and the absorption frontier
 

@@ -319,6 +319,11 @@ _TOOL_BOND_EVENTS_ABI = [
     _ev("ReviewSettled", [("digest", "bytes32", True), ("epoch", "uint256", True),
                           ("reviewer", "address", True), ("accuracy", "uint256", False),
                           ("harmAccuracy", "uint256", False)]),
+    _ev("Bonded", [("digest", "bytes32", True), ("author", "address", True),
+                    ("amount", "uint256", False), ("stake", "uint256", False)]),
+    _ev("UnbondRequested", [("digest", "bytes32", True), ("availableAt", "uint256", False)]),
+    _ev("Unbonded", [("digest", "bytes32", True), ("author", "address", True),
+                     ("amount", "uint256", False)]),
     _ev("EpochStarted", [("epoch", "uint256", True), ("charterHash", "bytes32", False),
                          ("axisIds", "bytes32[]", False), ("snapshot", "uint48", False),
                          ("supply", "uint256", False)]),
@@ -402,6 +407,8 @@ def tool_review_snapshot_from_logs(
     finalized: List[Tuple[str, int, int]] = []   # (digest, epoch, block), in order
     overruled: Dict[Tuple[str, int], int] = {}    # DAO's harm 0..100 for a round
     cooling: List[Tuple[str, int]] = []           # harm settled, appeal window open
+    bonds: Dict[str, Dict[str, Any]] = {}         # digest -> {author, stake, unbonding}
+    min_stake = 0
     settled: Dict[Tuple[str, int, str], int] = {}  # (digest, epoch, reviewer) -> accuracy
     epochs = dict(epochs)
     for r in ordered:
@@ -410,6 +417,18 @@ def tool_review_snapshot_from_logs(
         name, a = r["event"], r["args"]
         if name == "ParamsSet":
             bps = int(a["reviewerShareBps"])
+            min_stake = int(a["minStake"])
+        elif name == "Bonded":
+            b = bonds.setdefault(_hex32(a["digest"]), {"author": "", "stake": 0,
+                                                       "unbonding": False})
+            b["author"] = str(a["author"]).lower()
+            b["stake"] = int(a["stake"])
+            b["unbonding"] = False   # a top-up cancels a pending unbond
+        elif name == "UnbondRequested":
+            if _hex32(a["digest"]) in bonds:
+                bonds[_hex32(a["digest"])]["unbonding"] = True
+        elif name == "Unbonded":
+            bonds.pop(_hex32(a["digest"]), None)
         elif name == "Reviewed":
             reviews.setdefault((_hex32(a["digest"]), int(a["epoch"])), []).append({
                 "reviewer": str(a["reviewer"]).lower(),
@@ -418,6 +437,9 @@ def tool_review_snapshot_from_logs(
             })
         elif name == "Finalized":
             finalized.append((_hex32(a["digest"]), int(a["epoch"]), int(r["block"])))
+            b = bonds.get(_hex32(a["digest"]))
+            if b is not None:
+                b["stake"] = max(0, b["stake"] - int(a["bondSlashed"]))
         elif name == "Overruled":
             overruled[(_hex32(a["digest"]), int(a["epoch"]))] = int(a["harm"])
         elif name == "HarmSettled":
@@ -509,6 +531,9 @@ def tool_review_snapshot_from_logs(
                   for d, t in sorted(tools.items())},
         "rounds": {d: rs for d, rs in sorted(rounds.items())},
         "cooling_harm": dict(sorted(cooling_harm.items())),
+        # What may mint (Decision 2026-10-27): tools bonded at the block.
+        "bonds": dict(sorted(bonds.items())),
+        "min_stake": int(min_stake),
     }
 
 

@@ -306,6 +306,18 @@ def _normalize_review_snapshot(
             rounds[str(digest).lower().removeprefix("0x")] = sorted(
                 norm_rs, key=lambda r: r["epoch"])
     out["rounds"] = rounds
+    if isinstance(snapshot.get("bonds"), dict):
+        bonds: Dict[str, Dict[str, Any]] = {}
+        for digest, b in sorted(snapshot["bonds"].items()):
+            if not isinstance(b, dict) or not b.get("author"):
+                continue
+            bonds[str(digest).lower().removeprefix("0x")] = {
+                "author": str(b["author"]).lower(),
+                "stake": max(0, _int(b.get("stake"))),
+                "unbonding": bool(b.get("unbonding")),
+            }
+        out["bonds"] = bonds
+        out["min_stake"] = max(0, _int(snapshot.get("min_stake")))
     return out
 
 
@@ -385,6 +397,10 @@ def compute_tool_mint(
     # Staked reviews (docs/multi_jurisdiction.md decision 10): the pinned
     # ToolBond review snapshot (ratings + the reviewer-share rounds).
     review_snapshot: Optional[Dict[str, Any]] = None,
+    # The jurisdiction's gossip domain: attested receipts must be signed by
+    # the agent they name for it (nodes/common/tool_receipts.py). None (no
+    # chain, tests) = receipts unchecked.
+    receipt_domain: Optional[str] = None,
     vet_quorum: float = VET_QUORUM,
     vet_royalty_share: float = VET_ROYALTY_SHARE,
     vet_royalty_epochs: int = VET_ROYALTY_EPOCHS,
@@ -531,7 +547,8 @@ def compute_tool_mint(
             meta.setdefault("sender", str(ev["sender"]))
         known_regs.setdefault(ev["artifact_digest"], meta)
 
-    usage = tool_usage_from_events(events)
+    from .tool_receipts import verified_receipts
+    usage = tool_usage_from_events(verified_receipts(events, receipt_domain))
     by_digest = _artifact_standing(world)
 
     # ------------------------------------------------------------------
@@ -825,9 +842,20 @@ def compute_tool_mint(
 
     per_digest: Dict[str, Dict[str, Any]] = {}
     node_agent: Dict[str, Dict[str, float]] = {}
+    bonds = rev_snap.get("bonds")
     for digest in sorted(eff.keys()):
         meta = known_regs[digest]
         author = str(meta.get("author") or "")
+        if bonds is not None:
+            # Only a tool bonded on ToolBond at the pinned snapshot mints,
+            # and its mint goes to the bond's author (Decision 2026-10-27):
+            # a gossiped registration alone attributes nothing.
+            b = bonds.get(digest)
+            if not b or b["unbonding"] or b["stake"] < int(rev_snap.get("min_stake") or 0) \
+                    or b["stake"] <= 0:
+                continue
+            if author.lower() != b["author"]:
+                author = b["author"]
         if not author:
             continue
         # Pinned-only emission (spec v2): the network mints only for
@@ -1240,6 +1268,8 @@ def federated_epoch_close(
     # passed to others) and their estimates carry no drift weight. Their
     # reviews are already dropped from the ratings in ``review_snapshot``.
     sanctioned_households: Optional[List[str]] = None,
+    # Gossip domain for signed receipts (compute_tool_mint).
+    receipt_domain: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -1391,6 +1421,7 @@ def federated_epoch_close(
         positions=tool_positions,
         rep_shares=rep_shares,
         review_snapshot=review_snapshot,
+        receipt_domain=receipt_domain,
     )
     # Write the ToolBond-rated charter heads onto the replay world so the
     # checkpoint (world_cid) and any world reader carry them forward. Coords

@@ -1079,6 +1079,9 @@ class FederatedCloseDriver:
                 review_snapshot=(dict(self.review_snapshot)
                                  if self.review_snapshot else None),
                 sanctioned_households=list(self.sanctioned_households),
+                # Chain-backed closes count only agent-signed receipts.
+                receipt_domain=(str(getattr(self.gossip, "rpb_address", "") or "")
+                                if self.review_snapshot is not None else None),
             )
         except Exception as e:
             logger.error(

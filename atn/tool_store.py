@@ -227,6 +227,11 @@ class ToolStore:
         # safe (manifest claims are content-addressed by digest).
         self.event_sink: Any = None
         self.manifest_sink: Any = None
+        # Signs an attested receipt with the calling agent's key
+        # (callable: local agent id, event -> 0x signature or ""), wired by
+        # the autonet bridge. Chain-backed closes count only signed
+        # receipts (nodes/common/tool_receipts.py).
+        self.receipt_signer: Any = None
         # Optional network blob fetch (async callable: digest -> bytes
         # or None). Wired to the libp2p blob resolver when the autonet
         # host is up; lets validators vet (and later adopt) manifests
@@ -1893,6 +1898,14 @@ class ToolStore:
                     event["own_share"] = own_share
                 if _loadout:
                     event["loadout"] = _loadout
+                if self.receipt_signer is not None:
+                    try:
+                        sig = self.receipt_signer(caller, event)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("receipt signing failed for %s: %s", caller, exc)
+                        sig = ""
+                    if sig:
+                        event["agent_sig"] = sig
                 try:
                     self.event_sink(event)
                 except Exception as exc:

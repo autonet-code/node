@@ -1261,6 +1261,16 @@ class AutonetBridge:
                 _ws.submit_events([event], equilibrate_after=False)
             tool_store.event_sink = _sink
 
+            def _sign_receipt(caller: str, event: dict, _rt=self._runtime) -> str:
+                # The calling agent's own key signs its receipt for this
+                # jurisdiction; the owner (no agent key) cannot sign, so
+                # its receipts do not mint on a chain-backed close.
+                from nodes.common.tool_receipts import sign_receipt
+                key = _rt.registry.get_agent_key(caller) if caller else None
+                domain = self.state.jurisdiction_key or ""
+                return sign_receipt(key, domain, event) if key and domain else ""
+            tool_store.receipt_signer = _sign_receipt
+
             def _manifest_sink(manifest: dict, author: str, _ws=world_service) -> None:
                 _ws.submit_tool_manifest(manifest, agent_id=author)
             tool_store.manifest_sink = _manifest_sink
