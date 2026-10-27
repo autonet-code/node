@@ -1154,16 +1154,20 @@ class AutonetHost:
         Returns immediately. Failures are logged, not raised.
         """
         token = self._trio_token
-        if token is None:
+        nursery = self._nursery
+        if token is None or nursery is None:
             self.logger.debug("publish_topic_threadsafe before host run; dropping")
             return
-        import trio
 
         async def _do():
             await self.publish_topic(topic, data)
 
+        # Never wait for the trio thread: callers publish while holding the
+        # world lock, and the trio thread's topic reader takes that lock to
+        # ingest peer events, so a blocking hand-off deadlocks the daemon.
+        # run_sync_soon only queues; callbacks run in order on the loop.
         try:
-            trio.from_thread.run(_do, trio_token=token)
+            token.run_sync_soon(nursery.start_soon, _do)
         except Exception as e:
             self.logger.debug(f"publish_topic_threadsafe failed: {e}")
 

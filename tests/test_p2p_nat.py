@@ -195,3 +195,45 @@ def test_is_public_ip():
     assert p2p_mod._is_public_ip("188.25.100.16")
     for ip in ("192.168.3.9", "10.241.68.122", "127.0.0.1", "100.64.0.1", "nonsense"):
         assert not p2p_mod._is_public_ip(ip)
+
+
+def test_threadsafe_publish_never_waits_for_the_trio_thread():
+    """A thread holding a lock that the trio thread is waiting on can still
+    publish (the world lock / gossip ingest deadlock): the publish is
+    queued, and it goes out once the trio thread is free."""
+    import threading
+
+    host = _host("pub")
+    sent = []
+
+    async def _publish(topic, data):
+        sent.append((topic, data))
+        return True
+    host.publish_topic = _publish
+    lock = threading.Lock()
+    ready = threading.Event()
+
+    async def _loop():
+        host._trio_token = trio.lowlevel.current_trio_token()
+        async with trio.open_nursery() as nursery:
+            host._nursery = nursery
+            ready.set()
+            # Blocks the whole trio thread, as a topic handler waiting on
+            # the world lock does.
+            lock.acquire()
+            lock.release()
+            with trio.fail_after(5):
+                while not sent:
+                    await trio.sleep(0.01)
+
+    lock.acquire()
+    t = threading.Thread(target=trio.run, args=(_loop,))
+    t.start()
+    assert ready.wait(5)
+    done = threading.Event()
+    threading.Thread(target=lambda: (host.publish_topic_threadsafe("t", b"x"),
+                                     done.set())).start()
+    assert done.wait(2), "publish_topic_threadsafe waited for the trio thread"
+    lock.release()
+    t.join(10)
+    assert sent == [("t", b"x")]
