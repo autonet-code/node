@@ -148,6 +148,10 @@ INFERENCE_REQUEST_PROTOCOL = TProtocol("/rpb/inference/1.0.0")
 # Robot poll rail (docs/robots.md, 2026-10-25): polls, link pushes and
 # receipts between daemons, one JSON request and one JSON response a stream.
 ROBOT_PROTOCOL = TProtocol("/autonet/robot/1.0.0")
+# Reachability check: we send our listen port, the peer answers with the IP
+# it sees us on and whether a fresh TCP connect to that IP and port worked.
+# Only the requester's own observed IP is ever dialled.
+REACH_PROTOCOL = TProtocol("/autonet/reach/1.0.0")
 GUILD_GOSSIP_TOPIC_PREFIX = "/autonet/guild/"
 PROVIDER_REGISTRY_TOPIC = "/rpb/provider-registry/"
 
@@ -389,6 +393,16 @@ class PeerLatencyTracker:
 # =============================================================================
 
 
+def _is_public_ip(ip: str) -> bool:
+    """A LAN, loopback or tunnel address seen by a peer is not worth
+    announcing: the listen addresses already cover those peers."""
+    import ipaddress
+    try:
+        return ipaddress.ip_address(ip).is_global
+    except ValueError:
+        return False
+
+
 def resolve_dns_multiaddr(addr: str) -> str:
     """Rewrite a leading /dns4, /dns6 or /dns component to /ip4 or /ip6.
 
@@ -439,6 +453,8 @@ class AutonetHost:
         capability: Optional[NodeCapability] = None,
         announce_addrs: Optional[List[str]] = None,
         bootstrap_redial_interval: float = 30.0,
+        auto_reach: bool = False,
+        reach_interval: float = 300.0,
     ):
         self.node_id = node_id
         self._listen_port = listen_port
@@ -446,6 +462,11 @@ class AutonetHost:
         self._bootstrap_peers = bootstrap_peers or []
         self._announce_addrs = announce_addrs or []
         self._announce_resolved: List[Multiaddr] = []
+        # Without configured announce addrs, auto_reach finds our public
+        # address (UPnP mapping and/or a peer's observation) and announces
+        # it once a peer confirms it can connect to it.
+        self._auto_reach = auto_reach
+        self._reach_interval = reach_interval
         self._bootstrap_redial_interval = bootstrap_redial_interval
         self._enable_quic = enable_quic
         self._enable_upnp = enable_upnp
@@ -508,7 +529,9 @@ class AutonetHost:
         self._host = new_host(
             listen_addrs=listen_addrs,
             enable_quic=self._enable_quic,
-            enable_upnp=self._enable_upnp,
+            # UPnP is handled in _auto_reach_loop: py-libp2p's own mapping
+            # reads get_addrs, which we replace with the announce addrs.
+            enable_upnp=False,
             bootstrap=bootstrap if bootstrap else None,
         )
 
@@ -517,13 +540,16 @@ class AutonetHost:
             peer_id = str(self._host.get_id())
             if self._announce_addrs:
                 self._announce_resolved = self._resolve_announce_addrs()
+            if self._announce_addrs or self._auto_reach or self._enable_upnp:
                 p2p_part = Multiaddr(f"/p2p/{peer_id}")
+                listen = self._host.get_addrs
                 # Identify, the signed peer record and our capability all
                 # read get_addrs, so replacing it on the host instance is
                 # enough; the listen socket is unchanged.
-                self._host.get_addrs = lambda: [
-                    a.encapsulate(p2p_part) for a in self._announce_resolved
-                ]
+                self._host.get_addrs = lambda: (
+                    [a.encapsulate(p2p_part) for a in self._announce_resolved]
+                    or listen()
+                )
             addrs = self._host.get_addrs()
 
             # Update our capability with actual peer ID and addresses
@@ -553,6 +579,8 @@ class AutonetHost:
                     if ((self._bootstrap_peers or self._announce_addrs)
                             and self._bootstrap_redial_interval > 0):
                         nursery.start_soon(self._maintain_addrs)
+                    if not self._announce_addrs and (self._auto_reach or self._enable_upnp):
+                        nursery.start_soon(self._auto_reach_loop)
                     self._ready_event.set()
                     try:
                         yield self
@@ -611,6 +639,109 @@ class AutonetHost:
                     pass
                 with trio.move_on_after(10):
                     await self.connect_to_peer(addr)
+
+    def _listen_port_actual(self) -> int:
+        for addr in self._host.get_transport_addrs():
+            port = addr.value_for_protocol("tcp")
+            if port:
+                return int(port)
+        return 0
+
+    async def _set_auto_announce(self, addr: Optional[str]) -> None:
+        """Announce ``addr`` (or go back to the listen addrs on None) and
+        tell peers if that changed."""
+        fresh = [Multiaddr(addr)] if addr else []
+        if [str(a) for a in fresh] == [str(a) for a in self._announce_resolved]:
+            return
+        self.logger.info(
+            f"Reachable at {addr}" if addr else "No longer reachable; announcing listen addrs"
+        )
+        self._announce_resolved = fresh
+        self._capability.listen_addrs = self.addrs
+        await self.advertise_capability()
+
+    async def _auto_reach_loop(self) -> None:
+        """Find and confirm our public address, every ``reach_interval``.
+
+        With UPnP on, the router maps our listen port and reports its
+        public IP. Either way a connected peer is asked what IP it sees
+        us on and whether it can connect to us there; we announce
+        ``/ip4/<ip>/tcp/<port>`` only when it can. Repeating the check
+        catches a changed public IP. A daemon nobody can reach keeps
+        working NAT'd (dialling out).
+        """
+        import trio
+        port = self._listen_port_actual()
+        upnp = None
+        if self._enable_upnp and port:
+            try:
+                from libp2p.discovery.upnp.upnp import UpnpManager
+                upnp = UpnpManager()
+                if not (await upnp.discover() and await upnp.add_port_mapping(port, "TCP")):
+                    upnp = None
+            except Exception as e:  # miniupnpc missing or the router said no
+                self.logger.info(f"UPnP unavailable: {e}")
+                upnp = None
+        try:
+            while True:
+                if upnp is not None:
+                    # Leases expire and routers reboot: renew each round.
+                    await upnp.add_port_mapping(port, "TCP")
+                peers = self._host.get_connected_peers()
+                verdict = None
+                for pid in peers[:3]:
+                    with trio.move_on_after(15):
+                        verdict = await self.check_reachability(pid, port)
+                    if verdict is not None:
+                        break
+                if verdict is None:
+                    await trio.sleep(2.0)  # no peer answered yet; retry soon
+                    continue
+                ip = verdict.get("ip") or ""
+                if verdict.get("reachable") and _is_public_ip(ip):
+                    proto = "ip6" if ":" in ip else "ip4"
+                    await self._set_auto_announce(f"/{proto}/{ip}/tcp/{port}")
+                else:
+                    await self._set_auto_announce(None)
+                await trio.sleep(self._reach_interval)
+        finally:
+            if upnp is not None:
+                with trio.CancelScope(shield=True), trio.move_on_after(3):
+                    await upnp.remove_port_mapping(port, "TCP")
+
+    async def check_reachability(self, peer_id: Any, port: int) -> Optional[Dict]:
+        """Ask ``peer_id`` whether it can connect to us on ``port``.
+        Returns {"ip": observed ip, "reachable": bool} or None on failure."""
+        try:
+            stream = await self._host.new_stream(peer_id, [REACH_PROTOCOL])
+            await _write_frame_no_close(stream, json.dumps({"port": int(port)}).encode("utf-8"))
+            data = await _read_frame_no_close(stream)
+            await stream.close()
+            return json.loads(data.decode("utf-8")) if data else None
+        except Exception as e:
+            self.logger.debug(f"Reachability check via {str(peer_id)[:16]} failed: {e}")
+            return None
+
+    async def _handle_reach_stream(self, stream):
+        """Tell the requester its observed IP and whether we can connect
+        to it on the port it named. We dial only that observed IP."""
+        try:
+            req = json.loads((await _read_frame_no_close(stream)).decode("utf-8"))
+            port = int(req.get("port", 0))
+            remote = stream.get_remote_address()
+            ip = remote[0] if remote else ""
+            reachable = False
+            if ip and 0 < port < 65536:
+                with trio.move_on_after(5):
+                    try:
+                        conn = await trio.open_tcp_stream(ip, port)
+                        await conn.aclose()
+                        reachable = True
+                    except OSError:
+                        pass
+            await _write_framed(stream, json.dumps({"ip": ip, "reachable": reachable}).encode("utf-8"))
+        except Exception as e:
+            self.logger.debug(f"Error handling reach stream: {e}")
 
     # =========================================================================
     # Properties
@@ -1886,6 +2017,9 @@ class AutonetHost:
         )
         self._host.set_stream_handler(
             ROBOT_PROTOCOL, self._handle_robot_stream
+        )
+        self._host.set_stream_handler(
+            REACH_PROTOCOL, self._handle_reach_stream
         )
 
     # =========================================================================

@@ -61,7 +61,8 @@ p2p:
   listen_host: 0.0.0.0
   bootstrap_peers: []
   enable_quic: false
-  enable_upnp: false
+  enable_upnp: true
+  auto_reach: true
   capability_advertise_interval: 60
   ping_interval: 30
 guild:

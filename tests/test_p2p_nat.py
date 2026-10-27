@@ -162,3 +162,36 @@ async def test_two_hop_relay_between_nat_peers():
             miss = await a.fetch_blob_from_peers(
                 [b.peer_id], hashlib.sha256(other).hexdigest(), hops=0)
         assert miss is None
+
+
+@trio_test
+async def test_reach_check_reports_observed_ip_and_reachability():
+    asker, peer = _host("asker"), _host("peer")
+    async with asker.run(), peer.run():
+        assert await asker.connect_to_peer(peer.addrs[0])
+        port = asker._listen_port_actual()
+        with trio.fail_after(10):
+            open_ = await asker.check_reachability(peer._host.get_id(), port)
+        assert open_ == {"ip": "127.0.0.1", "reachable": True}
+        # A port nobody listens on is reported unreachable.
+        with trio.fail_after(10):
+            closed = await asker.check_reachability(peer._host.get_id(), 1)
+        assert closed == {"ip": "127.0.0.1", "reachable": False}
+
+
+@trio_test
+async def test_auto_reach_does_not_announce_private_ip():
+    """A LAN/loopback observation is reachable but not announced."""
+    asker = _host("asker", auto_reach=True, reach_interval=0.3)
+    peer = _host("peer")
+    async with asker.run(), peer.run():
+        listen = list(asker.addrs)
+        assert await asker.connect_to_peer(peer.addrs[0])
+        await trio.sleep(1.0)
+        assert asker.addrs == listen
+
+
+def test_is_public_ip():
+    assert p2p_mod._is_public_ip("188.25.100.16")
+    for ip in ("192.168.3.9", "10.241.68.122", "127.0.0.1", "100.64.0.1", "nonsense"):
+        assert not p2p_mod._is_public_ip(ip)

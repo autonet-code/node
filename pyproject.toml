@@ -58,10 +58,11 @@ dependencies = [
     "eth-utils>=2.0.0",
     # P2P: libp2p event gossip + federated close transport (nodes/common/p2p.py,
     # blob_resolver.py). multiaddr ships with libp2p. trio is the required
-    # async runtime for the libp2p host. (miniupnpc is NOT imported anywhere in
-    # code — UPnP defaults off — so it stays optional under [network] below.)
+    # async runtime for the libp2p host. miniupnpc maps the listen port on
+    # home routers (UPnP, on by default) so NAT'd daemons become reachable.
     "libp2p>=0.6.0",
     "trio>=0.22.0",
+    "miniupnpc>=2.0",
     # Substrate engine math: numpy is imported UNGUARDED at module level on the
     # live federated-close path — nodes/common/world_model_substrate/reconcile.py
     # does `from world_model.generalized import World`, whose __init__ pulls
@@ -98,12 +99,10 @@ training = [
 # Back-compat alias. The full-node deps (web3, eth-account, eth-utils, libp2p,
 # trio, numpy) moved to core so `pip install autonet-computer` is a working
 # node — see the block in [project].dependencies. This extra now carries only
-# the optional UPnP helper (never imported in code; UPnP defaults off) plus the
-# training stack, so existing `autonet-computer[network]` instructions still
-# resolve. Prefer `[training]` for the training stack going forward.
+# the training stack, so existing `autonet-computer[network]` instructions
+# still resolve. Prefer `[training]` for the training stack going forward.
 network = [
     "autonet-computer[training]",
-    "miniupnpc>=2.0",
 ]
 # Core voice: TTS output + audio mixing.
 # The low-level primitives (mixer, TTS backends, tones, PTT, STT) are VENDORED

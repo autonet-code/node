@@ -118,7 +118,11 @@ class P2PConfig:
     announce_addrs: list = field(default_factory=list)
     bootstrap_redial_interval: int = 30      # seconds; 0 = dial once at start
     enable_quic: bool = False
-    enable_upnp: bool = False
+    # Without announce_addrs: map the listen port on the home router (UPnP)
+    # and announce our public address once a peer confirms it can connect.
+    enable_upnp: bool = True
+    auto_reach: bool = True
+    reach_interval: int = 300                # seconds between reachability checks
     capability_advertise_interval: int = 60  # seconds
     ping_interval: int = 30                  # seconds
 

@@ -131,7 +131,7 @@ class TestP2PConfig:
         assert hasattr(cfg, "p2p")
         assert cfg.p2p.listen_port == 0
         assert cfg.p2p.enable_quic is False
-        assert cfg.p2p.enable_upnp is False
+        assert cfg.p2p.enable_upnp is True
 
     def test_p2p_defaults(self):
         """P2PConfig has correct defaults."""

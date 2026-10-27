@@ -14,8 +14,25 @@ Code: `nodes/common/p2p.py`, `nodes/common/blob_resolver.py`,
 | `bootstrap_peers` | `AUTONET_P2P_BOOTSTRAP` | Comma list of multiaddrs (`.../p2p/<peer id>`) |
 | `announce_addrs` | `AUTONET_P2P_ANNOUNCE` | Comma list of addresses peers should dial us on |
 | `bootstrap_redial_interval` | | Seconds between redials of unconnected bootstrap peers (0 = dial once) |
+| `enable_upnp` | | Map the listen port on the home router (default on) |
+| `auto_reach` | | Find and announce our public address when no `announce_addrs` is set (default on) |
+| `reach_interval` | | Seconds between reachability checks (default 300) |
 
 ## Reachable and NAT'd daemons
+
+Home users need no network setup. With no `announce_addrs`:
+
+1. **UPnP:** the daemon asks the home router to forward its listen port
+   (most routers support it; some ship with it off) and renews the
+   mapping every check.
+2. **Reach check** (`/autonet/reach/1.0.0`): the daemon asks a connected
+   peer what IP it sees it on and whether a fresh TCP connect to that IP
+   and our listen port works. The peer dials only the requester's
+   observed IP. If it works and the IP is public, the daemon announces
+   `/ip4/<ip>/tcp/<port>`; if a later check fails, it goes back to its
+   listen addresses. This also covers a manual port forward, and repeating
+   the check every `reach_interval` follows a changed home IP with no DNS.
+3. Otherwise the daemon stays NAT'd and keeps working by dialling out.
 
 - A **reachable** daemon (public IP, port forward or tunnel) sets
   `announce_addrs` to its public address. That address then replaces the
@@ -55,7 +72,7 @@ Code: `nodes/common/p2p.py`, `nodes/common/blob_resolver.py`,
 
 ## Not covered
 
-- Circuit relay v2 (py-libp2p has it) is not used. NAT'd daemons cannot
+- Hole punching (py-libp2p ships DCUtR) and circuit relay v2 are not used. NAT'd daemons cannot
   dial each other directly; gossip and blobs go through reachable peers.
 - Blobs held only in the in-memory resolver map (world checkpoints, carry
   bundles) are not persisted, so a daemon that restarts cannot serve the
