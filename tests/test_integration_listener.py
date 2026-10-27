@@ -537,3 +537,30 @@ async def test_list_tools_marks_the_bound_agents_own_tools(tmp_path):
     # Visible through lineage (root is guest's ancestor) but not authored.
     assert by_digest[child["digest"]]["mine"] is False
     assert by_digest[mine["digest"]]["published"] is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_proxy_guest_mode(tmp_path, monkeypatch):
+    """atn.mcp_server with ATN_MCP_TOKEN: connects to the integration
+    listener as the bound agent and offers only its allowlist."""
+    from atn import mcp_server
+    rt = await _fleet(tmp_path)
+    token, _rec = ws_auth.IntegrationTokenStore(rt._config.data_dir).create("guest", "mcp")
+    port = INTEGRATION_PORT + 2
+    bridge = WebSocketBridge(rt, host="127.0.0.1", port=27722,
+                             integration_host="127.0.0.1", integration_port=port)
+    await bridge.start()
+    monkeypatch.setattr(mcp_server, "GUEST_TOKEN", token)
+    monkeypatch.setattr(mcp_server, "DAEMON_URL", f"ws://127.0.0.1:{port}")
+    try:
+        allowed = await mcp_server._guest_allowed()
+        assert set(allowed) == set(INTEGRATION_ALLOWED_MESSAGES)
+        names = {t.name for t in mcp_server._tool_list(allowed)}
+        assert {"use_tool", "attest_tools", "status"} <= names
+        assert "export_agent_key" not in names and "pay_for_service" not in names
+        status = await mcp_server._call_daemon("status", {})
+        assert status["agent_id"] == "guest"
+        denied = await mcp_server._call_daemon("export_agent_key", {"agent_id": "guest"})
+        assert "error" in denied
+    finally:
+        await bridge.stop()
