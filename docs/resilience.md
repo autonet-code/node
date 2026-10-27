@@ -166,10 +166,12 @@ cannot **forge**, because mints need merkle proofs against anchors every
 honest daemon already ratified, and Substrate.sol has no admin keys.
 That leaves two failure modes, both covered:
 
-**Silence → halt.** Work halts if the governance heartbeat is missed.
-This is a hard constraint, not a courtesy: a network that can't reach
-its governance surface fails *closed*, so a censoring chain can pause
-the economy but cannot redirect it.
+**Silence → settlement waits.** A network that can't reach its chain
+stops settling: no anchors, no mints. Local work (agents, tools,
+services) continues, and settlement resumes from the last anchor when the
+chain is back (Decision 2026-10-26; the older rule halted all work, which
+punished every household for a network problem). A censoring chain can
+pause settlement but cannot redirect it.
 
 **Capture → consensus-gated migration.** Evolution is forward-only:
 there is no rollback mechanism, and there is no need for one, because
