@@ -320,6 +320,13 @@ class AutonetService:
             except Exception as e:
                 logger.warning("World-substrate cycle failed: %s", e)
 
+        # Local events held while no peer was subscribed go out now.
+        if self._event_gossip is not None:
+            try:
+                self._event_gossip.flush_outbox()
+            except Exception as e:
+                logger.warning("Gossip outbox flush failed: %s", e)
+
         # Epoch scheduler: tick to close+open reward windows on its
         # configured interval. Phase 4 will surface the close result
         # to the chain.

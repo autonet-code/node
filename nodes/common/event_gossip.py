@@ -282,6 +282,10 @@ class LibP2PTransport:
     def publish(self, topic: str, data: bytes) -> None:
         self._host.publish_topic_threadsafe(topic, data)
 
+    def has_peers(self, topic: str) -> bool:
+        """Whether a publish on ``topic`` would reach anyone."""
+        return self._host.topic_peer_count(topic) > 0
+
     def subscribe(self, topic: str, handler: TransportHandler) -> None:
         self._handlers.setdefault(topic, []).append(handler)
         if topic in self._subscribed:
@@ -390,6 +394,8 @@ class EventGossip:
         # by the federated-close driver at epoch boundaries to build
         # the canonical order. Held under self._lock.
         self._epoch_batches: List[EventBatch] = []
+        # Local events held while no peer is subscribed (publish_events).
+        self._outbox: List[List[Dict[str, Any]]] = []
         # Largest allowed gap (seconds) between a batch's signed timestamp
         # and its arrival (Decision 2026-10-26, the governed epoch_skew,
         # set by the close driver from the pinned rules). None = no check.
@@ -440,6 +446,38 @@ class EventGossip:
         """
         if not events:
             return None
+        # Nobody to hear it (booting, or cut off): hold the events and sign
+        # them when a peer is back. A batch is signed only when it is sent,
+        # so its timestamp is within every receiver's skew, and it joins our
+        # own epoch set only when peers can have it too; otherwise our own
+        # close counts batches nobody else ever saw.
+        has_peers = getattr(self.transport, "has_peers", None)
+        if has_peers is not None:
+            with self._lock:
+                if self._outbox or not has_peers(self.topic):
+                    self._outbox.append(list(events))
+                    held = True
+                else:
+                    held = False
+            if held:
+                return self.flush_outbox()
+        return self._sign_and_publish(events)
+
+    def flush_outbox(self) -> Optional[SignedBatch]:
+        """Publish the held events, oldest first, once a peer can hear
+        them. Called on every publish and by the service loop. Returns the
+        last batch published, or None."""
+        has_peers = getattr(self.transport, "has_peers", None)
+        last = None
+        while True:
+            with self._lock:
+                if not self._outbox or (has_peers is not None
+                                        and not has_peers(self.topic)):
+                    return last
+                events = self._outbox.pop(0)
+            last = self._sign_and_publish(events)
+
+    def _sign_and_publish(self, events: List[Dict[str, Any]]) -> Optional[SignedBatch]:
         with self._lock:
             seq = self._next_batch_seq
             self._next_batch_seq += 1

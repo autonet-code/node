@@ -266,3 +266,45 @@ def test_three_daemons_all_converge(tmp_path: Path):
         svc_a.shutdown()
         svc_b.shutdown()
         svc_c.shutdown()
+
+
+class _GatedTransport(InMemoryTransport):
+    """An InMemoryTransport that can report having no peers."""
+    online = False
+
+    def has_peers(self, topic):
+        return self.online
+
+
+def test_events_without_peers_wait_and_are_signed_when_sent(tmp_path: Path):
+    """Events published before any peer is subscribed (a booting daemon)
+    are held, not lost: signed only when a peer can hear them, and only
+    then part of the sender's own epoch set, so the sender's close and its
+    peers' closes count the same batches."""
+    hub = InMemoryHub()
+    rpb = "rpb_outbox"
+    svc_a = WorldService(rpb_address=rpb, data_root=tmp_path / "A")
+    gos_a = EventGossip(rpb_address=rpb, keypair=Keypair.generate(),
+                        transport=_GatedTransport(hub, node_id="A"), world_service=svc_a)
+    svc_b, gos_b = _peer(rpb, hub, tmp_path, "B")
+    now = [1000.0]
+    gos_a.clock = lambda: now[0]
+    ev = {"kind": "observation_added", "seq": 1, "author_agent": "alice",
+          "obs_id": "obs_held", "coords": [0.0] * 4 + [0.5] + [0.0] * 1023,
+          "label": "held"}
+    try:
+        assert gos_a.publish_events([ev]) is None
+        assert gos_a.pending_epoch_batches() == []
+        assert gos_b.stats.batches_received == 0
+
+        now[0] = 1090.0
+        assert gos_a.flush_outbox() is None          # still nobody there
+        gos_a.transport.online = True
+        signed = gos_a.flush_outbox()
+        assert signed is not None and signed.batch.timestamp == 1090.0
+        assert [b.content_hash() for b in gos_a.pending_epoch_batches()] == \
+            [b.content_hash() for b in gos_b.pending_epoch_batches()]
+        assert gos_b.stats.batches_received == 1
+    finally:
+        svc_a.shutdown()
+        svc_b.shutdown()

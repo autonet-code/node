@@ -882,6 +882,16 @@ class AutonetHost:
             return []
         return [str(pid) for pid in self._host.get_connected_peers()]
 
+    def topic_peer_count(self, topic: str) -> int:
+        """Peers known to be subscribed to ``topic`` (any thread)."""
+        pubsub = self._pubsub
+        if pubsub is None:
+            return 0
+        try:
+            return len(pubsub.peer_topics.get(topic, ()) or ())
+        except Exception:
+            return 0
+
     # =========================================================================
     # Story 4.3: Weight Delta Transfer
     # =========================================================================

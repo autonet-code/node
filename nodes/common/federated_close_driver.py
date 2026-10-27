@@ -1018,6 +1018,18 @@ class FederatedCloseDriver:
         # output of the epoch before it.
         prev_root = self._last_observed_root
         self._last_observed_root = canonical.epoch_root().hex()
+        # What this daemon closed over, per sender: two honest daemons
+        # whose roots differ can be compared line by line.
+        counts: Dict[bytes, int] = {}
+        for b in canonical.ordered_batches:
+            counts[b.sender_pubkey] = counts.get(b.sender_pubkey, 0) + 1
+        logger.info(
+            "federated close inputs: epoch=%s root=%s senders=[%s] dropped=[%s]",
+            epoch_id, self._last_observed_root[:16],
+            ", ".join(f"{pk.hex()[:8]}:{counts.get(pk, 0)}:{r.hex()[:8]}"
+                      for pk, r in sorted(canonical.per_sender_root.items())),
+            ", ".join(f"{pk.hex()[:8]}:{why}"
+                      for pk, why in sorted(canonical.dropped_senders.items())))
 
         if self.enforce_preconditions:
             if join_from_chain:
