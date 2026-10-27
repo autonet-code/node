@@ -55,6 +55,24 @@ Home users need no network setup. With no `announce_addrs`:
   while unconnected, so a daemon that started first, or lost its link,
   rejoins on its own.
 
+## Seeds and relay nodes
+
+- **Seeds come from the DAO Registry.** `jurisdiction.<id>.bootstrap` holds
+  comma-separated multiaddrs, changed by proposal like the charter. A daemon
+  uses them when `p2p.bootstrap_peers` (or `AUTONET_P2P_BOOTSTRAP`) is not
+  set locally; local config always wins.
+- **Relay nodes** (`python -m nodes.relay`) are the natural seeds: networking
+  only, light enough for a small server. A relay keeps a stable peer id
+  (`<data>/relay.key`), subscribes to each jurisdiction it serves
+  (`--jurisdiction <chain_id>:<DAO>`) so gossip crosses it between peers that
+  are not connected to each other, relays and caches blobs on disk, and
+  answers reachability checks. No close, no chain, no agents, no model. It
+  prints its full multiaddr on start: that is the address to publish.
+
+```
+python -m nodes.relay --jurisdiction 31337:0xDAO... --port 4001     --announce /dns4/hub.example.org/tcp/4001
+```
+
 ## Blob fetch
 
 - A resolver miss asks every connected peer and every peer known from

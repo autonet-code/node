@@ -41,3 +41,20 @@ def test_no_env_means_packaged(monkeypatch):
 
     monkeypatch.setattr(cfg, "_fetch_onchain_registry", boom)
     assert cfg._load_registry_seed("autonet").get("substrate_address")
+
+
+def test_registry_bootstrap_key_becomes_seed_peers(monkeypatch):
+    """jurisdiction.<id>.bootstrap (comma-separated multiaddrs) seeds the
+    p2p bootstrap list; the jurisdiction's relays are its seed nodes."""
+    monkeypatch.delenv("ATN_REGISTRY_URL", raising=False)
+    monkeypatch.setenv("ATN_JURISDICTION_REGISTRY", "0x" + "11" * 20)
+    seeds = ("/dns4/hub.example.org/tcp/4001/p2p/12D3KooWA, "
+             "/ip4/203.0.113.7/tcp/4001/p2p/12D3KooWB")
+    monkeypatch.setattr(cfg, "_fetch_onchain_registry", lambda addr, rpc, jid: {
+        "jurisdictions": {jid: {
+            "network": {"rpc_url": rpc, "chain_id": 7},
+            "contracts": {"substrate": "0x" + "22" * 20, "bootstrap": seeds}}}})
+    seed = cfg._load_registry_seed("launched")
+    assert seed["bootstrap_peers"] == [
+        "/dns4/hub.example.org/tcp/4001/p2p/12D3KooWA",
+        "/ip4/203.0.113.7/tcp/4001/p2p/12D3KooWB"]

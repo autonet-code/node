@@ -265,6 +265,9 @@ class RPBConfig:
     deploy_block: int = 0               # Block the jurisdiction's contracts
                                         # were deployed at; every close log
                                         # scan starts here. 0 = search.
+    # jurisdiction.<id>.bootstrap: the jurisdiction's seed nodes (relay
+    # nodes, nodes/relay.py), used when p2p.bootstrap_peers is not set.
+    bootstrap_peers: list = field(default_factory=list)
     epoch_rules: str = ""               # jurisdiction.<id>.epoch_rules: the
                                         # epoch computation version the DAO's
                                         # network runs. Empty = "1".
@@ -608,6 +611,11 @@ def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str
         seed["charter_uri"] = contracts["charter_uri"]
     if contracts.get("epoch_rules"):
         seed["epoch_rules"] = str(contracts["epoch_rules"]).strip()
+    if contracts.get("bootstrap"):
+        # Seed nodes (jurisdiction.<id>.bootstrap, comma-separated
+        # multiaddrs), changed by DAO proposal like the charter.
+        seed["bootstrap_peers"] = [
+            p.strip() for p in str(contracts["bootstrap"]).split(",") if p.strip()]
     if contracts.get("timelock"):
         seed["timelock_address"] = contracts["timelock"]
     # On chain the key is "registry"; registry.json calls it "dao_registry".
@@ -1169,6 +1177,7 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
         charter_uri=resolved.get("charter_uri", ""),
         charter_text=resolved.get("charter_text", ""),
         epoch_rules=str(resolved.get("epoch_rules", "") or ""),
+        bootstrap_peers=list(resolved.get("bootstrap_peers", []) or []),
         deploy_block=int(resolved.get("deploy_block", 0) or 0),
         anchor_election_address=resolved.get("anchor_election_address", ""),
         dao_registry_address=resolved.get("dao_registry_address", ""),

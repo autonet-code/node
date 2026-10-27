@@ -464,7 +464,10 @@ class AutonetBridge:
         # falls back to community-published bootstrap peers, so daemons
         # can join without manual multiaddr configuration.
         from nodes.common.peer_attribution import resolve_bootstrap_peers
-        bootstrap = resolve_bootstrap_peers(cfg.p2p.bootstrap_peers if cfg else [])
+        # Local config wins; else the jurisdiction's Registry seeds.
+        bootstrap = resolve_bootstrap_peers(
+            (cfg.p2p.bootstrap_peers if cfg else [])
+            or list(getattr(self.config, "bootstrap_peers", []) or []))
         advertise_interval = cfg.p2p.capability_advertise_interval if cfg else 60
 
         node_id = f"atn-{self.state.wallet_address[:8]}" if self.state.wallet_address else "atn-daemon"

@@ -455,6 +455,7 @@ class AutonetHost:
         bootstrap_redial_interval: float = 30.0,
         auto_reach: bool = False,
         reach_interval: float = 300.0,
+        key_seed: Optional[bytes] = None,
     ):
         self.node_id = node_id
         self._listen_port = listen_port
@@ -467,6 +468,9 @@ class AutonetHost:
         # it once a peer confirms it can connect to it.
         self._auto_reach = auto_reach
         self._reach_interval = reach_interval
+        # A 32-byte ed25519 seed gives a stable peer id across restarts (a
+        # seed node's bootstrap address embeds it); None = a fresh id.
+        self._key_seed = key_seed
         self._bootstrap_redial_interval = bootstrap_redial_interval
         self._enable_quic = enable_quic
         self._enable_upnp = enable_upnp
@@ -526,7 +530,12 @@ class AutonetHost:
         # The configured names are kept and resolved again on every redial.
         bootstrap = [resolve_dns_multiaddr(a) for a in self._bootstrap_peers]
 
+        key_pair = None
+        if self._key_seed is not None:
+            from libp2p.crypto.ed25519 import create_new_key_pair
+            key_pair = create_new_key_pair(self._key_seed)
         self._host = new_host(
+            key_pair=key_pair,
             listen_addrs=listen_addrs,
             enable_quic=self._enable_quic,
             # UPnP is handled in _auto_reach_loop: py-libp2p's own mapping
