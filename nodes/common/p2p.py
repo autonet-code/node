@@ -138,6 +138,11 @@ WEIGHTS_PROTOCOL = TProtocol("/autonet/weights/1.0.0")
 ACTIVATIONS_PROTOCOL = TProtocol("/autonet/activations/1.0.0")
 CAPABILITY_PROTOCOL = TProtocol("/autonet/capability/1.0.0")
 BLOB_PROTOCOL = TProtocol("/autonet/blob/1.0.0")
+# A blob request frame is "<hash>" or "<hash>|<hops>": how many times the
+# serving peer may forward the request to its own peers on a miss, so a
+# NAT'd daemon can reach a blob held only by another NAT'd daemon through
+# a reachable peer both are connected to. A bare hash allows one hop.
+BLOB_RELAY_MAX_HOPS = 1
 EMBEDDING_PROTOCOL = TProtocol("/autonet/embeddings/1.0.0")
 INFERENCE_REQUEST_PROTOCOL = TProtocol("/rpb/inference/1.0.0")
 # Robot poll rail (docs/robots.md, 2026-10-25): polls, link pushes and
@@ -384,6 +389,30 @@ class PeerLatencyTracker:
 # =============================================================================
 
 
+def resolve_dns_multiaddr(addr: str) -> str:
+    """Rewrite a leading /dns4, /dns6 or /dns component to /ip4 or /ip6.
+
+    Returns the address unchanged when it has no such component or the
+    name does not resolve.
+    """
+    parts = addr.split("/")
+    if len(parts) < 3 or parts[1] not in ("dns", "dns4", "dns6"):
+        return addr
+    import socket
+    family = {"dns4": socket.AF_INET, "dns6": socket.AF_INET6}.get(parts[1], 0)
+    try:
+        info = socket.getaddrinfo(parts[2], None, family)
+    except OSError as e:
+        logger.warning(f"Could not resolve {parts[2]} in {addr}: {e}")
+        return addr
+    if not info:
+        return addr
+    fam, ip = info[0][0], info[0][4][0]
+    parts[1] = "ip6" if fam == socket.AF_INET6 else "ip4"
+    parts[2] = ip
+    return "/".join(parts)
+
+
 class AutonetHost:
     """
     Main P2P host for Autonet nodes.
@@ -408,11 +437,15 @@ class AutonetHost:
         enable_quic: bool = False,
         enable_upnp: bool = False,
         capability: Optional[NodeCapability] = None,
+        announce_addrs: Optional[List[str]] = None,
+        bootstrap_redial_interval: float = 30.0,
     ):
         self.node_id = node_id
         self._listen_port = listen_port
         self._listen_host = listen_host
         self._bootstrap_peers = bootstrap_peers or []
+        self._announce_addrs = announce_addrs or []
+        self._bootstrap_redial_interval = bootstrap_redial_interval
         self._enable_quic = enable_quic
         self._enable_upnp = enable_upnp
 
@@ -421,6 +454,8 @@ class AutonetHost:
         self._activation_handler: Optional[Callable] = None
         self._guild_handlers: Dict[str, Callable] = {}
         self._blob_handler: Optional[Callable] = None       # async (hash: str) -> Optional[bytes]
+        self._blob_relay_sink: Optional[Callable] = None    # (hash, bytes) -> None, caches relayed blobs
+        self._blob_relay_timeout = 5.0
         self._embedding_handler: Optional[Callable] = None  # async (peer_id, metadata, tensor_bytes)
 
         # State (initialized in run())
@@ -464,6 +499,9 @@ class AutonetHost:
         listen_addrs = [
             Multiaddr(f"/ip4/{self._listen_host}/tcp/{self._listen_port}")
         ]
+        # py-libp2p's TCP transport dials only /ip4 and /ip6 (its bootstrap
+        # resolves /dnsaddr only), so /dns4 tunnel hostnames resolve here.
+        self._bootstrap_peers = [resolve_dns_multiaddr(a) for a in self._bootstrap_peers]
 
         self._host = new_host(
             listen_addrs=listen_addrs,
@@ -475,6 +513,8 @@ class AutonetHost:
         async with self._host.run(listen_addrs=listen_addrs):
             self._running = True
             peer_id = str(self._host.get_id())
+            if self._announce_addrs:
+                self._apply_announce_addrs(peer_id)
             addrs = self._host.get_addrs()
 
             # Update our capability with actual peer ID and addresses
@@ -501,6 +541,8 @@ class AutonetHost:
             try:
                 async with trio.open_nursery() as nursery:
                     self._nursery = nursery
+                    if self._bootstrap_peers and self._bootstrap_redial_interval > 0:
+                        nursery.start_soon(self._redial_bootstrap_peers)
                     self._ready_event.set()
                     try:
                         yield self
@@ -513,6 +555,43 @@ class AutonetHost:
                 self._trio_token = None
                 self._running = False
                 self.logger.info("P2P host shutting down")
+
+    def _apply_announce_addrs(self, peer_id: str) -> None:
+        """Advertise the announce addresses instead of the listen addresses.
+
+        Identify, the signed peer record and our capability all read
+        ``get_addrs``, so replacing it on the host instance is enough. The
+        listen socket is unchanged.
+        """
+        p2p_part = Multiaddr(f"/p2p/{peer_id}")
+        announce = []
+        for addr in self._announce_addrs:
+            addr = resolve_dns_multiaddr(addr).split("/p2p/")[0]
+            try:
+                announce.append(Multiaddr(addr))
+            except Exception as e:
+                self.logger.warning(f"Ignoring bad announce address {addr}: {e}")
+        if not announce:
+            return
+        self._host.get_addrs = lambda: [a.encapsulate(p2p_part) for a in announce]
+
+    async def _redial_bootstrap_peers(self) -> None:
+        """Redial bootstrap peers we are not connected to.
+
+        py-libp2p dials bootstrap peers once at start, so a daemon that
+        started before its bootstrap peer, or lost the connection, would
+        otherwise stay cut off.
+        """
+        import trio
+        while True:
+            await trio.sleep(self._bootstrap_redial_interval)
+            connected = set(self.get_connected_peers())
+            for addr in self._bootstrap_peers:
+                pid = addr.split("/p2p/")[-1] if "/p2p/" in addr else ""
+                if not pid or pid == self.peer_id or pid in connected:
+                    continue
+                with trio.move_on_after(10):
+                    await self.connect_to_peer(addr)
 
     # =========================================================================
     # Properties
@@ -1190,14 +1269,22 @@ class AutonetHost:
         """Set handler for blob requests: async handler(content_hash: str) -> Optional[bytes]"""
         self._blob_handler = handler
 
+    def set_blob_relay_sink(self, sink: Callable):
+        """Set where blobs fetched on a peer's behalf are cached: sink(content_hash, data)"""
+        self._blob_relay_sink = sink
+
     async def fetch_blob(
         self,
         target_peer_id: PeerID,
         content_hash: str,
         timeout: float = 30.0,
+        hops: int = BLOB_RELAY_MAX_HOPS,
     ) -> Optional[bytes]:
         """
         Request a blob from a peer by content hash.
+
+        ``hops`` is how many times the peer may forward the request on a
+        miss (see ``BLOB_RELAY_MAX_HOPS``).
 
         Returns the blob bytes if found and integrity-verified, None otherwise.
         """
@@ -1206,7 +1293,8 @@ class AutonetHost:
         try:
             stream = await self._host.new_stream(target_peer_id, [BLOB_PROTOCOL])
             # Write request: hash as UTF-8 (no stream close — waiting for response)
-            await _write_frame_no_close(stream, content_hash.encode("utf-8"))
+            request = content_hash if hops == BLOB_RELAY_MAX_HOPS else f"{content_hash}|{hops}"
+            await _write_frame_no_close(stream, request.encode("utf-8"))
             # Read response with timeout
             data = b""
             with trio.move_on_after(timeout):
@@ -1237,7 +1325,11 @@ class AutonetHost:
         """Handle incoming blob request: read content hash, write blob bytes."""
         try:
             hash_bytes = await _read_frame_no_close(stream)
-            content_hash = hash_bytes.decode("utf-8").strip()
+            content_hash, _, hops_str = hash_bytes.decode("utf-8").strip().partition("|")
+            try:
+                hops = min(int(hops_str), BLOB_RELAY_MAX_HOPS) if hops_str else BLOB_RELAY_MAX_HOPS
+            except ValueError:
+                hops = 0
 
             blob_data: Optional[bytes] = None
             if self._blob_handler:
@@ -1245,6 +1337,19 @@ class AutonetHost:
                     blob_data = await self._blob_handler(content_hash)
                 except Exception as e:
                     self.logger.debug(f"Blob handler error for {content_hash[:16]}: {e}")
+
+            if blob_data is None and hops > 0:
+                requester = stream.muxed_conn.peer_id
+                others = [p for p in self._host.get_connected_peers() if p != requester]
+                blob_data = await self.fetch_blob_from_peers(
+                    others, content_hash,
+                    timeout_per_peer=self._blob_relay_timeout, hops=hops - 1,
+                )
+                if blob_data is not None and self._blob_relay_sink:
+                    try:
+                        self._blob_relay_sink(content_hash, blob_data)
+                    except Exception as e:
+                        self.logger.debug(f"Blob relay sink error for {content_hash[:16]}: {e}")
 
             # Respond with blob data, or empty frame if not found
             response = blob_data if blob_data is not None else b""
@@ -1269,22 +1374,43 @@ class AutonetHost:
         """
         if not self._host:
             return None
-        peers = self._host.get_connected_peers()
-        if not peers:
+        return await self.fetch_blob_from_peers(
+            self._host.get_connected_peers(), content_hash,
+            timeout_per_peer=timeout_per_peer,
+        )
+
+    async def fetch_blob_from_peers(
+        self,
+        peer_ids: List[Any],
+        content_hash: str,
+        timeout_per_peer: float = 10.0,
+        hops: int = BLOB_RELAY_MAX_HOPS,
+    ) -> Optional[bytes]:
+        """Ask the given peers (PeerIDs or base58 strings) concurrently;
+        the first integrity-verified answer wins and cancels the rest."""
+        if not self._host or not peer_ids:
             return None
+        from libp2p.peer.id import ID as _PeerID
 
         result: List[Optional[bytes]] = [None]
 
-        async def try_peer(pid):
-            if result[0] is not None:
-                return
-            data = await self.fetch_blob(pid, content_hash, timeout=timeout_per_peer)
-            if data is not None:
-                result[0] = data
+        async def try_peer(pid, cancel_scope):
+            with trio.move_on_after(timeout_per_peer):
+                data = await self.fetch_blob(
+                    pid, content_hash, timeout=timeout_per_peer, hops=hops,
+                )
+                if data is not None and result[0] is None:
+                    result[0] = data
+                    cancel_scope.cancel()
 
         async with trio.open_nursery() as nursery:
-            for pid in peers:
-                nursery.start_soon(try_peer, pid)
+            for pid in peer_ids:
+                if isinstance(pid, str):
+                    try:
+                        pid = _PeerID.from_base58(pid)
+                    except Exception:
+                        continue
+                nursery.start_soon(try_peer, pid, nursery.cancel_scope)
 
         return result[0]
 

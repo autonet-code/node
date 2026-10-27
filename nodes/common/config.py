@@ -113,6 +113,10 @@ class P2PConfig:
     listen_port: int = 0           # 0 = random port
     listen_host: str = "0.0.0.0"
     bootstrap_peers: list = field(default_factory=list)  # multiaddr strings
+    # Addresses peers should dial us on, replacing the listen addresses we
+    # advertise (a NAT'd or tunneled daemon's public /ip4 or /dns4 addr).
+    announce_addrs: list = field(default_factory=list)
+    bootstrap_redial_interval: int = 30      # seconds; 0 = dial once at start
     enable_quic: bool = False
     enable_upnp: bool = False
     capability_advertise_interval: int = 60  # seconds
@@ -274,6 +278,9 @@ def _apply_env_overrides(raw: dict) -> dict:
         AUTONET_IMAGE_SIZE      -> model.image_size
         AUTONET_ARCHITECTURE    -> model.architecture
         AUTONET_P2P_PORT        -> p2p.listen_port
+        AUTONET_P2P_HOST        -> p2p.listen_host
+        AUTONET_P2P_BOOTSTRAP   -> p2p.bootstrap_peers (comma list)
+        AUTONET_P2P_ANNOUNCE    -> p2p.announce_addrs (comma list)
     """
     env_map = {
         "AUTONET_DEVICE": ("device", str),
@@ -291,6 +298,9 @@ def _apply_env_overrides(raw: dict) -> dict:
         "AUTONET_DATA_DIR": ("data_dir", str),
         "AUTONET_LOG_LEVEL": ("log_level", str),
         "AUTONET_P2P_PORT": ("p2p.listen_port", int),
+        "AUTONET_P2P_HOST": ("p2p.listen_host", str),
+        "AUTONET_P2P_BOOTSTRAP": ("p2p.bootstrap_peers", _csv_list),
+        "AUTONET_P2P_ANNOUNCE": ("p2p.announce_addrs", _csv_list),
         "AUTONET_SEED": ("seed", int),
         "AUTONET_TASK_TYPE": ("training.task_type", str),
         "AUTONET_EPOCHS": ("training.epochs", int),
@@ -312,6 +322,10 @@ def _apply_env_overrides(raw: dict) -> dict:
             logger.debug(f"Config override from env: {env_var} -> {path}={value}")
 
     return raw
+
+
+def _csv_list(value: str) -> list:
+    return [part.strip() for part in value.split(",") if part.strip()]
 
 
 def _dict_to_config(raw: dict) -> AutonetConfig:

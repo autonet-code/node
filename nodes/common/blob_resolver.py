@@ -96,6 +96,10 @@ class HostBlobServer:
 
         self._serve = _serve
         host.set_blob_handler(_serve)
+        # Blobs this host relays for a peer (two-hop fetch) are cached here.
+        set_sink = getattr(host, "set_blob_relay_sink", None)
+        if set_sink is not None:
+            set_sink(lambda _cid, data: self.put(data))
 
     def put(self, blob: bytes) -> str:
         cid = cid_for_blob(blob)
@@ -162,8 +166,9 @@ class LibP2PBlobResolver:
     ``/autonet/blob/1.0.0``. Any number of resolvers on one host share
     that map; none of them replaces the handler.
 
-    Reads: shared map first; on miss, walk every known peer and try
-    ``host.fetch_blob`` over libp2p. The host already verifies
+    Reads: shared map first; on miss, ask every connected or advertised
+    peer at once over libp2p (first verified answer wins; a peer that
+    misses forwards the request one hop to its own peers). The host already verifies
     content-hash integrity inside ``fetch_blob``; this resolver
     additionally confirms the returned hex matches the requested
     CID so a buggy peer can't poison our cache.
@@ -197,67 +202,61 @@ class LibP2PBlobResolver:
         if blob is not None:
             return blob
 
-        # Walk known peers, try each.
-        peer_ids = list(self._known_peer_ids())
+        peer_ids = self._known_peer_ids()
         if not peer_ids:
             logger.debug("LibP2PBlobResolver: no known peers to query for %s", cid[:16])
             return None
 
-        for pid in peer_ids:
-            blob = self._fetch_from_peer(pid, cid)
-            if blob is None:
-                continue
-            actual = cid_for_blob(blob)
-            if actual != cid:
-                logger.warning(
-                    "LibP2PBlobResolver: peer %s returned wrong cid for %s",
-                    str(pid)[:16], cid[:16],
-                )
-                continue
-            # Cache so subsequent calls (including peers hitting us) hit local.
-            self._server.put(blob)
-            return blob
-        return None
+        blob = self._fetch_from_peers(peer_ids, cid)
+        if blob is None:
+            return None
+        if cid_for_blob(blob) != cid:
+            logger.warning("LibP2PBlobResolver: peer returned wrong cid for %s", cid[:16])
+            return None
+        # Cache so subsequent calls (including peers hitting us) hit local.
+        self._server.put(blob)
+        return blob
 
     def _known_peer_ids(self) -> list:
-        """Iterate distinct PeerIDs we currently know about."""
+        """Distinct peers worth asking: connected peers first, then peers
+        known only from capability gossip. Our own id is skipped."""
+        out: list = []
+        try:
+            out.extend(self._host.get_connected_peers())
+        except Exception:
+            pass
         try:
             caps = self._host.known_capabilities
         except Exception:
-            return []
-        out = []
+            caps = {}
         for cap in caps.values():
             pid_str = getattr(cap, "peer_id", "")
-            if not pid_str:
-                continue
-            out.append(pid_str)
-        return out
+            if pid_str:
+                out.append(pid_str)
+        own = getattr(self._host, "peer_id", "")
+        seen: set = set()
+        peers = []
+        for pid in out:
+            if pid and pid != own and pid not in seen:
+                seen.add(pid)
+                peers.append(pid)
+        return peers
 
-    def _fetch_from_peer(self, peer_id_str: str, cid: str) -> Optional[bytes]:
-        """Cross-thread bridge: schedule host.fetch_blob via the host's
-        captured trio token and block briefly waiting for the result."""
+    def _fetch_from_peers(self, peer_ids: list, cid: str) -> Optional[bytes]:
+        """Cross-thread bridge: schedule host.fetch_blob_from_peers via the
+        host's captured trio token and block until it answers."""
         token = getattr(self._host, "_trio_token", None)
         if token is None:
             return None
         try:
             import trio
-            # Convert string peer_id to PeerID type lazily — the host
-            # API accepts the PeerID instance.
-            from libp2p.peer.id import ID as PeerID  # type: ignore
-            try:
-                pid = PeerID.from_base58(peer_id_str)
-            except Exception:
-                return None
 
             async def _do():
-                return await self._host.fetch_blob(
-                    pid, cid, timeout=self._fetch_timeout,
+                return await self._host.fetch_blob_from_peers(
+                    peer_ids, cid, timeout_per_peer=self._fetch_timeout,
                 )
 
             return trio.from_thread.run(_do, trio_token=token)
         except Exception as e:
-            logger.debug(
-                "LibP2PBlobResolver: fetch from %s failed: %s",
-                peer_id_str[:16], e,
-            )
+            logger.debug("LibP2PBlobResolver: fetch of %s failed: %s", cid[:16], e)
             return None

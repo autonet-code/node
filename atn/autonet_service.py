@@ -476,6 +476,8 @@ class AutonetBridge:
             listen_host=listen_host,
             bootstrap_peers=bootstrap,
             capability=cap,
+            announce_addrs=cfg.p2p.announce_addrs if cfg else None,
+            bootstrap_redial_interval=cfg.p2p.bootstrap_redial_interval if cfg else 30,
         )
         self._p2p_host = host
         self._p2p_stop.clear()
@@ -1161,6 +1163,25 @@ class AutonetBridge:
         except Exception as e:
             log.warning("chain submission attach failed: %s", e)
 
+    def _serve_disk_blobs(self, host) -> None:
+        """Serve the daemon's on-disk blob stores (tool manifests and code,
+        service specs) to peers, so what we published stays fetchable
+        after a restart and while we are the only holder."""
+        stores = []
+        for name in ("tool_store", "service_store"):
+            store = getattr(self._runtime, name, None) if self._runtime else None
+            if store is None:
+                continue
+            try:
+                stores.append(store._blob_store())
+            except Exception as e:
+                log.debug("%s blob store unavailable: %s", name, e)
+        for blobs in stores:
+            try:
+                blobs.set_p2p_host(host)
+            except Exception as e:
+                log.debug("serving disk blobs failed: %s", e)
+
     def _build_libp2p_blob_resolver(self):
         """Build a LibP2PBlobResolver if the host is up; else None
         (driver falls back to InMemoryBlobResolver)."""
@@ -1210,6 +1231,7 @@ class AutonetBridge:
                 log.info("Event gossip wired into WorldService")
         except Exception as e:
             log.warning("event gossip attach failed: %s", e)
+        self._serve_disk_blobs(host)
 
         # Tool substrate: route tool_used receipts onto the substrate
         # event rail (epoch buffer + gossip; the claim graph ignores
