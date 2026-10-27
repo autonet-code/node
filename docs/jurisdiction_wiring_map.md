@@ -347,7 +347,8 @@ Substrate.sol's `agentReputation` was **deleted**. Substrate is a pure money
 contract that mints ATN only and accrues two earnings ledgers
 (`agentMintTotal` = cumulative tool-pool mint, `serviceEarnings` = cumulative
 net service revenue). **REP is minted DAO-side by `AutonetRepClaim`** as a pull
-claim on those ledgers at a hardcoded **1:1** (you cannot lie about REP because
+claim at a hardcoded **1:1** on `agentMintTotal` only (2026-10-27:
+`serviceEarnings` stays money, no REP) (you cannot lie about REP because
 you cannot lie about ATN you provably received). REP is the DAO's `RepToken`
 (IVotes), so REP is voice/direction weight, held via the claim rail, and the
 federated close weights reviews by REP share read from `RepToken` checkpoints

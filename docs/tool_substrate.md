@@ -984,9 +984,9 @@ owner claim surface) and the per-agent claim it worked around.
    idempotent per (claimant, epoch).
 3. **REP follows the ATN.** REP is claimed 1:1 on an address's ratified
    earnings, so the owner holds the household's REP. The REP claim's
-   agent-only gate is dropped; REP for an agent's service earnings is
-   minted to that agent's owner. Agents still receive service ATN to
-   spend.
+   agent-only gate is dropped; an agent's REP is minted to its owner.
+   (Service earnings later left the REP base: see "REP comes from the
+   tool pool only" below.) Agents still receive service ATN to spend.
 4. **The daemon operator key.** Once an owner wallet is associated, the
    daemon generates its own key and registers it on Substrate, bound to
    the owner. It is not an agent: no fleet entry, no model, no earnings.
@@ -1072,6 +1072,31 @@ much that code may do on every node.
    quietly reads a planted secret and beacons out) next to an honest
    control, without telling the fleet, and measures how fast consensus
    denies it.
+
+## Decision (2026-10-27): REP comes from the tool pool only; reviews weigh the household's REP
+
+Ratified in discussion 2026-10-27 after the S0 local run
+(`scripts/s0_local_run.py`). Two consequences of the household model
+(the owner wallet holds the household's REP, agents hold none):
+
+1. **Service revenue earns money, not voice.** `AutonetRepClaim`'s
+   earnings base is `agentMintTotal` alone; `serviceEarnings` stays on
+   Substrate as money and as the provider's track record, and mints no
+   REP. S0 measured the old base: households paying each other bought REP
+   at the fee rate (2.5 ATN of fee for 97.5 REP; owners went from 250 to
+   about 1,700 REP in 35 minutes). REP from the tool pool costs real
+   burned fees, so the cheap path is closed without raising the fee on
+   honest volume. This retires the "known residual exposure" of item 8
+   in the v4.1 section and the matching entry in `docs/resilience.md`.
+   What remains is fake usage farming the tool pool, bounded by the
+   usage dampers and by reviews, not priced by fees; S0 is the place to
+   measure it.
+2. **A ToolBond review weighs its household's REP.** The weight is the
+   reviewer's bound owner's REP at the epoch's snapshot (trustless-contracts
+   d2f32ac). One weight per household per tool per epoch, carried by the
+   household's earliest commit (commits are hidden, so their order carries
+   no information); REP slashes land on the household. Before this, every
+   review weighed nothing, so ratings, harm and containment never settled.
 
 ## Doctrine (2026-07-08): the capability ratchet and the absorption frontier
 

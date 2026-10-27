@@ -128,7 +128,10 @@ real usage) never closable.
 Deliberately documented, because a threat model that claims completeness is
 lying:
 
-- **Unlinked-wallet wash trading buys REP at ~the fee rate.**
+- **Unlinked-wallet wash trading bought REP at ~the fee rate** (closed
+  2026-10-27: service revenue no longer earns REP, see
+  `tool_substrate.md` "REP comes from the tool pool only"; kept for the
+  record).
   Self-dealing across two unlinked wallets is undetectable in principle
   (wallets are free; household collapse can't hold). A washer pays the
   2.5% fee per cycle and claims REP on the rest: voice at roughly 2.5
