@@ -992,6 +992,12 @@ def main() -> None:
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "send":
         sys.exit(_send_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "relay":
+        # Relay mode: networking only, a low-cost node that supports the
+        # network (seed, gossip and blob relay, reach checks). No close, no
+        # chain, no agents, no model. See docs/p2p_networking.md.
+        from nodes.relay import main as _relay_main
+        sys.exit(_relay_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "integration-token":
         from .integration_token_cli import main as _token_main
         sys.exit(_token_main(sys.argv[2:]))

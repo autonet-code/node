@@ -61,8 +61,8 @@ Home users need no network setup. With no `announce_addrs`:
   comma-separated multiaddrs, changed by proposal like the charter. A daemon
   uses them when `p2p.bootstrap_peers` (or `AUTONET_P2P_BOOTSTRAP`) is not
   set locally; local config always wins.
-- **Relay nodes** (`python -m nodes.relay`) are the natural seeds: networking
-  only, light enough for a small server. A relay keeps a stable peer id
+- **Relay nodes** (`atn relay`, a daemon mode) are the natural seeds:
+  networking only, light enough for a small server. A relay keeps a stable peer id
   (`<data>/relay.key`), subscribes to each jurisdiction it serves
   (`--jurisdiction <chain_id>:<DAO>`) so gossip crosses it between peers that
   are not connected to each other, relays and caches blobs on disk, and
@@ -70,8 +70,13 @@ Home users need no network setup. With no `announce_addrs`:
   prints its full multiaddr on start: that is the address to publish.
 
 ```
-python -m nodes.relay --jurisdiction 31337:0xDAO... --port 4001     --announce /dns4/hub.example.org/tcp/4001
+atn relay --port 4001 --announce /dns4/hub.example.org/tcp/4001
 ```
+
+Without `--jurisdiction` it relays the jurisdiction this install would
+join; pass `--jurisdiction <chain_id>:<DAO>` (repeatable) to choose. To make
+a relay a seed, the DAO writes its printed multiaddr into
+`jurisdiction.<id>.bootstrap` by proposal.
 
 ## Blob fetch
 

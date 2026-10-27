@@ -14,8 +14,12 @@ A seed and meeting point for daemons, light enough for a small server:
 No close, no chain, no agents, no model.
 
 Run:
-    python -m nodes.relay --jurisdiction 31337:0xDAO... --port 4001 \\
-        --announce /dns4/hub.example.org/tcp/4001
+    atn relay --port 4001 --announce /dns4/hub.example.org/tcp/4001
+
+(or ``python -m nodes.relay``). Without ``--jurisdiction`` it relays the
+jurisdiction this install would join (the saved selection, else the
+packaged registry); pass ``--jurisdiction <chain_id>:<DAO>`` (repeatable)
+to choose.
 
 Every flag has an env twin (``AUTONET_P2P_PORT``, ``AUTONET_P2P_HOST``,
 ``AUTONET_P2P_ANNOUNCE``, ``AUTONET_P2P_BOOTSTRAP``,
@@ -60,7 +64,7 @@ def load_key_seed(path: Path) -> bytes:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     env = os.environ.get
-    ap = argparse.ArgumentParser(prog="python -m nodes.relay",
+    ap = argparse.ArgumentParser(prog="atn relay",
                                  description="Autonet relay node (networking only)")
     ap.add_argument("--port", type=int, default=int(env("AUTONET_P2P_PORT", "4001")))
     ap.add_argument("--host", default=env("AUTONET_P2P_HOST", "0.0.0.0"))
@@ -78,6 +82,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     args = ap.parse_args(argv)
     if args.jurisdiction is None:
         args.jurisdiction = _csv(env("AUTONET_RELAY_JURISDICTIONS", ""))
+    if not args.jurisdiction:
+        try:
+            from atn.config import boot_jurisdiction_key
+            key = boot_jurisdiction_key()
+        except Exception:  # noqa: BLE001 — the relay runs without atn too
+            key = ""
+        if key:
+            args.jurisdiction = [key]
     return args
 
 
