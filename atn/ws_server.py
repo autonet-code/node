@@ -63,8 +63,13 @@ DEFAULT_PORT = 7700
 # payload would cross the wire in plaintext. Checked at the top of
 # _handle_message, before any dispatch — so the execute_tool fallthrough cannot
 # bypass it.
+# Gas budget per operator transaction (claimFor / castVote / registerOption)
+# for the operator's low-gas estimate; generous on purpose.
+_OPERATOR_TX_GAS = 500_000
+
 KEY_LOCAL_ONLY_MESSAGES = frozenset({
     "export_agent_key",
+    "export_operator_key",
     "autonet_publish_standards",
     # DEPRECATED (pre-substrate Autonet.sol, removed Phase 5.6a): the handler
     # now returns a gone-marker. Kept in the set so an old client that still
@@ -274,7 +279,7 @@ INTEGRATION_DENIED_MESSAGES = frozenset({
     # path (daemon env + cwd). See _integration_register_args.
     # Ownership, wallets, chain registration + signing, money movement.
     "set_owner_wallet", "rotate_owner", "owner_binding_status",
-    "operator_status", "register_operator",
+    "operator_status", "register_operator", "export_operator_key",
     "owner_claim_status", "autonet_wallet_connect", "autonet_wallet_disconnect",
     "autonet_set_chain", "autonet_start", "autonet_stop",
     "register_agent_on_chain", "confirm_agent_registration",
@@ -4125,6 +4130,20 @@ class WebSocketBridge:
         # private key in its body. Gated localhost-only at the top of
         # _handle_message (KEY_LOCAL_ONLY_MESSAGES); re-asserted here as
         # defense-in-depth so the handler stays safe if dispatch is ever moved.
+        if msg_type == "export_operator_key":
+            # The owner imports the operator into their wallet to vote on
+            # ordinary proposals with the household's delegated REP (the
+            # daemon only votes on epoch elections). Decision 2026-10-27.
+            if not ws_auth.assert_local_key_access(session) or not session.owner                     or session.scope_ids is not None:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "Operator key export is for the owner, localhost-only."}
+            from eth_account import Account
+            key = self._operator_key()
+            log.warning("Operator key exported (local connection)")
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"address": Account.from_key(key).address,
+                               "private_key": key}}
+
         if msg_type == "export_agent_key":
             if not ws_auth.assert_local_key_access(session):
                 return {"msg_id": msg_id, "ok": False,
@@ -5778,6 +5797,12 @@ class WebSocketBridge:
                 "binding_nonce": int(sub.functions.bindingNonce(addr).call()),
                 "gas_balance_wei": int(w3.eth.get_balance(addr)),
             }
+            # How many claim/vote transactions the balance still covers at
+            # today's gas price (a claim costs well under this per-tx
+            # budget), so the app warns relative to the chain, not a sum.
+            gas_price = int(w3.eth.gas_price or 0)
+            r["txs_affordable"] = (r["gas_balance_wei"] // (gas_price * _OPERATOR_TX_GAS)
+                                   if gas_price else None)
             rep_addr = getattr(config, "rep_token_address", "") or ""
             owner = r["bound_owner"] if int(r["bound_owner"], 16) else out["owner_wallet"]
             if rep_addr and owner:
