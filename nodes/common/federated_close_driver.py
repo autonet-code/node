@@ -180,6 +180,13 @@ class FederatedCloseDriver:
         # each built on this daemon's own view of the unanchored ones
         # before it, every input pinned to the previous epoch's cutoff.
         self.chain_source: Optional[Callable[[], Dict[str, Any]]] = None
+        # (from_ts, to_ts) -> ATN burned by fees between them, from
+        # Substrate's on-chain checkpoints: with a target share set, an
+        # epoch ends on that volume (voice_state.volume_cutoff).
+        self.burned_source: Optional[Callable[[int, int], int]] = None
+        # Times this daemon found an epoch anchored differently from its own
+        # close and rewound onto the anchored state (a run collector metric).
+        self.rewinds: int = 0
         # This daemon's closed but unanchored epochs, oldest first:
         # {"number", "epoch_id", "cutoff", "root"} plus their member batches
         # (in memory only), so a rewind can put them back in the buffer.
@@ -394,6 +401,7 @@ class FederatedCloseDriver:
                 "anchored state", mine["number"],
                 (got or {}).get("epoch_id", "?"), mine["epoch_id"],
                 len(self._local_epochs))
+            self.rewinds += 1
             restore = getattr(self.gossip, "restore_epoch_batches", None)
             for e in self._local_epochs:
                 if restore is not None and e.get("members"):
@@ -506,6 +514,23 @@ class FederatedCloseDriver:
         grace = int(win["grace"])
         step = max(1, grace)
         cutoff = int(win["base"]) + int(win["length"])
+        if int(win.get("target_share") or 0) > 0 and self.burned_source is not None:
+            # Volume ends the epoch (Decision 2026-10-27). Read only time
+            # one grace old, so every daemon sees the same final burns.
+            from .voice_state import volume_cutoff
+            try:
+                vol = volume_cutoff(
+                    self.burned_source, start=int(win["base"]),
+                    floor=int(win["floor"]), ceiling=int(win["ceiling"]),
+                    target_share_ppm=int(win["target_share"]),
+                    supply=int(win.get("supply") or 0),
+                    final_ts=int(float(self.clock())) - grace)
+            except Exception as e:
+                logger.warning("federated close: burned-volume read failed: %s", e)
+                return None
+            if vol is None:
+                return None
+            cutoff = int(vol)
         earliest = min(float(b.timestamp) for b in live)
         if earliest > cutoff:
             cutoff += step * math.ceil((earliest - cutoff) / step)

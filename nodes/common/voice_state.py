@@ -61,7 +61,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .federated_reconcile import VOICE_EPSILON
 
@@ -773,21 +773,24 @@ def robot_policy(
 # id, so the next window's start is read from the chain (the last anchor's
 # epochId), not from local state.
 #
-# The length is retargeted Bitcoin style from anchored history only: over
-# the last ``epoch_retarget_window`` anchors, the fees burned per second,
-# and the length at which one epoch burns ``epoch_target_share`` of the ATN
-# supply. Bounded below by one DAO proposal lifecycle (voting delay + voting
-# period + timelock delay: an epoch cannot be anchored faster) and above by
-# ``epoch_ceiling_votes`` voting periods, so a quiet network still pays out.
-# Every input is pinned to the last anchor's block, integer arithmetic.
+# An epoch ends on VOLUME (Decision 2026-10-27): at the first moment after
+# the previous cutoff when the fees burned since it reach
+# ``epoch_target_share`` of the ATN supply (pinned at the last anchor),
+# read from Substrate's on-chain burn checkpoints (``burnedBetween``), so
+# every daemon finds the same moment. Bounded below by one DAO proposal
+# lifecycle (voting delay + voting period + timelock delay: an epoch cannot
+# be anchored faster) and above by ``epoch_ceiling_votes`` voting periods,
+# so a quiet network still pays out. Integer arithmetic. (This replaced a
+# Bitcoin-style retarget from previous epochs' fee rate.)
 # ---------------------------------------------------------------------------
 
 EPOCH_RULE_DEFAULTS: Dict[str, int] = {
     # Share of the ATN supply one epoch should burn in fees, in parts per
-    # million. 0 = unset (set by the DAO at deployment): the length stays
-    # at the floor.
+    # million: the volume that ends an epoch. 0 = unset (set by the DAO at
+    # deployment): every epoch lasts the floor.
     "epoch_target_share": 0,
-    # Anchors the retarget averages over.
+    # Retired with the retarget (volume ends an epoch now); still read so
+    # an old Registry key is harmless.
     "epoch_retarget_window": 4,
     # Ceiling on the length, in voting periods.
     "epoch_ceiling_votes": 10,
@@ -908,26 +911,40 @@ def governor_lifecycle(
     return out
 
 
-def retarget_length(
-    *, floor: int, ceiling: int, target_share_ppm: int,
-    span_seconds: int, burned: int, supply: int,
-) -> int:
-    """Epoch length (seconds) at which one epoch burns the target share of
-    the supply, given ``burned`` fees over ``span_seconds`` of anchored
-    history. Integer arithmetic, so every daemon gets the same number.
+def volume_cutoff(
+    burned_between: Callable[[int, int], int], *, start: int, floor: int,
+    ceiling: int, target_share_ppm: int, supply: int, final_ts: int,
+) -> Optional[int]:
+    """The cutoff of the epoch that began at ``start``, or None while it is
+    still open.
 
-    Unset target => the floor. No fees burned (or no history) => the
-    ceiling: a quiet network still closes epochs. Always within
-    [floor, max(floor, ceiling)]."""
+    It is the first second t in [start + floor, start + ceiling] at which
+    ``burned_between(start, t)`` (Substrate's on-chain burn checkpoints)
+    reaches ``target_share_ppm`` of ``supply``. Only time at or before
+    ``final_ts`` is read, so every daemon sees the same, final burns and
+    lands on the same second. Unset target (or no supply) => start + floor.
+    A quiet network still closes at start + ceiling."""
     floor = max(0, int(floor))
     ceiling = max(floor, int(ceiling))
-    if target_share_ppm <= 0:
-        return floor
-    if burned <= 0 or span_seconds <= 0 or supply <= 0:
-        return ceiling
-    length = (int(target_share_ppm) * int(supply) * int(span_seconds)) // (
-        SHARE_SCALE * int(burned))
-    return max(floor, min(ceiling, length))
+    lo, hi_cap = int(start) + floor, int(start) + ceiling
+    threshold = (int(target_share_ppm) * int(supply)) // SHARE_SCALE
+    if target_share_ppm <= 0 or threshold <= 0:
+        return lo if final_ts >= lo else None
+    hi = min(int(final_ts), hi_cap)
+    if hi < lo:
+        return None
+    if int(burned_between(int(start), hi)) < threshold:
+        return hi_cap if final_ts >= hi_cap else None
+    if int(burned_between(int(start), lo)) >= threshold:
+        return lo
+    # burned(lo) < threshold <= burned(hi): smallest t with burned(t) >= it.
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if int(burned_between(int(start), mid)) >= threshold:
+            hi = mid
+        else:
+            lo = mid
+    return hi
 
 
 def epoch_window(contract: Any, *, number: int, prev_root: str,
@@ -947,7 +964,9 @@ def epoch_window(contract: Any, *, number: int, prev_root: str,
     epochs as (cutoff, fees burned in that epoch's window), oldest first,
     ending with epoch number-1; ``supply`` the ATN supply at the pin.
     Returns {number, prev_root, start, base, length, floor, ceiling, grace,
-    skew}."""
+    skew, target_share, supply}: with a target share set the epoch ends on
+    volume (``volume_cutoff``), ``length`` being its floor; ``history`` is
+    no longer used."""
     deployed_at = int(contract.functions.deployedAt().call())
     lc = lifecycle or {}
     params = epoch_rule_params(records, params_block, jurisdiction_id)
@@ -955,28 +974,18 @@ def epoch_window(contract: Any, *, number: int, prev_root: str,
     floor = (int(lc.get("voting_delay", 0)) + int(lc.get("voting_period", 0))
              + int(lc.get("min_delay", 0)))
     ceiling = params["epoch_ceiling_votes"] * int(lc.get("voting_period", 0))
-    burned, span = 0, 0
-    if history:
-        window = params["epoch_retarget_window"]
-        recent = list(history)[-window:] if window > 0 else []
-        burned = sum(int(b) for _, b in recent)
-        first_ts = (int(history[-window - 1][0])
-                    if window > 0 and len(history) > window else deployed_at)
-        span = int(history[-1][0]) - first_ts
-    length = retarget_length(
-        floor=floor, ceiling=ceiling,
-        target_share_ppm=params["epoch_target_share"],
-        span_seconds=span, burned=burned, supply=int(supply))
     return {
         "number": int(number),
         "prev_root": str(prev_root),
         "start": None if start is None else int(start),
         "base": base,
-        "length": length,
+        "length": floor,
         "floor": floor,
         "ceiling": max(floor, ceiling),
         "grace": params["epoch_grace"],
         "skew": params["epoch_skew"],
+        "target_share": int(params["epoch_target_share"]),
+        "supply": int(supply),
     }
 
 
@@ -995,17 +1004,11 @@ def _window_after(w3: Any, contract: Any, anchor_count: int, anchor: Any,
                   start_block: Optional[int]) -> Dict[str, Any]:
     """The window after the latest anchor, every input pinned to it."""
     block = int(anchor[7])
-    params = epoch_rule_params(records, block, jurisdiction_id)
-    window = params["epoch_retarget_window"]
-    first = max(0, anchor_count - window - 1)
-    anchors = [contract.functions.getAnchor(i).call()
-               for i in range(first, anchor_count - 1)] + [anchor]
     return epoch_window(
         contract, number=anchor_count + 1, prev_root=bytes(anchor[1]).hex(),
         start=_anchor_cutoff(anchor), params_block=block, records=records,
         jurisdiction_id=jurisdiction_id,
         lifecycle=governor_lifecycle(w3, governor_address, block, start_block),
-        history=[(_anchor_cutoff(a), int(a[10])) for a in anchors],
         supply=int(contract.functions.atnTotalSupplyAt(block).call()))
 
 
@@ -1016,22 +1019,11 @@ def _window_pinned(w3: Any, contract: Any, pin: Dict[str, Any], block: int,
     """The window of epoch ``pin["number"]``, every input pinned to the
     previous epoch's cutoff (``block`` = the last block at or before it)."""
     cutoffs = [int(c) for c in pin["cutoffs"]]
-    params = epoch_rule_params(records, block, jurisdiction_id)
-    window = params["epoch_retarget_window"]
-    deployed_at = int(contract.functions.deployedAt().call())
-    # Epoch 1 counts from deployedAt; a tail that does not reach it
-    # starts at its own oldest cutoff.
-    full = len(cutoffs) == int(pin["number"]) - 1
-    chain = ([deployed_at] if full else []) + cutoffs
-    keep = chain[-(window + 2):] if window > 0 else chain[-2:]
-    history = [(keep[i], int(contract.functions.burnedBetween(
-        keep[i - 1], keep[i]).call())) for i in range(1, len(keep))]
     return epoch_window(
         contract, number=int(pin["number"]), prev_root=str(pin["prev_root"]),
         start=cutoffs[-1], params_block=block, records=records,
         jurisdiction_id=jurisdiction_id,
         lifecycle=governor_lifecycle(w3, governor_address, block, start_block),
-        history=history,
         supply=int(contract.functions.atnTotalSupplyAt(block).call()))
 
 

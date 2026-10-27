@@ -990,6 +990,26 @@ class AutonetService:
 
             self._federated_close_driver.chain_source = _chain_source
 
+            # Volume-ended epochs (Decision 2026-10-27): fees burned between
+            # two times, from Substrate's on-chain checkpoints.
+            _burn_contract: list = []
+
+            def _burned_source(from_ts: int, to_ts: int) -> int:
+                if not _burn_contract:
+                    from web3 import Web3
+                    w3 = Web3(Web3.HTTPProvider(rpc_url))
+                    _burn_contract.append(w3.eth.contract(
+                        address=Web3.to_checksum_address(substrate_addr),
+                        abi=[{"name": "burnedBetween", "type": "function",
+                              "stateMutability": "view",
+                              "inputs": [{"name": "fromTs", "type": "uint256"},
+                                         {"name": "toTs", "type": "uint256"}],
+                              "outputs": [{"name": "", "type": "uint256"}]}]))
+                return int(_burn_contract[0].functions.burnedBetween(
+                    int(from_ts), int(to_ts)).call())
+
+            self._federated_close_driver.burned_source = _burned_source
+
             # Cheap anchorCount read: the voice refresh (every input pinned
             # to the latest anchor) reruns only when a new anchor lands.
             def _anchor_count():

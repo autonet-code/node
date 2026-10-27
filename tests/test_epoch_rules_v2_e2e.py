@@ -188,7 +188,8 @@ def _build_net(tmp_path, households: bool = False):
         a = Daemon("A", w3, hub, contracts, agents[:2], resolver, tmp_path)
         b = Daemon("B", w3, hub, contracts, agents[2:], resolver, tmp_path)
     return {"w3": w3, "sub": sub, "el": el, "a": a, "b": b, "hub": hub,
-            "operators": operators, "owners": owners}
+            "operators": operators, "owners": owners, "rep": rep,
+            "deployer": deployer, "agents": agents}
 
 
 @pytest.fixture
@@ -233,6 +234,11 @@ def test_epochs_close_on_schedule_and_anchor_by_election(net):
 
 def test_a_divergent_epoch_is_rewound_and_the_chain_continues(net):
     w3, sub, a, b, hub = net["w3"], net["sub"], net["a"], net["b"], net["hub"]
+    # Daemon B outvotes A. With equal REP the epoch-2 election is a tie,
+    # settled by the lowest option hash, which carries a wall-clock cutoff:
+    # which side lost (and must rewind) changed from run to run.
+    b_agent = net["agents"][2]
+    _tx(w3, net["rep"].functions.mint(b_agent, REP), net["deployer"])
     _run(net, until_anchors=1)
     # A batch only daemon A ever sees, signed by a third sender.
     kp = Keypair.generate()
@@ -248,14 +254,12 @@ def test_a_divergent_epoch_is_rewound_and_the_chain_continues(net):
     a.gossip._on_message(a.gossip.topic, wire)
     _run(net, until_anchors=4)
     anchors = [sub.functions.getAnchor(i).call()[0] for i in range(4)]
-    # Somewhere the two closed an epoch differently; afterwards both
-    # follow the anchored chain again.
-    assert a.closed != b.closed
-    # The daemon whose view lost closed one epoch number twice (rewound).
-    def reclosed(d):
-        nums = [int(e.split("-")[1]) for e in d.closed]
-        return len(nums) != len(set(nums))
-    assert reclosed(a) or reclosed(b)
+    # A (outvoted, holding the lonely batch) closed epoch 2 differently and
+    # rewound onto the anchored state: by re-closing, or by installing the
+    # anchored carry-over straight from the chain, whichever is available
+    # first (timing decides; both are correct recovery).
+    assert a.close.rewinds >= 1
+    assert b.close.rewinds == 0
     # One more tick reconciles both with the chain: nothing local is at or
     # below the anchored head.
     a.step()

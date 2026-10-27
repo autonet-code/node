@@ -29,7 +29,7 @@ from nodes.common.voice_state import (
     epoch_window,
     governor_lifecycle,
     make_epoch_id,
-    retarget_length,
+    volume_cutoff,
 )
 
 BASE = 1_000_000
@@ -253,39 +253,57 @@ class TestRules:
         assert win["ceiling"] == 1000
 
 
-class TestRetarget:
-    def test_bounds(self):
-        kw = dict(floor=100, ceiling=1000, span_seconds=3600, supply=10**9)
-        assert retarget_length(target_share_ppm=0, burned=5, **kw) == 100
-        assert retarget_length(target_share_ppm=10, burned=0, **kw) == 1000
-        # 10 ppm of 1e9 = 10_000 per epoch; 36_000 burned per hour means
-        # 10_000 burns in 1000 s.
-        assert retarget_length(target_share_ppm=10, burned=36_000, **kw) == 1000
-        assert retarget_length(target_share_ppm=10, burned=72_000, **kw) == 500
-        assert retarget_length(target_share_ppm=10, burned=10**9, **kw) == 100
-        # A ceiling below the floor never undercuts the floor.
-        assert retarget_length(floor=100, ceiling=50, span_seconds=3600,
-                               supply=10**9, target_share_ppm=10,
-                               burned=0) == 100
+class TestVolumeCutoff:
+    """Decision 2026-10-27: an epoch ends when the fees burned since the
+    previous cutoff reach the target share of the supply."""
 
-    def test_reads_only_the_retarget_window(self):
+    @staticmethod
+    def _burns(events):
+        """burned_between over a list of (timestamp, amount) burns."""
+        def between(t0, t1):
+            return sum(a for t, a in events if t0 < t <= t1)
+        return between
+
+    def test_cuts_at_the_second_the_volume_is_reached(self):
+        # 10 ppm of 1e9 = 10_000 ends the epoch.
+        burns = self._burns([(1100, 4_000), (1350, 5_000), (1420, 1_000), (1500, 9)])
+        kw = dict(start=1000, floor=100, ceiling=1000, target_share_ppm=10,
+                  supply=10**9)
+        assert volume_cutoff(burns, final_ts=5000, **kw) == 1420
+        # Not final yet at 1400: the epoch is still open.
+        assert volume_cutoff(burns, final_ts=1400, **kw) is None
+
+    def test_floor_and_ceiling(self):
+        kw = dict(start=0, floor=100, ceiling=1000, target_share_ppm=10,
+                  supply=10**9)
+        # Reached before the floor: the floor.
+        assert volume_cutoff(self._burns([(5, 10**6)]), final_ts=5000, **kw) == 100
+        # A quiet network still closes at the ceiling.
+        assert volume_cutoff(self._burns([]), final_ts=999, **kw) is None
+        assert volume_cutoff(self._burns([]), final_ts=1000, **kw) == 1000
+        # Unset target: every epoch lasts the floor.
+        assert volume_cutoff(self._burns([]), final_ts=100, start=0, floor=100,
+                             ceiling=1000, target_share_ppm=0, supply=10**9) == 100
+
+    def test_daemons_reading_at_different_times_agree(self):
+        burns = self._burns([(t, 37) for t in range(1001, 2000, 7)])
+        kw = dict(start=1000, floor=10, ceiling=5000, target_share_ppm=3,
+                  supply=10**9)
+        cuts = {volume_cutoff(burns, final_ts=f, **kw) for f in (1900, 2500, 4000)}
+        assert len(cuts) == 1 and None not in cuts
+
+    def test_window_reports_target_and_supply(self):
         contract = MagicMock()
         contract.functions.deployedAt.return_value.call.return_value = 0
         recs = [{"block": 1, "index": 0,
                  "key": "jurisdiction.autonet.epoch_target_share",
-                 "value": "10"},
-                {"block": 1, "index": 1,
-                 "key": "jurisdiction.autonet.epoch_retarget_window",
-                 "value": "2"}]
+                 "value": "10"}]
         lc = {"voting_delay": 0, "voting_period": 1_000, "min_delay": 0}
-        # Epochs cut at t=1000 (huge burn, outside the window), 2000, 3000.
-        history = [(1000, 10**12), (2000, 9_000), (3000, 9_000)]
         win = epoch_window(contract, number=4, prev_root=ROOT, start=3000,
                            params_block=1, records=recs, lifecycle=lc,
-                           history=history, supply=10**9)
-        # 18_000 burned over 2000 s; 10_000 per epoch takes 1111 s.
-        assert win["length"] == 1111
-        assert win["base"] == 3000
+                           supply=10**9)
+        assert win["target_share"] == 10 and win["supply"] == 10**9
+        assert win["base"] == 3000 and win["length"] == win["floor"]
 
     def test_lifecycle_from_settings_events(self):
         from nodes.common import voice_state
@@ -327,3 +345,25 @@ class TestRetarget:
                 "voting_delay": 0, "voting_period": 0, "min_delay": 0}
         finally:
             voice_state._get_logs = orig
+
+
+class TestVolumeEndedEpoch:
+    def test_closes_when_the_burned_volume_is_reached(self):
+        """The window stays open on volume, then cuts at the crossing second
+        (plus the grace wait), taking only batches signed up to it."""
+        kp = Keypair.generate()
+        buf = _Buffer(kp, [_batch(kp, 1, BASE + 50), _batch(kp, 2, BASE + 400)])
+        win = dict(_window(), floor=10, ceiling=10_000, target_share=10,
+                   supply=10**9)
+        burns = [(BASE + 300, 10_000)]       # 10 ppm of 1e9 reached at +300
+        d = _driver(buf, win, BASE + 200)
+        d.burned_source = lambda t0, t1: sum(a for t, a in burns if t0 < t <= t1)
+        assert d.run({}) is None             # volume not reached yet
+        d.clock = lambda: BASE + 300 + 119
+        assert d.run({}) is None             # reached, but not one grace old
+        d.clock = lambda: BASE + 300 + 120 + 120
+        fed = d.run({})
+        assert fed is not None
+        assert fed.epoch_id.endswith(str(BASE + 300)) or str(BASE + 300) in fed.epoch_id
+        # The batch signed after the cutoff stays for the next epoch.
+        assert [b.batch_seq for b in buf.pending_epoch_batches()] == [2]

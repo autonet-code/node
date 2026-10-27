@@ -1011,6 +1011,29 @@ owner claim surface) and the per-agent claim it worked around.
 changes (`claimFor`), and the REP claim rail changes. Every daemon must
 run the new build on a fresh Substrate before the next close.
 
+## Decision (2026-10-27): an epoch ends on volume, not on a retargeted time
+
+Ratified in discussion 2026-10-27; BUILT same day
+(`voice_state.volume_cutoff`, `FederatedCloseDriver`). Replaces item 4 of
+Decision (2026-10-26) ("length set by activity, Bitcoin style").
+
+- The retarget estimated a length from the previous epochs' fee rate.
+  Substrate already meters fees on chain (`burnedBetween`), so the epoch
+  now simply ends at the first second after the previous cutoff when the
+  fees burned since it reach `epoch_target_share` of the ATN supply (the
+  supply pinned at the last anchor). Every daemon reads the same on-chain
+  checkpoints and lands on the same second; only time one grace old is
+  read, so the burns it sees are final.
+- Floor (one anchor lifecycle) and ceiling (`epoch_ceiling_votes` voting
+  periods, so a quiet network still pays out) stay. Unset target: every
+  epoch lasts the floor.
+- No contract change. `epoch_retarget_window` is retired (still read, so
+  an old key is harmless). The first epoch needs no time parameter: it
+  ends on volume like any other.
+- Tradeoffs accepted: burns are lumpy (a channel close settles many
+  payments at once), so epochs can end in bursts; and anyone can end an
+  epoch early by burning fees, which costs real fees that join the pool.
+
 ## Decision (2026-10-27): containment follows the network's judgement
 
 Ratified in discussion 2026-10-27; BUILT same day (`atn/tool_security.py`
