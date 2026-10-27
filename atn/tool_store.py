@@ -174,6 +174,34 @@ class ToolRecord:
         }
 
 
+# The containment tier of the network tool being executed (None = own tool)
+# and its trace file, for the exec paths below call() (incl. composites).
+import contextvars as _contextvars
+_CONTAINMENT_TIER: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
+    "atn_containment_tier", default=None)
+_TRACE_PATH: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
+    "atn_tool_trace_path", default=None)
+
+
+def _denials_from_trace(trace_path: str | None) -> list[dict[str, Any]]:
+    """The refusals tool_guard recorded in a run's trace."""
+    if not trace_path:
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with open(trace_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("kind") == "denied":
+                    out.append({"reason": rec.get("reason", "")})
+    except OSError:
+        return []
+    return out[:50]
+
+
 class ToolStore:
     """Persistent registry of tool manifests with author-lineage scoping."""
 
@@ -210,6 +238,9 @@ class ToolStore:
         # reading the federated close's vetting carry-over — feeds the
         # provenance block on adoption proposals. Absent = "unknown".
         self.vet_status_provider: Any = None
+        # digest -> {harm_sum, harm_mass, supply} at the pinned snapshot, for
+        # consensus containment tiers (wired by the autonet service).
+        self.security_standing_provider: Any = None
         # Optional sanction lookup (callable: address -> entry | None, may
         # block on a chain read): an agent may not propose adopting a tool
         # whose author's household the DAO has sanctioned; the owner sees
@@ -858,12 +889,20 @@ class ToolStore:
         nesting counter (``_COMPOSITE_MAX_DEPTH`` guard).
 
         Run gate (Decision 2026-10-13): network tools (adopted, authored
-        elsewhere) run only while bonded on ToolBond and vetted, or opted
-        in by the owner for this digest. Every execution path (agents,
-        composite deps, service sales, evidence replay, core swaps) comes
-        through here. Own tools are not gated.
+        elsewhere) run only while bonded on ToolBond. Containment follows
+        the network's settled judgement of the exact digest (Decision
+        2026-10-27, ``tool_security.containment_tier``): denied tools never
+        run, strict ones get no net/fs/spawn, declared ones get their
+        manifest's capabilities. Every network-tool run is traced; access
+        the sandbox refused comes back in the result and raises an alarm.
+        Every execution path (agents, composite deps, service sales,
+        evidence replay, core swaps) comes through here. Own tools are not
+        gated.
         """
-        from .tool_security import is_network_tool, run_clearance
+        from .tool_security import (
+            CONTAINMENT_DENIED, containment_tier, is_network_tool, run_clearance)
+        tier = None
+        own_trace = None
         if is_network_tool(record):
             cleared, why = await run_clearance(self._runtime, record)
             if not cleared:
@@ -871,6 +910,41 @@ class ToolStore:
                                  f"({record.digest[:16]}) is not cleared to "
                                  f"run on this node: {why}",
                         "run_gate": why}
+            tier, tier_why = containment_tier(self._runtime, record)
+            if tier == CONTAINMENT_DENIED:
+                return {"error": f"Tool {record.name!r} ({record.digest[:16]}) "
+                                 f"is denied by the network: {tier_why}",
+                        "run_gate": f"denied: {tier_why}"}
+            if not trace_path:
+                import tempfile
+                fd, own_trace = tempfile.mkstemp(prefix="tooltrace-", suffix=".jsonl")
+                os.close(fd)
+                trace_path = own_trace
+        tier_token = _CONTAINMENT_TIER.set(tier)
+        trace_token = _TRACE_PATH.set(trace_path if tier is not None else None)
+        try:
+            result = await self._dispatch(record, arguments, caller_id=caller_id,
+                                          via=via, _depth=_depth,
+                                          trace_path=trace_path)
+        finally:
+            _CONTAINMENT_TIER.reset(tier_token)
+            _TRACE_PATH.reset(trace_token)
+        if tier is not None:
+            denied = _denials_from_trace(trace_path)
+            if own_trace:
+                try:
+                    os.unlink(own_trace)
+                except OSError:
+                    pass
+            result = {**result, "containment": {"tier": tier, "reason": tier_why,
+                                                 "denied": denied}}
+            if denied:
+                await self._alarm_on_contained_access(record, denied, caller_id)
+        return result
+
+    async def _dispatch(self, record: ToolRecord, arguments: dict[str, Any], *,
+                        caller_id: str | None, via: str, _depth: int,
+                        trace_path: str | None) -> dict[str, Any]:
         manifest = record.manifest
         if manifest.get("code_digest"):
             deps = manifest.get("dependencies") or []
@@ -966,6 +1040,13 @@ class ToolStore:
             return ([sys.executable, str(guard), str(script)], env, None)
 
         caps = record.manifest.get("capabilities") or {}
+        # Consensus containment (Decision 2026-10-27): a strict-tier tool
+        # gets nothing beyond its sandbox, whatever its manifest declares.
+        from .tool_security import CONTAINMENT_STRICT
+        if _CONTAINMENT_TIER.get() in (None, CONTAINMENT_STRICT):
+            caps = {}
+        if not trace_path:
+            trace_path = _TRACE_PATH.get()
         sandbox = self._dir / "sandbox" / record.digest[:16]
         sandbox.mkdir(parents=True, exist_ok=True)
 
@@ -986,6 +1067,9 @@ class ToolStore:
             "net": bool(caps.get("net")),
             "fs": bool(caps.get("fs")),
             "spawn": bool(caps.get("spawn")),
+            # Foreign code never reads the daemon's data or the vault, even
+            # with fs declared.
+            "deny_paths": self._foreign_deny_paths(),
         }
         if secret_names:
             env["ATN_TOOL_SECRETS"] = secret_names
@@ -1035,6 +1119,43 @@ class ToolStore:
             log.debug("tool secret binding failed; running without secrets",
                       exc_info=True)
             return None, frozenset()
+
+    def _foreign_deny_paths(self) -> list[str]:
+        """The daemon's data dir and the vault: never readable by a network
+        tool. (The tool's own sandbox is under the tools dir, so the tools
+        dir itself stays reachable.)"""
+        out: list[str] = []
+        cfg = getattr(self._runtime, "_config", None)
+        data_dir = getattr(cfg, "data_dir", None)
+        try:
+            from ._vendor.kevin import keystore as _ks
+            out.append(str(Path(_ks.KEYSTORE_DIR).resolve()))
+        except Exception:  # noqa: BLE001 — optional vendored dep
+            pass
+        if data_dir is not None:
+            tools = self._dir.resolve()
+            for child in Path(data_dir).resolve().iterdir() if Path(data_dir).exists() else []:
+                c = child.resolve()
+                if c != tools and tools not in c.parents and c not in tools.parents:
+                    out.append(str(c))
+        return out
+
+    async def _alarm_on_contained_access(self, record: ToolRecord,
+                                         denied: list[dict[str, Any]],
+                                         caller_id: str | None) -> None:
+        """A network tool tried something its containment refused: log it
+        and raise the security alarm. Best-effort, never raises."""
+        log.warning("network tool %s (%s) attempted refused access: %s",
+                    record.name, record.digest[:16], denied[:5])
+        monitor = getattr(self._runtime, "security_monitor", None)
+        if monitor is None:
+            return
+        try:
+            dest = "; ".join(str(d.get("reason", ""))[:80] for d in denied[:3])
+            await monitor.report_scope_violation(
+                caller_id or "<unknown>", [f"tool:{record.digest[:16]}"], dest)
+        except Exception:  # noqa: BLE001 — alarm must not break the call path
+            log.debug("contained-access alarm failed", exc_info=True)
 
     async def _alarm_on_scope_violation(
         self, err_text: str, services: "frozenset[str]", caller_id: str,
@@ -2003,6 +2124,17 @@ class ToolStore:
             return {"error": "manifest signature does not recover to its "
                              "claimed author — refusing to install "
                              "(re-attribution attempt)"}
+        # Denied by the network (Decision 2026-10-27): never installed.
+        from .tool_security import CONTAINMENT_DENIED, tier_for_standing, containment_params
+        provider = getattr(self, "security_standing_provider", None)
+        if provider is not None:
+            try:
+                tier, why = tier_for_standing(provider(digest),
+                                              containment_params(self._runtime))
+            except Exception:  # noqa: BLE001 — unknown standing installs strict
+                tier, why = None, ""
+            if tier == CONTAINMENT_DENIED:
+                return {"error": f"denied by the network: {why} — refusing to install"}
         prov = (proposal.get("provenance") or {}) if isinstance(
             proposal.get("provenance"), dict) else {}
         if prov.get("busted") is True:

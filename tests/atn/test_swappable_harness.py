@@ -429,6 +429,8 @@ async def test_bonded_swap_runs_and_leaves_signed_evidence(tmp_path, monkeypatch
     rt.get_agent("worker").loadout = fork
     seen: list[str] = []
     rt.tool_bond_gate = ToolBondGate(rt, checker=lambda d: seen.append(d) or True)
+    # A core swap needs its declared spawn: reviewed safe by the network.
+    rt.tool_store.security_standing_provider = lambda d: {"harm_sum": 0, "harm_mass": 100, "supply": 1000}
 
     out = await rt.engine.route_tool_call("bash", {"command": "echo hi"}, "worker")
     assert out == {"output": "swapped:echo hi", "exit_code": 0}

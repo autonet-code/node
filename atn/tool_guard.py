@@ -259,28 +259,47 @@ def main() -> None:
                        "os.startfile"):
             _emit({"kind": "spawn", "event": event, "argv": list(args)[:3]})
 
-    def hook(event: str, args: tuple) -> None:
-        if trace_fd >= 0:
-            _observe(event, args)
+    def _refuse(reason: str) -> None:
+        raise PermissionError(reason)
+
+    def _check(event: str, args: tuple) -> None:
         if not allow_net and event.startswith("socket."):
-            raise PermissionError(f"undeclared capability: net ({event})")
+            _refuse(f"undeclared capability: net ({event})")
         if allow_net and event.startswith("socket."):
             if deny_loopback:
                 _check_local(event, args)
             _check_dest(event, args)
-        if deny_paths and event in ("open", "os.listdir", "os.scandir"):
+        if deny_paths and event in fs_path_events:
             if _denied_path(args[0] if args else None):
-                raise PermissionError(f"guest tool may not access {args[0]}")
+                _refuse(f"tool may not access {args[0]}")
         if not allow_spawn and event in spawn_events:
-            raise PermissionError(f"undeclared capability: spawn ({event})")
-        if not allow_fs and event == "open":
+            _refuse(f"undeclared capability: spawn ({event})")
+        if not allow_fs and event in fs_path_events:
             path = args[0] if args else None
             if path is None or isinstance(path, int):
                 return  # fd re-open: the fd was already policy-checked
             p = _real(os.fsdecode(path) if isinstance(path, bytes)
                       else str(path))
             if not p.startswith(allowed_prefixes):
-                raise PermissionError(f"undeclared capability: fs ({p})")
+                _refuse(f"undeclared capability: fs ({p})")
+
+    # Path-taking events checked for fs and deny_paths: reads, listings and
+    # the mutations (delete, rename, mkdir) an open-only check missed.
+    fs_path_events = ("open", "os.listdir", "os.scandir", "os.remove",
+                      "os.rename", "os.rmdir", "os.mkdir", "shutil.rmtree")
+
+    def hook(event: str, args: tuple) -> None:
+        if trace_fd >= 0:
+            _observe(event, args)
+        try:
+            _check(event, args)
+        except PermissionError as exc:
+            # Recorded BEFORE it propagates, so a tool that swallows the
+            # error still leaves the refusal in the trace (the daemon reads
+            # it back and raises the alarm, Decision 2026-10-27).
+            if trace_fd >= 0:
+                _emit({"kind": "denied", "reason": str(exc)[:300]})
+            raise
 
     sys.addaudithook(hook)
     sys.argv = [script]

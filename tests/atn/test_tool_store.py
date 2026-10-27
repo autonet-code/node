@@ -687,7 +687,9 @@ class TestAdoption:
         assert store.allowed("worker", record)
 
         result = await store.call(record, {"x": "hi"}, caller_id="worker")
-        assert result == {"result": {"echo": "hi"}}
+        assert result["result"] == {"echo": "hi"}
+        # Unreviewed foreign code runs strict (Decision 2026-10-27).
+        assert result["containment"]["tier"] == "strict"
 
     @pytest.mark.asyncio
     async def test_reason_required_and_reject_flow(self, tmp_path):
@@ -754,8 +756,11 @@ class TestAdoption:
         await store.propose_adoption("worker", digest, reason="r")
         await store.approve_adoption(digest)
         record = store.get(digest)
+        # Declared capabilities apply once the network reviewed it safe.
+        store.security_standing_provider = lambda d: {"harm_sum": 0, "harm_mass": 100, "supply": 1000}
         result = await store.call(record, {"x": "1"}, caller_id="worker")
-        assert result == {"result": {"made_socket": True}}
+        assert result["result"] == {"made_socket": True}
+        assert result["containment"]["tier"] == "declared"
 
     @pytest.mark.asyncio
     async def test_env_scrubbed_for_adopted_code(self, tmp_path,
@@ -777,7 +782,7 @@ class TestAdoption:
         result = await store.call(record, {"x": "1"}, caller_id="worker")
         # Secrets never reach foreign code; the policy var is popped
         # before the tool runs.
-        assert result == {"result": {"secret": None, "policy": None}}
+        assert result["result"] == {"secret": None, "policy": None}
 
     @pytest.mark.asyncio
     async def test_declared_env_passes_through(self, tmp_path, monkeypatch):
@@ -794,8 +799,10 @@ class TestAdoption:
         await store.propose_adoption("worker", digest, reason="r")
         await store.approve_adoption(digest)
         record = store.get(digest)
+        store.security_standing_provider = lambda d: {
+            "harm_sum": 0, "harm_mass": 100, "supply": 1000}
         result = await store.call(record, {"x": "1"}, caller_id="worker")
-        assert result == {"result": {"tok": "tok123"}}
+        assert result["result"] == {"tok": "tok123"}
 
     @pytest.mark.asyncio
     async def test_authored_tools_run_unguarded(self, tmp_path,

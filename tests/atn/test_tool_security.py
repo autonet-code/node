@@ -339,7 +339,7 @@ class TestRunGate:
     async def test_bonded_runs(self, tmp_path):
         rt, rec = await _adopted(tmp_path)
         out = await rt.tool_store.call(rec, {"x": "hi"}, caller_id="worker")
-        assert out == {"result": {"echo": "hi"}}
+        assert out["result"] == {"echo": "hi"}
         assert await run_clearance(rt, rec) == (True, "bonded")
 
     async def test_unbonded_never_runs_even_opted_in(self, tmp_path):

@@ -268,6 +268,12 @@ class RPBConfig:
     # jurisdiction.<id>.bootstrap: the jurisdiction's seed nodes (relay
     # nodes, nodes/relay.py), used when p2p.bootstrap_peers is not set.
     bootstrap_peers: list = field(default_factory=list)
+    # jurisdiction.<id>.containment_*: when a network tool is denied, held
+    # strict, or given its declared capabilities (atn/tool_security.py).
+    # None = the provisional defaults there.
+    containment_deny_harm: Any = None
+    containment_trust_harm: Any = None
+    containment_trust_mass_bps: Any = None
     epoch_rules: str = ""               # jurisdiction.<id>.epoch_rules: the
                                         # epoch computation version the DAO's
                                         # network runs. Empty = "1".
@@ -611,6 +617,12 @@ def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str
         seed["charter_uri"] = contracts["charter_uri"]
     if contracts.get("epoch_rules"):
         seed["epoch_rules"] = str(contracts["epoch_rules"]).strip()
+    # Consensus containment thresholds (Decision 2026-10-27; DAO-set,
+    # provisional defaults in atn/tool_security.py).
+    for key in ("containment_deny_harm", "containment_trust_harm",
+                "containment_trust_mass_bps"):
+        if contracts.get(key) not in (None, ""):
+            seed[key] = str(contracts[key]).strip()
     if contracts.get("bootstrap"):
         # Seed nodes (jurisdiction.<id>.bootstrap, comma-separated
         # multiaddrs), changed by DAO proposal like the charter.
@@ -1178,6 +1190,9 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
         charter_text=resolved.get("charter_text", ""),
         epoch_rules=str(resolved.get("epoch_rules", "") or ""),
         bootstrap_peers=list(resolved.get("bootstrap_peers", []) or []),
+        containment_deny_harm=resolved.get("containment_deny_harm"),
+        containment_trust_harm=resolved.get("containment_trust_harm"),
+        containment_trust_mass_bps=resolved.get("containment_trust_mass_bps"),
         deploy_block=int(resolved.get("deploy_block", 0) or 0),
         anchor_election_address=resolved.get("anchor_election_address", ""),
         dao_registry_address=resolved.get("dao_registry_address", ""),

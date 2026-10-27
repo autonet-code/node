@@ -9,11 +9,11 @@ Three pieces live here; the chain surface is ``runtime/tool_bond.py``:
     only by the same author, and ``ToolBondClient.register_and_bond`` signed
     with the AUTHOR AGENT's key. No ToolBond configured = refused (fail
     closed), except under the dev override ``ATN_TOOL_BOND_DEV_OVERRIDE=1``.
-  - RUN (``run_clearance``): a network tool (authored elsewhere, i.e. an
-    adopted record the owner approved for that exact digest) runs only
-    while ``isBonded``. There is no vetted flag any more: whether a rating
-    is trustworthy enough is the owner's and agent's gradient call, so the
-    numbers are exposed (``rating_view``), never gated on. Locally authored
+  - RUN (``run_clearance`` + ``containment_tier``): a network tool
+    (authored elsewhere, i.e. an adopted record the owner approved for
+    that exact digest) runs only while ``isBonded``, and its sandbox
+    follows the network's settled harm for that digest (Decision
+    2026-10-27): denied, strict, or its declared capabilities. Locally authored
     tools are not gated. Enforced in ``ToolStore.call`` (the one dispatch
     choke point) and ahead of a core swap in
     ``runtime/shell_provider.dispatch_shell`` so a refused swap falls back.
@@ -155,6 +155,79 @@ async def run_clearance(runtime: Any, record: Any) -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001 — fail closed
         log.warning("run clearance for %s failed: %s", digest[:16], exc)
         return False, f"not bonded (clearance check failed: {exc})"
+
+
+# ---------------------------------------------------------------------------
+# Containment by consensus standing (Decision 2026-10-27, docs/tool_substrate.md)
+# ---------------------------------------------------------------------------
+# A network tool's sandbox follows the network's settled judgement of its
+# exact code (per digest, from the anchor-pinned ToolBond review snapshot):
+#
+#   denied    settled harm >= deny_harm, with at least trust_mass_bps of REP
+#             supply behind the harm reviews: refused at adoption and at run.
+#   declared  harm <  trust_harm with that same REP behind it: the manifest's
+#             declared net/fs/spawn.
+#   strict    anything else (new, thinly reviewed, or contested): no net, no
+#             fs outside its sandbox, no spawn, whatever the manifest says.
+#
+# Harm is ToolBond's 0..100 scale. One reviewer can never deny or free a tool
+# on its own: both ends need REP mass. Defaults are PROVISIONAL; the DAO sets
+# them (jurisdiction.<id>.containment_*), and the owner's own tools never pass
+# through here.
+CONTAINMENT_DENIED = "denied"
+CONTAINMENT_STRICT = "strict"
+CONTAINMENT_DECLARED = "declared"
+_CONTAINMENT_DEFAULTS = {"deny_harm": 50.0, "trust_harm": 10.0,
+                         "trust_mass_bps": 200.0}
+
+
+def containment_params(runtime: Any) -> dict[str, float]:
+    cfg = getattr(getattr(runtime, "_config", None), "autonet", None)
+    out = dict(_CONTAINMENT_DEFAULTS)
+    for key in out:
+        val = getattr(cfg, f"containment_{key}", None) if cfg is not None else None
+        if val not in (None, ""):
+            try:
+                out[key] = float(val)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def tier_for_standing(standing: Optional[dict[str, Any]],
+                      params: dict[str, float]) -> tuple[str, str]:
+    """Pure tier rule over ``{harm_sum, harm_mass, supply}`` (REP units)."""
+    if not standing or not int(standing.get("harm_mass") or 0):
+        return CONTAINMENT_STRICT, "not yet reviewed for harm"
+    mass = int(standing["harm_mass"])
+    harm = int(standing.get("harm_sum") or 0) / mass
+    supply = int(standing.get("supply") or 0)
+    share_bps = mass * 10_000 / supply if supply > 0 else 0.0
+    quorate = share_bps >= params["trust_mass_bps"]
+    if harm >= params["deny_harm"] and quorate:
+        return CONTAINMENT_DENIED, f"settled harm {harm:.0f}/100"
+    if harm < params["trust_harm"] and quorate:
+        return CONTAINMENT_DECLARED, f"reviewed safe (harm {harm:.0f}/100)"
+    if not quorate:
+        return CONTAINMENT_STRICT, (f"harm {harm:.0f}/100 from too little REP "
+                                    f"({share_bps:.0f} bps of supply)")
+    return CONTAINMENT_STRICT, f"contested (harm {harm:.0f}/100)"
+
+
+def containment_tier(runtime: Any, record: Any) -> tuple[str, str]:
+    """``(tier, reason)`` for running ``record`` here; never raises. Own
+    tools return ``("own", ...)`` and keep the authored path."""
+    if not is_network_tool(record):
+        return "own", "locally authored"
+    store = getattr(runtime, "tool_store", None)
+    provider = getattr(store, "security_standing_provider", None)
+    standing = None
+    if provider is not None:
+        try:
+            standing = provider(str(getattr(record, "digest", "") or ""))
+        except Exception as exc:  # noqa: BLE001 — unknown standing = strict
+            log.debug("security standing read failed: %s", exc)
+    return tier_for_standing(standing, containment_params(runtime))
 
 
 def rating_view(rating: Optional[dict[str, Any]],

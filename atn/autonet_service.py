@@ -1295,6 +1295,13 @@ class AutonetBridge:
                     return (vetting.get("manifests") or {}).get(digest)
                 return None
             tool_store.vet_status_provider = _vet_status
+
+            # Containment tiers (Decision 2026-10-27): a network tool's
+            # sandbox follows its settled harm at the pinned snapshot.
+            def _standing(digest: str, _svc=service):
+                drv = getattr(_svc, "_federated_close_driver", None)
+                return drv.security_standing(digest) if drv is not None else None
+            tool_store.security_standing_provider = _standing
             # Sanctioned authors (docs/accountability.md): agents may not
             # propose adopting their tools.
             tool_store.sanction_check = lambda addr: self.sanctions.check(addr)

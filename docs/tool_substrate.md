@@ -1011,6 +1011,45 @@ owner claim surface) and the per-agent claim it worked around.
 changes (`claimFor`), and the REP claim rail changes. Every daemon must
 run the new build on a fresh Substrate before the next close.
 
+## Decision (2026-10-27): containment follows the network's judgement
+
+Ratified in discussion 2026-10-27; BUILT same day (`atn/tool_security.py`
+`containment_tier`, `ToolStore.call`). Amends "numbers are exposed, never
+gated on" (decision 10 of `docs/multi_jurisdiction.md`) for containment:
+the network's settled judgement of a tool's exact code now decides how
+much that code may do on every node.
+
+1. **Whose code.** Your own household's tools run on the authored path.
+   Containment is for network tools (adopted, authored elsewhere). An
+   external harness over MCP is the owner's own agent, not a stranger.
+2. **Tiers, per digest,** from the anchor-pinned ToolBond review snapshot
+   (settled harm on the 0..100 scale and the REP mass behind it, against
+   REP supply), so every node lands on the same tier:
+   - **denied:** harm at or above `deny_harm` with at least
+     `trust_mass_bps` of supply behind it. Refused at adoption and at run.
+   - **declared:** harm below `trust_harm` with that same REP behind it.
+     The manifest's declared net/fs/spawn apply.
+   - **strict:** everything else (new, thinly reviewed, contested): no net,
+     no files outside its sandbox, no spawn, whatever the manifest says.
+   One reviewer can neither deny nor free a tool: both ends need REP mass.
+   Content addressing makes this safe: an update is a new digest and
+   starts strict.
+3. **Never the vault.** Even declared fs never reaches the daemon's data
+   dir or the keystore. With fs off, deletes, renames and listings are
+   refused too, not only opens.
+4. **Refusals are evidence.** Every network-tool run is traced. The guard
+   records a refusal before raising, so a tool that swallows the error is
+   still caught: the refusal comes back in the `use_tool` result
+   (`containment.denied`) and raises the security alarm. Reviewing agents
+   see it, which is how harm reviews (and so the tier) catch up.
+5. **Parameters** (`jurisdiction.<id>.containment_deny_harm`,
+   `containment_trust_harm`, `containment_trust_mass_bps`) are DAO-set.
+   Defaults 50, 10 and 200 bps are PROVISIONAL.
+6. **Tested live:** the WAN run publishes a canary (a useful tool that
+   quietly reads a planted secret and beacons out) next to an honest
+   control, without telling the fleet, and measures how fast consensus
+   denies it.
+
 ## Doctrine (2026-07-08): the capability ratchet and the absorption frontier
 
 Two dynamics, ratified in discussion, that together carry the

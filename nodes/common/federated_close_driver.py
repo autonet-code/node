@@ -255,6 +255,9 @@ class FederatedCloseDriver:
         # voice_source refresh. None (no chain source / no ToolBond) = zero
         # ratings and no reviewer shares.
         self.review_snapshot: Optional[Dict[str, Any]] = None
+        # REP total supply at the same pin (containment tiers weigh review
+        # mass against it, atn/tool_security.py).
+        self.rep_supply: int = 0
         # The jurisdiction's charter text pinned to the snapshot anchor
         # (docs/multi_jurisdiction.md decision 5), read by the same
         # voice_source refresh. None = no pinned read (no DAO Registry
@@ -868,6 +871,8 @@ class FederatedCloseDriver:
             reviews = state.get("review_snapshot")
             if isinstance(reviews, dict):
                 updates["review_snapshot"] = reviews
+            if state.get("rep_supply") is not None:
+                updates["rep_supply"] = int(state["rep_supply"])
             if "charter_text" in state:
                 text = state.get("charter_text")
                 updates["pinned_charter_text"] = str(text) if text else None
@@ -890,6 +895,21 @@ class FederatedCloseDriver:
         if self.epoch_window is not None and hasattr(
                 self.gossip, "max_skew_seconds"):
             self.gossip.max_skew_seconds = float(self.epoch_window["skew"])
+
+    def security_standing(self, digest: str) -> Optional[Dict[str, Any]]:
+        """A tool's settled harm at the pinned snapshot, for containment
+        tiers: ``{harm_sum, harm_mass, supply}`` or None when unknown. The
+        same pinned read on every daemon, so tiers agree network-wide."""
+        snap = self.review_snapshot or {}
+        tool = (snap.get("tools") or {}).get(str(digest).lower().removeprefix("0x"))
+        if tool is None:
+            tool = (snap.get("tools") or {}).get(str(digest))
+        if not tool:
+            return None
+        harm = tool.get("harm") or {}
+        return {"harm_sum": int(harm.get("sum") or 0),
+                "harm_mass": int(harm.get("mass") or 0),
+                "supply": int(self.rep_supply or 0)}
 
     def _charter_changed(self) -> bool:
         """True when the jurisdiction's pinned charter differs from the
