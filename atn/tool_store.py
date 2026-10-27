@@ -2591,10 +2591,10 @@ class ToolStore:
 
         Ruling 2026-07-24 (never unclaimable rewards): an agent's own
         address counts only once the agent is REGISTERED ON-CHAIN —
-        every agent has a local keypair from birth, but Substrate's
-        recordTrainingForEpoch reverts AgentNotActive for addresses it
-        doesn't know, so mint keyed to an unregistered keypair is
-        stranded until (if ever) the agent registers. Unregistered
+        every agent has a local keypair from birth, but an unregistered
+        keypair has no proven owner, so its mint would key to an address
+        no household claims (the close keys mint by the agent's on-chain
+        owner, Decision 2026-10-27). Unregistered
         agents' tools are authored by the owner wallet instead — the
         household is the claimant. The owner ("user") → the owner
         wallet when configured. The local-id fallback only remains

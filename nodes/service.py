@@ -1089,6 +1089,7 @@ class AutonetService:
         agent_chain_resolver: Any,
         *,
         blob_resolver: Any = None,
+        owner_wallet: str = "",
     ) -> bool:
         """Wire on-chain anchor + per-agent mint submission.
 
@@ -1128,6 +1129,7 @@ class AutonetService:
             governor_address=getattr(bc, "governor_address", "") or "",
             anchor_election_address=getattr(
                 bc, "anchor_election_address", "") or "",
+            owner_wallet=owner_wallet,
         )
         try:
             driver = ChainSubmissionDriver(

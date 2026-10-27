@@ -203,19 +203,20 @@ SUBSTRATE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
-    # Per-epoch training record (money only, Decision 2026-07-10).
+    # Household mint claim (Decision 2026-10-27; money only, 2026-07-10).
     # ``amount`` = ATN mint, merkle-proven: the leaf is
-    # keccak256(bytes.concat(keccak256(abi.encode(agent, amount)))) under
+    # keccak256(bytes.concat(keccak256(abi.encode(claimant, amount)))) under
     # the anchor's agentMintRoot (built by nodes/common/mint_merkle.py).
-    # REP is no longer minted here — it is claimed DAO-side (RepToken) on
-    # ratified ATN earnings, so the leaf reverts to 2-field (agent, amount).
+    # Permissionless: anyone submits, the ATN goes to ``claimant`` (the
+    # household's owner wallet). REP is claimed DAO-side on earnings.
     {
         "inputs": [
+            {"internalType": "address",   "name": "claimant",    "type": "address"},
             {"internalType": "uint256",   "name": "amount",      "type": "uint256"},
             {"internalType": "bytes32",   "name": "epochIdHash", "type": "bytes32"},
             {"internalType": "bytes32[]", "name": "proof",       "type": "bytes32[]"},
         ],
-        "name": "recordTrainingForEpoch",
+        "name": "claimFor",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function",
@@ -1119,28 +1120,28 @@ class OnChainService:
             return {"success": False, "error": str(e)}
 
     # ------------------------------------------------------------------
-    # Per-epoch training record (write)
+    # Household mint claim (write)
     # ------------------------------------------------------------------
 
-    async def record_training_for_epoch(
+    async def claim_for(
         self,
         private_key: str,
+        claimant: str,
         amount: int,
         epoch_id_hash: str | bytes,
         proof: list[str | bytes],
     ) -> dict[str, Any]:
-        """Sign and submit a ``recordTrainingForEpoch`` transaction.
+        """Sign and submit ``claimFor(claimant, amount, epochIdHash, proof)``.
 
-        Money only (Decision 2026-07-10): ``amount`` is the ATN mint,
-        federation-ratified — the merkle leaf under the anchor's
-        agentMintRoot commits (agent, amount), so ``proof`` must have been
-        built over the SAME amount (nodes/common/mint_merkle.py
-        mint_merkle_proof) or the contract reverts MintProofInvalid. REP
-        is no longer minted here; it is claimed DAO-side (RepToken) on
-        ratified ATN earnings.
+        Decision 2026-10-27: the household's owner wallet is the claimant
+        and anyone may submit; ``private_key`` only signs and pays gas.
+        ``amount`` is the federation-ratified ATN mint: the merkle leaf under
+        the anchor's agentMintRoot commits (claimant, amount), so ``proof``
+        must be built over the SAME amount (nodes/common/mint_merkle.py
+        mint_merkle_proof) or the contract reverts MintProofInvalid.
 
-        Per-(agent, epoch) idempotent on-chain; the epoch must already be
-        anchored via ``anchor`` (governor-only).
+        Per-(claimant, epoch) idempotent on-chain; the epoch must already be
+        anchored.
         """
         try:
             from eth_account import Account
@@ -1158,17 +1159,16 @@ class OnChainService:
             nonce = w3.eth.get_transaction_count(account.address)
             chain_id = self.config.chain_id or w3.eth.chain_id
 
+            call = contract.functions.claimFor(
+                w3.to_checksum_address(claimant), int(amount), eid, proof_bytes,
+            )
             try:
-                estimated = contract.functions.recordTrainingForEpoch(
-                    int(amount), eid, proof_bytes,
-                ).estimate_gas({"from": account.address})
+                estimated = call.estimate_gas({"from": account.address})
                 gas_limit = max(int(estimated * 12 // 10), 1_500_000)
             except Exception:
                 gas_limit = 2_000_000
 
-            tx = contract.functions.recordTrainingForEpoch(
-                int(amount), eid, proof_bytes,
-            ).build_transaction({
+            tx = call.build_transaction({
                 "from": account.address,
                 "nonce": nonce,
                 "gas": gas_limit,
@@ -1187,7 +1187,7 @@ class OnChainService:
         except ImportError:
             return {"success": False, "error": "web3/eth-account not installed"}
         except Exception as e:
-            log.exception("Failed to record training for epoch on chain")
+            log.exception("Failed to claim the household mint on chain")
             return {"success": False, "error": str(e)}
 
     # ------------------------------------------------------------------
@@ -1337,8 +1337,10 @@ class OnChainService:
         ``networkMintTotal``; both names are LEGACY-WIRE. True REP/voice
         is claimed DAO-side (RepToken), 1:1 against these ratified
         earnings, and the federated close reads it from RepToken
-        checkpoints (see nodes/common/voice_state.py). Owner wallets
-        never earn, so there is no owner-wallet earnings term.
+        checkpoints (see nodes/common/voice_state.py). The owner wallet is
+        the household's claimant (Decision 2026-10-27), so its own
+        ``agentMintTotal`` is the main earnings term; bound agents may
+        still carry earnings from before.
 
         MONEY figures (owner balance, fleet ATN total, ATN supply) are
         still reported for the Owner page's money panel, but they no
@@ -1351,7 +1353,9 @@ class OnChainService:
             owner_addr = w3.to_checksum_address(owner)
             owner_raw = int(contract.functions.balanceOf(owner_addr).call())
             fleet_raw = owner_raw            # money: owner + Σ agent ATN
-            fleet_rep_raw = 0                # voice: Σ agent reputation
+            # voice: the owner's own earnings (it claims for the household)
+            # plus Σ bound agents' earnings.
+            fleet_rep_raw = int(contract.functions.agentMintTotal(owner_addr).call())
             agents: list[dict[str, Any]] = []
             count = contract.functions.registeredAgentCount().call()
             for i in range(count):
@@ -1463,8 +1467,8 @@ class OnChainService:
         request id (bytes32; e.g. keccak256 of the request body) emitted in
         the ServicePayment event so the payment is matchable off-chain.
 
-        Signs with the agent key exactly like ``register_agent_bound`` /
-        ``record_training_for_epoch``, with Etherlink-tolerant explicit gas
+        Signs with the agent key exactly like ``register_agent_bound``,
+        with Etherlink-tolerant explicit gas
         (estimate × 1.2, floored). Returns
         ``{success, tx_hash[, request_id]}`` or ``{success: False, error}``.
         """

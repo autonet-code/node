@@ -6,7 +6,7 @@ reputationTotalSupplyAt) is DELETED — REP lives DAO-side (RepToken),
 claimed on ratified ATN earnings. ``agentMintTotal`` remains as the
 cumulative tool-pool earnings counter (money). This file validates:
 
-  1. agentMintTotal is monotonic: only ``recordTrainingForEpoch`` can
+  1. agentMintTotal is monotonic: only ``claimFor`` can
      increase it, and it tracks the ATN minted.
   2. ATN balance is transferable via ``transfer``, ``approve`` /
      ``transferFrom``, and shaped like a minimal ERC20.
@@ -194,13 +194,14 @@ def test_reputation_surface_deleted_from_substrate(chain):
 
 
 def test_training_mints_atn_and_bumps_earnings(chain):
-    """recordTrainingForEpoch mints ATN and increments agentMintTotal by
-    the same amount; atnTotalSupply tracks it."""
+    """claimFor mints ATN to the claimant (not the sender) and increments
+    agentMintTotal by the same amount; atnTotalSupply tracks it."""
     w3 = chain["w3"]
     contract = chain["contract"]
     addr = chain["agent_addrs"][0]
-    # Agent ids ARE addresses: merkle mint proofs are keyed by
-    # msg.sender, so claimable mint-map entries must be address-keyed.
+    # Agent ids ARE addresses: the mint leaf names the claimant (each
+    # agent is its own household here, keyed lowercase). Claims are sent
+    # by the deployer (an operator key), not the claimant.
     agent_ids = list(chain["agent_addrs"])
 
     earn_before = contract.functions.agentMintTotal(addr).call()
@@ -214,22 +215,26 @@ def test_training_mints_atn_and_bumps_earnings(chain):
         chain, agent_ids, epoch_id="e_71_money",
     )
     minting_aid = next(
-        (aid for aid in agent_ids if result["agent_mint"].get(aid, 0) > 0),
+        (aid for aid in agent_ids if result["agent_mint"].get(aid.lower(), 0) > 0),
         None,
     )
-    if minting_aid is None:
-        pytest.skip("no positive mint")
+    assert minting_aid is not None, "no positive mint"
     minting_addr = chain["agent_addrs"][agent_ids.index(minting_aid)]
 
     submitter = AuthoritativeChainSubmitter(
-        agent_id=minting_aid, agent_address=minting_addr,
+        claimant_id=minting_aid.lower(), claimant_address=minting_addr,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=w3, substrate_abi=chain["abi"],
     )
+    op_bal_before = contract.functions.balanceOf(chain["deployer"]).call()
     s = submitter.submit_for_epoch(epoch_id)
-    assert s.success
+    assert s.success, s.error
     expected = s.contribution_scaled
+    assert expected > 0
+    # The operator paid gas but received no ATN.
+    assert contract.functions.balanceOf(chain["deployer"]).call() == op_bal_before
 
     earn_after = contract.functions.agentMintTotal(minting_addr).call()
     bal_after = contract.functions.balanceOf(minting_addr).call()
@@ -250,26 +255,27 @@ def test_atn_transfer_moves_balance_does_not_affect_earnings(chain):
     cumulative earnings counter (agentMintTotal) on both sides unchanged."""
     w3 = chain["w3"]
     contract = chain["contract"]
-    # Agent ids ARE addresses: merkle mint proofs are keyed by
-    # msg.sender, so claimable mint-map entries must be address-keyed.
+    # Agent ids ARE addresses: the mint leaf names the claimant (each
+    # agent is its own household here, keyed lowercase). Claims are sent
+    # by the deployer (an operator key), not the claimant.
     agent_ids = list(chain["agent_addrs"])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_71_xfer",
     )
     src_aid = next(
-        (aid for aid in agent_ids if result["agent_mint"].get(aid, 0) > 0),
+        (aid for aid in agent_ids if result["agent_mint"].get(aid.lower(), 0) > 0),
         None,
     )
-    if src_aid is None:
-        pytest.skip("no positive mint")
+    assert src_aid is not None, "no positive mint"
     src_addr = chain["agent_addrs"][agent_ids.index(src_aid)]
     # dst is some other registered agent address.
     dst_addr = next(a for a in chain["agent_addrs"] if a != src_addr)
 
     submitter = AuthoritativeChainSubmitter(
-        agent_id=src_aid, agent_address=src_addr,
+        claimant_id=src_aid.lower(), claimant_address=src_addr,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=w3, substrate_abi=chain["abi"],
     )
     s = submitter.submit_for_epoch(epoch_id)
@@ -345,18 +351,18 @@ def test_atn_approve_and_transfer_from(chain):
     """Standard ERC20 approve / transferFrom flow."""
     w3 = chain["w3"]
     contract = chain["contract"]
-    # Agent ids ARE addresses: merkle mint proofs are keyed by
-    # msg.sender, so claimable mint-map entries must be address-keyed.
+    # Agent ids ARE addresses: the mint leaf names the claimant (each
+    # agent is its own household here, keyed lowercase). Claims are sent
+    # by the deployer (an operator key), not the claimant.
     agent_ids = list(chain["agent_addrs"])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_71_allow",
     )
     src_aid = next(
-        (aid for aid in agent_ids if result["agent_mint"].get(aid, 0) > 0),
+        (aid for aid in agent_ids if result["agent_mint"].get(aid.lower(), 0) > 0),
         None,
     )
-    if src_aid is None:
-        pytest.skip("no positive mint")
+    assert src_aid is not None, "no positive mint"
     src = chain["agent_addrs"][agent_ids.index(src_aid)]
     spender = next(a for a in chain["agent_addrs"] if a != src)
     dst = next(
@@ -365,9 +371,10 @@ def test_atn_approve_and_transfer_from(chain):
     )
 
     submitter = AuthoritativeChainSubmitter(
-        agent_id=src_aid, agent_address=src,
+        claimant_id=src_aid.lower(), claimant_address=src,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=w3, substrate_abi=chain["abi"],
     )
     submitter.submit_for_epoch(epoch_id)
@@ -421,18 +428,18 @@ def test_unlimited_approval_does_not_decrease(chain):
     decrement it (matches ERC20 unlimited-approval convention)."""
     w3 = chain["w3"]
     contract = chain["contract"]
-    # Agent ids ARE addresses: merkle mint proofs are keyed by
-    # msg.sender, so claimable mint-map entries must be address-keyed.
+    # Agent ids ARE addresses: the mint leaf names the claimant (each
+    # agent is its own household here, keyed lowercase). Claims are sent
+    # by the deployer (an operator key), not the claimant.
     agent_ids = list(chain["agent_addrs"])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_71_unlim",
     )
     src_aid = next(
-        (aid for aid in agent_ids if result["agent_mint"].get(aid, 0) > 0),
+        (aid for aid in agent_ids if result["agent_mint"].get(aid.lower(), 0) > 0),
         None,
     )
-    if src_aid is None:
-        pytest.skip("no positive mint")
+    assert src_aid is not None, "no positive mint"
     src = chain["agent_addrs"][agent_ids.index(src_aid)]
     spender = next(a for a in chain["agent_addrs"] if a != src)
     dst = next(
@@ -441,9 +448,10 @@ def test_unlimited_approval_does_not_decrease(chain):
     )
 
     submitter = AuthoritativeChainSubmitter(
-        agent_id=src_aid, agent_address=src,
+        claimant_id=src_aid.lower(), claimant_address=src,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=w3, substrate_abi=chain["abi"],
     )
     submitter.submit_for_epoch(epoch_id)
@@ -476,25 +484,28 @@ def test_atn_total_supply_tracks_minted(chain):
     # Baseline: the seed epoch's purchased (vault-minted) ATN.
     supply0 = contract.functions.atnTotalSupply().call()
 
-    # Agent ids ARE addresses: merkle mint proofs are keyed by
-    # msg.sender, so claimable mint-map entries must be address-keyed.
+    # Agent ids ARE addresses: the mint leaf names the claimant (each
+    # agent is its own household here, keyed lowercase). Claims are sent
+    # by the deployer (an operator key), not the claimant.
     agent_ids = list(chain["agent_addrs"])
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_71_supply",
     )
     expected_total = 0
     for aid, addr in zip(agent_ids, chain["agent_addrs"]):
-        if result["agent_mint"].get(aid, 0) <= 0:
+        if result["agent_mint"].get(aid.lower(), 0) <= 0:
             continue
         sub = AuthoritativeChainSubmitter(
-            agent_id=aid, agent_address=addr, resolver=resolver,
+            claimant_id=aid.lower(), claimant_address=addr, resolver=resolver,
             config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+            sender_address=chain["deployer"],
             web3=w3, substrate_abi=chain["abi"],
         )
         s = sub.submit_for_epoch(epoch_id)
         if s.success and s.contribution_scaled > 0:
             expected_total += s.contribution_scaled
 
+    assert expected_total > 0
     assert contract.functions.atnTotalSupply().call() == supply0 + expected_total
 
     # Now do a transfer; supply unchanged.

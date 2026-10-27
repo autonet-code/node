@@ -35,7 +35,7 @@ def test_falls_back_to_packaged_abi(tmp_path, monkeypatch):
     assert path == ca.PACKAGED_ABI_DIR / "Substrate.json"
     names = {e.get("name") for e in ca.load_abi("Substrate")}
     # Functions the four former hardcoded call sites rely on.
-    assert {"anchor", "recordTrainingForEpoch", "anchorCount",
+    assert {"anchor", "claimFor", "anchorCount",
             "getAnchor"} <= names
 
 

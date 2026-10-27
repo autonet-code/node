@@ -72,9 +72,10 @@ Seven stages, each verified:
    zero, proving the chain-fed same-owner exclusion.
 6. **Settlement**: Substrate's governor (hardhat #9 here; the DAO
    timelock in production) anchors the epoch (`anchor` via
-   `EpochAnchorer`; a non-governor anchor is checked to revert), `author-1` records its own mint
-   (`recordTrainingForEpoch` via `AuthoritativeChainSubmitter`, mint-merkle
-   proof against the anchored root). Money only (Decision 2026-07-10):
+   `EpochAnchorer`; a non-governor anchor is checked to revert), and the
+   household's mint is claimed for owner A by another key (`claimFor` via
+   `AuthoritativeChainSubmitter`, mint-merkle proof against the anchored
+   root; the ATN lands on owner A, the submitter receives nothing). Money only (Decision 2026-07-10):
    Substrate has no reputation surface: the mint is a 2-field
    `(agent, amount)` leaf. Verifies the cumulative tool-pool earnings
    ledger (`agentMintTotal`) and the ATN `balanceOf` both moved on chain

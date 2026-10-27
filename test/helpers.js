@@ -215,7 +215,8 @@ async function seedPool(substrate, gross = 1_000_000_000n) {
 }
 
 // Earned ATN through the honest path: seed a pool, anchor a single-leaf
-// epoch for `agentSigner`, claim it. Accrues agentMintTotal.
+// epoch for `agentSigner`, claim it (claimFor, submitted by the earner).
+// Accrues agentMintTotal.
 let _epochCounter = 0;
 async function mintEarned(substrate, agentSigner, amount) {
   const pool = await seedPool(substrate, amount * 100n);
@@ -223,7 +224,7 @@ async function mintEarned(substrate, agentSigner, amount) {
   _epochCounter += 1;
   const epochId = "earn-" + _epochCounter;
   await anchorEpoch(substrate, epochId, mintLeaf(agentSigner.address, amount));
-  await substrate.connect(agentSigner).recordTrainingForEpoch(amount, digest(epochId), []);
+  await substrate.connect(agentSigner).claimFor(agentSigner.address, amount, digest(epochId), []);
   return epochId;
 }
 

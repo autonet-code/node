@@ -274,6 +274,7 @@ INTEGRATION_DENIED_MESSAGES = frozenset({
     # path (daemon env + cwd). See _integration_register_args.
     # Ownership, wallets, chain registration + signing, money movement.
     "set_owner_wallet", "rotate_owner", "owner_binding_status",
+    "operator_status", "register_operator",
     "owner_claim_status", "autonet_wallet_connect", "autonet_wallet_disconnect",
     "autonet_set_chain", "autonet_start", "autonet_stop",
     "register_agent_on_chain", "confirm_agent_registration",
@@ -2012,16 +2013,11 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": self.runtime.tool_store.balances()}
 
-        # Owner claim status (docs/tool_substrate.md, Decision 2026-07-24
-        # item 5, "Owner claim surface: DEFERRED").
-        #
-        # Mint keyed to the owner wallet is EARNED but not RECEIVABLE until
-        # that wallet is registered on Substrate: recordTrainingForEpoch
-        # reverts AgentNotActive for an unregistered address. Nothing
-        # expires — epochs are anchored and claims are idempotent per
-        # (agent, epoch), so accrual is retroactively claimable — but until
-        # now there was no way to SEE that you had unclaimable earnings
-        # sitting there, which is the failure this answers.
+        # Owner claim status (docs/tool_substrate.md, Decision 2026-10-27):
+        # the owner wallet is the household's claimant. The daemon operator
+        # claims for it after every anchored epoch (claimFor), so this
+        # reports what the household has received and which tools earn for
+        # it directly.
         if msg_type == "owner_claim_status":
             rpb_cfg = self.runtime._config.autonet
             wallet = (getattr(rpb_cfg, "owner_wallet", "") or "").strip()
@@ -2050,25 +2046,24 @@ class WebSocketBridge:
                         "author": consensus,
                     })
 
-            registered = False
             mint_total = "0"
             if wallet:
                 try:
                     from .on_chain import OnChainService
                     svc = OnChainService(rpb_cfg)
-                    registered = bool(await svc.is_registered(wallet))
-                    rec = await svc.get_agent_record(wallet)
-                    if rec:
-                        mint_total = str(rec.get("total_training_mint")
-                                         or rec.get("totalTrainingMint") or 0)
+
+                    async def _read(_svc=svc, _w=wallet) -> int:
+                        w3 = _svc._get_web3()
+                        return int(_svc._get_contract(w3).functions.agentMintTotal(
+                            w3.to_checksum_address(_w)).call())
+                    mint_total = str(await self._offload(_read))
                 except Exception as exc:                   # noqa: BLE001
                     log.debug("owner_claim_status chain read failed: %s", exc)
 
             return {"msg_id": msg_id, "ok": True, "result": {
                 "owner_wallet": wallet,
-                # Registered => owner-keyed mint is receivable. Not
-                # registered => it accrues and waits.
-                "wallet_registered": registered,
+                # Always receivable now: the operator claims for the owner.
+                "wallet_registered": bool(wallet),
                 "owner_authored_count": len(owner_tools),
                 "owner_authored": owner_tools[:50],
                 # Tools that cannot enter consensus at all for want of a
@@ -3069,7 +3064,7 @@ class WebSocketBridge:
         # there is no such contract to call. Same treatment as the
         # _DEPRECATED_RPB set below: an explicit gone-marker so the UI can hide
         # the panel instead of showing a chain error it cannot act on.
-        # The live rails are Substrate.recordTrainingForEpoch, surfaced by
+        # The live rails are Substrate.claimFor, surfaced by
         # 'tool_earnings' and 'owner_claim_status'.
         _DEPRECATED_AUTONET = {
             "autonet_earnings", "autonet_claim_reward",
@@ -3268,6 +3263,32 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'dependent_address'"}
             removed = self.runtime.sponsor_bindings.remove(dependent_address)
             return {"msg_id": msg_id, "ok": True, "result": {"removed": removed}}
+
+        # The daemon operator key (Decision 2026-10-27): registered bound to
+        # the owner, it anchors, proposes, votes with delegated REP and
+        # submits the household's claims.
+        if msg_type in ("operator_status", "register_operator") and (
+                not session.owner or session.scope_ids is not None):
+            return {"msg_id": msg_id, "ok": False,
+                    "error": f"'{msg_type}' is for the daemon owner's full-fleet "
+                             "session only"}
+        if msg_type == "operator_status":
+            try:
+                return {"msg_id": msg_id, "ok": True,
+                        "result": await self._operator_status()}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
+        if msg_type == "register_operator":
+            try:
+                result = await self._handle_register_operator(
+                    owner=msg.get("owner", ""),
+                    owner_sig=msg.get("owner_sig", ""),
+                    self_owned=bool(msg.get("self_owned", False)),
+                )
+                return {"msg_id": msg_id, "ok": bool(result.get("success")),
+                        "result": result, "error": result.get("error", "")}
+            except Exception as e:
+                return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
         # On-chain agent registration
         if msg_type == "register_agent_on_chain":
@@ -5718,6 +5739,115 @@ class WebSocketBridge:
             identity.registered_on_chain = True
             identity.registration_tx = result.get("tx_hash")
             self.runtime.registry.persist_identity(agent_id)
+        return result
+
+    def _operator_key(self) -> str:
+        """The key the daemon anchors, votes and claims with: the configured
+        daemon key, else the vault-held operator key."""
+        configured = getattr(self.runtime.autonet.config, "private_key", "") or ""
+        return configured or self.runtime.registry.operator_key()
+
+    async def _operator_status(self) -> dict[str, Any]:
+        """Operator address, whether it is registered and bound to which
+        owner, its gas balance, the nonce the owner signs the binding at,
+        and whether the owner's REP votes are delegated to it."""
+        from eth_account import Account
+        from .on_chain import OnChainService
+        config = self.runtime.autonet.config
+        key = self._operator_key()
+        address = Account.from_key(key).address
+        out: dict[str, Any] = {
+            "operator": address,
+            "owner_wallet": getattr(config, "owner_wallet", "") or "",
+            "chain_id": getattr(config, "chain_id", 0),
+        }
+        svc = OnChainService(config)
+        if not svc.available:
+            out["error"] = "Substrate not configured on this daemon"
+            return out
+        out["substrate_address"] = svc._substrate_address()
+
+        async def _reads() -> dict[str, Any]:
+            w3 = svc._get_web3()
+            sub = svc._get_contract(w3)
+            addr = w3.to_checksum_address(address)
+            r: dict[str, Any] = {
+                "registered": int(sub.functions.agents(addr).call()[0]) != 0,
+                "live": bool(sub.functions.isLive(addr).call()),
+                "bound_owner": sub.functions.agentOwner(addr).call(),
+                "binding_nonce": int(sub.functions.bindingNonce(addr).call()),
+                "gas_balance_wei": int(w3.eth.get_balance(addr)),
+            }
+            rep_addr = getattr(config, "rep_token_address", "") or ""
+            owner = r["bound_owner"] if int(r["bound_owner"], 16) else out["owner_wallet"]
+            if rep_addr and owner:
+                rep = w3.eth.contract(
+                    address=w3.to_checksum_address(rep_addr),
+                    abi=[{"name": "delegates", "type": "function",
+                          "stateMutability": "view",
+                          "inputs": [{"name": "account", "type": "address"}],
+                          "outputs": [{"name": "", "type": "address"}]}])
+                delegatee = rep.functions.delegates(
+                    w3.to_checksum_address(owner)).call()
+                r["owner_delegatee"] = delegatee
+                r["delegated_to_operator"] = delegatee.lower() == address.lower()
+            return r
+
+        out.update(await self._offload(_reads))
+        return out
+
+    async def _handle_register_operator(self, owner: str = "", owner_sig: str = "",
+                                        self_owned: bool = False) -> dict[str, Any]:
+        """Register the operator key on Substrate, bound to the owner.
+
+        The owner signs the EIP-712 OwnerBinding for the operator address
+        (the same popup as binding an agent); ``self_owned`` signs with the
+        daemon's own owner key instead (server setups). The operator pays
+        the registration gas, so it must be funded first.
+        """
+        from eth_account import Account
+        from .models import AgentIdentity
+        from .on_chain import OnChainService
+        self.runtime.autonet.ensure_network_config()
+        config = self.runtime.autonet.config
+        svc = OnChainService(config)
+        if not svc.available:
+            return {"success": False,
+                    "error": "On-chain not configured (missing substrate_address or rpc_url)"}
+        key = self._operator_key()
+        address = Account.from_key(key).address
+        try:
+            w3 = svc._get_web3()
+            if w3.eth.get_balance(w3.to_checksum_address(address)) == 0:
+                return {"success": False, "mode": "needs_funding",
+                        "error": "Operator address has no gas balance; fund it first.",
+                        "operator": address, "chain_id": config.chain_id}
+        except Exception as e:
+            return {"success": False, "error": f"Could not check operator balance: {e}"}
+        autonet = getattr(self.runtime, "autonet", None)
+        peer_id = self._read_libp2p_peer_id(autonet) if autonet is not None else ""
+        if not peer_id:
+            return {"success": False,
+                    "error": "libp2p host is not up yet; start autonet and retry."}
+        if self_owned and not owner_sig:
+            owner_key = self.runtime.registry.local_owner_key()
+            owner = Account.from_key(owner_key).address
+            nonce = await self._offload(lambda: svc.binding_nonce(address))
+            owner_sig = svc.sign_binding(owner_key, address, "", nonce)
+        if not owner or not owner_sig:
+            return {"success": False,
+                    "error": "registering the operator needs the owner's binding "
+                             "signature (owner + owner_sig) or self_owned"}
+        result = await self._offload(lambda: svc.register_agent_bound(
+            identity=AgentIdentity(address=address),
+            private_key=key,
+            peer_id=peer_id,
+            owner=owner,
+            owner_sig=owner_sig,
+            parent="",
+        ))
+        if result.get("success"):
+            result["operator"] = address
         return result
 
     def _imported_sessions(self) -> dict[str, str]:

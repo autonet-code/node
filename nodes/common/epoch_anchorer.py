@@ -263,9 +263,9 @@ class EpochAnchorer:
             mint_blob = encode_agent_mint_blob(agent_mint)
             cid = cid_for_blob(mint_blob)
 
-            # Merkle root over the mint map: agents prove their share
-            # against this when claiming (recordTrainingForEpoch), a
-            # 2-field (agent, amount) leaf.
+            # Merkle root over the mint map: each household's share is
+            # proven against this when claimed (claimFor), a 2-field
+            # (claimant, amount) leaf.
             mint_root = mint_merkle_root(agent_mint)
 
             from .voice_state import epoch_id_cutoff

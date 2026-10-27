@@ -943,6 +943,14 @@ class AutonetBridge:
                 self._autonet_config.blockchain.chain_id = self.config.chain_id
             if self.config.private_key:
                 self._autonet_config.blockchain.private_key = self.config.private_key
+            elif self._agent_registry is not None:
+                # No configured daemon key: the vault-held operator key
+                # anchors, votes and claims (Decision 2026-10-27).
+                try:
+                    self._autonet_config.blockchain.private_key = (
+                        self._agent_registry.operator_key())
+                except Exception as e:
+                    log.warning("operator key unavailable: %s", e)
             # Contract addresses: the atn side resolved them at join (packaged
             # registry, ATN_REGISTRY_URL or a launched jurisdiction's DAO
             # Registry), so its values win over the node's packaged seed.
@@ -1157,6 +1165,7 @@ class AutonetBridge:
             ok = service.attach_chain_submission(
                 agent_chain_resolver=self._build_agent_chain_resolver(),
                 blob_resolver=blob_resolver,
+                owner_wallet=getattr(self.config, "owner_wallet", "") or "",
             )
             if ok:
                 log.info(

@@ -95,8 +95,8 @@ def main():
     #
     # Easier: skip the blob-resolution dance and check the contract's
     # idempotency directly. mintForEpoch should already have a value;
-    # try to submit ANY positive amount via recordTrainingForEpoch
-    # for this (agent, epoch_id) and confirm the contract rejects it.
+    # try to claim ANY positive amount via claimFor for this
+    # (claimant, epoch_id) and confirm the contract rejects it.
     eid_hash = epoch_id_hash(target_epoch_id)
     existing = contract.functions.mintForEpoch(addr_a, eid_hash).call()
     print(f"mintForEpoch (existing): {existing}")
@@ -106,9 +106,9 @@ def main():
 
     print("attempting duplicate submission directly via contract...")
     try:
-        tx = contract.functions.recordTrainingForEpoch(
+        tx = contract.functions.claimFor(
+            addr_a,    # claimant
             existing,  # ATN amount (any positive value)
-            existing,  # repAmount (v4.1) — <= amount; equal here
             eid_hash,
             [],        # empty merkle proof — we expect a revert regardless
         ).build_transaction({

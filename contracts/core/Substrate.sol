@@ -23,12 +23,14 @@ import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol
 ///      agent_mint_cid, payload_hash). The chain verifies the anchor
 ///      links into the chain correctly and rejects forgeries.
 ///
-///   2. **Agent training records** — registered agents read their
-///      authoritative mint from the off-chain agent_mint blob (CID is
-///      on chain), then call recordTrainingForEpoch(amount, epochId)
-///      from their own keypair. The contract dedupes per (agent,
-///      epochId), binds the record to a real anchored epoch, mints ATN,
-///      and accumulates the per-agent tool-pool earnings ledger.
+///   2. **Household mint claims** — the close keys each mint leaf by a
+///      household's owner wallet (Decision 2026-10-27). Anyone (the
+///      household's daemon operator, typically) reads the authoritative
+///      mint from the off-chain agent_mint blob (CID is on chain) and
+///      calls claimFor(owner, amount, epochIdHash, proof). The contract
+///      dedupes per (claimant, epoch), binds the claim to a real
+///      anchored epoch, mints ATN to the owner, and accumulates its
+///      tool-pool earnings ledger.
 ///
 /// Substrate is a PURE MONEY contract (Decision 2026-07-10, fees-only
 /// emission + REP-from-earnings): it moves ATN, takes the service fee,
@@ -57,15 +59,15 @@ import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol
 /// 1. Once: ``registerAgentBound(peerId, owner, parent, sig)``. Sets
 ///    msg.sender as an active agent, bound to its owner wallet.
 ///
-/// 2. Per epoch close it minted in:
+/// 2. Per epoch close its household minted in (any submitter):
 ///      a. Off-chain: read EpochAnchored event for the epoch_id.
 ///      b. Off-chain: fetch agent_mint blob via the cid.
-///      c. Off-chain: decode own mint amount, scale to uint256, and
-///         build the merkle proof from the full mint map.
-///      d. On-chain: ``recordTrainingForEpoch(amount, epochIdHash,
-///         proof)``. Reverts if (msg.sender, epochIdHash) already
-///         submitted, or if (msg.sender, amount) doesn't verify
-///         against the anchor's agentMintRoot.
+///      c. Off-chain: decode the owner's mint amount, scale to uint256,
+///         and build the merkle proof from the full mint map.
+///      d. On-chain: ``claimFor(owner, amount, epochIdHash, proof)``.
+///         Reverts if (owner, epochIdHash) was already claimed, or if
+///         (owner, amount) doesn't verify against the anchor's
+///         agentMintRoot.
 ///
 /// 3. Anytime: read ``agentMintTotal(address)`` for cumulative earnings
 ///    or ``mintForEpoch(address, bytes32)`` for per-epoch.
@@ -127,8 +129,8 @@ contract Substrate is EIP712 {
         address submitter;
         uint256 blockNumber;
         uint256 timestamp;
-        // Merkle root over (agent address, scaled ATN amount) leaves for
-        // this epoch. recordTrainingForEpoch verifies the caller's claim
+        // Merkle root over (owner wallet, scaled ATN amount) leaves for
+        // this epoch. claimFor verifies each claim
         // against it — the mint amount is federation-ratified, not
         // self-reported. Money-only leaf (Decision 2026-07-10): REP is a
         // DAO-side function of ratified earnings, so nothing about voice
@@ -139,7 +141,7 @@ contract Substrate is EIP712 {
         // order exact). mintPool = the PREVIOUS anchor's windowBurned: the
         // fees-only pool this epoch may mint (lag-1, the same window the
         // daemon close prices from; voice_state reads it from here).
-        // minted = cumulative recordTrainingForEpoch amounts for this epoch,
+        // minted = cumulative claimFor amounts for this epoch,
         // capped at mintPool. Appended last so prior tuple indexes hold.
         uint256 windowBurned;
         uint256 mintPool;
@@ -258,7 +260,7 @@ contract Substrate is EIP712 {
     ///         AnchorElection) only: the call arrives through a DAO decision.
     /// @param agentMintRoot Merkle root over the epoch's
     ///        (agent, scaledAmount) mint map; sorted-pair hashing,
-    ///        double-hashed leaves (see recordTrainingForEpoch).
+    ///        double-hashed leaves (see claimFor).
     /// @param cutoff The epoch's cutoff: after the latest one and not in
     ///        the future.
     function anchor(
@@ -842,7 +844,7 @@ contract Substrate is EIP712 {
 
     /// @dev Cumulative tool-pool mint for each agent — the CUMULATIVE
     ///      TOOL-POOL EARNINGS LEDGER (money), monotonic, one write site
-    ///      (recordTrainingForEpoch). This is NOT reputation: under the
+    ///      (claimFor). This is NOT reputation: under the
     ///      fees-only / REP-from-earnings decision (2026-07-10) Substrate
     ///      mints no reputation. REP lives DAO-side (RepToken) as pull
     ///      claims on this ledger at a hardcoded 1:1 — tool authors claim
@@ -873,59 +875,58 @@ contract Substrate is EIP712 {
     error MintProofInvalid(bytes32 epochIdHash);
     error EpochPoolExceeded(bytes32 epochIdHash, uint256 pool, uint256 mintedAfter);
 
-    /// @notice Record this agent's authoritative mint for an
-    ///         already-anchored epoch.
-    /// @dev    Per-(agent, epochIdHash) idempotent. The epoch must
-    ///         have been anchored via submitAnchor() first — this
-    ///         binds the record to a federation-ratified close. The
-    ///         ATN ``amount`` is NOT self-reported: it must verify
-    ///         against the anchor's agentMintRoot, so the only
-    ///         claimable ATN amount is the one the federation ratified.
+    /// @notice Claim a household's authoritative mint for an
+    ///         already-anchored epoch, on its behalf.
+    /// @dev    Permissionless (Decision 2026-10-27, the owner wallet
+    ///         claims): anyone may submit, typically the household's
+    ///         daemon operator key paying the gas. The leaf commits
+    ///         (claimant, amount), so the merkle proof fixes the amount
+    ///         and the ATN can only go to ``claimant``, the household's
+    ///         owner wallet. Per-(claimant, epochIdHash) idempotent. The
+    ///         epoch must have been anchored first, binding the claim to a
+    ///         federation-ratified close.
     ///
     ///         Money-only leaf (Decision 2026-07-10, fees-only emission +
     ///         REP-from-earnings). This mints ATN ONLY and accrues the
-    ///         tool-pool earnings ledger — it grants NO reputation.
+    ///         tool-pool earnings ledger; it grants NO reputation.
     ///         Reputation is a pure DAO-side function of ratified
-    ///         earnings (RepToken claims 1:1 on agentMintTotal), so there
-    ///         is nothing about voice to commit or mint here. You cannot
-    ///         lie about REP because you cannot lie about the ATN this
-    ///         proof forces you to have provably received.
-    /// @param amount The ATN (money) mint, integer-scaled (default ×1e6
-    ///               at the agent-side submitter, see Phase 5.6 docs).
+    ///         earnings (REP claims 1:1 on agentMintTotal), so there is
+    ///         nothing about voice to commit or mint here.
+    /// @param claimant The household owner wallet the leaf names.
+    /// @param amount The ATN (money) mint, integer-scaled (default x1e6
+    ///               at the submitter, see Phase 5.6 docs).
     /// @param epochIdHash keccak256 of the epoch_id string.
     /// @param proof Merkle proof for the leaf
     ///              keccak256(bytes.concat(keccak256(abi.encode(
-    ///              msg.sender, amount)))) under the anchor's
+    ///              claimant, amount)))) under the anchor's
     ///              agentMintRoot (sorted-pair hashing; a single-leaf
     ///              tree has root == leaf and an empty proof).
-    function recordTrainingForEpoch(
+    function claimFor(
+        address claimant,
         uint256 amount,
         bytes32 epochIdHash,
         bytes32[] calldata proof
     ) external {
-        if (!isLive(msg.sender)) revert AgentNotActive();
         string storage epochId = epochIdByHash[epochIdHash];
         if (bytes(epochId).length == 0) {
             revert EpochNotAnchored(epochIdHash);
         }
-        if (mintForEpoch[msg.sender][epochIdHash] != 0) {
+        if (mintForEpoch[claimant][epochIdHash] != 0) {
             revert AlreadySubmittedForEpoch(epochIdHash);
         }
-        // Allow zero submissions to be skipped silently — the agent
-        // had no mint share for this epoch but may still want a
-        // marker on chain. Here we treat zero as a no-op (no event,
-        // no state change). Zero shares are not in the mint tree.
+        // Zero shares are not in the mint tree: a no-op (no event, no
+        // state change).
         if (amount == 0) {
             return;
         }
 
         bytes32 root = anchors[anchorIndexByEpochId[epochId] - 1].agentMintRoot;
         if (root == bytes32(0)) revert MintRootMissing(epochIdHash);
-        // Money-only leaf: commits (agent, amount). Same double-hashed
+        // Money-only leaf: commits (claimant, amount). Same double-hashed
         // OpenZeppelin leaf convention (mirrored by
         // nodes/common/mint_merkle.py).
         bytes32 leaf = keccak256(
-            bytes.concat(keccak256(abi.encode(msg.sender, amount)))
+            bytes.concat(keccak256(abi.encode(claimant, amount)))
         );
         if (!_verifyMintProof(proof, root, leaf)) {
             revert MintProofInvalid(epochIdHash);
@@ -944,21 +945,23 @@ contract Substrate is EIP712 {
 
         // Record the ratified per-epoch amount, then accrue the
         // cumulative tool-pool earnings ledger (the DAO's REP claim base).
-        mintForEpoch[msg.sender][epochIdHash] = amount;
-        agentMintTotal[msg.sender] += amount;
+        mintForEpoch[claimant][epochIdHash] = amount;
+        agentMintTotal[claimant] += amount;
         networkMintTotal += amount;
-        agents[msg.sender].totalTrainingMint += amount;
-        agents[msg.sender].trainingSubmissionCount += 1;
+        if (agents[claimant].registeredAt != 0) {
+            agents[claimant].totalTrainingMint += amount;
+            agents[claimant].trainingSubmissionCount += 1;
+        }
 
         // ATN balance is transferable money, minted at the ratified
-        // `amount` — the agent can spend it on inference fees.
-        _mintATN(msg.sender, amount);
+        // `amount` to the household.
+        _mintATN(claimant, amount);
 
         emit TrainingRecorded(
-            msg.sender,
+            claimant,
             epochIdHash,
             amount,
-            agentMintTotal[msg.sender]
+            agentMintTotal[claimant]
         );
     }
 
@@ -996,7 +999,7 @@ contract Substrate is EIP712 {
     // allowance. Deliberately minimal — no name/symbol/decimals/totalSupply
     // (those belong on a wrapper if we ever want a standard ERC20 facade).
     // No external mint or burn function — the only mint path is through
-    // recordTrainingForEpoch. No admin keys.
+    // claimFor. No admin keys.
     // =========================================================================
 
     mapping(address => uint256) private _atnBalance;
@@ -1209,7 +1212,7 @@ contract Substrate is EIP712 {
     // Vault minter (purchased-money rail).
     //
     // ATN has exactly two mint origins: tool-pool EARNINGS via
-    // recordTrainingForEpoch (which also accrues the REP claim ledger),
+    // claimFor (which also accrues the REP claim ledger),
     // and PURCHASED money via mintFromVault (which does not). The two are
     // kept strictly separate on purpose: a holder who buys ATN
     // through the DAO-repo AutonetVault accrues NO service/pool earnings
@@ -1239,7 +1242,7 @@ contract Substrate is EIP712 {
     ///         vaultMinter (AutonetVault from the DAO repo, via a minimal
     ///         IAutonetATN interface).
     /// @dev Mints ATN ONLY — balance, supply, and checkpoints move exactly
-    ///      like the recordTrainingForEpoch mint path, but the earnings
+    ///      like the claimFor mint path, but the earnings
     ///      ledger (agentMintTotal) is deliberately NOT touched: this is
     ///      purchased money, not earned revenue, so it grants no REP claim
     ///      (Decision 2026-07-10). If vaultMinter is the zero address the

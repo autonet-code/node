@@ -192,9 +192,13 @@ def test_pool_floored_close_claims_fully_and_conserves(chain):
     total = 0
     for addr, amount in mint_leaves(mint):
         proof = mint_merkle_proof(mint, addr)
-        tx = c.functions.recordTrainingForEpoch(amount, eid, proof).transact(
-            {"from": addr, "gas": 1_500_000})
+        # claimFor is permissionless: the deployer (an operator key) sends
+        # every claim; the ATN lands on the leaf's claimant.
+        before = c.functions.balanceOf(addr).call()
+        tx = c.functions.claimFor(addr, amount, eid, proof).transact(
+            {"from": chain["deployer"], "gas": 1_500_000})
         assert w3.eth.wait_for_transaction_receipt(tx).status == 1
+        assert c.functions.balanceOf(addr).call() == before + amount
         total += amount
     assert total <= pool_raw
     assert c.functions.getAnchorByEpochId("e-cons").call()[12] == total

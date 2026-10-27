@@ -3,7 +3,7 @@
 ``Substrate.anchor`` is governor-only (production: the DAO timelock). The
 Python chain tests deploy with an EOA governor (the deployer, eth_tester
 account 0, by default) and anchor directly from it. Every
-``recordTrainingForEpoch`` must also be covered by the on-chain fees-only
+``claimFor`` must also be covered by the on-chain fees-only
 pool, so:
 
   - ``deploy_substrate``: 3-arg constructor (treasury, vaultMinter,

@@ -965,6 +965,52 @@ Closes E2E seam #3 (slug-authored mint with no chain claim path).
    idempotent per (agent, epoch): accrual is retroactively claimable,
    nothing expires.
 
+## Decision (2026-10-27): the owner wallet claims, the daemon operates
+
+Ratified in discussion 2026-10-27. Supersedes item 5 above (the deferred
+owner claim surface) and the per-agent claim it worked around.
+
+1. **The household is the owner wallet, and it is the only claimant.**
+   The close keys every mint leaf by the proven owner of the earning
+   identity (agent → `agentOwner`, pinned like the household damping
+   reads), summed per owner. Owner-authored tools (author `user` → the
+   owner wallet) are no longer stranded. ATN lands on the owner; agents
+   are funded by their owner, as "the human owns the wallet" says.
+2. **Claims are permissionless.** `claimFor(owner, amount, epochIdHash,
+   proof)` replaces the agent-only `recordTrainingForEpoch`: anyone may
+   submit it, the merkle proof fixes the amount and the ATN can only go
+   to `owner`. The daemon submits it and pays the gas, so automatic
+   claiming survives without the daemon holding the owner key. Still
+   idempotent per (claimant, epoch).
+3. **REP follows the ATN.** REP is claimed 1:1 on an address's ratified
+   earnings, so the owner holds the household's REP. The REP claim's
+   agent-only gate is dropped; REP for an agent's service earnings is
+   minted to that agent's owner. Agents still receive service ATN to
+   spend.
+4. **The daemon operator key.** Once an owner wallet is associated, the
+   daemon generates its own key and registers it on Substrate, bound to
+   the owner. It is not an agent: no fleet entry, no model, no earnings.
+   It proposes the daemon's close when drawn, votes, and submits claims.
+   AnchorElection keeps its `isLive` gate, so only addresses with a
+   registered daemon are drawn as proposers.
+5. **Voting power by delegation.** The owner delegates REP votes to the
+   operator key once, in werule's user section (revocable there). The
+   draw and the governor both count delegated votes, so the operator is
+   drawn and votes with the household's REP. Owners may instead give the
+   daemon their own key (server setups). An undelegated owner can still
+   vote directly in werule but is never drawn as a proposer. Shares stay
+   with the owner; the daemon is the proxy voter.
+6. **Wallet before registration is a daemon rule, not a chain rule.** The
+   chain only checks that some address signed as owner; a throwaway key
+   works, so an agent bound to a fake owner is a household of one. That
+   is priced by the per-household damping and REP weighting, not
+   prevented. The daemon and app do not offer on-chain registration
+   before an owner wallet is configured.
+
+**FLAG-DAY:** the mint leaves change (keyed by owner), the claim ABI
+changes (`claimFor`), and the REP claim rail changes. Every daemon must
+run the new build on a fresh Substrate before the next close.
+
 ## Doctrine (2026-07-08): the capability ratchet and the absorption frontier
 
 Two dynamics, ratified in discussion, that together carry the

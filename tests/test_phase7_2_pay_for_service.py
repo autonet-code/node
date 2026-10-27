@@ -150,9 +150,13 @@ def _give_agent_some_atn(chain_fixture, agent_id: str, agent_addr: str) -> int:
     resolver = InMemoryBlobResolver()
     resolver.put(s.agent_mint_blob)
 
+    # Decision 2026-10-27: the household (here the self-owned agent) is
+    # the claimant, keyed lowercase; the deployer submits as operator.
     submitter = AuthoritativeChainSubmitter(
-        agent_id=agent_id, agent_address=agent_addr, resolver=resolver,
+        claimant_id=str(agent_id).lower(), claimant_address=agent_addr,
+        resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain_fixture["addr"]),
+        sender_address=deployer,
         web3=w3, substrate_abi=chain_fixture["abi"],
     )
     sub = submitter.submit_for_epoch(epoch_id)

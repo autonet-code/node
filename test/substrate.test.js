@@ -46,7 +46,7 @@ describe("Substrate — fees-only emission + REP-from-earnings (2026-07-10)", fu
   // -------------------------------------------------------------------------
   // Money-only merkle leaf round-trip.
   // -------------------------------------------------------------------------
-  describe("recordTrainingForEpoch (money-only 2-field leaf)", function () {
+  describe("claimFor (household claimant, money-only 2-field leaf)", function () {
     let substrate;
     beforeEach(async function () {
       substrate = await deployWith(deployer.address, ZERO, ZERO);
@@ -65,7 +65,7 @@ describe("Substrate — fees-only emission + REP-from-earnings (2026-07-10)", fu
       await expect(
         substrate
           .connect(agentA)
-          .recordTrainingForEpoch(amount, digest(epochId), [])
+          .claimFor(agentA.address, amount, digest(epochId), [])
       )
         .to.emit(substrate, "TrainingRecorded")
         .withArgs(agentA.address, digest(epochId), amount, amount);
@@ -77,7 +77,36 @@ describe("Substrate — fees-only emission + REP-from-earnings (2026-07-10)", fu
       expect(await substrate.mintForEpoch(agentA.address, digest(epochId))).to.equal(amount);
     });
 
-    it("two-leaf tree: each agent verifies with the sibling as proof", async function () {
+    it("anyone may submit; the ATN goes to the unregistered owner wallet the leaf names", async function () {
+      // `payer` is a bare owner wallet (never registered on Substrate);
+      // `submitter` is the daemon operator paying the gas.
+      const amount = 250_000n;
+      const epochId = "epoch-owner";
+      await genesisAnchor(substrate, submitter, epochId, mintLeaf(payer.address, amount));
+      const before = await substrate.balanceOf(submitter.address);
+      await expect(
+        substrate.connect(submitter).claimFor(payer.address, amount, digest(epochId), [])
+      )
+        .to.emit(substrate, "TrainingRecorded")
+        .withArgs(payer.address, digest(epochId), amount, amount);
+      expect(await substrate.balanceOf(payer.address)).to.equal(amount);
+      expect(await substrate.balanceOf(submitter.address)).to.equal(before);
+      expect(await substrate.agentMintTotal(payer.address)).to.equal(amount);
+      expect(await substrate.agentMintTotal(submitter.address)).to.equal(0n);
+      // An unregistered claimant gets no Agent struct entry.
+      expect((await substrate.agents(payer.address)).registeredAt).to.equal(0n);
+    });
+
+    it("a submitter cannot redirect a leaf to itself", async function () {
+      const amount = 400_000n;
+      const epochId = "epoch-steal";
+      await genesisAnchor(substrate, submitter, epochId, mintLeaf(payer.address, amount));
+      await expect(
+        substrate.connect(submitter).claimFor(submitter.address, amount, digest(epochId), [])
+      ).to.be.revertedWithCustomError(substrate, "MintProofInvalid");
+    });
+
+    it("two-leaf tree: each claimant verifies with the sibling as proof", async function () {
       const amtA = 700_000n;
       const amtB = 300_000n;
       const leafA = mintLeaf(agentA.address, amtA);
@@ -87,13 +116,13 @@ describe("Substrate — fees-only emission + REP-from-earnings (2026-07-10)", fu
 
       await genesisAnchor(substrate, submitter, epochId, root);
 
-      // agentA proves with leafB as its sibling.
+      // Both claimed by one submitter; each proves with its sibling.
       await substrate
-        .connect(agentA)
-        .recordTrainingForEpoch(amtA, digest(epochId), [leafB]);
+        .connect(submitter)
+        .claimFor(agentA.address, amtA, digest(epochId), [leafB]);
       await substrate
-        .connect(agentB)
-        .recordTrainingForEpoch(amtB, digest(epochId), [leafA]);
+        .connect(submitter)
+        .claimFor(agentB.address, amtB, digest(epochId), [leafA]);
 
       expect(await substrate.balanceOf(agentA.address)).to.equal(amtA);
       expect(await substrate.balanceOf(agentB.address)).to.equal(amtB);
@@ -108,25 +137,30 @@ describe("Substrate — fees-only emission + REP-from-earnings (2026-07-10)", fu
       await expect(
         substrate
           .connect(agentA)
-          .recordTrainingForEpoch(amount + 1n, digest(epochId), [])
+          .claimFor(agentA.address, amount + 1n, digest(epochId), [])
       ).to.be.revertedWithCustomError(substrate, "MintProofInvalid");
     });
 
-    it("double submit for the same epoch reverts", async function () {
+    it("double claim for the same epoch reverts, whoever submits", async function () {
       const amount = 123_456n;
       const epochId = "epoch-dup";
       const root = mintLeaf(agentA.address, amount);
       await genesisAnchor(substrate, submitter, epochId, root);
-      await substrate.connect(agentA).recordTrainingForEpoch(amount, digest(epochId), []);
+      await substrate.connect(agentA).claimFor(agentA.address, amount, digest(epochId), []);
       await expect(
-        substrate.connect(agentA).recordTrainingForEpoch(amount, digest(epochId), [])
+        substrate.connect(submitter).claimFor(agentA.address, amount, digest(epochId), [])
       ).to.be.revertedWithCustomError(substrate, "AlreadySubmittedForEpoch");
+      expect(await substrate.hasSubmittedForEpoch(agentA.address, digest(epochId))).to.equal(true);
     });
 
     it("unanchored epoch reverts", async function () {
       await expect(
-        substrate.connect(agentA).recordTrainingForEpoch(1n, digest("nope"), [])
+        substrate.connect(agentA).claimFor(agentA.address, 1n, digest("nope"), [])
       ).to.be.revertedWithCustomError(substrate, "EpochNotAnchored");
+    });
+
+    it("the agent-only recordTrainingForEpoch is gone", async function () {
+      expect(substrate.interface.hasFunction("recordTrainingForEpoch")).to.equal(false);
     });
   });
 

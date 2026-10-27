@@ -8,9 +8,9 @@
 > - **`Substrate.sol`**: constitutional core, covering epoch anchoring
 >   (`anchor`, governor-only: the DAO timelock executes it as a proposal,
 >   Decision 2026-10-16), agent registry (`registerAgent`/`updatePeerId`/
->   `updateEndpoint`), money-only training records
->   (`recordTrainingForEpoch(amount, epochIdHash, proof)`, 2-field merkle
->   leaf), ATN token (transferable, only mint path, no admin keys), and
+>   `updateEndpoint`), money-only household mint claims
+>   (`claimFor(claimant, amount, epochIdHash, proof)`, permissionless,
+>   2-field merkle leaf keyed by the owner wallet, Decision 2026-10-27), ATN token (transferable, only mint path, no admin keys), and
 >   service payments (`payForService`). No reputation surface: REP is
 >   claimed DAO-side (RepToken, 1:1 on ATN earnings).
 > - **`ServiceMarket.sol`**: remote-API market (registry + EIP-712 payment
