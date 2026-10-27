@@ -9,11 +9,13 @@ Spec
 
 The authoritative payload is a dict with these fields, in this order:
 
-  1. schema:           int (currently 5)
+  1. schema:           int (currently 6)
   2. epoch_id:         str
   3. epoch_root:       64-char lowercase hex string (sha256 digest)
   4. prev_epoch_root:  64-char lowercase hex string (sha256 digest)
-  5. agent_mint:       dict[str, str] — agent_id -> fixed-format float string
+  5. agent_mint:       dict[str, str] — claimant -> fixed-format float string.
+                       From schema 6 the claimant is the household's
+                       lowercase owner wallet (Decision 2026-10-27).
   6. agent_novelty:    dict[str, str] — agent_id -> fixed-format float string
   7. total_mint:       fixed-format float string
   8. total_novelty:    fixed-format float string
@@ -100,7 +102,7 @@ from typing import Any, Dict, List, Tuple
 # ``agent_rep`` key (REP is claimed DAO-side now, never anchored). Schema 2
 # was the v4.1 era (3-field merkle leaf + agent_rep blob key); bumped so the
 # blob shape change is explicit, not silently reusing a different-shape number.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_DECIMALS = 10
 
 # The fixed top-level field order. Encoding will lay these out in
@@ -221,8 +223,8 @@ def encode_agent_mint_blob(
 
     Format:
       {
-        "schema": 5,
-        "agent_mint": {agent_id: float-as-str (sorted keys)}
+        "schema": 6,
+        "agent_mint": {claimant: float-as-str (sorted keys)}
       }
 
     Decision 2026-07-10 (money only): the v4.1 decoupled ``agent_rep``

@@ -247,8 +247,8 @@ def test_payload_encodes_carry_cid_charter_and_sanctions_schema_5():
     raw = encode_authoritative_payload(
         payload, epoch_id="e1", epoch_root_hex=ROOT_B, prev_epoch_root_hex=ROOT_A)
     decoded = json.loads(raw)
-    assert SCHEMA_VERSION == 5
-    assert decoded["schema"] == 5
+    assert SCHEMA_VERSION == 6
+    assert decoded["schema"] == 6
     assert decoded["carry_cid"] == "cc" * 32
     assert list(decoded)[-4:] == [
         "world_cid", "carry_cid", "charter_hash", "sanctioned_households"]
@@ -337,12 +337,14 @@ def network(chain, tmp_path):
         anchorer=anchorer,
     )
     # eth_tester-wired submitter (empty private_key = unlocked-account
-    # path); the agent has no mint, so it never sends a record tx.
-    csd._submitter_cache[signer.address] = AuthoritativeChainSubmitter(
-        agent_id=signer.address, agent_address=signer.address,
+    # path), cached under the lowercase claimant the driver looks up; the
+    # household has no mint, so it never sends a claim tx.
+    csd._submitter_cache[signer.address.lower()] = AuthoritativeChainSubmitter(
+        claimant_id=signer.address.lower(), claimant_address=signer.address,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(
             substrate_address=chain["addr"], private_key=""),
+        sender_address=chain["deployer"],
         web3=chain["w3"], substrate_abi=chain["abi"],
     )
 
@@ -446,7 +448,7 @@ def test_fetch_reports_anchor_and_carry(network):
         network["chain"]["contract"], network["resolver"])
     assert fetch.status == "ok"
     assert fetch.epoch_id == "e3"
-    assert fetch.payload_schema == 5
+    assert fetch.payload_schema == 6
     assert fetch.carry == {
         k: json.loads(json.dumps(v))
         for k, v in network["always_on"].carry_over_maps().items()

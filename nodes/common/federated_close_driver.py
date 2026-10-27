@@ -1026,15 +1026,13 @@ class FederatedCloseDriver:
             )
             return None
 
-        # MONEY-ONLY CONTRACT SEAM (Decision 2026-07-10). ``close_result``
-        # carries ``agent_mint`` and the ``authoritative_payload`` (schema 3)
-        # commits it on a 2-field (agent, amount) merkle leaf. The per-agent
-        # submitter (nodes/common/authoritative_submitter.py — owned by the
-        # contract agent) reads agent_mint from the anchored payload/blob and
-        # calls ``record_training_for_epoch(private_key, amount,
-        # epoch_id_hash, proof)`` /
-        # ``recordTrainingForEpoch(amount, epochIdHash, proof)``. REP is no
-        # longer minted on this path — it is claimed DAO-side (RepToken) on
+        # MONEY-ONLY CONTRACT SEAM. ``close_result`` carries ``agent_mint``,
+        # keyed by household claimant (schema 6, Decision 2026-10-27), and
+        # the ``authoritative_payload`` commits it on a 2-field
+        # (claimant, amount) merkle leaf. The household submitter
+        # (nodes/common/authoritative_submitter.py) reads it from the
+        # anchored blob and calls ``claimFor(claimant, amount, epochIdHash,
+        # proof)`` with the daemon operator key. REP is claimed DAO-side on
         # ratified ATN earnings. This driver does not itself call the chain.
 
         # Advance + persist the tool-registration carry-over for the

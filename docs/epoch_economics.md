@@ -191,19 +191,20 @@ Implementation state (2026-06-11):
 
 Mint amounts are no longer self-reported. `anchor` (governor-only since
 2026-10-16) commits
-`agentMintRoot`, a merkle root over the epoch's `(agent address,
+`agentMintRoot`, a merkle root over the epoch's `(claimant address,
 scaled amount)` map (sorted-pair hashing, double-hashed leaves,
-OZ-compatible), and `recordTrainingForEpoch(amount, epochIdHash,
-proof)` verifies the caller's leaf against it. Anchors with no
+OZ-compatible); the claimant is the household's owner wallet (Decision
+2026-10-27). `claimFor(claimant, amount, epochIdHash, proof)`, which
+anyone may submit, verifies that leaf against it. Anchors with no
 claimable entries carry the zero root; the contract rejects all
 nonzero claims against those (`MintRootMissing`).
 
-The leaf is MONEY-ONLY: `keccak256(abi.encode(agent, amount))`, 2
+The leaf is MONEY-ONLY: `keccak256(abi.encode(claimant, amount))`, 2
 fields. (The v4.1 build briefly used a 3-field `(agent, amount,
 repAmount)` leaf; the fees-only decision 2026-07-10 reverted it, since
 REP is now a DAO-side function of ratified earnings and nothing about
 voice is committed on the close path. See `nodes/common/mint_merkle.py`
-and `Substrate.recordTrainingForEpoch`.)
+and `Substrate.claimFor`.)
 
 Python side: `nodes/common/mint_merkle.py` (tree/proof/scaling:
 both the anchorer and the agent submitter MUST route the float→int

@@ -90,7 +90,7 @@ describe("Substrate governor-only anchoring + conservation", function () {
       const f = await anchorFields(substrate, "e1", mintLeaf(a1.address, 1n));
       await anchorTx(substrate, gov, f);
       await expect(
-        substrate.connect(a1).recordTrainingForEpoch(1n, digest("e1"), [])
+        substrate.connect(a1).claimFor(a1.address, 1n, digest("e1"), [])
       ).to.be.revertedWithCustomError(substrate, "EpochPoolExceeded");
     });
 
@@ -114,8 +114,8 @@ describe("Substrate governor-only anchoring + conservation", function () {
       const anchor = await substrate.getAnchorByEpochId("e2");
       expect(anchor.mintPool).to.equal(12_500n);
 
-      await substrate.connect(a1).recordTrainingForEpoch(12_000n, digest("e2"), [l2]);
-      await expect(substrate.connect(a2).recordTrainingForEpoch(600n, digest("e2"), [l1]))
+      await substrate.connect(a1).claimFor(a1.address, 12_000n, digest("e2"), [l2]);
+      await expect(substrate.connect(a2).claimFor(a2.address, 600n, digest("e2"), [l1]))
         .to.be.revertedWithCustomError(substrate, "EpochPoolExceeded")
         .withArgs(digest("e2"), 12_500n, 12_600n);
       expect((await substrate.getAnchorByEpochId("e2")).minted).to.equal(12_000n);
@@ -131,8 +131,8 @@ describe("Substrate governor-only anchoring + conservation", function () {
       const root = ethers.keccak256(ethers.solidityPacked(["bytes32", "bytes32"], [lo, hi]));
       const f = await anchorFields(substrate, "h1", root);
       await anchorTx(substrate, gov, f);
-      await substrate.connect(a1).recordTrainingForEpoch(half, digest("h1"), [l2]);
-      await substrate.connect(a2).recordTrainingForEpoch(rest, digest("h1"), [l1]);
+      await substrate.connect(a1).claimFor(a1.address, half, digest("h1"), [l2]);
+      await substrate.connect(a2).claimFor(a2.address, rest, digest("h1"), [l1]);
       expect(await substrate.networkMintTotal()).to.equal(pool);
     });
 

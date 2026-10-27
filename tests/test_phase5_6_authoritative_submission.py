@@ -1,5 +1,10 @@
-"""Phase 5.6: agents read authoritative mint from anchor blob and
-submit on-chain via Substrate.recordTrainingForEpoch.
+"""Phase 5.6: households read authoritative mint from anchor blob and
+claim on-chain via Substrate.claimFor.
+
+Decision 2026-10-27 (the owner wallet claims, the daemon operates): the
+mint map is keyed by household claimant (lowercase), the leaf commits
+(claimant, amount), and the claim is submitted by an operator key (here
+the deployer) that is not the claimant; the ATN lands on the claimant.
 
 This test file is the **architectural successor** to
 ``test_phase5_1_chain_submission.py``. The flip:
@@ -231,9 +236,9 @@ def test_agent_reads_anchor_and_submits_authoritative_mint(chain):
     on-chain mintForEpoch matches the authoritative blob."""
     agent_addrs = chain["agent_addrs"]
     contract = chain["contract"]
-    # Agent ids ARE addresses: the merkle mint proof is keyed by
-    # msg.sender, so claimable mint-map entries must be address-keyed
-    # (matches ChainSubmissionDriver, which uses agent_id=address).
+    # Agent ids ARE addresses: the merkle leaf names the claimant, so
+    # claimable mint-map entries must be address-keyed. No owner map is
+    # given, so each agent is its own household, keyed lowercase.
     agent_ids = list(agent_addrs)
 
     result, epoch_id, resolver = _build_close_and_anchor(chain, agent_ids)
@@ -245,17 +250,19 @@ def test_agent_reads_anchor_and_submits_authoritative_mint(chain):
     ))
 
     # Pick the first agent that actually has mint; submit for it.
-    minting_agent_id = next((aid for aid in agent_ids if expected_blob_mint.get(aid, 0) > 0), None)
-    if minting_agent_id is None:
-        pytest.skip("federated close produced no positive mint for any test agent")
-
-    minting_addr = agent_addrs[agent_ids.index(minting_agent_id)]
+    minting_addr = next((a for a in agent_addrs
+                         if expected_blob_mint.get(a.lower(), 0) > 0), None)
+    assert minting_addr is not None, "close produced no positive mint"
+    minting_agent_id = minting_addr.lower()
+    operator = chain["deployer"]
+    op_balance_before = contract.functions.balanceOf(operator).call()
 
     submitter = AuthoritativeChainSubmitter(
-        agent_id=minting_agent_id,
-        agent_address=minting_addr,
+        claimant_id=minting_agent_id,
+        claimant_address=minting_addr,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=chain["w3"],
         substrate_abi=chain["abi"],
     )
@@ -275,6 +282,9 @@ def test_agent_reads_anchor_and_submits_authoritative_mint(chain):
     on_chain = contract.functions.mintForEpoch(minting_addr, eid_hash).call()
     assert on_chain == expected_scaled, (on_chain, expected_scaled)
     assert contract.functions.agentMintTotal(minting_addr).call() == expected_scaled
+    # The ATN lands on the claimant, not the operator that sent the tx.
+    assert contract.functions.balanceOf(minting_addr).call() == expected_scaled
+    assert contract.functions.balanceOf(operator).call() == op_balance_before
 
 
 # ---------------------------------------------------------------------------
@@ -291,18 +301,18 @@ def test_contract_dedupes_double_submit(chain):
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_idem",
     )
-    minting_agent_id = next(
-        (aid for aid in agent_ids if result["agent_mint"].get(aid, 0) > 0), None,
+    minting_addr = next(
+        (a for a in agent_ids if result["agent_mint"].get(a.lower(), 0) > 0), None,
     )
-    if minting_agent_id is None:
-        pytest.skip("no positive mint for idempotency test")
-    minting_addr = agent_addrs[agent_ids.index(minting_agent_id)]
+    assert minting_addr is not None, "no positive mint for idempotency test"
+    minting_agent_id = minting_addr.lower()
 
     submitter = AuthoritativeChainSubmitter(
-        agent_id=minting_agent_id,
-        agent_address=minting_addr,
+        claimant_id=minting_agent_id,
+        claimant_address=minting_addr,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=chain["w3"],
         substrate_abi=chain["abi"],
     )
@@ -329,17 +339,17 @@ def test_restart_does_not_double_submit(chain):
     result, epoch_id, resolver = _build_close_and_anchor(
         chain, agent_ids, epoch_id="e_restart",
     )
-    minting_agent_id = next(
-        (aid for aid in agent_ids if result["agent_mint"].get(aid, 0) > 0), None,
+    minting_addr = next(
+        (a for a in agent_ids if result["agent_mint"].get(a.lower(), 0) > 0), None,
     )
-    if minting_agent_id is None:
-        pytest.skip("no positive mint for restart test")
-    minting_addr = agent_addrs[agent_ids.index(minting_agent_id)]
+    assert minting_addr is not None, "no positive mint for restart test"
+    minting_agent_id = minting_addr.lower()
 
     submitter1 = AuthoritativeChainSubmitter(
-        agent_id=minting_agent_id, agent_address=minting_addr,
+        claimant_id=minting_agent_id, claimant_address=minting_addr,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=chain["w3"], substrate_abi=chain["abi"],
     )
     s1 = submitter1.submit_for_epoch(epoch_id)
@@ -348,9 +358,10 @@ def test_restart_does_not_double_submit(chain):
 
     # Pretend the process restarted: brand-new submitter, no memory.
     submitter2 = AuthoritativeChainSubmitter(
-        agent_id=minting_agent_id, agent_address=minting_addr,
+        claimant_id=minting_agent_id, claimant_address=minting_addr,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=chain["w3"], substrate_abi=chain["abi"],
     )
     s2 = submitter2.submit_for_epoch(epoch_id)
@@ -380,25 +391,33 @@ def test_three_agents_each_submit_independently(chain):
     submissions = {}
     for aid, addr_ in zip(agent_ids, agent_addrs):
         sub = AuthoritativeChainSubmitter(
-            agent_id=aid, agent_address=addr_,
+            claimant_id=aid.lower(), claimant_address=addr_,
             resolver=resolver,
             config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+            sender_address=chain["deployer"],
             web3=chain["w3"], substrate_abi=chain["abi"],
         )
         submissions[aid] = sub.submit_for_epoch(epoch_id)
 
     expected = result["agent_mint"]
+    assert set(expected) <= {a.lower() for a in agent_ids}
     network_total_expected = 0
+    n_minted = 0
     for aid, addr_ in zip(agent_ids, agent_addrs):
+        assert submissions[aid].success, submissions[aid].error
         on_chain = contract.functions.mintForEpoch(addr_, eid_hash).call()
-        if aid in expected and expected[aid] > 0:
-            scaled = int(expected[aid] * 1_000_000)
+        key = aid.lower()
+        if expected.get(key, 0) > 0:
+            scaled = int(expected[key] * 1_000_000)
             assert on_chain == scaled, (aid, on_chain, scaled)
+            assert contract.functions.balanceOf(addr_).call() == scaled
             network_total_expected += scaled
+            n_minted += 1
         else:
             # Zero mint: submitter skipped the tx entirely.
             assert on_chain == 0
 
+    assert n_minted > 0
     assert contract.functions.networkMintTotal().call() == network_total_expected
 
 
@@ -428,9 +447,10 @@ def test_tampered_blob_raises_integrity_error(chain):
     resolver._store[real_cid] = b'{"schema":1,"agent_mint":{"alice":"99999999.9999999999"}}'
 
     submitter = AuthoritativeChainSubmitter(
-        agent_id=minting_agent_id, agent_address=minting_addr,
+        claimant_id=minting_agent_id, claimant_address=minting_addr,
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=chain["w3"], substrate_abi=chain["abi"],
     )
     with pytest.raises(BlobIntegrityError):
@@ -449,9 +469,10 @@ def test_missing_blob_returns_clean_failure(chain):
     resolver._store.clear()
 
     submitter = AuthoritativeChainSubmitter(
-        agent_id="alice", agent_address=agent_addrs[0],
+        claimant_id="alice", claimant_address=agent_addrs[0],
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=chain["w3"], substrate_abi=chain["abi"],
     )
     submission = submitter.submit_for_epoch(epoch_id)
@@ -475,10 +496,11 @@ def test_agent_with_zero_mint_skips_chain_call(chain):
     )
     # Use a non-minting agent_id (charlie isn't in the close)
     submitter = AuthoritativeChainSubmitter(
-        agent_id="charlie",
-        agent_address=agent_addrs[2],
+        claimant_id="charlie",
+        claimant_address=agent_addrs[2],
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=chain["w3"], substrate_abi=chain["abi"],
     )
     submission = submitter.submit_for_epoch(epoch_id)
@@ -491,7 +513,7 @@ def test_agent_with_zero_mint_skips_chain_call(chain):
 
 
 # ---------------------------------------------------------------------------
-# Anchor-binding: contract refuses recordTraining for un-anchored epochs
+# Anchor-binding: contract refuses claimFor for un-anchored epochs
 # ---------------------------------------------------------------------------
 
 
@@ -510,9 +532,10 @@ def test_unanchored_epoch_rejected_by_contract(chain):
     fake_cid = resolver.put(fake_blob)
 
     submitter = AuthoritativeChainSubmitter(
-        agent_id="alice", agent_address=agent_addrs[0],
+        claimant_id="alice", claimant_address=agent_addrs[0],
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=chain["deployer"],
         web3=chain["w3"], substrate_abi=chain["abi"],
     )
 

@@ -1,9 +1,10 @@
 """Merkle tree over an epoch's agent mint map.
 
-Counterpart of ``Substrate.recordTrainingForEpoch``'s proof check:
-mint amounts stop being self-reported — the anchor commits a root over
-(agent address, scaled ATN amount) leaves, and each agent proves its own
-leaf when claiming.
+Counterpart of ``Substrate.claimFor``'s proof check: mint amounts are
+never self-reported — the anchor commits a root over (claimant address,
+scaled ATN amount) leaves, and each household's leaf is proven when it is
+claimed. The claimant is the household's owner wallet (Decision
+2026-10-27); anyone may submit the claim.
 
 Money only (Decision 2026-07-10, docs/tool_substrate.md §4): the leaf
 commits the ATN mint alone. REP is no longer minted on the close path —
@@ -27,9 +28,8 @@ conversion the agent-side submitter applies (default 1e6).
 Both sides MUST route through ``scale_mint`` here — a one-ulp float
 disagreement means an unprovable leaf.
 
-Only keys that parse as 0x addresses enter the tree: the contract can
-only verify msg.sender, and non-address agent ids could never claim
-on-chain anyway. Zero ATN shares are excluded (the contract treats zero
+Only keys that parse as 0x addresses enter the tree: non-address agent
+ids could never be paid on-chain anyway. Zero ATN shares are excluded (the contract treats zero
 as a no-op without a proof).
 """
 

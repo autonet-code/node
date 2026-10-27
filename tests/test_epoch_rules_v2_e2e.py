@@ -58,7 +58,8 @@ def _now(w3) -> int:
 
 
 class Daemon:
-    def __init__(self, name, w3, hub, contracts, agents, resolver, tmp):
+    def __init__(self, name, w3, hub, contracts, agents, resolver, tmp,
+                 operator=None, owner_wallet=""):
         sub, gov, el, rep, sub_abi = contracts
         self.name = name
         self.kp = Keypair.generate()
@@ -89,12 +90,16 @@ class Daemon:
         self.close.chain_source = chain_source
         self.close.carry_source = lambda: fetch_carry_over_from_chain(sub, resolver)
         idents = [AgentChainIdentity(a, account_key(w3, a)) for a in agents]
+        # The daemon operator key: anchors, proposes, votes and claims.
+        # Without an explicit one, the first agent's key stands in.
+        op_key = account_key(w3, operator) if operator else idents[0].private_key
         self.chain = ChainSubmissionDriver(
             config=ChainSubmissionConfig(
                 substrate_address=sub.address, chain_id=w3.eth.chain_id,
-                daemon_private_key=idents[0].private_key,
+                daemon_private_key=op_key,
                 governor_address=gov.address,
-                anchor_election_address=el.address),
+                anchor_election_address=el.address,
+                owner_wallet=owner_wallet),
             agent_chain_resolver=lambda: idents,
             blob_resolver=resolver,
             anchorer=EpochAnchorer(
@@ -118,8 +123,11 @@ class Daemon:
         self.chain.tick()
 
 
-@pytest.fixture
-def net(tmp_path):
+def _build_net(tmp_path, households: bool = False):
+    """Two daemons on one chain. ``households`` (Decision 2026-10-27): REP
+    sits only on two owner wallets, which delegate their votes to their
+    daemon's operator key; agents hold no REP. Otherwise every agent holds
+    and self-delegates REP (the pre-decision shape)."""
     hb = _artifact(HOMEBASE)
     names = [i["name"] for i in next(
         f for f in hb["abi"] if f.get("type") == "constructor")["inputs"]]
@@ -135,10 +143,16 @@ def net(tmp_path):
     w3 = Web3(EthereumTesterProvider())
     acc = w3.eth.accounts
     deployer, agents = acc[0], acc[1:5]
+    operators, owners = [acc[1], acc[2]], [acc[5], acc[6]]
     rep = _deploy(w3, rep_art)
-    for a in agents:
-        _tx(w3, rep.functions.mint(a, REP), deployer)
-        _tx(w3, rep.functions.delegate(a), a)
+    if households:
+        for owner, op in zip(owners, operators):
+            _tx(w3, rep.functions.mint(owner, REP), deployer)
+            _tx(w3, rep.functions.delegate(op), owner)
+    else:
+        for a in agents:
+            _tx(w3, rep.functions.mint(a, REP), deployer)
+            _tx(w3, rep.functions.delegate(a), a)
     timelock = _deploy(w3, tl_art, 0, [], ["0x" + "00" * 20], deployer)
     gov = _deploy(w3, hb, rep.address, timelock.address, "Test DAO",
                   1, 3, 0, 4, deployer)
@@ -152,16 +166,39 @@ def net(tmp_path):
     for role in ("PROPOSER_ROLE", "CANCELLER_ROLE"):
         rid = getattr(timelock.functions, role)().call()
         _tx(w3, timelock.functions.grantRole(rid, gov.address), deployer)
-    for i, a in enumerate(agents):
-        assert register_bound(w3, sub, a, f"peer-{i}".encode()).status == 1
-    _travel(w3, 2)
-
     hub = InMemoryHub()
     resolver = InMemoryBlobResolver()
     contracts = (sub, gov, el, rep, sub_art["abi"])
-    a = Daemon("A", w3, hub, contracts, agents[:2], resolver, tmp_path)
-    b = Daemon("B", w3, hub, contracts, agents[2:], resolver, tmp_path)
-    return {"w3": w3, "sub": sub, "a": a, "b": b, "hub": hub}
+    if households:
+        # Operators acc[1], acc[2] and one agent each (acc[3], acc[4]), all
+        # bound to their daemon's owner wallet.
+        for i, (who, owner) in enumerate([(acc[1], owners[0]), (acc[3], owners[0]),
+                                          (acc[2], owners[1]), (acc[4], owners[1])]):
+            assert register_bound(w3, sub, who, f"peer-{i}".encode(),
+                                  owner=owner).status == 1
+        _travel(w3, 2)
+        a = Daemon("A", w3, hub, contracts, [acc[3]], resolver, tmp_path,
+                   operator=operators[0], owner_wallet=owners[0])
+        b = Daemon("B", w3, hub, contracts, [acc[4]], resolver, tmp_path,
+                   operator=operators[1], owner_wallet=owners[1])
+    else:
+        for i, x in enumerate(agents):
+            assert register_bound(w3, sub, x, f"peer-{i}".encode()).status == 1
+        _travel(w3, 2)
+        a = Daemon("A", w3, hub, contracts, agents[:2], resolver, tmp_path)
+        b = Daemon("B", w3, hub, contracts, agents[2:], resolver, tmp_path)
+    return {"w3": w3, "sub": sub, "el": el, "a": a, "b": b, "hub": hub,
+            "operators": operators, "owners": owners}
+
+
+@pytest.fixture
+def net(tmp_path):
+    return _build_net(tmp_path)
+
+
+@pytest.fixture
+def household_net(tmp_path):
+    return _build_net(tmp_path, households=True)
 
 
 def _run(net, until_anchors: int, max_steps: int = 400, publish_every: int = 4):
@@ -231,3 +268,18 @@ def test_a_divergent_epoch_is_rewound_and_the_chain_continues(net):
     full = [sub.functions.getAnchor(i).call() for i in range(head)]
     for prev, cur in zip(full, full[1:]):
         assert bytes(cur[2]) == bytes(prev[1])
+
+
+def test_operators_carry_elections_with_delegated_owner_rep(household_net):
+    """Decision 2026-10-27: REP sits on owner wallets only; each owner
+    delegated its votes to its daemon's operator key. The operators alone
+    are drawn, register the options and vote, so epochs still anchor."""
+    net = household_net
+    w3, sub, el = net["w3"], net["sub"], net["el"]
+    _run(net, until_anchors=2)
+    proposers = {str(log["args"]["proposer"]).lower()
+                 for log in el.events.OptionRegistered.get_logs(from_block=0)}
+    assert proposers, "no option was registered"
+    assert proposers <= {o.lower() for o in net["operators"]}
+    ids = [sub.functions.getAnchor(i).call()[0] for i in range(2)]
+    assert ids == net["a"].closed[:2] == net["b"].closed[:2]

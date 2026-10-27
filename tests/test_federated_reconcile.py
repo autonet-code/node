@@ -554,3 +554,13 @@ def test_evidence_is_close_neutral():
         without_ev["agent_mint"])
     assert json.dumps(with_ev["tool_mint"]) == json.dumps(
         without_ev["tool_mint"])
+
+
+
+def test_household_mint_sums_per_owner_and_keeps_unbound_agents():
+    from nodes.common.federated_reconcile import household_mint
+    mint = {"0xAgentA": 3.0, "0xagentb": 2.0, "0xAgentC": 4.0}
+    owners = {"0xagenta": "0xOWNER1", "0xAgentB": "0xowner1"}
+    assert household_mint(mint, owners, 10) == {"0xagentc": 4.0, "0xowner1": 5.0}
+    assert household_mint(mint, None, 10) == {
+        "0xagenta": 3.0, "0xagentb": 2.0, "0xagentc": 4.0}

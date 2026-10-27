@@ -165,17 +165,28 @@ def _anchor_epoch(fx, agent_ids, epoch_id: str, rpb: str):
 
 
 def _mint_for(fx, result, resolver, epoch_id: str) -> Tuple[str, int]:
-    """Submit recordTrainingForEpoch for the first minting agent;
-    returns (address, scaled amount)."""
+    """Claim (claimFor) the first minting household's share, submitted by
+    a DIFFERENT key (the deployer, standing in for a daemon operator);
+    returns (claimant checksum address, scaled amount). The ATN must land
+    on the claimant, not the sender."""
+    w3, contract = fx["w3"], fx["contract"]
     aid = next(a for a in fx["agent_addrs"]
-               if result["agent_mint"].get(a, 0) > 0)
+               if result["agent_mint"].get(a.lower(), 0) > 0)
+    sender = fx["deployer"]
+    assert sender != aid
+    sender_before = contract.functions.balanceOf(sender).call()
+    claimant_before = contract.functions.balanceOf(aid).call()
     submitter = AuthoritativeChainSubmitter(
-        agent_id=aid, agent_address=aid, resolver=resolver,
+        claimant_id=aid.lower(), claimant_address=aid, resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=fx["addr"]),
-        web3=fx["w3"], substrate_abi=fx["abi"],
+        sender_address=sender, web3=w3, substrate_abi=fx["abi"],
     )
     s = submitter.submit_for_epoch(epoch_id)
-    assert s.success
+    assert s.success, s.error
+    assert s.contribution_scaled > 0
+    assert contract.functions.balanceOf(aid).call() == (
+        claimant_before + s.contribution_scaled)
+    assert contract.functions.balanceOf(sender).call() == sender_before
     return aid, s.contribution_scaled
 
 
@@ -409,9 +420,8 @@ class TestVoiceStateSnapshot:
         assert other.lower() in after["voice_weights"]
 
     def test_owner_wallet_not_agent_has_no_rep_term(self, fx):
-        """Only registered agents contribute REP to a household; a bare
-        owner wallet (not an agent, no OwnerBound) appears in no
-        household."""
+        """A bare wallet that owns no agent (no OwnerBound) appears in no
+        household, whatever REP it holds."""
         w3 = fx["w3"]
         agents = fx["agent_addrs"]
         owner_wallet = w3.eth.accounts[6]     # NOT a registered agent
@@ -425,6 +435,36 @@ class TestVoiceStateSnapshot:
         assert owner_wallet.lower() not in state["voice_weights"]
         # agents[0] holds 500 of the 1000 supply => share 0.5.
         assert state["rep_shares"][agents[0].lower()] == pytest.approx(0.5)
+
+    def test_owner_wallet_own_rep_counts_in_its_household(self, fx):
+        """Decision 2026-10-27: the owner wallet claims, so it holds the
+        household's REP itself. An owner (not a registered agent) bound
+        over an agent gets its OWN REP in that household's share, on top
+        of the agent's."""
+        w3, contract = fx["w3"], fx["contract"]
+        agents = fx["agent_addrs"]
+        owner_wallet = w3.eth.accounts[6]     # NOT a registered agent
+        bound = w3.eth.accounts[5]
+        r = register_bound(w3, contract, bound, b"peer-owned",
+                           owner=owner_wallet)
+        assert r.status == 1
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], owner_wallet, 600)
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], bound, 100)
+        _set_votes(w3, fx["rep_contract"], fx["deployer"], agents[0], 300)
+        _anchor_epoch(fx, agents, "e_ow2", "rpb_ow2")
+
+        state = read_voice_state(
+            fx["addr"], web3=w3, rep_token_address=fx["rep_addr"])
+        assert state["supply"] == 1000
+        assert state["owner_map"][bound.lower()] == owner_wallet.lower()
+        house = owner_wallet.lower()
+        # 600 (owner's own) + 100 (bound agent) of 1000.
+        assert state["rep_shares"][house] == pytest.approx(0.7)
+        assert state["voice_weights"][house] == pytest.approx(
+            VOICE_EPSILON + 0.7)
+        assert state["rep_shares"][agents[0].lower()] == pytest.approx(0.3)
+        # The bound agent is not its own household.
+        assert bound.lower() not in state["rep_shares"]
 
 
 class TestFeeRecycledEmission:

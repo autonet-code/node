@@ -9,7 +9,7 @@ binding (EIP-712), drives a full tool economy through the daemon
 (register -> invoke -> attest), runs the REAL federated epoch close
 fed by the captured substrate events + the owner map READ BACK FROM
 CHAIN, and settles the resulting mint back to the chain (anchor +
-recordTrainingForEpoch). It verifies each hop and prints a
+claimFor, the owner wallet claiming). It verifies each hop and prints a
 stage-by-stage scoreboard, exiting nonzero on any failure.
 
 Run:
@@ -888,14 +888,22 @@ async def amain() -> int:
         # validators must receive NOTHING from this close.
         vetter_addrs = [rt_a.get_agent(v).identity.address
                         for v in ("vetter-1", "vetter-2")]
-        vet_mints = [float(close_result["agent_mint"].get(
-            Web3.to_checksum_address(a), 0)
-            or close_result["agent_mint"].get(a, 0)) for a in vetter_addrs]
+        # Per-agent split (diagnostic); the anchored agent_mint is keyed by
+        # household (Decision 2026-10-27, the owner wallet claims).
+        by_agent = close_result.get("agent_mint_by_agent", {})
+        vet_mints = [float(by_agent.get(Web3.to_checksum_address(a), 0)
+                           or by_agent.get(a, 0)) for a in vetter_addrs]
         assert all(m == 0 for m in vet_mints), (
             "validators must not earn royalty under v4.1 (gate removed)",
-            close_result["agent_mint"])
-        author_agent_mint_raw = float(close_result["agent_mint"].get(author_addr, 0))
+            by_agent)
+        author_agent_mint_raw = float(by_agent.get(author_addr, 0))
         assert author_agent_mint_raw > 0
+        household_raw = float(close_result["agent_mint"].get(owner_a.address.lower(), 0))
+        assert abs(household_raw - author_agent_mint_raw) < 1e-9, (
+            "the author's mint must be keyed by its owner wallet",
+            close_result["agent_mint"])
+        assert author_addr not in close_result["agent_mint"]
+        assert author_addr.lower() not in close_result["agent_mint"]
         # Author keeps the full tool mint (no royalty carved out).
         assert abs(author_agent_mint_raw - author_mint_raw) < 1e-6, (
             author_agent_mint_raw, author_mint_raw)
@@ -905,6 +913,7 @@ async def amain() -> int:
         s5.note("validator_royalty", [round(m, 8) for m in vet_mints])
         s5.note("tool_mint_raw", round(author_mint_raw, 8))
         s5.note("agent_mint_raw", round(author_agent_mint_raw, 8))
+        s5.note("claimant", owner_a.address[:12] + "… (owner A)")
 
         # CONTROL CASE: set caller's owner == author's owner in the map.
         # The chain-fed same-owner exclusion must drop the mint to zero.
@@ -926,7 +935,7 @@ async def amain() -> int:
     # ------------------------------------------------------------------
     # Stage 6 — settlement back to chain
     # ------------------------------------------------------------------
-    s6 = board.stage(6, "settlement (anchor + recordTraining + channel)")
+    s6 = board.stage(6, "settlement (anchor + owner claimFor + channel)")
     try:
         from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
         from nodes.common.authoritative_submitter import (
@@ -943,8 +952,7 @@ async def amain() -> int:
         # The anchor payload needs epoch_id; the driver already set it.
         close_result["epoch_id"] = epoch_id
 
-        earn_before = substrate.functions.agentMintTotal(author_addr).call()
-        atn_before = substrate.functions.balanceOf(author_addr).call()
+        earn_before = substrate.functions.agentMintTotal(owner_a.address).call()
 
         # Anchor as Substrate's governor (account #9; a DAO timelock in
         # production, where the anchor is a DAO proposal). Uses the
@@ -998,27 +1006,37 @@ async def amain() -> int:
         resolver = InMemoryBlobResolver()
         resolver.put(anchor_res.agent_mint_blob)
 
-        # author-1 records its own mint from its own key.
+        # The household's mint is claimed FOR owner A by another key (the
+        # author agent's here, standing in for the daemon operator): the
+        # leaf fixes the amount and the ATN can only go to owner A.
         submitter = AuthoritativeChainSubmitter(
-            agent_id=author_addr, agent_address=author_addr,
+            claimant_id=owner_a.address.lower(),
+            claimant_address=owner_a.address,
             resolver=resolver,
             config=AuthoritativeSubmitterConfig(
                 substrate_address=addresses["substrate"],
                 rpc_url=RPC_URL, chain_id=CHAIN_ID,
-                private_key=author_key))
+                private_key=author_key),
+            sender_address=author_addr)
+        # Read balances right before the claim: owner A is also the dev
+        # treasury, so the seed step's fee share already landed on it.
+        atn_before = substrate.functions.balanceOf(owner_a.address).call()
+        author_atn_before = substrate.functions.balanceOf(author_addr).call()
         sub_res = submitter.submit_for_epoch(epoch_id)
         if not sub_res.success:
-            raise RuntimeError(f"recordTraining failed: {sub_res.error}")
+            raise RuntimeError(f"claimFor failed: {sub_res.error}")
         s6.note("record_tx", (sub_res.tx_hash or "(noop)")[:14] + "…")
         s6.note("scaled_mint", sub_res.contribution_scaled)
 
         # Money only (Decision 2026-07-10): Substrate has no reputation
-        # surface. recordTrainingForEpoch mints ATN and bumps the
-        # cumulative tool-pool earnings counter (agentMintTotal) by the
-        # same amount; REP is claimed DAO-side (RepToken) on these ratified
-        # earnings, not minted here.
-        earn_after = substrate.functions.agentMintTotal(author_addr).call()
-        atn_after = substrate.functions.balanceOf(author_addr).call()
+        # surface. claimFor mints ATN to the owner and bumps its cumulative
+        # tool-pool earnings counter (agentMintTotal) by the same amount;
+        # REP is claimed DAO-side (RepToken) on these ratified earnings.
+        earn_after = substrate.functions.agentMintTotal(owner_a.address).call()
+        atn_after = substrate.functions.balanceOf(owner_a.address).call()
+        # The submitting key received nothing (only paid gas).
+        author_atn_after = substrate.functions.balanceOf(author_addr).call()
+        assert author_atn_after == author_atn_before, (author_atn_before, author_atn_after)
         earn_delta = earn_after - earn_before
         atn_delta = atn_after - atn_before
         s6.note("earnings_delta", earn_delta)

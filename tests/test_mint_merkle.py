@@ -1,7 +1,8 @@
 """Merkle mint proofs: python tree ↔ Substrate.sol verification.
 
-The anchor commits agentMintRoot; recordTrainingForEpoch only accepts
-(msg.sender, amount) pairs that prove into it. Money only (Decision
+The anchor commits agentMintRoot; claimFor only accepts (claimant,
+amount) pairs that prove into it, whoever sends the transaction
+(Decision 2026-10-27: the owner wallet claims, the daemon operates). Money only (Decision
 2026-07-10): the leaf commits the ATN amount alone — REP is claimed
 DAO-side (RepToken) on ratified ATN earnings, not minted on this path.
 These tests pin:
@@ -166,13 +167,16 @@ def _anchor_with_mint(chain, mint: Dict[str, float], epoch_id: str):
     return s
 
 
-def _record(chain, agent, amount, eid_hash, proof):
-    # Money only (Decision 2026-07-10): recordTrainingForEpoch takes
-    # (amount, epochIdHash, proof); the leaf commits (agent, amount).
-    fn = chain["contract"].functions.recordTrainingForEpoch(
-        amount, eid_hash, proof,
+def _record(chain, claimant, amount, eid_hash, proof, sender=None):
+    # Decision 2026-10-27: claimFor(claimant, amount, epochIdHash, proof)
+    # is permissionless; the leaf commits (claimant, amount). Default
+    # sender is the deployer, NOT the claimant, so every claim here also
+    # exercises "anyone may submit".
+    fn = chain["contract"].functions.claimFor(
+        claimant, amount, eid_hash, proof,
     )
-    tx = fn.transact({"from": agent, "gas": 1_500_000})
+    sender = sender or chain["deployer"]
+    tx = fn.transact({"from": sender, "gas": 1_500_000})
     receipt = chain["w3"].eth.wait_for_transaction_receipt(tx)
     return receipt.status == 1
 
@@ -192,9 +196,9 @@ def test_contract_accepts_ratified_amounts(chain):
 
 
 def test_contract_mints_atn_at_amount(chain):
-    """recordTrainingForEpoch mints ATN at the proven amount and bumps
-    agentMintTotal (cumulative tool-pool earnings). No reputation surface
-    exists on the money-only contract."""
+    """claimFor mints ATN at the proven amount to the CLAIMANT (not the
+    sender) and bumps agentMintTotal (cumulative tool-pool earnings). No
+    reputation surface exists on the money-only contract."""
     contract = chain["contract"]
     addrs = chain["agent_addrs"]
     mint = {addrs[0]: 4.0, addrs[1]: 1.0}
@@ -205,9 +209,12 @@ def test_contract_mints_atn_at_amount(chain):
     a = addrs[0]
     amount = scale_mint(mint[a])
     proof = mint_merkle_proof(mint, a)
-    assert _record(chain, a, amount, eid, proof)
+    sender = addrs[2]                    # a third party, not in the mint
+    sender_before = contract.functions.balanceOf(sender).call()
+    assert _record(chain, a, amount, eid, proof, sender=sender)
 
     assert contract.functions.balanceOf(a).call() == amount
+    assert contract.functions.balanceOf(sender).call() == sender_before
     assert contract.functions.atnTotalSupply().call() == supply0 + amount
     assert contract.functions.mintForEpoch(a, eid).call() == amount
     # agentMintTotal = cumulative pool earnings (money).
@@ -238,11 +245,13 @@ def test_contract_rejects_foreign_proof(chain):
     _anchor_with_mint(chain, mint, "e_merkle_foreign")
     eid = epoch_id_hash("e_merkle_foreign")
 
-    # addrs[1] tries to claim addrs[0]'s amount using addrs[0]'s proof.
+    # Claiming addrs[0]'s amount for addrs[1] with addrs[0]'s proof (even
+    # sent by addrs[1]) fails: the leaf binds the claimant.
     proof = mint_merkle_proof(mint, addrs[0])
     rejected = False
     try:
-        ok = _record(chain, addrs[1], scale_mint(1.0), eid, proof)
+        ok = _record(chain, addrs[1], scale_mint(1.0), eid, proof,
+                     sender=addrs[1])
         rejected = not ok
     except Exception:
         rejected = True
@@ -267,22 +276,30 @@ def test_contract_rejects_rootless_anchor_claims(chain):
 
 
 def test_submitter_builds_proof_end_to_end(chain):
-    """Full path: anchor → blob → submitter decodes, proves, claims."""
+    """Full path: anchor → blob → submitter decodes, proves, claims for
+    the household, signed by an operator key that is not the claimant."""
     addrs = chain["agent_addrs"]
-    mint = {addrs[0]: 3.5, addrs[1]: 1.25}
+    contract = chain["contract"]
+    # Schema-6 shape: household claimants keyed lowercase.
+    mint = {addrs[0].lower(): 3.5, addrs[1].lower(): 1.25}
     s = _anchor_with_mint(chain, mint, "e_merkle_sub")
     resolver = InMemoryBlobResolver()
     resolver.put(s.agent_mint_blob)
 
+    operator = chain["deployer"]
+    op_before = contract.functions.balanceOf(operator).call()
     submitter = AuthoritativeChainSubmitter(
-        agent_id=addrs[0], agent_address=addrs[0],
+        claimant_id=addrs[0].lower(), claimant_address=addrs[0],
         resolver=resolver,
         config=AuthoritativeSubmitterConfig(substrate_address=chain["addr"]),
+        sender_address=operator,
         web3=chain["w3"], substrate_abi=chain["abi"],
     )
     sub = submitter.submit_for_epoch("e_merkle_sub")
     assert sub.success, sub.error
     assert sub.contribution_scaled == scale_mint(3.5)
     eid = epoch_id_hash("e_merkle_sub")
-    assert chain["contract"].functions.mintForEpoch(
+    assert contract.functions.mintForEpoch(
         addrs[0], eid).call() == scale_mint(3.5)
+    assert contract.functions.balanceOf(addrs[0]).call() == scale_mint(3.5)
+    assert contract.functions.balanceOf(operator).call() == op_before

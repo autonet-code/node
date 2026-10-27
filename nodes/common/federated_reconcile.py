@@ -1135,7 +1135,7 @@ def federated_reconcile_epoch(
         from .world_model_substrate.reconcile import apply_emission_pool
         result = apply_emission_pool(result, emission_pool)
         # On-chain conservation (2026-10-12): Substrate caps each epoch's
-        # cumulative recordTrainingForEpoch at the integer fee pool, so the
+        # cumulative claimFor at the integer fee pool, so the
         # ratified mints are FLOORED to integer base units whose sum never
         # exceeds it (float rounding could otherwise over-allocate by an
         # ulp and the last claimer would revert).
@@ -1445,6 +1445,16 @@ def federated_epoch_close(
         result["total_mint"] = round(sum(kept.values()), output_decimals)
     result["sanctioned_households"] = sanctioned
     result["withheld_mint"] = dict(sorted(withheld.items()))
+    # The owner wallet claims (Decision 2026-10-27): key each mint by the
+    # earning agent's pinned owner, summed per household. An agent with no
+    # owner entry (bound after the snapshot, or genesis) stays its own
+    # claimant. The per-agent split is kept for diagnostics only.
+    result["agent_mint_by_agent"] = result.get("agent_mint", {}) or {}
+    result["agent_mint"] = household_mint(
+        result["agent_mint_by_agent"], agent_owner_map, output_decimals)
+    # Pool-floored mints are whole base units, so the household sums are
+    # exact and never exceed the pool.
+    result["total_mint"] = round(sum(result["agent_mint"].values()), output_decimals)
 
     result["tool_mint"] = per_digest
     result["tool_registrations"] = tool_result["registrations_next"]
@@ -1482,7 +1492,9 @@ def federated_epoch_close(
         # world_cid) committing the next close's carry-over bundle.
         # schema 5 (Decision 2026-10-26): the encoding also commits
         # charter_hash and sanctioned_households.
-        "schema": 5,
+        # schema 6 (Decision 2026-10-27): agent_mint is keyed by household
+        # claimant (lowercase owner wallet), the leaf claimFor verifies.
+        "schema": 6,
         "epoch_root": result["epoch_root"],
         "agent_mint": result["agent_mint"],
         "agent_novelty": result["agent_novelty"],
@@ -1498,6 +1510,28 @@ def federated_epoch_close(
         "n_events": result["n_events"],
     }
     return result
+
+
+def household_mint(
+    agent_mint: Dict[str, float],
+    agent_owner_map: Optional[Dict[str, str]],
+    output_decimals: int,
+) -> Dict[str, float]:
+    """Re-key a per-agent mint map by household claimant.
+
+    Each agent's amount goes to its owner in the pinned ``agent_owner_map``
+    (lowercased), or to the agent itself when it has none. Keys are
+    lowercase so the merkle leaf and every submitter agree on spelling.
+    Sorted accumulation, then rounding, for the bit-identical guarantee.
+    """
+    owners = {str(k).lower(): str(v).lower()
+              for k, v in (agent_owner_map or {}).items()}
+    out: Dict[str, float] = {}
+    for agent in sorted(agent_mint):
+        a = str(agent).lower()
+        claimant = owners.get(a, a)
+        out[claimant] = out.get(claimant, 0.0) + float(agent_mint[agent])
+    return {k: round(v, output_decimals) for k, v in sorted(out.items())}
 
 
 def _annotate_sender(ev: Dict[str, Any], sender_hex: str) -> Dict[str, Any]:

@@ -885,6 +885,28 @@ class AgentRegistry:
         ks.put_secret(self.LOCAL_OWNER_SECRET, key)
         return key
 
+    OPERATOR_SECRET = "operator-key.local"
+
+    def operator_key(self) -> str:
+        """The daemon operator key (Decision 2026-10-27), made on first use
+        and kept in the vault. Not an agent: it is registered on Substrate
+        bound to the owner so it can be drawn, and it anchors, proposes,
+        votes with the REP the owner delegates to it, and submits the
+        household's claims (paying gas). It never owns earnings."""
+        ks = self._keystore()
+        if ks is None:
+            raise RuntimeError("vault unavailable; cannot hold an operator key")
+        try:
+            key = ks.get_secret(self.OPERATOR_SECRET)
+        except Exception:
+            key = None
+        if key:
+            return key
+        from eth_account import Account
+        key = "0x" + Account.create().key.hex().removeprefix("0x")
+        ks.put_secret(self.OPERATOR_SECRET, key)
+        return key
+
     def get_agent_key(self, agent_id: str) -> str | None:
         """Get the private key for an agent (parent holds child's key)."""
         return self._agent_keys.get(agent_id)

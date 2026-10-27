@@ -31,10 +31,10 @@ pure function over gossiped events; every honest daemon derives
 bit-identical `{agent_mint, tool_positions}`. The chain's role is only
 (a) commitment (a rotating submitter anchors the epoch root,
 hash-chained via `prevEpochRoot`/`prevAnchorHash` so forks are rejected
-on-chain too) and (b) settlement: each agent records its own mint with
-a merkle proof against the anchored root (`recordTrainingForEpoch`,
-2-field money-only leaf, idempotent per (agent, epoch), no admin keys,
-only mint path).
+on-chain too) and (b) settlement: each household's mint is claimed for
+its owner wallet with a merkle proof against the anchored root
+(`claimFor`, permissionless, 2-field money-only leaf, idempotent per
+(claimant, epoch), no admin keys, only mint path).
 
 Consequences:
 

@@ -30,10 +30,11 @@ weight. An agent delegating out keeps its household's weight; an outsider
 delegating in adds none. Governor votes and the anchor election keep
 reading delegated ``getVotes``.
 
-OWNER-WALLET REPUTATION NOTE: there is NO separate owner-wallet term. A
-bare owner wallet that never earned/claimed REP has zero votes; if the
-owner ADDRESS is itself a registered agent it already appears in the
-agent set and its REP is summed into its household there.
+OWNER-WALLET REPUTATION NOTE (Decision 2026-10-27): the owner wallet is
+the household's claimant, so it holds the household's REP. A household's
+REP is the owner's own balance plus its bound agents' balances (agents
+may still hold REP from earlier claims). An owner address that is itself
+a registered agent is counted once, through the agent set.
 
 Determinism contract: every input is derived AS OF the previous epoch's
 anchor (``getAnchor(anchorCount-1)`` — block number for logs, timestamp
@@ -1329,13 +1330,16 @@ def read_voice_state(
             r = _reputation_at(agent)
             agent_rep[agent] = r
             if owner and owner != _ZERO:
-                # Bound agent: REP rolls up to the owner household. NO
-                # separate owner-wallet term — a bare owner never earns REP;
-                # if it is itself a registered agent it is summed via this
-                # loop. See module docstring.
+                # Bound agent: REP rolls up to the owner household.
                 house_rep[owner] = house_rep.get(owner, 0) + r
             else:
                 house_rep[agent] = house_rep.get(agent, 0) + r
+        # The owner wallet's own REP (it claims for the household). An
+        # owner that is itself a registered agent was counted above.
+        agent_set = set(agents)
+        for owner in sorted(set(owner_map.values())):
+            if owner not in agent_set:
+                house_rep[owner] = house_rep.get(owner, 0) + _reputation_at(owner)
 
         # The RAW rep share (no epsilon floor) drives drift weight;
         # voice_weights keeps the epsilon floor for mint bootstrap.

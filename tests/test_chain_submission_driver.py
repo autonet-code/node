@@ -159,7 +159,7 @@ def test_direct_winner_anchors_writes_blob_then_submits_agents(fake_submit):
     assert out["anchored"] is True
     assert out["anchor_tx"] == "0xtx"
     assert driver.blob_resolver.has("cid_xyz") or len(driver.blob_resolver) > 0
-    assert {r["agent_address"] for r in out["agent_submissions"]} == {"0xAAA", "0xBBB"}
+    assert {r["claimant"] for r in out["agent_submissions"]} == {"0xAAA", "0xBBB"}
     driver._governed.build.assert_not_called()
 
 
@@ -177,10 +177,14 @@ def test_per_agent_submitter_cache(fake_submit):
     out2 = driver.handle_federated_close(_fed("e2", is_winner=False))
     assert len(out1["agent_submissions"]) == 2
     assert len(out2["agent_submissions"]) == 2
-    assert set(driver._submitter_cache.keys()) == {"0xAAA", "0xBBB"}
+    # One submitter per claimant, keyed lowercase.
+    assert set(driver._submitter_cache.keys()) == {"0xaaa", "0xbbb"}
 
 
 def test_agent_resolver_filtering(fake_submit):
+    """An agent with no address is skipped. An agent with no private key
+    is still claimed for: the operator key signs claims (Decision
+    2026-10-27), the agent's own key is not needed."""
     agents = [
         AgentChainIdentity(address="0xAAA", private_key="0x" + "a" * 64),
         AgentChainIdentity(address="", private_key="0x" + "b" * 64),
@@ -188,8 +192,32 @@ def test_agent_resolver_filtering(fake_submit):
     ]
     driver = _make_driver(agents=agents)
     out = driver.handle_federated_close(_fed("e1", is_winner=True))
-    assert len(out["agent_submissions"]) == 1
-    assert out["agent_submissions"][0]["agent_address"] == "0xAAA"
+    assert [r["claimant"] for r in out["agent_submissions"]] == ["0xAAA", "0xCCC"]
+
+
+def test_owner_wallet_claimed_and_operator_signs(fake_submit):
+    """The configured owner wallet is claimed for first (deduped against
+    the agents), and every submitter is signed by the operator key, not
+    the claimant's."""
+    from eth_account import Account
+    driver = _make_driver(agents=AGENTS)
+    driver.config.owner_wallet = "0xDDD"
+    out = driver.handle_federated_close(_fed("e1", is_winner=True))
+    assert [r["claimant"] for r in out["agent_submissions"]] == [
+        "0xDDD", "0xAAA", "0xBBB"]
+    op_key = driver.config.daemon_private_key
+    op_addr = Account.from_key(op_key).address
+    for claimant, sub in driver._submitter_cache.items():
+        assert sub.claimant_id == claimant
+        assert sub.sender_address == op_addr
+        assert sub.config.private_key == op_key
+
+
+def test_no_operator_key_skips_claims(fake_submit):
+    driver = _make_driver(agents=AGENTS)
+    driver.config.daemon_private_key = ""
+    assert driver._submit_agents("e1") == []
+    fake_submit.assert_not_called()
 
 
 def test_stale_snapshot_is_never_anchored():

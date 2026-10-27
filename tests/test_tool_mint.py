@@ -249,6 +249,18 @@ class TestToolMintClose:
         assert entry["attesters"] == 1          # only caller-2 counts
         assert entry["mint"] == pytest.approx(math.log1p(1))  # v3 usage-only
 
+    def test_mint_is_keyed_by_owner_wallet(self):
+        """Decision 2026-10-27: the owner wallet claims. The anchored
+        agent_mint names the author's lowercase owner, not the agent."""
+        batches = _standard_batches()
+        owner_map = {AUTHOR: "0xOwnerA", "caller-1": "0xOwnerB",
+                     "caller-2": "0xOwnerC"}
+        result = federated_epoch_close(
+            canonical_order(batches), agent_owner_map=owner_map)
+        assert set(result["agent_mint"]) == {"0xownera"}
+        assert result["agent_mint_by_agent"][AUTHOR] == result["agent_mint"]["0xownera"]
+        assert result["authoritative_payload"]["agent_mint"] == result["agent_mint"]
+
     def test_unknown_owner_is_not_excluded(self):
         """Absent map entries = unknown owner = no exclusion (the map is
         chain-derived; unregistered agents simply aren't in it)."""
@@ -687,7 +699,7 @@ class TestMoneyOnlyMint:
         )
         assert result["agent_mint"].get(AUTHOR, 0) > 0
         assert "agent_rep" not in result
-        assert result["authoritative_payload"]["schema"] == 5
+        assert result["authoritative_payload"]["schema"] == 6
         assert "agent_rep" not in result["authoritative_payload"]
 
 

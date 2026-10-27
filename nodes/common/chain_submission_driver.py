@@ -1,4 +1,4 @@
-"""Chain submission driver — anchor + per-agent mint submission.
+"""Chain submission driver — anchor + household mint claims.
 
 Triggered by ``FederatedCloseDriver`` results (Phase 10.3a). Two
 responsibilities:
@@ -11,16 +11,19 @@ responsibilities:
     network whose Substrate governor is this daemon's own key, the winner
     anchors directly.
 
-  - **Per-agent mint**: for every locally-registered agent (each one
-    holds its own private key + 0x address via the agent registry),
-    construct an ``AuthoritativeChainSubmitter`` and call
-    ``submit_for_epoch(epoch_id)``. The submitter reads the anchor
-    on chain, fetches the blob, decodes the agent's share, and
-    submits ``recordTrainingForEpoch``. Per-agent submission is
-    inherently parallel — every agent does it independently.
+  - **Household claims** (Decision 2026-10-27): the anchored mint is
+    keyed by owner wallet. For each household this daemon serves (the
+    configured owner wallet and the on-chain owners of its registered
+    agents) an ``AuthoritativeChainSubmitter`` reads the anchor, fetches
+    the blob, decodes the household's share and calls ``claimFor``,
+    signed by the daemon operator key (``daemon_private_key``), which
+    pays the gas. The ATN goes to the owner whoever submits.
+
+The daemon operator key also anchors, proposes and votes: the owner
+delegates its REP votes to it.
 
 The anchor blob (off-chain) is written to a ``BlobResolver`` that
-the per-agent submitters read from. For single-process testing an
+the submitters read from. For single-process testing an
 ``InMemoryBlobResolver`` is fine; cross-daemon needs a libp2p-backed
 resolver (Phase 10.3d).
 """
@@ -73,6 +76,9 @@ class ChainSubmissionConfig:
     # The AnchorElection (Decision 2026-10-26). Set => anchors go through
     # single-choice elections (anchor_election.ElectionAnchorer).
     anchor_election_address: str = ""
+    # The household this daemon serves (Decision 2026-10-27). Claimed for
+    # alongside the on-chain owners of the local agents.
+    owner_wallet: str = ""
 
 
 # Resolver: local agent_id (YAML id) -> (address, private_key) or None.
@@ -121,7 +127,7 @@ class ChainSubmissionDriver:
         # Optional shared Web3 for the per-agent submitters (tests and
         # in-process chains); None = each submitter dials config.rpc_url.
         self._submitter_web3 = submitter_web3
-        # Cache: agent_address -> AuthoritativeChainSubmitter.
+        # Cache: claimant address (lowercase) -> AuthoritativeChainSubmitter.
         self._submitter_cache: Dict[str, AuthoritativeChainSubmitter] = {}
         # Anchor side. Configurable so tests can pass an in-process
         # anchorer with eth_tester.
@@ -290,8 +296,8 @@ class ChainSubmissionDriver:
                                        "daemon is not Substrate's governor")
                 logger.warning("epoch %s: %s", fed.epoch_id, out["anchor_error"])
 
-        # Per-agent submissions. Run regardless of is_winner: every daemon
-        # submits each of its agents' mints once the anchor is on chain.
+        # Household claims. Run regardless of is_winner: every daemon
+        # claims for its households once the anchor is on chain.
         agent_results = self._submit_agents(fed.epoch_id)
         out["agent_submissions"] = agent_results
         return out
@@ -392,14 +398,37 @@ class ChainSubmissionDriver:
     # Governed anchoring: propose -> vote -> queue -> execute
     # ------------------------------------------------------------------
 
+    def _operator(self) -> Optional[Voter]:
+        """The daemon operator key: anchors, proposes, votes with the REP
+        the owner delegated to it, and signs household claims."""
+        key = self.config.daemon_private_key
+        if not key:
+            return None
+        try:
+            from eth_account import Account
+            return Voter(Account.from_key(key).address, key)
+        except Exception as e:
+            logger.warning("daemon operator key unusable: %s", e)
+            return None
+
     def _voters(self) -> List[Voter]:
+        """The operator first, then any local agent keys (an agent can
+        still hold votes delegated to it)."""
+        out: List[Voter] = []
+        op = self._operator()
+        if op is not None:
+            out.append(op)
         try:
             agents = self._agent_resolver()
         except Exception as e:
             logger.warning("agent_chain_resolver failed: %s", e)
-            return []
-        return [Voter(a.address, a.private_key) for a in agents
-                if a.address and a.private_key]
+            return out
+        seen = {v.address.lower() for v in out}
+        for a in agents:
+            if a.address and a.private_key and a.address.lower() not in seen:
+                seen.add(a.address.lower())
+                out.append(Voter(a.address, a.private_key))
+        return out
 
     def _step(self, proposal: AnchorProposal, *, may_propose: bool) -> str:
         ga = self.governed_anchorer()
@@ -518,30 +547,66 @@ class ChainSubmissionDriver:
             out.update({e: el.last_state for e, el in self._elections.items()})
             return out
 
-    def _submit_agents(self, epoch_id: str) -> List[Dict[str, Any]]:
-        """Run AuthoritativeChainSubmitter.submit_for_epoch for each
-        registered agent on this daemon."""
+    def _claimants(self) -> List[str]:
+        """The households this daemon claims for: the configured owner
+        wallet, each local agent's on-chain owner, and each agent itself
+        (an agent bound after the close's owner snapshot is still keyed
+        by its own address). A zero share costs one read, no gas."""
+        out: List[str] = []
+        if self.config.owner_wallet:
+            out.append(self.config.owner_wallet)
         try:
             agents = self._agent_resolver()
         except Exception as e:
             logger.warning("agent_chain_resolver failed: %s", e)
-            return []
-
-        results: List[Dict[str, Any]] = []
+            agents = []
+        contract = None
+        if self._anchorer is not None:
+            try:
+                contract = self._anchorer._get_contract()
+            except Exception:
+                contract = None
         for ident in agents:
-            if not ident.address or not ident.private_key:
+            if not ident.address:
                 continue
-            submitter = self._get_submitter(ident)
+            if contract is not None:
+                try:
+                    owner = contract.functions.getAgentOwner(
+                        self._anchorer._w3.to_checksum_address(ident.address)).call()
+                    if owner and int(owner, 16):
+                        out.append(owner)
+                except Exception:
+                    pass
+            out.append(ident.address)
+        seen: set = set()
+        unique = []
+        for a in out:
+            if a.lower() not in seen:
+                seen.add(a.lower())
+                unique.append(a)
+        return unique
+
+    def _submit_agents(self, epoch_id: str) -> List[Dict[str, Any]]:
+        """Claim the anchored mint for each household this daemon serves,
+        signed by the operator key."""
+        op = self._operator()
+        if op is None:
+            logger.warning("epoch %s: no daemon operator key; household "
+                           "claims skipped", epoch_id)
+            return []
+        results: List[Dict[str, Any]] = []
+        for claimant in self._claimants():
+            submitter = self._get_submitter(claimant, op)
             try:
                 r = submitter.submit_for_epoch(epoch_id)
             except Exception as e:
                 logger.error(
                     "submit_for_epoch raised for %s: %s",
-                    ident.address, e, exc_info=True,
+                    claimant, e, exc_info=True,
                 )
                 continue
             results.append({
-                "agent_address": ident.address,
+                "claimant": claimant,
                 "success": r.success,
                 "tx_hash": r.tx_hash,
                 "raw_mint": r.raw_mint,
@@ -556,23 +621,25 @@ class ChainSubmissionDriver:
         return {"web3": self._submitter_web3, "substrate_abi": load_abi("Substrate")}
 
     def _get_submitter(
-        self, ident: AgentChainIdentity,
+        self, claimant: str, operator: Voter,
     ) -> AuthoritativeChainSubmitter:
+        key = claimant.lower()
         with self._lock:
-            cached = self._submitter_cache.get(ident.address)
+            cached = self._submitter_cache.get(key)
             if cached is not None:
                 return cached
             sub = AuthoritativeChainSubmitter(
-                agent_id=ident.address,
-                agent_address=ident.address,
+                claimant_id=key,
+                claimant_address=claimant,
                 resolver=self._blob_resolver,
                 config=AuthoritativeSubmitterConfig(
                     substrate_address=self.config.substrate_address,
                     rpc_url=self.config.rpc_url,
                     chain_id=self.config.chain_id,
-                    private_key=ident.private_key,
+                    private_key=operator.private_key,
                 ),
+                sender_address=operator.address,
                 **self._submitter_chain(),
             )
-            self._submitter_cache[ident.address] = sub
+            self._submitter_cache[key] = sub
             return sub

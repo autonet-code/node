@@ -15,8 +15,9 @@ What's validated:
   2. ``AuthoritativeChainSubmitter.submit_for_epoch`` runs for each
      registered agent in the resolver list, reading the on-chain
      anchor and submitting authoritative mint.
-  3. ``Substrate.mintForEpoch(agent, epochIdHash)`` matches the
-     scaled mint each agent contributed.
+  3. ``Substrate.mintForEpoch(claimant, epochIdHash)`` matches the
+     scaled mint each household earned; claims are signed by the daemon
+     operator key and the ATN lands on the claimant (Decision 2026-10-27).
   4. Non-winner daemon (with the same agents registered) submits its
      agents' mints too — the contract's per-(agent, epoch) idempotency
      means it doesn't double-credit.
@@ -216,7 +217,10 @@ def test_winner_drives_anchor_and_each_agent_mint_lands(chain):
     # Federated close may produce mint for only some of the agents
     # given how few synthetic events we built; we only assert the
     # ones with positive mint land correctly on chain.
-    minting_addrs = [a for a in agent_addrs if payload_mint.get(a, 0.0) > 0]
+    # Schema 6: claimants keyed lowercase (no owner map => each agent is
+    # its own household).
+    minting_addrs = [a for a in agent_addrs
+                     if payload_mint.get(a.lower(), 0.0) > 0]
     assert minting_addrs, f"no agent got positive mint: {payload_mint}"
 
     # Build the chain submission driver wired to eth_tester.
@@ -233,26 +237,15 @@ def test_winner_drives_anchor_and_each_agent_mint_lands(chain):
     anchorer._set_submitter_address(deployer)
 
     resolver = InMemoryBlobResolver()
-    # Per-agent identities. eth_tester accounts don't have private
-    # keys exposed via accounts[i]; we use the deployer as a stand-in
-    # for the per-agent submitter signer (eth_tester signs from any
-    # local account). Each AuthoritativeChainSubmitter gets the
-    # agent_address for the contract call's `from`.
-    # We construct submitters manually via the driver's patching path
-    # by overriding the cache after the driver decides who to submit
-    # for. The simpler route: prebuild submitters via the cache.
-    from nodes.common.authoritative_submitter import (
-        AuthoritativeChainSubmitter,
-        AuthoritativeSubmitterConfig,
-    )
-
-    # Build the driver with a mocked anchorer instance + use real
-    # AuthoritativeChainSubmitters configured with eth_tester web3.
+    # Decision 2026-10-27: the driver claims for each household (here each
+    # self-owned agent) signed by the OPERATOR key (daemon_private_key, the
+    # deployer). The driver builds its own submitters on the shared
+    # eth_tester web3, so this exercises the production signing path.
     driver = ChainSubmissionDriver(
         config=ChainSubmissionConfig(
             substrate_address=chain["addr"],
             rpc_url="",
-            chain_id=0,
+            chain_id=w3.eth.chain_id,
             # The governor's key: direct-anchor mode (dev network).
             daemon_private_key=account_key(w3, deployer),
         ),
@@ -262,26 +255,10 @@ def test_winner_drives_anchor_and_each_agent_mint_lands(chain):
         ],
         blob_resolver=resolver,
         anchorer=anchorer,
+        submitter_web3=w3,
     )
-    # Pre-populate the per-agent submitter cache with eth_tester-wired
-    # submitters. Empty private_key triggers the eth_tester fast-path
-    # in _send_record (transact from agent_address, which is already
-    # unlocked in the test EVM).
-    for a in agent_addrs:
-        sub = AuthoritativeChainSubmitter(
-            agent_id=a,
-            agent_address=a,
-            resolver=resolver,
-            config=AuthoritativeSubmitterConfig(
-                substrate_address=chain["addr"],
-                rpc_url="",
-                chain_id=0,
-                private_key="",
-            ),
-            web3=w3,
-            substrate_abi=chain["abi"],
-        )
-        driver._submitter_cache[a] = sub
+    bal_before = {a: contract.functions.balanceOf(a).call()
+                  for a in agent_addrs + [deployer]}
 
     out = driver.handle_federated_close(fed)
 
@@ -294,10 +271,16 @@ def test_winner_drives_anchor_and_each_agent_mint_lands(chain):
     eid_hash = epoch_id_hash(fed.epoch_id)
     for a in minting_addrs:
         on_chain = contract.functions.mintForEpoch(a, eid_hash).call()
-        scaled = scale_mint(payload_mint[a])
+        scaled = scale_mint(payload_mint[a.lower()])
         assert on_chain == scaled, (
             f"agent {a}: on_chain={on_chain} expected={scaled}"
         )
+        # ATN landed on the claimant although the operator sent the tx.
+        assert contract.functions.balanceOf(a).call() == bal_before[a] + scaled
+    assert contract.functions.balanceOf(deployer).call() == bal_before[deployer]
+    assert {r["claimant"].lower() for r in out["agent_submissions"]} == {
+        a.lower() for a in agent_addrs}
+    assert all(r["success"] for r in out["agent_submissions"]), out
 
     # Agents with no authoritative mint should remain at zero —
     # ``skip_zero=True`` means the submitter doesn't even attempt
