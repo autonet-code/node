@@ -993,7 +993,9 @@ def resolve_network_registry(an: "RPBConfig", *, force: bool = False) -> bool:
         if key in explicit or not hasattr(an, key):
             continue
         current = getattr(an, key)
-        if current in ("", 0, None) or current == defaults.get(key):
+        # An empty list is unset too (bootstrap_peers): ``[] in ("", 0,
+        # None)`` is False, which kept the Registry's seeds out.
+        if current in ("", 0, None) or current == [] or current == defaults.get(key):
             setattr(an, key, value)
     an.network_joined = True
     return bool(seed)

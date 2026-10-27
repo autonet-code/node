@@ -315,3 +315,18 @@ def test_load_config_agents_dir_tracks_custom_data_dir(tmp_path, monkeypatch):
 
     assert conf.data_dir == data_dir
     assert conf.agents_dir == data_dir / "agents"
+
+
+def test_registry_bootstrap_seeds_fill_an_empty_list(monkeypatch):
+    """jurisdiction.<id>.bootstrap reaches bootstrap_peers, whose unset
+    value is an empty list."""
+    doc = json.loads(json.dumps(_SAMPLE))
+    doc["jurisdictions"]["autonet"]["contracts"]["bootstrap"] = (
+        "/dns4/relay.example/tcp/443/wss/p2p/12D3KooWA, /dns4/b.example/tcp/443/wss/p2p/12D3KooWB")
+    monkeypatch.setattr(cfg, "_fetch_registry", lambda url: doc)
+    monkeypatch.setenv("ATN_REGISTRY_URL", "https://fork.example/registry.json")
+    an = cfg.RPBConfig()
+    cfg.resolve_network_registry(an)
+
+    assert an.bootstrap_peers == ["/dns4/relay.example/tcp/443/wss/p2p/12D3KooWA",
+                                  "/dns4/b.example/tcp/443/wss/p2p/12D3KooWB"]
