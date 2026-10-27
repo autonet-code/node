@@ -126,6 +126,27 @@ def test_the_close_denies_what_containment_denies():
     from nodes.common.containment import CONTAINMENT_DEFAULTS, denied_digests
     snap = {"tools": {"aa" * 32: {"harm": {"sum": 80 * 300, "mass": 300}}},
             "cooling_harm": {"bb" * 32: {"sum": 90 * 300, "mass": 300},
-                             "cc" * 32: {"sum": 90 * 50, "mass": 50}}}
-    # cc: harm from too little REP (50 of 10,000 = 50 bps < 200).
+                             "cc" * 32: {"sum": 90 * 5, "mass": 5}}}
+    # cc: harm from too little REP (5 of 10,000 = 5 bps < 10).
     assert denied_digests(snap, 10_000, dict(CONTAINMENT_DEFAULTS)) == ["aa" * 32, "bb" * 32]
+
+
+def test_a_tool_mints_only_once_it_breaks_through():
+    """Its users this epoch must hold >= A of REP and be >= B of the
+    REP-holding households (sized by the GPU sim, 2026-10-28)."""
+    receipts = [_signed(1, ALICE), _signed(2, BOB)]
+    owner = {ALICE.address.lower(): "0x" + "c1" * 20, BOB.address.lower(): "0x" + "c2" * 20}
+    others = {f"0x{i:040x}": 0.01 for i in range(1, 97)}     # 96 other holders
+
+    def mint(gate, alice=0.01, bob=0.01):
+        shares = {owner[ALICE.address.lower()]: alice, owner[BOB.address.lower()]: bob, **others}
+        return _agent_totals(compute_tool_mint(
+            _world(), receipts, registrations=REGS, review_snapshot=_bonded(),
+            receipt_domain=DOMAIN, agent_owner_map=owner, voice_weights=shares,
+            rep_shares=shares, mint_gate=gate))
+    assert mint(None).get(AUTHOR, 0) > 0
+    # 2 users with 2% of REP, 2 of 98 holders: passes 1% / 0.5%...
+    assert mint((100, 50)).get(AUTHOR, 0) > 0
+    # ...but not 5% of REP, nor 5% of the holders.
+    assert mint((500, 50)) == {}
+    assert mint((100, 500)) == {}

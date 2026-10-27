@@ -13,8 +13,26 @@ from typing import Any, Dict, Optional
 CONTAINMENT_DENIED = "denied"
 CONTAINMENT_STRICT = "strict"
 CONTAINMENT_DECLARED = "declared"
+# trust_mass_bps 10 (0.1% of REP supply), not 200: at 2% the GPU sim denied
+# 0 of 933 harmful tools at 100k households (experiments/econ_gpu REPORT 3.4).
 CONTAINMENT_DEFAULTS = {"deny_harm": 50.0, "trust_harm": 10.0,
-                        "trust_mass_bps": 200.0}
+                        "trust_mass_bps": 10.0}
+# Breakthrough gate defaults (bps of REP supply, bps of REP-holding
+# households): DAO-set as jurisdiction.<id>.mint_gate_rep_bps / _houses_bps.
+MINT_GATE_DEFAULTS = (100, 50)
+
+
+def mint_gate_from_writes(writes: Dict[str, str], jurisdiction_id: str) -> tuple:
+    out = list(MINT_GATE_DEFAULTS)
+    for i, key in enumerate(("mint_gate_rep_bps", "mint_gate_houses_bps")):
+        raw = writes.get(f"jurisdiction.{jurisdiction_id}.{key}")
+        if raw in (None, ""):
+            continue
+        try:
+            out[i] = max(0, int(str(raw).strip()))
+        except ValueError:
+            continue
+    return tuple(out)
 
 
 def tier_for_standing(standing: Optional[Dict[str, Any]],

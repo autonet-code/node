@@ -111,7 +111,9 @@ class TestReviewerShare:
         assert entry["reviewers"] == 1
         assert entry["reviewer_mint"] == pytest.approx(mint * 0.4)
 
-    def test_split_by_stake_times_accuracy(self):
+    def test_split_by_accuracy_not_stake(self):
+        # Stake is only the bet (2026-10-28): A staked 3x B and is twice as
+        # accurate, so A takes 2/3, not 6/7.
         out = compute_tool_mint(
             _world(), _receipts(), registrations=REGS,
             review_snapshot=_snapshot([_rev(AUD_A, 3 * E18), _rev(AUD_B, 2 * E18, E18 // 2)],
@@ -119,8 +121,8 @@ class TestReviewerShare:
         )
         mint = out["per_digest"][DIGEST]["mint"]
         totals = _agent_totals(out)
-        assert totals[AUD_A] == pytest.approx(mint * 0.5 * 0.75, rel=1e-12)
-        assert totals[AUD_B] == pytest.approx(mint * 0.5 * 0.25, rel=1e-12)
+        assert totals[AUD_A] == pytest.approx(mint * 0.5 * 2 / 3, rel=1e-12)
+        assert totals[AUD_B] == pytest.approx(mint * 0.5 * 1 / 3, rel=1e-12)
         assert totals[AUTHOR] == pytest.approx(mint * 0.5, rel=1e-12)
 
     def test_novelty_discounts_reviews_landing_on_settled_mass(self):
@@ -131,8 +133,8 @@ class TestReviewerShare:
             {"epoch": 2, "supply": SUPPLY, "prior_mass": {"correctness": SUPPLY},
              "reviews": [_rev(AUD_B, E18)]},
         ])
-        assert w[AUD_A] == pytest.approx(E18)
-        assert w[AUD_B] == pytest.approx(E18 / 2)
+        assert w[AUD_A] == pytest.approx(1.0)
+        assert w[AUD_B] == pytest.approx(0.5)
 
     def test_novelty_averages_over_scored_axes_and_harm(self):
         w = reviewer_weights([{
@@ -140,7 +142,7 @@ class TestReviewerShare:
             "prior_mass": {"correctness": SUPPLY, "harm": 3 * SUPPLY},
             "reviews": [_rev(AUD_A, E18, axes=("correctness", "simplicity"), harm=True)],
         }])
-        assert w[AUD_A] == pytest.approx(E18 * (0.5 + 1.0 + 0.25) / 3)
+        assert w[AUD_A] == pytest.approx((0.5 + 1.0 + 0.25) / 3)
 
     def test_zero_stake_and_uninformative_reviews_weigh_nothing(self):
         w = reviewer_weights([{"epoch": 1, "supply": SUPPLY, "prior_mass": {},
@@ -202,7 +204,8 @@ class TestReviewerShare:
         assert pool_units - sum(units.values()) < len(units)
         assert sum(split["agent_mint"].values()) == pytest.approx(
             sum(plain["agent_mint"].values()), abs=3e-6)
-        assert units[AUD_A] == pytest.approx(2 * units[AUD_B], abs=1)
+        # Equal accuracy: equal parts, whatever they staked.
+        assert units[AUD_A] == pytest.approx(units[AUD_B], abs=1)
         assert split["tool_mint"][DIGEST]["reviewer_mint"] == pytest.approx(
             pool * 0.4, rel=1e-6)
 

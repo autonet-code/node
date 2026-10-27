@@ -65,7 +65,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .federated_reconcile import VOICE_EPSILON
 
-from .containment import params_from_writes
+from .containment import mint_gate_from_writes, params_from_writes
 
 logger = logging.getLogger(__name__)
 
@@ -1481,6 +1481,8 @@ def read_voice_state(
         # mints nothing for a tool they deny (Decision 2026-10-27).
         "containment_params": params_from_writes(
             _last_writes(reg_records, block) if reg_records else {}, jurisdiction_id),
+        "mint_gate": list(mint_gate_from_writes(
+            _last_writes(reg_records, block) if reg_records else {}, jurisdiction_id)),
         # Per-agent REP (raw base units) and the robot policy (docs/robots.md,
         # 2026-10-25): the robot poll rail draws pollers from the REP, takes
         # witnesses from the fleet and checks packs against the cascaded

@@ -32,7 +32,7 @@ codepath get the stricter guarantee.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from world_model.generalized import World, equilibrate
 
@@ -326,7 +326,8 @@ def reviewer_weights(rounds: List[Dict[str, Any]],
     """Each reviewer's claim on a tool's reviewer share, over the rounds of
     it finalized in this close's window (decision 10):
 
-        weight = stake x accuracy x novelty,
+        weight = accuracy x novelty   (stake > 0 required, not weighed:
+                                       the stake is the bet, 2026-10-28),
         novelty = mean over the axes the review scored (harm counting as
                   one) of 1 / (1 + M / supply),
 
@@ -352,7 +353,9 @@ def reviewer_weights(rounds: List[Dict[str, Any]],
                 m = int(prior.get(axis, 0))
                 nov += 1.0 / (1.0 + (m / supply if supply > 0 else 0.0))
             nov /= len(scored)
-            w = (stake * int(acc) // 10 ** 18) * nov
+            # Accuracy alone, not stake: weighting by ATN staked let money buy
+            # REP through reviews (GPU sim, experiments/econ_gpu REPORT 3).
+            w = (int(acc) / 10 ** 18) * nov
             if w > 0:
                 key = str(v["reviewer"]).lower()
                 out[key] = out.get(key, 0.0) + w
@@ -405,6 +408,11 @@ def compute_tool_mint(
     denied_tools: Optional[List[str]] = None,
     # Sanctioned households: their usage credits no tool.
     sanctioned_households: Optional[List[str]] = None,
+    # Breakthrough gate (Decision 2026-10-27, sized 2026-10-28 by the GPU
+    # sim): (rep_bps, houses_bps). A tool mints only when this epoch's users
+    # hold >= rep_bps of REP supply and are >= houses_bps of the REP-holding
+    # households. None, or no rep_shares (no chain), = no gate.
+    mint_gate: Optional[Tuple[int, int]] = None,
     vet_quorum: float = VET_QUORUM,
     vet_royalty_share: float = VET_ROYALTY_SHARE,
     vet_royalty_epochs: int = VET_ROYALTY_EPOCHS,
@@ -851,6 +859,9 @@ def compute_tool_mint(
     per_digest: Dict[str, Dict[str, Any]] = {}
     node_agent: Dict[str, Dict[str, float]] = {}
     bonds = rev_snap.get("bonds")
+    gate_on = mint_gate is not None and rep_shares is not None
+    gate_rep_bps, gate_houses_bps = (int(mint_gate[0]), int(mint_gate[1])) if gate_on else (0, 0)
+    n_holders = sum(1 for v in (rep_shares or {}).values() if float(v) > 0)
     for digest in sorted(eff.keys()):
         if digest in denied_set:
             continue   # denied by the network: mints nothing
@@ -888,6 +899,8 @@ def compute_tool_mint(
         attested_by = eff[digest]
         usage_term = 0.0
         attesters = 0
+        gate_rep = 0.0
+        gate_holders = 0
         for house in sorted(attested_by.keys()):
             if house == author_house:
                 continue
@@ -895,6 +908,13 @@ def compute_tool_mint(
                 continue
             usage_term += attested_by[house] * round(_mint_weight(house), 12)
             attesters += 1
+            share = _rep_share(house)
+            if share > 0:
+                gate_rep += share
+                gate_holders += 1
+        if gate_on and (gate_rep * 10_000 < gate_rep_bps
+                        or gate_holders * 10_000 < gate_houses_bps * n_holders):
+            continue   # not broken through yet: earns nothing this epoch
         # v3/v4.1: USAGE ALONE mints. No standing multiplier, no vet gate.
         mint = usage_term
         if mint <= 0.0:
@@ -1282,6 +1302,8 @@ def federated_epoch_close(
     receipt_domain: Optional[str] = None,
     # Tools denied at the snapshot (compute_tool_mint).
     denied_tools: Optional[List[str]] = None,
+    # Breakthrough gate (compute_tool_mint).
+    mint_gate: Optional[Tuple[int, int]] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -1436,6 +1458,7 @@ def federated_epoch_close(
         receipt_domain=receipt_domain,
         denied_tools=denied_tools,
         sanctioned_households=sanctioned,
+        mint_gate=mint_gate,
     )
     # Write the ToolBond-rated charter heads onto the replay world so the
     # checkpoint (world_cid) and any world reader carry them forward. Coords

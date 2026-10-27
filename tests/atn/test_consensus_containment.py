@@ -29,13 +29,13 @@ def _st(harm, mass, supply=10_000):
 def test_tier_rule():
     assert tier_for_standing(None, P)[0] == CONTAINMENT_STRICT
     assert tier_for_standing(_st(0, 0), P)[0] == CONTAINMENT_STRICT
-    # Reviewed safe by enough REP (2% of supply at the default).
+    # Reviewed safe by enough REP (0.1% of supply at the default).
     assert tier_for_standing(_st(5, 300), P)[0] == CONTAINMENT_DECLARED
     # Malicious by enough REP.
     assert tier_for_standing(_st(80, 300), P)[0] == CONTAINMENT_DENIED
     # One small reviewer can neither deny nor free a tool.
-    assert tier_for_standing(_st(100, 50), P)[0] == CONTAINMENT_STRICT
-    assert tier_for_standing(_st(0, 50), P)[0] == CONTAINMENT_STRICT
+    assert tier_for_standing(_st(100, 5), P)[0] == CONTAINMENT_STRICT
+    assert tier_for_standing(_st(0, 5), P)[0] == CONTAINMENT_STRICT
     # Contested middle stays strict.
     assert tier_for_standing(_st(30, 300), P)[0] == CONTAINMENT_STRICT
 

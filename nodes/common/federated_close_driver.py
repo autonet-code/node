@@ -277,6 +277,8 @@ class FederatedCloseDriver:
         # Containment thresholds pinned with the voice state: tools they
         # deny mint nothing.
         self.containment_params: Optional[Dict[str, float]] = None
+        # Breakthrough gate pinned with the voice state (None = off).
+        self.mint_gate: Optional[tuple] = None
         # Set to the new charter text once a pinned charter differs from
         # the active one: the close must not run on the old axes. The host
         # restarts the daemon onto the new charter (on_charter_change).
@@ -906,6 +908,8 @@ class FederatedCloseDriver:
                 updates["pinned_charter_text"] = str(text) if text else None
             if isinstance(state.get("containment_params"), dict):
                 updates["containment_params"] = dict(state["containment_params"])
+            if isinstance(state.get("mint_gate"), (list, tuple)) and len(state["mint_gate"]) == 2:
+                updates["mint_gate"] = (int(state["mint_gate"][0]), int(state["mint_gate"][1]))
             houses = state.get("sanctioned_households")
             if isinstance(houses, list):
                 updates["sanctioned_households"] = sorted(
@@ -1093,6 +1097,7 @@ class FederatedCloseDriver:
                                  if self.review_snapshot else None),
                 sanctioned_households=list(self.sanctioned_households),
                 denied_tools=self._denied_tools(),
+                mint_gate=self.mint_gate,
                 # Chain-backed closes count only agent-signed receipts.
                 receipt_domain=(str(getattr(self.gossip, "rpb_address", "") or "")
                                 if self.review_snapshot is not None else None),
