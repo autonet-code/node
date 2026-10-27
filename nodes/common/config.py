@@ -196,8 +196,11 @@ class GuildConfig:
 @dataclass
 class NodeConfig:
     """Per-node runtime config."""
-    max_cycles: int = 10
-    cycle_delay: float = 3.0
+    # 0 = run forever. A daemon reads autonet.yaml only from its cwd, so
+    # these are what every installed daemon runs with: the old 10 stopped
+    # the service (and its epoch closes) after ~40s.
+    max_cycles: int = 0
+    cycle_delay: float = 30.0
     aggregation_method: str = "fedavg"  # "fedavg" or "trimmed_mean"
     trim_ratio: float = 0.2
     min_updates_for_aggregation: int = 2
