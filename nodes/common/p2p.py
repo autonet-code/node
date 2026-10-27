@@ -445,6 +445,7 @@ class AutonetHost:
         self._listen_host = listen_host
         self._bootstrap_peers = bootstrap_peers or []
         self._announce_addrs = announce_addrs or []
+        self._announce_resolved: List[Multiaddr] = []
         self._bootstrap_redial_interval = bootstrap_redial_interval
         self._enable_quic = enable_quic
         self._enable_upnp = enable_upnp
@@ -501,20 +502,28 @@ class AutonetHost:
         ]
         # py-libp2p's TCP transport dials only /ip4 and /ip6 (its bootstrap
         # resolves /dnsaddr only), so /dns4 tunnel hostnames resolve here.
-        self._bootstrap_peers = [resolve_dns_multiaddr(a) for a in self._bootstrap_peers]
+        # The configured names are kept and resolved again on every redial.
+        bootstrap = [resolve_dns_multiaddr(a) for a in self._bootstrap_peers]
 
         self._host = new_host(
             listen_addrs=listen_addrs,
             enable_quic=self._enable_quic,
             enable_upnp=self._enable_upnp,
-            bootstrap=self._bootstrap_peers if self._bootstrap_peers else None,
+            bootstrap=bootstrap if bootstrap else None,
         )
 
         async with self._host.run(listen_addrs=listen_addrs):
             self._running = True
             peer_id = str(self._host.get_id())
             if self._announce_addrs:
-                self._apply_announce_addrs(peer_id)
+                self._announce_resolved = self._resolve_announce_addrs()
+                p2p_part = Multiaddr(f"/p2p/{peer_id}")
+                # Identify, the signed peer record and our capability all
+                # read get_addrs, so replacing it on the host instance is
+                # enough; the listen socket is unchanged.
+                self._host.get_addrs = lambda: [
+                    a.encapsulate(p2p_part) for a in self._announce_resolved
+                ]
             addrs = self._host.get_addrs()
 
             # Update our capability with actual peer ID and addresses
@@ -541,8 +550,9 @@ class AutonetHost:
             try:
                 async with trio.open_nursery() as nursery:
                     self._nursery = nursery
-                    if self._bootstrap_peers and self._bootstrap_redial_interval > 0:
-                        nursery.start_soon(self._redial_bootstrap_peers)
+                    if ((self._bootstrap_peers or self._announce_addrs)
+                            and self._bootstrap_redial_interval > 0):
+                        nursery.start_soon(self._maintain_addrs)
                     self._ready_event.set()
                     try:
                         yield self
@@ -556,14 +566,8 @@ class AutonetHost:
                 self._running = False
                 self.logger.info("P2P host shutting down")
 
-    def _apply_announce_addrs(self, peer_id: str) -> None:
-        """Advertise the announce addresses instead of the listen addresses.
-
-        Identify, the signed peer record and our capability all read
-        ``get_addrs``, so replacing it on the host instance is enough. The
-        listen socket is unchanged.
-        """
-        p2p_part = Multiaddr(f"/p2p/{peer_id}")
+    def _resolve_announce_addrs(self) -> List[Multiaddr]:
+        """The announce addresses with DNS names resolved, /p2p stripped."""
         announce = []
         for addr in self._announce_addrs:
             addr = resolve_dns_multiaddr(addr).split("/p2p/")[0]
@@ -571,25 +575,40 @@ class AutonetHost:
                 announce.append(Multiaddr(addr))
             except Exception as e:
                 self.logger.warning(f"Ignoring bad announce address {addr}: {e}")
-        if not announce:
-            return
-        self._host.get_addrs = lambda: [a.encapsulate(p2p_part) for a in announce]
+        return announce
 
-    async def _redial_bootstrap_peers(self) -> None:
-        """Redial bootstrap peers we are not connected to.
+    async def _maintain_addrs(self) -> None:
+        """Track address changes, every ``bootstrap_redial_interval``.
 
-        py-libp2p dials bootstrap peers once at start, so a daemon that
-        started before its bootstrap peer, or lost the connection, would
-        otherwise stay cut off.
+        Announce names are resolved again; if the result changed (a
+        dynamic-DNS or tunnel name now points elsewhere) we advertise the
+        new address at once. Bootstrap peers we are not connected to are
+        redialled at their freshly resolved address: py-libp2p dials them
+        once at start, so a daemon that started first, lost its link, or
+        whose bootstrap peer moved would otherwise stay cut off.
         """
         import trio
         while True:
             await trio.sleep(self._bootstrap_redial_interval)
+            if self._announce_addrs:
+                fresh = await trio.to_thread.run_sync(self._resolve_announce_addrs)
+                if fresh and [str(a) for a in fresh] != [str(a) for a in self._announce_resolved]:
+                    self.logger.info(f"Announce address changed to {[str(a) for a in fresh]}")
+                    self._announce_resolved = fresh
+                    self._capability.listen_addrs = self.addrs
+                    await self.advertise_capability()
             connected = set(self.get_connected_peers())
-            for addr in self._bootstrap_peers:
+            for addr in list(self._bootstrap_peers):
                 pid = addr.split("/p2p/")[-1] if "/p2p/" in addr else ""
                 if not pid or pid == self.peer_id or pid in connected:
                     continue
+                addr = await trio.to_thread.run_sync(resolve_dns_multiaddr, addr)
+                # Drop cached addresses so a peer that moved is dialled
+                # only at its current address, not the stale one first.
+                try:
+                    self._host.get_peerstore().clear_addrs(PeerID.from_base58(pid))
+                except Exception:
+                    pass
                 with trio.move_on_after(10):
                     await self.connect_to_peer(addr)
 

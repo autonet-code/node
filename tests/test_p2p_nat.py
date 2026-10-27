@@ -17,6 +17,7 @@ import trio
 
 from nodes.common.blob_resolver import host_blob_server
 from nodes.common.config import load_config
+from nodes.common import p2p as p2p_mod
 from nodes.common.p2p import AutonetHost, resolve_dns_multiaddr
 
 
@@ -60,21 +61,66 @@ async def test_announce_replaces_advertised_addrs():
         assert host._capability.listen_addrs == [expected]
 
 
+class _FakeDNS:
+    """Stands in for resolve_dns_multiaddr: maps /dns4/<name> to an ip."""
+
+    def __init__(self, **names):
+        self.names = names
+
+    def __call__(self, addr):
+        parts = addr.split("/")
+        if len(parts) > 2 and parts[1] == "dns4" and parts[2] in self.names:
+            parts[1], parts[2] = "ip4", self.names[parts[2]]
+        return "/".join(parts)
+
+
 @trio_test
-async def test_bootstrap_redial_reaches_late_peer():
-    """The startup dial misses a peer that is not up yet; the redial loop
-    connects once it is."""
-    dead = "/ip4/127.0.0.1/tcp/1/p2p/12D3KooWDeadBeefDeadBeefDeadBeefDeadBeefDeadBeefDeadBe"
-    early = _host("early", bootstrap_peers=[dead], bootstrap_redial_interval=0.5)
-    async with early.run():
+async def test_redial_follows_bootstrap_dns_change():
+    """The bootstrap name first points at a dead address; once it points
+    at the live peer the redial loop connects there."""
+    dns = _FakeDNS(boot="127.0.0.2")
+    real, p2p_mod.resolve_dns_multiaddr = p2p_mod.resolve_dns_multiaddr, dns
+    try:
         late = _host("late")
         async with late.run():
-            # The redial list is read each round; point it at the live peer.
-            early._bootstrap_peers = [dead, late.addrs[0]]
+            port = late.addrs[0].split("/tcp/")[1].split("/")[0]
+            boot = f"/dns4/boot/tcp/{port}/p2p/{late.peer_id}"
+            early = _host("early", bootstrap_peers=[boot], bootstrap_redial_interval=0.3)
+            async with early.run():
+                await trio.sleep(0.5)
+                assert late.peer_id not in early.get_connected_peers()
+                dns.names["boot"] = "127.0.0.1"
+                with trio.move_on_after(15):
+                    while late.peer_id not in early.get_connected_peers():
+                        await trio.sleep(0.1)
+                assert late.peer_id in early.get_connected_peers()
+    finally:
+        p2p_mod.resolve_dns_multiaddr = real
+
+
+@trio_test
+async def test_announce_dns_change_is_advertised():
+    dns = _FakeDNS(hub="203.0.113.7")
+    real, p2p_mod.resolve_dns_multiaddr = p2p_mod.resolve_dns_multiaddr, dns
+    try:
+        moving = _host("moving", announce_addrs=["/dns4/hub/tcp/4101"],
+                       bootstrap_redial_interval=0.3)
+        watcher = _host("watcher")
+        async with moving.run(), watcher.run():
+            assert moving.addrs == [f"/ip4/203.0.113.7/tcp/4101/p2p/{moving.peer_id}"]
+            assert await moving.connect_to_peer(watcher.addrs[0])
+            dns.names["hub"] = "203.0.113.8"
+            new = f"/ip4/203.0.113.8/tcp/4101/p2p/{moving.peer_id}"
             with trio.move_on_after(5):
-                while late.peer_id not in early.get_connected_peers():
+                while True:
+                    cap = watcher.known_capabilities.get(moving.peer_id)
+                    if cap and cap.listen_addrs == [new]:
+                        break
                     await trio.sleep(0.1)
-            assert late.peer_id in early.get_connected_peers()
+            assert moving.addrs == [new]
+            assert watcher.known_capabilities[moving.peer_id].listen_addrs == [new]
+    finally:
+        p2p_mod.resolve_dns_multiaddr = real
 
 
 @trio_test
