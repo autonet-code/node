@@ -312,6 +312,8 @@ _TOOL_BOND_EVENTS_ABI = [
                       ("lossPool", "uint256", False), ("repPool", "uint256", False)]),
     _ev("Overruled", [("digest", "bytes32", True), ("epoch", "uint256", True),
                       ("harm", "uint256", False)]),
+    _ev("HarmSettled", [("digest", "bytes32", True), ("epoch", "uint256", True),
+                        ("harm", "uint256", False), ("appealEnds", "uint48", False)]),
     # Added in trustless-contracts baab631; older deploys simply emit none
     # and the views below fill in.
     _ev("ReviewSettled", [("digest", "bytes32", True), ("epoch", "uint256", True),
@@ -399,6 +401,7 @@ def tool_review_snapshot_from_logs(
     reviews: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
     finalized: List[Tuple[str, int, int]] = []   # (digest, epoch, block), in order
     overruled: Dict[Tuple[str, int], int] = {}    # DAO's harm 0..100 for a round
+    cooling: List[Tuple[str, int]] = []           # harm settled, appeal window open
     settled: Dict[Tuple[str, int, str], int] = {}  # (digest, epoch, reviewer) -> accuracy
     epochs = dict(epochs)
     for r in ordered:
@@ -417,6 +420,8 @@ def tool_review_snapshot_from_logs(
             finalized.append((_hex32(a["digest"]), int(a["epoch"]), int(r["block"])))
         elif name == "Overruled":
             overruled[(_hex32(a["digest"]), int(a["epoch"]))] = int(a["harm"])
+        elif name == "HarmSettled":
+            cooling.append((_hex32(a["digest"]), int(a["epoch"])))
         elif name == "ReviewSettled":
             settled[(_hex32(a["digest"]), int(a["epoch"]),
                      str(a["reviewer"]).lower())] = int(a["accuracy"])
@@ -477,11 +482,33 @@ def tool_review_snapshot_from_logs(
         tool["harm"]["sum"] += h_sum
         tool["harm"]["mass"] += h_mass
 
+    # Harm settled but still in its appeal window (Decision 2026-10-27):
+    # containment acts on it at once, since containment is reversible (an
+    # overrule replaces it); ratings, mint and slashes wait for Finalized.
+    # Kept out of "tools", so the close's inputs do not change.
+    done = {(d, e) for d, e, _b in finalized}
+    cooling_harm: Dict[str, Dict[str, int]] = {}
+    for digest, epoch in cooling:
+        if (digest, epoch) in done:
+            continue
+        h_sum = h_mass = 0
+        for v in reviews.get((digest, epoch), []):
+            w = 0 if v["reviewer"] in excluded else v["weight"]
+            if v["harm"] != _NO_HARM and w > 0:
+                h_sum += w * v["harm"]
+                h_mass += w
+        if (digest, epoch) in overruled:
+            h_sum = h_mass * overruled[(digest, epoch)]
+        cell = cooling_harm.setdefault(digest, {"sum": 0, "mass": 0})
+        cell["sum"] += h_sum
+        cell["mass"] += h_mass
+
     return {
         "reviewer_share_bps": int(default_bps if bps is None else bps),
         "tools": {d: {"axes": dict(sorted(t["axes"].items())), "harm": dict(t["harm"])}
                   for d, t in sorted(tools.items())},
         "rounds": {d: rs for d, rs in sorted(rounds.items())},
+        "cooling_harm": dict(sorted(cooling_harm.items())),
     }
 
 

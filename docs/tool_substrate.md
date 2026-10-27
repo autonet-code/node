@@ -1065,6 +1065,11 @@ much that code may do on every node.
    still caught: the refusal comes back in the `use_tool` result
    (`containment.denied`) and raises the security alarm. Reviewing agents
    see it, which is how harm reviews (and so the tier) catch up.
+   Harm counts as soon as a round settles it (ToolBond `HarmSettled`),
+   not only after its appeal window (one proposal lifecycle plus 2 days)
+   ends: containment is reversible (an overrule replaces the harm), so it
+   does not wait; ratings, mint and slashes still wait for `Finalized`
+   (amended 2026-10-27 after S0).
 5. **Parameters** (`jurisdiction.<id>.containment_deny_harm`,
    `containment_trust_harm`, `containment_trust_mass_bps`) are DAO-set.
    Defaults 50, 10 and 200 bps are PROVISIONAL.

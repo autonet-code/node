@@ -218,6 +218,8 @@ def deploy_jurisdiction(run: Path, usdc: str, owners: List[str], bootstrap: str)
         "VOTING_DELAY_SECS": str(VOTING_DELAY_SECS),
         "VOTING_PERIOD_SECS": str(VOTING_PERIOD_SECS),
         "TIMELOCK_DELAY_SECS": str(TIMELOCK_DELAY_SECS),
+        # Reviews reveal and finalize within minutes, not the default day.
+        "TOOLBOND_REVEAL_WINDOW_SECS": "60",
         "EPOCH_TARGET_SHARE": str(EPOCH_TARGET_SHARE),
         "BOOTSTRAP": bootstrap,
         "MEMBERS": ",".join(owners),
@@ -285,7 +287,8 @@ class Household:
         env["AUTONET_P2P_PORT"] = str(self.p2p_port)
         env["AUTONET_P2P_HOST"] = "127.0.0.1"
         env["AUTONET_P2P_TRANSPORT"] = "ws"
-        env["ATN_DISABLE_PROVIDER_AUTODETECT"] = "1"
+        # Not ATN_DISABLE_PROVIDER_AUTODETECT: that test gate also stops the
+        # review driver, so no review would ever reach ToolBond.
         return env
 
     def start(self, procs: Procs, registry: str) -> None:

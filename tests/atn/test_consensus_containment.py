@@ -125,3 +125,37 @@ def test_driver_reads_standing_from_the_pinned_snapshot():
     assert drv.security_standing("0x" + "AB" * 32) == {
         "harm_sum": 4000, "harm_mass": 50, "supply": 1000}
     assert drv.security_standing("cd" * 32) is None
+
+
+def test_harm_in_its_appeal_window_counts_for_containment_only():
+    """Decision 2026-10-27: a round whose harm has settled but whose appeal
+    window is still open already moves containment (reversible), while the
+    close's ratings keep waiting for Finalized."""
+    from nodes.common.federated_close_driver import FederatedCloseDriver
+    from nodes.common.voice_state import tool_review_snapshot_from_logs
+    d = "ab" * 32
+
+    def rec(block, event, **args):
+        return {"block": block, "index": 0, "event": event,
+                "args": {"digest": bytes.fromhex(d), "epoch": 1, **args}}
+    reviews = [rec(10, "Reviewed", reviewer="0x" + "1" * 40, scores=b"", harm=100,
+                   stake=0, weight=300, evidenceHash=b"\0" * 32),
+               rec(11, "Reviewed", reviewer="0x" + "2" * 40, scores=b"", harm=0,
+                   stake=0, weight=100, evidenceHash=b"\0" * 32),
+               rec(20, "HarmSettled", harm=75 * 10**16, appealEnds=999)]
+    kw = dict(since_block=0, epochs={1: {"axis_ids": [], "supply": 1000}},
+              accuracies={}, axis_ids=[])
+    snap = tool_review_snapshot_from_logs(reviews, block=30, **kw)
+    assert snap["tools"] == {}
+    assert snap["cooling_harm"] == {d: {"sum": 30000, "mass": 400}}
+
+    drv = FederatedCloseDriver.__new__(FederatedCloseDriver)
+    drv.review_snapshot, drv.rep_supply = snap, 1000
+    assert tier_for_standing(drv.security_standing(d), P)[0] == CONTAINMENT_DENIED
+
+    # Once the round finalizes it leaves the cooling map for the ratings.
+    done = reviews + [rec(40, "Finalized", harm=75 * 10**16, bondSlashed=0,
+                          lossPool=0, repPool=0)]
+    snap = tool_review_snapshot_from_logs(done, block=50, **kw)
+    assert snap["cooling_harm"] == {}
+    assert snap["tools"][d]["harm"] == {"sum": 30000, "mass": 400}

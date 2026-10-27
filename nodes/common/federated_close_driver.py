@@ -924,16 +924,19 @@ class FederatedCloseDriver:
     def security_standing(self, digest: str) -> Optional[Dict[str, Any]]:
         """A tool's settled harm at the pinned snapshot, for containment
         tiers: ``{harm_sum, harm_mass, supply}`` or None when unknown. The
-        same pinned read on every daemon, so tiers agree network-wide."""
+        same pinned read on every daemon, so tiers agree network-wide.
+        Harm still in its appeal window counts (Decision 2026-10-27):
+        containment is reversible, so it does not wait out the appeal."""
         snap = self.review_snapshot or {}
-        tool = (snap.get("tools") or {}).get(str(digest).lower().removeprefix("0x"))
-        if tool is None:
-            tool = (snap.get("tools") or {}).get(str(digest))
-        if not tool:
+        key = str(digest).lower().removeprefix("0x")
+        tools = snap.get("tools") or {}
+        tool = tools.get(key) or tools.get(str(digest)) or {}
+        cooling = (snap.get("cooling_harm") or {}).get(key) or {}
+        if not tool and not cooling:
             return None
         harm = tool.get("harm") or {}
-        return {"harm_sum": int(harm.get("sum") or 0),
-                "harm_mass": int(harm.get("mass") or 0),
+        return {"harm_sum": int(harm.get("sum") or 0) + int(cooling.get("sum") or 0),
+                "harm_mass": int(harm.get("mass") or 0) + int(cooling.get("mass") or 0),
                 "supply": int(self.rep_supply or 0)}
 
     def _charter_changed(self) -> bool:
