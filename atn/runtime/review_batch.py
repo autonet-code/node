@@ -94,7 +94,9 @@ TOOL_BOND_REVIEW_ABI = [
     _fn("commitmentOf", [("epoch", "uint256"), ("agent", "address"),
                          ("reviews", "ReviewInput[]"), ("salt", "bytes32")],
         [("", "bytes32")], "pure"),
-    _fn("commit", [("commitment", "bytes32"), ("stake", "uint256")]),
+    # trustless-contracts ad32e38: the commit declares its review count
+    # (public), the reveal must hold exactly that many.
+    _fn("commit", [("commitment", "bytes32"), ("stake", "uint256"), ("reviews", "uint256")]),
     _fn("reveal", [("epoch", "uint256"), ("agent", "address"),
                    ("reviews", "ReviewInput[]"), ("salt", "bytes32")]),
     _fn("forfeit", [("epoch", "uint256"), ("agent", "address")]),
@@ -379,7 +381,9 @@ class ReviewBondClient:
                     b.address, int(stake)))
                 if not res.get("success"):
                     return {**res, "step": "approve"}
-        res = await self._write(private_key, lambda b, s, a: b.functions.commit(c, int(stake)),
+        count = len(batch.inputs())
+        res = await self._write(private_key, lambda b, s, a: b.functions.commit(
+                                    c, int(stake), int(count)),
                                 gas_floor=400_000)
         if res.get("success"):
             batch.committed_tx = res["tx_hash"]

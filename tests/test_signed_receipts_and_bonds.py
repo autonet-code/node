@@ -105,3 +105,27 @@ def test_bonds_fold_from_toolbond_logs():
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"][DIGEST]["stake"] == 90
     logs.append(rec(6, "Unbonded", author=AUTHOR, amount=90))
     assert tool_review_snapshot_from_logs(logs, block=10, **kw)["bonds"] == {}
+
+
+def test_denied_tools_and_sanctioned_usage_mint_nothing():
+    receipts = [_signed(1, ALICE), _signed(2, BOB)]
+
+    def mint(**kw):
+        return _agent_totals(compute_tool_mint(
+            _world(), receipts, registrations=REGS, review_snapshot=_bonded(),
+            receipt_domain=DOMAIN, **kw))
+    full = mint()
+    assert full.get(AUTHOR, 0) > 0
+    assert mint(denied_tools=["0x" + DIGEST]) == {}
+    # Bob's household is sanctioned: only Alice's use credits the author.
+    part = mint(sanctioned_households=[BOB.address.lower()])
+    assert 0 < part[AUTHOR] < full[AUTHOR]
+
+
+def test_the_close_denies_what_containment_denies():
+    from nodes.common.containment import CONTAINMENT_DEFAULTS, denied_digests
+    snap = {"tools": {"aa" * 32: {"harm": {"sum": 80 * 300, "mass": 300}}},
+            "cooling_harm": {"bb" * 32: {"sum": 90 * 300, "mass": 300},
+                             "cc" * 32: {"sum": 90 * 50, "mass": 50}}}
+    # cc: harm from too little REP (50 of 10,000 = 50 bps < 200).
+    assert denied_digests(snap, 10_000, dict(CONTAINMENT_DEFAULTS)) == ["aa" * 32, "bb" * 32]

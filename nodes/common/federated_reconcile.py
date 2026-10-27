@@ -401,6 +401,10 @@ def compute_tool_mint(
     # the agent they name for it (nodes/common/tool_receipts.py). None (no
     # chain, tests) = receipts unchecked.
     receipt_domain: Optional[str] = None,
+    # Tools the network denied at the snapshot: they mint nothing.
+    denied_tools: Optional[List[str]] = None,
+    # Sanctioned households: their usage credits no tool.
+    sanctioned_households: Optional[List[str]] = None,
     vet_quorum: float = VET_QUORUM,
     vet_royalty_share: float = VET_ROYALTY_SHARE,
     vet_royalty_epochs: int = VET_ROYALTY_EPOCHS,
@@ -756,6 +760,8 @@ def compute_tool_mint(
     # once — N co-owned agents are one voice, not N log1p terms.
     eff: Dict[str, Dict[str, float]] = {}
     house_senders: Dict[str, set] = {}
+    sanctioned_set = {str(h).lower() for h in (sanctioned_households or ())}
+    denied_set = {str(d).lower().removeprefix("0x") for d in (denied_tools or ())}
     for digest in sorted(set(usage) & set(known_regs)):
         shares = _composition_shares(digest, deps_of,
                                      root_shares=root_share_of)
@@ -763,6 +769,8 @@ def compute_tool_mint(
         counts: Dict[str, int] = {}
         for caller in sorted(entry["attested_ok_by_caller"].keys()):
             house = _household(caller)
+            if house in sanctioned_set:
+                continue   # a sanctioned household's usage credits nobody
             counts[house] = (counts.get(house, 0)
                              + int(entry["attested_ok_by_caller"][caller]))
             house_senders.setdefault(house, set()).update(
@@ -844,6 +852,8 @@ def compute_tool_mint(
     node_agent: Dict[str, Dict[str, float]] = {}
     bonds = rev_snap.get("bonds")
     for digest in sorted(eff.keys()):
+        if digest in denied_set:
+            continue   # denied by the network: mints nothing
         meta = known_regs[digest]
         author = str(meta.get("author") or "")
         if bonds is not None:
@@ -1270,6 +1280,8 @@ def federated_epoch_close(
     sanctioned_households: Optional[List[str]] = None,
     # Gossip domain for signed receipts (compute_tool_mint).
     receipt_domain: Optional[str] = None,
+    # Tools denied at the snapshot (compute_tool_mint).
+    denied_tools: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run a full federated epoch close given a canonical sequence.
 
@@ -1422,6 +1434,8 @@ def federated_epoch_close(
         rep_shares=rep_shares,
         review_snapshot=review_snapshot,
         receipt_domain=receipt_domain,
+        denied_tools=denied_tools,
+        sanctioned_households=sanctioned,
     )
     # Write the ToolBond-rated charter heads onto the replay world so the
     # checkpoint (world_cid) and any world reader carry them forward. Coords

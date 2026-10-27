@@ -65,6 +65,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .federated_reconcile import VOICE_EPSILON
 
+from .containment import params_from_writes
+
 logger = logging.getLogger(__name__)
 
 # RepToken (DAO) read surface: ERC20Votes checkpoints, timestamp-clocked.
@@ -330,7 +332,8 @@ _TOOL_BOND_EVENTS_ABI = [
     _ev("ParamsSet", [("minStake", "uint256", False), ("revealWindow", "uint256", False),
                       ("degradeBps", "uint256", False), ("authorSlashBps", "uint256", False),
                       ("unbondDelay", "uint256", False), ("reviewerShareBps", "uint256", False),
-                      ("harmWeightBps", "uint256", False)]),
+                      ("harmWeightBps", "uint256", False),
+                      ("harmQuorumBps", "uint256", False)]),
 ]
 
 _REVIEW_COMPONENTS = [
@@ -1474,6 +1477,10 @@ def read_voice_state(
         # those households' mint and their drift weight.
         "sanctions": sanctions,
         "sanctioned_households": houses,
+        # Containment thresholds in force at the snapshot: the close
+        # mints nothing for a tool they deny (Decision 2026-10-27).
+        "containment_params": params_from_writes(
+            _last_writes(reg_records, block) if reg_records else {}, jurisdiction_id),
         # Per-agent REP (raw base units) and the robot policy (docs/robots.md,
         # 2026-10-25): the robot poll rail draws pollers from the REP, takes
         # witnesses from the fleet and checks packs against the cascaded

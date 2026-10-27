@@ -274,6 +274,9 @@ class FederatedCloseDriver:
         # (docs/accountability.md), by the same voice_source refresh. Their
         # mint is withheld and their estimates carry no drift weight.
         self.sanctioned_households: List[str] = []
+        # Containment thresholds pinned with the voice state: tools they
+        # deny mint nothing.
+        self.containment_params: Optional[Dict[str, float]] = None
         # Set to the new charter text once a pinned charter differs from
         # the active one: the close must not run on the old axes. The host
         # restarts the daemon onto the new charter (on_charter_change).
@@ -901,6 +904,8 @@ class FederatedCloseDriver:
             if "charter_text" in state:
                 text = state.get("charter_text")
                 updates["pinned_charter_text"] = str(text) if text else None
+            if isinstance(state.get("containment_params"), dict):
+                updates["containment_params"] = dict(state["containment_params"])
             houses = state.get("sanctioned_households")
             if isinstance(houses, list):
                 updates["sanctioned_households"] = sorted(
@@ -920,6 +925,14 @@ class FederatedCloseDriver:
         if self.epoch_window is not None and hasattr(
                 self.gossip, "max_skew_seconds"):
             self.gossip.max_skew_seconds = float(self.epoch_window["skew"])
+
+    def _denied_tools(self) -> Optional[List[str]]:
+        """Tools the pinned snapshot denies (None without one)."""
+        if self.review_snapshot is None:
+            return None
+        from .containment import CONTAINMENT_DEFAULTS, denied_digests
+        return denied_digests(self.review_snapshot, int(self.rep_supply or 0),
+                              self.containment_params or dict(CONTAINMENT_DEFAULTS))
 
     def security_standing(self, digest: str) -> Optional[Dict[str, Any]]:
         """A tool's settled harm at the pinned snapshot, for containment
@@ -1079,6 +1092,7 @@ class FederatedCloseDriver:
                 review_snapshot=(dict(self.review_snapshot)
                                  if self.review_snapshot else None),
                 sanctioned_households=list(self.sanctioned_households),
+                denied_tools=self._denied_tools(),
                 # Chain-backed closes count only agent-signed receipts.
                 receipt_domain=(str(getattr(self.gossip, "rpb_address", "") or "")
                                 if self.review_snapshot is not None else None),

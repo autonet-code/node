@@ -174,11 +174,10 @@ async def run_clearance(runtime: Any, record: Any) -> tuple[bool, str]:
 # on its own: both ends need REP mass. Defaults are PROVISIONAL; the DAO sets
 # them (jurisdiction.<id>.containment_*), and the owner's own tools never pass
 # through here.
-CONTAINMENT_DENIED = "denied"
-CONTAINMENT_STRICT = "strict"
-CONTAINMENT_DECLARED = "declared"
-_CONTAINMENT_DEFAULTS = {"deny_harm": 50.0, "trust_harm": 10.0,
-                         "trust_mass_bps": 200.0}
+from nodes.common.containment import (  # noqa: E402  (one rule, shared with the close)
+    CONTAINMENT_DECLARED, CONTAINMENT_DENIED, CONTAINMENT_STRICT,
+    CONTAINMENT_DEFAULTS as _CONTAINMENT_DEFAULTS, tier_for_standing,
+)
 
 
 def containment_params(runtime: Any) -> dict[str, float]:
@@ -194,24 +193,6 @@ def containment_params(runtime: Any) -> dict[str, float]:
     return out
 
 
-def tier_for_standing(standing: Optional[dict[str, Any]],
-                      params: dict[str, float]) -> tuple[str, str]:
-    """Pure tier rule over ``{harm_sum, harm_mass, supply}`` (REP units)."""
-    if not standing or not int(standing.get("harm_mass") or 0):
-        return CONTAINMENT_STRICT, "not yet reviewed for harm"
-    mass = int(standing["harm_mass"])
-    harm = int(standing.get("harm_sum") or 0) / mass
-    supply = int(standing.get("supply") or 0)
-    share_bps = mass * 10_000 / supply if supply > 0 else 0.0
-    quorate = share_bps >= params["trust_mass_bps"]
-    if harm >= params["deny_harm"] and quorate:
-        return CONTAINMENT_DENIED, f"settled harm {harm:.0f}/100"
-    if harm < params["trust_harm"] and quorate:
-        return CONTAINMENT_DECLARED, f"reviewed safe (harm {harm:.0f}/100)"
-    if not quorate:
-        return CONTAINMENT_STRICT, (f"harm {harm:.0f}/100 from too little REP "
-                                    f"({share_bps:.0f} bps of supply)")
-    return CONTAINMENT_STRICT, f"contested (harm {harm:.0f}/100)"
 
 
 def containment_tier(runtime: Any, record: Any) -> tuple[str, str]:
