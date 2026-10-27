@@ -330,3 +330,23 @@ def test_registry_bootstrap_seeds_fill_an_empty_list(monkeypatch):
 
     assert an.bootstrap_peers == ["/dns4/relay.example/tcp/443/wss/p2p/12D3KooWA",
                                   "/dns4/b.example/tcp/443/wss/p2p/12D3KooWB"]
+
+
+def test_boot_key_follows_the_env_registry_not_the_packaged_one(monkeypatch, tmp_path):
+    """A daemon pointed at a launched jurisdiction with
+    ATN_JURISDICTION_REGISTRY is keyed by that jurisdiction, so its review
+    batches and parked tools don't land under the packaged network's name."""
+    calls = []
+
+    def _fetch(addr, rpc, jid):
+        calls.append(addr)
+        return {"jurisdictions": {"autonet": {
+            "network": {"rpc_url": rpc, "chain_id": 31337},
+            "contracts": {"substrate": "0x5", "dao": "0xDA0DA0"}}}}
+    monkeypatch.setattr(cfg, "_fetch_onchain_registry", _fetch)
+    monkeypatch.setattr(cfg, "_ENV_KEY_CACHE", {})
+    monkeypatch.setenv("ATN_JURISDICTION_REGISTRY", "0xREG")
+    monkeypatch.setenv("ATN_JURISDICTION_RPC", "http://127.0.0.1:8545")
+    assert cfg.boot_jurisdiction_key(tmp_path) == "31337:0xda0da0"
+    assert cfg.boot_jurisdiction_key(tmp_path) == "31337:0xda0da0"
+    assert calls == ["0xREG"]

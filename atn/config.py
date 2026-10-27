@@ -829,7 +829,16 @@ def save_selected_jurisdiction(sel: dict[str, Any], data_dir: Path | None = None
 def boot_jurisdiction_key(data_dir: Path | None = None) -> str:
     """``<chain_id>:<DAO address>`` of the jurisdiction this process runs,
     known at boot without touching the network: the saved selection, else
-    the packaged registry.json's entry. "" when neither names a DAO."""
+    the packaged registry.json's entry. "" when neither names a DAO.
+
+    An operator who points the daemon at a launched jurisdiction with
+    ATN_JURISDICTION_REGISTRY gets that jurisdiction's key (its DAO read from
+    the Registry, once), not the packaged one's: everything keyed by it
+    (review batches, parked tools, world dirs) must name the network the
+    daemon actually joins."""
+    env_key = _env_jurisdiction_key()
+    if env_key is not None:
+        return env_key
     sel = load_selected_jurisdiction(data_dir)
     if sel is not None:
         dao, chain_id = str(sel.get("dao") or ""), int(sel.get("chain_id") or 0)
@@ -844,6 +853,37 @@ def boot_jurisdiction_key(data_dir: Path | None = None) -> str:
     if not dao or not chain_id:
         return ""
     return f"{chain_id}:{dao.strip().lower()}"
+
+
+_ENV_KEY_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _env_jurisdiction_key() -> str | None:
+    """The key of the jurisdiction ATN_JURISDICTION_REGISTRY names, or None
+    when it is unset. "" when its Registry cannot be read (nothing joins)."""
+    addr = os.environ.get("ATN_JURISDICTION_REGISTRY", "").strip()
+    if not addr:
+        return None
+    rpc = os.environ.get("ATN_JURISDICTION_RPC", "").strip()
+    if not rpc:
+        from .jurisdiction import RPC_URL
+        rpc = RPC_URL
+    cached = _ENV_KEY_CACHE.get((addr.lower(), rpc))
+    if cached:
+        return cached
+    doc = _fetch_onchain_registry(addr, rpc, "autonet")
+    if doc is None:
+        log.warning("ATN_JURISDICTION_REGISTRY %s unreadable at boot; no "
+                    "jurisdiction key", addr)
+        return ""
+    entry = doc["jurisdictions"]["autonet"]
+    dao = str(entry["contracts"].get("dao") or "")
+    chain_id = int(entry["network"].get("chain_id") or 0)
+    if not dao or not chain_id:
+        return ""
+    key = f"{chain_id}:{dao.lower()}"
+    _ENV_KEY_CACHE[(addr.lower(), rpc)] = key
+    return key
 
 
 def _onchain_registry_target() -> tuple[str, str]:
