@@ -25,6 +25,9 @@ pip install autonet-computer
 atn --headless          # keep it running; see below for a background start
 ```
 
+On Linux, a crypto dependency builds from source and needs the GMP headers
+first: `sudo apt-get install -y libgmp-dev` (Debian/Ubuntu).
+
 Start it so it outlives your session, with output in a log:
 
 ```bash
