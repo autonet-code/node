@@ -1,6 +1,6 @@
 # Autonet: one epoch end to end, and the economy as the code implements it
 
-Every claim below comes from the code under `D:\autonet_codeonly`. Paths are relative to that root. Citations use `file:line`.
+Every claim below comes from the code. It was first written from commit 782bdc8 and now describes HEAD (157796c), including the later fixes d5f77db (loadout receipts and sanctions, empty REP), 8a7241d (stuck election re-post) and 157796c (search hides finally denied tools). Paths are relative to the repo root. Citations use `file:line`. Text rewritten for those commits cites HEAD lines. Older citations were taken at 782bdc8; since then `federated_reconcile.py` lines past 803 moved down 2 (past 812, down 4), and `federated_close_driver.py` lines past 955 moved down 4 (past 1080, down 10). Other cited files are unchanged except `anchor_election.py` (past 125) and `atn/tool_security.py` (past 211).
 
 ---
 
@@ -57,7 +57,7 @@ Receipts are emitted by `ToolStore._record_receipt` (mechanical, `atn/tool_store
 
 `read_voice_state` (`:1165`) is the single chain read for a close. It is all-or-nothing: any failure blocks the close (`federated_close_driver.py:867-931`). It returns the following:
 
-- **Pinning.** In pipelined mode (`pin` with `number > 1`), REP is read at `timestamp = cutoffs[-1]` (the previous epoch's cutoff). Logs are read up to `block_at_or_before(timestamp)`, which raises until the chain head is past that time (`:1088-1109`). The pool is `burnedBetween(cutoffs[-2] or deployedAt, cutoffs[-1])` (`:1275-1292`). Without a pin, the read is pinned to `getAnchor(anchorCount-1)` and the pool is that anchor's `windowBurned` (`:1294-1302`).
+- **Pinning.** In pipelined mode (`pin` with `number > 1`), REP is read at `timestamp = cutoffs[-1]` (the previous epoch's cutoff). Logs are read up to `block_at_or_before(timestamp)`, which raises until the chain head is past that time (`:1088-1109`). The pool is `burnedBetween(cutoffs[-2], cutoffs[-1])`. For epoch 2 the start is `deployedAt`; past epoch 2 a pin without two cutoffs raises (`:1275-1292`, `:1286-1289`). Without a pin, the read is pinned to `getAnchor(anchorCount-1)` and the pool is that anchor's `windowBurned` (`:1294-1302`).
 - **Genesis branch** (`anchorCount == 0`, not pinned). The result has empty maps, `emission_pool 0.0`, a review snapshot without `bonds`, and no `mint_gate` key (`:1242-1274`).
 - **Owner map.** Agents come from `AgentRegistered` logs and owners from `OwnerBound` logs, with the last binding per agent winning. Revoked agents and their whole subtree are dropped (`:1309-1354`).
 - **REP.** REP comes from RepToken `getPastBalance` and `getPastTotalSupply` at the pinned timestamp. It reads balances, not votes (`:1359-1370`, docstring `:27-31`). Household REP is the sum of its bound agents plus the owner's own balance when the owner is not itself an agent (`:1374-1389`). Then `rep_shares[house] = round(rep/supply, 9)` and `voice_weights[house] = round(epsilon + share, 9)` with `epsilon = VOICE_EPSILON = 0.0` (`:1393-1396`, `federated_reconcile.py:136`).
@@ -87,8 +87,8 @@ Receipts are emitted by `ToolStore._record_receipt` (mechanical, `atn/tool_store
 - the canonical order
 - carried `tool_registrations`, `tool_vetting`, `tool_positions`
 - `agent_owner_map`
-- `voice_weights`, or None when empty
-- `rep_shares`, or None when empty
+- `voice_weights`, or None when empty and the close is not chain-backed past genesis
+- `rep_shares`, same rule. A chain-backed close past genesis passes the empty maps, so an empty REP read weighs nothing and keeps the gate on (`federated_close_driver.py:1082-1086`, `:1099-1105`, HEAD)
 - `emission_pool`, or None without a chain source
 - `review_snapshot`
 - `sanctioned_households`
@@ -143,7 +143,7 @@ Notation: for a household `h` and a tool `d`, `n_{h,d}` is the number of atteste
 ### 4.3 Households, the owner map and the sanctions skip
 
 - `_household(agent) = owner_map[agent.lower()] or agent.lower()` (`:666-667`). Every lookup lowercases both sides (`:582-593`).
-- In the usage loop, a sanctioned household's receipts are skipped: "a sanctioned household's usage credits nobody" (`:778-783`).
+- In the usage loop, a sanctioned household's receipts are skipped: "a sanctioned household's usage credits nobody" (`:778-783`). The loadout adoption loop skips it too (`:815-816` at HEAD).
 
 ### 4.4 Collapse, then damp, then fan out
 
@@ -170,8 +170,9 @@ N agents under one owner are one `log1p` term. The value is damped first and spl
 
 ### 4.6 Loadout adoption
 
-- Each distinct household (fleet) whose attested receipts carry `loadout = L` contributes `log1p(1)` once per epoch to `eff[t][h]` over `L`'s composition shares (`:803-822`).
-- Its senders are pooled into `house_senders` for the wire dedup (`:815-817`).
+- Adoption reads the same `verified_receipts(events, receipt_domain)` as usage, so unsigned or forged attestations credit no adoption (`federated_reconcile.py:806`, HEAD).
+- Each distinct household (fleet) whose attested receipts carry `loadout = L` contributes `log1p(1)` once per epoch to `eff[t][h]` over `L`'s composition shares. A sanctioned household is skipped (`:807-826`, HEAD).
+- Its senders are pooled into `house_senders` for the wire dedup (`:819-821`, HEAD).
 
 ### 4.7 Per-tool rules, in order (`:865-962`)
 
@@ -179,6 +180,7 @@ N agents under one owner are one `log1p` term. The value is damped first and spl
 2. **Bond rule.** Applies only when the snapshot carries `bonds`, which happens only when ToolBond logs were read.
    - The tool must be bonded, not unbonding, `stake >= min_stake` and `stake > 0`.
    - The mint author becomes the bond's author (`:870-879`).
+   - Then, bonded or not, a tool with no author is skipped (`:884-885` at HEAD). This check sits between the bond rule and the pinned rule.
    - Bonds come from `Bonded` events (stake = the event's `stake` field, unbonding cleared), `UnbondRequested`, `Unbonded` (removes the bond) and `Finalized` (stake reduced by `bondSlashed`). `min_stake` comes from the latest `ParamsSet`, default 0 (`voice_state.py:421-445`).
 3. **Pinned only.** `manifest_meta.trust_class` must equal `"pinned"` (`:884-885`, `tool_manifest.py:41`).
 4. **Exclusions** per household `h` in `eff[d]`:
@@ -190,8 +192,8 @@ N agents under one owner are one `log1p` term. The value is damped first and spl
    mint_weight(h) = round(voice_weights.get(h, VOICE_EPSILON = 0.0), 9)
                     or 1.0 when voice_weights is None                                   (:832-837)
    ```
-   With ε = 0, a household's mint weight is its REP share.
-6. **Breakthrough gate** (`:862-864`, `:911-917`). It is on when `mint_gate is not None and rep_shares is not None`.
+   With ε = 0, a household's mint weight is its REP share. `voice_weights` is None only off chain or at genesis; a chain-backed close past genesis passes `{}` even when the REP read is empty, so every household then weighs 0 (`federated_close_driver.py:1082-1100`, HEAD).
+6. **Breakthrough gate** (`:862-864`, `:911-917`). It is on when `mint_gate is not None and rep_shares is not None`. Since d5f77db `rep_shares` is `{}`, not None, on a chain-backed close past genesis, so an empty REP read leaves the gate on (`federated_reconcile.py:866`, `federated_close_driver.py:1101-1105`, HEAD).
    - `gate_rep = sum of rep_share(h)` over the counted households with share > 0. `gate_holders` is the count of those households. `n_holders` is the count of all households with positive `rep_shares`.
    - The tool earns nothing this epoch if `gate_rep * 10000 < rep_bps` or `gate_holders * 10000 < houses_bps * n_holders`.
    - Defaults are `MINT_GATE_DEFAULTS = (100, 50)` (`containment.py:22`): users must hold at least 1% of REP supply and be at least 0.5% of REP-holding households.
@@ -305,11 +307,11 @@ Read from `jurisdiction.<id>.<name>` at the pinned block, with defaults in `voic
    - The Python side proposes with any key that meets `proposalThreshold`. While the proposal is Pending, a drawn local key registers this daemon's option. While it is Active, every local key with votes votes for the option whose hash matches its own close. A succeeded proposal is queued, then executed after its eta (`anchor_election.py:105-220`).
    - **Draw.** A live agent is drawn if `mulDiv(h, supply, 2^256-1) < proposers * votes`, where `h = keccak(chainid, this, epoch, attempt, agent)`. Defaults are `proposers = 3`, `proposerFloorPpm = 0`, `maxOptions = 8`, `openAfterAttempts = 2`. From attempt 2 on, any live agent may register (`AnchorElection.sol:85-91`, `:171-183`).
    - `anchorWinner` requires `epochNumber == anchorCount + 1` (`:249-260`).
-   - A defeated, expired or canceled proposal moves to the next attempt (`anchor_election.py:130-136`).
+   - A defeated, expired or canceled proposal moves to the next attempt. So does a queued proposal still unexecuted `EXECUTE_GRACE_S = 600` seconds past its eta, for example when Substrate rejects the winning option and every `anchorWinner` reverts (`anchor_election.py:38-42`, `:127-145`, HEAD).
 2. **Governed proposal.** The proposal calls `Substrate.anchor` with the description `"Anchor epoch <id> 0x<root>"` (`governed_anchor.py:78-80`, `:136-148`). The winner proposes first. The others propose after `tick_interval = 15 s` (`chain_submission_driver.py:129`, `:517-519`).
 3. **Direct.** When Substrate's governor is this daemon's key (dev), only the `pick_submitter` winner anchors (`:282-288`).
 
-The ticker drops an election or proposal after `_MAX_PROPOSAL_AGE_S = 9 days` (`:72`).
+The ticker drops an election or proposal after `_MAX_PROPOSAL_AGE_S = 9 days` (`:72`). Before 8a7241d a stuck-queued election waited out this limit.
 
 ### 6.4 Mint claims and REP claims
 
@@ -357,7 +359,8 @@ quorate   = share_bps >= trust_mass_bps
 Source: `:38-55`.
 
 - **In the close.** A denied tool mints nothing. Its standing includes appeal-window (cooling) harm (`:74-91`).
-- **In the daemon.** A network (adopted) tool runs only while bonded. Its sandbox tier comes from the driver's pinned `security_standing`, which includes cooling harm (`federated_close_driver.py:941-957`, `atn/tool_security.py:140-211`).
+- **In the daemon.** A network (adopted) tool runs only while bonded. Its sandbox tier comes from the driver's pinned `security_standing`, which includes cooling harm (`federated_close_driver.py:941-962`, HEAD; `atn/tool_security.py:140-211`).
+- **In search.** `probe_tools` drops a tool whose final verdict is denied: `finally_denied` asks `security_standing(include_cooling=False)`, so harm still in its appeal window contains a tool but does not hide it. Unknown standing is shown (`atn/tool_security.py:214-228`, `:520-521`, `atn/autonet_service.py:1350-1354`, HEAD).
 
 ### 7.4 Sanctions
 
@@ -366,7 +369,7 @@ Source: `:38-55`.
   - A sanction is in force while the pin timestamp is before `until`.
   - The household is the address's owner if bound, else the address.
   - An agent rotated away from a sanctioned household at or after the sanction's block carries the sanction to its new owner, repeated transitively (`:1112-1162`).
-  - Effects: their usage credits no tool (`federated_reconcile.py:780-781`). Their REP shares are removed from own-share weighting and from the gate holder count (`:1443-1448`). Their reviews move no rating, with weight 0 (`voice_state.py:468`). Their mint is withheld (`federated_reconcile.py:1494-1515`).
+  - Effects: their usage credits no tool (`federated_reconcile.py:780-781`), and since d5f77db their loadout adoption credits no distro (`:815-816`, HEAD). Their REP shares are removed from own-share weighting and from the gate holder count (`:1443-1448`). Their reviews move no rating, with weight 0 (`voice_state.py:468`). Their mint is withheld (`federated_reconcile.py:1494-1515`).
 - **Live use** (`atn/sanctions.py`). The daemon reads `getAllKeys` and `getAllValues`, refreshed at most every 60 s (`:25`). An address is sanctioned if it is named directly, its owner is named, or a past owner (`OwnerBound.prevOwner`) is named (`:161-180`). Agents may not buy from, adopt from, or review for a sanctioned household (`:1-14`, `:194-203`).
 
 ---
@@ -415,9 +418,9 @@ From the latest `ParamsSet` log: `reviewerShareBps` (default 4000 when no event)
 
 1. **Reviewer weighting is described two ways.** `compute_tool_mint`'s docstring and the constant comment say reviewers split "by stake x accuracy x novelty" (`federated_reconcile.py:83-86`, `:499-502`). `reviewer_weights` uses `accuracy x novelty`, with the stake only required to be positive (`:329-330`, `:356-358`).
 2. **Stale ε comments.** Several places describe weight as `epsilon + share`, with ε bounding zero-REP voice and bootstrapping a cold start: `voice_state.py:10-16`, `:1207-1210`, `federated_close_driver.py:236-242`, and "ε-floored" throughout `compute_tool_mint`'s docstring. `VOICE_EPSILON = 0.0` (`federated_reconcile.py:136`). The driver comment even says `household_ATN / supply` (`federated_close_driver.py:239`).
-3. **No RepToken means weight 1.0, not 0.** With no RepToken, or an empty REP read, `voice_weights` and `rep_shares` are `{}`. The driver passes None for empty maps (`federated_close_driver.py:1089-1095`). Every household then weighs 1.0 and the breakthrough gate is off (`federated_reconcile.py:832-837`, `:862`). This is the opposite of the "ε = 0, no free weight" rule. Config refuses to start a jurisdiction without `rep_token`, but a RepToken with zero supply still yields empty maps.
-4. **Loadout adoption bypasses receipt signatures.** `loadout_adoption_from_events(events)` reads raw events, not `verified_receipts(...)` (`federated_reconcile.py:804`). Unsigned or forged attested receipts with a `loadout` stamp still credit adoption.
-5. **Loadout adoption bypasses sanctions.** The adoption loop never checks `sanctioned_set` (`:805-822`), unlike the usage loop (`:780-781`).
+3. Fixed in d5f77db: a chain-backed close past genesis now passes the empty maps, so empty REP weighs nothing and the gate stays on (`federated_close_driver.py:1082-1105`, HEAD). Original finding: **No RepToken means weight 1.0, not 0.** With no RepToken, or an empty REP read, `voice_weights` and `rep_shares` are `{}`. The driver passes None for empty maps (`federated_close_driver.py:1089-1095`). Every household then weighs 1.0 and the breakthrough gate is off (`federated_reconcile.py:832-837`, `:862`). This is the opposite of the "ε = 0, no free weight" rule. Config refuses to start a jurisdiction without `rep_token`, but a RepToken with zero supply still yields empty maps.
+4. Fixed in d5f77db: adoption now reads `verified_receipts(events, receipt_domain)` (`federated_reconcile.py:806`, HEAD). Original finding: **Loadout adoption bypasses receipt signatures.** `loadout_adoption_from_events(events)` reads raw events, not `verified_receipts(...)` (`federated_reconcile.py:804`). Unsigned or forged attested receipts with a `loadout` stamp still credit adoption.
+5. Fixed in d5f77db: the adoption loop skips sanctioned households (`federated_reconcile.py:815-816`, HEAD). Original finding: **Loadout adoption bypasses sanctions.** The adoption loop never checks `sanctioned_set` (`:805-822`), unlike the usage loop (`:780-781`).
 6. **Charter key is hard-coded.** `charter.py:3-4`, `charter_version.py:5-6` and `atn/config.py` use `jurisdiction.<id>.charter`. The close reads `CHARTER_REGISTRY_KEY = "jurisdiction.autonet.charter"` (`voice_state.py:612`, `:1408`). Every other pinned key also uses the default id `"autonet"`, because `nodes/service.py` never passes `jurisdiction_id`.
 7. **Containment thresholds come from two sources.** `containment.py:3-6` says one rule shared by daemon and close. The close uses thresholds pinned to the snapshot (`voice_state.py:1482-1483`). The daemon's run tier uses `RPBConfig.containment_*` from the join-time registry seed (`atn/tool_security.py:183-193`, `atn/config.py:624-627`). A DAO change applies to the close at the next epoch and to sandboxes only after a restart.
 8. **The submitter pick is not canonical.** `pick_submitter` claims all daemons compute the same winner (`federated_close_driver.py:15-20`, `:94-98`). Its input is `gossip.known_senders()`, the daemon's lifetime set of seen senders (`event_gossip.py:654-663`), which differs between daemons. On the election path `is_winner` is unused.

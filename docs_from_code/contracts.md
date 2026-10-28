@@ -1,6 +1,8 @@
 # Autonet on-chain layer, documented from the code
 
-All paths are relative to `D:\autonet_codeonly`. Citations use `file:line`.
+All paths are relative to the repo root. Citations use `file:line`.
+
+This doc describes HEAD at `157796c`. It was first written from `782bdc8` and then fact-checked and updated for the 13 commits since. No Solidity source changed in that range, so contract citations are the same at both commits. Python and script citations point at HEAD.
 
 ## 1. Overview
 
@@ -105,7 +107,7 @@ Fees:
 | `claimGenesis(amount, proof)` | `msg.sender` claims its own leaf once | `:1032-1046` |
 | `mintFromVault(to, amount)` | only `vaultMinter` (non-zero) | Emits `VaultMint` and an `ATNTransfer` from 0. Does not touch `agentMintTotal` (`:1310-1316`). |
 | `transfer`, `approve`, `transferFrom`, `balanceOf`, `allowance`, `balanceOfAt(addr, block)`, `atnTotalSupplyAt(block)` | ERC20-shaped | Reverts on failure instead of returning false. An allowance of `type(uint256).max` is not decremented (`:1143-1178`). There is no name/symbol/decimals/`totalSupply()`; supply is `atnTotalSupply` (`:1055-1060`). |
-| `payForService(recipient, amount, requestId)` | any caller, including contracts | No liveness check on payer or recipient. `ServicePayerMock` pins that contract callers work (`contracts/test/ServicePayerMock.sol:362-373`). |
+| `payForService(recipient, amount, requestId)` | any caller, including contracts | No liveness check on payer or recipient. The only checks are a non-zero recipient and the payer's balance (`Substrate.sol:1342-1344`). `ServicePayerMock` pins that contract callers work (`contracts/test/ServicePayerMock.sol:8-18`). |
 | `setServiceFeeBps(uint16)` | governor | Bounded to 50..1000 bps (`:1251-1261`). |
 | `hasSubmittedForEpoch` | view | `:975-977` |
 
@@ -138,7 +140,7 @@ Fees:
 - Rotation needs only the agent key plus the new owner's signature; the old owner is not consulted (`:516-523`).
 - Rotating a parent does not touch its children (`:705-708`).
 
-**Liveness**: `isLive` walks up to 17 ancestors and fails if any is inactive (`:749-758`). Revoking a node therefore kills its whole subtree.
+**Liveness**: `isLive` requires the agent to be registered, then checks the agent itself and up to 16 ancestors (17 nodes, the loop runs `i = 0..MAX_FLEET_DEPTH`) and fails if any is inactive (`:749-758`). Revoking a node therefore kills its whole subtree.
 
 **Fee split** (`:1348-1375`):
 - `fee = amount * serviceFeeBps / 10000`. Half the fee goes to the treasury (when one is set) and the rest burns.
@@ -234,7 +236,7 @@ This means Substrate's `anchorer` must be set to this contract, either at constr
 
 ### 4.6 Governance
 
-`setParams(...)`, `onlyTimelock`. It requires `proposers > 0`, `0 < maxOptions <= 256`, and `floor <= 1e6` (`:266-280`). The 256 cap lines up with the daemon voting through `castVote(pid, uint8 index)` (`nodes/common/anchor_election.py:219`).
+`setParams(...)`, `onlyTimelock`. It requires `proposers > 0`, `0 < maxOptions <= 256`, and `floor <= 1e6` (`:266-280`). The 256 cap lines up with the daemon voting through `castVote(pid, uint8 index)` (`nodes/common/anchor_election.py:229`).
 
 `onlyTimelock` resolves the timelock dynamically through `governor.timelock()` (`:125-128`).
 
@@ -258,7 +260,7 @@ The daemon reaches Substrate through several separate ABIs:
 
 - **`SUBSTRATE_ABI` (inline)** (`atn/on_chain.py:47-357`): `updatePeerId`, `registerAgentBound`, `rotateOwner`, `revokeAgent`, `isLive`, `bindingNonce`, `isRegistered`, `areRegistered`, `getAgentPeerId`, `updateEndpoint`, `getAgentEndpoint`, `agents`, `registeredAgentCount`, `getRegisteredAgent`, `agentOwner`, `agentMintTotal`, `balanceOf`, `mintForEpoch`, `claimFor`, `payForService`, `serviceEarnings`, `serviceFeeBps`, `anchorCount`, `latestAnchorHash`, `latestEpochRoot`, `atnTotalSupply`, `networkMintTotal`, and the events `ServicePayment`, `ServiceFee`, `AgentRegistered`, `AgentRevoked`, `PeerIdUpdated`, `OwnerBound`.
 - **`_VOICE_ABI`** (`nodes/common/voice_state.py:93-193`): `atnTotalSupplyAt`, `burnedBetween`, `deployedAt`, `anchorCount`, `getAnchor` (the full 14-field tuple), and the events `AgentRegistered`, `AgentRevoked`, `OwnerBound`, `ServiceFee`.
-- **Packaged ABI** (`load_abi("Substrate")`): used by `EpochAnchorer` (`nodes/common/epoch_anchorer.py:167-168`), `AuthoritativeChainSubmitter` (`nodes/common/authoritative_submitter.py:170-171`), `ChainCandleSeed` (`nodes/common/candle_seed.py:113-123`), and peer attribution (`atn/autonet_service.py:1128-1132`, falling back to the inline ABI).
+- **Packaged ABI** (`load_abi("Substrate")`): used by `EpochAnchorer` (`nodes/common/epoch_anchorer.py:167-168`), `AuthoritativeChainSubmitter` (`nodes/common/authoritative_submitter.py:170-171`), `ChainCandleSeed` (`nodes/common/candle_seed.py:113-123`), and peer attribution (`atn/autonet_service.py:1175-1179`, falling back to the inline ABI).
 - **`SUBSTRATE_TOOL_ABI`** (`atn/runtime/tool_bond.py:179-185`): `registerTool`, `toolAuthor`, `approve`, `allowance`, `balanceOf`.
 
 What these call sites rely on:
@@ -270,7 +272,7 @@ What these call sites rely on:
 - **Anchor building.** `prepare_anchor` reads `latestEpochRoot`, `latestAnchorHash` and `latestCutoff`. `anchorHashOf` chains a pipelined child onto an unanchored parent (`nodes/common/epoch_anchorer.py:242-278`, `nodes/common/chain_submission_driver.py:373`).
 - **Claims.** `getAnchorByEpochId` (cid at `[4]`, root at `[9]`), `hasSubmittedForEpoch` and `claimFor`, with a local proof pre-check (`authoritative_submitter.py:203-320`). `nodes/common/mint_merkle.py:81-158` mirrors the leaf and pair hashing.
 - **Direct dev anchoring.** `GovernedAnchorer.direct` compares `substrate.governor()` with the daemon key (`nodes/common/governed_anchor.py:114`, `:121-123`).
-- **Owner sweep.** `ws_server` reads `agentOwner` and `balanceOf` and calls `transfer` (`atn/ws_server.py:5960-5974`).
+- **Owner sweep.** `ws_server` reads `agentOwner` and `balanceOf` and calls `transfer` (`atn/ws_server.py:5961-5975`).
 
 ### 6.2 ServiceRegistry and PaymentChannel (Python side)
 
@@ -289,12 +291,12 @@ Settings are rebuilt from events (`nodes/common/voice_state.py:864-966`): `Votin
 
 What this implies about the Governor:
 - It is OZ-compatible and timestamp-clocked.
-- It uses an options counting module in which `castVote` support is an option index (`anchor_election.py:219`).
+- It uses an options counting module in which `castVote` support is an option index (`anchor_election.py:229`).
 - It decides early (`governed_anchor.py:10-13`).
 
 Two proposal shapes are in use:
 - **Governed path:** target Substrate, calldata `anchor(...)`, description `"Anchor epoch <id> 0x<root>"` (`governed_anchor.py:78-80`, `:136-148`).
-- **Election path:** target AnchorElection (`anchor_election.py:140-145`).
+- **Election path:** target AnchorElection (`anchor_election.py:150-155`).
 
 `ChainSubmissionDriver` prefers the election path whenever `anchor_election_address` is set (`chain_submission_driver.py:263-311`).
 
@@ -302,10 +304,10 @@ Two proposal shapes are in use:
 
 - **Voice weights** use `getPastBalance(account, ts)` and `getPastTotalSupply(ts)` at the anchor timestamp. They read balances, not votes (`voice_state.py:73-91`, `:1359-1396`).
 - **The draw** uses `getPastVotes` (`AnchorElection.sol:40-44`).
-- **Operator delegation flow:** `delegates`, `name`, `nonces`, `delegateBySig` (`atn/ws_server.py:69-86`, `:5856-5896`).
-- **Tool security:** `balanceOf` (`atn/tool_security.py:50-54`, `:429-430`).
+- **Operator delegation flow:** `delegates`, `name`, `nonces`, `delegateBySig` (`atn/ws_server.py:69-86`, `:5857-5897`).
+- **Tool security:** `balanceOf` (`atn/tool_security.py:50-54`, `:446-447`).
 
-Implied: an ERC20Votes and ERC20Permit token with `mode=timestamp` plus a balance-history extension. That matches the mock (`contracts/test/MockRepToken.sol:283-292`).
+Implied: an ERC20Votes and ERC20Permit token with `mode=timestamp` plus a balance-history extension. That matches the mock (`contracts/test/MockRepToken.sol:22-23`, `:64-75`).
 
 ### 6.5 AutonetRepClaim (external)
 
@@ -321,7 +323,7 @@ Implied: an ERC20Votes and ERC20Permit token with `mode=timestamp` plus a balanc
 Implied:
 - Bonds are paid in ATN, pulled through Substrate `approve` and `transferFrom` (`tool_bond.py:343-349`).
 - An author must hold `Substrate.toolAuthor` (`tool_bond.py:328-338`).
-- Slashes go through `Substrate.payForService` from contract context (`ServicePayerMock.sol:362-365`).
+- Slashes go through `Substrate.payForService` from contract context (`ServicePayerMock.sol:8-18`).
 - A review tuple's scores field is `bytes16`, which caps a charter at 16 axes (`review_batch.py:37`, `:55-59`).
 
 ### 6.7 DAO Registry (external)
@@ -348,7 +350,7 @@ There is no daemon call site. The vault appears only in `scripts/s0_local_run.py
 | `scripts/deploy_substrate.js` | Deploys `Substrate(TREASURY or deployer, VAULT_MINTER or 0, TIMELOCK or GOVERNOR (required, non-zero), ANCHORER or 0, GENESIS_ROOT or 0)` (`:38-71`). Writes `deployments/<network>.json` (`:84-99`). Its comment points at an external key file path (`:16-17`). |
 | `scripts/deploy_economy.js` | Deploys only `ServiceRegistry`. PaymentChannel is "pending challengeWindow blessing" (`:6-8`, `:46`). Reads `substrate_address` from `deployments/<network>.json` and writes `<network>_economy.json`. |
 | `scripts/deploy_service_market.js` | Deploys `ServiceRegistry` and `PaymentChannel(SUBSTRATE_ADDR, CHALLENGE_WINDOW or 3600)` and prints JSON. Writes no file. |
-| `scripts/fund_smoke_wallets.js` | Tops up a second wallet and writes its private key to `deployments/<network>-smoke-wallet.json` (`:72-83`). |
+| `scripts/fund_smoke_wallets.js` | Tops up a second wallet and writes its record, private key included, to `$AUTONET_KEYS_DIR/<network>-smoke-wallet.json` (default `~/.autonet/keys`, dir 0700, file 0600 where the OS supports it), outside the repo. It no longer prints the key (`:19-24`, `:32-34`, `:81-101`). `scripts/testnet_chain_smoke.py` reads the same path (`:172-179`). |
 | `scripts/sim_service_market.js` | In-memory scenario narrative over Substrate, ServiceRegistry and PaymentChannel. |
 | `scripts/sync_contract_abis.py` | Copies compiled ABIs to `nodes/common/abi/<Name>.json`. Its list contains only `"Substrate"` (`:25`). |
 
@@ -358,7 +360,7 @@ Deployment records:
 - **`deployments/shadownet.json`**: Substrate `0x2017...A256`, governor/timelock `0x0489...`, treasury `0x652d...` (which is the `dao_registry` in `registry.json`), and vault_minter `0x90D7...` (which is `autonet_vault` in `registry.json`).
 - **`deployments/shadownet-autonet-dao-e2e.json`**: an older (2026-07-10) full stack with a different Substrate `0x4C4d...`, a CharterAnchor contract, and a "pending attach proposal".
 - **`deployments/shadownet_economy.json`**: an older Substrate `0xE266...`.
-- **Raw private keys** are stored in plaintext in `shadownet-dao-deployer.json`, `shadownet-smoke-throwaway.json` and `shadownet-smoke-wallet.json`.
+- **No key files.** `deployments/` holds addresses only. `.gitignore` blocks wallet, deployer, throwaway, key, secret, `.key` and `.pem` files there (`.gitignore:70-78`).
 
 Packaged ABIs: `nodes/common/abi/Substrate.json` and `AnchorElection.json` (`{"contractName", "abi"}`). Both match the sources function for function. They ship as package data (`pyproject.toml:159-160`).
 
@@ -392,7 +394,7 @@ Defaults come from `atn/jurisdiction.py` (CHAIN_ID 127823, RPC, GOVERNOR_ADDRESS
 4. **ServiceRegistry's liveness gate is partial.** The `onlyAgent` comment says a revoked agent "may not list or change services" (`ServiceMarket.sol:103-106`), but `updateServiceAsk` and `retireService` check only the provider, not `isLive` (`:130-154`).
 5. **PaymentChannel status handling is out of date in Python.** `get_channel`'s docstring lists only statuses 0 to 3, missing ClientClosing (4) (`atn/on_chain.py:2252-2253`). `verify_voucher` rejects any status other than Open (`:2136`), but the contract still accepts `closeChannel` during ClientClosing (`ServiceMarket.sol:369-370`).
 6. **Hardhat compiler pin comment is wrong.** The config says every non-test-DAO source is pinned to 0.8.20 (`hardhat.config.js:17-21`). `AnchorElection.sol` and `MockOptionGovernor.sol` are missing from the overrides list (`:24-34`), so with pragma `^0.8.20` Hardhat compiles them with the highest matching compiler, 0.8.24 cancun.
-7. **`sync_contract_abis.py` only syncs Substrate** (`:25`), but `AnchorElection.json` is packaged and loaded (`nodes/common/anchor_election.py:79`). The drift test covers Substrate only (`tests/test_contract_artifacts.py:26-58`).
+7. **`sync_contract_abis.py` only syncs Substrate** (`:25`), but `AnchorElection.json` is packaged and loaded (`nodes/common/anchor_election.py:83`). The drift test covers Substrate only (`tests/test_contract_artifacts.py:26-58`).
 8. **`contract_artifacts._CONTRACT_SOURCES["ServiceMarket"]` points at a non-existent artifact.** It maps to `ServiceMarket.sol/ServiceMarket.json` (`nodes/common/contract_artifacts.py:36-44`), but that file defines `ServiceRegistry` and `PaymentChannel`, so no such artifact exists.
 9. **`sim_service_market.js` is broken.** It calls `substrate.registerAgent(...)` (`scripts/sim_service_market.js:110-112`), which no longer exists; `registerAgentBound` is the only path. It also passes 5 constructor args while the comment says "(treasury, vaultMinter, governor)" (`:89-93`).
 10. **`package.json` deploy scripts reference a missing file.** They point at `scripts/deploy.js`, which does not exist.
@@ -401,7 +403,7 @@ Defaults come from `atn/jurisdiction.py` (CHAIN_ID 127823, RPC, GOVERNOR_ADDRESS
     - `shadownet_economy.json` contains fields `deploy_economy.js` does not produce, and an old Substrate address.
     - `registry.json`'s `service_registry`, `payment_channel`, `tool_bond`, `rep_claim` and `economy` appear in no deployment record.
     - `registry.json` has no `anchor_election` or `deploy_block`, so on shadownet the election path and the configured scan start are both off.
-12. **Private keys are committed in plaintext.** See `deployments/shadownet-dao-deployer.json`, `shadownet-smoke-throwaway.json` and `shadownet-smoke-wallet.json`. `fund_smoke_wallets.js` writes such a file by design (`:72-83`).
+12. **Private keys are committed in plaintext.** Fixed in `18f6a51`: the three key files under `deployments/` are deleted, `fund_smoke_wallets.js` writes its record to `~/.autonet/keys` instead, and `.gitignore` blocks key files in `deployments/`. Git history still holds those keys, so they are burned.
 13. **Stale default governor.** `atn/jurisdiction.py` hardcodes `GOVERNOR_ADDRESS = 0xD569...`, which is the 2026-07-10 e2e DAO (`deployments/shadownet-autonet-dao-e2e.json:8`), not `registry.json`'s `dao` `0x9660...`. Its docstring describes a discovery chain "Governor -> RepToken -> Registry -> RPB" (`:6-10`). Config fields claim to be "Discovered from RepToken.registryAddress()" and similar through `_discover_jurisdiction()` (`atn/config.py:285-305`), but no such function exists anywhere.
 14. **`epoch_anchorer.py` docstring describes the old model.** It says one agent submits anchors "from their own keypair" and that a second submitter's revert means "I'm second" (`:11-18`, `:37-40`). In the code, `anchor` is governor- or anchorer-only and goes through DAO proposals (`:312-313`). `signatures` and `signer_keys` parameters are accepted and ignored (`:330-336`).
 15. **Rounding versus truncation.** `authoritative_submitter.py` says the float is "truncated" at the chain boundary (`:32-35`); `scale_mint` rounds (`mint_merkle.py:50-56`). Its anchor tuple comment lists only 10 fields (`:210-213`).
@@ -409,10 +411,10 @@ Defaults come from `atn/jurisdiction.py` (CHAIN_ID 127823, RPC, GOVERNOR_ADDRESS
 17. **Possible pool mismatch on the pinned path.** The pinned path prices the pool with `burnedBetween(prevCutoff, cutoff)`, computed from checkpoint lookups (`voice_state.py:1292`). On chain, `windowBurned` is measured from `burnedAtLatestCutoff`, which is frozen when the previous anchor landed (`Substrate.sol:305-307`). Fees burned in a cutoff's own second after its anchor tx are counted differently by the two.
 18. **Unbounded log scan in sanctions.** `sanctions.py` scans `OwnerBound` from block 0 with no range splitting (`atn/sanctions.py:52-53`), unlike `_get_logs`, which exists because public RPCs cap `eth_getLogs` ranges (`voice_state.py:241-264`).
 19. **Inconsistent chain-id defaults.** Python configs default to 31337 (`epoch_anchorer.py:92`, `authoritative_submitter.py:85`, `chain_submission_driver.py:82`), while the Hardhat network is 1337 (`hardhat.config.js:43-46`). `EpochAnchorer._submit` signs with `config.chain_id` (`:437`) even though `chain_id()` reads the node (`:204-216`).
-20. **Code-integrity check result is discarded.** `_cache.validate()` returns a bool that `start()` ignores, inside `except: pass` (`atn/autonet_service.py:922-932`). The "core-protected... detected by the on-chain integrity check" claim (`atn/jurisdiction.py:12-14`) is therefore not enforced.
+20. **Code-integrity check result is discarded.** `_cache.validate()` returns a bool that `start()` ignores, inside `except: pass` (`atn/autonet_service.py:935-945`). The "core-protected... detected by the on-chain integrity check" claim (`atn/jurisdiction.py:12-14`) is therefore not enforced.
 21. **Pre-substrate dead code.**
     - `nodes/common/contracts.py` loads only `Substrate` but exposes `set_mature_model` and `get_mature_model` on "RPB" (`:201-216`) and reads `deployment-addresses.json` (`:25-27`), which does not exist.
-    - `atn/autonet_service.py:1702-1830` and `:1892-2103` call an `Autonet` contract (`createUserContract`, `claimParticipantReward`, proposals) whose ABI no longer exists. `ws_server` marks one such handler deprecated (`atn/ws_server.py:96-101`).
+    - `atn/autonet_service.py:1739-1867` and `:1929-2140` call an `Autonet` contract (`createUserContract`, `claimParticipantReward`, proposals) whose ABI no longer exists. `ws_server` marks one such handler deprecated (`atn/ws_server.py:96-101`).
     - `nodes/service.py:493-500` reads `RPB.modelVersion` and similar.
     - `economy_address` is resolved and displayed but never called.
-22. **Possible stall when an election is won by an invalid option.** `AnchorElection` does not validate option content at registration (`AnchorElection.sol:198-220`). A winning option that `Substrate.anchor` rejects reverts every `anchorWinner` call. `ElectionAnchorer` retries a new attempt only on Defeated, Expired or Canceled (`anchor_election.py:38`, `:130-136`), so a Queued proposal with an unexecutable winner sits until the driver's 9-day give-up (`chain_submission_driver.py:72`, `:492-495`). This is inferred from the code, not observed.
+22. **Possible stall when an election is won by an invalid option.** Fixed in `8a7241d`: if the proposal is still Queued `EXECUTE_GRACE_S` (600 s) past its eta after an execute try, `ElectionAnchorer` treats the attempt as failed and re-posts it as the next attempt, instead of waiting for the driver's 9-day give-up (`anchor_election.py:39-42`, `:128-146`; `tests/test_election_stuck_execute.py`). `AnchorElection` still does not validate option content at registration (`AnchorElection.sol:198-220`), so a bad winner costs one attempt plus the grace period.

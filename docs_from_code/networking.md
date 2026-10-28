@@ -1,14 +1,14 @@
 # Autonet peer-to-peer networking and deployment (derived from code only)
 
-All paths are relative to `D:\autonet_codeonly`. Citations use `file:line`.
+All paths are relative to the repo root. Citations use `file:line`. First written from commit 782bdc8; this version describes HEAD as of 157796c (fact-checked, and updated for the commits between them).
 
 ## 1. Overview
 
 The networking layer is one libp2p host class, `AutonetHost` (`nodes/common/p2p.py:430`), running on py-libp2p 0.6.x under trio (`pyproject.toml:63-65`). Several things sit on top of it:
 
 - **Event gossip.** World-event batches are signed and sent over GossipSub on one topic per jurisdiction (`nodes/common/event_gossip.py`).
-- **Content-addressed blobs.** They are fetched over a request/response protocol and can be forwarded one hop (`p2p.py:1458-1608`, `nodes/common/blob_resolver.py`).
-- **Capability advertisement.** Each node pushes a JSON capability record directly to every connected peer (`p2p.py:1288-1329`).
+- **Content-addressed blobs.** They are fetched over a request/response protocol and can be forwarded one hop (`p2p.py:1461-1611`, `nodes/common/blob_resolver.py`).
+- **Capability advertisement.** Each node pushes a JSON capability record directly to every connected peer (`p2p.py:1291-1332`).
 - **Other request/response protocols.** Inference (`/rpb/inference/1.0.0`), the robot rail, the reachability check, and older weights, activations and embeddings protocols (`p2p.py:137-154`).
 - **A relay node.** It runs networking only: it is a seed, keeps the gossip mesh connected, relays blobs and answers reach checks (`nodes/relay.py`).
 
@@ -20,10 +20,10 @@ There is no DHT, no mDNS and no QUIC in use, even though some docstrings say so 
 
 - `AutonetHost(transport=...)` accepts only `"tcp"` or `"ws"`. Anything else raises `ValueError` (`p2p.py:479-481`).
 - The host listens on one address, `/ip4/<listen_host>/tcp/<listen_port>`, with `/ws` appended when the transport is ws (`p2p.py:537-540`).
-- A code comment says py-libp2p runs one transport per host, picked from the listen address, so every node in a network must use the same one (`p2p.py:475-478`, `nodes/common/config.py:123-126`).
+- A code comment says py-libp2p runs one transport per host, picked from the listen address, so every node in a network must use the same one (`p2p.py:475-478`, `nodes/common/config.py:120-123`).
 - `wss` is never served by the process itself. The intended shape is a plain `ws` listener behind an HTTPS reverse proxy that terminates TLS on 443 (`p2p.py:476-478`, `nodes/relay.py:82`). The S1 harness does exactly this with Caddy (section 10.3).
 - A wss seed address looks like `/dns4/<name>/tcp/443/wss/p2p/<id>` (`scripts/s1_container_run.py:208-209`; the test fixture is at `tests/atn/test_config_registry.py:331`).
-- QUIC: `enable_quic` is passed through to `new_host` (`p2p.py:553`) but defaults to False. The daemon never passes it (`atn/autonet_service.py:477-489`), so `p2p.enable_quic` in config has no effect on the daemon.
+- QUIC: `enable_quic` is passed through to `new_host` (`p2p.py:553`) but defaults to False. The daemon never passes it (`atn/autonet_service.py:488-501`), so `p2p.enable_quic` in config has no effect on the daemon.
 
 ### 2.2 DNS handling
 
@@ -35,10 +35,11 @@ There is no DHT, no mDNS and no QUIC in use, even though some docstrings say so 
 ### 2.3 HTTP CONNECT proxies (`nodes/common/ws_proxy.py`)
 
 - py-libp2p's WebSocket client reads `HTTP_PROXY` / `HTTPS_PROXY` but only speaks SOCKS5 to them (`ws_proxy.py:3-8`).
-- `install()` replaces `WebsocketTransport._create_proxy_connection` once (`ws_proxy.py:54-96`):
+- `install()` replaces `WebsocketTransport._create_proxy_connection` once (`ws_proxy.py:54-97`):
   - For `http`/`https` proxy URLs it opens a CONNECT tunnel. The tunnel uses TLS to the proxy itself when the proxy URL is `https`, and sends Basic `Proxy-Authorization` when the URL carries credentials (`ws_proxy.py:24-51`).
-  - For `wss` it then wraps the tunnel in TLS with SNI set to the target host (`ws_proxy.py:78-81`), then runs the WebSocket handshake through `trio_websocket.wrap_client_stream` (`ws_proxy.py:85-88`).
-  - SOCKS URLs fall through to the library's original code (`ws_proxy.py:67-68`).
+  - For `wss` it then wraps the tunnel in TLS with SNI set to the target host (`ws_proxy.py:79-82`), then runs the WebSocket handshake through `trio_websocket.wrap_client_stream` (`ws_proxy.py:86-89`).
+  - SOCKS URLs fall through to the library's original code (`ws_proxy.py:68-69`).
+- `install()` also replaces `P2PWebSocketConnection.get_remote_address`, which in py-libp2p returns only a placeholder, with one that reads the peer's IP and port from trio-websocket's endpoint (`ws_proxy.py:64`, `ws_proxy.py:100-116`). The reach check (section 3.4) depends on this to see a ws peer's IP.
 - `install()` is called only when the host's transport is `ws` (`p2p.py:482-485`).
 - CONNECT is only considered successful if the status line contains ` 200` (`ws_proxy.py:48-50`), and the response header is capped at 16 KiB (`ws_proxy.py:46-47`).
 
@@ -47,15 +48,15 @@ There is no DHT, no mDNS and no QUIC in use, even though some docstrings say so 
 - Every custom protocol uses a 4-byte big-endian length prefix and writes in 65000-byte chunks to stay under the Noise and Yamux limits (`p2p.py:61-130`).
 - There are two framing styles:
   - Write-then-close: `_write_framed` / `_read_framed`.
-  - Request/response on one stream: `_write_frame_no_close` / `_read_frame_no_close`. A comment says a full close tears down the read half on py-libp2p, so the response could never come back (`p2p.py:1640-1644`).
+  - Request/response on one stream: `_write_frame_no_close` / `_read_frame_no_close`. A comment says a full close tears down the read half on py-libp2p, so the response could never come back (`p2p.py:1643-1647`).
 
 ## 3. Host lifecycle and addresses
 
 ### 3.1 Identity
 
 - `key_seed` (32 bytes) gives a stable ed25519 peer id through `create_new_key_pair(seed)` (`p2p.py:472-474`, `p2p.py:546-549`).
-- Only the relay passes one. It reads or creates `<data-dir>/relay.key` (hex, chmod 600) (`nodes/relay.py:47-62`, `nodes/relay.py:115`).
-- The ATN daemon does not pass `key_seed` (`atn/autonet_service.py:477-489`), so its libp2p peer id changes on every start (section 12).
+- The relay reads or creates `<data-dir>/relay.key` (hex, chmod 600) with `load_key_seed` (`nodes/relay.py:47-62`, `nodes/relay.py:115`).
+- The ATN daemon uses the same `load_key_seed` on `<data_dir>/p2p.key` and passes the seed to the host, so its peer id survives restarts. If the file cannot be read it logs a warning and starts with a fresh id (`atn/autonet_service.py:477-490`).
 
 ### 3.2 Announce addresses
 
@@ -73,16 +74,16 @@ These run in the host's nursery (`p2p.py:598-608`):
 
 ### 3.4 NAT handling: UPnP plus the reach protocol
 
-The auto-reach loop (`p2p.py:692-739`) works like this:
+The auto-reach loop (`p2p.py:692-742`) works like this:
 
-1. **UPnP.** If enabled and the listen port is known, it uses `libp2p.discovery.upnp.upnp.UpnpManager` to discover the router and map the port as TCP. Any failure turns UPnP off for the run (`p2p.py:704-713`). py-libp2p's own UPnP is explicitly turned off because it reads `get_addrs`, which the host has replaced (`p2p.py:554-556`). The mapping is renewed every round (`p2p.py:716-718`) and removed on shutdown inside a shielded 3 s scope (`p2p.py:736-739`). Mapping needs `miniupnpc` (`pyproject.toml:65`).
+1. **UPnP.** If enabled and the listen port is known, it uses `libp2p.discovery.upnp.upnp.UpnpManager` to discover the router and map the port as TCP. Any failure turns UPnP off for the run (`p2p.py:704-713`). py-libp2p's own UPnP is explicitly turned off because it reads `get_addrs`, which the host has replaced (`p2p.py:554-556`). The mapping is renewed every round (`p2p.py:716-718`) and removed on shutdown inside a shielded 3 s scope (`p2p.py:739-742`). Mapping needs `miniupnpc` (`pyproject.toml:65`).
 2. **Reach check.** It asks up to three connected peers, with 15 s each, over `/autonet/reach/1.0.0` (`p2p.py:719-725`). If nobody answers it retries after 2 s (`p2p.py:726-728`).
-3. **Decision.** If a peer reports `reachable` and the observed IP is globally routable (`_is_public_ip`, `p2p.py:396-403`), the host announces `/ip4|ip6/<ip>/tcp/<port>`. Otherwise it goes back to the listen addresses (`p2p.py:729-734`). Any change is pushed to peers at once (`p2p.py:679-690`).
-4. It repeats every `reach_interval` seconds (`p2p.py:735`).
+3. **Decision.** If a peer reports `reachable` and the observed IP is globally routable (`_is_public_ip`, `p2p.py:396-403`), the host announces `/ip4|ip6/<ip>/tcp/<port>`, with `/ws` appended when the transport is ws (`p2p.py:731-735`). Otherwise it goes back to the listen addresses (`p2p.py:729-737`). Any change is pushed to peers at once (`p2p.py:679-690`).
+4. It repeats every `reach_interval` seconds (`p2p.py:738`).
 
-The reach handler, on the answering side (`p2p.py:754-773`):
+The reach handler, on the answering side (`p2p.py:757-776`):
 
-- It reads `{"port": N}` and takes the requester's observed IP from `stream.get_remote_address()`.
+- It reads `{"port": N}` and takes the requester's observed IP from `stream.get_remote_address()` (on ws this is the patched method from section 2.3).
 - It tries a raw TCP connect to that IP and port, with a 5 s limit.
 - It replies `{"ip", "reachable"}`.
 - It only ever dials the requester's own observed IP (`p2p.py:151-153`), so the check cannot be used to make the node dial arbitrary hosts.
@@ -91,28 +92,28 @@ A host that nobody can reach keeps working NAT'd by dialling out (`p2p.py:699-70
 
 ### 3.5 GossipSub setup
 
-GossipSub is created lazily on the first `join_guild` / `subscribe_topic` / `publish_topic` (`p2p.py:1040-1087`), with these settings:
+GossipSub is created lazily on the first `join_guild` / `subscribe_topic` / `publish_topic` (`p2p.py:1043-1090`), with these settings:
 
 - protocols `/meshsub/1.1.0` and `/meshsub/1.0.0`;
 - degree 6, low 4, high 12;
-- `heartbeat_interval=1` (a comment says 120 s used to stall mesh formation, `p2p.py:1048-1052`);
-- `Pubsub(strict_signing=False)` (`p2p.py:1060-1064`).
+- `heartbeat_interval=1` (a comment says 120 s used to stall mesh formation, `p2p.py:1051-1055`);
+- `Pubsub(strict_signing=False)` (`p2p.py:1063-1067`).
 
 Libp2p-level message signing is therefore off. Event batches are signed at the application layer instead (section 4.2).
 
-Pubsub and GossipSub each run under their own `TrioManager` in the host nursery (`p2p.py:1075-1082`). Two workarounds call the private `Pubsub._handle_new_peer_safe`:
+Pubsub and GossipSub each run under their own `TrioManager` in the host nursery (`p2p.py:1078-1085`). Two workarounds call the private `Pubsub._handle_new_peer_safe`:
 
-- `_reconcile_pubsub_peers` runs every 2 s and registers any connected peer that pubsub has missed (`p2p.py:807-829`);
-- `_nudge_pubsub_peer` runs after every explicit connect (`p2p.py:831-848`, `p2p.py:862`).
+- `_reconcile_pubsub_peers` runs every 2 s and registers any connected peer that pubsub has missed (`p2p.py:810-832`);
+- `_nudge_pubsub_peer` runs after every explicit connect (`p2p.py:834-851`, `p2p.py:865`).
 
 The comments say PubsubNotifee delivery was seen to lag on ZeroTier networks.
 
 ### 3.6 Cross-thread use
 
 - The host captures its trio token and nursery (`p2p.py:597-600`) and sets a `threading.Event` called `_ready_event` once they are ready (`p2p.py:516-517`, `p2p.py:606`).
-- `publish_topic_threadsafe` queues the publish with `run_sync_soon` and never waits. This avoids a deadlock with the world lock (`p2p.py:1161-1182`).
-- `subscribe_topic_threadsafe` blocks through `trio.from_thread.run` (`p2p.py:1208-1226`).
-- One reader task runs per topic. It skips messages that came from this host (`p2p.py:1228-1252`).
+- `publish_topic_threadsafe` queues the publish with `run_sync_soon` and never waits. This avoids a deadlock with the world lock (`p2p.py:1164-1185`).
+- `subscribe_topic_threadsafe` blocks through `trio.from_thread.run` (`p2p.py:1211-1229`).
+- One reader task runs per topic. It skips messages that came from this host (`p2p.py:1231-1255`).
 
 ## 4. Event gossip (`nodes/common/event_gossip.py`)
 
@@ -149,7 +150,7 @@ The comments say PubsubNotifee delivery was seen to lag on ZeroTier networks.
 - `publish_events` holds local events in `_outbox` whenever the transport reports no subscribed peers, or the outbox is already non-empty (to keep ordering) (`event_gossip.py:441-464`).
 - A batch is signed only when it is actually sent. A comment says this keeps its timestamp inside every receiver's skew window, and keeps unseen batches out of the local epoch set (`event_gossip.py:449-453`).
 - `flush_outbox` drains the outbox oldest first while peers are present (`event_gossip.py:466-478`). It is called on every publish and on every service cycle (`nodes/service.py:323-328`).
-- `has_peers` maps to `host.topic_peer_count(topic) > 0` (`event_gossip.py:285-287`, `p2p.py:885-893`).
+- `has_peers` maps to `host.topic_peer_count(topic) > 0` (`event_gossip.py:285-287`, `p2p.py:888-896`).
 
 ### 4.5 Transports
 
@@ -159,20 +160,20 @@ The comments say PubsubNotifee delivery was seen to lag on ZeroTier networks.
 
 ### 4.6 Wiring in the daemon
 
-- `AutonetBridge.start()` starts p2p, then runs `_wire_event_gossip_when_ready` (`atn/autonet_service.py:997-1018`). That task polls for up to 30 s until both the WorldService and the host's `_ready_event` are ready, then calls `service.attach_event_gossip(host)` (`atn/autonet_service.py:1219-1252`).
+- `AutonetBridge.start()` starts p2p, then runs `_wire_event_gossip_when_ready` (`atn/autonet_service.py:1009-1030`). That task waits until both the WorldService and the host's `_ready_event` are ready, then calls `service.attach_event_gossip(host)` on the current host (`atn/autonet_service.py:1262-1287`).
 - `attach_event_gossip` builds the `EventGossip` and then the federated close driver (`nodes/service.py:804-851`).
-- If 30 s pass first, gossip is never attached and nothing retries (`atn/autonet_service.py:1243-1245`).
+- The wait is the shared `_wait_until_ready` (`atn/autonet_service.py:1113-1141`): it polls every 0.2 s for the first 30 s, then logs one warning and keeps polling with backoff capped at 10 s. It gives up only when the bridge stops or its service is replaced (`_still_running`, `atn/autonet_service.py:1101-1106`). The peer-attribution and chain-submission waiters use the same helper (`atn/autonet_service.py:1163-1166`, `:1207-1211`).
 
 ## 5. Blobs
 
 ### 5.1 Protocol `/autonet/blob/1.0.0`
 
 - A request is `"<sha256hex>"` or `"<hash>|<hops>"` (`p2p.py:141-145`).
-- `BLOB_RELAY_MAX_HOPS = 1`. A bare hash means one hop is allowed, and the server caps any requested hop count at that value (`p2p.py:1521-1525`).
-- On a local miss with hops > 0, the server asks every other connected peer at the same time with `hops-1`. The timeout is `_blob_relay_timeout` = 5 s (`p2p.py:496`). Any relayed result is passed to `_blob_relay_sink` (`p2p.py:1534-1545`).
-- The response is the raw bytes, or an empty frame for "not found" (`p2p.py:1547-1549`).
-- The client checks that sha256 of the bytes equals the requested hash (`p2p.py:1497-1508`).
-- `fetch_blob_from_peers` asks all given peers at once, and the first verified answer cancels the rest (`p2p.py:1575-1608`).
+- `BLOB_RELAY_MAX_HOPS = 1`. A bare hash means one hop is allowed, and the server caps any requested hop count at that value (`p2p.py:1524-1528`).
+- On a local miss with hops > 0, the server asks every other connected peer at the same time with `hops-1`. The timeout is `_blob_relay_timeout` = 5 s (`p2p.py:496`). Any relayed result is passed to `_blob_relay_sink` (`p2p.py:1537-1548`).
+- The response is the raw bytes, or an empty frame for "not found" (`p2p.py:1550-1552`).
+- The client checks that sha256 of the bytes equals the requested hash (`p2p.py:1500-1511`).
+- `fetch_blob_from_peers` asks all given peers at once, and the first verified answer cancels the rest (`p2p.py:1578-1611`).
 
 A comment says the one hop exists so that a NAT'd daemon can reach a blob held only by another NAT'd daemon, through a reachable peer that both are connected to (`p2p.py:141-144`).
 
@@ -182,8 +183,8 @@ A comment says the one hop exists so that a NAT'd daemon can reach a blob held o
 - `host_blob_server(host)` installs one `HostBlobServer` per host, stored on attribute `_autonet_blob_server`. It serves from an in-memory map first, then from registered read-only sources such as `BlobStore.get_bytes_local`, returning a source's result only when the bytes hash to the requested CID (`blob_resolver.py:129-143`).
 - It also installs the relay sink so relayed blobs land in the in-memory map (`blob_resolver.py:99-102`).
 - `LibP2PBlobResolver.get` checks locally first, then asks connected peers and also peers known only through capability gossip, bridging into trio with `trio.from_thread.run`. It caches verified results (`blob_resolver.py:199-262`).
-- The daemon uses this resolver for chain submission (`atn/autonet_service.py:1170`) and for fetching tool blobs through `asyncio.to_thread` (`atn/autonet_service.py:1289-1298`).
-- It also registers the on-disk tool and service blob stores as sources (`atn/autonet_service.py:1184-1201`).
+- The daemon uses this resolver for chain submission (`atn/autonet_service.py:1213`) and for fetching tool blobs through `asyncio.to_thread` (`atn/autonet_service.py:1325-1334`).
+- It also registers the on-disk tool and service blob stores as sources (`atn/autonet_service.py:1227-1244`).
 
 ### 5.3 `BlobStore` (`nodes/common/blob_store.py`)
 
@@ -195,30 +196,30 @@ A comment says the one hop exists so that a NAT'd daemon can reach a blob held o
 ## 6. Capability advertisement and discovery
 
 - `NodeCapability` is JSON with sorted keys. It carries peer_id, node_id, roles, gpu fields, modules_hosted, listen_addrs, agents, model_state, inference and timestamp (`p2p.py:239-272`).
-- `advertise_capability` opens a `/autonet/capability/1.0.0` stream to every connected peer and writes the record (`p2p.py:1288-1315`).
+- `advertise_capability` opens a `/autonet/capability/1.0.0` stream to every connected peer and writes the record (`p2p.py:1291-1318`).
 - How often it runs:
-  - the daemon, every `p2p.capability_advertise_interval` seconds (default 60) (`atn/autonet_service.py:472`, `atn/autonet_service.py:509-512`);
+  - the daemon, every `p2p.capability_advertise_interval` seconds (default 60) (`atn/autonet_service.py:472`, `atn/autonet_service.py:521-524`);
   - the relay, every `--advertise-interval` seconds (`nodes/relay.py:136-139`);
   - also on any address change (`p2p.py:656`, `p2p.py:690`).
-- On receipt the record is stored under the `peer_id` field inside the payload, not under the stream's authenticated remote peer (`p2p.py:1317-1329`). Records are never expired.
+- On receipt the record is stored under the `peer_id` field inside the payload, not under the stream's authenticated remote peer (`p2p.py:1320-1332`). Records are never expired.
 - The capability's `listen_addrs` are never used to dial anyone. Discovery beyond the seeds depends on connections that already exist.
-- `discover_inference_providers` filters by price and model and sorts known-latency peers first (`p2p.py:1877-1970`). `RPBNetworkProvider.discover_providers` does its own scan of `_known_capabilities`, preferring sponsors (`atn/providers/rpb.py:81-146`).
+- `discover_inference_providers` filters by price and model and sorts known-latency peers first (`p2p.py:1880-1973`). `RPBNetworkProvider.discover_providers` does its own scan of `_known_capabilities`, preferring sponsors (`atn/providers/rpb.py:81-146`).
 - Latency: `PeerLatencyTracker` exists (`p2p.py:303-388`), but nothing in non-test code ever calls `ping_peer` / `ping_all`. Every latency is therefore unmeasured: `None` in `discover_inference_providers`, and `9999` in the RPB provider (`rpb.py:124-128`).
 
 ## 7. Request/response protocols
 
 | Protocol | Handler | Used by |
 |---|---|---|
-| `/autonet/weights/1.0.0` | `p2p.py:933` (sha256-prefixed payload) | no non-test caller |
-| `/autonet/activations/1.0.0` | `p2p.py:1009` | no non-test caller |
-| `/autonet/embeddings/1.0.0` | `p2p.py:2010` | `nodes/common/distributed_jepa.py:170,496,525` |
-| `/autonet/capability/1.0.0` | `p2p.py:1317` | section 6 |
-| `/autonet/blob/1.0.0` | `p2p.py:1517` | section 5 |
-| `/rpb/inference/1.0.0` | `p2p.py:1668` (`_inference_handler`, `{"error"}` if unset) | sponsor handler set directly as `host._inference_handler` (`atn/autonet_service.py:496-499`); client `atn/providers/rpb.py:198` |
-| `/autonet/robot/1.0.0` | `p2p.py:1760` | robot rail (`atn/robot/rail.py:160-174`, `rail.py:237`) |
-| `/autonet/reach/1.0.0` | `p2p.py:754` | section 3.4 |
+| `/autonet/weights/1.0.0` | `p2p.py:936` (sha256-prefixed payload) | no non-test caller |
+| `/autonet/activations/1.0.0` | `p2p.py:1012` | no non-test caller |
+| `/autonet/embeddings/1.0.0` | `p2p.py:2013` | `nodes/common/distributed_jepa.py:170,496,525` |
+| `/autonet/capability/1.0.0` | `p2p.py:1320` | section 6 |
+| `/autonet/blob/1.0.0` | `p2p.py:1520` | section 5 |
+| `/rpb/inference/1.0.0` | `p2p.py:1671` (`_inference_handler`, `{"error"}` if unset) | sponsor handler set directly as `host._inference_handler` (`atn/autonet_service.py:508-511`); client `atn/providers/rpb.py:198` |
+| `/autonet/robot/1.0.0` | `p2p.py:1763` | robot rail (`atn/robot/rail.py:160-174`, `rail.py:237`) |
+| `/autonet/reach/1.0.0` | `p2p.py:757` | section 3.4 |
 
-The robot rail finds a target agent's peer id through the on-chain `PeerAttribution` that is stored on the host as `_peer_attribution` (`atn/robot/rail.py:153-158`, `atn/autonet_service.py:1148-1150`).
+The robot rail finds a target agent's peer id through the on-chain `PeerAttribution` that is stored on the host as `_peer_attribution` (`atn/robot/rail.py:153-158`, `atn/autonet_service.py:1195-1197`).
 
 ## 8. Seeds: where bootstrap peers come from
 
@@ -230,14 +231,14 @@ The order, highest priority first, as applied in `start_p2p` (`atn/autonet_servi
    - else `ATN_JURISDICTION_REGISTRY` plus `ATN_JURISDICTION_RPC`, or the saved `<data_dir>/jurisdiction.json` selection, read on chain through the DAO Registry's `getAllKeys` / `getAllValues` (`atn/config.py:889-936`);
    - else the packaged `atn/registry.json`.
    
-   A Registry list can replace an empty `bootstrap_peers` list (`atn/config.py:1040-1043`). `start()` resolves the registry (`ensure_network_config`) before it calls `start_p2p` (`atn/autonet_service.py:912`, `atn/autonet_service.py:997`).
+   A Registry list can replace an empty `bootstrap_peers` list (`atn/config.py:1040-1043`). `start()` resolves the registry (`ensure_network_config`) before it calls `start_p2p` (`atn/autonet_service.py:924`, `atn/autonet_service.py:1009`).
 3. **`COMMUNITY_BOOTSTRAP_PEERS`.** This list is currently empty (`nodes/common/peer_attribution.py:56-60`, `peer_attribution.py:205-215`).
 
 Neither the repo-root `registry.json` nor `atn/registry.json` contains a `bootstrap` key (a grep found none). Seeds therefore come only from config, env, or an on-chain or URL registry. The S0 and S1 harnesses put the relay's address into the Registry at deploy time through `BOOTSTRAP=<seed>` passed to the external `deploy-autonet-jurisdiction.js` (`scripts/s0_local_run.py:219-247`).
 
 ## 9. Relay node (`nodes/relay.py`)
 
-- **Start command:** `atn relay ...` (`atn/cli.py:995-1000`) or `python -m nodes.relay`.
+- **Start command:** `atn relay ...` (`atn/cli.py:996-1001`) or `python -m nodes.relay`.
 - **Flags and their env twins** (`relay.py:65-96`):
   - `--port`: `AUTONET_P2P_PORT`, default 4001
   - `--host`: `AUTONET_P2P_HOST`, default 0.0.0.0
@@ -257,27 +258,27 @@ Neither the repo-root `registry.json` nor `atn/registry.json` contains a `bootst
 
 ### 10.1 Desktop / interactive daemon
 
-- `atn` runs `run_cli()`, an interactive console, when stdin is a TTY (`atn/cli.py:780-795`).
+- `atn` runs `run_cli()`, an interactive console, when stdin is a TTY (`atn/cli.py:781-796`).
 - Autonet, and with it p2p, starts only when `autonet.enabled: true` is set, or when an agent is or becomes registered on chain (`atn/runtime/__init__.py:840-855`, `__init__.py:874-901`).
-- Agents register with the daemon's current libp2p peer id (`atn/ws_server.py:5737-5804`).
+- Agents register with the daemon's libp2p peer id, which is now stable across restarts (section 3.1, `atn/ws_server.py:5738-5805`).
 - Other listeners, which are not part of the P2P layer:
-  - the local owner WS (default `ws://127.0.0.1:7700`, `atn/cli.py:952`);
-  - an optional remote wallet-auth WS (`ATN_REMOTE_WS_HOST`/`_PORT`, `atn/cli.py:585-610`);
-  - an integration listener (`ATN_INTEGRATION_WS`, `_HOST`, `_PORT`, default 7710, `atn/cli.py:564-582`);
+  - the local owner WS (default `ws://127.0.0.1:7700`, `atn/cli.py:953`). It pre-auths connections as the owner, so it refuses any peer whose socket belongs to a process the daemon spawned (guest tools, authored and adopted tools, agent shell commands, agent workers), checked by peer credential (`atn/ws_auth.py:187-260`, `atn/ws_server.py:635-645`);
+  - an optional remote wallet-auth WS (`ATN_REMOTE_WS_HOST`/`_PORT`, `atn/cli.py:586-611`);
+  - an integration listener (`ATN_INTEGRATION_WS`, `_HOST`, `_PORT`, default 7710, `atn/cli.py:565-583`);
   - optional publication of `public_ws_endpoint` to a Firestore agent directory (`atn/runtime/__init__.py:865-877`).
 
 ### 10.2 Headless daemon
 
-- `atn --headless`, or any run with a non-TTY stdin, waits for the shutdown event instead of reading input (`atn/cli.py:780-793`).
+- `atn --headless`, or any run with a non-TTY stdin, waits for the shutdown event instead of reading input (`atn/cli.py:781-794`).
 - `python -m nodes` runs `nodes.service.AutonetService` directly (`nodes/__main__.py:41-45`). It never constructs an `AutonetHost` (no `AutonetHost(` call in `nodes/service.py`), so that entry point has no P2P.
 
 ### 10.3 Docker (`docker/Dockerfile.daemon`)
 
 - Two-stage build on python:3.11-slim. State lives on one volume at `/data/atn`, with `~/.atn` symlinked to it.
-- The entrypoint is tini plus `atn.guest_launcher`, and the default command is `atn --headless` (`Dockerfile.daemon:111-114`).
-- `AUTONET_P2P_PORT=4001` and `EXPOSE 7710 4001` (`Dockerfile.daemon:105-109`). The comments name 4001 as the only public port (`Dockerfile.daemon:15-21`, compose snippet `:37-62`).
+- The entrypoint is tini plus `atn.guest_launcher`, and the default command is `atn --headless` (`Dockerfile.daemon:127-129`).
+- `AUTONET_P2P_PORT=4001` and `EXPOSE 7710 4001` (`Dockerfile.daemon:117-120`). The comments name 4001 as the only public port (`Dockerfile.daemon:14-21`, compose snippet `:36-61`).
 - No transport, announce or bootstrap env is set. A container behind Docker NAT therefore relies on UPnP or auto-reach (which usually fails inside a bridge network), or on `AUTONET_P2P_ANNOUNCE` set by the operator.
-- The build copies `README.md` (`Dockerfile.daemon:74`). That file does not exist in this docs-stripped copy, so building from this copy would fail at that step.
+- The build copies `README.md` (`Dockerfile.daemon:76`), so a source tree without it (such as a docs-stripped copy) fails at that step. The repo has one.
 
 ### 10.4 Relay node
 
@@ -326,50 +327,50 @@ This shows the intended WAN topology: daemons on cloud VMs that can only reach t
 | `p2p.listen_port` | 0 (random) | `AUTONET_P2P_PORT` | yes (`autonet_service.py:462`) |
 | `p2p.listen_host` | 0.0.0.0 | `AUTONET_P2P_HOST` | yes (`:463`) |
 | `p2p.bootstrap_peers` | [] | `AUTONET_P2P_BOOTSTRAP` (comma list) | yes (`:469-471`) |
-| `p2p.announce_addrs` | [] | `AUTONET_P2P_ANNOUNCE` (comma list) | yes (`:483`) |
-| `p2p.bootstrap_redial_interval` | 30 (0 = dial once) | none | yes (`:484`) |
-| `p2p.transport` | tcp | `AUTONET_P2P_TRANSPORT` | yes (`:488`) |
-| `p2p.enable_upnp` | True | none | yes (`:485`) |
-| `p2p.auto_reach` | True | none | yes (`:486`) |
-| `p2p.reach_interval` | 300 | none | yes (`:487`) |
+| `p2p.announce_addrs` | [] | `AUTONET_P2P_ANNOUNCE` (comma list) | yes (`:495`) |
+| `p2p.bootstrap_redial_interval` | 30 (0 = dial once) | none | yes (`:496`) |
+| `p2p.transport` | tcp | `AUTONET_P2P_TRANSPORT` | yes (`:500`) |
+| `p2p.enable_upnp` | True | none | yes (`:497`) |
+| `p2p.auto_reach` | True | none | yes (`:498`) |
+| `p2p.reach_interval` | 300 | none | yes (`:499`) |
 | `p2p.capability_advertise_interval` | 60 | none | yes (`:472`) |
 | `p2p.enable_quic` | False | none | no |
 | `p2p.ping_interval` | 30 | none | no (never read) |
 | `blob_store.data_dir` | `~/.autonet/blobs` | `AUTONET_BLOB_DIR` | `nodes/service.py:346` |
 | `blob_store.peer_urls` | [] | none | `nodes/service.py:350-354` |
 | `blob_store.server_port` | 9100 | none | never read |
-| `jurisdiction_key` | "" | set by the bridge (`autonet_service.py:979`) | names the gossip topic |
+| `jurisdiction_key` | "" | set by the bridge (`autonet_service.py:991`) | names the gossip topic |
 
-The source table is `nodes/common/config.py:113-134` and `:299-328`. The config file is located through `AUTONET_CONFIG` (`config.py:399`). `AUTONET_DATA_DIR` maps to `data_dir`.
+The source table is `nodes/common/config.py:113-131` and `:299-328`. The config file is located through `AUTONET_CONFIG` (`config.py:399`). `AUTONET_DATA_DIR` maps to `data_dir`.
 
 ### 11.2 Other variables
 
 - **Relay only:** `AUTONET_RELAY_JURISDICTIONS`, `AUTONET_RELAY_DIR`. It also reads the `AUTONET_P2P_*` twins directly with `os.environ` (`relay.py:66-87`).
 - **Seed resolution:** `ATN_REGISTRY_URL`, `ATN_JURISDICTION_REGISTRY`, `ATN_JURISDICTION_RPC` (`atn/config.py:575-577`, `:861-904`). Registry key `jurisdiction.<id>.bootstrap`.
-- **Proxy:** `HTTP_PROXY`, `HTTPS_PROXY` and lowercase variants, read by py-libp2p's ws transport (`ws_proxy.py:3-4`). S1 also sets `NO_PROXY`, `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`. The ws TLS path uses `ssl.create_default_context()` (`ws_proxy.py:30`, `:79`), which honours `SSL_CERT_FILE`.
+- **Proxy:** `HTTP_PROXY`, `HTTPS_PROXY` and lowercase variants, read by py-libp2p's ws transport (`ws_proxy.py:3-4`). S1 also sets `NO_PROXY`, `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`. The ws TLS path uses `ssl.create_default_context()` (`ws_proxy.py:30`, `:80`), which honours `SSL_CERT_FILE`.
 - **Docker image:** `AUTONET_P2P_PORT=4001`.
 
 ## 12. Inconsistencies and dead code
 
-1. **The daemon's peer id is not persistent.** `start_p2p` never passes `key_seed` (`atn/autonet_service.py:477-489`), so each restart gets a new libp2p id. Agents register with the current one (`atn/ws_server.py:5737-5804`). `OnChainService.update_peer_id` exists (`atn/on_chain.py:1039-1056`) but nothing calls it. After a restart, on-chain `getAgentPeerId` is stale, so robot-rail routing (`atn/robot/rail.py:153-158`) and `PeerAttribution` point at a dead id. Only the relay persists its key.
-2. **Auto-reach announces a TCP address even on ws.** `_auto_reach_loop` announces `/ip4/<ip>/tcp/<port>` with no `/ws` suffix (`p2p.py:731-732`), even when `transport == "ws"`. On a ws network that address is undialable. The reach check itself is a raw TCP connect (`p2p.py:766`), so it cannot tell whether a ws upgrade would work.
+1. **The daemon's peer id is not persistent.** `start_p2p` never passed `key_seed`, so each restart got a new libp2p id and the one agents registered on chain went stale, breaking robot-rail routing (`atn/robot/rail.py:153-158`) and `PeerAttribution`. Fixed in 420f6b9: the daemon keeps its seed in `<data_dir>/p2p.key` (`atn/autonet_service.py:477-490`). Still open: `OnChainService.update_peer_id` (`atn/on_chain.py:1039-1056`) has no caller, so a lost or unreadable `p2p.key` (which falls back to a fresh id) still leaves the on-chain peer id stale.
+2. **Auto-reach announces a TCP address even on ws.** `_auto_reach_loop` announced `/ip4/<ip>/tcp/<port>` with no `/ws` suffix even when `transport == "ws"`, and py-libp2p's ws connection returned no remote address, so a reach check over ws always saw `ip=''`. Fixed in f03219f: the announce keeps `/ws` (`p2p.py:731-735`) and the remote address comes from trio-websocket (`ws_proxy.py:100-116`). Still open: the reach check is a raw TCP connect (`p2p.py:769`), so it cannot tell whether a ws upgrade would work.
 3. **Docstrings describe features that do not exist.** The `p2p.py` docstrings promise Kademlia DHT discovery, "QUIC transport (preferred)", DHT capability advertisement, and a constructor `AutonetHost(node_id=..., config=p2p_config)` (`p2p.py:4-19`, `:435`). None of that exists: there is no `config` parameter, no DHT, and QUIC is off by default. `peer_attribution.py:33-34` says the DHT is unused. `blob_resolver.py:177` mentions mDNS, and there is no mDNS code. `peer_attribution.py:14-15` says new peers learn about everyone through libp2p's natural peer exchange, but nothing dials gossiped `listen_addrs`.
 4. **`_P2P_AVAILABLE` does nothing.** `TProtocol(...)` is called at module level (`p2p.py:137-150`), so a missing libp2p raises `NameError` on import anyway.
-5. **Guild gossip is dead.** `join_guild` subscribes but never starts a reader, so `_guild_handlers` is never called (`p2p.py:1089-1113`). `publish_guild_message`, `leave_guild` and `get_guild_for_module` have no non-test callers. `PROVIDER_REGISTRY_TOPIC` is unused (`p2p.py:156`).
+5. **Guild gossip is dead.** `join_guild` subscribes but never starts a reader, so `_guild_handlers` is never called (`p2p.py:1092-1116`). `publish_guild_message`, `leave_guild` and `get_guild_for_module` have no non-test callers. `PROVIDER_REGISTRY_TOPIC` is unused (`p2p.py:156`).
 6. **Training-era protocols are unused.** The weights and activations protocols have no callers outside `p2p.py`. Embeddings are used only by `distributed_jepa.py`. `nodes/service.py:308-310` says JEPA is retired.
-7. **Latency is never measured.** `PeerLatencyTracker.ping_*` is never called, and `p2p.ping_interval` is never read. Every "latency-aware" sort (`p2p.py:1964-1969`, `atn/providers/rpb.py:139-140`) falls back to price, or to sponsor flag then 9999.
-8. **`enable_quic` is a no-op for the daemon.** It is a config key (`config.py:127`, `autonet.yaml:63`) but is not passed to the host.
-9. **Blob-store leftovers.** `blob_store.server_port` / `BlobStore.start_server` are never used, so the HTTP blob server never runs, while `peer_urls` clients still exist. `BlobStore._serve_blob_for_p2p` (`blob_store.py:143-145`) and `announce_blobs_to_peers` (`blob_store.py:201-223`) have no callers; the latter would also append `blob:<hash>` entries to `modules_hosted` every time it ran. `InferenceP2PConfig` (`config.py:137-144`) is not part of `AutonetConfig` and is never read.
-10. **Capability records are unauthenticated.** A record is stored under the `peer_id` claimed inside its JSON, not the stream's remote peer (`p2p.py:1321-1322`), so any peer can overwrite another's entry. Records never expire. `from_bytes` uses `cls(**d)` (`p2p.py:270-272`), so a peer sending an unknown top-level field has its record dropped, despite the "wire format can evolve" comment (`p2p.py:253-255`).
-11. **Gossip trust rests only on application signatures.** Pubsub uses `strict_signing=False` (`p2p.py:1063`). The ed25519 key is self-asserted and tied to neither the peer id nor the chain. If `cryptography` is missing, `_verify` returns True for everything (`event_gossip.py:125-127`). The keypair is stored in plaintext JSON (`nodes/service.py:1212-1218`).
+7. **Latency is never measured.** `PeerLatencyTracker.ping_*` is never called, and `p2p.ping_interval` is never read. Every "latency-aware" sort (`p2p.py:1967-1972`, `atn/providers/rpb.py:139-140`) falls back to price, or to sponsor flag then 9999.
+8. **`enable_quic` is a no-op for the daemon.** It is a config key (`config.py:124`, `autonet.yaml:63`) but is not passed to the host.
+9. **Blob-store leftovers.** `blob_store.server_port` / `BlobStore.start_server` are never used, so the HTTP blob server never runs, while `peer_urls` clients still exist. `BlobStore._serve_blob_for_p2p` (`blob_store.py:143-145`) and `announce_blobs_to_peers` (`blob_store.py:201-223`) have no callers; the latter would also append `blob:<hash>` entries to `modules_hosted` every time it ran. `InferenceP2PConfig` (`config.py:134-141`) is not part of `AutonetConfig` and is never read.
+10. **Capability records are unauthenticated.** A record is stored under the `peer_id` claimed inside its JSON, not the stream's remote peer (`p2p.py:1324-1325`), so any peer can overwrite another's entry. Records never expire. `from_bytes` uses `cls(**d)` (`p2p.py:270-272`), so a peer sending an unknown top-level field has its record dropped, despite the "wire format can evolve" comment (`p2p.py:253-255`).
+11. **Gossip trust rests only on application signatures.** Pubsub uses `strict_signing=False` (`p2p.py:1066`). The ed25519 key is self-asserted and tied to neither the peer id nor the chain. If `cryptography` is missing, `_verify` returns True for everything (`event_gossip.py:125-127`). The keypair is stored in plaintext JSON (`nodes/service.py:1212-1218`).
 12. **The relay does not forward robot-rail gossip.** The relay subscribes only to world-event topics (`relay.py:127-128`), so the GossipSub mesh will not carry `autonet/robot/1` (`atn/robot/rail.py:38`) between NAT'd daemons. The topic also breaks the `/autonet/...` naming used everywhere else.
 13. **Relay docstring is incomplete.** `relay.py:24-26` says "every flag has an env twin", but `--no-upnp` and `--advertise-interval` have none, and the twin `AUTONET_P2P_TRANSPORT` is not in that list.
-14. **Peer attribution is refreshed once.** It refreshes once at startup (`atn/autonet_service.py:1139-1140`). `maybe_refresh` is never called, so agents registered later are unknown to the robot rail until a restart. `is_registered_peer` and `agent_for_peer` are unused, so the "ignore unregistered peers for consensus" idea (`peer_attribution.py:17-18`) is not enforced anywhere.
-15. **Gossip attaches once or never.** `_wire_event_gossip_when_ready` (and the peer-attribution and chain-submission waiters) give up silently after 30 s with no retry (`atn/autonet_service.py:1228-1245`, `:1157-1168`, `:1110-1119`).
+14. **Peer attribution is refreshed once.** It refreshes once at startup (`atn/autonet_service.py:1186-1187`). `maybe_refresh` is never called, so agents registered later are unknown to the robot rail until a restart. `is_registered_peer` and `agent_for_peer` are unused, so the "ignore unregistered peers for consensus" idea (`peer_attribution.py:17-18`) is not enforced anywhere.
+15. **Gossip attaches once or never.** `_wire_event_gossip_when_ready` (and the peer-attribution and chain-submission waiters) gave up silently after 30 s with no retry. Fixed in 9763c12: all three wait through `_wait_until_ready` until wired or the bridge stops (`atn/autonet_service.py:1113-1141`, section 4.6).
 16. **The inference client looks unbridged.** `RPBNetworkProvider.send` awaits `self._p2p.request_inference(...)` directly (`atn/providers/rpb.py:198`). That is a trio coroutine (it uses `self._host.new_stream`), called from the asyncio provider path. Every other cross-runtime call bridges through `_trio_token` (`atn/robot/rail.py:166-173`, `blob_resolver.py:248-259`). This looks broken unless a caller bridges it elsewhere. Not verified at runtime.
-17. **The sponsor handler bypasses its setter.** It is installed by assigning the private `host._inference_handler` (`atn/autonet_service.py:497`, `:783`) instead of calling `set_inference_handler` (`p2p.py:1704-1716`).
+17. **The sponsor handler bypasses its setter.** It is installed by assigning the private `host._inference_handler` (`atn/autonet_service.py:509`, `:795`) instead of calling `set_inference_handler` (`p2p.py:1707-1719`).
 18. **Redial can miss bootstrap entries.** Entries without `/p2p/<id>` are dialled once by py-libp2p and never again (`p2p.py:659-661`).
 19. **`autonet.yaml` uses defaults for several keys.** It sets `enable_upnp` and `auto_reach` but omits `transport`, `announce_addrs`, `reach_interval` and `bootstrap_redial_interval` (`autonet.yaml:59-67`). A comment in `config.py:202-204` notes that a daemon reads `autonet.yaml` only from its cwd, so installed daemons usually run on dataclass defaults plus env.
 20. **Docker image defaults do little in a bridge network.** The image ships with UPnP and auto-reach on and TCP transport, but no announce address. In a Docker bridge network neither UPnP nor auto-reach can usually give a public address, while the S1 harness overrides the transport to ws.
 21. **Stale docstring in `event_gossip.py`.** It says the libp2p transport is future work (`event_gossip.py:22-25`, `:237`), but `LibP2PTransport` is defined in the same file and is used in production (`nodes/service.py:834`).
-22. **Unused methods.** `connect_to_info` (`p2p.py:868`) and `fetch_blob_from_any_peer` have no daemon-path callers. The latter is used by `BlobStore.get_bytes_async` and `sharding.py:704`, which belong to the JEPA/sharding path.
+22. **Unused methods.** `connect_to_info` (`p2p.py:871`) and `fetch_blob_from_any_peer` have no daemon-path callers. The latter is used by `BlobStore.get_bytes_async` and `sharding.py:704`, which belong to the JEPA/sharding path.
