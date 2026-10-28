@@ -474,8 +474,20 @@ class AutonetBridge:
         node_id = f"atn-{self.state.wallet_address[:8]}" if self.state.wallet_address else "atn-daemon"
         cap = NodeCapability(peer_id="", node_id=node_id)
 
+        # A stable libp2p identity: agents register this peer id on chain,
+        # so a new one per restart left their on-chain peer id stale.
+        key_seed = None
+        if self._data_dir:
+            from pathlib import Path as _Path
+            from nodes.relay import load_key_seed
+            try:
+                key_seed = load_key_seed(_Path(self._data_dir) / "p2p.key")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("p2p.key unreadable (%s); using a fresh peer id", exc)
+
         host = AutonetHost(
             node_id=node_id,
+            key_seed=key_seed,
             listen_port=listen_port,
             listen_host=listen_host,
             bootstrap_peers=bootstrap,

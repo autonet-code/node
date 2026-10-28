@@ -105,3 +105,16 @@ async def test_gossip_and_blobs_cross_the_relay(tmp_path):
             # The relay kept the blob on disk.
             assert (tmp_path / "relay" / "blobs").exists()
         nursery.cancel_scope.cancel()
+
+
+def test_daemon_peer_id_survives_restart(tmp_path):
+    """The daemon keeps its libp2p key in <data_dir>/p2p.key, the same way
+    the relay does, so its on-chain peer id stays valid across restarts."""
+    from nodes.common.p2p import AutonetHost
+    from nodes.relay import load_key_seed
+    ids = []
+    for _ in range(2):
+        host = AutonetHost(node_id="d", listen_host="127.0.0.1",
+                           key_seed=load_key_seed(tmp_path / "p2p.key"))
+        ids.append(str(host._host.get_id()) if getattr(host, "_host", None) else host.peer_id)
+    assert ids[0] == ids[1]
