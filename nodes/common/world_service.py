@@ -27,6 +27,7 @@ import logging
 import os
 import threading
 import time
+import collections
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -206,6 +207,17 @@ class WorldService:
         # schedule regardless of how often epochs close.
         self.epoch_emission_rate = epoch_emission_rate
         self._lock = threading.RLock()
+        # Epoch-close records waiting to be handed to subscribers. The
+        # close itself runs under ``_lock``; the subscribers (the
+        # federated close driver: blob fetches over the trio host, web3
+        # reads) run AFTER it is released. A subscriber that waits on
+        # another thread while the world lock is held deadlocks the
+        # daemon, because the trio thread's gossip ingest
+        # (submit_events) needs that lock (issue #40). The second lock
+        # only keeps deliveries in close order; it is never taken while
+        # holding ``_lock``.
+        self._pending_close_records: "collections.deque" = collections.deque()
+        self._close_delivery_lock = threading.Lock()
         self._world: World = build_charter_world(
             bandwidth=bandwidth, embedding_dim=embedding_dim,
         )
@@ -412,6 +424,14 @@ class WorldService:
 
         Returns a small descriptor.
         """
+        try:
+            return self._open_epoch(epoch_id)
+        finally:
+            # An auto-close of the prior epoch queued its record; deliver
+            # it now that the world lock is released.
+            self._deliver_epoch_closed()
+
+    def _open_epoch(self, epoch_id: Optional[str]) -> Dict[str, Any]:
         with self._lock:
             if self._current_epoch_id is not None:
                 logger.warning(
@@ -499,13 +519,17 @@ class WorldService:
         applies the cutoff exactly by truncating the canonical
         sequence before replay.
         """
-        with self._lock:
-            return self._close_epoch_locked(
-                apply_gate=apply_gate,
-                gate_strength=gate_strength,
-                agent_weights=agent_weights,
-                cutoff_ts=cutoff_ts,
-            )
+        try:
+            with self._lock:
+                return self._close_epoch_locked(
+                    apply_gate=apply_gate,
+                    gate_strength=gate_strength,
+                    agent_weights=agent_weights,
+                    cutoff_ts=cutoff_ts,
+                )
+        finally:
+            # Subscribers run with the world lock RELEASED (issue #40).
+            self._deliver_epoch_closed()
 
     @property
     def current_epoch_id(self) -> Optional[str]:
@@ -514,16 +538,21 @@ class WorldService:
 
     def epoch_status(self) -> Dict[str, Any]:
         """World-side half of the epoch_status surface (the scheduler
-        owns timing config; see EpochScheduler.status)."""
-        with self._lock:
-            return {
-                "epoch_id": self._current_epoch_id,
-                "opened_at": self._epoch_started_at or None,
-                "buffered_events": len(self._epoch_events),
-                "emission_rate": self.epoch_emission_rate,
-                "emission_clock": self._emission_clock or None,
-                "rpb_address": self.rpb_address,
-            }
+        owns timing config; see EpochScheduler.status).
+
+        Lock-free on purpose: a status poll must never queue behind a
+        close or an ingest holding the world lock (issue #40: the WS
+        handler stalled the event loop that way). Each field is a single
+        attribute read, so the snapshot can straddle a close by at most
+        one field, which is fine for a status surface."""
+        return {
+            "epoch_id": self._current_epoch_id,
+            "opened_at": self._epoch_started_at or None,
+            "buffered_events": len(self._epoch_events),
+            "emission_rate": self.epoch_emission_rate,
+            "emission_clock": self._emission_clock or None,
+            "rpb_address": self.rpb_address,
+        }
 
     @property
     def epoch_history(self) -> List[Dict[str, Any]]:
@@ -2059,7 +2088,8 @@ class WorldService:
 
         Handler signature: ``handler(record: dict) -> None``. Exceptions
         in handlers are logged and isolated; one bad handler doesn't
-        break others.
+        break others. Handlers run on the closing thread AFTER the world
+        lock is released, so they may block (blob fetch, chain read).
         """
         with self._lock:
             self._epoch_subscribers.append(handler)
@@ -2331,9 +2361,26 @@ class WorldService:
             "epochs_considered": len(recent),
         }
 
+    def _deliver_epoch_closed(self) -> None:
+        """Hand queued close records to the subscribers, in close order.
+
+        Must be called WITHOUT holding ``self._lock``: subscribers (the
+        federated close driver) fetch blobs through the trio host and
+        read the chain, and the trio thread's gossip ingest needs the
+        world lock, so delivering under it deadlocks (issue #40).
+        """
+        with self._close_delivery_lock:
+            while True:
+                try:
+                    record = self._pending_close_records.popleft()
+                except IndexError:
+                    return
+                self._broadcast_epoch_closed(record)
+
     def _broadcast_epoch_closed(self, record: Dict[str, Any]) -> None:
         """Invoke all registered subscribers with the close record.
-        Must be called under self._lock; handlers run synchronously."""
+        Called by ``_deliver_epoch_closed`` with the world lock released;
+        handlers run synchronously on the closing thread."""
         for handler in list(self._epoch_subscribers):
             try:
                 handler(record)
@@ -2600,8 +2647,9 @@ class WorldService:
             self._persistence.write_epoch_record(record)
         except Exception as e:
             logger.warning("failed to persist epoch record: %s", e)
-        # Notify subscribers (e.g. the daemon's WS bridge).
-        self._broadcast_epoch_closed(record)
+        # Notify subscribers (e.g. the daemon's WS bridge) once the
+        # caller releases the world lock (``_deliver_epoch_closed``).
+        self._pending_close_records.append(record)
 
         # Reset state (carry buffers survive — open_epoch consumes them)
         self._current_epoch_id = None
