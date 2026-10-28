@@ -52,3 +52,11 @@ def _isolated_keystore():
                         "atn.runtime.broker_client") or mod_name.endswith(".keystore"):
             _repoint(module, _SESSION_KEYSTORE)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tx_nonces():
+    """Each test's chain starts fresh, so forget nonces handed out earlier."""
+    from nodes.common import tx_nonce
+    tx_nonce.reset()
+    yield

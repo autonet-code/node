@@ -24,6 +24,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from .tx_nonce import next_nonce
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,7 @@ class GovernedAnchorer:
             raise RuntimeError(f"would revert: {e}") from e
         tx = fn.build_transaction({
             "from": sender,
-            "nonce": self._w3.eth.get_transaction_count(sender, "pending"),
+            "nonce": next_nonce(self._w3, sender),
             "gas": gas,
             "gasPrice": self._w3.eth.gas_price,
             "chainId": self._chain_id,

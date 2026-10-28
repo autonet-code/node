@@ -52,6 +52,7 @@ from .epoch_anchorer import (
 from .federated_close_driver import FederatedCloseResult
 from .anchor_election import Election, ElectionAnchorer
 from .governed_anchor import AnchorProposal, GovernedAnchorer, Voter
+from .tx_nonce import next_nonce
 
 
 logger = logging.getLogger(__name__)
@@ -649,7 +650,7 @@ class ChainSubmissionDriver:
                     continue
                 tx = rc.functions.claim(who).build_transaction({
                     "from": acct.address, "chainId": int(self.config.chain_id or w3.eth.chain_id),
-                    "nonce": w3.eth.get_transaction_count(acct.address, "pending")})
+                    "nonce": next_nonce(w3, acct.address)})
                 signed = acct.sign_transaction(tx)
                 h = w3.eth.send_raw_transaction(signed.raw_transaction)
                 receipt = w3.eth.wait_for_transaction_receipt(h, timeout=120)

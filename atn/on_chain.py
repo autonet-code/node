@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from typing import Any, TYPE_CHECKING
+from nodes.common.tx_nonce import next_nonce
 
 if TYPE_CHECKING:
     from .config import RPBConfig
@@ -771,7 +772,7 @@ class OnChainService:
                          else bytes.fromhex(owner_sig[2:] if owner_sig.startswith("0x")
                                             else owner_sig))
 
-            nonce = w3.eth.get_transaction_count(account.address)
+            nonce = next_nonce(w3, account.address)
             chain_id = self.config.chain_id or w3.eth.chain_id
 
             try:
@@ -880,7 +881,7 @@ class OnChainService:
                 gas_limit = 500_000
             tx = fn.build_transaction({
                 "from": account.address,
-                "nonce": w3.eth.get_transaction_count(account.address),
+                "nonce": next_nonce(w3, account.address),
                 "gas": gas_limit,
                 "gasPrice": w3.eth.gas_price,
                 "chainId": self.config.chain_id or w3.eth.chain_id,
@@ -937,7 +938,7 @@ class OnChainService:
                                             if new_owner_sig.startswith("0x")
                                             else new_owner_sig))
 
-            nonce = w3.eth.get_transaction_count(account.address)
+            nonce = next_nonce(w3, account.address)
             chain_id = self.config.chain_id or w3.eth.chain_id
 
             try:
@@ -1053,7 +1054,7 @@ class OnChainService:
             contract = self._get_contract(w3)
             account = Account.from_key(private_key)
             peer_bytes = _to_peer_id_bytes(peer_id)
-            nonce = w3.eth.get_transaction_count(account.address)
+            nonce = next_nonce(w3, account.address)
             chain_id = self.config.chain_id or w3.eth.chain_id
             tx = contract.functions.updatePeerId(peer_bytes).build_transaction({
                 "from": account.address,
@@ -1098,7 +1099,7 @@ class OnChainService:
             w3 = self._get_web3()
             contract = self._get_contract(w3)
             account = Account.from_key(private_key)
-            nonce = w3.eth.get_transaction_count(account.address)
+            nonce = next_nonce(w3, account.address)
             chain_id = self.config.chain_id or w3.eth.chain_id
             tx = contract.functions.updateEndpoint(ws_endpoint).build_transaction({
                 "from": account.address,
@@ -1156,7 +1157,7 @@ class OnChainService:
                 (p if isinstance(p, bytes) else _to_bytes32(p)) for p in proof
             ]
 
-            nonce = w3.eth.get_transaction_count(account.address)
+            nonce = next_nonce(w3, account.address)
             chain_id = self.config.chain_id or w3.eth.chain_id
 
             call = contract.functions.claimFor(
@@ -1483,7 +1484,7 @@ class OnChainService:
             req = (request_id if isinstance(request_id, bytes)
                    else _to_bytes32(request_id))
 
-            nonce = w3.eth.get_transaction_count(account.address)
+            nonce = next_nonce(w3, account.address)
             chain_id = self.config.chain_id or w3.eth.chain_id
 
             try:
@@ -1745,7 +1746,7 @@ class ServiceMarketClient:
         Shared write path — mirrors OnChainService's per-method inline
         pattern. Returns (receipt, tx_hash_hex).
         """
-        nonce = w3.eth.get_transaction_count(account.address)
+        nonce = next_nonce(w3, account.address)
         try:
             estimated = func.estimate_gas({"from": account.address})
             gas_limit = max(int(estimated * 12 // 10), gas_floor)

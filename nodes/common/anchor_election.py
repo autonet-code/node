@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
+from .tx_nonce import next_nonce
 from .governed_anchor import (
     ACTIVE, CANCELED, DEFEATED, EXPIRED, GOVERNOR_ABI, PENDING,
     QUEUED, STATE_NAMES, SUCCEEDED, Voter, _addr_of,
@@ -245,7 +246,7 @@ class ElectionAnchorer:
             raise RuntimeError(f"would revert: {ex}") from ex
         tx = fn.build_transaction({
             "from": sender,
-            "nonce": self._w3.eth.get_transaction_count(sender, "pending"),
+            "nonce": next_nonce(self._w3, sender),
             "gas": gas,
             "gasPrice": self._w3.eth.gas_price,
             "chainId": self._chain_id,

@@ -67,6 +67,7 @@ from .authoritative_encoding import (
 )
 from .blob_resolver import BlobIntegrityError, BlobResolver
 from .mint_merkle import mint_merkle_proof, scale_mint, verify_mint_proof
+from .tx_nonce import next_nonce
 
 
 logger = logging.getLogger(__name__)
@@ -405,7 +406,7 @@ class AuthoritativeChainSubmitter:
             gas_limit = 2_000_000
         tx = call.build_transaction({
             "from": sender,
-            "nonce": w3.eth.get_transaction_count(sender),
+            "nonce": next_nonce(w3, sender),
             "gas": gas_limit,
             "gasPrice": w3.eth.gas_price,
             "chainId": self.config.chain_id,

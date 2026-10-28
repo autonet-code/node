@@ -29,6 +29,7 @@ import logging
 import os
 import time
 from typing import Any, Callable, Optional
+from nodes.common.tx_nonce import next_nonce
 
 log = logging.getLogger(__name__)
 
@@ -243,7 +244,7 @@ class ToolBondClient:
         chain_id = int(getattr(self._cfg(), "chain_id", 0) or w3.eth.chain_id)
         tx = func.build_transaction({
             "from": account.address, "gas": gas, "gasPrice": w3.eth.gas_price, "chainId": chain_id,
-            "nonce": w3.eth.get_transaction_count(account.address)})
+            "nonce": next_nonce(w3, account.address)})
         signed = account.sign_transaction(tx)
         raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
         tx_hash = w3.eth.send_raw_transaction(raw)

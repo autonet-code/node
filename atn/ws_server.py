@@ -44,6 +44,7 @@ from .events import Event, EventBus, EventType
 from .runtime import Runtime
 from .runtime.provider_manager import get_model_tier, get_tier_label
 from .ws_auth import ClientSession
+from nodes.common.tx_nonce import next_nonce
 
 log = logging.getLogger(__name__)
 
@@ -5897,7 +5898,7 @@ class WebSocketBridge:
             tx = call.build_transaction({
                 "from": op.address, "gas": gas, "gasPrice": int(w3.eth.gas_price),
                 "chainId": int(w3.eth.chain_id),
-                "nonce": w3.eth.get_transaction_count(op.address)})
+                "nonce": next_nonce(w3, op.address)})
             signed = op.sign_transaction(tx)
             raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
             h = w3.eth.send_raw_transaction(raw)
@@ -5977,11 +5978,11 @@ class WebSocketBridge:
                         row["gas_tx"] = _send({
                             "to": a, "value": need, "gas": 21_000,
                             "gasPrice": gas_price, "chainId": chain_id,
-                            "nonce": w3.eth.get_transaction_count(op.address)}, op_key)
+                            "nonce": next_nonce(w3, op.address)}, op_key)
                     row["tx"] = _send(call.build_transaction({
                         "from": a, "gas": gas, "gasPrice": gas_price,
                         "chainId": chain_id,
-                        "nonce": w3.eth.get_transaction_count(a)}), key)
+                        "nonce": next_nonce(w3, a)}), key)
                     row.update(amount=bal, owner=owner)
                 except Exception as e:
                     row["error"] = str(e)

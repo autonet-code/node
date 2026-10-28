@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Any, TYPE_CHECKING
 
 from .events import EventType
+from nodes.common.tx_nonce import next_nonce
 
 if TYPE_CHECKING:
     from .config import AutonetConfig
@@ -1713,7 +1714,7 @@ class AutonetBridge:
             )
 
             # Build and send createUserContract transaction
-            nonce = w3.eth.get_transaction_count(account.address)
+            nonce = next_nonce(w3, account.address)
             tx = contract.functions.createUserContract(
                 standards_hash_bytes
             ).build_transaction({
@@ -1986,7 +1987,7 @@ class AutonetBridge:
 
             sid_bytes = bytes.fromhex(service_id) if isinstance(service_id, str) else service_id
 
-            nonce = w3.eth.get_transaction_count(account.address)
+            nonce = next_nonce(w3, account.address)
             tx = contract.functions.claimParticipantReward(
                 sid_bytes, epoch_id
             ).build_transaction({

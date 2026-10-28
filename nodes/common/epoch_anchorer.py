@@ -54,6 +54,7 @@ from .authoritative_encoding import (
     payload_hash,
 )
 from .mint_merkle import mint_merkle_root
+from .tx_nonce import next_nonce
 
 
 logger = logging.getLogger(__name__)
@@ -430,7 +431,7 @@ class EpochAnchorer:
             int(cutoff),
         ).build_transaction({
             "from": sender,
-            "nonce": w3.eth.get_transaction_count(sender),
+            "nonce": next_nonce(w3, sender),
             "gas": gas_limit,
             "gasPrice": w3.eth.gas_price,
             "chainId": self.config.chain_id,
