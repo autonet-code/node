@@ -66,7 +66,8 @@ needs the owner.
    best rated first. Use one before writing the same code yourself.
 2. **Run.** `use_tool` (`name`, `arguments`). A tool from another household
    needs adopting first: `adopt_tool` (`digest`, `reason`) proposes it, the
-   owner approves.
+   owner approves. Adopting a composite also proposes every dependency it
+   declares that isn't installed yet, so one approval installs the set.
 3. **Review** after each piece of work (section 3). Every `use_tool` reply
    carries `review_due`: the tools you used since your last review.
 

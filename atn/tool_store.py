@@ -2083,11 +2083,21 @@ class ToolStore:
             except Exception as exc:
                 log.warning("vet status lookup failed: %s", exc)
 
+        # A composite brings its declared dependencies (#37): every one not
+        # installed here joins this proposal, so one owner approval installs
+        # the set and the composite can actually run.
+        bundle, dep_err = await self._collect_missing_deps(payload, caller)
+        if dep_err is not None:
+            return dep_err
+
         signed = await asyncio.to_thread(self._verify_manifest_sig, payload)
         caps = dict(payload.get("capabilities") or {})
         authored_via = str(payload.get("authored_via") or "")
         from .runtime.shell_provider import core_claims
         replaces = core_claims(payload)
+        for dep in bundle:
+            replaces = replaces + [c for c in dep["core_replacement"]
+                                   if c not in replaces]
         proposal = {
             "digest": digest,
             "name": str(payload.get("name") or ""),
@@ -2119,15 +2129,101 @@ class ToolStore:
                 "dependencies": len(payload.get("dependencies") or []),
                 "authored_via": authored_via,
             },
+            # Declared dependencies not installed here, installed together
+            # with this tool on approval (each re-checked like an adoption).
+            "bundle": bundle,
         }
         self._proposals[digest] = proposal
         self._save_proposals()
-        log.info("adoption proposed: %s (%s) by %s",
-                 proposal["name"], digest[:16], caller)
+        log.info("adoption proposed: %s (%s) by %s, %d dependencies",
+                 proposal["name"], digest[:16], caller, len(bundle))
+        note = "proposed; awaiting owner approval"
+        if bundle:
+            note += (" (includes dependencies: "
+                     + ", ".join(d["name"] or d["digest"][:16] for d in bundle)
+                     + ")")
         return {"status": "pending", "digest": digest,
                 "capabilities": caps, "provenance": proposal["provenance"],
                 "core_replacement": replaces,
-                "note": "proposed; awaiting owner approval"}
+                "dependencies": [{"digest": d["digest"], "name": d["name"]}
+                                 for d in bundle],
+                "note": note}
+
+    async def _collect_missing_deps(
+        self, payload: dict[str, Any], caller: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Walk a manifest's declared dependencies (recursively, at most
+        ``_COMPOSITE_MAX_DEPTH`` levels, the same bound composition runs
+        under) and return the ones not installed here, each fetched and
+        checked like a proposal: fetchable manifest, pinned, author not
+        sanctioned (agent callers). Returns ``(bundle, None)`` or
+        ``([], {"error": ...})`` naming the dependency that failed."""
+        from nodes.common.world_model_substrate.tool_manifest import (
+            is_tool_manifest,
+        )
+        from .runtime.shell_provider import core_claims
+        bundle: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        frontier = [str(d).strip().lower()
+                    for d in (payload.get("dependencies") or [])]
+        for _level in range(_COMPOSITE_MAX_DEPTH):
+            nxt: list[str] = []
+            for dep in frontier:
+                if not dep or dep in seen:
+                    continue
+                seen.add(dep)
+                if dep in self._records:
+                    continue  # already installed here
+                dep_payload = await self.fetch_payload(dep)
+                if dep_payload is None or not is_tool_manifest(dep_payload):
+                    return [], {"error": f"cannot adopt: dependency {dep} "
+                                         "is not fetchable from the network "
+                                         "(its author may not have published "
+                                         "it)", "dependency": dep}
+                name = str(dep_payload.get("name") or "")
+                label = f"{name} ({dep[:16]})" if name else dep
+                if str(dep_payload.get("trust_class") or "") != "pinned":
+                    return [], {"error": f"cannot adopt: dependency {label} is "
+                                         "not a pinned tool", "dependency": dep}
+                author = str(dep_payload.get("author") or "")
+                sanction: dict[str, Any] | None = None
+                if self.sanction_check is not None and author:
+                    try:
+                        sanction = await asyncio.to_thread(
+                            self.sanction_check, author)
+                    except Exception as exc:
+                        log.warning("sanction lookup failed: %s", exc)
+                if sanction is not None and caller != OWNER_AUTHOR:
+                    from .sanctions import refusal
+                    out = refusal(author, sanction, "adopt the tools of")
+                    out["dependency"] = dep
+                    return [], out
+                vet_status: dict[str, Any] | None = None
+                if self.vet_status_provider is not None:
+                    try:
+                        vet_status = self.vet_status_provider(dep)
+                    except Exception as exc:
+                        log.warning("vet status lookup failed: %s", exc)
+                bundle.append({
+                    "digest": dep,
+                    "name": name,
+                    "author": author,
+                    "capabilities": dict(dep_payload.get("capabilities") or {}),
+                    "core_replacement": core_claims(dep_payload),
+                    "sanction": sanction,
+                    "provenance": {
+                        "signed": await asyncio.to_thread(
+                            self._verify_manifest_sig, dep_payload),
+                        "busted": (bool(vet_status.get("busted"))
+                                   if vet_status else None),
+                    },
+                })
+                nxt.extend(str(d).strip().lower()
+                           for d in (dep_payload.get("dependencies") or []))
+            frontier = nxt
+            if not frontier:
+                break
+        return bundle, None
 
     def list_adoption_proposals(
         self, status: str | None = None,
@@ -2148,17 +2244,106 @@ class ToolStore:
         proposal = self._proposals.get(digest)
         if proposal is None or proposal.get("status") != "pending":
             return {"error": "no pending proposal for that digest"}
+
+        # A composite's proposal carries its missing dependencies (#37).
+        # Every member passes the same install checks; any failure installs
+        # NOTHING, so the composite never lands without what it calls.
+        members: list[tuple[str, dict[str, Any]]] = []
+        replaces: list[str] = []
+        for dep in proposal.get("bundle") or []:
+            dep_digest = str(dep.get("digest") or "")
+            if not dep_digest or dep_digest in self._records:
+                continue
+            payload, err = await self._install_check(
+                dep_digest, dep.get("provenance") or {})
+            if err is not None:
+                label = (f"{dep.get('name')} ({dep_digest[:16]})"
+                         if dep.get("name") else dep_digest)
+                return {"error": f"dependency {label}: {err}",
+                        "dependency": dep_digest}
+            members.append((dep_digest, payload))
+        prov = (proposal.get("provenance") or {}) if isinstance(
+            proposal.get("provenance"), dict) else {}
+        payload, err = await self._install_check(digest, prov)
+        if err is not None:
+            return {"error": err}
+        members.append((digest, payload))
+
+        from .runtime.shell_provider import core_claims
+        for _d, p in members:
+            replaces += [c for c in core_claims(p) if c not in replaces]
+        # Core-replacement privilege class (Decision 2026-10-12). A tool that
+        # claims to provide core built-in names would see every command and
+        # file body the agent touches once swapped in, so approving it is a
+        # visibly different act: the approval must carry the explicit
+        # acknowledgment, and is rejected without it. One ack covers the
+        # bundle; the proposal listed every claim.
+        if replaces and not core_replacement_ack:
+            return {"error": "core_replacement_ack required: this tool "
+                             "replaces " + ", ".join(replaces) + " and will "
+                             "see every command and file your agent touches",
+                    "core_replacement": replaces}
+
+        now = int(time.time())
+        local_author = str(proposal.get("proposed_by") or "")
+        for d, p in members:
+            self._records[d] = ToolRecord(
+                digest=d,
+                manifest=p,
+                local_author=local_author,
+                registered_ts=now,
+                origin="adopted",
+                core_replacement_ack=bool(core_claims(p)
+                                          and core_replacement_ack),
+                jurisdiction=self._jurisdiction,
+            )
+            if d != digest:
+                # A standalone pending proposal for a dependency is settled
+                # by this install.
+                other = self._proposals.get(d)
+                if other is not None and other.get("status") == "pending":
+                    other["status"] = "approved"
+                    other["resolved_ts"] = now
+                    other["installed_with"] = digest
+        record = self._records[digest]
+        proposal["status"] = "approved"
+        if replaces and core_replacement_ack:
+            proposal["core_replacement_ack"] = True
+        proposal["resolved_ts"] = now
+        self._persist()
+        self._save_proposals()
+        deps_installed = [{"digest": d, "name": str(p.get("name") or "")}
+                          for d, p in members if d != digest]
+        log.info("adoption approved: %s (%s) for %s, %d dependencies",
+                 record.name, digest[:16], record.local_author,
+                 len(deps_installed))
+        return {"digest": digest, "name": record.name,
+                "origin": "adopted", "author": record.author,
+                "adopted_for": record.local_author,
+                "dependencies_installed": deps_installed,
+                "core_replacement": replaces,
+                "core_replacement_ack": bool(replaces and core_replacement_ack)}
+
+    async def _install_check(
+        self, digest: str, prov: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """The install-time checks one adopted tool must pass, against a
+        freshly fetched manifest: resolvable, pinned, code fetchable,
+        signature not wrong, not denied by the network, not CON-busted.
+        Returns ``(payload, None)`` or ``(None, reason)``."""
         payload = await self.fetch_payload(digest)
         from nodes.common.world_model_substrate.tool_manifest import (
             is_tool_manifest,
         )
         if payload is None or not is_tool_manifest(payload):
-            return {"error": "manifest blob no longer resolvable"}
+            return None, "manifest blob no longer resolvable"
+        if str(payload.get("trust_class") or "") != "pinned":
+            return None, "only pinned tools can be adopted"
         code_digest = str(payload.get("code_digest") or "")
         code_raw = await self.fetch_bytes(code_digest) if code_digest else None
         if code_raw is None:
-            return {"error": "code blob not fetchable — refusing to install "
-                             "a manifest whose code can't be pinned locally"}
+            return None, ("code blob not fetchable — refusing to install "
+                          "a manifest whose code can't be pinned locally")
 
         # Provenance is LOAD-BEARING here, not decoration. propose_adoption
         # assembles {signed, greenlit, busted, vets} for the owner to read,
@@ -2176,9 +2361,9 @@ class ToolStore:
         # A CON-busted tool is likewise refused: the network has already
         # produced reproducible evidence against it.
         if await asyncio.to_thread(self._verify_manifest_sig, payload) is False:
-            return {"error": "manifest signature does not recover to its "
-                             "claimed author — refusing to install "
-                             "(re-attribution attempt)"}
+            return None, ("manifest signature does not recover to its "
+                          "claimed author — refusing to install "
+                          "(re-attribution attempt)")
         # Denied by the network (Decision 2026-10-27): never installed.
         from .tool_security import CONTAINMENT_DENIED, tier_for_standing, containment_params
         provider = getattr(self, "security_standing_provider", None)
@@ -2189,12 +2374,10 @@ class ToolStore:
             except Exception:  # noqa: BLE001 — unknown standing installs strict
                 tier, why = None, ""
             if tier == CONTAINMENT_DENIED:
-                return {"error": f"denied by the network: {why} — refusing to install"}
+                return None, f"denied by the network: {why} — refusing to install"
         # Busted: re-read now (a CON claim may have landed since the
         # proposal); the stored flag still counts, so a failed read cannot
         # clear a recorded bust.
-        prov = (proposal.get("provenance") or {}) if isinstance(
-            proposal.get("provenance"), dict) else {}
         busted = prov.get("busted") is True
         vet_provider = getattr(self, "vet_status_provider", None)
         if vet_provider is not None:
@@ -2204,45 +2387,9 @@ class ToolStore:
             except Exception as exc:  # noqa: BLE001
                 log.warning("vet status re-check failed: %s", exc)
         if busted:
-            return {"error": "tool is CON-busted on the substrate — refusing "
-                             "to install; clear the evidence claim first"}
-
-        # Core-replacement privilege class (Decision 2026-10-12). A tool that
-        # claims to provide core built-in names would see every command and
-        # file body the agent touches once swapped in, so approving it is a
-        # visibly different act: the approval must carry the explicit
-        # acknowledgment, and is rejected without it.
-        from .runtime.shell_provider import core_claims
-        replaces = core_claims(payload)
-        if replaces and not core_replacement_ack:
-            return {"error": "core_replacement_ack required: this tool "
-                             "replaces " + ", ".join(replaces) + " and will "
-                             "see every command and file your agent touches",
-                    "core_replacement": replaces}
-
-        record = ToolRecord(
-            digest=digest,
-            manifest=payload,
-            local_author=str(proposal.get("proposed_by") or ""),
-            registered_ts=int(time.time()),
-            origin="adopted",
-            core_replacement_ack=bool(replaces and core_replacement_ack),
-            jurisdiction=self._jurisdiction,
-        )
-        self._records[digest] = record
-        proposal["status"] = "approved"
-        if record.core_replacement_ack:
-            proposal["core_replacement_ack"] = True
-        proposal["resolved_ts"] = int(time.time())
-        self._persist()
-        self._save_proposals()
-        log.info("adoption approved: %s (%s) for %s",
-                 record.name, digest[:16], record.local_author)
-        return {"digest": digest, "name": record.name,
-                "origin": "adopted", "author": record.author,
-                "adopted_for": record.local_author,
-                "core_replacement": replaces,
-                "core_replacement_ack": record.core_replacement_ack}
+            return None, ("tool is CON-busted on the substrate — refusing "
+                          "to install; clear the evidence claim first")
+        return payload, None
 
     def reject_adoption(self, digest: str, reason: str = "") -> dict[str, Any]:
         proposal = self._proposals.get(digest)

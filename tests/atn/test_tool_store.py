@@ -911,6 +911,81 @@ class TestAdoption:
         assert "CON-busted" in out["error"]
         assert store.get(digest) is None
 
+    # ---- composites bring their dependencies (#37) ------------------
+
+    async def _composite_on_author_daemon(self, tmp_path):
+        """Author daemon with a dep tool and a composite declaring it."""
+        rt = _make_runtime(tmp_path / "author_daemon")
+        await _register_agent(rt, "foreign-author")
+        dep = await execute_tool(
+            "register_tool",
+            {"name": "net_dep", "description": "Dependency.",
+             "input_schema": SCHEMA, "code": ECHO_CODE},
+            rt, caller_id="foreign-author")
+        assert "error" not in dep, dep
+        comp = await _register_composite(rt, dep["digest"],
+                                         caller_id="foreign-author",
+                                         name="net_composite")
+        assert "error" not in comp, comp
+        return dep["digest"], comp["digest"], rt.tool_store._blob_store()
+
+    @pytest.mark.asyncio
+    async def test_adopting_composite_installs_dependencies(self, tmp_path):
+        dep, comp, blobs = await self._composite_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        out = await store.propose_adoption("worker", comp, reason="r")
+        assert out["status"] == "pending"
+        assert [d["digest"] for d in out["dependencies"]] == [dep]
+        assert "net_dep" in out["note"]
+        assert store.get(dep) is None and store.get(comp) is None
+
+        approved = await store.approve_adoption(comp)
+        assert "error" not in approved, approved
+        assert [d["digest"] for d in approved["dependencies_installed"]] == [dep]
+        dep_rec, comp_rec = store.get(dep), store.get(comp)
+        assert dep_rec.origin == comp_rec.origin == "adopted"
+        assert dep_rec.local_author == "worker"
+
+        result = await store.call(comp_rec, {"x": "hi", "dep": dep},
+                                  caller_id="worker")
+        assert result["result"]["seen"] == "hi"
+        assert result["result"]["wrapped"]["result"] == {"echo": "hi"}
+
+    @pytest.mark.asyncio
+    async def test_installed_dependency_not_bundled(self, tmp_path):
+        dep, comp, blobs = await self._composite_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        await store.propose_adoption("worker", dep, reason="r")
+        await store.approve_adoption(dep)
+        out = await store.propose_adoption("worker", comp, reason="r")
+        assert out["dependencies"] == []
+
+    @pytest.mark.asyncio
+    async def test_unfetchable_dependency_named(self, tmp_path):
+        dep, comp, blobs = await self._composite_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+
+        async def _fetch(digest: str) -> bytes | None:
+            return None if digest == dep else blobs.get_bytes(digest)
+        rt.tool_store.blob_fetcher = _fetch
+        out = await rt.tool_store.propose_adoption("worker", comp, reason="r")
+        assert dep in out["error"] and out["dependency"] == dep
+        assert rt.tool_store.list_adoption_proposals("pending") == []
+
+    @pytest.mark.asyncio
+    async def test_failing_dependency_installs_nothing(self, tmp_path):
+        dep, comp, blobs = await self._composite_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        await store.propose_adoption("worker", comp, reason="r")
+        store.vet_status_provider = lambda d: {"busted": d == dep}
+        out = await store.approve_adoption(comp)
+        assert "net_dep" in out["error"] and "CON-busted" in out["error"]
+        assert store.get(dep) is None and store.get(comp) is None
+        assert store.list_adoption_proposals("pending")[0]["digest"] == comp
+
 
 class TestVetting:
     """Validator rail (docs/tool_substrate.md — Vetting section):
