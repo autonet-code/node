@@ -801,7 +801,9 @@ def compute_tool_mint(
     # the fleet's sorted representative caller, whose sender pool is
     # the union of the fleet's senders.
     from .world_model_substrate.tool_usage import loadout_adoption_from_events
-    adoption = loadout_adoption_from_events(events)
+    # Same receipt rule as usage: unsigned or forged attestations credit
+    # no adoption either.
+    adoption = loadout_adoption_from_events(verified_receipts(events, receipt_domain))
     for loadout in sorted(set(adoption) & set(known_regs)):
         shares = _composition_shares(loadout, deps_of,
                                      root_shares=root_share_of)
@@ -810,6 +812,8 @@ def compute_tool_mint(
         for caller in sorted(entry["by_caller"].keys()):
             fleets.setdefault(_household(caller), []).append(caller)
         for fleet_key in sorted(fleets.keys()):
+            if fleet_key in sanctioned_set:
+                continue    # a sanctioned household adopts for nobody
             # Fleet == household: credit lands on the household key
             # directly, senders pool there for the wire dedup below.
             pooled = house_senders.setdefault(fleet_key, set())

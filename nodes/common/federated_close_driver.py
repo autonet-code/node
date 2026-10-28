@@ -1075,6 +1075,12 @@ class FederatedCloseDriver:
                 )
                 return None
 
+        # A chain-backed close past genesis weighs by REP even when the read
+        # came back empty: no REP means no weight and the gate stays on,
+        # never the chain-free regime's weight 1.0 for everyone.
+        chain_backed = (self.voice_source is not None
+                        and self._chain_at_genesis is False)
+
         # Replay the canonical sequence on a fresh charter world. This
         # produces the bit-identical authoritative_payload across
         # daemons.
@@ -1086,13 +1092,13 @@ class FederatedCloseDriver:
                 pricing=self.pricing,
                 tool_registrations=dict(self._tool_registrations),
                 agent_owner_map=dict(self.agent_owner_map),
-                voice_weights=(dict(self.voice_weights)
-                               if self.voice_weights else None),
+                voice_weights=(dict(self.voice_weights or {})
+                               if self.voice_weights or chain_backed else None),
                 emission_pool=self.emission_pool,
                 tool_vetting=dict(self._tool_vetting),
                 tool_positions=dict(self._tool_positions),
-                rep_shares=(dict(self.rep_shares)
-                            if self.rep_shares else None),
+                rep_shares=(dict(self.rep_shares or {})
+                            if self.rep_shares or chain_backed else None),
                 review_snapshot=(dict(self.review_snapshot)
                                  if self.review_snapshot else None),
                 sanctioned_households=list(self.sanctioned_households),
