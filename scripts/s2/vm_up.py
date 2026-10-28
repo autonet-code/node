@@ -66,7 +66,21 @@ async def amain(a) -> int:
     sys.path.insert(0, str(REPO / "scripts"))
     import s0_local_run as s0
 
-    run = s0.S0_DIR / time.strftime("vm-%Y%m%d-%H%M%S")
+    if a.bootstrap:
+        # Extra seeds (comma list). A local bootstrap wins over the Registry's.
+        _env = s0.Household.env
+
+        def env_with_seeds(self, registry, _env=_env):
+            e = _env(self, registry)
+            e["AUTONET_P2P_BOOTSTRAP"] = a.bootstrap
+            return e
+        s0.Household.env = env_with_seeds
+    if a.resume:
+        # Restart the same households on their existing homes: same keys,
+        # agents and tools; nothing is onboarded again.
+        run = Path(a.resume).expanduser()
+    else:
+        run = s0.S0_DIR / time.strftime("vm-%Y%m%d-%H%M%S")
     run.mkdir(parents=True, exist_ok=True)
     w3, accts = s0.w3_and_accounts()
     s0.wait_for(lambda: w3.is_connected(), 60, "the hub chain")
@@ -81,6 +95,9 @@ async def amain(a) -> int:
     for h in households:
         h.client = s0.DaemonClient(h.client_url(), h.name)
         await h.client.connect()
+        if a.resume:
+            s0.log(f"{h.name} resumed")
+            continue
         await s0.onboard(h, j, w3, usdc)
         s0.log(f"{h.name} onboarded: agent {h.agent_id} {h.agent_address}")
 
@@ -113,6 +130,10 @@ def main() -> int:
     ap.add_argument("--dir", default="~/autonet-wan")
     ap.add_argument("--name-prefix", default="",
                     help="prefix for telemetry names, e.g. vm1-")
+    ap.add_argument("--bootstrap", default="",
+                    help="extra seed multiaddrs, comma separated (override the Registry's)")
+    ap.add_argument("--resume", default="",
+                    help="an earlier run dir (~/autonet-wan/vm-...): restart its households, no onboarding")
     return asyncio.run(amain(ap.parse_args()))
 
 
