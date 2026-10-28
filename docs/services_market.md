@@ -292,6 +292,40 @@ Daemon-side components:
   consuming agent's seat, a remote service is indistinguishable from
   any other tool. One probe, two economies, one interface.
 
+#### How requests travel: libp2p first, wss second (2026-10-28, #36)
+
+A provider on a cloud VM or a home connection usually has no public
+address, so it cannot publish a dialable wss endpoint. `request_service`
+(`atn/service_client.py`) therefore tries libp2p first:
+
+1. **libp2p** (`/autonet/service/1.0.0`), when this daemon's host is
+   running. The provider is found by the peer id its agent bound on chain
+   (`Substrate.getAgentPeerId`; stable across restarts via
+   `<data_dir>/p2p.key`). Connected to that peer: one stream, direct.
+   Otherwise the request goes to connected relays first, then other
+   connected peers, one at a time, each asked to forward it one hop; a
+   peer that is not connected to the provider says so at once and the
+   next is tried. Relays and daemons both forward (`nodes/relay.py` has no
+   service handler of its own).
+2. **wss endpoint**, only when libp2p could not deliver the request (no
+   host, no peer id on chain, no path, or an older provider without the
+   protocol). Once a request reached the provider, its reply, its error or
+   its timeout is final: the request is never sent a second way.
+
+Why libp2p first: it is the only path that reaches a NAT'd provider, and
+the Noise handshake proves the far end holds the peer id bound on chain,
+while a wss URL proves nothing about who answers. The wss rail stays for
+providers that publish one and for buyers whose daemon has no host.
+
+The payload is the same `service_request` frame the WS path sends
+(payment proof, payer signature), and the provider hands it to the same
+`_handle_service_request` with `local=False`, so the payment gate, the
+payer-signature check and the replay guard are shared. The relay carries
+bytes only; all trust stays end to end. Default wait: 300 s
+(`DEFAULT_REQUEST_TIMEOUT`, per-call `timeout`); a relay waits at most
+`--service-timeout` (default 600 s, `AUTONET_RELAY_SERVICE_TIMEOUT`) or the
+buyer's timeout if shorter.
+
 #### The payment IS the channel authentication (built 2026-07-26)
 
 "Authenticates the channel" above resolves to: **nothing but the

@@ -7,10 +7,12 @@ instead of re-implementing chain code:
   1. ``new_request_id()``     — a fresh bytes32 request id per call.
   2. ``pay_for_service()``    — sign a ``Substrate.payForService`` transfer
                                 and return ``{tx_hash, request_id}``.
-  3. ``request_service()``    — resolve the provider's on-chain wss
-                                endpoint, dial it one-shot, send a
-                                ``service_request`` carrying the payment
-                                proof, and return the reply.
+  3. ``request_service()``    — send a ``service_request`` carrying the
+                                payment proof to the provider and return
+                                the reply: over libp2p to the provider's
+                                on-chain peer id (direct, or one hop
+                                through a connected relay), else over its
+                                on-chain wss endpoint.
   4. ``lookup_service_ask()`` — read a service's on-chain ask by
                                 (provider, spec_digest).
 
@@ -84,8 +86,105 @@ def recover_request_signer(signature: str, request_id: str, spec_digest: str,
 
 log = logging.getLogger(__name__)
 
-# Default wait for a provider daemon's reply to a service_request.
-DEFAULT_REQUEST_TIMEOUT = 60.0
+# Default wait for a provider daemon's reply to a service_request. Generous:
+# a service may be a long inference or a slow tool.
+DEFAULT_REQUEST_TIMEOUT = 300.0
+
+# The daemon's libp2p host (AutonetHost), registered by the autonet bridge
+# while it runs, so every caller of request_service gets the libp2p path
+# without threading the host through. Tests pass ``p2p_host=`` instead.
+_p2p_host: Any = None
+
+
+def set_p2p_host(host: Any) -> None:
+    global _p2p_host
+    _p2p_host = host
+
+
+def clear_p2p_host(host: Any) -> None:
+    """Unregister ``host`` (only if it is still the registered one)."""
+    global _p2p_host
+    if _p2p_host is host:
+        _p2p_host = None
+
+
+def _running_host(host: Any) -> Any:
+    host = host if host is not None else _p2p_host
+    if host is None or getattr(host, "_trio_token", None) is None:
+        return None
+    return host
+
+
+async def resolve_provider_peer_id(config: Any, provider_address: str,
+                                   host: Any = None) -> str:
+    """The provider agent's libp2p peer id, as bound on chain
+    (``Substrate.getAgentPeerId``), base58. Falls back to the host's
+    cached peer attribution; '' when neither knows it."""
+    from nodes.common.peer_attribution import PeerAttribution
+
+    from .on_chain import OnChainService
+
+    try:
+        svc = OnChainService(config)
+        if svc.available:
+            raw = await asyncio.to_thread(
+                lambda: asyncio.run(svc.get_agent_peer_id(provider_address)))
+            peer = PeerAttribution._decode_peer_id(raw or b"")
+            if peer:
+                return peer
+    except Exception:  # noqa: BLE001 (a failed read falls through to the cache)
+        log.debug("getAgentPeerId read failed for %s", provider_address,
+                  exc_info=True)
+    attribution = getattr(host, "_peer_attribution", None) if host else None
+    if attribution is not None:
+        try:
+            rec = attribution.peer_for_agent(provider_address)
+            if rec is not None:
+                return rec.peer_id
+        except Exception:  # noqa: BLE001
+            pass
+    return ""
+
+
+async def p2p_request(host: Any, peer_id: str, frame: dict[str, Any],
+                      timeout: float) -> dict[str, Any]:
+    """Run ``host.request_service`` (trio, in the host's thread) from
+    asyncio, blocking only an executor thread.
+
+    Raises ``ConnectionError`` when the request reached no path to the
+    provider, ``TimeoutError`` when it was delivered but not answered."""
+    import trio
+
+    token = getattr(host, "_trio_token", None)
+    if token is None:
+        raise ConnectionError("libp2p host not running")
+
+    def call() -> dict:
+        async def _do():
+            return await host.request_service(peer_id, frame, timeout=timeout)
+        return trio.from_thread.run(_do, trio_token=token)
+    return await asyncio.get_running_loop().run_in_executor(None, call)
+
+
+def host_service_handler(serve: Any, loop: asyncio.AbstractEventLoop,
+                         timeout: float = 900.0) -> Any:
+    """Wrap an asyncio ``serve(msg) -> reply`` coroutine function (the
+    daemon's shared ``service_request`` handler) as the trio handler
+    ``AutonetHost.set_service_handler`` expects. The call runs on
+    ``loop``; the trio side waits in a worker thread."""
+    import trio
+
+    async def handle(msg: dict) -> dict:
+        def run() -> dict:
+            return asyncio.run_coroutine_threadsafe(
+                serve(msg), loop).result(timeout)
+        try:
+            return await trio.to_thread.run_sync(run, abandon_on_cancel=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("service request over libp2p failed: %s", exc)
+            return {"msg_id": msg.get("msg_id"), "ok": False,
+                    "error": f"provider failed to serve the request: {exc}"}
+    return handle
 
 
 def new_request_id() -> str:
@@ -157,12 +256,27 @@ async def request_service(
     timeout: float = DEFAULT_REQUEST_TIMEOUT,
     endpoint: str = "",
     payer_key: str = "",
+    p2p_host: Any = None,
+    peer_id: str = "",
 ) -> dict[str, Any]:
-    """Cross-daemon ``service_request``: resolve endpoint, dial, send, read.
+    """Cross-daemon ``service_request``: send it to the provider, read the reply.
 
-    Returns ``{ok, result, error, endpoint}``; ``{"error": ...}`` on a
-    setup failure. ``endpoint`` may be passed in to skip the chain read
-    (the provider caches it).
+    Transport order (docs/services_market.md, "How requests travel"):
+
+      1. libp2p, when this daemon's host is running and the provider's
+         peer id is known (``peer_id``, else the on-chain
+         ``getAgentPeerId``): direct if connected, else one hop through a
+         connected relay. Works for providers with no public address, and
+         the noise handshake proves the far end holds the peer id the
+         provider bound on chain.
+      2. The provider's on-chain wss endpoint, only if libp2p could not
+         deliver the request. A request libp2p delivered is never resent
+         (a paid request would be refused as a replay anyway), so a
+         provider error or a reply timeout is final.
+
+    Returns ``{ok, result, error, endpoint, transport}``; ``{"error": ...}``
+    on a setup failure. ``endpoint`` may be passed in to skip the chain
+    read (the provider caches it).
     """
     from .on_chain import OnChainService
 
@@ -172,21 +286,6 @@ async def request_service(
         return {"error": "Missing spec_digest"}
     if not isinstance(args, dict):
         return {"error": "'args' must be an object"}
-
-    if not endpoint:
-        svc = OnChainService(config)
-        if not svc.available:
-            return {"error": "Substrate not configured — cannot resolve the "
-                             "provider endpoint."}
-        endpoint = await svc.get_agent_endpoint(provider_address)
-    if not endpoint:
-        return {"error": f"Provider {provider_address[:10]} published no WS "
-                         "endpoint on chain — cannot reach it."}
-
-    try:
-        import websockets
-    except ImportError:
-        return {"error": "websockets library not installed on this daemon."}
 
     msg_id = uuid.uuid4().hex[:12]
     frame: dict[str, Any] = {
@@ -205,6 +304,57 @@ async def request_service(
             frame["payer_signature"] = sign_request(
                 payer_key, request_id, spec_digest, args, provider_address)
 
+    def _reply(reply: dict[str, Any], via: str, where: str) -> dict[str, Any]:
+        return {
+            "ok": bool(reply.get("ok")),
+            "result": reply.get("result"),
+            "error": reply.get("error"),
+            "endpoint": where if via == "wss" else endpoint,
+            "transport": via,
+        }
+
+    # --- 1. libp2p ---------------------------------------------------------
+    p2p_error = ""
+    host = _running_host(p2p_host)
+    if host is not None:
+        peer = peer_id or await resolve_provider_peer_id(
+            config, provider_address, host)
+        if not peer:
+            p2p_error = "no peer id on chain for the provider"
+        else:
+            try:
+                reply = await p2p_request(host, peer, frame, timeout)
+                return _reply(reply, "libp2p", peer)
+            except TimeoutError as exc:
+                return {"error": f"Provider did not reply within "
+                                 f"{int(timeout)}s over libp2p ({exc}).",
+                        "endpoint": endpoint, "transport": "libp2p"}
+            except ConnectionError as exc:
+                p2p_error = str(exc)
+            except Exception as exc:  # noqa: BLE001 (treated as undelivered)
+                p2p_error = f"libp2p call failed: {exc}"
+            log.info("service request to %s: libp2p could not deliver (%s); "
+                     "trying the wss endpoint", provider_address[:10], p2p_error)
+
+    # --- 2. wss endpoint ---------------------------------------------------
+    if not endpoint:
+        svc = OnChainService(config)
+        if not svc.available:
+            return {"error": "Substrate not configured — cannot resolve the "
+                             "provider endpoint."
+                             + (f" libp2p: {p2p_error}" if p2p_error else "")}
+        endpoint = await svc.get_agent_endpoint(provider_address)
+    if not endpoint:
+        return {"error": f"Provider {provider_address[:10]} is unreachable: "
+                         + (f"libp2p: {p2p_error}; " if p2p_error else
+                            "libp2p not running here; ")
+                         + "and it published no WS endpoint on chain."}
+
+    try:
+        import websockets
+    except ImportError:
+        return {"error": "websockets library not installed on this daemon."}
+
     try:
         async with websockets.connect(endpoint, open_timeout=10) as ws:
             await ws.send(json.dumps(frame))
@@ -218,16 +368,13 @@ async def request_service(
                 except (json.JSONDecodeError, TypeError):
                     continue
                 if reply.get("msg_id") == msg_id:
-                    return {
-                        "ok": bool(reply.get("ok")),
-                        "result": reply.get("result"),
-                        "error": reply.get("error"),
-                        "endpoint": endpoint,
-                    }
+                    return _reply(reply, "wss", endpoint)
             return {"error": f"Provider did not reply within {int(timeout)}s.",
-                    "endpoint": endpoint}
+                    "endpoint": endpoint, "transport": "wss"}
     except Exception as exc:  # noqa: BLE001 — network failure is a normal outcome
-        return {"error": f"Service request failed: {exc}", "endpoint": endpoint}
+        return {"error": f"Service request failed: {exc}"
+                         + (f" (libp2p: {p2p_error})" if p2p_error else ""),
+                "endpoint": endpoint, "transport": "wss"}
 
 
 async def lookup_service_ask(

@@ -464,6 +464,13 @@ class WebSocketBridge:
         if callable(setter):
             setter(self._ws_token_live)
 
+        # Paid service calls over libp2p (/autonet/service/1.0.0) land on the
+        # same handler as a WS `service_request` from a stranger.
+        autonet = getattr(self.runtime, "autonet", None)
+        setter = getattr(autonet, "set_service_request_handler", None)
+        if callable(setter):
+            setter(self._serve_p2p_service_request, asyncio.get_running_loop())
+
         # Privileged local listener — full control, key export, no handshake.
         self._server = await websockets.serve(
             lambda ws: self._handle_client(ws, local=True),
@@ -4777,6 +4784,19 @@ class WebSocketBridge:
             return getattr(host, "peer_id", "") or ""
         except Exception:
             return ""
+
+    async def _serve_p2p_service_request(
+        self, msg: dict[str, Any]
+    ) -> dict[str, Any]:
+        """A ``service_request`` that arrived over libp2p
+        (``/autonet/service/1.0.0``, direct or through a relay). Same code
+        path as the WS stranger surface: the caller is never local, so the
+        payment gate and payer-signature check apply in full."""
+        msg_id = msg.get("msg_id")
+        if msg.get("type", "service_request") != "service_request":
+            return {"msg_id": msg_id, "ok": False,
+                    "error": "only service_request is served over libp2p"}
+        return await self._handle_service_request(msg, msg_id, local=False)
 
     async def _handle_service_request(
         self, msg: dict[str, Any], msg_id: Any, *, local: bool = False

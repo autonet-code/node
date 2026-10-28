@@ -66,6 +66,10 @@ agent directory.
   dials out only; UPnP and a reach check make home machines reachable when
   the router allows. Behind an HTTP proxy (cloud sandboxes) it dials `wss`
   through CONNECT.
+- Buyer to service provider: libp2p `/autonet/service/1.0.0` to the
+  provider's on-chain peer id, direct or one hop through a relay (so NAT'd
+  providers can sell); the provider's wss endpoint only when libp2p cannot
+  deliver.
 - Daemon to chain: one RPC URL. Addresses come from the jurisdiction's
   Registry, read pinned to the previous anchor so every daemon agrees.
 - Household on chain: the owner wallet claims ATN and REP; the daemon's

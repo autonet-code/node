@@ -226,6 +226,11 @@ class AutonetBridge:
 
         # P2P agent advertisement
         self._p2p_host = None      # AutonetHost (lazy, trio-based)
+        # The daemon's asyncio service_request handler and its loop, set by
+        # the WS bridge, so libp2p service calls reach the same code path as
+        # WS ones (installed on every host start_p2p builds).
+        self._service_request_handler = None
+        self._service_request_loop: asyncio.AbstractEventLoop | None = None
         self._p2p_thread: threading.Thread | None = None
         self._p2p_stop = threading.Event()
         self._agent_registry = None  # Set by Runtime after init
@@ -501,6 +506,9 @@ class AutonetBridge:
         )
         self._p2p_host = host
         self._p2p_stop.clear()
+        self._install_service_handler(host)
+        from . import service_client
+        service_client.set_p2p_host(host)
 
         # Wire sponsor-side inference handler (Path A). self.config IS the
         # RPBConfig — sponsor_* fields are directly on it.
@@ -810,7 +818,27 @@ class AutonetBridge:
         if self._p2p_thread:
             self._p2p_thread.join(timeout=5)
             self._p2p_thread = None
+        if self._p2p_host is not None:
+            from . import service_client
+            service_client.clear_p2p_host(self._p2p_host)
         self._p2p_host = None
+
+    def set_service_request_handler(self, serve, loop) -> None:
+        """Serve ``/autonet/service/1.0.0`` requests with ``serve(msg) ->
+        reply`` (an asyncio coroutine function run on ``loop``): the WS
+        bridge's shared ``service_request`` path. Installed on the current
+        host now and on every host built later."""
+        self._service_request_handler = serve
+        self._service_request_loop = loop
+        if self._p2p_host is not None:
+            self._install_service_handler(self._p2p_host)
+
+    def _install_service_handler(self, host) -> None:
+        serve, loop = self._service_request_handler, self._service_request_loop
+        if serve is None or loop is None:
+            return
+        from .service_client import host_service_handler
+        host.set_service_handler(host_service_handler(serve, loop))
 
     async def _emit(self, event_type_name: str, data: dict[str, Any] | None = None) -> None:
         """Emit an event if the event bus is available."""

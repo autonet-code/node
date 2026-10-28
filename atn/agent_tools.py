@@ -1439,13 +1439,15 @@ _TOOLS: list[ToolDefinition] = [
         name="request_service",
         description=(
             "Invoke a service on the provider's daemon (cross-daemon call). "
-            "Resolves the provider's WS endpoint from the on-chain agent "
-            "registry, connects, and sends the request with your payment proof "
+            "Reaches the provider over libp2p by the peer id in the on-chain "
+            "agent registry (directly or through a relay, so providers behind "
+            "NAT work), else at its on-chain WS endpoint, and sends the "
+            "request with your payment proof "
             "(the tx_hash + request_id from pay_for_service). Pass the "
             "'service_id''s spec_digest as 'service_id' is looked up on chain, "
             "and the request 'payload' (matching the service's input schema). "
             "Returns the provider's result, or a clear error if the provider "
-            "published no endpoint or the payment failed verification."
+            "is unreachable or the payment failed verification."
         ),
         input_schema={
             "type": "object",
@@ -3566,9 +3568,9 @@ async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
 
 
 async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Consumer cross-daemon call: resolve the provider's on-chain WS endpoint,
-    connect one-shot, send a service_request with the payment proof, return the
-    reply.
+    """Consumer cross-daemon call: send a service_request with the payment
+    proof to the provider (libp2p by its on-chain peer id, else its on-chain
+    WS endpoint) and return the reply.
 
     Thin wrapper over ``atn.service_client.request_service`` (shared with the
     ``service`` inference provider)."""

@@ -8,6 +8,9 @@ A seed and meeting point for daemons, light enough for a small server:
     connected to each other (NAT'd daemons dial out to the relay);
   - a blob relay: requests it cannot answer are forwarded one hop and the
     blobs it relays are cached on disk;
+  - a service relay: a paid service request addressed to a provider the
+    relay is connected to is forwarded one hop and the reply piped back
+    (``/autonet/service/1.0.0``; bytes only, the relay serves nothing);
   - the reachability check that tells home daemons whether peers can
     reach them.
 
@@ -23,7 +26,8 @@ to choose.
 
 Every flag has an env twin (``AUTONET_P2P_PORT``, ``AUTONET_P2P_HOST``,
 ``AUTONET_P2P_ANNOUNCE``, ``AUTONET_P2P_BOOTSTRAP``,
-``AUTONET_RELAY_JURISDICTIONS``, ``AUTONET_RELAY_DIR``). It prints its full
+``AUTONET_RELAY_JURISDICTIONS``, ``AUTONET_RELAY_DIR``,
+``AUTONET_RELAY_SERVICE_TIMEOUT``). It prints its full
 multiaddr on start: that is the address to publish as a bootstrap seed.
 """
 
@@ -82,6 +86,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                     help="ws: serve WebSocket, e.g. behind an HTTPS proxy as wss on 443")
     ap.add_argument("--no-upnp", action="store_true")
     ap.add_argument("--advertise-interval", type=float, default=60.0)
+    ap.add_argument("--service-timeout", type=float,
+                    default=float(env("AUTONET_RELAY_SERVICE_TIMEOUT", "600")),
+                    help="longest wait (s) for a provider's reply to a "
+                         "forwarded service request")
     args = ap.parse_args(argv)
     if args.jurisdiction is None:
         args.jurisdiction = _csv(env("AUTONET_RELAY_JURISDICTIONS", ""))
@@ -116,6 +124,9 @@ async def run(args: argparse.Namespace) -> None:
         transport=args.transport,
         capability=NodeCapability(peer_id="", node_id="relay", roles=["relay"]),
     )
+    # Service requests: forwarding is built into the host (it has no service
+    # handler of its own, so anything addressed to the relay itself is refused).
+    host.service_relay_timeout = args.service_timeout
     async with host.run():
         # Blobs: serve what is on disk, and keep what we relay on disk
         # (replacing the default in-memory relay cache).

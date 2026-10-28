@@ -148,6 +148,14 @@ INFERENCE_REQUEST_PROTOCOL = TProtocol("/rpb/inference/1.0.0")
 # Robot poll rail (docs/robots.md, 2026-10-25): polls, link pushes and
 # receipts between daemons, one JSON request and one JSON response a stream.
 ROBOT_PROTOCOL = TProtocol("/autonet/robot/1.0.0")
+# Paid service calls (docs/services_market.md, docs/p2p_networking.md): one
+# JSON envelope {"target": <peer id>, "hops": n, "timeout": s, "msg":
+# <service_request>} and one JSON reply a stream. A peer that is not the
+# target forwards it to the target, but only if it is connected to it and
+# the envelope allows a hop, so a NAT'd provider is reachable through a
+# relay both sides dialled out to. A missing "hops" means direct only.
+SERVICE_PROTOCOL = TProtocol("/autonet/service/1.0.0")
+SERVICE_RELAY_MAX_HOPS = 1
 # Reachability check: we send our listen port, the peer answers with the IP
 # it sees us on and whether a fresh TCP connect to that IP and port worked.
 # Only the requester's own observed IP is ever dialled.
@@ -495,6 +503,10 @@ class AutonetHost:
         self._blob_relay_sink: Optional[Callable] = None    # (hash, bytes) -> None, caches relayed blobs
         self._blob_relay_timeout = 5.0
         self._embedding_handler: Optional[Callable] = None  # async (peer_id, metadata, tensor_bytes)
+        self._service_handler: Optional[Callable] = None    # async (msg: dict) -> dict, in trio
+        # Longest a forwarding peer waits for the target's reply (the
+        # requester's own timeout is honoured when it is shorter).
+        self.service_relay_timeout = 600.0
 
         # State (initialized in run())
         self._host: Optional[IHost] = None
@@ -1777,6 +1789,155 @@ class AutonetHost:
         except Exception:
             pass
 
+    # =========================================================================
+    # Service calls (/autonet/service/1.0.0), relayed at most one hop
+    # =========================================================================
+
+    def set_service_handler(
+        self,
+        handler: Optional[Callable[[dict], Awaitable[dict]]],
+    ) -> None:
+        """Register the coroutine (run in the host's trio loop) that serves
+        service requests addressed to this peer: the ``service_request``
+        dict in, the reply dict out. None unregisters. A host without a
+        handler still forwards requests addressed to other peers."""
+        self._service_handler = handler
+
+    async def _service_exchange(self, peer_id: Any, envelope: dict,
+                                timeout: float,
+                                connect_timeout: float = 15.0) -> dict:
+        """One envelope out, one reply back on a fresh stream.
+
+        Raises ``ConnectionError`` when the stream cannot be opened or the
+        request cannot be written (the request never left this host), and
+        ``TimeoutError`` when it was sent but no reply came in time."""
+        if self._host is None:
+            raise ConnectionError("libp2p host not running")
+        if isinstance(peer_id, str):
+            peer_id = PeerID.from_base58(peer_id)
+        try:
+            with trio.fail_after(connect_timeout):
+                stream = await self._host.new_stream(peer_id, [SERVICE_PROTOCOL])
+                await _write_frame_no_close(
+                    stream, json.dumps(envelope).encode("utf-8"))
+        except Exception as e:
+            raise ConnectionError(f"could not reach {str(peer_id)[:16]}: {e}") from e
+        try:
+            with trio.fail_after(timeout):
+                raw = await _read_frame_no_close(stream)
+        except trio.TooSlowError:
+            raise TimeoutError(f"no reply within {int(timeout)}s") from None
+        except Exception as e:
+            raise TimeoutError(f"the stream broke before the reply: {e}") from e
+        finally:
+            try:
+                await stream.close()
+            except Exception:
+                pass
+        if not raw:
+            raise TimeoutError("the stream closed without a reply")
+        return json.loads(raw.decode("utf-8"))
+
+    def _relay_candidates(self, target: str) -> List[str]:
+        """Connected peers other than the target, relays first."""
+        def is_relay(pid: str) -> bool:
+            cap = self._known_capabilities.get(pid)
+            return bool(cap and "relay" in (cap.roles or []))
+        peers = [p for p in self.get_connected_peers() if p != target]
+        return sorted(peers, key=lambda p: not is_relay(p))
+
+    async def request_service(self, target_peer_id: str, message: dict,
+                              timeout: float = 300.0,
+                              connect_timeout: float = 15.0) -> dict:
+        """Send a ``service_request`` to the peer ``target_peer_id`` and
+        return its reply.
+
+        Direct when connected to the target; otherwise each connected peer
+        (relays first) is asked in turn to forward it one hop. A peer that
+        is not connected to the target answers with ``relay_error`` at
+        once and the next is tried. Once a request has been handed to a
+        path that reached the target, no other path is tried, so a paid
+        request is never sent twice.
+
+        Raises ``ConnectionError`` if no path reached the target (nothing
+        was delivered) and ``TimeoutError`` if it was delivered but no
+        reply came within ``timeout``."""
+        target = str(target_peer_id)
+        if target in self.get_connected_peers():
+            try:
+                return await self._service_exchange(
+                    target, {"target": target, "hops": 0, "msg": message},
+                    timeout, connect_timeout)
+            except ConnectionError as e:
+                self.logger.debug("direct service call to %s failed: %s",
+                                  target[:16], e)
+        errors: List[str] = []
+        envelope = {"target": target, "hops": SERVICE_RELAY_MAX_HOPS,
+                    "timeout": float(timeout), "msg": message}
+        for relay in self._relay_candidates(target):
+            try:
+                reply = await self._service_exchange(
+                    relay, envelope, timeout + connect_timeout, connect_timeout)
+            except ConnectionError as e:
+                errors.append(str(e))
+                continue
+            if isinstance(reply, dict) and reply.get("relay_error"):
+                errors.append(f"{relay[:16]}: {reply['relay_error']}")
+                continue
+            return reply
+        detail = "; ".join(errors) if errors else "no connected peers"
+        raise ConnectionError(f"no path to {target[:16]} ({detail})")
+
+    async def _handle_service_stream(self, stream):
+        """Serve a service request addressed to us, or forward it one hop
+        to the target if we are connected to it. Forwarding carries the
+        bytes only: payment, payer signature and provider identity are
+        checked end to end."""
+        try:
+            envelope = json.loads((await _read_frame_no_close(stream)).decode("utf-8"))
+            if not isinstance(envelope, dict):
+                raise ValueError("envelope must be an object")
+            target = str(envelope.get("target") or "")
+            try:
+                hops = min(int(envelope.get("hops") or 0), SERVICE_RELAY_MAX_HOPS)
+            except (TypeError, ValueError):
+                hops = 0
+            msg = envelope.get("msg")
+            if not isinstance(msg, dict):
+                raise ValueError("missing 'msg'")
+            if not target or target == self.peer_id:
+                handler = self._service_handler
+                response = (await handler(msg)) if handler else {
+                    "msg_id": msg.get("msg_id"), "ok": False,
+                    "error": "this node serves no services"}
+            elif hops <= 0:
+                response = {"relay_error": "not the target and no hops left"}
+            elif target not in self.get_connected_peers():
+                response = {"relay_error": "not connected to the target"}
+            else:
+                try:
+                    wait = float(envelope.get("timeout") or self.service_relay_timeout)
+                except (TypeError, ValueError):
+                    wait = self.service_relay_timeout
+                wait = max(1.0, min(wait, self.service_relay_timeout))
+                try:
+                    response = await self._service_exchange(
+                        target, {"target": target, "hops": 0, "msg": msg}, wait)
+                except ConnectionError as e:
+                    response = {"relay_error": str(e)}
+                except TimeoutError as e:
+                    response = {"msg_id": msg.get("msg_id"), "ok": False,
+                                "error": f"the provider did not reply through "
+                                         f"the relay: {e}"}
+        except Exception as e:
+            self.logger.warning("service request failed: %s", e)
+            response = {"ok": False, "error": f"bad service request: {e}"}
+        try:
+            await _write_frame_no_close(stream, json.dumps(response).encode("utf-8"))
+            await stream.close()
+        except Exception:
+            pass
+
     def set_inference_advertisement(
         self,
         *,
@@ -2066,6 +2227,9 @@ class AutonetHost:
         )
         self._host.set_stream_handler(
             REACH_PROTOCOL, self._handle_reach_stream
+        )
+        self._host.set_stream_handler(
+            SERVICE_PROTOCOL, self._handle_service_stream
         )
 
     # =========================================================================

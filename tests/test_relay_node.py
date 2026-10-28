@@ -118,3 +118,52 @@ def test_daemon_peer_id_survives_restart(tmp_path):
                            key_seed=load_key_seed(tmp_path / "p2p.key"))
         ids.append(str(host._host.get_id()) if getattr(host, "_host", None) else host.peer_id)
     assert ids[0] == ids[1]
+
+
+@trio_test
+async def test_service_requests_cross_the_relay(tmp_path):
+    """A paid service request from one NAT'd daemon reaches another through
+    the relay node, which forwards it and serves nothing itself."""
+    args = relay.parse_args([
+        "--port", "0", "--host", "127.0.0.1", "--no-upnp",
+        "--data-dir", str(tmp_path / "relay"), "--service-timeout", "30"])
+    assert args.service_timeout == 30
+
+    async with trio.open_nursery() as nursery:
+        relay_addr = []
+
+        async def _relay():
+            import builtins
+            real_print = builtins.print
+
+            def _capture(*a, **kw):
+                if a and str(a[0]).startswith("relay address: "):
+                    relay_addr.append(str(a[0])[len("relay address: "):])
+                real_print(*a, **kw)
+            builtins.print = _capture
+            try:
+                await relay.run(args)
+            finally:
+                builtins.print = real_print
+
+        nursery.start_soon(_relay)
+        with trio.fail_after(10):
+            while not relay_addr:
+                await trio.sleep(0.05)
+        relay_pid = relay_addr[0].split("/p2p/")[1]
+
+        a = AutonetHost(node_id="nat-a", listen_host="127.0.0.1")
+        c = AutonetHost(node_id="nat-c", listen_host="127.0.0.1")
+
+        async def serve(msg):
+            return {"msg_id": msg.get("msg_id"), "ok": True, "result": "served by c"}
+        async with a.run(), c.run():
+            c.set_service_handler(serve)
+            assert await a.connect_to_peer(relay_addr[0])
+            assert await c.connect_to_peer(relay_addr[0])
+            with trio.fail_after(15):
+                reply = await a.request_service(c.peer_id, {"msg_id": "r1"})
+                own = await a.request_service(relay_pid, {"msg_id": "r2"})
+            assert reply == {"msg_id": "r1", "ok": True, "result": "served by c"}
+            assert own["ok"] is False and "serves no services" in own["error"]
+        nursery.cancel_scope.cancel()

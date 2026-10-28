@@ -218,6 +218,7 @@ A comment says the one hop exists so that a NAT'd daemon can reach a blob held o
 | `/rpb/inference/1.0.0` | `p2p.py:1671` (`_inference_handler`, `{"error"}` if unset) | sponsor handler set directly as `host._inference_handler` (`atn/autonet_service.py:508-511`); client `atn/providers/rpb.py:198` |
 | `/autonet/robot/1.0.0` | `p2p.py:1763` | robot rail (`atn/robot/rail.py:160-174`, `rail.py:237`) |
 | `/autonet/reach/1.0.0` | `p2p.py:757` | section 3.4 |
+| `/autonet/service/1.0.0` | `AutonetHost._handle_service_stream` (serve, or forward one hop to a connected target) | `atn/service_client.py` `request_service` (libp2p first, wss fallback); provider handler is the WS bridge's `_handle_service_request` (#36) |
 
 The robot rail finds a target agent's peer id through the on-chain `PeerAttribution` that is stored on the host as `_peer_attribution` (`atn/robot/rail.py:153-158`, `atn/autonet_service.py:1195-1197`).
 

@@ -65,8 +65,8 @@ Home users need no network setup. With no `announce_addrs`:
   networking only, light enough for a small server. A relay keeps a stable peer id
   (`<data>/relay.key`), subscribes to each jurisdiction it serves
   (`--jurisdiction <chain_id>:<DAO>`) so gossip crosses it between peers that
-  are not connected to each other, relays and caches blobs on disk, and
-  answers reachability checks. No close, no chain, no agents, no model. It
+  are not connected to each other, relays and caches blobs on disk,
+  forwards service calls one hop, and answers reachability checks. No close, no chain, no agents, no model. It
   prints its full multiaddr on start: that is the address to publish.
 
 ```
@@ -115,10 +115,37 @@ network must use the same one.
   on the host's single `/autonet/blob/1.0.0` handler, so manifests and code
   a daemon published stay fetchable after it restarts.
 
+## Service calls
+
+Paid service requests (`docs/services_market.md`, "How requests travel")
+use `/autonet/service/1.0.0`: one JSON envelope and one JSON reply per
+stream, same-stream framing (write without closing, read, close).
+
+- **Envelope:** `{"target": <peer id>, "hops": n, "timeout": s, "msg":
+  <service_request>}`. The reply is the provider's `service_request` reply.
+- **Serving:** a peer that is the target (or gets no target) passes `msg`
+  to its service handler (`set_service_handler`; the daemon installs the
+  WS bridge's shared handler, bridged trio to asyncio). No handler: an
+  `ok: false` "serves no services" reply.
+- **Forwarding:** a peer that is not the target forwards only if `hops >
+  0` and it is connected to the target, sending the envelope on with
+  `hops: 0` and piping the reply back. Otherwise it answers
+  `{"relay_error": ...}` at once. `hops` is capped at
+  `SERVICE_RELAY_MAX_HOPS = 1` and a missing `hops` means 0, so a request
+  travels at most one hop and a relay never fans it out.
+- **Client (`AutonetHost.request_service`):** direct when connected to the
+  target; else each connected peer in turn, relays (capability role
+  `relay`) first, with `hops: 1`, moving on only on a `relay_error` or a
+  failed dial. It raises `ConnectionError` when nothing was delivered and
+  `TimeoutError` when a delivered request got no reply. Connect limit 15 s;
+  reply limit is the caller's (default 300 s); a forwarding peer waits at
+  most `service_relay_timeout` (600 s; relay flag `--service-timeout`).
+
 ## Not covered
 
 - Hole punching (py-libp2p ships DCUtR) and circuit relay v2 are not used. NAT'd daemons cannot
-  dial each other directly; gossip and blobs go through reachable peers.
+  dial each other directly; gossip, blobs and service calls go through
+  reachable peers.
 - Blobs held only in the in-memory resolver map (world checkpoints, carry
   bundles) are not persisted, so a daemon that restarts cannot serve the
   ones it published before the restart. Peers that fetched them can.
