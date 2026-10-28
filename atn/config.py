@@ -22,7 +22,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import hashlib
 import json
@@ -577,6 +577,11 @@ def _registry_override_url() -> str:
     return os.environ.get("ATN_REGISTRY_URL", "").strip()
 
 
+def _split_seeds(value: Any) -> list[str]:
+    """A ``jurisdiction.<id>.bootstrap`` value as a list of multiaddrs."""
+    return [p.strip() for p in str(value or "").split(",") if p.strip()]
+
+
 def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str, Any]:
     """Flatten a parsed registry document into an RPBConfig-mergeable seed.
 
@@ -628,8 +633,7 @@ def _parse_registry_data(data: dict[str, Any], jurisdiction_id: str) -> dict[str
     if contracts.get("bootstrap"):
         # Seed nodes (jurisdiction.<id>.bootstrap, comma-separated
         # multiaddrs), changed by DAO proposal like the charter.
-        seed["bootstrap_peers"] = [
-            p.strip() for p in str(contracts["bootstrap"]).split(",") if p.strip()]
+        seed["bootstrap_peers"] = _split_seeds(contracts["bootstrap"])
     if contracts.get("timelock"):
         seed["timelock_address"] = contracts["timelock"]
     # On chain the key is "registry"; registry.json calls it "dao_registry".
@@ -934,6 +938,33 @@ def _fetch_onchain_registry(registry_address: str, rpc_url: str,
     return {"jurisdictions": {jurisdiction_id: {
         "network": {"rpc_url": rpc_url, "chain_id": chain_id},
         "contracts": contracts}}}
+
+
+def registry_seed_source(an: "RPBConfig") -> "Callable[[], list[str] | None] | None":
+    """A reader of the jurisdiction's current seed list, for a running
+    daemon to re-read (issue #42): the join read is the only one otherwise,
+    so a relay the DAO adds later would wait for a restart.
+
+    Reads ``jurisdiction.<id>.bootstrap`` from the DAO Registry at the
+    latest block, as the join read does (seeds are networking, not
+    consensus). None when the Registry is not the seed source: no Registry
+    address, no RPC, seeds set in config.yaml, or an ATN_REGISTRY_URL
+    document overriding the chain. The reader returns None on a failed
+    read.
+    """
+    registry = str(getattr(an, "dao_registry_address", "") or "")
+    rpc = str(getattr(an, "rpc_url", "") or "")
+    if (not registry or not rpc or _registry_override_url()
+            or "bootstrap_peers" in set(getattr(an, "explicit_fields", ()) or ())):
+        return None
+    jid = getattr(an, "jurisdiction_id", "") or "autonet"
+
+    def read() -> list[str] | None:
+        doc = _fetch_onchain_registry(registry, rpc, jid)
+        if doc is None:
+            return None
+        return _split_seeds(doc["jurisdictions"][jid]["contracts"].get("bootstrap"))
+    return read
 
 
 def _load_registry_seed(jurisdiction_id: str = "autonet") -> dict[str, Any]:

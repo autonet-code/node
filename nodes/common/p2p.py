@@ -469,6 +469,8 @@ class AutonetHost:
         reach_interval: float = 300.0,
         key_seed: Optional[bytes] = None,
         transport: str = "tcp",
+        seed_source: Optional[Callable[[], Optional[List[str]]]] = None,
+        seed_refresh_interval: float = 300.0,
     ):
         self.node_id = node_id
         self._listen_port = listen_port
@@ -496,6 +498,16 @@ class AutonetHost:
             from .ws_proxy import install as _install_ws_proxy
             _install_ws_proxy()
         self._bootstrap_redial_interval = bootstrap_redial_interval
+        # The seed list is re-read from ``seed_source`` (the jurisdiction's
+        # Registry, blocking; run off the trio thread) every
+        # ``seed_refresh_interval``, so a relay the DAO adds later is
+        # dialled without a restart. None or <= 0 = the list given here.
+        self._seed_source = seed_source
+        self._seed_refresh_interval = seed_refresh_interval
+        # While no peer is connected the seeds are redialled at once and
+        # then with backoff from this interval up to ``_alone_max_backoff``.
+        self._alone_check_interval = 5.0
+        self._alone_max_backoff = 120.0
         self._enable_quic = enable_quic
         self._enable_upnp = enable_upnp
 
@@ -615,9 +627,15 @@ class AutonetHost:
             try:
                 async with trio.open_nursery() as nursery:
                     self._nursery = nursery
-                    if ((self._bootstrap_peers or self._announce_addrs)
+                    refresh = (self._seed_source is not None
+                               and self._seed_refresh_interval > 0)
+                    if ((self._bootstrap_peers or self._announce_addrs or refresh)
                             and self._bootstrap_redial_interval > 0):
                         nursery.start_soon(self._maintain_addrs)
+                    if refresh:
+                        nursery.start_soon(self._refresh_seeds_loop)
+                    if self._bootstrap_peers or refresh:
+                        nursery.start_soon(self._redial_when_alone)
                     if not self._announce_addrs and (self._auto_reach or self._enable_upnp):
                         nursery.start_soon(self._auto_reach_loop)
                     self._ready_event.set()
@@ -671,20 +689,79 @@ class AutonetHost:
                     self._announce_resolved = fresh
                     self._capability.listen_addrs = self.addrs
                     await self.advertise_capability()
-            connected = set(self.get_connected_peers())
-            for addr in list(self._bootstrap_peers):
-                pid = addr.split("/p2p/")[-1] if "/p2p/" in addr else ""
-                if not pid or pid == self.peer_id or pid in connected:
-                    continue
-                addr = await trio.to_thread.run_sync(self._resolve, addr)
-                # Drop cached addresses so a peer that moved is dialled
-                # only at its current address, not the stale one first.
-                try:
-                    self._host.get_peerstore().clear_addrs(PeerID.from_base58(pid))
-                except Exception:
-                    pass
-                with trio.move_on_after(10):
-                    await self.connect_to_peer(addr)
+            await self._dial_seeds(list(self._bootstrap_peers))
+
+    async def _dial_seeds(self, addrs: List[str]) -> None:
+        """Dial the seeds in ``addrs`` we are not connected to, each at its
+        freshly resolved address."""
+        import trio
+        connected = set(self.get_connected_peers())
+        for addr in addrs:
+            pid = addr.split("/p2p/")[-1] if "/p2p/" in addr else ""
+            if not pid or pid == self.peer_id or pid in connected:
+                continue
+            addr = await trio.to_thread.run_sync(self._resolve, addr)
+            # Drop cached addresses so a peer that moved is dialled
+            # only at its current address, not the stale one first.
+            try:
+                self._host.get_peerstore().clear_addrs(PeerID.from_base58(pid))
+            except Exception:
+                pass
+            with trio.move_on_after(10):
+                await self.connect_to_peer(addr)
+
+    async def refresh_seeds(self) -> List[str]:
+        """Re-read the seed list from ``seed_source`` and dial the new ones.
+
+        A failed read or an empty list keeps the seeds we have: a daemon
+        must not cut itself off because the RPC hiccuped or the key was
+        cleared. Returns the seeds that were added.
+        """
+        import trio
+        if self._seed_source is None:
+            return []
+        try:
+            fresh = await trio.to_thread.run_sync(self._seed_source)
+        except Exception as e:
+            self.logger.debug(f"Seed list read failed: {e}")
+            return []
+        fresh = list(dict.fromkeys(a.strip() for a in (fresh or []) if a and a.strip()))
+        if not fresh:
+            return []
+        added = [a for a in fresh if a not in self._bootstrap_peers]
+        if fresh != self._bootstrap_peers:
+            self.logger.info(f"Seed list changed: {fresh}")
+            self._bootstrap_peers = fresh
+        if added:
+            await self._dial_seeds(added)
+        return added
+
+    async def _refresh_seeds_loop(self) -> None:
+        """Re-read the seed list every ``seed_refresh_interval``."""
+        import trio
+        while True:
+            await trio.sleep(self._seed_refresh_interval)
+            await self.refresh_seeds()
+
+    async def _redial_when_alone(self) -> None:
+        """Redial the seeds as soon as no peer is connected.
+
+        The redial in _maintain_addrs waits its interval (or is off); a
+        daemon whose last link dropped should not sit cut off that long.
+        Repeated failures back off so dead seeds are not hammered.
+        """
+        import trio
+        backoff = self._alone_check_interval
+        while True:
+            if self.get_connected_peers() or not self._bootstrap_peers:
+                backoff = self._alone_check_interval
+                await trio.sleep(self._alone_check_interval)
+                continue
+            await self._dial_seeds(list(self._bootstrap_peers))
+            if self.get_connected_peers():
+                continue
+            await trio.sleep(backoff)
+            backoff = min(backoff * 2, self._alone_max_backoff)
 
     def _listen_port_actual(self) -> int:
         for addr in self._host.get_transport_addrs():

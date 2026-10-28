@@ -14,6 +14,7 @@ Code: `nodes/common/p2p.py`, `nodes/common/blob_resolver.py`,
 | `bootstrap_peers` | `AUTONET_P2P_BOOTSTRAP` | Comma list of multiaddrs (`.../p2p/<peer id>`) |
 | `announce_addrs` | `AUTONET_P2P_ANNOUNCE` | Comma list of addresses peers should dial us on |
 | `bootstrap_redial_interval` | | Seconds between redials of unconnected bootstrap peers (0 = dial once) |
+| `seed_refresh_interval` | | Seconds between re-reads of the Registry seed list on a running daemon (default 300, 0 = read at join only) |
 | `enable_upnp` | | Map the listen port on the home router (default on) |
 | `auto_reach` | | Find and announce our public address when no `announce_addrs` is set (default on) |
 | `reach_interval` | | Seconds between reachability checks (default 300) |
@@ -53,14 +54,19 @@ Home users need no network setup. With no `announce_addrs`:
   first).
 - Bootstrap peers are redialled every `bootstrap_redial_interval` seconds
   while unconnected, so a daemon that started first, or lost its link,
-  rejoins on its own.
+  rejoins on its own. A daemon with no peer at all redials them at once,
+  then with backoff (5 s doubling to 2 min), even with that interval at 0.
 
 ## Seeds and relay nodes
 
 - **Seeds come from the DAO Registry.** `jurisdiction.<id>.bootstrap` holds
   comma-separated multiaddrs, changed by proposal like the charter. A daemon
   uses them when `p2p.bootstrap_peers` (or `AUTONET_P2P_BOOTSTRAP`) is not
-  set locally; local config always wins.
+  set locally; local config always wins. A running daemon re-reads the key
+  every `seed_refresh_interval` seconds (latest block, like the join read)
+  and dials seeds it is not connected to, so a relay the DAO adds reaches
+  running daemons without a restart. A failed read or an emptied key keeps
+  the seeds it has.
 - **Relay nodes** (`atn relay`, a daemon mode) are the natural seeds:
   networking only, light enough for a small server. A relay keeps a stable peer id
   (`<data>/relay.key`), subscribes to each jurisdiction it serves

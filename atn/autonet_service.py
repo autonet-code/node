@@ -475,6 +475,12 @@ class AutonetBridge:
             (cfg.p2p.bootstrap_peers if cfg else [])
             or list(getattr(self.config, "bootstrap_peers", []) or []))
         advertise_interval = cfg.p2p.capability_advertise_interval if cfg else 60
+        # Registry seeds are re-read while running (#42); seeds set in the
+        # local config are fixed.
+        seed_source = None
+        if not (cfg and cfg.p2p.bootstrap_peers):
+            from .config import registry_seed_source
+            seed_source = registry_seed_source(self.config)
 
         node_id = f"atn-{self.state.wallet_address[:8]}" if self.state.wallet_address else "atn-daemon"
         cap = NodeCapability(peer_id="", node_id=node_id)
@@ -503,6 +509,8 @@ class AutonetBridge:
             auto_reach=cfg.p2p.auto_reach if cfg else True,
             reach_interval=cfg.p2p.reach_interval if cfg else 300,
             transport=cfg.p2p.transport if cfg else "tcp",
+            seed_source=seed_source,
+            seed_refresh_interval=cfg.p2p.seed_refresh_interval if cfg else 300,
         )
         self._p2p_host = host
         self._p2p_stop.clear()

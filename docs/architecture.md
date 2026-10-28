@@ -68,7 +68,9 @@ agent directory.
   its peers closes the same set as everyone else. Behind NAT a daemon
   dials out only; UPnP and a reach check make home machines reachable when
   the router allows. Behind an HTTP proxy (cloud sandboxes) it dials `wss`
-  through CONNECT.
+  through CONNECT. A running daemon re-reads the Registry seed list every
+  few minutes (`p2p.seed_refresh_interval`, default 300 s) and dials new
+  seeds; with no peers it redials its seeds at once.
 - Buyer to service provider: libp2p `/autonet/service/1.0.0` to the
   provider's on-chain peer id, direct or one hop through a relay (so NAT'd
   providers can sell); the provider's wss endpoint only when libp2p cannot

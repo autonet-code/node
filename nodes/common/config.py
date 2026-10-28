@@ -120,6 +120,9 @@ class P2PConfig:
     # advertise (a NAT'd or tunneled daemon's public /ip4 or /dns4 addr).
     announce_addrs: list = field(default_factory=list)
     bootstrap_redial_interval: int = 30      # seconds; 0 = dial once at start
+    # Seconds between re-reads of the Registry seed list
+    # (jurisdiction.<id>.bootstrap) on a running daemon; 0 = read at join only.
+    seed_refresh_interval: int = 300
     # "tcp" or "ws": one transport per network (py-libp2p runs one per host).
     # "ws" lets relays sit behind an HTTPS proxy and HTTPS-only machines
     # dial out through HTTP_PROXY / HTTPS_PROXY (nodes/common/ws_proxy.py).
