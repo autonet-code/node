@@ -5,7 +5,8 @@ only speaks SOCKS5 to them. Machines whose only egress is an HTTP proxy
 (cloud sandboxes, corporate networks) need HTTP CONNECT: open a tunnel
 through the proxy, add TLS for ``wss``, then run the WebSocket handshake
 over that stream. ``install()`` patches the transport once; SOCKS proxy URLs
-keep the library's own path. See docs/p2p_networking.md.
+keep the library's own path. Every WebSocket dial (direct or proxied) also
+runs in its own guarded task group (``_guarded``). See docs/p2p_networking.md.
 """
 
 from __future__ import annotations
@@ -83,18 +84,64 @@ def install() -> None:
             if self._background_nursery is None:
                 raise wst.OpenConnectionError(
                     "No background nursery available for the WebSocket transport")
-            ws = await wrap_client_stream(
-                self._background_nursery, stream, host, "/",
-                message_queue_size=1024,
-                max_message_size=self._config.max_message_size)
+            ws = await self._background_nursery.start(_guarded(
+                lambda n: wrap_client_stream(
+                    n, stream, host, "/", message_queue_size=1024,
+                    max_message_size=self._config.max_message_size)))
         logger.info("WebSocket dial to %s:%s through HTTP proxy %s",
                     host, port, urlparse(proxy_url).hostname)
         return wst.P2PWebSocketConnection(
             ws, None, is_secure=proto_info.is_wss,
             max_buffered_amount=self._config.max_buffered_amount)
 
+    async def _create_direct_connection(self: Any, proto_info: Any,
+                                        ssl_context: Optional[ssl.SSLContext]) -> Any:
+        import trio
+        from trio_websocket import connect_websocket_url
+        from libp2p.utils.multiaddr_utils import extract_host_from_multiaddr, format_host_for_url
+        host = extract_host_from_multiaddr(proto_info.rest_multiaddr) or "localhost"
+        if isinstance(host, tuple):
+            host = host[0]
+        port = int(proto_info.rest_multiaddr.value_for_protocol("tcp") or "80")
+        url = f"{'wss' if proto_info.is_wss else 'ws'}://{format_host_for_url(host)}:{port}/"
+        if self._background_nursery is None:
+            raise wst.OpenConnectionError(
+                "No background nursery available for the WebSocket transport")
+        with trio.fail_after(self._config.handshake_timeout):
+            ws = await self._background_nursery.start(_guarded(
+                lambda n: connect_websocket_url(
+                    n, url, ssl_context=ssl_context, message_queue_size=1024,
+                    max_message_size=self._config.max_message_size)))
+        return wst.P2PWebSocketConnection(
+            ws, None, is_secure=proto_info.is_wss,
+            max_buffered_amount=self._config.max_buffered_amount)
+
     wst.WebsocketTransport._create_proxy_connection = _create_proxy_connection
+    wst.WebsocketTransport._create_direct_connection = _create_direct_connection
     _installed = True
+
+
+def _guarded(opener: Any) -> Any:
+    """A WebSocket connection in its own task group inside the transport's
+    shared one. py-libp2p runs every connection's reader directly in one
+    background nursery, so a rejected handshake (a proxy answering 502 for
+    a dead relay) or a reader error cancelled every connection on the node.
+    Here a failure before the connection is up raises in the dial alone, and
+    a failure after it stays with that connection."""
+    import trio
+
+    async def run(task_status: Any = trio.TASK_STATUS_IGNORED) -> None:
+        up = False
+        try:
+            async with trio.open_nursery() as n:
+                ws = await opener(n)
+                up = True
+                task_status.started(ws)
+        except* Exception as group:
+            if not up:
+                raise
+            logger.debug("WebSocket connection ended: %r", group.exceptions[0])
+    return run
 
 
 def _install_remote_address() -> None:

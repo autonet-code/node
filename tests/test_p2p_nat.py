@@ -255,3 +255,69 @@ def test_threadsafe_publish_never_waits_for_the_trio_thread():
     lock.release()
     t.join(10)
     assert sent == [("t", b"x")]
+
+
+@trio_test
+async def test_rejected_ws_dial_does_not_drop_other_connections():
+    """A proxy answering 502 for a dead relay used to cancel every WebSocket
+    connection on the node (one shared task group): the S3 relay outage."""
+    async def reject(stream):
+        try:
+            await stream.receive_some(4096)
+            # Like Cloudflare in front of a dead origin: the body arrives after
+            # the headers, so trio-websocket raises in its reader task.
+            await stream.send_all(b"HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain\r\n"
+                                  b"Content-Length: 16\r\n\r\n")
+            await trio.sleep(0.3)
+            await stream.send_all(b"error code: 502\n")
+            await trio.sleep(0.5)
+        finally:
+            await stream.aclose()
+
+    a = _host("a", transport="ws", enable_upnp=False, auto_reach=False)
+    b = _host("b", transport="ws", enable_upnp=False, auto_reach=False)
+    async with trio.open_nursery() as n:
+        listeners = await n.start(trio.serve_tcp, reject, 0)
+        port = listeners[0].socket.getsockname()[1]
+        async with a.run(), b.run():
+            assert await a.connect_to_peer(b.addrs[0])
+            dead = f"/ip4/127.0.0.1/tcp/{port}/ws/p2p/12D3KooWQXiXmXcVRnCJZ8WErsRZcwApSKc9MybYhaQgLdgScVpT"
+            with trio.move_on_after(10):
+                await a.connect_to_peer(dead)
+            await trio.sleep(1.0)
+            assert str(b.peer_id) in [str(p) for p in a.get_connected_peers()]
+        n.cancel_scope.cancel()
+
+
+@trio_test
+async def test_ws_connection_errors_stay_with_their_connection():
+    """ws_proxy._guarded: an error after the connection is up (trio-websocket's
+    reader raising ConnectionRejected, as in the S3 relay outage) must not
+    reach the transport's shared task group; an error before it is up raises
+    in the dial alone."""
+    from nodes.common.ws_proxy import _guarded
+
+    class Rejected(Exception):
+        pass
+
+    async def opener_fails_later(n):
+        async def reader():
+            await trio.sleep(0.1)
+            raise Rejected("502")
+        n.start_soon(reader)
+        return "ws"
+
+    async def opener_fails_now(n):
+        raise Rejected("handshake")
+
+    survived = False
+    async with trio.open_nursery() as shared:
+        ws = await shared.start(_guarded(opener_fails_later))
+        assert ws == "ws"
+        try:
+            await shared.start(_guarded(opener_fails_now))
+        except BaseException as e:  # the dial alone sees it
+            assert any(isinstance(x, Rejected) for x in getattr(e, "exceptions", [e]))
+        await trio.sleep(0.3)
+        survived = True
+    assert survived
