@@ -248,6 +248,36 @@ class TestPublish:
         assert stamped["replaced"] == ""
         assert rt.tool_store.get(res["digest"]) is not None
 
+    async def test_composite_needs_published_dependencies(self, tmp_path):
+        """#38: a composite whose own dependency is private is refused,
+        naming it; publishing the dependency first unblocks it."""
+        rt = _make_runtime(tmp_path)
+        await _agent(rt, "a")
+        rt.tool_bond_client = client = FakeClient()
+        dep = await _register(rt, "a", name="dep_tool", novelty=NOVEL)
+        comp = await _register(rt, "a", name="composite", code=ECHO + "# c\n",
+                               dependencies=[dep["digest"]], novelty=NOVEL)
+        out = await execute_tool("publish_tool", {"digest": comp["digest"]}, rt,
+                                 caller_id="a")
+        assert "not published" in out["error"] and "dep_tool" in out["error"]
+        assert not rt.tool_store.get(comp["digest"]).published and client.bonds == []
+
+        out = await execute_tool("publish_tool", {"digest": dep["digest"]}, rt,
+                                 caller_id="a")
+        assert out["published"] is True and out["digest"] == dep["digest"]
+        out = await execute_tool("publish_tool", {"digest": comp["digest"]}, rt,
+                                 caller_id="a")
+        assert out["published"] is True
+
+    async def test_composite_on_adopted_dependency_publishes(self, tmp_path):
+        rt, net = await _adopted(tmp_path)
+        rt.tool_bond_client = FakeClient()
+        comp = await _register(rt, "worker", name="composite", code=ECHO + "# c\n",
+                               dependencies=[net.digest], novelty=NOVEL)
+        out = await execute_tool("publish_tool", {"digest": comp["digest"]}, rt,
+                                 caller_id="worker")
+        assert out["published"] is True, out
+
     async def test_fails_closed_without_tool_bond(self, tmp_path):
         rt = _make_runtime(tmp_path)
         await _agent(rt, "a")

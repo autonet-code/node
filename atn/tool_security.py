@@ -280,6 +280,9 @@ async def publish_with_stake(runtime: Any, record: Any, *,
     if record.published:
         return {"digest": record.digest, "name": record.name,
                 "published": True, "note": "already published"}
+    err = unpublished_dependencies_error(runtime.tool_store, record)
+    if err:
+        return {"error": err}
     stamped: dict[str, Any] = {}
     if novelty is not None:
         if not isinstance(novelty, dict):
@@ -294,6 +297,28 @@ async def publish_with_stake(runtime: Any, record: Any, *,
             if res.get("replaced"):
                 stamped["replaces_private"] = res["replaced"]
     return {**await _publish_staked(runtime, record), **stamped}
+
+
+def unpublished_dependencies_error(store: Any, record: Any) -> str:
+    """Why a composite cannot be published yet, or "" (#38). Every declared
+    dependency must be on the network, or other households can neither find
+    nor run the composite: own dependencies must be published first, and an
+    adopted dependency is a network tool, published by definition. No
+    auto-publishing: each publish is its own staked act."""
+    missing: list[str] = []
+    for dep in record.manifest.get("dependencies") or []:
+        dep_rec = store.get(str(dep))
+        if dep_rec is not None and (dep_rec.origin == "adopted"
+                                    or dep_rec.published):
+            continue
+        missing.append(f"{dep_rec.name} ({str(dep)[:16]})" if dep_rec is not None
+                       else f"{str(dep)[:16]} (not found locally)")
+    if not missing:
+        return ""
+    return ("this composite depends on tools that are not published: "
+            + ", ".join(missing) + ". Publish them first (publish_tool), "
+            "then publish this one (if publishing a dependency gave it a new "
+            "digest, register this composite again with that digest)")
 
 
 async def _publish_staked(runtime: Any, record: Any) -> dict[str, Any]:
