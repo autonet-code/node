@@ -81,6 +81,9 @@ async def main() -> int:
                     continue
                 await client.call({"type": "adopt_tool", "digest": digest,
                                    "reason": "archive for the mainnet seed library"}, timeout=120)
+                # Approval is what pulls the code: the tool is installed on
+                # this archive daemon but never run.
+                await client.call({"type": "approve_adoption", "digest": digest}, timeout=180)
                 mpath = find_blob(data_dir, digest)
                 if mpath is None:
                     print(f"{digest[:16]}: manifest not fetched yet", flush=True)
