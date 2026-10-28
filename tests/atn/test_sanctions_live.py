@@ -155,3 +155,58 @@ def test_the_service_inference_provider_refuses_a_sanctioned_provider():
         asyncio.run(prov._refuse_if_sanctioned())
     prov._provider_address = OTHER
     asyncio.run(prov._refuse_if_sanctioned())
+
+
+def test_owner_history_scan_splits_capped_log_ranges(monkeypatch):
+    """Issue #40: the OwnerBound scan starts at the deploy block and splits
+    the range when the RPC caps eth_getLogs spans, like the close does."""
+    import web3
+
+    from atn.sanctions import _chain_past_owners
+
+    calls = []
+
+    class _Event:
+        @staticmethod
+        def get_logs(argument_filters=None, from_block=None, to_block=None):
+            calls.append((from_block, to_block, dict(argument_filters or {})))
+            if to_block - from_block > 1000:
+                raise ValueError("block range too large")
+            if from_block <= 4321 <= to_block:
+                return [{"args": {"prevOwner": HOUSE}}]
+            return []
+
+    class _W3:
+        def __init__(self, _provider):
+            self.eth = SimpleNamespace(
+                block_number=5000,
+                contract=lambda **kw: SimpleNamespace(
+                    events=SimpleNamespace(OwnerBound=_Event)))
+
+        HTTPProvider = staticmethod(lambda *a, **kw: object())
+        to_checksum_address = staticmethod(lambda a: a)
+
+    monkeypatch.setattr(web3, "Web3", _W3)
+    past = _chain_past_owners("http://rpc", OTHER, deploy_block=1000)
+    assert past(AGENT) == [HOUSE]
+    assert min(lo for lo, _, _ in calls) == 1000
+    assert all(f == {"agent": AGENT} for _, _, f in calls)
+    assert any(hi - lo <= 1000 for lo, hi, _ in calls)
+
+
+def test_a_failed_owner_history_scan_is_not_retried_on_every_check():
+    clock = Clock(1000)
+    scans = []
+
+    def past(_a):
+        scans.append(1)
+        raise RuntimeError("rpc down")
+
+    sl = SanctionList(lambda: {f"sanction.{HOUSE}": "x"}, {}.get,
+                      clock=clock, past_owners=past)
+    assert sl.check(AGENT) is None
+    assert sl.check(AGENT) is None
+    assert len(scans) == 1
+    clock.t += 61
+    sl.check(AGENT)
+    assert len(scans) == 2

@@ -41,17 +41,30 @@ _OWNER_ABI = [
 ]
 
 
-def _chain_past_owners(rpc_url: str, substrate: str) -> Callable[[str], list[str]]:
-    """Every owner an agent was rotated away from (OwnerBound prevOwner)."""
+def _chain_past_owners(rpc_url: str, substrate: str,
+                       deploy_block: int | None = None) -> Callable[[str], list[str]]:
+    """Every owner an agent was rotated away from (OwnerBound prevOwner).
+
+    The scan starts at the jurisdiction's deploy block (searched when not
+    configured) and splits the range when the RPC caps eth_getLogs spans,
+    the same way the close reads its logs (voice_state._get_logs). Callers
+    run it off the event loop (asyncio.to_thread)."""
     def past_owners(agent: str) -> list[str]:
         from web3 import Web3
-        from nodes.common.voice_state import _VOICE_ABI
+        from nodes.common.voice_state import _VOICE_ABI, _get_logs
         w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
-        c = w3.eth.contract(address=Web3.to_checksum_address(substrate),
-                            abi=_VOICE_ABI)
-        logs = c.events.OwnerBound.get_logs(
-            from_block=0, argument_filters={
-                "agent": Web3.to_checksum_address(agent)})
+        address = Web3.to_checksum_address(substrate)
+        c = w3.eth.contract(address=address, abi=_VOICE_ABI)
+        event = c.events.OwnerBound
+        filters = {"agent": Web3.to_checksum_address(agent)}
+
+        class _Filtered:
+            @staticmethod
+            def get_logs(**kw):
+                return event.get_logs(argument_filters=filters, **kw)
+
+        logs = _get_logs(_Filtered, w3, address, int(w3.eth.block_number),
+                         start_block=deploy_block)
         return [str(lg["args"]["prevOwner"]).lower() for lg in logs
                 if str(lg["args"]["prevOwner"]).lower() != _ZERO]
     return past_owners
@@ -93,6 +106,7 @@ class SanctionList:
         self._owner_of = owner_of
         self._past_owners = past_owners
         self._history: dict[str, list[str]] = {}
+        self._history_failed: dict[str, float] = {}
         self._clock = clock
         self._refresh_s = refresh_s
         self._raw: dict[str, dict[str, Any]] = {}
@@ -105,11 +119,12 @@ class SanctionList:
         rpc = str(getattr(rpb, "rpc_url", "") or "")
         registry = str(getattr(rpb, "dao_registry_address", "") or "")
         substrate = str(getattr(rpb, "substrate_address", "") or "")
+        deploy_block = int(getattr(rpb, "deploy_block", 0) or 0) or None
         if not rpc or not registry:
             return cls(None)
         return cls(_chain_reader(rpc, registry),
                    _chain_owner_lookup(rpc, substrate) if substrate else None,
-                   past_owners=(_chain_past_owners(rpc, substrate)
+                   past_owners=(_chain_past_owners(rpc, substrate, deploy_block)
                                 if substrate else None))
 
     def _refresh(self) -> None:
@@ -183,11 +198,19 @@ class SanctionList:
         if self._past_owners is None:
             return []
         if address not in self._history:
+            # A failed scan is retried at most once per refresh period, not
+            # on every check (each one is a full log scan).
+            failed = self._history_failed.get(address)
+            if failed is not None and self._clock() - failed < self._refresh_s:
+                return []
             try:
                 self._history[address] = [
                     str(p).lower() for p in self._past_owners(address)]
-            except Exception:
+            except Exception as exc:
+                log.warning("owner history read for %s failed: %s", address, exc)
+                self._history_failed[address] = self._clock()
                 return []
+            self._history_failed.pop(address, None)
         return self._history[address]
 
 
