@@ -36,6 +36,10 @@ from .governed_anchor import (
 logger = logging.getLogger(__name__)
 
 _RETRY = {DEFEATED, EXPIRED, CANCELED}
+# A queued election whose winner still hasn't executed this long after its
+# eta can't anchor (the winning option is one Substrate rejects): re-post
+# as a new attempt instead of waiting out the driver's give-up.
+EXECUTE_GRACE_S = 600
 
 
 def epoch_number_of(epoch_id: str) -> Optional[int]:
@@ -123,10 +127,16 @@ class ElectionAnchorer:
         if st == QUEUED:
             pid = self.proposal_id(e)
             eta = int(self._governor.functions.proposalEta(pid).call())
-            if eta and self._now() >= eta:
+            now = self._now()
+            if eta and now >= eta:
                 self._try(e, "execute", self._governor.functions.execute(
                     *self._proposal_args(e)[:3], self._description_hash(e)))
                 st = self.state(e)
+                if st == QUEUED and now >= eta + EXECUTE_GRACE_S:
+                    logger.warning("epoch %s: attempt %d won but its option "
+                                   "has not executed %ds past its eta",
+                                   e.epoch_id, e.attempt, now - eta)
+                    st = CANCELED   # treated like a failed attempt below
         if st in _RETRY:
             logger.warning("epoch %s: election attempt %d %s; re-posting as "
                            "attempt %d", e.epoch_id, e.attempt,
