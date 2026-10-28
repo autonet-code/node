@@ -66,3 +66,13 @@ angles/
 
 # GPU tokenomics sim, local for now (2026-10-27)
 experiments/econ_gpu/
+
+# Private keys never live in deployments/ (addresses only). Key records go
+# to ~/.autonet/keys/ (scripts/fund_smoke_wallets.js, AUTONET_KEYS_DIR).
+/deployments/*wallet*.json
+/deployments/*deployer*.json
+/deployments/*throwaway*.json
+/deployments/*key*.json
+/deployments/*secret*.json
+/deployments/*.key
+/deployments/*.pem

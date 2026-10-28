@@ -7,8 +7,10 @@ in-process EVM.
 
 What it does:
   1. Reads `deployments/shadownet.json` for the deployed contract address.
-  2. Reads `deployments/shadownet-smoke-wallet.json` for the second
-     funded wallet.
+  2. Reads the second funded wallet from the record
+     `scripts/fund_smoke_wallets.js` writes outside the repo:
+     `$AUTONET_KEYS_DIR/shadownet-smoke-wallet.json`
+     (default `~/.autonet/keys/`).
   3. Registers both wallets as agents on the contract (skipping if
      already registered).
   4. Builds a synthetic 2-sender federated close result.
@@ -167,9 +169,14 @@ def main():
     deploy = json.loads(
         (_REPO_ROOT / "deployments" / "shadownet.json").read_text()
     )
-    smoke_wallet = json.loads(
-        (_REPO_ROOT / "deployments" / "shadownet-smoke-wallet.json").read_text()
-    )
+    keys_dir = Path(os.environ.get("AUTONET_KEYS_DIR")
+                    or Path.home() / ".autonet" / "keys")
+    smoke_wallet_path = keys_dir / "shadownet-smoke-wallet.json"
+    if not smoke_wallet_path.exists():
+        print(f"ERROR: no smoke wallet record at {smoke_wallet_path}; run "
+              "scripts/fund_smoke_wallets.js first", file=sys.stderr)
+        sys.exit(1)
+    smoke_wallet = json.loads(smoke_wallet_path.read_text())
 
     rpc_url = deploy["rpc_url"]
     chain_id = deploy["chainId"]

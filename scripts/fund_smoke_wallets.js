@@ -16,11 +16,22 @@
  *                     random one is generated. The script tops it up to
  *                     SMOKE_BALANCE_ETH (default 1.0).
  *   SMOKE_BALANCE_ETH (default 1.0)
+ *   AUTONET_KEYS_DIR  Where the wallet record (with its private key) is
+ *                     written. Default ~/.autonet/keys. Never inside the
+ *                     repo: deployments/ holds addresses only.
+ *
+ * The record lands at <AUTONET_KEYS_DIR>/<network>-smoke-wallet.json,
+ * mode 0600 where the OS supports it. The key is not printed.
  */
 
 const { ethers, network } = require("hardhat");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+
+function keysDir() {
+  return process.env.AUTONET_KEYS_DIR || path.join(os.homedir(), ".autonet", "keys");
+}
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -44,8 +55,7 @@ async function main() {
   } else {
     targetWallet = ethers.Wallet.createRandom().connect(ethers.provider);
     console.log(`Target (fresh):    ${targetWallet.address}`);
-    console.log(`Target PRIVATE_KEY: ${targetWallet.privateKey}`);
-    console.log("  (record this — it's not stored anywhere else)");
+    console.log(`  (its key is saved to ${keysDir()} after funding)`);
   }
 
   const targetBal = await ethers.provider.getBalance(targetWallet.address);
@@ -68,7 +78,8 @@ async function main() {
   const finalBal = await ethers.provider.getBalance(targetWallet.address);
   console.log(`Target balance after: ${ethers.formatEther(finalBal)} ETH`);
 
-  // Persist the wallet info to deployments/ so the smoke script can pick it up.
+  // Persist the wallet record outside the repo so the smoke script can
+  // pick it up (scripts/testnet_chain_smoke.py reads the same path).
   const out = {
     network: network.name,
     chainId: network.config.chainId,
@@ -78,10 +89,16 @@ async function main() {
     funded_at: new Date().toISOString(),
     final_balance_eth: ethers.formatEther(finalBal),
   };
-  const dir = path.join(__dirname, "..", "deployments");
+  const dir = keysDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const outPath = path.join(dir, `${network.name}-smoke-wallet.json`);
-  fs.writeFileSync(outPath, JSON.stringify(out, null, 2));
-  console.log(`Wallet record written to ${outPath}`);
+  fs.writeFileSync(outPath, JSON.stringify(out, null, 2), { mode: 0o600 });
+  try {
+    fs.chmodSync(outPath, 0o600); // writeFileSync's mode skips existing files
+  } catch (_) {
+    // Windows: POSIX modes are not enforced; the file stays in the user profile.
+  }
+  console.log(`Wallet record (with private key) written to ${outPath}`);
 }
 
 main().catch((err) => {
