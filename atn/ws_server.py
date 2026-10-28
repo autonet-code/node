@@ -3465,6 +3465,12 @@ class WebSocketBridge:
         # WorldService half (epoch id, buffered events, emission) with
         # the EpochScheduler half (mode, candle window, T_max, seed
         # source).
+        if msg_type == "network_status":
+            # The same public summary guests get; the owner's dashboards and
+            # the WAN run's telemetry read it here.
+            return {"msg_id": msg_id, "ok": True,
+                    "result": self._network_status_payload()}
+
         if msg_type == "epoch_status":
             autonet = getattr(self.runtime, "autonet", None)
             service = getattr(autonet, "_service", None) if autonet else None

@@ -23,6 +23,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+# Cloudflare refuses urllib's default user agent.
+UA = "autonet-wan/1"
 KEEP = ("WARNING", "ERROR", "CRITICAL", "Traceback", "rewind", "anchored",
         "federated close", "Connected to", "disconnect")
 STATUS_KEYS = ("status", "errors", "last_error", "paused_reason", "uptime_seconds",
@@ -40,7 +42,11 @@ async def ask(url: str, kind: str, timeout: float = 20.0) -> dict:
             while time.time() < deadline:
                 msg = json.loads(await asyncio.wait_for(ws.recv(), deadline - time.time()))
                 if isinstance(msg, dict) and msg.get("msg_id") == mid:
-                    return msg.get("result") if msg.get("ok") else {"error": msg.get("error")}
+                    if not msg.get("ok"):
+                        return {"error": msg.get("error")}
+                    if "result" in msg:
+                        return msg["result"]
+                    return {k: v for k, v in msg.items() if k not in ("msg_id", "ok")}
     except Exception as exc:  # noqa: BLE001
         return {"error": repr(exc)[:300]}
     return {"error": "timeout"}
@@ -71,7 +77,7 @@ class LogTail:
 def post(obs: str, token: str, report: dict) -> str:
     req = urllib.request.Request(
         obs.rstrip("/") + "/ingest", data=json.dumps(report, default=str).encode(),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        headers={"User-Agent": UA, "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             return str(r.status)
@@ -94,7 +100,8 @@ async def main() -> int:
         url, *opts = rest.split(",")
         kw = dict(o.split("=", 1) for o in opts)
         daemons.append((name, url, LogTail(kw.get("log", ""), kw.get("container", ""))))
-    host = os.environ.get("HOSTNAME") or os.uname().nodename
+    import socket
+    host = os.environ.get("HOSTNAME") or socket.gethostname()
     while True:
         for name, url, tail in daemons:
             status = await ask(url, "autonet_status")
@@ -102,6 +109,7 @@ async def main() -> int:
                 "daemon": name, "host": host, "t": time.time(),
                 "network": await ask(url, "network_status"),
                 "epoch": await ask(url, "epoch_status"),
+                "epochs": await ask(url, "epoch_history"),
                 "status": {k: status.get(k) for k in STATUS_KEYS} if isinstance(status, dict) else status,
                 "log": tail.new_lines(),
             }

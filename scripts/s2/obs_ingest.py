@@ -69,6 +69,13 @@ def make_handler(store: Path, token: str):
             if url.path == "/latest":
                 with lock:
                     return self._send(200, latest)
+            if url.path.startswith("/share/"):
+                # Run files a VM needs (jurisdiction.json, vm_env.json, summary.json).
+                name = url.path[len("/share/"):]
+                f = store.parent / "share" / name
+                if not NAME_RE.match(name) or not f.is_file():
+                    return self._send(404, {"error": "not found"})
+                return self._send(200, json.loads(f.read_text(encoding="utf-8")))
             if url.path == "/since":
                 t = float((parse_qs(url.query).get("t") or ["0"])[0])
                 out = []

@@ -21,6 +21,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+# Cloudflare refuses urllib's default user agent.
+UA = "autonet-wan/1"
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
@@ -30,7 +32,7 @@ HOST = "ubuntu@65.21.186.126"
 
 def obs_latest(token: str) -> dict:
     req = urllib.request.Request("https://obs.autonet.computer/latest",
-                                 headers={"Authorization": f"Bearer {token}"})
+                                 headers={"User-Agent": UA, "Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read())

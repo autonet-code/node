@@ -61,7 +61,8 @@ MINUTES = float(os.environ.get("S0_MINUTES", "60"))
 KEEP = os.environ.get("S0_KEEP", "") == "1"
 
 RPC_PORT = 8545
-RPC_URL = f"http://127.0.0.1:{RPC_PORT}"
+# S2 VMs point this at the hub chain (https://rpc.autonet.computer/<token>).
+RPC_URL = os.environ.get("S0_RPC_URL") or f"http://127.0.0.1:{RPC_PORT}"
 CHAIN_ID = 31337
 RELAY_PORT = 4101
 HOUSEHOLDS = 4
@@ -133,9 +134,12 @@ class Procs:
 
 def base_env() -> Dict[str, str]:
     env = dict(os.environ)
-    for k in ("ATN_REGISTRY_URL", "ATN_JURISDICTION_REGISTRY", "ATN_JURISDICTION_RPC",
-              "AUTONET_P2P_BOOTSTRAP", "AUTONET_P2P_ANNOUNCE", "HTTP_PROXY",
-              "HTTPS_PROXY", "http_proxy", "https_proxy"):
+    drop = ["ATN_REGISTRY_URL", "ATN_JURISDICTION_REGISTRY", "ATN_JURISDICTION_RPC",
+            "AUTONET_P2P_BOOTSTRAP", "AUTONET_P2P_ANNOUNCE"]
+    # A cloud VM's only way out is its egress proxy: keep it there (S2).
+    if os.environ.get("S0_KEEP_PROXY") != "1":
+        drop += ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
+    for k in drop:
         env.pop(k, None)
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
