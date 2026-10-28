@@ -938,17 +938,21 @@ class FederatedCloseDriver:
         return denied_digests(self.review_snapshot, int(self.rep_supply or 0),
                               self.containment_params or dict(CONTAINMENT_DEFAULTS))
 
-    def security_standing(self, digest: str) -> Optional[Dict[str, Any]]:
+    def security_standing(self, digest: str, *,
+                          include_cooling: bool = True) -> Optional[Dict[str, Any]]:
         """A tool's settled harm at the pinned snapshot, for containment
         tiers: ``{harm_sum, harm_mass, supply}`` or None when unknown. The
         same pinned read on every daemon, so tiers agree network-wide.
         Harm still in its appeal window counts (Decision 2026-10-27):
-        containment is reversible, so it does not wait out the appeal."""
+        containment is reversible, so it does not wait out the appeal.
+        ``include_cooling=False`` gives the final verdict only (discovery
+        hides a tool once its harm is past appeal)."""
         snap = self.review_snapshot or {}
         key = str(digest).lower().removeprefix("0x")
         tools = snap.get("tools") or {}
         tool = tools.get(key) or tools.get(str(digest)) or {}
-        cooling = (snap.get("cooling_harm") or {}).get(key) or {}
+        cooling = ((snap.get("cooling_harm") or {}).get(key) or {}
+                   if include_cooling else {})
         if not tool and not cooling:
             return None
         harm = tool.get("harm") or {}

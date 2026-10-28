@@ -211,6 +211,23 @@ def containment_tier(runtime: Any, record: Any) -> tuple[str, str]:
     return tier_for_standing(standing, containment_params(runtime))
 
 
+def finally_denied(runtime: Any, digest: str) -> bool:
+    """True once the network's harm verdict on ``digest`` is past appeal
+    (settled and not overruled, or its appeal window expired). Containment
+    acts on harm still under appeal; discovery waits for the final verdict
+    before hiding a tool. Unknown standing is never hidden."""
+    store = getattr(runtime, "tool_store", None)
+    provider = getattr(store, "security_standing_provider", None)
+    if provider is None:
+        return False
+    try:
+        standing = provider(str(digest), include_cooling=False)
+    except Exception as exc:  # noqa: BLE001 — unknown = shown
+        log.debug("final standing read failed: %s", exc)
+        return False
+    return tier_for_standing(standing, containment_params(runtime))[0] == "denied"
+
+
 def rating_view(rating: Optional[dict[str, Any]],
                 rep_supply: Optional[int] = None) -> dict[str, Any]:
     """A ToolBond rating (``ToolBondClient.rating``) as display numbers:
@@ -500,6 +517,8 @@ async def _annotate(runtime: Any, rows: list[dict[str, Any]]) -> list[dict[str, 
         st = statuses.get(digest)
         if st is not None and not st.get("bonded"):
             continue  # unstaked / unbonding / slashed: not in the economy
+        if finally_denied(runtime, digest):
+            continue  # harmful by the network's final verdict
         if st is not None:
             row.update({"bonded": True, "stake": str(st.get("stake", "")),
                         **rating_view(st.get("rating"))})

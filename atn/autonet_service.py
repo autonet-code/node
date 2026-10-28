@@ -1347,9 +1347,10 @@ class AutonetBridge:
 
             # Containment tiers (Decision 2026-10-27): a network tool's
             # sandbox follows its settled harm at the pinned snapshot.
-            def _standing(digest: str, _svc=service):
+            def _standing(digest: str, include_cooling: bool = True, _svc=service):
                 drv = getattr(_svc, "_federated_close_driver", None)
-                return drv.security_standing(digest) if drv is not None else None
+                return (drv.security_standing(digest, include_cooling=include_cooling)
+                        if drv is not None else None)
             tool_store.security_standing_provider = _standing
             # Sanctioned authors (docs/accountability.md): agents may not
             # propose adopting their tools.
