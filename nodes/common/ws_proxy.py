@@ -61,6 +61,7 @@ def install() -> None:
     except Exception:  # noqa: BLE001 — no websocket transport, nothing to do
         return
     original = wst.WebsocketTransport._create_proxy_connection
+    _install_remote_address()
 
     async def _create_proxy_connection(self: Any, proto_info: Any, proxy_url: str,
                                        ssl_context: Optional[ssl.SSLContext]) -> Any:
@@ -94,3 +95,22 @@ def install() -> None:
 
     wst.WebsocketTransport._create_proxy_connection = _create_proxy_connection
     _installed = True
+
+
+def _install_remote_address() -> None:
+    """py-libp2p's WebSocket connection returns no remote address (a
+    placeholder), so the reach check could never see a ws peer's IP. Read
+    it from trio-websocket's endpoint instead."""
+    try:
+        from libp2p.transport.websocket import connection as wsc
+    except Exception:  # noqa: BLE001
+        return
+
+    def get_remote_address(self: Any) -> Optional[tuple]:
+        remote = getattr(getattr(self, "_ws_connection", None), "remote", None)
+        address = getattr(remote, "address", None)
+        if address is None:
+            return None
+        return (str(address), int(getattr(remote, "port", 0) or 0))
+
+    wsc.P2PWebSocketConnection.get_remote_address = get_remote_address

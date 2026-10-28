@@ -191,6 +191,24 @@ async def test_auto_reach_does_not_announce_private_ip():
         assert asker.addrs == listen
 
 
+@trio_test
+async def test_auto_reach_on_ws_announces_a_ws_address(monkeypatch):
+    """A reachable ws daemon announces /ws: peers on a ws network can't
+    dial a bare tcp address."""
+    monkeypatch.setattr(p2p_mod, "_is_public_ip", lambda ip: True)
+    asker = _host("asker", auto_reach=True, reach_interval=0.3, transport="ws",
+                  enable_upnp=False)
+    peer = _host("peer", transport="ws")
+    async with asker.run(), peer.run():
+        assert await asker.connect_to_peer(peer.addrs[0])
+        for _ in range(100):
+            if asker._announce_resolved:
+                break
+            await trio.sleep(0.2)
+        announced = [str(a) for a in asker._announce_resolved]
+        assert announced and all(a.endswith("/ws") for a in announced), announced
+
+
 def test_is_public_ip():
     assert p2p_mod._is_public_ip("188.25.100.16")
     for ip in ("192.168.3.9", "10.241.68.122", "127.0.0.1", "100.64.0.1", "nonsense"):

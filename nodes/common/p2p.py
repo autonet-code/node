@@ -729,7 +729,10 @@ class AutonetHost:
                 ip = verdict.get("ip") or ""
                 if verdict.get("reachable") and _is_public_ip(ip):
                     proto = "ip6" if ":" in ip else "ip4"
-                    await self._set_auto_announce(f"/{proto}/{ip}/tcp/{port}")
+                    # Same transport as the listener: a ws network can't
+                    # dial a bare tcp address.
+                    suffix = "/ws" if self._transport == "ws" else ""
+                    await self._set_auto_announce(f"/{proto}/{ip}/tcp/{port}{suffix}")
                 else:
                     await self._set_auto_announce(None)
                 await trio.sleep(self._reach_interval)
