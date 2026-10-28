@@ -1218,6 +1218,34 @@ class Runtime:
                             defn.id, exc_info=True)
         return aid
 
+    async def reload_agent(self, defn: AgentDefinition) -> str:
+        """Replace an already-registered agent's definition in place.
+
+        For the CLI ``reload``: the agent keeps its identity, wallet, vault
+        key, data dir, agent dir and children. Running executions are
+        stopped and the cached provider is closed so the new definition
+        (provider, model, prompt) takes effect on the next run. An unknown
+        id is registered like any on-disk agent (legacy=True)."""
+        current = self.registry.get_agent(defn.id)
+        if current is None:
+            return await self.register_agent(defn, legacy=True)
+        await self.control.kill_agent(defn.id)
+        old_provider = self.providers._active_providers.pop(defn.id, None)
+        if old_provider is not None:
+            try:
+                await old_provider.close()
+            except Exception:
+                pass
+        self.providers._cached_session_stats.pop(defn.id, None)
+        # With identity and wallet carried over, registry.register_agent
+        # neither loads nor generates a keypair, and the existing vault key
+        # stays in registry._agent_keys.
+        if defn.identity is None:
+            defn.identity = current.identity
+        if defn.wallet is None:
+            defn.wallet = current.wallet
+        return await self.register_agent(defn, legacy=True)
+
     def migrate_budget_keys(self, defn: AgentDefinition) -> dict[str, str]:
         """Re-key budgets written under the legacy default-provider stand-in
         (``claude_max``) onto the provider the agent actually runs on, so the

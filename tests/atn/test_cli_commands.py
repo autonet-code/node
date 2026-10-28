@@ -278,3 +278,65 @@ class TestAdoptionFlow:
         rt = _make_runtime(tmp_path)
         await cli._handle_command("reject", rt)
         assert "Usage: reject" in cap.text
+
+
+# ---------------------------------------------------------------------------
+# reload: existing agents are updated in place
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_reload_keeps_identity_and_key_and_updates_definition(
+        tmp_path, monkeypatch):
+    """`reload` used to unregister every existing agent (deleting its dirs,
+    identity and vault key) and re-register it with a fresh keypair."""
+    from atn.loader import save_agent
+
+    monkeypatch.setattr(cli, "console", _CaptureConsole())
+    rt = _make_runtime(tmp_path)
+    config = rt._config
+    for aid, parent in (("keep-1", None), ("kid-1", "keep-1"), ("gone-1", None)):
+        save_agent(AgentDefinition(
+            id=aid, name=aid, mode=AgentMode.COGNITIVE, provider="claude_max",
+            cognitive_model="sonnet", system_prompt="be useful",
+            parent_id=parent, budgets={"claude_max": 1000},
+        ), config.agents_dir)
+
+    assert await cli._load_agents(rt, config) == 3
+    before = rt.get_agent("keep-1")
+    address = before.identity.address
+    key = rt.registry.get_agent_key("keep-1")
+    assert address and key
+    kid_address = rt.get_agent("kid-1").identity.address
+    marker = config.data_dir / "agents" / "keep-1" / "marker.txt"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("x", encoding="utf-8")
+
+    # Edit keep-1's yaml on disk, delete gone-1's.
+    edited = AgentDefinition(
+        id="keep-1", name="keep-1", mode=AgentMode.COGNITIVE,
+        provider="claude_max", cognitive_model="sonnet",
+        system_prompt="be useful", description="edited",
+        budgets={"claude_max": 2000},
+    )
+    save_agent(edited, config.agents_dir)
+    from atn.loader import delete_agent_dir
+    delete_agent_dir("gone-1", config.agents_dir)
+
+    assert await cli._load_agents(rt, config) == 2
+    after = rt.get_agent("keep-1")
+    assert after.description == "edited"
+    assert after.identity.address == address
+    assert rt.registry.get_agent_key("keep-1") == key
+    assert (config.agents_dir / "keep-1" / "identity.json").exists()
+    assert (config.agents_dir / "keep-1" / "agent.yaml").exists()
+    assert marker.exists()
+    kid = rt.get_agent("kid-1")
+    assert kid.parent_id == "keep-1"
+    assert kid.identity.address == kid_address
+    assert rt.get_agent("gone-1") is None
+
+    # A fresh runtime (next boot) loads the same identity from disk.
+    rt2 = _make_runtime(tmp_path)
+    await cli._load_agents(rt2, config)
+    assert rt2.get_agent("keep-1").identity.address == address
+    assert rt2.registry.get_agent_key("keep-1") == key

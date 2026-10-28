@@ -499,11 +499,12 @@ async def _load_agents(runtime: Runtime, config: ATNConfig) -> int:
     for defn in agents:
         try:
             if defn.id in current_ids:
-                # Reload, not removal: the agent comes straight back, so its
-                # children must keep pointing at it.
-                await runtime.unregister_agent(
-                    defn.id, promote_children=False)
-            await runtime.register_agent(defn, legacy=True)
+                # Reload, not removal: update the definition in place. An
+                # unregister here would delete the agent's dirs, identity and
+                # vault key, and the re-register would mint a new keypair.
+                await runtime.reload_agent(defn)
+            else:
+                await runtime.register_agent(defn, legacy=True)
             loaded += 1
         except Exception as exc:
             # One malformed agent file must not take the whole fleet down.
