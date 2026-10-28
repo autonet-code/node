@@ -1,9 +1,11 @@
 /**
  * Deploy contracts/core/Substrate.sol to a Hardhat-configured network.
  *
- * Constructor (Decision 2026-10-16): (treasury, vaultMinter, governor),
+ * Constructor: (treasury, vaultMinter, governor, anchorer, genesisRoot),
  * all from env below. The governor (the DAO timelock) is the only address
- * that may anchor an epoch or retune the service fee.
+ * that may anchor an epoch or retune the service fee. GENESIS_ROOT is the
+ * fork/split ATN carry-over root from scripts/build_atn_genesis.py; unset
+ * (zero) for a fresh network.
  * Writes the deployed address + network info to
  * deployments/<network>.json so daemons + tests can pick it up.
  *
@@ -62,7 +64,10 @@ async function main() {
     treasury,
     vaultMinter,
     governor,
-    process.env.ANCHORER || ethers.ZeroAddress
+    process.env.ANCHORER || ethers.ZeroAddress,
+    // Fork/split carry-over root (scripts/build_atn_genesis.py); zero for a
+    // fresh network.
+    process.env.GENESIS_ROOT || ethers.ZeroHash
   );
   await substrate.waitForDeployment();
   const address = await substrate.getAddress();

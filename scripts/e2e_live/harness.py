@@ -320,7 +320,7 @@ def deploy(w3) -> Dict[str, str]:
     # (treasury, vaultMinter, governor), Decision 2026-10-16: the deployer
     # is the governor, so a daemon holding its key anchors directly.
     sub = _deploy("Substrate", "Substrate", acct.address, acct.address,
-                  acct.address, zero)
+                  acct.address, zero, bytes(32))
     out = {
         "substrate": sub,
         "service_registry": _deploy("ServiceRegistry", "ServiceMarket", sub),

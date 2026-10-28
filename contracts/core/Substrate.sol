@@ -97,11 +97,16 @@ contract Substrate is EIP712 {
     ///        (werule's JurisdictionFactory, which predicts the election's
     ///        address) anchors from its first epoch; changed later by the
     ///        governor (setAnchorer).
+    /// @param genesisRoot_ Merkle root of carried-over ATN balances for a
+    ///        jurisdiction fork or split (see claimGenesis), or bytes32(0)
+    ///        for a fresh network: zero means no genesis and every
+    ///        claimGenesis reverts. Immutable, no setter.
     constructor(
         address treasury_,
         address vaultMinter_,
         address governor_,
-        address anchorer_
+        address anchorer_,
+        bytes32 genesisRoot_
     )
         EIP712("AutonetSubstrate", "1")
     {
@@ -112,6 +117,7 @@ contract Substrate is EIP712 {
         deployedAt = block.timestamp;
         latestCutoff = block.timestamp;
         anchorer = anchorer_;
+        genesisRoot = genesisRoot_;
         emit AnchorerSet(address(0), anchorer_);
     }
 
@@ -989,6 +995,57 @@ contract Substrate is EIP712 {
     }
 
     // =========================================================================
+    // Genesis claim (jurisdiction forks and splits)
+    //
+    // A jurisdiction that forks or splits off an old chain carries the old
+    // ATN balances (minus excluded addresses) as a merkle root fixed at
+    // construction. Each address claims its own leaf once. Genesis ATN is
+    // outside the epoch mint cap (mintPool) and does NOT accrue the
+    // tool-pool earnings ledger (agentMintTotal), so it grants no REP
+    // claim; REP genesis is the DAO's initial members list. A fresh
+    // network passes a zero root and this path is closed. No admin keys,
+    // no setters. Supply check: atnTotalSupply minted ==
+    // epoch mints + vault mints + genesisMinted.
+    // =========================================================================
+
+    /// @notice Merkle root of genesis (address, amount) leaves; zero = none.
+    bytes32 public immutable genesisRoot;
+
+    /// @notice Has this address claimed its genesis leaf?
+    mapping(address => bool) public genesisClaimed;
+
+    /// @notice Total ATN minted through claimGenesis.
+    uint256 public genesisMinted;
+
+    event GenesisClaimed(address indexed account, uint256 amount);
+
+    error NoGenesis();
+    error GenesisAlreadyClaimed(address account);
+    error GenesisProofInvalid(address account);
+
+    /// @notice Claim the caller's carried-over ATN balance.
+    /// @param amount The ATN amount the caller's leaf commits.
+    /// @param proof Merkle proof for the leaf
+    ///              keccak256(bytes.concat(keccak256(abi.encode(
+    ///              msg.sender, amount)))) under genesisRoot (the same
+    ///              double-hashed, sorted-pair convention as claimFor).
+    function claimGenesis(uint256 amount, bytes32[] calldata proof) external {
+        bytes32 root = genesisRoot;
+        if (root == bytes32(0)) revert NoGenesis();
+        if (genesisClaimed[msg.sender]) revert GenesisAlreadyClaimed(msg.sender);
+        bytes32 leaf = keccak256(
+            bytes.concat(keccak256(abi.encode(msg.sender, amount)))
+        );
+        if (!_verifyMintProof(proof, root, leaf)) {
+            revert GenesisProofInvalid(msg.sender);
+        }
+        genesisClaimed[msg.sender] = true;
+        genesisMinted += amount;
+        _mintATN(msg.sender, amount);
+        emit GenesisClaimed(msg.sender, amount);
+    }
+
+    // =========================================================================
     // ATN: transferable token (Phase 7.1)
     //
     // The ONLY thing Substrate mints (Decision 2026-07-10). Reputation is
@@ -998,8 +1055,9 @@ contract Substrate is EIP712 {
     // ERC20-shaped surface: balanceOf, transfer, approve, transferFrom,
     // allowance. Deliberately minimal — no name/symbol/decimals/totalSupply
     // (those belong on a wrapper if we ever want a standard ERC20 facade).
-    // No external mint or burn function — the only mint path is through
-    // claimFor. No admin keys.
+    // No external mint or burn function. The mint paths are claimFor
+    // (epoch pool), mintFromVault (purchased) and claimGenesis (fork
+    // carry-over). No admin keys.
     // =========================================================================
 
     mapping(address => uint256) private _atnBalance;

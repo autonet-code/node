@@ -22,6 +22,11 @@
      "internalType": "address",
      "name": "anchorer_",
      "type": "address"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "genesisRoot_",
+     "type": "bytes32"
     }
    ],
    "stateMutability": "nonpayable",
@@ -173,6 +178,28 @@
   {
    "inputs": [
     {
+     "internalType": "address",
+     "name": "account",
+     "type": "address"
+    }
+   ],
+   "name": "GenesisAlreadyClaimed",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "account",
+     "type": "address"
+    }
+   ],
+   "name": "GenesisProofInvalid",
+   "type": "error"
+  },
+  {
+   "inputs": [
+    {
      "internalType": "uint256",
      "name": "requested",
      "type": "uint256"
@@ -237,6 +264,11 @@
   {
    "inputs": [],
    "name": "NoAnchorAuthority",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "NoGenesis",
    "type": "error"
   },
   {
@@ -535,6 +567,25 @@
     }
    ],
    "name": "EpochAnchored",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "account",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    }
+   ],
+   "name": "GenesisClaimed",
    "type": "event"
   },
   {
@@ -1359,6 +1410,24 @@
    "type": "function"
   },
   {
+   "inputs": [
+    {
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    },
+    {
+     "internalType": "bytes32[]",
+     "name": "proof",
+     "type": "bytes32[]"
+    }
+   ],
+   "name": "claimGenesis",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
    "inputs": [],
    "name": "deployedAt",
    "outputs": [
@@ -1409,6 +1478,51 @@
      "internalType": "uint256[]",
      "name": "extensions",
      "type": "uint256[]"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "name": "genesisClaimed",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "genesisMinted",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "genesisRoot",
+   "outputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
     }
    ],
    "stateMutability": "view",

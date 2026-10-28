@@ -30,7 +30,9 @@ async function deploySubstrateWith(opts = {}) {
   const governor =
     opts.governor !== undefined ? opts.governor : signers[SLOT_GOVERNOR].address;
   const Substrate = await ethers.getContractFactory("Substrate");
-  const substrate = await Substrate.deploy(treasury, vaultMinter, governor, ethers.ZeroAddress);
+  const substrate = await Substrate.deploy(
+    treasury, vaultMinter, governor, ethers.ZeroAddress,
+    opts.genesisRoot !== undefined ? opts.genesisRoot : ethers.ZeroHash);
   await substrate.waitForDeployment();
   _ctx[(await substrate.getAddress()).toLowerCase()] = {
     vaultFaucet: vaultMinter === vaultSigner.address ? vaultSigner : null,

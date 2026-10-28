@@ -1124,6 +1124,34 @@ Ratified in discussion 2026-10-27 after the S0 local run
    chosen from the GPU sim (`experiments/econ_gpu`) before the close
    changes.
 
+## Decision (2026-10-28): ATN genesis claim for forks and splits
+
+A jurisdiction that forks or splits off an old chain carries the old ATN
+balances, minus an exclusion list, into its new Substrate. Not a launch
+feature: a fresh network passes a zero root and nothing changes.
+
+- Constructor gains a fifth argument, `genesisRoot` (immutable, no
+  setter): `(treasury, vaultMinter, governor, anchorer, genesisRoot)`.
+  Zero means no genesis; `claimGenesis` then reverts `NoGenesis`.
+- `claimGenesis(amount, proof)`: once per address (`genesisClaimed`),
+  mints ATN to the caller, emits `GenesisClaimed(account, amount)`. Leaf is
+  the `claimFor` leaf, `keccak256(bytes.concat(keccak256(abi.encode(
+  msg.sender, amount))))`, sorted-pair tree.
+- Outside the epoch cap: it does not touch `mintPool` or any anchor's
+  `minted`, and does not bump `agentMintTotal`/`networkMintTotal`, so
+  carried ATN grants no REP claim. `genesisMinted` totals it, so a
+  collector checks supply as epoch mints + vault mints + `genesisMinted`.
+- REP genesis needs no Substrate work: the DAO deploy takes
+  `MEMBERS`/`AMOUNTS`.
+- `scripts/build_atn_genesis.py`: holders from the old Substrate's
+  `ATNTransfer` logs, balances via `balanceOfAt(block)`, exclusions
+  dropped, writes the root and per-address proofs; with `--rep-token` it
+  also prints `MEMBERS`/`AMOUNTS` from the old RepToken. Deploy with
+  `GENESIS_ROOT=<root>` (`scripts/deploy_substrate.js`).
+
+**Breaking upgrade:** constructor ABI change. AutonetSetup (dao) must
+append the root to the Substrate init code.
+
 ## Doctrine (2026-07-08): the capability ratchet and the absorption frontier
 
 Two dynamics, ratified in discussion, that together carry the

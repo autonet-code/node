@@ -6,8 +6,8 @@ account 0, by default) and anchor directly from it. Every
 ``claimFor`` must also be covered by the on-chain fees-only
 pool, so:
 
-  - ``deploy_substrate``: 3-arg constructor (treasury, vaultMinter,
-    governor); vaultMinter = account 8 (test faucet for purchased ATN);
+  - ``deploy_substrate``: constructor (treasury, vaultMinter, governor,
+    anchorer, genesisRoot; zero root = no genesis); vaultMinter = account 8 (test faucet for purchased ATN);
   - ``anchor_direct``: chain onto the current head and anchor from the
     governor;
   - ``seed_pool``: buy ATN, burn real service fees, anchor a seed epoch so
@@ -50,6 +50,7 @@ def deploy_substrate(
     vault_minter: Optional[str] = None,
     governor: Optional[str] = None,
     anchorer: str = ZERO,
+    genesis_root: bytes = bytes(32),
 ) -> str:
     """Deploy Substrate. ``governor`` defaults to ``deployer``: the
     account the tests anchor from."""
@@ -58,7 +59,8 @@ def deploy_substrate(
     vault_minter = accts[SLOT_VAULT] if vault_minter is None else vault_minter
     governor = deployer if governor is None else governor
     factory = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = factory.constructor(treasury, vault_minter, governor, anchorer).transact(
+    tx = factory.constructor(treasury, vault_minter, governor, anchorer,
+                             genesis_root).transact(
         {"from": deployer, "gas": 12_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1

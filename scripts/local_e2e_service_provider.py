@@ -210,7 +210,8 @@ async function main() {
   // at its 2.5% default, which is what this script asserts.
   const Substrate = await ethers.getContractFactory("Substrate");
   const substrate = await Substrate.deploy(
-    deployer.address, deployer.address, deployer.address, ethers.ZeroAddress);
+    deployer.address, deployer.address, deployer.address, ethers.ZeroAddress,
+    ethers.ZeroHash);
   await substrate.waitForDeployment();
   const substrateAddr = await substrate.getAddress();
 
