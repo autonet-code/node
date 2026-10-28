@@ -844,11 +844,41 @@ class AutonetService:
                 keypair.public_key.hex()[:16],
             )
             self._init_federated_close_driver()
+            self._wire_batch_catchup(p2p_host)
             return True
         except Exception as e:
             logger.warning("attach_event_gossip: %s", e, exc_info=True)
             self._event_gossip = None
             return False
+
+    def _wire_batch_catchup(self, p2p_host: Any) -> None:
+        """Serve our batch log to peers catching up, and let the close ask
+        peers for the batches we missed (issue #41). The close runs off the
+        host's trio thread, so its request crosses with from_thread."""
+        gossip = self._event_gossip
+        if gossip is None or not hasattr(p2p_host, "set_batch_source"):
+            return
+        p2p_host.set_batch_source(gossip.topic, gossip.batch_log.serve)
+        driver = self._federated_close_driver
+        if driver is None:
+            return
+
+        def catchup(floor: float) -> int:
+            import trio
+            token = getattr(p2p_host, "_trio_token", None)
+            if token is None:
+                return 0
+            request = gossip.catchup_request(floor)
+
+            async def ask():
+                return await p2p_host.request_batches(request)
+            try:
+                wires = trio.from_thread.run(ask, trio_token=token)
+            except RuntimeError:   # already on the trio thread: skip
+                return 0
+            return gossip.ingest_catchup(wires, floor)
+
+        driver.catchup = catchup
 
     def _init_federated_close_driver(self) -> None:
         """Construct the federated-close driver and subscribe it to

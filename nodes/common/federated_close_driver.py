@@ -184,6 +184,11 @@ class FederatedCloseDriver:
         # Substrate's on-chain checkpoints: with a target share set, an
         # epoch ends on that volume (voice_state.volume_cutoff).
         self.burned_source: Optional[Callable[[int, int], int]] = None
+        # floor_ts -> batches gained: asks peers for the open epoch's batches
+        # signed after floor_ts that this daemon is missing, and feeds them
+        # to the gossip (issue #41). Called once per window, before closing.
+        self.catchup: Optional[Callable[[float], int]] = None
+        self._caught_up: Optional[tuple] = None
         # Times this daemon found an epoch anchored differently from its own
         # close and rewound onto the anchored state (a run collector metric).
         self.rewinds: int = 0
@@ -541,6 +546,22 @@ class FederatedCloseDriver:
             cutoff += step * math.ceil((earliest - cutoff) / step)
         if float(self.clock()) < cutoff + grace:
             return None
+        # Before closing, ask peers for this epoch's batches we never saw
+        # (issue #41: joined late, slept, or lost peers mid-epoch), once per
+        # window; then pick again over the fuller buffer.
+        floor = float(start) if start is not None else 0.0
+        ckey = (number, floor)
+        if self.catchup is not None and self._caught_up != ckey:
+            self._caught_up = ckey
+            try:
+                got = int(self.catchup(floor) or 0)
+            except Exception as e:  # noqa: BLE001 — close with what we have
+                logger.warning("federated close: batch catch-up failed: %s", e)
+                got = 0
+            if got:
+                logger.info("federated close: caught up %d batch(es) for epoch %d",
+                            got, number)
+                return self._select_window()
         members = [b for b in live if float(b.timestamp) <= cutoff]
         self.gossip.take_epoch_batches(members, drop_at_or_before=cutoff)
         epoch_id = make_epoch_id(number, str(win["prev_root"]), cutoff)

@@ -349,6 +349,55 @@ class InMemoryHub:
 # ---------------------------------------------------------------------------
 
 
+class BatchLog:
+    """Recently seen signed batches, kept as wire bytes so a peer that
+    missed them can ask (issue #41: GossipSub keeps no history, so a daemon
+    that joins or loses its peers mid-epoch never sees the batches sent
+    before). Entries older than ``retention`` seconds are dropped. Daemons
+    and relays both keep one; requesters verify every batch themselves."""
+
+    def __init__(self, retention: float = 7200.0, max_entries: int = 20000,
+                 clock: Callable[[], float] = time.time):
+        self.retention = float(retention)
+        self.max_entries = int(max_entries)
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._entries: Dict[bytes, tuple] = {}  # content hash -> (timestamp, wire)
+
+    def add(self, content_hash: bytes, timestamp: float, wire: bytes) -> None:
+        with self._lock:
+            self._entries[content_hash] = (float(timestamp), wire)
+            if len(self._entries) > self.max_entries:
+                self._prune_locked(force=True)
+
+    def _prune_locked(self, force: bool = False) -> None:
+        floor = float(self.clock()) - self.retention
+        self._entries = {h: e for h, e in self._entries.items() if e[0] >= floor}
+        if force and len(self._entries) > self.max_entries:
+            keep = sorted(self._entries.items(), key=lambda kv: kv[1][0])
+            self._entries = dict(keep[-self.max_entries:])
+
+    def since(self, start: float, have: set, limit: int = 500) -> List[bytes]:
+        """Wire bytes of the batches signed after ``start`` whose hash is
+        not in ``have``, oldest first, at most ``limit``."""
+        with self._lock:
+            self._prune_locked()
+            picked = sorted(((ts, h, w) for h, (ts, w) in self._entries.items()
+                             if ts > start and h.hex() not in have),
+                            key=lambda t: (t[0], t[1]))
+        return [w for _, _, w in picked[:limit]]
+
+    def serve(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Answer a catch-up request ``{since, have, limit}``."""
+        try:
+            start = float(request.get("since") or 0.0)
+            have = {str(h) for h in (request.get("have") or [])}
+            limit = max(1, min(int(request.get("limit") or 500), 500))
+        except (TypeError, ValueError):
+            return {"error": "bad catch-up request"}
+        return {"batches": [w.decode("utf-8") for w in self.since(start, have, limit)]}
+
+
 @dataclass
 class GossipStats:
     batches_published: int = 0
@@ -401,6 +450,8 @@ class EventGossip:
         # set by the close driver from the pinned rules). None = no check.
         self.max_skew_seconds: Optional[float] = None
         self.clock = time.time
+        # Batches we accepted, served to peers catching up (issue #41).
+        self.batch_log = BatchLog(clock=lambda: self.clock())
 
         # Subscribe to the topic so peers' batches reach us.
         self.transport.subscribe(self.topic, self._on_message)
@@ -494,15 +545,17 @@ class EventGossip:
         payload = batch.canonical_payload()
         signature = _sign(self.keypair.private_key, payload)
         signed = SignedBatch(batch=batch, signature=signature)
+        wire = signed.to_wire()
 
         with self._lock:
             self._last_published_hash = batch.content_hash()
             self._note_seen_locked(batch.content_hash())
             self._epoch_batches.append(batch)
             self._stats.batches_published += 1
+        self.batch_log.add(batch.content_hash(), batch.timestamp, wire)
 
         try:
-            self.transport.publish(self.topic, signed.to_wire())
+            self.transport.publish(self.topic, wire)
         except Exception as e:
             logger.error("Failed to publish batch: %s", e)
         return signed
@@ -514,11 +567,37 @@ class EventGossip:
     def _on_message(self, topic: str, data: bytes) -> None:
         if topic != self.topic:
             return
+        self._accept(data)
+
+    def ingest_catchup(self, wires: List[bytes], floor: float) -> int:
+        """Accept batches a peer served for catch-up (issue #41). They were
+        signed in the past, so the skew check is replaced by a window: after
+        ``floor`` (the previous epoch's cutoff) and no later than now plus the
+        skew. Signatures, rpb and dedupe are checked as for gossip. Returns
+        how many were new."""
+        n = 0
+        for w in wires:
+            if isinstance(w, str):
+                w = w.encode("utf-8")
+            if self._accept(w, catchup_floor=float(floor)):
+                n += 1
+        return n
+
+    def catchup_request(self, start: float) -> Dict[str, Any]:
+        """The request a catch-up sends: batches signed after ``start`` that
+        this daemon does not already hold."""
+        with self._lock:
+            have = sorted({b.content_hash().hex() for b in self._epoch_batches})
+        return {"topic": self.topic, "since": float(start), "have": have}
+
+    def _accept(self, data: bytes, catchup_floor: Optional[float] = None) -> bool:
+        """Verify one wire batch and buffer it for the close; True when it
+        was new. ``catchup_floor`` marks a batch served for catch-up."""
         try:
             signed = SignedBatch.from_wire(data)
         except Exception as e:
             logger.warning("malformed batch dropped: %s", e)
-            return
+            return False
 
         # Reject batches addressed to a different rpb (shouldn't happen
         # given topic isolation, but defense in depth).
@@ -527,7 +606,7 @@ class EventGossip:
                 "batch with rpb=%s dropped on topic=%s",
                 signed.batch.rpb_address, self.topic,
             )
-            return
+            return False
 
         # Verify signature.
         if not _verify(
@@ -541,27 +620,33 @@ class EventGossip:
                 "batch from %s dropped: bad signature",
                 signed.batch.sender_pubkey.hex()[:16],
             )
-            return
+            return False
 
         # A batch signed further from now than the skew could be backdated
         # into an epoch that is closing (or post-dated into a later one).
+        # A catch-up batch is old by nature: it must belong to the open
+        # epoch (signed after the previous cutoff) and not be post-dated.
         skew = self.max_skew_seconds
-        if skew is not None and abs(
-                float(signed.batch.timestamp) - float(self.clock())) > skew:
+        ts, now = float(signed.batch.timestamp), float(self.clock())
+        if catchup_floor is not None:
+            late = ts <= catchup_floor or (skew is not None and ts - now > skew)
+        else:
+            late = skew is not None and abs(ts - now) > skew
+        if late:
             with self._lock:
                 self._stats.batches_skewed += 1
             logger.warning(
-                "batch from %s dropped: signed %.0fs from now (skew limit %ss)",
-                signed.batch.sender_pubkey.hex()[:16],
-                float(signed.batch.timestamp) - float(self.clock()), skew,
+                "batch from %s dropped: signed %.0fs from now (skew limit %ss%s)",
+                signed.batch.sender_pubkey.hex()[:16], ts - now, skew,
+                ", catch-up" if catchup_floor is not None else "",
             )
-            return
+            return False
 
         h = signed.batch.content_hash()
         with self._lock:
             if h in self._seen:
                 self._stats.batches_duplicate += 1
-                return
+                return False
             self._note_seen_locked(h)
             self._stats.batches_received += 1
 
@@ -576,11 +661,12 @@ class EventGossip:
             # Both peer batches and (in publish_events) own batches
             # land here so the federated close sees the full set.
             self._epoch_batches.append(signed.batch)
+        self.batch_log.add(h, ts, data)
 
-            # Don't ingest our own published batches: the local
-            # WorldService already has them.
-            if signed.batch.sender_pubkey == self.sender_pubkey:
-                return
+        # Don't ingest our own published batches: the local
+        # WorldService already has them.
+        if signed.batch.sender_pubkey == self.sender_pubkey:
+            return True
 
         # Ingest into the local WorldService. Use submit_events with
         # origin="remote" so content-addressed dedupe + persistence +
@@ -596,6 +682,7 @@ class EventGossip:
                 self._stats.events_ingested += len(signed.batch.events)
         except Exception as e:
             logger.error("ingesting peer batch failed: %s", e, exc_info=True)
+        return True
 
     # ------------------------------------------------------------------
     # Internal

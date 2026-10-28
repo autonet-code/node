@@ -46,7 +46,7 @@ watch earnings, epochs and the substrate. It talks to the daemon's 7700
 locally or 7701 remotely. Agents don't need it.
 
 **Relay (`atn relay`).** A networking-only node: seed, gossip and blob
-relay, reach checks. No close, chain or agents. Seeds are listed in the
+relay, a short log of event batches for catch-up, reach checks. No close, chain or agents. Seeds are listed in the
 DAO Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
 
 **Chain.** In this repo (`contracts/core/`): `Substrate.sol` (ATN, epoch
@@ -62,7 +62,10 @@ agent directory.
 ## How things connect
 
 - Daemon to daemon: libp2p gossip per jurisdiction (topic
-  `<chain_id>:<DAO address>`), over TCP or WebSocket. Behind NAT a daemon
+  `<chain_id>:<DAO address>`), over TCP or WebSocket. Before closing an
+  epoch, a daemon asks its peers (relays first) for that epoch's batches it
+  missed (`/autonet/batches/1.0.0`), so a late joiner or a daemon that lost
+  its peers closes the same set as everyone else. Behind NAT a daemon
   dials out only; UPnP and a reach check make home machines reachable when
   the router allows. Behind an HTTP proxy (cloud sandboxes) it dials `wss`
   through CONNECT.

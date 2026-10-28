@@ -8,6 +8,9 @@ A seed and meeting point for daemons, light enough for a small server:
     connected to each other (NAT'd daemons dial out to the relay);
   - a blob relay: requests it cannot answer are forwarded one hop and the
     blobs it relays are cached on disk;
+  - a batch log: the event batches it relays are kept for a while and
+    served to daemons catching up on an epoch (``/autonet/batches/1.0.0``,
+    issue #41);
   - a service relay: a paid service request addressed to a provider the
     relay is connected to is forwarded one hop and the reply piped back
     (``/autonet/service/1.0.0``; bytes only, the relay serves nothing);
@@ -108,7 +111,7 @@ async def run(args: argparse.Namespace) -> None:
     import trio
     from .common.blob_resolver import host_blob_server
     from .common.blob_store import BlobStore
-    from .common.event_gossip import topic_for_rpb
+    from .common.event_gossip import BatchLog, SignedBatch, _verify, topic_for_rpb
     from .common.p2p import AutonetHost, NodeCapability
 
     data = Path(args.data_dir).expanduser()
@@ -135,8 +138,22 @@ async def run(args: argparse.Namespace) -> None:
         server.add_source(store.get_bytes_local)
         host.set_blob_relay_sink(lambda _cid, blob: store.add_bytes(blob))
 
+        def keep(log: BatchLog):
+            def on_batch(_topic: str, data: bytes) -> None:
+                try:
+                    signed = SignedBatch.from_wire(data)
+                except Exception:  # noqa: BLE001 — not a batch, nothing to keep
+                    return
+                b = signed.batch
+                if _verify(b.sender_pubkey, b.canonical_payload(), signed.signature):
+                    log.add(b.content_hash(), b.timestamp, data)
+            return on_batch
+
         for key in args.jurisdiction:
-            await host.subscribe_topic(topic_for_rpb(key), lambda _t, _d: None)
+            topic = topic_for_rpb(key)
+            log = BatchLog()
+            host.set_batch_source(topic, log.serve)
+            await host.subscribe_topic(topic, keep(log))
             logger.info("relaying gossip for jurisdiction %s", key)
         if not args.jurisdiction:
             logger.warning("no --jurisdiction given: blobs and reach checks "

@@ -160,6 +160,10 @@ SERVICE_RELAY_MAX_HOPS = 1
 # it sees us on and whether a fresh TCP connect to that IP and port worked.
 # Only the requester's own observed IP is ever dialled.
 REACH_PROTOCOL = TProtocol("/autonet/reach/1.0.0")
+# Batch catch-up (issue #41): {topic, since, have} in, {batches} out, the
+# batches a peer (daemon or relay) holds for that topic signed after
+# ``since``. Not forwarded: relays answer from their own log.
+BATCHES_PROTOCOL = TProtocol("/autonet/batches/1.0.0")
 GUILD_GOSSIP_TOPIC_PREFIX = "/autonet/guild/"
 PROVIDER_REGISTRY_TOPIC = "/rpb/provider-registry/"
 
@@ -504,6 +508,7 @@ class AutonetHost:
         self._blob_relay_timeout = 5.0
         self._embedding_handler: Optional[Callable] = None  # async (peer_id, metadata, tensor_bytes)
         self._service_handler: Optional[Callable] = None    # async (msg: dict) -> dict, in trio
+        self._batch_sources: Dict[str, Callable] = {}       # topic -> serve(request) -> dict
         # Longest a forwarding peer waits for the target's reply (the
         # requester's own timeout is honoured when it is shorter).
         self.service_relay_timeout = 600.0
@@ -1938,6 +1943,62 @@ class AutonetHost:
         except Exception:
             pass
 
+    # =========================================================================
+    # Batch catch-up (/autonet/batches/1.0.0), issue #41
+    # =========================================================================
+
+    def set_batch_source(self, topic: str,
+                         serve: Optional[Callable[[dict], dict]]) -> None:
+        """Register ``serve(request) -> {"batches": [...]}`` (sync, cheap)
+        for catch-up requests on ``topic``. None unregisters."""
+        if serve is None:
+            self._batch_sources.pop(topic, None)
+        else:
+            self._batch_sources[topic] = serve
+
+    async def _handle_batches_stream(self, stream):
+        try:
+            request = json.loads((await _read_frame_no_close(stream)).decode("utf-8"))
+            serve = self._batch_sources.get(str(request.get("topic") or ""))
+            response = serve(request) if serve else {"batches": []}
+        except Exception as e:
+            self.logger.debug("catch-up request failed: %s", e)
+            response = {"error": str(e)}
+        try:
+            await _write_frame_no_close(stream, json.dumps(response).encode("utf-8"))
+            await stream.close()
+        except Exception:
+            pass
+
+    async def request_batches(self, request: dict, max_peers: int = 4,
+                              timeout: float = 10.0) -> List[str]:
+        """Ask up to ``max_peers`` connected peers (relays first, then the
+        rest) for catch-up batches, concurrently; returns every wire batch
+        they sent (the caller verifies and dedupes)."""
+        if not self._host:
+            return []
+        peers = self._relay_candidates("")[:max_peers]
+        out: List[str] = []
+        frame = json.dumps(request).encode("utf-8")
+
+        async def ask(pid: str) -> None:
+            with trio.move_on_after(timeout):
+                try:
+                    stream = await self._host.new_stream(
+                        PeerID.from_base58(pid), [BATCHES_PROTOCOL])
+                    await _write_frame_no_close(stream, frame)
+                    raw = await _read_frame_no_close(stream)
+                    await stream.close()
+                    reply = json.loads(raw.decode("utf-8")) if raw else {}
+                    out.extend(str(w) for w in (reply.get("batches") or []))
+                except Exception as e:
+                    self.logger.debug("catch-up from %s failed: %s", pid[:16], e)
+
+        async with trio.open_nursery() as nursery:
+            for pid in peers:
+                nursery.start_soon(ask, pid)
+        return out
+
     def set_inference_advertisement(
         self,
         *,
@@ -2230,6 +2291,9 @@ class AutonetHost:
         )
         self._host.set_stream_handler(
             SERVICE_PROTOCOL, self._handle_service_stream
+        )
+        self._host.set_stream_handler(
+            BATCHES_PROTOCOL, self._handle_batches_stream
         )
 
     # =========================================================================
