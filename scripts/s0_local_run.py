@@ -175,11 +175,24 @@ def tail(path: Path, n: int = 30) -> str:
 # Chain
 # ---------------------------------------------------------------------------
 
-def w3_and_accounts():
+HARDHAT_MNEMONIC = "test test test test test test test test test test test junk"
+
+
+def hardhat_accounts(n: int = 20) -> list:
+    """Hardhat's well-known prefunded accounts (local and test chains only):
+    #0 deploys, the rest are owner wallets."""
     from eth_account import Account
+    Account.enable_unaudited_hdwallet_features()
+    return [Account.from_mnemonic(HARDHAT_MNEMONIC, account_path=f"m/44'/60'/0'/0/{i}")
+            for i in range(n)]
+
+
+def w3_and_accounts():
     from web3 import Web3
     w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 60}))
-    return w3, [Account.from_key(k) for k in HH_KEYS]
+    accts = hardhat_accounts()
+    assert [a.key.hex().removeprefix("0x") for a in accts[:len(HH_KEYS)]] ==         [k.removeprefix("0x") for k in HH_KEYS]
+    return w3, accts
 
 
 def send(w3, acct, call=None, *, to=None, value=0, gas=3_000_000) -> Any:
