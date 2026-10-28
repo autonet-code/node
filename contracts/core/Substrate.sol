@@ -33,11 +33,10 @@ import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol
 /// Substrate is a PURE MONEY contract (Decision 2026-07-10, fees-only
 /// emission + REP-from-earnings): it moves ATN, takes the service fee,
 /// and records earnings. It mints NO reputation. Reputation (== the DAO
-/// governance token == review weight) lives DAO-side as pull claims on
-/// the two on-chain earnings ledgers materialized here — cumulative
-/// tool-pool mint (agentMintTotal) and cumulative net service revenue
-/// (serviceEarnings) — at a hardcoded 1:1. You cannot lie about REP
-/// because you cannot lie about ATN you provably received.
+/// governance token == review weight) is claimed DAO-side at a hardcoded
+/// 1:1 from cumulative tool-pool mint (agentMintTotal). Service revenue
+/// is tracked separately in serviceEarnings and does not earn REP. You
+/// cannot lie about REP because you cannot lie about ATN you provably received.
 ///
 /// What is deliberately NOT here
 /// -----------------------------
@@ -944,7 +943,7 @@ contract Substrate is EIP712 {
     /// @dev The one ATN mint primitive: bumps balance + supply, checkpoints
     ///      both, and emits the canonical mint transfer (from address(0)).
     ///      Substrate mints ATN only and never reputation (REP is a DAO-side
-    ///      claim on earnings, Decision 2026-07-10). The training path
+    ///      claim on ratified tool-pool earnings, Decision 2026-07-10). The training path
     ///      additionally accrues the earnings ledger (agentMintTotal) around
     ///      its call to this; the purchased-money path (mintFromVault) does
     ///      not, because bought ATN grants no REP claim.
@@ -1111,10 +1110,10 @@ contract Substrate is EIP712 {
         emit ServiceFeeBpsSet(oldBps, newBps);
     }
 
-    /// @notice Cumulative net service revenue per recipient (the second REP
-    ///         claim base). Bumped by payForService with the post-fee `net`.
-    ///         Service providers claim REP DAO-side on this counter 1:1
-    ///         (Decision 2026-07-10). Monotonic.
+    /// @notice Cumulative net service revenue per recipient. This payment
+    ///         ledger is not a REP claim base; DAO-side REP claims use
+    ///         agentMintTotal only. Bumped by payForService with the post-fee
+    ///         `net`; monotonic.
     mapping(address => uint256) public serviceEarnings;
 
     // -------------------------------------------------------------------------
@@ -1124,7 +1123,7 @@ contract Substrate is EIP712 {
     // recordTrainingForEpoch (which also accrues the REP claim ledger),
     // and PURCHASED money via mintFromVault (which does not). The two are
     // kept strictly separate on purpose: a venture backer who buys ATN
-    // through the DAO-repo AutonetVault accrues NO service/pool earnings
+    // through the DAO-repo AutonetVault accrues no tool-pool earnings
     // and therefore no REP claim — money can be bought, voice must be
     // earned (Decision 2026-07-10).
     //
@@ -1205,8 +1204,8 @@ contract Substrate is EIP712 {
 
         unchecked { _atnBalance[msg.sender] = bal - amount; }
         _atnBalance[recipient] += net;
-        // Cumulative net service revenue per recipient — the DAO's REP
-        // claim base for service providers (1:1, Decision 2026-07-10).
+        // Cumulative net service revenue per recipient. This payment ledger
+        // does not accrue REP; DAO-side claims use agentMintTotal only.
         serviceEarnings[recipient] += net;
         _checkpointATN(msg.sender);
         _checkpointATN(recipient);
