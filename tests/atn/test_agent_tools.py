@@ -506,6 +506,48 @@ class TestBundleGrantIsEnforcedAtCallTime:
         assert "get_my_budget_status" in granted
 
 
+class TestRegisterOnChainScope:
+    """register_on_chain acts only for the caller itself or its subtree."""
+
+    async def _fleet(self, tmp_path):
+        from atn.agent_tools import execute_tool
+
+        rt = _make_runtime(EventBus(), tmp_path)
+        for aid, parent in (("parent-1", None), ("child-1", "parent-1"),
+                            ("other-1", None)):
+            await rt.register_agent(AgentDefinition(
+                id=aid, name=aid, mode=AgentMode.COGNITIVE,
+                cognitive_model="sonnet", system_prompt="be useful",
+                parent_id=parent, budgets={"claude_max": 100000},
+            ))
+        # Stop every admitted call before it touches the network.
+        rt.registry.get_agent_key = lambda _aid: None
+        return rt, execute_tool
+
+    @pytest.mark.asyncio
+    async def test_peer_cannot_register_another_subtree(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool("register_on_chain", {"agent_id": "child-1"},
+                                 rt, caller_id="other-1")
+        assert res == {"error": "Agent 'child-1' not found."}
+
+    @pytest.mark.asyncio
+    async def test_child_cannot_register_its_parent(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        res = await execute_tool("register_on_chain", {"agent_id": "parent-1"},
+                                 rt, caller_id="child-1")
+        assert res == {"error": "Agent 'parent-1' not found."}
+
+    @pytest.mark.asyncio
+    async def test_self_subtree_and_owner_pass_the_gate(self, tmp_path):
+        rt, execute_tool = await self._fleet(tmp_path)
+        for caller, target in (("parent-1", "child-1"), ("child-1", "child-1"),
+                               (None, "other-1")):
+            res = await execute_tool("register_on_chain", {"agent_id": target},
+                                     rt, caller_id=caller)
+            assert "not found" not in res.get("error", ""), (caller, target)
+
+
 class TestUseToolConnectorGrant:
     """use_tool on an ``mcp_<cid>_<op>`` name runs the owner's MCP
     connector, so an agent needs the connectors bundle for it, exactly as

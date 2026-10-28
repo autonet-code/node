@@ -4775,6 +4775,15 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
     household without the owner wallet."""
     agent_id = input["agent_id"]
 
+    # An agent may register only itself or an agent in its own subtree
+    # (fractal doctrine: each level manages what sits beneath it). The
+    # owner surface is unrestricted. Out-of-subtree ids read as missing so
+    # peers cannot be enumerated by probing.
+    caller_id = input.get("_caller_id")
+    if (caller_id is not None and not is_owner_caller(caller_id)
+            and agent_id not in runtime.registry.get_subtree_ids(caller_id)):
+        return _not_visible(agent_id)
+
     defn = runtime.get_agent(agent_id)
     if defn is None:
         return {"error": f"Agent '{agent_id}' not found."}
