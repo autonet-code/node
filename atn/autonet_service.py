@@ -21,7 +21,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from .events import EventType
 from nodes.common.tx_nonce import next_nonce
@@ -1086,6 +1086,48 @@ class AutonetBridge:
 
         return _resolve
 
+    def _still_running(self, service: Any) -> bool:
+        """True while ``service`` is the live service of a running bridge.
+        A stop (or a restart with a new service) ends the wiring waiters."""
+        return (self._service is service
+                and self.state.status in (AutonetStatus.RUNNING,
+                                          AutonetStatus.PAUSED))
+
+    def _host_ready(self) -> bool:
+        host = self._p2p_host
+        ev = getattr(host, "_ready_event", None) if host is not None else None
+        return ev is not None and ev.is_set()
+
+    async def _wait_until_ready(
+        self, ready: Callable[[], bool], what: str, service: Any, *,
+        timeout: float = 30.0, poll: float = 0.5, max_poll: float = 10.0,
+    ) -> bool:
+        """Poll ``ready()`` until it holds or the service stops.
+
+        The first ``timeout`` seconds poll every ``poll`` seconds. After
+        that the wait logs one warning and keeps polling quietly, backing
+        off to ``max_poll``. A slow host or WorldService delays wiring; it
+        never cancels it. Returns False only when the service stopped."""
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        warned = False
+        interval = poll
+        while self._still_running(service):
+            try:
+                if ready():
+                    return True
+            except Exception:
+                log.debug("%s readiness check failed", what, exc_info=True)
+            if loop.time() >= deadline:
+                if not warned:
+                    log.warning("%s not ready after %.0fs; still waiting",
+                                what, timeout)
+                    warned = True
+                interval = min(max_poll, interval * 2)
+            await asyncio.sleep(interval)
+        log.debug("%s wait ended: service stopped", what)
+        return False
+
     async def _wire_peer_attribution_when_ready(self, timeout: float = 30.0) -> None:
         """Build the libp2p-PeerId ↔ on-chain-agent attribution table
         once the chain is reachable. No-op if substrate_address is
@@ -1104,19 +1146,12 @@ class AutonetBridge:
             log.debug("peer attribution: substrate_address/rpc_url unset, skipping")
             return
 
-        # Wait briefly for the libp2p host to come up. Attribution can
-        # work without it (we can still read the chain) but storing
-        # it on the host is the natural place for downstream lookups.
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            host_ready = (
-                self._p2p_host is not None
-                and getattr(self._p2p_host, "_ready_event", None) is not None
-                and self._p2p_host._ready_event.is_set()
-            )
-            if host_ready:
-                break
-            await asyncio.sleep(0.5)
+        # Wait for the libp2p host: the attribution table is stored on
+        # it, which is where downstream lookups read it.
+        if not await self._wait_until_ready(
+                self._host_ready, "peer attribution (libp2p host)",
+                self._service, timeout=timeout, poll=0.5):
+            return
 
         def _blocking_build_attribution():
             """Synchronous web3 work — connect, build contract, refresh.
@@ -1154,17 +1189,13 @@ class AutonetBridge:
     async def _wire_chain_submission_when_ready(self, timeout: float = 30.0) -> None:
         """Attach chain submission once the federated-close driver is
         up. No-op if substrate_address is unset (offline mode)."""
-        deadline = asyncio.get_event_loop().time() + timeout
         service = self._service
         if not service:
             return
-        while asyncio.get_event_loop().time() < deadline:
-            ready = getattr(service, "_federated_close_driver", None) is not None
-            if ready:
-                break
-            await asyncio.sleep(0.5)
-        else:
-            log.debug("chain submission wait timed out (federated-close driver not ready)")
+        if not await self._wait_until_ready(
+                lambda: getattr(service, "_federated_close_driver", None) is not None,
+                "chain submission (federated-close driver)", service,
+                timeout=timeout, poll=0.5):
             return
         try:
             blob_resolver = self._build_libp2p_blob_resolver()
@@ -1218,31 +1249,24 @@ class AutonetBridge:
 
     async def _wire_event_gossip_when_ready(self, timeout: float = 30.0) -> None:
         """Poll until the WorldService is up and the libp2p host is
-        ready, then attach event gossip. No-ops on timeout.
+        ready, then attach event gossip. Keeps waiting (with backoff,
+        one warning) until wired or the service stops.
 
         WorldService is constructed inside the nodes-side
         ``AutonetService.start()`` (executor-run); the libp2p host's
         trio token is captured inside its own thread. Both are
         asynchronous relative to this coroutine, so we poll briefly.
         """
-        deadline = asyncio.get_event_loop().time() + timeout
-        host = self._p2p_host
         service = self._service
         if not service:
             return
-        while asyncio.get_event_loop().time() < deadline:
-            ws_ready = getattr(service, "_world_service", None) is not None
-            host_ready = (
-                host is not None
-                and getattr(host, "_ready_event", None) is not None
-                and host._ready_event.is_set()
-            )
-            if ws_ready and host_ready:
-                break
-            await asyncio.sleep(0.2)
-        else:
-            log.debug("event gossip wait timed out (ws or host not ready)")
+        if not await self._wait_until_ready(
+                lambda: (getattr(service, "_world_service", None) is not None
+                         and self._host_ready()),
+                "event gossip (WorldService and libp2p host)", service,
+                timeout=timeout, poll=0.2):
             return
+        host = self._p2p_host
         try:
             ok = service.attach_event_gossip(host)
             if ok:
