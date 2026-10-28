@@ -53,6 +53,16 @@ def make_handler(store: Path, token: str):
                         fh.write(json.dumps({"t": time.time(), "from": self.client_address[0],
                                              "body": body[:4000]}) + "\n")
                 return self._send(200, {"ok": True})
+            if urlparse(self.path).path.startswith("/upload/") and self._authed():
+                # A VM's tool store (tar.gz), so tools outlive the VM.
+                name = urlparse(self.path).path[len("/upload/"):]
+                n = int(self.headers.get("Content-Length") or 0)
+                if not NAME_RE.match(name) or n <= 0 or n > 50 * 1024 * 1024:
+                    return self._send(400, {"error": "bad upload"})
+                up = store / "uploads"
+                up.mkdir(exist_ok=True)
+                (up / name).write_bytes(self.rfile.read(n))
+                return self._send(200, {"ok": True, "bytes": n})
             if urlparse(self.path).path != "/ingest" or not self._authed():
                 return self._send(403, {"error": "forbidden"})
             n = int(self.headers.get("Content-Length") or 0)
