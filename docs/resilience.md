@@ -215,6 +215,55 @@ the new build and a fresh Substrate before the next close, otherwise
 closes and proofs fork. Migration is cheap *because* it is total; the
 network never runs two truths at once.
 
+### 5.1 Splits, reunions and forks (procedures, 2026-10-28)
+
+These are procedures, not code: each one is "deploy a new jurisdiction,
+seed its genesis, point daemons at its Registry", using tools that exist.
+Two genesis inputs carry state across: REP through the deploy's genesis
+member list (`MEMBERS` / `AMOUNTS` in dao's
+`deploy-autonet-jurisdiction.js`), and ATN through Substrate's genesis
+merkle root (`claimGenesis`, `scripts/build_atn_genesis.py`, Decision
+2026-10-28 in `tool_substrate.md`). Both are snapshots of the old chain at a
+named base block, so anyone can re-run the script and check the roots.
+Validated in the GPU tokenomics sim (`experiments/econ_gpu`, E6), except
+the fork, which is argued, not simulated.
+
+**Split** (a network cut leaves some households unable to reach the
+chain or each other). The cut-off side starts its own jurisdiction from
+the last anchor both sides share. Its genesis REP is re-derived from
+**every** household's earnings up to that anchor, not only the households
+on its side: the absent majority's REP still counts in the supply, so
+capturing the small side stays as expensive as capturing the whole
+network, and its sanctions still pass. Re-deriving from the region alone
+let an attacker take a small side with 66-85% of its REP.
+
+**Reunion** (the cut heals). The reunited jurisdiction counts both sides'
+earnings since the split (rule M2): each household's REP is its pre-split
+earnings plus what it earned on whichever side it was on. Keeping only
+the larger side's history (M1) is also safe but throws away the minority's
+honest work.
+
+**Fork that excludes a blocking coalition** (a bribed majority votes
+down a sanction against a detected attack). Votes are on-chain, so the
+coalition is known exactly. Honest households deploy a new jurisdiction
+whose genesis (REP list and ATN root) is the old chain's state at the last
+anchor before the attack, minus every address that voted Against the
+sanction. Each household then chooses which Registry its daemon follows;
+nothing forces anyone, and the old jurisdiction keeps running with the
+attacker. Costs, stated plainly: honest households that voted Against are
+excluded too (a readmission vote in the new jurisdiction can bring them
+back), and only the voting address is excluded, so delegators of an
+Against-voting delegate keep their balances and can follow the fork. This
+is the last defence above roughly half of REP; below about a third,
+ordinary sanctions win the race (sim E5).
+
+**Sanctions that burn the farmed REP.** A sanction proposal withholds the
+sanctioned households' mint (the close excludes their usage) and should
+also burn the REP they farmed: RepToken's `burn(from, amount)` is callable
+by its admin, the timelock, so the proposal adds that call. No contract
+change. In the sim, attackers kept 8-29% of REP after a mint-only
+sanction and 0.8-5% with the burn.
+
 ## 6. The equilibrium, in one paragraph
 
 Money is demand-backed (mint == burned fees), voice is work-backed (REP
@@ -226,5 +275,5 @@ reputation, canonical code), and the one resource that is free to forge
 (identities) is collapsed to households and carries zero weight until it
 earns some. What can't be prevented is priced, what can't be priced is
 kept off the trust substrate, and if the settlement layer itself turns
-hostile, the network halts, votes, and walks, carrying its state with
-it, forward-only.
+hostile, settlement pauses while households keep working, then the
+network votes and walks, carrying its state with it, forward-only.
