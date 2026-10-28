@@ -258,6 +258,7 @@ async def request_service(
     payer_key: str = "",
     p2p_host: Any = None,
     peer_id: str = "",
+    voucher: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Cross-daemon ``service_request``: send it to the provider, read the reply.
 
@@ -274,8 +275,15 @@ async def request_service(
          (a paid request would be refused as a replay anyway), so a
          provider error or a reply timeout is final.
 
-    Returns ``{ok, result, error, endpoint, transport}``; ``{"error": ...}``
-    on a setup failure. ``endpoint`` may be passed in to skip the chain
+    ``voucher`` (``{channel_id, cumulative_amount, signature}``) pays
+    through a payment channel instead of ``tx_hash``; the request is then
+    signed by ``payer_key`` under ``request_id`` all the same.
+
+    Returns ``{ok, result, error, endpoint, transport, delivered}``;
+    ``{"error": ..., "delivered": False}`` when the request never left this
+    daemon or reached no path to the provider. ``delivered`` is True once
+    the provider may have received it (a reply, a provider error, or a
+    timeout after sending). ``endpoint`` may be passed in to skip the chain
     read (the provider caches it).
     """
     from .on_chain import OnChainService
@@ -297,12 +305,18 @@ async def request_service(
         "client": client_address,
         "client_address": client_address,
     }
-    if tx_hash:
-        # Payment proof (direct payForService path), signed by the payer.
+    if voucher:
+        # Payment proof (channel path): the voucher for this request.
+        frame["channel_id"] = int(voucher["channel_id"])
+        frame["cumulative_amount"] = int(voucher["cumulative_amount"])
+        frame["signature"] = str(voucher["signature"])
+    elif tx_hash:
+        # Payment proof (direct payForService path).
         frame["tx_hash"] = tx_hash
-        if payer_key and request_id:
-            frame["payer_signature"] = sign_request(
-                payer_key, request_id, spec_digest, args, provider_address)
+    if (voucher or tx_hash) and payer_key and request_id:
+        # Signed by the payer, so only it can redeem the payment.
+        frame["payer_signature"] = sign_request(
+            payer_key, request_id, spec_digest, args, provider_address)
 
     def _reply(reply: dict[str, Any], via: str, where: str) -> dict[str, Any]:
         return {
@@ -311,6 +325,7 @@ async def request_service(
             "error": reply.get("error"),
             "endpoint": where if via == "wss" else endpoint,
             "transport": via,
+            "delivered": True,
         }
 
     # --- 1. libp2p ---------------------------------------------------------
@@ -328,7 +343,8 @@ async def request_service(
             except TimeoutError as exc:
                 return {"error": f"Provider did not reply within "
                                  f"{int(timeout)}s over libp2p ({exc}).",
-                        "endpoint": endpoint, "transport": "libp2p"}
+                        "endpoint": endpoint, "transport": "libp2p",
+                        "delivered": True}
             except ConnectionError as exc:
                 p2p_error = str(exc)
             except Exception as exc:  # noqa: BLE001 (treated as undelivered)
@@ -355,9 +371,11 @@ async def request_service(
     except ImportError:
         return {"error": "websockets library not installed on this daemon."}
 
+    sent = False
     try:
         async with websockets.connect(endpoint, open_timeout=10) as ws:
             await ws.send(json.dumps(frame))
+            sent = True
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
@@ -370,11 +388,11 @@ async def request_service(
                 if reply.get("msg_id") == msg_id:
                     return _reply(reply, "wss", endpoint)
             return {"error": f"Provider did not reply within {int(timeout)}s.",
-                    "endpoint": endpoint, "transport": "wss"}
+                    "endpoint": endpoint, "transport": "wss", "delivered": True}
     except Exception as exc:  # noqa: BLE001 — network failure is a normal outcome
         return {"error": f"Service request failed: {exc}"
                          + (f" (libp2p: {p2p_error})" if p2p_error else ""),
-                "endpoint": endpoint, "transport": "wss"}
+                "endpoint": endpoint, "transport": "wss", "delivered": sent}
 
 
 async def lookup_service_ask(

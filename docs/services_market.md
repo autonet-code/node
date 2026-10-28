@@ -4,8 +4,11 @@ Status: BUILT, beta on testnet, with two pieces still only specified.
 BUILT: the on-chain registry (register / update ask / retire), direct
 `payForService` settlement, the provider-side payment gate, and the
 `service` consumer provider type. SPECIFIED, NOT BUILT: receipt-gated
-reviews (§4) and the voucher-per-call client flow (channels are on
-chain and the gate accepts vouchers, but no client drives them).
+reviews (§4). The voucher-per-call client flow is BUILT for agents'
+`request_service` (2026-10-28, #45: `atn/service_channels.py`, one channel
+per payer and provider, a voucher committed only once the request may have
+reached the provider, refunds swept after the window); the `service`
+inference provider still pays each call up front.
 `ServiceRegistry` + `PaymentChannel`
 (`contracts/core/ServiceMarket.sol`) are deployed on the Autonet
 jurisdiction (Etherlink Shadownet; addresses in `registry.json` under

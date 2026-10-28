@@ -307,7 +307,8 @@ INTEGRATION_DENIED_MESSAGES = frozenset({
     "autonet_set_chain", "autonet_start", "autonet_stop",
     "register_agent_on_chain", "confirm_agent_registration",
     "check_agent_registration", "register_on_chain", "rpb_reconcile_registrations",
-    "pay_for_service", "request_service", "invoke_service", "register_service",
+    "pay_for_service", "request_service", "close_service_channel",
+    "invoke_service", "register_service",
     "retire_service", "service_request",
     # Budgets + sponsor inference.
     "set_budget", "get_budget", "update_sponsor_budget", "create_sponsor_agent",
@@ -5649,6 +5650,24 @@ class WebSocketBridge:
                     lambda: smc.verify_voucher(cid, cum, signature))
                 if not res.get("valid"):
                     return {"ok": False, "reason": res.get("reason", "invalid voucher")}
+                # The voucher pays for these args only: the channel's client
+                # signs the request (as on the direct path), so a relay that
+                # sees the voucher cannot spend it on a request of its own.
+                from .service_client import recover_request_signer
+                sig = str(request.get("payer_signature") or "").strip()
+                try:
+                    payer = recover_request_signer(
+                        sig, request_id,
+                        str(request.get("spec_digest") or record.digest),
+                        request.get("args") if isinstance(request.get("args"), dict)
+                        else {}, recipient) if sig and request_id else ""
+                except Exception:
+                    payer = ""
+                if not payer or payer.lower() != str(res.get("client") or "").lower():
+                    return {"ok": False,
+                            "reason": "a voucher request must be signed by the "
+                                      "channel's client (payer_signature over "
+                                      "request_id and args)"}
                 # The channel's provider must be the serving agent.
                 if recipient and str(res.get("provider", "")).lower() != recipient.lower():
                     return {"ok": False,

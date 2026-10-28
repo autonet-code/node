@@ -82,7 +82,8 @@ def _patch_chain(monkeypatch, *, verify=None, voucher=None):
         return verify
 
     async def _verify_voucher(self, channel_id, cumulative_amount, signature):
-        return voucher
+        # The channel's client is the test payer unless a test says otherwise.
+        return {"client": _payer(), **voucher} if isinstance(voucher, dict) else voucher
 
     monkeypatch.setattr(oc.OnChainService, "verify_service_payment", _verify)
     monkeypatch.setattr(oc.ServiceMarketClient, "verify_voucher",
@@ -106,6 +107,12 @@ def _signed(req: dict, record, key: str = PAYER_KEY) -> dict:
     except ValueError:
         return dict(req)   # a malformed id the gate refuses before any signature
     return {**req, "payer_signature": sig}
+
+def _vsigned(req: dict, record, key: str = PAYER_KEY) -> dict:
+    """A voucher request signed by the channel's client, as a buyer sends it."""
+    rid = "0x" + "ab" * 32
+    return _signed({**req, "request_id": rid}, record, key)
+
 
 
 # ---------------------------------------------------------------------------
@@ -202,17 +209,35 @@ class TestVoucherPath:
         record = _register_service(rt)
         _patch_chain(monkeypatch, voucher={
             "valid": True, "reason": "ok",
-            "provider": PROVIDER_ADDR, "client": CLIENT_ADDR, "status": 1})
+            "provider": PROVIDER_ADDR, "client": _payer(), "status": 1})
         server = WebSocketBridge(rt)
 
         out = await server._validate_service_payment(
-            {"channel_id": 7, "cumulative_amount": ASK_AMOUNT,
-             "signature": "0xsig"}, record)
+            _vsigned({"channel_id": 7, "cumulative_amount": ASK_AMOUNT,
+             "signature": "0xsig"}, record), record)
         assert out["ok"] is True, out
         # Latest cumulative recorded + voucher stored for later settlement.
         assert rt.service_store.last_channel_cumulative(7) == ASK_AMOUNT
         stored = rt.service_store.get_channel_voucher(7)
         assert stored and stored["signature"] == "0xsig"
+
+    @pytest.mark.asyncio
+    async def test_voucher_request_must_be_signed_by_the_channel_client(
+            self, tmp_path, monkeypatch):
+        # A relay that saw a voucher cannot spend it on its own request.
+        rt = _make_runtime(tmp_path, chain=True)
+        record = _register_service(rt)
+        _patch_chain(monkeypatch, voucher={
+            "valid": True, "reason": "ok",
+            "provider": PROVIDER_ADDR, "client": _payer(), "status": 1})
+        server = WebSocketBridge(rt)
+        bare = {"channel_id": 7, "cumulative_amount": ASK_AMOUNT, "signature": "0xsig"}
+        out = await server._validate_service_payment(bare, record)
+        assert out["ok"] is False and "signed by the channel" in out["reason"]
+        other = _vsigned(bare, record, key="0x" + "22" * 32)
+        out = await server._validate_service_payment(other, record)
+        assert out["ok"] is False
+        assert rt.service_store.last_channel_cumulative(7) == 0
 
     @pytest.mark.asyncio
     async def test_accept_second_increment(self, tmp_path, monkeypatch):
@@ -223,13 +248,13 @@ class TestVoucherPath:
         server = WebSocketBridge(rt)
 
         first = await server._validate_service_payment(
-            {"channel_id": 9, "cumulative_amount": ASK_AMOUNT,
-             "signature": "0xsig1"}, record)
+            _vsigned({"channel_id": 9, "cumulative_amount": ASK_AMOUNT,
+             "signature": "0xsig1"}, record), record)
         assert first["ok"] is True
         # Next voucher must add at least another ask on top of the last.
         second = await server._validate_service_payment(
-            {"channel_id": 9, "cumulative_amount": ASK_AMOUNT * 2,
-             "signature": "0xsig2"}, record)
+            _vsigned({"channel_id": 9, "cumulative_amount": ASK_AMOUNT * 2,
+             "signature": "0xsig2"}, record), record)
         assert second["ok"] is True
         assert rt.service_store.last_channel_cumulative(9) == ASK_AMOUNT * 2
 
@@ -242,8 +267,8 @@ class TestVoucherPath:
         server = WebSocketBridge(rt)
 
         out = await server._validate_service_payment(
-            {"channel_id": 1, "cumulative_amount": ASK_AMOUNT,
-             "signature": "0xbad"}, record)
+            _vsigned({"channel_id": 1, "cumulative_amount": ASK_AMOUNT,
+             "signature": "0xbad"}, record), record)
         assert out["ok"] is False
         assert "signer" in out["reason"] or "client" in out["reason"]
 
@@ -257,14 +282,14 @@ class TestVoucherPath:
 
         # First voucher: fine (increment == ask).
         first = await server._validate_service_payment(
-            {"channel_id": 3, "cumulative_amount": ASK_AMOUNT,
-             "signature": "0xs1"}, record)
+            _vsigned({"channel_id": 3, "cumulative_amount": ASK_AMOUNT,
+             "signature": "0xs1"}, record), record)
         assert first["ok"] is True
         # Second voucher: increment only 1, below the ask -> rejected, and the
         # stored cumulative does NOT regress or advance.
         second = await server._validate_service_payment(
-            {"channel_id": 3, "cumulative_amount": ASK_AMOUNT + 1,
-             "signature": "0xs2"}, record)
+            _vsigned({"channel_id": 3, "cumulative_amount": ASK_AMOUNT + 1,
+             "signature": "0xs2"}, record), record)
         assert second["ok"] is False
         assert "increment" in second["reason"]
         assert rt.service_store.last_channel_cumulative(3) == ASK_AMOUNT
@@ -278,8 +303,8 @@ class TestVoucherPath:
         server = WebSocketBridge(rt)
 
         out = await server._validate_service_payment(
-            {"channel_id": 2, "cumulative_amount": ASK_AMOUNT,
-             "signature": "0xsig"}, record)
+            _vsigned({"channel_id": 2, "cumulative_amount": ASK_AMOUNT,
+             "signature": "0xsig"}, record), record)
         assert out["ok"] is False
         assert "not Open" in out["reason"]
 
@@ -293,8 +318,8 @@ class TestVoucherPath:
         server = WebSocketBridge(rt)
 
         out = await server._validate_service_payment(
-            {"channel_id": 4, "cumulative_amount": ASK_AMOUNT,
-             "signature": "0xsig"}, record)
+            _vsigned({"channel_id": 4, "cumulative_amount": ASK_AMOUNT,
+             "signature": "0xsig"}, record), record)
         assert out["ok"] is False
         assert "provider" in out["reason"]
 
@@ -452,8 +477,8 @@ class TestSurveyHoles:
             "deposit": "1", "exceeds_deposit": True})
         server = WebSocketBridge(rt)
         out = await server._validate_service_payment(
-            {"channel_id": 3, "cumulative_amount": ASK_AMOUNT * 50,
-             "signature": "0xsig"}, record)
+            _vsigned({"channel_id": 3, "cumulative_amount": ASK_AMOUNT * 50,
+             "signature": "0xsig"}, record), record)
         assert out["ok"] is False and "deposit" in out["reason"]
         assert rt.service_store.last_channel_cumulative(3) == 0
 

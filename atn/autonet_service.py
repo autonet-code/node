@@ -1368,6 +1368,9 @@ class AutonetBridge:
                     # the trio host — keep it off the asyncio loop.
                     return await asyncio.to_thread(_r.get, digest)
                 tool_store.blob_fetcher = _fetch
+                service_store = getattr(self._runtime, "service_store", None)
+                if service_store is not None:
+                    service_store.blob_fetcher = _fetch
 
             # A new peer may hold code an approved adoption is waiting for
             # (#46): the retry loop watches the connected set.

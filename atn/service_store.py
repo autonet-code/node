@@ -132,6 +132,9 @@ class ServiceStore:
         self._request_seq = 0
         self._seen_requests: set[str] = set()
         self._channel_vouchers: dict[str, dict[str, Any]] = {}
+        # async digest -> bytes | None over the libp2p blob protocol, set by
+        # the autonet wiring: specs of other daemons' services (#45).
+        self.blob_fetcher: Any = None
         self._load()
         self._load_payment_state()
         self._request_seq = self._count_requests()
@@ -541,6 +544,37 @@ class ServiceStore:
             spec["author_sig"] = signed.signature.hex()
         except Exception as exc:  # optional-dep path; never block registration
             log.debug("service spec signing skipped for %s: %s", author, exc)
+
+    async def spec_for(self, digest: str, timeout: float = 10.0) -> dict[str, Any] | None:
+        """A service's spec by digest: ours, one fetched before, or one
+        fetched now from the network (digest-verified, then kept). None
+        when nobody online holds it."""
+        import asyncio
+        import hashlib
+
+        d = str(digest or "").lower().removeprefix("0x")
+        rec = self.get(d)
+        if rec is not None:
+            return rec.spec
+        try:
+            blobs = self._blob_store()
+        except RuntimeError:
+            return None
+        raw = blobs.get_bytes_local(d)
+        if raw is None and self.blob_fetcher is not None:
+            try:
+                raw = await asyncio.wait_for(self.blob_fetcher(d), timeout)
+            except Exception:  # noqa: BLE001 — unknown is a normal answer
+                raw = None
+            if raw is not None and hashlib.sha256(raw).hexdigest() == d:
+                blobs.add_bytes(raw)
+            else:
+                raw = None
+        try:
+            spec = json.loads(raw) if raw else None
+        except ValueError:
+            return None
+        return spec if isinstance(spec, dict) else None
 
     def _blob_store(self) -> Any:
         if self._blobs is None:

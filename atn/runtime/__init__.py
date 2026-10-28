@@ -458,6 +458,9 @@ class Runtime:
         # is a local tool the OWNER chose to sell; dispatch rides tool_store.
         from ..service_store import ServiceStore
         self.service_store = ServiceStore(self, self._config.data_dir / "services")
+        # The buyer's payment channels, one per (payer agent, provider) (#45).
+        from ..service_channels import book_at
+        self.channel_book = book_at(self._config.data_dir / "service_channels.json")
 
         # Tool registry
         from ..tool_registry import ToolRegistry
@@ -688,7 +691,10 @@ class Runtime:
                     interval = 300.0
                     continue
                 store = getattr(self, "service_store", None)
-                if store is None or not store.channel_vouchers():
+                book = getattr(self, "channel_book", None)
+                selling = store is not None and bool(store.channel_vouchers())
+                refunding = book is not None and bool(book.closing())
+                if not selling and not refunding:
                     interval = 300.0
                     continue
                 try:
@@ -698,7 +704,12 @@ class Runtime:
                     interval = max(30.0, min(300.0, window / 4.0))
                 except Exception:   # noqa: BLE001
                     interval = 60.0
-                await settle_closing_channels(store, smc, self._channel_key_for)
+                if selling:
+                    await settle_closing_channels(store, smc, self._channel_key_for)
+                if refunding:
+                    # As a buyer: take back what closed channels did not pay.
+                    from ..service_channels import sweep_refunds
+                    await sweep_refunds(book, smc, self._channel_key_for)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 — never let the sweep die

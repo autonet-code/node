@@ -1328,8 +1328,10 @@ _TOOLS: list[ToolDefinition] = [
             "services most-recent first: service_id, provider address, ask "
             "(ATN price per work item), spec digest, and whether it's active. "
             "Pass 'query' to filter by a substring against locally-known service "
-            "names/descriptions. To invoke one: pay_for_service to the provider, "
-            "then request_service with the payment proof. Read-only."
+            "names/descriptions. Each row carries the service's spec (name, "
+            "description, input_schema), fetched from the network when this "
+            "daemon doesn't hold it. To invoke one: request_service (it pays "
+            "through a payment channel). Read-only."
         ),
         input_schema={
             "type": "object",
@@ -1412,7 +1414,10 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="pay_for_service",
         description=(
-            "Pay a service provider in ATN before invoking their service. This "
+            "Pay a service provider in ATN up front, outside a channel. Prefer "
+            "request_service without a payment proof: it pays per request through "
+            "a payment channel, so a request that is never served is never paid. "
+            "This "
             "signs a Substrate.payForService transfer from YOUR agent key to the "
             "provider (taking the network service fee) and returns {tx_hash, "
             "request_id}. Hand BOTH the tx_hash and request_id to the provider "
@@ -1441,9 +1446,12 @@ _TOOLS: list[ToolDefinition] = [
             "Invoke a service on the provider's daemon (cross-daemon call). "
             "Reaches the provider over libp2p by the peer id in the on-chain "
             "agent registry (directly or through a relay, so providers behind "
-            "NAT work), else at its on-chain WS endpoint, and sends the "
-            "request with your payment proof "
-            "(the tx_hash + request_id from pay_for_service). Pass the "
+            "NAT work), else at its on-chain WS endpoint. Payment: by default a "
+            "payment channel to the provider (opened on first use, escrowing "
+            "'deposit', default 10 requests' worth; the unspent part comes back "
+            "on close_service_channel) and a signed voucher per request, spent "
+            "only if the request reached the provider. Or pass a direct proof "
+            "(tx_hash + request_id from pay_for_service). Pass the "
             "'service_id''s spec_digest as 'service_id' is looked up on chain, "
             "and the request 'payload' (matching the service's input schema). "
             "Returns the provider's result, or a clear error if the provider "
@@ -1459,10 +1467,26 @@ _TOOLS: list[ToolDefinition] = [
                     "description": "The request arguments (per the service input schema).",
                     "additionalProperties": True,
                 },
-                "tx_hash": {"type": "string", "description": "The payForService tx hash from pay_for_service."},
-                "request_id": {"type": "string", "description": "The request_id from pay_for_service (bytes32 hex)."},
+                "tx_hash": {"type": "string", "description": "Optional: a direct payment's tx hash from pay_for_service."},
+                "request_id": {"type": "string", "description": "Optional: that payment's request_id (bytes32 hex)."},
+                "deposit": {"type": "integer", "description": "Optional: ATN base units to escrow when a new channel to this provider is opened (default 10x the ask)."},
             },
-            "required": ["provider_address", "service_id", "payload", "tx_hash", "request_id"],
+            "required": ["provider_address", "service_id", "payload"],
+        },
+    ),
+    ToolDefinition(
+        name="close_service_channel",
+        description=(
+            "Close your payment channel to a service provider. The provider "
+            "has one challenge window to collect what your vouchers cover; "
+            "the rest of the deposit returns to you automatically after it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "provider_address": {"type": "string", "description": "The provider's agent address (0x...)."},
+            },
+            "required": ["provider_address"],
         },
     ),
 ]
@@ -3410,16 +3434,18 @@ async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     services = list(reversed(services))
 
     store = getattr(runtime, "service_store", None)
+    services = [s for s in services if s.get("active")][:max(limit * 4, 100)]
+    # The spec says what a service is and what to send it: ours, or fetched
+    # (concurrently) from whoever holds it: the provider, a buyer, a relay.
+    specs = await asyncio.gather(*(
+        store.spec_for(str(s.get("spec_digest") or "")) for s in services
+    )) if store is not None else [None] * len(services)
     rows: list[dict[str, Any]] = []
-    for s in services:
+    for s, spec in zip(services, specs):
         digest = str(s.get("spec_digest") or "")
-        name = ""
-        description = ""
-        # Enrich with locally-known metadata + drive the substring filter.
-        rec = store.get(digest) if store is not None else None
-        if rec is not None:
-            name = rec.name
-            description = str(rec.spec.get("description") or "")
+        spec = spec or {}
+        name = str(spec.get("name") or "")
+        description = str(spec.get("description") or "")
         if query:
             hay = f"{name} {description} {digest} {s.get('provider','')}".lower()
             if query not in hay:
@@ -3432,6 +3458,9 @@ async def _find_services(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
             "active": s.get("active"),
             "name": name,
             "description": description,
+            "input_schema": spec.get("input_schema"),
+            "output_schema": spec.get("output_schema"),
+            "spec_available": bool(spec),
         })
         if len(rows) >= limit:
             break
@@ -3587,9 +3616,10 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
         return {"error": "Missing required field: 'service_id'"}
     if not isinstance(payload, dict):
         return {"error": "'payload' must be an object"}
-    if not tx_hash or not request_id:
-        return {"error": "Missing payment proof: both 'tx_hash' and "
-                         "'request_id' are required (from pay_for_service)."}
+    if bool(tx_hash) != bool(request_id):
+        return {"error": "A direct payment needs both 'tx_hash' and "
+                         "'request_id' (from pay_for_service); omit both to "
+                         "pay through a payment channel."}
     blocked = await _sanctioned(runtime, provider_address, "buy services from")
     if blocked:
         return blocked
@@ -3598,22 +3628,81 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     defn = runtime.get_agent(caller_id) if caller_id else None
     client_addr = (defn.identity.address
                    if defn and defn.identity else "")
-    # The payment came from this agent's key (pay_for_service): sign the
-    # request with it so the provider can tell the payer from a copier.
+    # The payer's key signs the request so the provider can tell the payer
+    # from a copier (and, on the channel path, signs the voucher).
     payer_key = ""
     if caller_id and not is_owner_caller(caller_id):
         payer_key = runtime.registry.get_agent_key(caller_id) or ""
 
-    return await service_client.request_service(
-        runtime._config.rpb,
-        provider_address,
-        service_id,
-        payload,
-        tx_hash=tx_hash,
-        request_id=request_id,
-        client_address=client_addr,
-        payer_key=payer_key,
-    )
+    if tx_hash:
+        return await service_client.request_service(
+            runtime._config.rpb, provider_address, service_id, payload,
+            tx_hash=tx_hash, request_id=request_id,
+            client_address=client_addr, payer_key=payer_key)
+
+    # Channel path (docs/services_market.md: settlement is the prepaid
+    # channel; #45): a voucher for this one request, committed only if the
+    # request may have reached the provider. A provider that never gets it
+    # can never collect it.
+    from .on_chain import ServiceMarketClient
+    from .service_channels import voucher_for
+
+    ask = await service_client.lookup_service_ask(
+        runtime._config.rpb, provider_address, service_id)
+    if ask.get("error"):
+        return ask
+    if not ask.get("active"):
+        return {"error": "that service is retired"}
+    amount = int(ask.get("ask_amount") or 0)
+    voucher = None
+    book = getattr(runtime, "channel_book", None)
+    if amount > 0:
+        if not payer_key or not client_addr:
+            return {"error": "paying for a service needs an agent with its own "
+                             "key (call as an agent, not the owner)"}
+        smc = ServiceMarketClient(runtime._config.rpb)
+        if not smc.channel_available or book is None:
+            return {"error": "PaymentChannel not configured on this daemon"}
+        try:
+            deposit = int(input.get("deposit") or 0)
+        except (TypeError, ValueError):
+            return {"error": "deposit must be an integer (ATN base units)"}
+        voucher = await voucher_for(book, smc, payer_key, client_addr,
+                                    provider_address, amount, deposit)
+        if voucher.get("error"):
+            return voucher
+    reply = await service_client.request_service(
+        runtime._config.rpb, provider_address, service_id, payload,
+        request_id=service_client.new_request_id(),
+        client_address=client_addr, payer_key=payer_key, voucher=voucher)
+    if voucher is not None and reply.get("delivered"):
+        book.commit(client_addr, provider_address,
+                    voucher["channel_id"], voucher["cumulative_amount"])
+    if voucher is not None:
+        reply["paid"] = amount if reply.get("delivered") else 0
+        reply["channel_id"] = voucher["channel_id"]
+    return reply
+
+
+async def _close_service_channel(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """Start closing this agent's payment channel to a provider; the unspent
+    deposit is withdrawn automatically once the challenge window passes."""
+    from .on_chain import ServiceMarketClient
+    from .service_channels import close_channel
+
+    caller_id = input.get("_caller_id")
+    resolved = _caller_identity(runtime, caller_id)
+    if isinstance(resolved, dict):
+        return resolved
+    _defn, identity, key = resolved
+    provider = str(input.get("provider_address") or "").strip()
+    if not provider:
+        return {"error": "Missing required field: 'provider_address'"}
+    book = getattr(runtime, "channel_book", None)
+    smc = ServiceMarketClient(runtime._config.rpb)
+    if book is None or not smc.channel_available:
+        return {"error": "PaymentChannel not configured on this daemon"}
+    return await close_channel(book, smc, key, identity.address, provider)
 
 
 # ---------------------------------------------------------------------------
@@ -4305,7 +4394,7 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # the consumer half (sign a payForService transfer, then cross-daemon
     # invoke with the proof). Kept off the progressive surface.
     "services": {"find_services", "register_service",
-                 "pay_for_service", "request_service"},
+                 "pay_for_service", "request_service", "close_service_channel"},
     # User-memory bundle: read + write the dossier (USER.md). One grant —
     # an agent trusted to know the user is trusted to keep the record
     # current. Assignable to ANY agent; nothing about it is Kevin-specific.
@@ -5392,6 +5481,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "register_service": _register_service,
     "pay_for_service": _pay_for_service,
     "request_service": _request_service,
+    "close_service_channel": _close_service_channel,
     # Manual compaction (§15)
     "compact_agent": _compact_agent,
     # Conversation management (UI-facing, not in the agent tool list)

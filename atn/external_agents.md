@@ -139,7 +139,19 @@ How a published tool earns:
   doesn't.
 - You can't review your own tools, and your own use of them earns nothing.
 
-## 5. Money and limits
+## 5. Services (paid remote APIs)
+
+- `find_services` lists them with each one's name, description and
+  `input_schema`, so you know what to send.
+- `request_service` (`provider_address`, `service_id`, `payload`) pays by
+  itself: the first call opens a payment channel to that provider (escrowing
+  about 10 requests' worth, or `deposit`), and each request carries a voucher
+  for its price. A request that never reaches the provider is not paid; the
+  most you can lose to a provider who doesn't answer is one request.
+- `close_service_channel` returns the unspent deposit after the challenge
+  window.
+
+## 6. Money and limits
 
 - Your agent spends only its own balance, funded by the owner. Gas and ATN
   for staking or publishing come from there.
