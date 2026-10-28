@@ -211,6 +211,11 @@ def deploy_test_usdc(w3, deployer) -> str:
     return receipt.contractAddress
 
 
+def seed_addr(peer: str) -> str:
+    """The relay's seed as the Registry records it (S1 overrides this)."""
+    return f"/dns4/localhost/tcp/{RELAY_PORT}/ws/p2p/{peer}"
+
+
 def deploy_jurisdiction(run: Path, usdc: str, owners: List[str], bootstrap: str) -> Dict[str, Any]:
     out = run / "jurisdiction.json"
     env = base_env()
@@ -293,6 +298,15 @@ class Household:
         # Not ATN_DISABLE_PROVIDER_AUTODETECT: that test gate also stops the
         # review driver, so no review would ever reach ToolBond.
         return env
+
+    def client_url(self) -> str:
+        return f"ws://127.0.0.1:{self.ws_port}"
+
+    def log_tail(self) -> str:
+        return tail(self.home / "daemon.log")
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
 
     def start(self, procs: Procs, registry: str) -> None:
         self.write_config()
@@ -641,7 +655,7 @@ async def collector(run: Path, households: List[Household], j: Dict[str, Any], w
     # Its own connections, so a slow tool call never delays a poll.
     clients = {}
     for h in households:
-        c = DaemonClient(f"ws://127.0.0.1:{h.ws_port}", f"{h.name}-col")
+        c = DaemonClient(h.client_url(), f"{h.name}-col")
         await c.connect()
         clients[h.name] = c
     epochs = open(run / "epochs.jsonl", "a", encoding="utf-8")
@@ -678,7 +692,7 @@ async def collector(run: Path, households: List[Household], j: Dict[str, Any], w
                     "agent_atn": int(sub.functions.balanceOf(agent).call()) if agent else 0,
                     "operator_gas": (int(w3.eth.get_balance(w3.to_checksum_address(h.operator)))
                                      if h.operator else 0),
-                    "daemon_alive": h.proc.poll() is None if h.proc else False,
+                    "daemon_alive": h.alive(),
                     "status": res}, default=str) + "\n")
             status.flush()
         except Exception as exc:  # noqa: BLE001
@@ -780,7 +794,7 @@ async def amain() -> int:
                                       if "relay address: " in ln), None), 90, "relay address")
         procs.stop("relay-probe")
         peer = addr.rsplit("/p2p/", 1)[1]
-        bootstrap = f"/dns4/localhost/tcp/{RELAY_PORT}/ws/p2p/{peer}"
+        bootstrap = seed_addr(peer)
         log(f"relay peer {peer}; seed {bootstrap}")
 
         # 3. The jurisdiction.
@@ -796,11 +810,11 @@ async def amain() -> int:
             h.start(procs, j["dao"]["registry"])
             households.append(h)
         for h in households:
-            h.client = DaemonClient(f"ws://127.0.0.1:{h.ws_port}", h.name)
+            h.client = DaemonClient(h.client_url(), h.name)
             try:
                 await h.client.connect()
             except Exception:
-                log(f"{h.name} boot failed:\n{tail(h.home / 'daemon.log')}")
+                log(f"{h.name} boot failed:\n{h.log_tail()}")
                 raise
             log(f"{h.name} up on :{h.ws_port}")
 
@@ -809,7 +823,7 @@ async def amain() -> int:
             try:
                 await onboard(h, j, w3, usdc)
             except Exception:
-                log(f"{h.name} onboarding failed:\n{tail(h.home / 'daemon.log')}")
+                log(f"{h.name} onboarding failed:\n{h.log_tail()}")
                 raise
 
         log("all households onboarded")
