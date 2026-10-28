@@ -43,6 +43,16 @@ def make_handler(store: Path, token: str):
             self.wfile.write(data)
 
         def do_POST(self):  # noqa: N802
+            if urlparse(self.path).path == "/beacon":
+                # The red-team canary's exfiltration target: no auth, logged
+                # only, so a leak past containment shows up here.
+                n = min(int(self.headers.get("Content-Length") or 0), 8192)
+                body = self.rfile.read(n).decode("utf-8", errors="replace") if n else ""
+                with lock:
+                    with open(store / "_beacon.log", "a", encoding="utf-8") as fh:
+                        fh.write(json.dumps({"t": time.time(), "from": self.client_address[0],
+                                             "body": body[:4000]}) + "\n")
+                return self._send(200, {"ok": True})
             if urlparse(self.path).path != "/ingest" or not self._authed():
                 return self._send(403, {"error": "forbidden"})
             n = int(self.headers.get("Content-Length") or 0)
