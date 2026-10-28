@@ -109,6 +109,16 @@ async def main() -> int:
             subprocess.run(["scp", "-i", SSH_KEY, "-q", "-o", "BatchMode=yes",
                             f"{HOST}:/home/ubuntu/autonet-wan/obs/uploads/*", str(lib / "uploads")],
                            capture_output=True)
+            # Everything that ever crossed the relay (it keeps relayed blobs),
+            # so a tool whose author's VM was recycled is still kept.
+            rb = lib / "relay_blobs"
+            rb.mkdir(exist_ok=True)
+            subprocess.run(["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", HOST,
+                            "sudo tar czf /tmp/relay_blobs.tgz -C /home/ubuntu/autonet-wan/relay blobs"
+                            " && sudo chown ubuntu /tmp/relay_blobs.tgz"], capture_output=True)
+            subprocess.run(["scp", "-i", SSH_KEY, "-q", "-o", "BatchMode=yes",
+                            f"{HOST}:/tmp/relay_blobs.tgz", str(rb / "relay_blobs.tgz")], capture_output=True)
+            subprocess.run(["tar", "xzf", str(rb / "relay_blobs.tgz"), "-C", str(rb)], capture_output=True)
             print(f"[{time.strftime('%H:%M:%S')}] library: {len(done)} tools, "
                   f"{len(list((lib / 'uploads').iterdir()))} uploads", flush=True)
         except Exception as exc:  # noqa: BLE001
