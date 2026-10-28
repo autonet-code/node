@@ -45,13 +45,22 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   before. The bar rises with the network.
 - **Excluded**: denied tools, and usage by sanctioned households.
 - **Reviewer share**: paid by review accuracy (leave-one-out against the
-  consensus), not by stake. Stake is only the bet.
+  consensus), not by stake. The ATN stake is only the bet: each review loses
+  stake x (1 - accuracy) to the round's pool, paid out by stake x accuracy;
+  an unrevealed batch loses its whole stake to the treasury. REP moves the
+  same way (see Voice).
 
 ## Voice (REP)
 
 - Soulbound. Claimed through `AutonetRepClaim`, 1:1 on cumulative
   **tool-pool** earnings (`agentMintTotal`). Service revenue earns no REP.
 - Weighs reviews (by the reviewer's household REP), votes, elections.
+- **Moves on reviews** (ToolBond): each review risks `degradeBps` (10%) of the
+  household REP it weighed, losing that x (1 - accuracy), reassigned to the
+  round's reviews by REP x accuracy; none is created. An unrevealed batch
+  loses the full amount per review. A tool settled harmful costs its author's
+  household H x `authorSlashBps` (100%) of its REP. So REP is earned only from
+  the tool pool, but can be won or lost by reviewing.
 
 ## Tools
 

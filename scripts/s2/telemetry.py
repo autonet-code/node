@@ -111,8 +111,16 @@ async def main() -> int:
                 "epoch": await ask(url, "epoch_status"),
                 "epochs": await ask(url, "epoch_history"),
                 "status": {k: status.get(k) for k in STATUS_KEYS} if isinstance(status, dict) else status,
-                "log": tail.new_lines(),
+                "log": tail.new_lines()[-200:],
             }
+            # The hub caps a report at 256 KiB; a long-lived daemon's
+            # history outgrows it, so send only the recent end.
+            if isinstance(report["epochs"], dict):
+                for k, v in report["epochs"].items():
+                    if isinstance(v, list):
+                        report["epochs"][k] = [
+                            {f: x for f, x in e.items() if len(json.dumps(x, default=str)) < 2000}
+                            if isinstance(e, dict) else e for e in v[-20:]]
             print(name, post(a.obs, token, report), flush=True)
         await asyncio.sleep(a.interval)
 
