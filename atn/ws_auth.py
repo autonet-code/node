@@ -192,23 +192,29 @@ def local_peer_denied(remote_address, local_address) -> str | None:
     local (host, port) tuples. A bare int ``local_address`` is read as the
     port on 127.0.0.1 (older callers).
 
-    The local listener pre-auths every connection as the OWNER, so a guest
-    tool process (atn/guest_sandbox.py) must never be served there. Checked by
-    peer credential, never by address (guests connect from loopback too). The
+    The local listener pre-auths every connection as the OWNER, so no
+    process the daemon spawned to run lower-trust code may be served there:
+    guest tools (atn/guest_sandbox.py), authored and adopted tools, agent
+    shell commands and agent workers (atn/contained_pids.py). Checked by peer
+    credential, never by address (they all connect from loopback too). The
     client socket is found by the full 4-tuple, never by ports alone:
 
     - separate-uid guests (ATN_GUEST_UID, set by atn.guest_launcher): the
       client socket's owning uid, from /proc/net/tcp. Unresolvable or
       ambiguous while uid isolation is configured => refused (fail closed).
-    - same-uid fallback guests: the client socket's owning pid (psutil) is a
-      tracked guest PID or a descendant of one. Checked only while a guest run
-      is live; unresolvable during one => refused.
+    - daemon-spawned runs (same uid): the client socket's owning pid
+      (psutil) is a tracked PID or a descendant of one. Checked only while
+      such a run is live. When the system socket table cannot name the pid
+      (macOS without root), the tracked process trees' own sockets are
+      scanned instead; a scan that cannot complete => refused.
 
-    With no guest uid configured and no guest run live, this is a no-op and
-    the listener behaves exactly as before."""
-    from .guest_sandbox import guest_uids, live_guest_pids
+    Owner clients (app, ``atn send``, the user's MCP proxy) are not spawned
+    by the daemon, so they resolve to an untracked pid and are accepted.
+    With no guest uid configured and no tracked run live, this is a no-op."""
+    from .guest_sandbox import guest_uids
+    from . import contained_pids
     uids = guest_uids()
-    live = live_guest_pids()
+    live = contained_pids.live()
     if not uids and not live:
         return None
     if isinstance(local_address, int):
@@ -231,12 +237,27 @@ def local_peer_denied(remote_address, local_address) -> str | None:
 
 
 def _pid_gate(peer, server) -> str | None:
-    from .guest_sandbox import pid_is_guest
+    from . import contained_pids
     pid = _peer_pid(peer, server)
-    if pid is None:
-        return "peer process unresolved while a guest tool is running"
-    if pid_is_guest(pid):
-        return f"peer pid {pid} is a guest tool process"
+    if pid is not None:
+        kind = contained_pids.kind_of(pid)
+        if kind:
+            return f"peer pid {pid} is a daemon-spawned {kind} process"
+        return None
+    want_local = _endpoint(peer)
+    want_remote = _endpoint(server)
+
+    def _match(c) -> bool:
+        if not c.laddr or not c.raddr:
+            return False
+        return (_endpoint((c.laddr.ip, c.laddr.port)) == want_local
+                and _endpoint((c.raddr.ip, c.raddr.port)) == want_remote)
+
+    complete, kind = contained_pids.tree_owner_of(_match)
+    if kind:
+        return f"peer socket belongs to a daemon-spawned {kind} process"
+    if not complete:
+        return "peer process unresolved while a daemon-spawned run is live"
     return None
 
 

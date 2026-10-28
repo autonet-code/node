@@ -633,10 +633,11 @@ class WebSocketBridge:
         unauthed and is issued an auth_challenge instead of a snapshot."""
         remote = ws.remote_address
         if local:
-            # The local listener pre-auths as OWNER, so a guest tool process
-            # (separate guest uid, or a tracked same-uid guest PID) must never
-            # get a session here. Peer credential, not address: every guest
-            # connects from loopback too.
+            # The local listener pre-auths as OWNER, so no process the daemon
+            # spawned to run lower-trust code (guest uid, or a tracked tool,
+            # shell command or worker PID and its descendants, see
+            # atn/contained_pids.py) may get a session here. Peer credential,
+            # not address: they all connect from loopback too.
             local_addr = getattr(ws, "local_address", None) or ()
             if len(local_addr) < 2:
                 local_addr = ("127.0.0.1", self.port)

@@ -174,37 +174,31 @@ def guest_policy(caps: dict[str, Any] | None, *, uid_isolated: bool,
 # Live guest PIDs (same-uid fallback): the owner listener refuses them
 # ---------------------------------------------------------------------------
 
-_GUEST_PIDS: set[int] = set()
-_PID_LOCK = threading.Lock()
+# The registry is shared with every other daemon-spawned run (authored and
+# adopted tools, agent shell commands, workers): atn/contained_pids.py.
 
 
 def register_guest_pid(pid: int) -> None:
-    with _PID_LOCK:
-        _GUEST_PIDS.add(int(pid))
+    from . import contained_pids
+    contained_pids.register(pid, "guest tool")
 
 
 def unregister_guest_pid(pid: int) -> None:
-    with _PID_LOCK:
-        _GUEST_PIDS.discard(int(pid))
+    from . import contained_pids
+    contained_pids.unregister(pid)
 
 
 def live_guest_pids() -> frozenset[int]:
-    with _PID_LOCK:
-        return frozenset(_GUEST_PIDS)
+    """Every tracked daemon-spawned PID (guest tools and the other kinds in
+    atn/contained_pids.py): the set the owner listener's PID gate checks."""
+    from . import contained_pids
+    return frozenset(contained_pids.live())
 
 
 def pid_is_guest(pid: int | None) -> bool:
-    """True if ``pid`` is a tracked guest process or a descendant of one."""
-    if pid is None:
-        return False
-    pids = live_guest_pids()
-    if pid in pids:
-        return True
-    try:
-        import psutil
-        return any(p.pid in pids for p in psutil.Process(pid).parents())
-    except Exception:  # noqa: BLE001 — process gone / no access
-        return False
+    """True if ``pid`` is a tracked process or a descendant of one."""
+    from . import contained_pids
+    return contained_pids.kind_of(pid) is not None
 
 
 def _scrubbed_env(sandbox: str, policy: dict[str, Any]) -> dict[str, str]:

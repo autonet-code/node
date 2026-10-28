@@ -177,6 +177,20 @@ capabilities gets them enforced.
 
 Escape hatch: `ATN_AUTHORED_TOOLS_BARE=1` restores the old bare exec.
 
+**Update 2026-10-28: env inheritance is gone.** Authored tools now get the
+same scrubbed environment as adopted tools (PATH set to the interpreter
+dir, TEMP/TMP set to a per-tool sandbox, PYTHONIOENCODING, the Windows
+runtime vars, plus only the manifest's declared `capabilities.env` names
+and `ATN_TOOL_SECRETS` / `ATN_TOOL_POLICY`) and the same `deny_paths`
+(keystore, and the data dir outside `tools/`). The inherited env carried
+`BROKER_OWNER_SECRET` and provider keys to model-written code. A tool that
+needs a daemon variable (PATH, APPDATA for user-site packages, a config
+var) declares it in `capabilities.env`. `ATN_AUTHORED_TOOLS_BARE=1` now
+drops only the guard (capability checks, `deny_paths`, destination
+checks); the env is still scrubbed. Every tool run is also tracked so
+the local owner listener refuses its PID and descendants
+(`atn/contained_pids.py`).
+
 Verified: five realistic authored-tool shapes (module-level stdin,
 `__main__`-guarded, env reads, temp writes, stdlib net imports) all run
 unchanged under the guard — `runpy` passes `run_name="__main__"`, so the

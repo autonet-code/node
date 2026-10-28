@@ -248,6 +248,25 @@ async def _run_process(argv: list[str] | None, shell_cmd: str | None,
         proc = await asyncio.create_subprocess_shell(shell_cmd, **kwargs)
     else:
         proc = await asyncio.create_subprocess_exec(*(argv or []), **kwargs)
+    # The daemon's owner listener refuses this command and its descendants
+    # while it runs (atn/contained_pids.py). Absent when this file runs as a
+    # standalone sealed tool: then the tool's own PID is tracked instead.
+    try:
+        from atn import contained_pids as _tracked
+    except ImportError:
+        _tracked = None
+    if _tracked is not None:
+        _tracked.register(proc.pid, "agent shell command")
+    try:
+        return await _await_process(proc, timeout)
+    finally:
+        if _tracked is not None:
+            _tracked.unregister(proc.pid)
+
+
+async def _await_process(proc: Any, timeout: float,
+                         ) -> tuple[int | None, str, bool]:
+    import asyncio
     cap = _Capture()
     reader = asyncio.ensure_future(_drain(proc.stdout, cap))
     timed_out = False

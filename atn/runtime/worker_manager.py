@@ -297,6 +297,10 @@ class WorkerManager:
                 **kwargs,
             )
             pid = proc.pid  # race-free capture at spawn
+            # The owner listener refuses the worker and everything it spawns
+            # (agent shell commands, the bridge's node child) for its life.
+            from .. import contained_pids
+            contained_pids.register(pid, "agent worker")
 
             if _IS_WIN and job is not None:
                 # proc._handle is the process HANDLE (int) on Windows.
@@ -352,6 +356,8 @@ class WorkerManager:
                 pass
             if proc is not None:
                 await self._hard_kill_proc(proc, job)
+                from .. import contained_pids
+                contained_pids.unregister(proc.pid)
             elif job is not None and _IS_WIN:
                 _close_handle(job)
             try:
@@ -474,6 +480,8 @@ class WorkerManager:
             return proc.poll() is not None
 
     async def _cleanup_handle(self, handle: WorkerHandle) -> None:
+        from .. import contained_pids
+        contained_pids.unregister(handle.pid)
         try:
             await handle.channel.close()
         except Exception:

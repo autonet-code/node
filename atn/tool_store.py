@@ -987,20 +987,26 @@ class ToolStore:
             the daemon's environment never reach foreign code;
           - cwd is a per-tool sandbox directory under the tool store.
 
-        AUTHORED tools historically ran BARE — no guard, no sandbox, and
-        ``env=None`` meaning full inheritance of the daemon environment
-        ("the author judged their own code"). But the author is a model,
-        and register_tool is therefore a general code-execution primitive
-        (docs/tool_secret_binding.md — change 3). They now run under the
-        guard by default, with one deliberate concession: ENV INHERITANCE
-        IS PRESERVED. Authored tools depend on reading daemon config vars,
-        and scrubbing them would break working tools for a benefit the
-        audit hook already delivers. Tightening env is a separate step,
-        gated on a survey of what actually reads what.
+        AUTHORED tools run under the same environment and path containment
+        (findings 10/11, docs_from_code/runtime_and_agents.md section 7). The
+        author is a model, so register_tool is a general code-execution
+        primitive: inheriting the daemon environment handed it provider keys
+        and BROKER_OWNER_SECRET, and no deny paths left the keystore and data
+        dir readable. They now get the scrubbed env (PATH = the interpreter
+        dir, TEMP/TMP = a per-tool sandbox, PYTHONIOENCODING, the Windows
+        runtime vars, plus ONLY the manifest's declared ``capabilities.env``
+        names and ATN_TOOL_SECRETS / ATN_TOOL_POLICY) and the same
+        ``deny_paths``. Two differences from adopted tools remain: undeclared
+        net/fs/spawn keep the permissive default (an authored tool that
+        declares nothing may still use them), and cwd stays the daemon's.
+        A tool that needs a daemon variable (PATH included) declares it in
+        ``capabilities.env``.
 
-        Set ``ATN_AUTHORED_TOOLS_BARE=1`` to restore the old bare exec —
-        an escape hatch for a daemon whose authored tools break under the
-        hook, not a recommended posture.
+        ``ATN_AUTHORED_TOOLS_BARE=1`` drops the audit hook only: no
+        tool_guard wrapper, so no capability checks, no ``deny_paths`` and no
+        destination check. The environment is still scrubbed and the PID is
+        still tracked for the owner-listener gate. It is an escape hatch for
+        a tool that breaks under the hook, not a recommended posture.
 
         ``secrets`` is the RESOLVED tool-secret binding (L_agent ∩
         declared, docs/tool_secret_binding.md). It is advertised to the
@@ -1012,30 +1018,26 @@ class ToolStore:
         import sys
         secret_names = ",".join(sorted(secrets or ()))
         guard = Path(__file__).with_name("tool_guard.py")
+        caps = record.manifest.get("capabilities") or {}
+        sandbox = self._dir / "sandbox" / record.digest[:16]
+        sandbox.mkdir(parents=True, exist_ok=True)
 
         if record.origin != "adopted":
+            env = self._contained_env(caps, sandbox, secret_names)
             if os.environ.get("ATN_AUTHORED_TOOLS_BARE") == "1":
-                env = None
-                if secret_names:
-                    env = dict(os.environ)
-                    env["ATN_TOOL_SECRETS"] = secret_names
                 return [sys.executable, str(script)], env, None
 
-            # Guarded, but env-inheriting (see docstring). The policy is the
-            # author's own declaration; absent capabilities keep the historical
-            # permissive posture (net/fs/spawn all allowed) so existing tools
-            # keep working — the hook's value here is the DESTINATION check on
-            # a secret-bound tool, not a sudden deny-by-default flip.
-            caps = record.manifest.get("capabilities") or {}
+            # The policy is the author's own declaration; absent capabilities
+            # keep the historical permissive posture (net/fs/spawn allowed) so
+            # existing tools keep working. deny_paths applies regardless.
             declared_any = any(k in caps for k in ("net", "fs", "spawn"))
-            env = dict(os.environ)
             policy: dict[str, Any] = {
                 "net": bool(caps.get("net")) if declared_any else True,
                 "fs": bool(caps.get("fs")) if declared_any else True,
                 "spawn": bool(caps.get("spawn")) if declared_any else True,
+                "deny_paths": self._foreign_deny_paths(),
             }
             if secret_names:
-                env["ATN_TOOL_SECRETS"] = secret_names
                 hosts = _authorized_hosts_for(secrets or ())
                 if hosts:
                     policy["hosts"] = sorted(hosts)
@@ -1044,7 +1046,6 @@ class ToolStore:
             env["ATN_TOOL_POLICY"] = json.dumps(policy)
             return ([sys.executable, str(guard), str(script)], env, None)
 
-        caps = record.manifest.get("capabilities") or {}
         # Consensus containment (Decision 2026-10-27): a strict-tier tool
         # gets nothing beyond its sandbox, whatever its manifest declares.
         from .tool_security import CONTAINMENT_STRICT
@@ -1052,23 +1053,9 @@ class ToolStore:
             caps = {}
         if not trace_path:
             trace_path = _TRACE_PATH.get()
-        sandbox = self._dir / "sandbox" / record.digest[:16]
-        sandbox.mkdir(parents=True, exist_ok=True)
 
-        env: dict[str, str] = {
-            "PATH": os.path.dirname(sys.executable),
-            "TEMP": str(sandbox),
-            "TMP": str(sandbox),
-            "PYTHONIOENCODING": "utf-8",
-        }
-        # Windows: python/network runtime needs SystemRoot.
-        for keep in ("SYSTEMROOT", "SystemRoot", "WINDIR"):
-            if keep in os.environ:
-                env[keep] = os.environ[keep]
-        for name in caps.get("env") or []:
-            if name in os.environ:
-                env[name] = os.environ[name]
-        policy: dict[str, Any] = {
+        env = self._contained_env(caps, sandbox, secret_names)
+        policy = {
             "net": bool(caps.get("net")),
             "fs": bool(caps.get("fs")),
             "spawn": bool(caps.get("spawn")),
@@ -1077,7 +1064,6 @@ class ToolStore:
             "deny_paths": self._foreign_deny_paths(),
         }
         if secret_names:
-            env["ATN_TOOL_SECRETS"] = secret_names
             # docs/tool_secret_binding.md (change 2): a tool holding a
             # credential AND unrestricted egress is the shape worth narrowing.
             # The destinations come from each bound secret's authorized_hosts
@@ -1093,6 +1079,34 @@ class ToolStore:
             policy["trace_path"] = str(trace_path)
         env["ATN_TOOL_POLICY"] = json.dumps(policy)
         return ([sys.executable, str(guard), str(script)], env, str(sandbox))
+
+    @staticmethod
+    def _contained_env(caps: dict[str, Any], sandbox: Path,
+                       secret_names: str) -> dict[str, str]:
+        """The scrubbed environment every pinned (authored or adopted) tool
+        runs with: the minimum Python needs plus ONLY the declared ``env``
+        names. Secrets in the daemon's environment never reach tool code."""
+        import sys
+        env: dict[str, str] = {
+            "PATH": os.path.dirname(sys.executable),
+            "TEMP": str(sandbox),
+            "TMP": str(sandbox),
+            "PYTHONIOENCODING": "utf-8",
+        }
+        # Windows: python/network runtime needs SystemRoot.
+        for keep in ("SYSTEMROOT", "SystemRoot", "WINDIR"):
+            if keep in os.environ:
+                env[keep] = os.environ[keep]
+        for name in caps.get("env") or []:
+            if isinstance(name, str) and name in os.environ:
+                env[name] = os.environ[name]
+        if secret_names:
+            env["ATN_TOOL_SECRETS"] = secret_names
+            # Where the tool's broker session lives (a path, not a secret).
+            for name in ("VAULT_BROKER_SOCK", "ATN_VAULT_BROKER_SOCK"):
+                if name in os.environ:
+                    env[name] = os.environ[name]
+        return env
 
     def _tool_secret_session(self, record: ToolRecord,
                              caller_id: str | None) -> tuple[Any, frozenset[str]]:
@@ -1221,6 +1235,8 @@ class ToolStore:
         session, services = self._tool_secret_session(record, caller_id)
         argv, env, cwd = self._exec_spec(record, script, services,
                                          trace_path=trace_path)
+        from . import contained_pids
+        tracked_pid: int | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -1229,6 +1245,10 @@ class ToolStore:
                 stderr=asyncio.subprocess.PIPE,
                 env=env, cwd=cwd,
             )
+            # The owner listener refuses this PID and its descendants for the
+            # life of the run (atn/contained_pids.py).
+            tracked_pid = proc.pid
+            contained_pids.register(tracked_pid, f"{record.origin} tool")
             # Bind BEFORE writing stdin: the tool may request its secret the
             # instant it starts, and an unbound PID is not a broker session.
             if session is not None:
@@ -1250,6 +1270,8 @@ class ToolStore:
             # for the PID, so no raw value outlives the subprocess.
             if session is not None:
                 session.release()
+            if tracked_pid is not None:
+                contained_pids.unregister(tracked_pid)
 
         out_text = stdout.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
@@ -1359,6 +1381,8 @@ class ToolStore:
         guest = self._is_guest(record)
         session, services = None, frozenset()
         timeout = self._exec_timeout(record)
+        from . import contained_pids
+        tracked_pid: int | None = None  # guests track their own PIDs
         if guest:
             # Guest composites: same line protocol, guest containment, no
             # tool secrets. Their deps run on their OWN containment path and
@@ -1394,11 +1418,15 @@ class ToolStore:
                     stderr=asyncio.subprocess.PIPE,
                     env=env, cwd=cwd,
                 )
+                tracked_pid = proc.pid
+                contained_pids.register(tracked_pid, f"{record.origin} tool")
                 if session is not None:
                     session.bind(proc.pid)
             except Exception as exc:
                 if session is not None:
                     session.release()
+                if tracked_pid is not None:
+                    contained_pids.unregister(tracked_pid)
                 return {"error": f"tool subprocess failed to start: {exc}"}
 
         async def _pump() -> dict[str, Any]:
@@ -1491,6 +1519,8 @@ class ToolStore:
                 session.release()
             if guest:
                 await proc.aclose()
+            if tracked_pid is not None:
+                contained_pids.unregister(tracked_pid)
 
     async def _dispatch_dep_call(
         self,
