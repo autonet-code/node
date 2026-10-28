@@ -959,6 +959,13 @@ Closes E2E seam #3 (slug-authored mint with no chain claim path).
    provenance `signed=True` accepts recovery to author OR
    author_pubkey, so an owner-wallet-authored manifest is still bound
    to the authoring agent's key.
+   **Amended 2026-10-28:** both fields sit inside the signed payload, so
+   recovery to `author_pubkey` alone let any key claim any `author`.
+   `signed=True` now needs recovery to `author`, or to an `author_pubkey`
+   the chain binds to `author` (Substrate `agentOwner(signer) == author`).
+   Bound to a different owner => `False` (refused at approval). Unbound
+   signer (the unregistered-agent case), local-id author, or chain
+   unreachable => `None`: authorship unproven, same standing as unsigned.
 5. **Owner claim surface: DEFERRED.** Owner-keyed mints need the
    wallet registered on Substrate (one-time `registerAgent` signed by
    the wallet) + a frontend claim flow. Epochs are anchored, claims

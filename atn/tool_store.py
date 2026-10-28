@@ -61,6 +61,17 @@ _MAX_CODE_BYTES = 512 * 1024
 _COMPOSITE_MAX_DEPTH = 4
 
 
+def _is_address(value: str) -> bool:
+    v = str(value or "")
+    if len(v) != 42 or not v.lower().startswith("0x"):
+        return False
+    try:
+        int(v[2:], 16)
+    except ValueError:
+        return False
+    return True
+
+
 def _authorized_hosts_for(services) -> set[str]:
     """Union of ``authorized_hosts`` across ``services`` (keystore sidecar).
 
@@ -2072,6 +2083,7 @@ class ToolStore:
             except Exception as exc:
                 log.warning("vet status lookup failed: %s", exc)
 
+        signed = await asyncio.to_thread(self._verify_manifest_sig, payload)
         caps = dict(payload.get("capabilities") or {})
         authored_via = str(payload.get("authored_via") or "")
         from .runtime.shell_provider import core_claims
@@ -2097,7 +2109,7 @@ class ToolStore:
             # proposals only; agents are refused above).
             "sanction": sanction,
             "provenance": {
-                "signed": self._verify_manifest_sig(payload),
+                "signed": signed,
                 "greenlit": (bool(vet_status.get("greenlit"))
                              if vet_status else None),
                 "busted": (bool(vet_status.get("busted"))
@@ -2163,7 +2175,7 @@ class ToolStore:
         #     would break the rail. Absence of a claim is not a false claim.
         # A CON-busted tool is likewise refused: the network has already
         # produced reproducible evidence against it.
-        if self._verify_manifest_sig(payload) is False:
+        if await asyncio.to_thread(self._verify_manifest_sig, payload) is False:
             return {"error": "manifest signature does not recover to its "
                              "claimed author — refusing to install "
                              "(re-attribution attempt)"}
@@ -2178,9 +2190,20 @@ class ToolStore:
                 tier, why = None, ""
             if tier == CONTAINMENT_DENIED:
                 return {"error": f"denied by the network: {why} — refusing to install"}
+        # Busted: re-read now (a CON claim may have landed since the
+        # proposal); the stored flag still counts, so a failed read cannot
+        # clear a recorded bust.
         prov = (proposal.get("provenance") or {}) if isinstance(
             proposal.get("provenance"), dict) else {}
-        if prov.get("busted") is True:
+        busted = prov.get("busted") is True
+        vet_provider = getattr(self, "vet_status_provider", None)
+        if vet_provider is not None:
+            try:
+                fresh = vet_provider(digest)
+                busted = busted or bool((fresh or {}).get("busted"))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("vet status re-check failed: %s", exc)
+        if busted:
             return {"error": "tool is CON-busted on the substrate — refusing "
                              "to install; clear the evidence claim first"}
 
@@ -2233,15 +2256,33 @@ class ToolStore:
         return {"digest": digest, "status": "rejected"}
 
     def _verify_manifest_sig(self, manifest: dict[str, Any]) -> bool | None:
-        """True = signature recovers to the manifest author OR its
-        author_pubkey; False = present but WRONG (red flag:
-        re-attribution attempt); None = no signature / verification
-        unavailable. Content addressing already guarantees integrity —
-        this proves the AUTHORSHIP claim. author_pubkey matters when
-        the author is the owner WALLET (unregistered agent's tool,
-        household-claimed rewards): the authoring agent's key signs,
-        its address is stamped as author_pubkey inside the signed
-        payload, so recovery to it still binds code to signer."""
+        """Does the signature prove the manifest's ``author`` claim?
+
+        True  = the signature recovers to ``author``, or to a signer the
+                chain binds to ``author`` (see below);
+        False = present but WRONG: it recovers to neither ``author`` nor
+                ``author_pubkey``, or to an ``author_pubkey`` the chain binds
+                to a DIFFERENT owner (re-attribution attempt);
+        None  = no signature, verification unavailable, or authorship not
+                provable. Treated like an unsigned manifest.
+
+        Content addressing already guarantees integrity; this proves the
+        AUTHORSHIP claim. Both ``author`` and ``author_pubkey`` sit inside the
+        signed payload, so a signature recovering to ``author_pubkey`` proves
+        only that the signer wrote the bytes, not that ``author`` did: any key
+        could stamp itself as ``author_pubkey`` and claim any ``author``.
+
+        The legitimate case for that shape: an agent not registered on-chain
+        authors tools as the owner WALLET (_consensus_identity), and its own
+        key signs (_sign), so ``author`` = wallet and ``author_pubkey`` = the
+        agent. That counts as proof only when the chain binds the signer to
+        ``author`` (Substrate ``agentOwner(signer) == author``). An unbound
+        signer (an unregistered agent, which is exactly the case above) or an
+        unreachable chain yields None: authorship unproven, fail closed for
+        the claim, same standing as an unsigned tool.
+
+        Blocking (a chain read on that path): async callers run it in a
+        thread."""
         sig = manifest.get("author_sig")
         if not sig:
             return None
@@ -2255,12 +2296,46 @@ class ToolStore:
                 encode_defunct(canonical_manifest_bytes(manifest)),
                 signature=bytes.fromhex(str(sig).removeprefix("0x")),
             ).lower()
-            return recovered in (
-                str(manifest.get("author") or "").lower(),
-                str(manifest.get("author_pubkey") or "").lower(),
-            )
         except Exception as exc:
             log.debug("manifest sig verification unavailable: %s", exc)
+            return None
+        author = str(manifest.get("author") or "").lower()
+        if recovered == author:
+            return True
+        if recovered != str(manifest.get("author_pubkey") or "").lower():
+            return False
+        if not _is_address(author):
+            return None  # a local id / "user" author is never chain-bound
+        owner = self._bound_owner(recovered)
+        if not owner or owner == "0x" + "00" * 20:
+            return None  # unbound signer or chain unreachable: unproven
+        return True if owner == author else False
+
+    def _bound_owner(self, signer: str) -> str | None:
+        """The owner wallet the chain binds ``signer`` to (lowercase 0x; the
+        zero address when unbound), or None when the chain is not configured
+        or unreachable. ``agent_owner_lookup`` (address -> owner) overrides
+        the default Substrate read, for tests and alternate chains."""
+        lookup = getattr(self, "agent_owner_lookup", None)
+        try:
+            if lookup is None:
+                from .on_chain import OnChainService
+                cfg = getattr(getattr(self, "_runtime", None), "_config", None)
+                autonet = getattr(cfg, "autonet", None)
+                if autonet is None or not getattr(autonet, "enabled", False):
+                    return None
+                svc = OnChainService(autonet)
+                if not svc.available:
+                    return None
+                status = svc.read_binding_status(signer)
+                owner = status.get("owner") if status.get("registered") else None
+                owner = owner or "0x" + "00" * 20
+            else:
+                owner = lookup(signer)
+            owner = str(owner or "").lower()
+            return owner if owner.startswith("0x") else None
+        except Exception as exc:  # noqa: BLE001 — unreachable => unproven
+            log.debug("agent owner lookup failed for %s: %s", signer, exc)
             return None
 
     def _load_proposals(self) -> dict[str, dict[str, Any]]:

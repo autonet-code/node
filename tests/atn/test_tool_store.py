@@ -673,7 +673,10 @@ class TestAdoption:
         pending = store.list_adoption_proposals("pending")
         assert len(pending) == 1
         assert pending[0]["proposed_by"] == "worker"
-        assert pending[0]["provenance"]["signed"] is True
+        # The author daemon has no owner wallet, so the tool's author is a
+        # local id the agent key cannot be chain-bound to: the signature is
+        # valid but proves nothing about `author` (unproven, not forged).
+        assert pending[0]["provenance"]["signed"] is None
 
         approved = await store.approve_adoption(digest)
         assert approved["origin"] == "adopted"
@@ -826,6 +829,87 @@ class TestAdoption:
         record = rt.tool_store.get(res["digest"])
         result = await rt.tool_store.call(record, {}, caller_id="child")
         assert result == {"result": {"secret": None}}
+
+
+    # ---- manifest authorship (section 7 item 14) -------------------
+
+    @staticmethod
+    def _signed(author: str, signer_key: bytes, pubkey: str | None = None):
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        from nodes.common.world_model_substrate.tool_manifest import (
+            canonical_manifest_bytes,
+        )
+        m = {"kind": "tool_manifest", "name": "t", "author": author,
+             "author_pubkey": pubkey or Account.from_key(signer_key).address}
+        sig = Account.sign_message(encode_defunct(canonical_manifest_bytes(m)),
+                                   private_key=signer_key)
+        m["author_sig"] = sig.signature.hex()
+        return m
+
+    def test_sig_must_recover_to_author_or_bound_signer(self, tmp_path):
+        from eth_account import Account
+        rt = _make_runtime(tmp_path)
+        store = rt.tool_store
+        key = b"" * 32
+        signer = Account.from_key(key).address
+        victim = "0x" + "77" * 20
+        # Signer IS the author.
+        assert store._verify_manifest_sig(self._signed(signer, key)) is True
+        # Signer stamps itself as author_pubkey and claims someone else.
+        forged = self._signed(victim, key)
+        store.agent_owner_lookup = lambda a: "0x" + "00" * 20   # unbound
+        assert store._verify_manifest_sig(forged) is None
+        store.agent_owner_lookup = lambda a: "0x" + "99" * 20   # other owner
+        assert store._verify_manifest_sig(forged) is False
+        store.agent_owner_lookup = lambda a: victim               # bound
+        assert store._verify_manifest_sig(forged) is True
+
+        def _down(_a):
+            raise ConnectionError("rpc down")
+        store.agent_owner_lookup = _down                          # fail closed
+        assert store._verify_manifest_sig(forged) is None
+        # Recovers to neither author nor author_pubkey.
+        other = self._signed(victim, key, pubkey="0x" + "55" * 20)
+        assert store._verify_manifest_sig(other) is False
+
+    @pytest.mark.asyncio
+    async def test_approve_refuses_signer_bound_to_another_owner(self, tmp_path):
+        author_rt = _make_runtime(tmp_path / "author_daemon")
+        wallet = "0x" + "44" * 20
+        author_rt._config.autonet.owner_wallet = wallet
+        await _register_agent(author_rt, "foreign-author")
+        res = await execute_tool(
+            "register_tool",
+            {"name": "net_tool", "description": "d", "input_schema": SCHEMA,
+             "code": ECHO_CODE}, author_rt, caller_id="foreign-author")
+        digest = res["digest"]
+        assert author_rt.tool_store.get(digest).manifest["author"] == wallet
+        rt = await self._adopter(tmp_path, author_rt.tool_store._blob_store())
+        store = rt.tool_store
+
+        store.agent_owner_lookup = lambda a: wallet
+        await store.propose_adoption("worker", digest, reason="r")
+        assert store.list_adoption_proposals()[0]["provenance"]["signed"] is True
+        # The binding changed (or was never this wallet's): refused at approval.
+        store.agent_owner_lookup = lambda a: "0x" + "99" * 20
+        out = await store.approve_adoption(digest)
+        assert "re-attribution" in out["error"]
+        assert store.get(digest) is None
+
+    @pytest.mark.asyncio
+    async def test_approve_rechecks_busted_from_fresh_state(self, tmp_path):
+        _, digest, blobs = await self._publish_on_author_daemon(tmp_path)
+        rt = await self._adopter(tmp_path, blobs)
+        store = rt.tool_store
+        store.vet_status_provider = lambda d: {"busted": False}
+        await store.propose_adoption("worker", digest, reason="r")
+        assert store.list_adoption_proposals()[0]["provenance"]["busted"] is False
+        # A CON claim lands after the proposal was written.
+        store.vet_status_provider = lambda d: {"busted": True}
+        out = await store.approve_adoption(digest)
+        assert "CON-busted" in out["error"]
+        assert store.get(digest) is None
 
 
 class TestVetting:
