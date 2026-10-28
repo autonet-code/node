@@ -63,3 +63,6 @@ cache/
 # Local E2E deployment addresses (hardhat-local, regenerated per run)
 /deployments/_e2e_service_provider.json
 angles/
+
+# GPU tokenomics sim, local for now (2026-10-27)
+experiments/econ_gpu/
