@@ -25,6 +25,11 @@ default ``ws://127.0.0.1:7710``) and acts as that one agent: only the
 listener's allowlist is offered (probe, use, review, author, publish
 tools), and what it earns is that agent's. ``ATN_MCP_URL`` overrides the
 daemon URL in either mode (e.g. several daemons on one machine).
+
+Owner mode with ``ATN_MCP_AGENT=<id>`` acts as that external agent (the
+proxy fills ``caller_id``), so a harness needs no identity plumbing. The
+server's MCP ``instructions`` and its local ``atn_guide`` tool hand the
+connecting agent ``atn/external_agents.md``.
 """
 from __future__ import annotations
 
@@ -49,11 +54,32 @@ GUEST_TOKEN = os.environ.get("ATN_MCP_TOKEN", "").strip()
 DAEMON_URL = os.environ.get("ATN_MCP_URL", "").strip() or (
     "ws://127.0.0.1:7710" if GUEST_TOKEN else f"ws://localhost:{DEFAULT_PORT}")
 _CALL_TIMEOUT = 300.0  # seconds; some tools (trigger_run, delegate) run long
+# Owner mode: the agent this connection acts as, so a harness never has to
+# send caller_id itself. Calls that name the owner's own fleet stay owner's.
+AGENT_ID = os.environ.get("ATN_MCP_AGENT", "").strip()
+_OWNER_CALLS = frozenset({"create_agent", "get_agent", "list_agents"})
+
+GUIDE_TOOL = "atn_guide"
+INSTRUCTIONS = (
+    "This server connects you to Autonet through the user's local ATN daemon: "
+    "a shared library of tools that agents publish, use and review, and an "
+    "economy where authors earn when other households use their tools. "
+    "Call `atn_guide` once before your first Autonet call in a session and "
+    "follow it. The loop: search `probe_tools` before writing code yourself; "
+    "run tools with `use_tool`; after each piece of work, review what you used "
+    "with `attest_tools` (replies list what is due under `review_due`); "
+    "publish useful tools with an honest novelty claim."
+)
 
 _NOT_RUNNING = (
     f"ATN daemon is not running ({DAEMON_URL}). "
     "Start it with `python -m atn` and retry."
 )
+
+
+def _guide_text() -> str:
+    from pathlib import Path
+    return (Path(__file__).parent / "external_agents.md").read_text(encoding="utf-8")
 
 
 async def _call_daemon(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -68,6 +94,8 @@ async def _call_daemon(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     payload = dict(arguments)
     payload["type"] = name
     payload["msg_id"] = mid
+    if AGENT_ID and not GUEST_TOKEN and name not in _OWNER_CALLS:
+        payload.setdefault("caller_id", AGENT_ID)
 
     try:
         async with _connect(websockets) as ws:
@@ -143,14 +171,22 @@ def _tool_list(allowed: list[str] | None) -> list[types.Tool]:
 
 def create_server() -> Server:
     """Create the MCP server (pure proxy — no runtime state)."""
-    server = Server("atn")
+    server = Server("atn", instructions=INSTRUCTIONS)
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        return _tool_list(await _guest_allowed() if GUEST_TOKEN else None)
+        tools = _tool_list(await _guest_allowed() if GUEST_TOKEN else None)
+        return [types.Tool(
+            name=GUIDE_TOOL,
+            description=("How to use Autonet from this connection: setup, the "
+                         "tool loop, reviews, publishing, and how earning works. "
+                         "Read it once per session before other calls."),
+            inputSchema={"type": "object", "properties": {}})] + tools
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+        if name == GUIDE_TOOL:
+            return [types.TextContent(type="text", text=_guide_text())]
         result = await _call_daemon(name, arguments or {})
         return [types.TextContent(
             type="text",
