@@ -4361,7 +4361,13 @@ def resolve_tool_grant(tool_spec: list[str]) -> set[str] | None:
     granted: set[str] = set(_ALWAYS_GRANTED_TOOLS)
     saw_grant = False
     for spec in tool_spec:
-        if spec in ("sdk_builtin", "connectors", "shell", "web"):
+        if spec == "connectors":
+            # The connectors bundle grants the connector tools
+            # (use_connector, ...) without by itself declaring a narrowing
+            # grant: a spec of only ["connectors"] stays unrestricted.
+            granted.update(_TOOL_CATEGORIES["connectors"])
+            continue
+        if spec in ("sdk_builtin", "shell", "web"):
             continue  # handled by execution_engine, not a core-tool grant
         saw_grant = True
         if spec == "atn_core":
@@ -4375,6 +4381,20 @@ def resolve_tool_grant(tool_spec: list[str]) -> set[str] | None:
     # grant, so no restriction — same fall-through resolve_tool_surface
     # takes when it drops back to the delegate set.
     return granted if saw_grant else None
+
+
+def caller_may_use_connectors(runtime: "Runtime", caller_id: str | None) -> bool:
+    """True when ``caller_id`` may call the owner's MCP connectors.
+
+    The same rule ``execute_tool`` applies to ``use_connector``: the owner
+    is unrestricted, an agent with no declared bundles is unrestricted,
+    and any other agent must hold the ``connectors`` bundle.
+    """
+    if is_owner_caller(caller_id):
+        return True
+    defn = runtime.get_agent(caller_id)
+    granted = resolve_tool_grant(list(defn.tools) if defn else [])
+    return granted is None or "use_connector" in granted
 
 
 def resolve_tool_surface(tool_spec: list[str]) -> list[dict[str, Any]]:

@@ -504,3 +504,58 @@ class TestBundleGrantIsEnforcedAtCallTime:
         assert "use_tool" in granted and "publish_tool" not in granted
         # Self-knowledge is never a bundle.
         assert "get_my_budget_status" in granted
+
+
+class TestUseToolConnectorGrant:
+    """use_tool on an ``mcp_<cid>_<op>`` name runs the owner's MCP
+    connector, so an agent needs the connectors bundle for it, exactly as
+    for use_connector. The owner and bundle-free agents are unaffected."""
+
+    async def _rt(self, tmp_path):
+        from atn.agent_tools import execute_tool
+        from atn.connectors_manager import ConnectorSpec
+
+        rt = _make_runtime(EventBus(), tmp_path)
+        rt.connectors._specs["fake"] = ConnectorSpec(command="none")
+        rt.connectors.ensure_started = AsyncMock()
+        rt.connectors.call_tool = AsyncMock(return_value={"ok": True})
+        for aid, tools in (("narrow-1", ["unified_tools"]),
+                           ("conn-1", ["unified_tools", "connectors"]),
+                           ("open-1", [])):
+            await rt.register_agent(AgentDefinition(
+                id=aid, name=aid, mode=AgentMode.COGNITIVE,
+                cognitive_model="sonnet", tools=list(tools),
+                budgets={"claude_max": 100000},
+            ))
+        return rt, execute_tool
+
+    async def _use(self, rt, execute_tool, caller):
+        return await execute_tool(
+            "use_tool", {"name": "mcp_fake_read", "arguments": {}},
+            rt, caller_id=caller)
+
+    @pytest.mark.asyncio
+    async def test_unified_only_agent_is_refused(self, tmp_path):
+        rt, execute_tool = await self._rt(tmp_path)
+        res = await self._use(rt, execute_tool, "narrow-1")
+        assert "not granted" in res.get("error", "")
+        rt.connectors.call_tool.assert_not_called()
+        listed = rt.tool_registry.list_all(caller_id="narrow-1")
+        assert not any(t["category"] == "connector" for t in listed)
+
+    @pytest.mark.asyncio
+    async def test_connectors_bundle_reaches_the_connector(self, tmp_path):
+        rt, execute_tool = await self._rt(tmp_path)
+        assert await self._use(rt, execute_tool, "conn-1") == {"ok": True}
+        # The bundle also grants use_connector itself.
+        res = await execute_tool(
+            "use_connector",
+            {"connector_id": "fake", "tool": "read", "arguments": {}},
+            rt, caller_id="conn-1")
+        assert res == {"ok": True}
+
+    @pytest.mark.asyncio
+    async def test_owner_and_bundle_free_agent_are_unrestricted(self, tmp_path):
+        rt, execute_tool = await self._rt(tmp_path)
+        assert await self._use(rt, execute_tool, None) == {"ok": True}
+        assert await self._use(rt, execute_tool, "open-1") == {"ok": True}

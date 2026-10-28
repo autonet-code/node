@@ -94,7 +94,9 @@ class ToolRegistry:
         tools: list[dict[str, Any]] = []
 
         if category is None or category == ToolCategory.CONNECTOR:
-            tools.extend(self._list_connector_tools(include_operations))
+            from .agent_tools import caller_may_use_connectors
+            if caller_may_use_connectors(self._runtime, caller_id):
+                tools.extend(self._list_connector_tools(include_operations))
 
         if category is None or category == ToolCategory.PIPELINE:
             tools.extend(self._list_pipeline_tools(include_operations))
@@ -194,6 +196,13 @@ class ToolRegistry:
             return {"error": f"Unknown tool: {name}"}
 
         if tool.category == ToolCategory.CONNECTOR:
+            # An MCP connector runs with the owner's credentials. An agent
+            # reaches it only with the same grant use_connector requires.
+            from .agent_tools import caller_may_use_connectors
+            if not caller_may_use_connectors(self._runtime, caller_id):
+                return {"error": f"Tool '{name}' is a connector tool, which "
+                                 f"is not granted to agent '{caller_id}'; ask "
+                                 f"the owner for the connectors bundle"}
             return await self._call_connector_tool(tool, arguments)
         elif tool.category == ToolCategory.PIPELINE:
             return await self._call_pipeline_tool(tool, arguments, caller_id=caller_id)
