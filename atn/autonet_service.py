@@ -1369,6 +1369,13 @@ class AutonetBridge:
                     return await asyncio.to_thread(_r.get, digest)
                 tool_store.blob_fetcher = _fetch
 
+            # A new peer may hold code an approved adoption is waiting for
+            # (#46): the retry loop watches the connected set.
+            def _peers() -> list[str]:
+                host = getattr(self, "_p2p_host", None)
+                return host.get_connected_peers() if host is not None else []
+            tool_store.peer_lister = _peers
+
             # Inspection status for adoption provenance: read the
             # federated close driver's vetting carry-over per digest
             # (v4.1: these fields track inspection activity, not a gate —

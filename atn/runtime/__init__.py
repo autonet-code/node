@@ -749,6 +749,10 @@ class Runtime:
         # the best voucher before the window ends (atn/channel_settlement.py).
         self._channel_settler = asyncio.create_task(self._settle_channels_loop())
 
+        # Approved adoptions still waiting for a code holder to come online
+        # keep retrying across restarts (#46).
+        self.tool_store.resume_adoption_retries()
+
         # Recover crashed executions
         recovered = self.execution_log.recover_running()
         if recovered:
@@ -949,6 +953,8 @@ class Runtime:
 
         if self.autonet.state.status.value in ("running", "paused"):
             await self.autonet.stop()
+
+        await self.tool_store.stop_adoption_retries()
 
         # Cancel the reaper BEFORE stop_all so a sweep cannot race the
         # shutdown teardown (both call ConnectorManager.stop).

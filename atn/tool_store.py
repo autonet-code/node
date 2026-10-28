@@ -213,6 +213,21 @@ def _denials_from_trace(trace_path: str | None) -> list[dict[str, Any]]:
     return out[:50]
 
 
+# Code seeding (#46). A tool's code lives only with its author and the
+# daemons that adopted it, like a torrent. An approval made while none of
+# them is online is kept as approved_pending and retried: after
+# ADOPTION_RETRY_BASE_S, doubling up to ADOPTION_RETRY_MAX_S, and at once when
+# a new peer connects (checked every ADOPTION_PEER_POLL_S), for at most
+# ADOPTION_RETRY_WINDOW_S. After that the proposal goes back to pending and
+# the owner can approve it again.
+ADOPTION_APPROVED_PENDING = "approved_pending"
+ADOPTION_RETRY_BASE_S = 120.0
+ADOPTION_RETRY_MAX_S = 600.0
+ADOPTION_RETRY_WINDOW_S = 24 * 3600.0
+ADOPTION_PEER_POLL_S = 15.0
+_NO_CODE_HOLDER = "no holder of this tool's code is online"
+
+
 class ToolStore:
     """Persistent registry of tool manifests with author-lineage scoping."""
 
@@ -273,6 +288,17 @@ class ToolStore:
         # legitimate approval queue in the tool economy.
         self._proposals_path = self._dir / "adoption_proposals.json"
         self._proposals: dict[str, dict[str, Any]] = self._load_proposals()
+        # Approved adoptions waiting for their code (#46): a background
+        # retry with backoff, also woken when a new peer connects.
+        # peer_lister (callable -> iterable of connected peer ids) is wired
+        # by the autonet service; absent = timer retries only.
+        self.peer_lister: Any = None
+        self.adoption_retry_base_s = ADOPTION_RETRY_BASE_S
+        self.adoption_retry_max_s = ADOPTION_RETRY_MAX_S
+        self.adoption_retry_window_s = ADOPTION_RETRY_WINDOW_S
+        self.adoption_poll_s = ADOPTION_PEER_POLL_S
+        self._adopt_lock: asyncio.Lock | None = None
+        self._retry_task: asyncio.Task | None = None
         # Active harness distro digest (docs/tool_substrate.md — "Resident
         # tools, loadouts, distros"). Set by bootstrap_reference_distro at
         # runtime init; stamped onto cognitive attestations so adoption
@@ -2052,6 +2078,11 @@ class ToolStore:
         if existing is not None and existing.get("status") == "pending":
             return {"status": "pending", "digest": digest,
                     "note": "already proposed; awaiting owner approval"}
+        if (existing is not None
+                and existing.get("status") == ADOPTION_APPROVED_PENDING):
+            return {"status": ADOPTION_APPROVED_PENDING, "digest": digest,
+                    "note": "already approved; waiting for a holder of its "
+                            "code to come online"}
 
         payload = await self.fetch_payload(digest)
         from nodes.common.world_model_substrate.tool_manifest import (
@@ -2240,10 +2271,32 @@ class ToolStore:
         install as an ADOPTED record — original author preserved on the
         manifest (their mint keeps flowing from our attestations),
         adopter-lineage scoping via local_author, contained execution
-        via origin="adopted"."""
+        via origin="adopted".
+
+        Code seeds like a torrent (#46): only the author and adopters hold
+        a tool's code. When none of them is online the approval is kept
+        (status ``approved_pending``) and the code fetch retried in the
+        background; see ``_adoption_retry_loop``."""
+        async with self._adoption_lock():
+            return await self._approve_locked(digest, core_replacement_ack)
+
+    def _adoption_lock(self) -> asyncio.Lock:
+        # One install at a time: the owner's approval and a background
+        # retry must not both install the same proposal.
+        if self._adopt_lock is None:
+            self._adopt_lock = asyncio.Lock()
+        return self._adopt_lock
+
+    async def _approve_locked(
+        self, digest: str, core_replacement_ack: bool,
+    ) -> dict[str, Any]:
         proposal = self._proposals.get(digest)
-        if proposal is None or proposal.get("status") != "pending":
+        if proposal is None or proposal.get("status") not in (
+                "pending", ADOPTION_APPROVED_PENDING):
             return {"error": "no pending proposal for that digest"}
+        # A retry keeps the owner's original acknowledgment.
+        core_replacement_ack = bool(core_replacement_ack
+                                    or proposal.get("core_replacement_ack"))
 
         # A composite's proposal carries its missing dependencies (#37).
         # Every member passes the same install checks; any failure installs
@@ -2256,6 +2309,9 @@ class ToolStore:
                 continue
             payload, err = await self._install_check(
                 dep_digest, dep.get("provenance") or {})
+            if err == _NO_CODE_HOLDER:
+                return self._defer_for_code(digest, proposal, dep_digest,
+                                            core_replacement_ack)
             if err is not None:
                 label = (f"{dep.get('name')} ({dep_digest[:16]})"
                          if dep.get("name") else dep_digest)
@@ -2265,6 +2321,9 @@ class ToolStore:
         prov = (proposal.get("provenance") or {}) if isinstance(
             proposal.get("provenance"), dict) else {}
         payload, err = await self._install_check(digest, prov)
+        if err == _NO_CODE_HOLDER:
+            return self._defer_for_code(digest, proposal, digest,
+                                        core_replacement_ack)
         if err is not None:
             return {"error": err}
         members.append((digest, payload))
@@ -2301,12 +2360,15 @@ class ToolStore:
                 # A standalone pending proposal for a dependency is settled
                 # by this install.
                 other = self._proposals.get(d)
-                if other is not None and other.get("status") == "pending":
+                if other is not None and other.get("status") in (
+                        "pending", ADOPTION_APPROVED_PENDING):
+                    other.pop("retry", None)
                     other["status"] = "approved"
                     other["resolved_ts"] = now
                     other["installed_with"] = digest
         record = self._records[digest]
         proposal["status"] = "approved"
+        proposal.pop("retry", None)
         if replaces and core_replacement_ack:
             proposal["core_replacement_ack"] = True
         proposal["resolved_ts"] = now
@@ -2342,8 +2404,9 @@ class ToolStore:
         code_digest = str(payload.get("code_digest") or "")
         code_raw = await self.fetch_bytes(code_digest) if code_digest else None
         if code_raw is None:
-            return None, ("code blob not fetchable — refusing to install "
-                          "a manifest whose code can't be pinned locally")
+            # Not a refusal: nobody holding the code is online right now.
+            # approve_adoption keeps the approval and retries (#46).
+            return None, _NO_CODE_HOLDER
 
         # Provenance is LOAD-BEARING here, not decoration. propose_adoption
         # assembles {signed, greenlit, busted, vets} for the owner to read,
@@ -2391,10 +2454,174 @@ class ToolStore:
                           "to install; clear the evidence claim first")
         return payload, None
 
+    def _defer_for_code(
+        self, digest: str, proposal: dict[str, Any], missing: str,
+        core_replacement_ack: bool,
+    ) -> dict[str, Any]:
+        """Keep an approval whose code no online daemon holds (#46) and
+        schedule the background retry. Nothing is installed."""
+        now = int(time.time())
+        if proposal.get("status") != ADOPTION_APPROVED_PENDING:
+            proposal["status"] = ADOPTION_APPROVED_PENDING
+            proposal["approved_ts"] = now
+        if core_replacement_ack:
+            proposal["core_replacement_ack"] = True
+        retry = dict(proposal.get("retry") or {})
+        attempts = int(retry.get("attempts") or 0) + 1
+        delay = min(self.adoption_retry_base_s * (2 ** (attempts - 1)),
+                    self.adoption_retry_max_s)
+        retry.update({"attempts": attempts, "last_ts": now,
+                      "next_ts": now + delay, "awaiting_code_of": missing})
+        proposal["retry"] = retry
+        self._save_proposals()
+        self._ensure_adoption_retry()
+        whose = ("this tool's" if missing == digest
+                 else f"its dependency {missing[:16]}'s")
+        return {"status": ADOPTION_APPROVED_PENDING, "digest": digest,
+                "name": str(proposal.get("name") or ""),
+                "awaiting_code_of": missing,
+                "note": (f"No holder of {whose} code is online (its author "
+                         "or a daemon that adopted it). The adoption stays "
+                         "approved and pending: this daemon retries the "
+                         "fetch in the background and when a new peer "
+                         "connects, and installs it then.")}
+
+    def resume_adoption_retries(self) -> None:
+        """Start the retry loop if approved adoptions are waiting for code
+        (called at runtime start, so a restart keeps retrying)."""
+        self._ensure_adoption_retry()
+
+    async def stop_adoption_retries(self) -> None:
+        task, self._retry_task = self._retry_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    def _awaiting_code(self) -> list[str]:
+        return [d for d, p in self._proposals.items()
+                if p.get("status") == ADOPTION_APPROVED_PENDING]
+
+    def _ensure_adoption_retry(self) -> None:
+        if self._retry_task is not None and not self._retry_task.done():
+            return
+        if not self._awaiting_code():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._retry_task = loop.create_task(self._adoption_retry_loop())
+
+    def _peer_snapshot(self) -> set[str] | None:
+        if self.peer_lister is None:
+            return None
+        try:
+            return {str(p) for p in self.peer_lister()}
+        except Exception:  # noqa: BLE001 — host down: timer retries only
+            return None
+
+    async def _adoption_retry_loop(self) -> None:
+        seen = self._peer_snapshot()
+        while True:
+            waiting = self._awaiting_code()
+            if not waiting:
+                return
+            peers = self._peer_snapshot()
+            new_peer = bool(peers is not None and seen is not None
+                            and peers - seen)
+            if peers is not None:
+                seen = peers
+            now = time.time()
+            for digest in waiting:
+                proposal = self._proposals.get(digest)
+                if (proposal is None
+                        or proposal.get("status") != ADOPTION_APPROVED_PENDING):
+                    continue
+                started = float(proposal.get("approved_ts") or now)
+                if now - started > self.adoption_retry_window_s:
+                    await self._expire_adoption(digest, proposal)
+                    continue
+                due = float((proposal.get("retry") or {}).get("next_ts") or 0)
+                if new_peer or now >= due:
+                    try:
+                        await self.retry_adoption(digest)
+                    except Exception:  # noqa: BLE001 — keep retrying others
+                        log.warning("adoption retry crashed for %s",
+                                    digest[:16], exc_info=True)
+            await asyncio.sleep(self.adoption_poll_s)
+
+    async def retry_adoption(self, digest: str) -> dict[str, Any]:
+        """One background attempt for an approved_pending adoption. It
+        runs the owner's approval path unchanged (same verification,
+        digest pinning, containment) and reports the outcome as a
+        TOOL_ADOPTION event."""
+        async with self._adoption_lock():
+            proposal = self._proposals.get(digest)
+            if (proposal is None
+                    or proposal.get("status") != ADOPTION_APPROVED_PENDING):
+                return {"error": "no approved adoption waiting for code"}
+            out = await self._approve_locked(digest, False)
+            if out.get("status") == ADOPTION_APPROVED_PENDING:
+                return out
+            if "error" in out:
+                # The code arrived but a later check refused it (denied,
+                # busted, wrong signature): the approval ends here.
+                proposal["status"] = "failed"
+                proposal["fail_reason"] = str(out["error"])
+                proposal["resolved_ts"] = int(time.time())
+                proposal.pop("retry", None)
+                self._save_proposals()
+                log.warning("adoption retry refused %s: %s",
+                            digest[:16], out["error"])
+        if "error" in out:
+            await self._emit_adoption(digest, proposal, "failed",
+                                      error=str(out["error"]))
+        else:
+            await self._emit_adoption(digest, proposal, "installed",
+                                      result=out)
+        return out
+
+    async def _expire_adoption(self, digest: str,
+                               proposal: dict[str, Any]) -> None:
+        proposal["status"] = "pending"
+        proposal["expired_ts"] = int(time.time())
+        proposal.pop("retry", None)
+        self._save_proposals()
+        log.info("adoption of %s found no online code holder in %ds: back "
+                 "to the owner's queue", digest[:16],
+                 int(self.adoption_retry_window_s))
+        await self._emit_adoption(
+            digest, proposal, "expired",
+            note="no holder of its code came online; approve it again to "
+                 "retry")
+
+    async def _emit_adoption(self, digest: str, proposal: dict[str, Any],
+                             status: str, **extra: Any) -> None:
+        events = getattr(self._runtime, "events", None)
+        if events is None:
+            return
+        from .events import Event, EventType
+        try:
+            await events.emit(Event(
+                type=EventType.TOOL_ADOPTION,
+                source="tool_store",
+                data={"digest": digest,
+                      "name": str(proposal.get("name") or ""),
+                      "proposed_by": str(proposal.get("proposed_by") or ""),
+                      "status": status, **extra},
+            ))
+        except Exception:  # noqa: BLE001 — reporting never breaks install
+            log.debug("adoption event emit failed", exc_info=True)
+
     def reject_adoption(self, digest: str, reason: str = "") -> dict[str, Any]:
         proposal = self._proposals.get(digest)
-        if proposal is None or proposal.get("status") != "pending":
+        if proposal is None or proposal.get("status") not in (
+                "pending", ADOPTION_APPROVED_PENDING):
             return {"error": "no pending proposal for that digest"}
+        proposal.pop("retry", None)
         proposal["status"] = "rejected"
         proposal["resolved_ts"] = int(time.time())
         if reason:

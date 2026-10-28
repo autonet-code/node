@@ -406,6 +406,8 @@ async def _handle_command(line: str, runtime: Runtime) -> bool:
             core_replacement_ack="--core-replacement" in args[1:])
         if result.get("error"):
             console.print(f"  [red]{result['error']}[/]")
+        elif result.get("status") == "approved_pending":
+            console.print(f"  [yellow]{result.get('note', '')}[/]")
         else:
             console.print(
                 f"  [green]Approved {result.get('name', args[0])} "

@@ -987,6 +987,184 @@ class TestAdoption:
         assert store.list_adoption_proposals("pending")[0]["digest"] == comp
 
 
+class TestAdoptionAwaitingCode:
+    """#46: code seeds like a torrent. With no holder of a tool's code
+    online, the approval stays pending and the daemon retries the fetch in
+    the background (backoff, and when a new peer connects)."""
+
+    async def _setup(self, tmp_path, composite=False):
+        helper = TestAdoption()
+        if composite:
+            dep, digest, blobs = await helper._composite_on_author_daemon(
+                tmp_path)
+        else:
+            _, digest, blobs = await helper._publish_on_author_daemon(tmp_path)
+            dep = None
+        rt = await helper._adopter(tmp_path, blobs)
+        holder = {"online": False}
+        code_of = {d: json.loads(blobs.get_bytes(d))["code_digest"]
+                   for d in filter(None, (digest, dep))}
+
+        async def _fetch(d: str) -> bytes | None:
+            if d in code_of.values() and not holder["online"]:
+                return None
+            return blobs.get_bytes(d)
+        rt.tool_store.blob_fetcher = _fetch
+        events: list = []
+
+        async def _on(evt):
+            if evt.type.value == "tool.adoption":
+                events.append(evt)
+        rt.events.subscribe(None, _on)
+        return rt, digest, dep, holder, events
+
+    @pytest.mark.asyncio
+    async def test_no_holder_online_keeps_approval_pending(self, tmp_path):
+        rt, digest, _, _, _ = await self._setup(tmp_path)
+        store = rt.tool_store
+        await store.propose_adoption("worker", digest, reason="r")
+        out = await store.approve_adoption(digest)
+        try:
+            assert "error" not in out
+            assert out["status"] == "approved_pending"
+            assert "No holder of this tool's code is online" in out["note"]
+            assert store.get(digest) is None
+            row = store.list_adoption_proposals("approved_pending")[0]
+            assert row["retry"]["attempts"] == 1
+            again = await store.propose_adoption("worker", digest, reason="r")
+            assert again["status"] == "approved_pending"
+        finally:
+            await store.stop_adoption_retries()
+
+    @pytest.mark.asyncio
+    async def test_retry_installs_like_normal_approval(self, tmp_path):
+        rt, digest, _, holder, events = await self._setup(tmp_path)
+        store = rt.tool_store
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        await store.stop_adoption_retries()
+
+        still = await store.retry_adoption(digest)
+        assert still["status"] == "approved_pending"
+        assert store.list_adoption_proposals()[0]["retry"]["attempts"] == 2
+
+        holder["online"] = True
+        done = await store.retry_adoption(digest)
+        assert done["origin"] == "adopted"
+        record = store.get(digest)
+        assert record.origin == "adopted" and record.local_author == "worker"
+        assert store.list_adoption_proposals()[0]["status"] == "approved"
+        result = await store.call(record, {"x": "hi"}, caller_id="worker")
+        assert result["result"] == {"echo": "hi"}
+        assert result["containment"]["tier"] == "strict"
+        assert [e.data["status"] for e in events] == ["installed"]
+        assert events[0].data["digest"] == digest
+
+    @pytest.mark.asyncio
+    async def test_new_peer_triggers_background_install(self, tmp_path):
+        import asyncio
+        rt, digest, _, holder, events = await self._setup(tmp_path)
+        store = rt.tool_store
+        peers = ["peerA"]
+        store.peer_lister = lambda: list(peers)
+        store.adoption_retry_base_s = 3600.0   # timer never fires in-test
+        store.adoption_poll_s = 0.01
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        try:
+            await asyncio.sleep(0.05)
+            assert store.get(digest) is None
+            holder["online"] = True
+            peers.append("peerB")              # the author reconnects
+            for _ in range(200):
+                if store.get(digest) is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert store.get(digest) is not None
+            assert [e.data["status"] for e in events] == ["installed"]
+        finally:
+            await store.stop_adoption_retries()
+
+    @pytest.mark.asyncio
+    async def test_backoff_timer_retries_without_peers(self, tmp_path):
+        import asyncio
+        rt, digest, _, holder, events = await self._setup(tmp_path)
+        store = rt.tool_store
+        store.adoption_retry_base_s = 0.0
+        store.adoption_poll_s = 0.01
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        try:
+            holder["online"] = True
+            for _ in range(200):
+                if store.get(digest) is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert store.get(digest) is not None
+        finally:
+            await store.stop_adoption_retries()
+
+    @pytest.mark.asyncio
+    async def test_missing_dependency_code_waits_then_installs_set(
+            self, tmp_path):
+        rt, comp, dep, holder, _ = await self._setup(tmp_path, composite=True)
+        store = rt.tool_store
+        await store.propose_adoption("worker", comp, reason="r")
+        out = await store.approve_adoption(comp)
+        await store.stop_adoption_retries()
+        assert out["status"] == "approved_pending"
+        assert out["awaiting_code_of"] == dep
+        assert store.get(dep) is None and store.get(comp) is None
+        holder["online"] = True
+        done = await store.retry_adoption(comp)
+        assert [d["digest"] for d in done["dependencies_installed"]] == [dep]
+        assert store.get(dep) is not None and store.get(comp) is not None
+
+    @pytest.mark.asyncio
+    async def test_checks_still_apply_when_code_arrives(self, tmp_path):
+        rt, digest, _, holder, events = await self._setup(tmp_path)
+        store = rt.tool_store
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        await store.stop_adoption_retries()
+        store.vet_status_provider = lambda d: {"busted": True}
+        holder["online"] = True
+        out = await store.retry_adoption(digest)
+        assert "CON-busted" in out["error"]
+        assert store.get(digest) is None
+        assert store.list_adoption_proposals()[0]["status"] == "failed"
+        assert [e.data["status"] for e in events] == ["failed"]
+
+    @pytest.mark.asyncio
+    async def test_window_expires_back_to_owner_queue(self, tmp_path):
+        import asyncio
+        rt, digest, _, _, events = await self._setup(tmp_path)
+        store = rt.tool_store
+        store.adoption_retry_window_s = 0.0
+        store.adoption_poll_s = 0.01
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        try:
+            for _ in range(200):
+                if events:
+                    break
+                await asyncio.sleep(0.01)
+            assert [e.data["status"] for e in events] == ["expired"]
+            assert store.list_adoption_proposals("pending")[0]["digest"] == digest
+        finally:
+            await store.stop_adoption_retries()
+
+    @pytest.mark.asyncio
+    async def test_owner_can_reject_while_waiting(self, tmp_path):
+        rt, digest, _, _, _ = await self._setup(tmp_path)
+        store = rt.tool_store
+        await store.propose_adoption("worker", digest, reason="r")
+        await store.approve_adoption(digest)
+        await store.stop_adoption_retries()
+        assert store.reject_adoption(digest)["status"] == "rejected"
+        assert "error" in await store.retry_adoption(digest)
+
+
 class TestVetting:
     """Validator rail (docs/tool_substrate.md — Vetting section):
     inspect → attest, self-vet rejection, report requirement, and the

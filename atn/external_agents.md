@@ -68,6 +68,8 @@ needs the owner.
    needs adopting first: `adopt_tool` (`digest`, `reason`) proposes it, the
    owner approves. Adopting a composite also proposes every dependency it
    declares that isn't installed yet, so one approval installs the set.
+   Code lives only with the author and adopters: if none is online, the
+   approval stays pending and the daemon installs it once one connects.
 3. **Review** after each piece of work (section 3). Every `use_tool` reply
    carries `review_due`: the tools you used since your last review.
 

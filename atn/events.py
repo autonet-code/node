@@ -104,6 +104,12 @@ class EventType(Enum):
     # gone), reason (fallback code or ""), detail.
     HARNESS_SWAP_STATUS = "harness.swap_status"
 
+    # Background adoption outcome (atn/tool_store.py, #46): an approval kept
+    # pending because no holder of the code was online, later resolved by
+    # the retry loop. data: digest, name, proposed_by, status (installed |
+    # failed | expired), plus result | error | note.
+    TOOL_ADOPTION = "tool.adoption"
+
     # Security (stub — full monitor is the security track)
     SECURITY_ALARM = "security.alarm"
     # Secret-access audit trail (names-only; see runtime/secret_audit.py).
