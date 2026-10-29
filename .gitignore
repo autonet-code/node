@@ -65,6 +65,7 @@ cache/
 angles/
 
 # GPU tokenomics sim, local for now (2026-10-27)
+# moved to C:/code/autonet-sims (2026-10-29)
 experiments/econ_gpu/
 
 # Private keys never live in deployments/ (addresses only). Key records go

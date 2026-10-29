@@ -1128,7 +1128,7 @@ Ratified in discussion 2026-10-27 after the S0 local run
    with the network). Until then it earns nothing (no escrow). Households
    without REP do not count toward B, so free wallets cannot fill it, and
    no household is treated differently for its size. A and B are to be
-   chosen from the GPU sim (`experiments/econ_gpu`) before the close
+   chosen from the GPU sim (`C:deutonet-sims`) before the close
    changes.
 
 ## Decision (2026-10-28): ATN genesis claim for forks and splits

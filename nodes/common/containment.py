@@ -14,7 +14,7 @@ CONTAINMENT_DENIED = "denied"
 CONTAINMENT_STRICT = "strict"
 CONTAINMENT_DECLARED = "declared"
 # trust_mass_bps 10 (0.1% of REP supply), not 200: at 2% the GPU sim denied
-# 0 of 933 harmful tools at 100k households (experiments/econ_gpu REPORT 3.4).
+# 0 of 933 harmful tools at 100k households (autonet-sims REPORT 3.4).
 CONTAINMENT_DEFAULTS = {"deny_harm": 50.0, "trust_harm": 10.0,
                         "trust_mass_bps": 10.0}
 # Breakthrough gate defaults (bps of REP supply, bps of REP-holding

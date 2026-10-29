@@ -354,7 +354,7 @@ def reviewer_weights(rounds: List[Dict[str, Any]],
                 nov += 1.0 / (1.0 + (m / supply if supply > 0 else 0.0))
             nov /= len(scored)
             # Accuracy alone, not stake: weighting by ATN staked let money buy
-            # REP through reviews (GPU sim, experiments/econ_gpu REPORT 3).
+            # REP through reviews (GPU sim, autonet-sims REPORT 3).
             w = (int(acc) / 10 ** 18) * nov
             if w > 0:
                 key = str(v["reviewer"]).lower()

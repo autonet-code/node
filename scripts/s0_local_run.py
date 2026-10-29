@@ -243,7 +243,7 @@ def deploy_jurisdiction(run: Path, usdc: str, owners: List[str], bootstrap: str)
         # Reviews reveal and finalize within minutes, not the default day.
         "TOOLBOND_REVEAL_WINDOW_SECS": "60",
         # Harm settles from 0.1% of REP supply, matching containment's
-        # default (GPU sim, experiments/econ_gpu REPORT 3.4).
+        # default (GPU sim, autonet-sims REPORT 3.4).
         "TOOLBOND_HARM_QUORUM_BPS": "10",
         "EPOCH_TARGET_SHARE": str(EPOCH_TARGET_SHARE),
         "BOOTSTRAP": bootstrap,

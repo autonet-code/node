@@ -225,7 +225,7 @@ member list (`MEMBERS` / `AMOUNTS` in dao's
 merkle root (`claimGenesis`, `scripts/build_atn_genesis.py`, Decision
 2026-10-28 in `tool_substrate.md`). Both are snapshots of the old chain at a
 named base block, so anyone can re-run the script and check the roots.
-Validated in the GPU tokenomics sim (`experiments/econ_gpu`, E6), except
+Validated in the GPU tokenomics sim (`C:deutonet-sims`, E6), except
 the fork, which is argued, not simulated.
 
 **Split** (a network cut leaves some households unable to reach the

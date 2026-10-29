@@ -3,7 +3,7 @@
 One page, kept current. Where this disagrees with older text elsewhere,
 this wins; the reasoning behind each rule is in `tool_substrate.md`
 (Decision sections), `resilience.md` and the GPU sim report
-(`experiments/econ_gpu/REPORT.md`, local only). Every number below is a
+(`C:deutonet-simsREPORT.md`, local only). Every number below is a
 default the DAO can change; changing any rule needs the owner's sign-off.
 
 ## Who is who
