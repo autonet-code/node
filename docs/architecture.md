@@ -40,12 +40,14 @@ coding agent's start is the only start (today it errors and says to run
 `atn`).
 
 **App (`C:\code\atn_web_apps`, Flutter, branch `unified-apps`; never
-`atn_web`).** The owner's dashboard and wallet. The avatar opens the
-Household page: owner (wallet, ATN, voice, claims), jurisdiction (contracts,
-charter, epochs, switch), operator key (including delegating REP to the
-operator, the one governance write the app does; everything else in
-governance is werule's), agents (registration, owner binding), network, and
-governance read-only with a link to werule. Each agent's window keeps only
+`atn_web`).** The owner's dashboard and wallet. The avatar opens two
+tabs. Household: owner (wallet, ATN, voice, claims), operator key
+(including delegating REP to the operator, the one governance write the
+app does; everything else in governance is werule's), agents
+(registration, owner binding), governance read-only with a link to werule,
+and this daemon's network. Jurisdiction: contracts, charter, epochs, the
+switch, and the Substrate view. The home section keeps Docs and the
+Novelty map. Each agent's window keeps only
 its own identity, registration indicator and substrate position. The app
 also approves adoptions. It talks to the daemon's 7700 locally or 7701
 remotely. Agents don't need it.
