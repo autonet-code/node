@@ -328,6 +328,9 @@ class RPBConfig:
     # ``enabled``); resolve_network_registry() then fills the chain addresses
     # from the packaged registry and sets ``network_joined``.
     network_joined: bool = False
+    # Runtime-only: why the registry's addresses were not applied (the
+    # operator's dao_address names a different DAO), "" when they were.
+    registry_conflict: str = ""
     # Keys the operator set in config.yaml; the registry never replaces them.
     explicit_fields: list[str] = field(default_factory=list, repr=False)
 
@@ -1052,6 +1055,11 @@ def _seed_defaults() -> dict[str, Any]:
             "gas_decimals": 18, "jurisdiction_id": "autonet"}
 
 
+# Registry fields that describe the chain, not a DAO's contracts.
+_NETWORK_SEED_FIELDS = frozenset({"rpc_url", "chain_id", "gas_symbol", "gas_decimals",
+                                  "jurisdiction_id", "bootstrap_peers"})
+
+
 def resolve_network_registry(an: "RPBConfig", *, force: bool = False) -> bool:
     """Join the network: fill ``an`` (in place) from the registry.
 
@@ -1064,8 +1072,22 @@ def resolve_network_registry(an: "RPBConfig", *, force: bool = False) -> bool:
     seed = _load_registry_seed(getattr(an, "jurisdiction_id", "") or "autonet")
     explicit = set(getattr(an, "explicit_fields", ()) or ())
     defaults = _seed_defaults()
+    # A dao_address set in config.yaml that is not the registry's DAO: the
+    # registry's contracts belong to another jurisdiction, and mixing them
+    # would run one DAO's governance over another's Substrate. Take only
+    # the network fields and say why the rest is missing.
+    seed_dao = str(seed.get("dao_address") or "")
+    mismatch = ("dao_address" in explicit and seed_dao
+                and seed_dao.lower() != str(an.dao_address or "").lower())
+    an.registry_conflict = (
+        f"config.yaml sets dao_address {an.dao_address}, but the registry's "
+        f"jurisdiction is {seed_dao}; its contract addresses were not applied. "
+        "Remove dao_address from config.yaml or switch jurisdiction."
+        if mismatch else "")
     for key, value in seed.items():
         if key in explicit or not hasattr(an, key):
+            continue
+        if mismatch and key not in _NETWORK_SEED_FIELDS:
             continue
         current = getattr(an, key)
         # An empty list is unset too (bootstrap_peers): ``[] in ("", 0,

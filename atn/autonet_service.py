@@ -312,6 +312,9 @@ class AutonetBridge:
 
         errors: list[str] = []
         if self.network_joined:
+            conflict = getattr(c, "registry_conflict", "")
+            if conflict:
+                errors.append(conflict)
             missing = missing_prerequisites(c)
             if missing:
                 errors.append("missing jurisdiction addresses: " + ", ".join(missing))

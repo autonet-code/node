@@ -350,3 +350,22 @@ def test_boot_key_follows_the_env_registry_not_the_packaged_one(monkeypatch, tmp
     assert cfg.boot_jurisdiction_key(tmp_path) == "31337:0xda0da0"
     assert cfg.boot_jurisdiction_key(tmp_path) == "31337:0xda0da0"
     assert calls == ["0xREG"]
+
+
+def test_explicit_dao_of_another_jurisdiction_takes_no_contracts(
+        _isolate_registry, tmp_path, monkeypatch):
+    """A dao_address in config.yaml that is not the registry's DAO must not
+    pick up the registry's contracts (another jurisdiction's Substrate);
+    the daemon says why instead."""
+    _no_dotenv(monkeypatch)
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("autonet:\n  dao_address: '0xOLDDAO'\n", encoding="utf-8")
+    an = cfg.load_config(cfg_file).autonet
+    cfg.resolve_network_registry(an)
+
+    assert an.dao_address == "0xOLDDAO"
+    assert an.substrate_address == ""
+    assert an.rpc_url == "https://rpc.example.test"
+    assert "0xOLDDAO" in an.registry_conflict
+    assert "substrate" in [m.lower() for m in cfg.missing_prerequisites(an)] or \
+        cfg.missing_prerequisites(an)
