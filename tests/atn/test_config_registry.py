@@ -369,3 +369,13 @@ def test_explicit_dao_of_another_jurisdiction_takes_no_contracts(
     assert "0xOLDDAO" in an.registry_conflict
     assert "substrate" in [m.lower() for m in cfg.missing_prerequisites(an)] or \
         cfg.missing_prerequisites(an)
+
+
+def test_pre_join_dao_is_the_packaged_registry_dao(_isolate_registry, tmp_path,
+                                                   monkeypatch):
+    """Before joining, the daemon names the packaged registry's DAO, the same
+    one its boot key uses, not an older built-in constant."""
+    _no_dotenv(monkeypatch)
+    an = cfg.load_config(tmp_path / "missing.yaml").autonet
+    assert an.network_joined is False
+    assert an.dao_address == "0xDA0000000000000000000000000000000000dead"

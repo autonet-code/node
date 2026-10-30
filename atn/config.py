@@ -336,9 +336,9 @@ class RPBConfig:
 
     def __post_init__(self) -> None:
         """Apply jurisdiction defaults for empty fields."""
-        from .jurisdiction import GOVERNOR_ADDRESS, RPC_URL, CHAIN_ID
+        from .jurisdiction import RPC_URL, CHAIN_ID
         if not self.dao_address:
-            self.dao_address = GOVERNOR_ADDRESS
+            self.dao_address = _default_dao()
         if not self.rpc_url:
             self.rpc_url = RPC_URL
         if not self.chain_id:
@@ -1046,12 +1046,27 @@ def _selection_data_dir() -> Path | None:
     return _SELECTION_DATA_DIR
 
 
+def _default_dao() -> str:
+    """The DAO a daemon names before it joins: the packaged registry.json's,
+    so the pre-join status and the boot key (boot_jurisdiction_key) agree;
+    atn.jurisdiction's constant only when the registry names none."""
+    try:
+        data = json.loads(_packaged_registry_path().read_text(encoding="utf-8"))
+        dao = str(data["jurisdictions"]["autonet"]["contracts"].get("dao") or "")
+    except Exception:
+        dao = ""
+    if dao:
+        return dao
+    from .jurisdiction import GOVERNOR_ADDRESS
+    return GOVERNOR_ADDRESS
+
+
 def _seed_defaults() -> dict[str, Any]:
     """Values an RPBConfig holds when nobody set them (dataclass defaults and
     the atn.jurisdiction fallbacks). The registry may replace these."""
-    from .jurisdiction import GOVERNOR_ADDRESS, RPC_URL, CHAIN_ID
+    from .jurisdiction import RPC_URL, CHAIN_ID
     return {"rpc_url": RPC_URL, "chain_id": CHAIN_ID,
-            "dao_address": GOVERNOR_ADDRESS, "gas_symbol": "XTZ",
+            "dao_address": _default_dao(), "gas_symbol": "XTZ",
             "gas_decimals": 18, "jurisdiction_id": "autonet"}
 
 
