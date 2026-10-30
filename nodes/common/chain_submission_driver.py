@@ -256,6 +256,8 @@ class ChainSubmissionDriver:
                 out["carry_cid"] = fed.carry_cid
             except Exception as e:
                 logger.warning("carry-over bundle blob put failed: %s", e)
+        self._offer_to_relays(fed.world_cid if fed.world_checkpoint_blob else "",
+                              fed.carry_cid if carry_blob else "")
 
         prepared = self._prepare(fed, out)
         if prepared is not None:
@@ -388,14 +390,25 @@ class ChainSubmissionDriver:
         """Every daemon computed the identical anchor blobs; serve them so
         per-agent submitters (and rejoining peers) can fetch them from
         anyone once the anchor lands."""
+        cids = []
         for blob, what in ((result.agent_mint_blob, "agent mint"),
                            (result.payload_bytes, "payload")):
             if not blob:
                 continue
             try:
-                self._blob_resolver.put(blob)
+                cids.append(self._blob_resolver.put(blob))
             except Exception as e:
                 logger.warning("%s blob put failed: %s", what, e)
+        self._offer_to_relays(*cids)
+
+    def _offer_to_relays(self, *cids: str) -> None:
+        """Relays keep the blobs an anchor commits (issue #44): without
+        them a joiner whose close diverged can only fetch the anchored
+        state from daemons that closed the same way, and those may all be
+        offline."""
+        offer = getattr(self._blob_resolver, "offer_to_relays", None)
+        if offer is not None:
+            offer([c for c in cids if c])
 
     def _anchor_direct(self, prepared: Any) -> AnchorResult:
         result = self._anchorer.submit_prepared(prepared)

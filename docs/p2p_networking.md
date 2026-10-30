@@ -72,7 +72,11 @@ Home users need no network setup. With no `announce_addrs`:
   (`<data>/relay.key`), subscribes to each jurisdiction it serves
   (`--jurisdiction <chain_id>:<DAO>`) so gossip crosses it between peers that
   are not connected to each other, relays and caches blobs on disk,
-  forwards service calls one hop, and answers reachability checks. No close, no chain, no agents, no model. It
+  keeps the state blobs daemons offer it after each close (anchor payload,
+  carry-over, world checkpoint, agent mints, over
+  `/autonet/blob-offer/1.0.0`; it fetches what it lacks from the offerer),
+  so a joiner can install the anchored state when every daemon that
+  computed it is offline (issue #44), forwards service calls one hop, and answers reachability checks. No close, no chain, no agents, no model. It
   prints its full multiaddr on start: that is the address to publish.
 
 ```

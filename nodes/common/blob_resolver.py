@@ -217,6 +217,23 @@ class LibP2PBlobResolver:
         self._server.put(blob)
         return blob
 
+    def offer_to_relays(self, cids: list) -> None:
+        """Hand blobs we hold to the connected relays (issue #44) without
+        waiting: they fetch what they lack and keep it, so the state an
+        anchor commits stays fetchable when we and every other daemon
+        that holds it are offline."""
+        token = getattr(self._host, "_trio_token", None)
+        nursery = getattr(self._host, "_nursery", None)
+        cids = [c for c in cids if c]
+        if token is None or nursery is None or not cids:
+            return
+        try:
+            import trio
+            trio.from_thread.run_sync(
+                nursery.start_soon, self._host.offer_blobs, cids, trio_token=token)
+        except Exception as e:
+            logger.debug("LibP2PBlobResolver: offer of %d blobs failed: %s", len(cids), e)
+
     def _known_peer_ids(self) -> list:
         """Distinct peers worth asking: connected peers first, then peers
         known only from capability gossip. Our own id is skipped."""

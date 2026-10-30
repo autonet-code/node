@@ -53,7 +53,8 @@ also approves adoptions. It talks to the daemon's 7700 locally or 7701
 remotely. Agents don't need it.
 
 **Relay (`atn relay`).** A networking-only node: seed, gossip and blob
-relay, a short log of event batches for catch-up, reach checks. No close, chain or agents. Seeds are listed in the
+relay, a short log of event batches for catch-up, the state blobs each
+anchor commits (daemons offer them after every close), reach checks. No close, chain or agents. Seeds are listed in the
 DAO Registry by hostname (`jurisdiction.<id>.bootstrap`, never an IP).
 
 **Chain.** In this repo (`contracts/core/`): `Substrate.sol` (ATN, epoch

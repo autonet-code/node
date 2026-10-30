@@ -163,6 +163,31 @@ def test_direct_winner_anchors_writes_blob_then_submits_agents(fake_submit):
     driver._governed.build.assert_not_called()
 
 
+def test_close_offers_the_state_blobs_to_relays(fake_submit):
+    """Issue #44: the world checkpoint, carry-over and anchor blobs are
+    offered to the relays, so they outlive the daemons that hold them."""
+    import hashlib
+
+    class OfferingResolver(InMemoryBlobResolver):
+        def __init__(self):
+            super().__init__()
+            self.offered = []
+
+        def offer_to_relays(self, cids):
+            self.offered.extend(cids)
+
+    driver = _make_driver(agents=AGENTS)
+    driver._blob_resolver = OfferingResolver()
+    fed = _fed("e1", is_winner=True)
+    fed.world_checkpoint_blob, fed.world_cid = b"world", hashlib.sha256(b"world").hexdigest()
+    fed.carry_bundle_blob, fed.carry_cid = b"carry", hashlib.sha256(b"carry").hexdigest()
+    driver.handle_federated_close(fed)
+    offered = driver._blob_resolver.offered
+    assert fed.world_cid in offered and fed.carry_cid in offered
+    assert hashlib.sha256(b"blob-bytes-here").hexdigest() in offered
+    assert all(driver._blob_resolver.has(c) for c in offered)
+
+
 def test_direct_non_winner_skips_anchor_but_submits(fake_submit):
     driver = _make_driver(agents=AGENTS)
     out = driver.handle_federated_close(_fed("e1", is_winner=False))

@@ -7,7 +7,9 @@ A seed and meeting point for daemons, light enough for a small server:
     so the gossipsub mesh forwards events between peers that are not
     connected to each other (NAT'd daemons dial out to the relay);
   - a blob relay: requests it cannot answer are forwarded one hop and the
-    blobs it relays are cached on disk;
+    blobs it relays are cached on disk; after each close daemons offer it
+    the epoch's state blobs (payload, carry-over, world checkpoint, agent
+    mints), which it fetches and keeps (issue #44);
   - a batch log: the event batches it relays are kept for a while and
     served to daemons catching up on an epoch (``/autonet/batches/1.0.0``,
     issue #41);
@@ -137,6 +139,9 @@ async def run(args: argparse.Namespace) -> None:
         server = host_blob_server(host)
         server.add_source(store.get_bytes_local)
         host.set_blob_relay_sink(lambda _cid, blob: store.add_bytes(blob))
+        # Keep the blobs daemons offer after a close (the anchored state,
+        # issue #44), so it outlives the daemons that computed it.
+        host.set_blob_offer_store(store.has, store.add_bytes)
 
         def keep(log: BatchLog):
             def on_batch(_topic: str, data: bytes) -> None:

@@ -167,3 +167,58 @@ async def test_service_requests_cross_the_relay(tmp_path):
             assert reply == {"msg_id": "r1", "ok": True, "result": "served by c"}
             assert own["ok"] is False and "serves no services" in own["error"]
         nursery.cancel_scope.cancel()
+
+
+@trio_test
+async def test_offered_state_outlives_the_daemon_that_computed_it(tmp_path):
+    """Issue #44: a daemon offers its close's state blobs to the relay; the
+    relay keeps them, so a joiner can fetch them after that daemon is gone."""
+    args = relay.parse_args([
+        "--port", "0", "--host", "127.0.0.1", "--no-upnp",
+        "--jurisdiction", JURISDICTION, "--data-dir", str(tmp_path / "relay"),
+        "--advertise-interval", "0.5"])
+    blob = b"anchored-payload-only-c-holds"
+    cid = hashlib.sha256(blob).hexdigest()
+
+    async with trio.open_nursery() as nursery:
+        relay_addr = []
+
+        async def _relay():
+            import builtins
+            real_print = builtins.print
+
+            def _capture(*a, **kw):
+                if a and str(a[0]).startswith("relay address: "):
+                    relay_addr.append(str(a[0])[len("relay address: "):])
+                real_print(*a, **kw)
+            builtins.print = _capture
+            try:
+                await relay.run(args)
+            finally:
+                builtins.print = real_print
+
+        nursery.start_soon(_relay)
+        with trio.fail_after(10):
+            while not relay_addr:
+                await trio.sleep(0.05)
+        relay_pid = relay_addr[0].split("/p2p/")[1]
+
+        c = AutonetHost(node_id="closer", listen_host="127.0.0.1")
+        async with c.run():
+            assert await c.connect_to_peer(relay_addr[0])
+            # The relay's capability (role "relay") arrives with its adverts.
+            with trio.fail_after(15):
+                while relay_pid not in c.known_capabilities:
+                    await trio.sleep(0.1)
+            host_blob_server(c).put(blob)
+            assert await c.offer_blobs([cid, "not-a-cid"]) == 1
+            assert await c.offer_blobs([cid]) == 0   # already kept
+
+        a = AutonetHost(node_id="joiner", listen_host="127.0.0.1")
+        async with a.run():
+            assert await a.connect_to_peer(relay_addr[0])
+            with trio.fail_after(15):
+                fetched = await a.fetch_blob_from_peers([relay_pid], cid, hops=0)
+            assert fetched == blob
+
+        nursery.cancel_scope.cancel()

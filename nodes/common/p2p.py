@@ -164,6 +164,13 @@ REACH_PROTOCOL = TProtocol("/autonet/reach/1.0.0")
 # batches a peer (daemon or relay) holds for that topic signed after
 # ``since``. Not forwarded: relays answer from their own log.
 BATCHES_PROTOCOL = TProtocol("/autonet/batches/1.0.0")
+# Blob offers (issue #44): {"cids": [...]} in, {"kept": n} out. The
+# offering peer names blobs it holds; a peer that keeps blobs for others (a
+# relay) fetches the ones it lacks back from the offerer, direct only, and
+# stores them, so the state an anchor commits outlives the daemons that
+# computed it. Everyone else answers {"kept": 0}.
+BLOB_OFFER_PROTOCOL = TProtocol("/autonet/blob-offer/1.0.0")
+BLOB_OFFER_MAX_CIDS = 16
 GUILD_GOSSIP_TOPIC_PREFIX = "/autonet/guild/"
 PROVIDER_REGISTRY_TOPIC = "/rpb/provider-registry/"
 
@@ -521,6 +528,7 @@ class AutonetHost:
         self._embedding_handler: Optional[Callable] = None  # async (peer_id, metadata, tensor_bytes)
         self._service_handler: Optional[Callable] = None    # async (msg: dict) -> dict, in trio
         self._batch_sources: Dict[str, Callable] = {}       # topic -> serve(request) -> dict
+        self._blob_offer_store: Optional[Tuple[Callable, Callable]] = None  # (has(cid), put(bytes)), relays only
         # Longest a forwarding peer waits for the target's reply (the
         # requester's own timeout is honoured when it is shorter).
         self.service_relay_timeout = 600.0
@@ -2076,6 +2084,70 @@ class AutonetHost:
                 nursery.start_soon(ask, pid)
         return out
 
+    # =========================================================================
+    # Blob offers (issue #44)
+    # =========================================================================
+
+    def set_blob_offer_store(self, has: Optional[Callable[[str], bool]],
+                             put: Optional[Callable[[bytes], Any]]) -> None:
+        """Accept blob offers: ``has(cid)`` skips what is already kept,
+        ``put(blob)`` keeps a fetched one. None (the default) declines."""
+        self._blob_offer_store = (has, put) if has and put else None
+
+    async def _handle_blob_offer_stream(self, stream):
+        kept = 0
+        try:
+            request = json.loads((await _read_frame_no_close(stream)).decode("utf-8"))
+            store = self._blob_offer_store
+            cids = [str(c) for c in (request.get("cids") or [])][:BLOB_OFFER_MAX_CIDS]
+            if store is not None:
+                has, put = store
+                offerer = stream.muxed_conn.peer_id
+                for cid in cids:
+                    if len(cid) != 64 or not all(ch in "0123456789abcdef" for ch in cid) or has(cid):
+                        continue
+                    # Direct only: the offerer said it holds the blob.
+                    blob = await self.fetch_blob(
+                        offerer, cid, timeout=self._blob_relay_timeout * 4, hops=0)
+                    if blob is not None:
+                        put(blob)
+                        kept += 1
+        except Exception as e:
+            self.logger.debug("blob offer failed: %s", e)
+        try:
+            await _write_frame_no_close(stream, json.dumps({"kept": kept}).encode("utf-8"))
+            await stream.close()
+        except Exception:
+            pass
+
+    async def offer_blobs(self, cids: List[str], timeout: float = 60.0) -> int:
+        """Offer blobs this host holds to every connected relay, so they
+        stay fetchable after this host goes offline. Returns how many the
+        relays kept (0 when they already had them)."""
+        if not self._host or not cids:
+            return 0
+        relays = [p for p in self.get_connected_peers()
+                  if "relay" in (getattr(self._known_capabilities.get(p), "roles", None) or [])]
+        frame = json.dumps({"cids": list(cids)[:BLOB_OFFER_MAX_CIDS]}).encode("utf-8")
+        kept = [0]
+
+        async def offer(pid: str) -> None:
+            with trio.move_on_after(timeout):
+                try:
+                    stream = await self._host.new_stream(
+                        PeerID.from_base58(pid), [BLOB_OFFER_PROTOCOL])
+                    await _write_frame_no_close(stream, frame)
+                    raw = await _read_frame_no_close(stream)
+                    await stream.close()
+                    kept[0] += int((json.loads(raw.decode("utf-8")) if raw else {}).get("kept", 0))
+                except Exception as e:
+                    self.logger.debug("blob offer to %s failed: %s", pid[:16], e)
+
+        async with trio.open_nursery() as nursery:
+            for pid in relays:
+                nursery.start_soon(offer, pid)
+        return kept[0]
+
     def set_inference_advertisement(
         self,
         *,
@@ -2371,6 +2443,9 @@ class AutonetHost:
         )
         self._host.set_stream_handler(
             BATCHES_PROTOCOL, self._handle_batches_stream
+        )
+        self._host.set_stream_handler(
+            BLOB_OFFER_PROTOCOL, self._handle_blob_offer_stream
         )
 
     # =========================================================================

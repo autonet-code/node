@@ -406,10 +406,12 @@ class FederatedCloseDriver:
                 self._local_epochs.pop(0)
                 continue
             logger.warning(
-                "federated close: epoch %d was anchored as %s, not as this "
-                "daemon closed it (%s); rewinding %d local epoch(s) onto the "
-                "anchored state", mine["number"],
-                (got or {}).get("epoch_id", "?"), mine["epoch_id"],
+                "federated close: epoch %d was anchored as %s root %s, not as "
+                "this daemon closed it (%s root %s); rewinding %d local "
+                "epoch(s) onto the anchored state", mine["number"],
+                (got or {}).get("epoch_id", "?"),
+                str((got or {}).get("root", "?"))[:16],
+                mine["epoch_id"], str(mine["root"])[:16],
                 len(self._local_epochs))
             self.rewinds += 1
             restore = getattr(self.gossip, "restore_epoch_batches", None)
