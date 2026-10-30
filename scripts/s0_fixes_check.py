@@ -16,6 +16,8 @@ epochs keep closing:
   #41 batch catch-up: h3 stays down about a minute mid-epoch, comes back,
       and its next closes must match the other daemons' closes (same epoch
       id, root and per-sender batch set) after catching up missed batches.
+  #44 relay keeps anchored state: every anchor's payload, carry-over and
+      world checkpoint blobs are in the relay's store (daemons offer them).
   #42 seed refresh: the only relay is killed and restarted (daemons must
       reconnect on their own), then a second relay is started and added to
       the Registry bootstrap key (daemons must dial it without a restart).
@@ -450,6 +452,27 @@ async def check_catchup(h3: Household, hs: List[Household], procs: s0.Procs, w3,
             anchored_epoch_ids=anchored)
 
 
+def check_relay_state(w3, j, relay_dir: Path, rep: Report) -> None:
+    """#44: the relay holds every anchored epoch's state (payload, and the
+    carry-over and world checkpoint it names), offered by the daemons."""
+    sub = w3.eth.contract(address=w3.to_checksum_address(j["autonet"]["substrate"]),
+                          abi=s0.abi("Substrate"))
+    blobs = relay_dir / "blobs"
+    rows = []
+    for i in range(int(sub.functions.anchorCount().call())):
+        a = sub.functions.getAnchor(i).call()
+        ph = bytes(a[5]).hex()
+        row = {"epoch": a[0], "payload": (blobs / ph).exists()}
+        if row["payload"]:
+            payload = json.loads((blobs / ph).read_bytes())
+            for k in ("carry_cid", "world_cid"):
+                if payload.get(k):
+                    row[k] = (blobs / payload[k]).exists()
+        rows.append(row)
+    ok = bool(rows) and all(all(v for k, v in r.items() if k != "epoch") for r in rows)
+    rep.set("#44 relay keeps anchored state", ok, anchors=rows)
+
+
 async def check_seeds(hs: List[Household], procs: s0.Procs, w3, j, run: Path,
                       relay1: subprocess.Popen, relay1_args: List[str], relay1_peer: str,
                       rep: Report) -> None:
@@ -597,6 +620,10 @@ async def amain() -> int:
             await check_catchup(h3, hs, procs, w3, j, rep, down_since)
         except Exception:
             rep.set("#41 batch catch-up", False, crash=traceback.format_exc()[-1500:])
+        try:
+            check_relay_state(w3, j, relay_dir, rep)
+        except Exception:
+            rep.set("#44 relay keeps anchored state", False, crash=traceback.format_exc()[-1500:])
         try:
             await check_seeds(hs, procs, w3, j, run, relay1, relay1_args, peer, rep)
         except Exception:
