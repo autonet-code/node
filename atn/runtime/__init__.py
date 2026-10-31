@@ -72,9 +72,17 @@ class Runtime:
         self.data_dir = data_dir
         self._config = config or ATNConfig()
         # One jurisdiction per process (docs/multi_jurisdiction.md 1): the
-        # saved selection in the data dir, else the packaged one.
-        from ..config import boot_jurisdiction_key, set_selection_data_dir
+        # saved selection in the data dir, else none (issue #50). A data dir
+        # from before #50 whose agents are registered in the packaged
+        # jurisdiction keeps it.
+        from ..config import (boot_jurisdiction_key, migrate_legacy_selection,
+                              set_selection_data_dir)
         set_selection_data_dir(getattr(self._config, "data_dir", None))
+        try:
+            migrate_legacy_selection(getattr(self._config, "data_dir", None),
+                                     getattr(self._config, "agents_dir", None))
+        except Exception:
+            log.warning("legacy jurisdiction migration failed", exc_info=True)
         self.jurisdiction = boot_jurisdiction_key(getattr(self._config, "data_dir", None))
 
         # Single-writer input arbitration (P3). Runtime-owned; a gate ABOVE

@@ -63,7 +63,45 @@ def _isolate_registry(tmp_path, monkeypatch):
         raise AssertionError(f"unexpected registry fetch: {url}")
 
     monkeypatch.setattr(cfg, "_fetch_registry", _no_network)
-    return {"packaged": packaged, "fetched": fetched, "tmp": tmp_path}
+    # The owner chose the packaged jurisdiction (issue #50: without a
+    # choice nothing is joined; see the no-jurisdiction tests below).
+    monkeypatch.delenv("ATN_JURISDICTION_REGISTRY", raising=False)
+    data_dir = tmp_path / "home"
+    cfg.save_selected_jurisdiction({"packaged": True}, data_dir)
+    monkeypatch.setattr(cfg, "_SELECTION_DATA_DIR", data_dir)
+    return {"packaged": packaged, "fetched": fetched, "tmp": tmp_path,
+            "data_dir": data_dir}
+
+
+def test_no_jurisdiction_joins_nothing(_isolate_registry, monkeypatch):
+    """Issue #50: with no selection and no env, the daemon has no
+    jurisdiction; the packaged one is never joined silently."""
+    (_isolate_registry["data_dir"] / cfg.SELECTION_FILE).unlink()
+    assert not cfg.jurisdiction_configured()
+    assert cfg._load_registry_seed("autonet") == {}
+    assert cfg.boot_jurisdiction_key(_isolate_registry["data_dir"]) == ""
+    assert cfg.RPBConfig().dao_address == ""
+
+
+def test_packaged_selection_names_the_packaged_dao(_isolate_registry):
+    sel = cfg.load_selected_jurisdiction(_isolate_registry["data_dir"])
+    assert sel["packaged"] and sel["dao"] == _SAMPLE["jurisdictions"]["autonet"]["contracts"]["dao"]
+    assert cfg.boot_jurisdiction_key(_isolate_registry["data_dir"]) == (
+        "424242:0xda0000000000000000000000000000000000dead")
+
+
+def test_legacy_registered_agent_keeps_the_packaged_jurisdiction(_isolate_registry, tmp_path):
+    data_dir = _isolate_registry["data_dir"]
+    (data_dir / cfg.SELECTION_FILE).unlink()
+    agents = tmp_path / "agents"
+    (agents / "a1").mkdir(parents=True)
+    (agents / "a2").mkdir()
+    (agents / "a1" / "identity.json").write_text(json.dumps({"registrations": {}}))
+    assert not cfg.migrate_legacy_selection(data_dir, agents)
+    (agents / "a2" / "identity.json").write_text(json.dumps({"registrations": {
+        "424242:0xda0000000000000000000000000000000000dead": "0x01"}}))
+    assert cfg.migrate_legacy_selection(data_dir, agents)
+    assert cfg.load_selected_jurisdiction(data_dir)["packaged"]
 
 
 def _no_dotenv(monkeypatch):

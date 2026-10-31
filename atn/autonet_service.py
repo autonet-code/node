@@ -105,6 +105,8 @@ class AutonetState:
     tool_bond_address: str = ""
     epoch_rules: str = ""
     jurisdiction_errors: list[str] = field(default_factory=list)
+    # False until a jurisdiction is chosen (issue #50).
+    jurisdiction_configured: bool = True
     # Constitution CID loaded from registry
     constitution_cid: str = ""
     # Full constitution text (loaded from RPB.constitution() or local file)
@@ -155,6 +157,7 @@ class AutonetState:
             "tool_bond_address": self.tool_bond_address,
             "epoch_rules": self.epoch_rules,
             "jurisdiction_errors": list(self.jurisdiction_errors),
+            "jurisdiction_configured": self.jurisdiction_configured,
             # The active charter's axes, in coordinate order: what the UI
             # draws (a DAO defines its own; docs/multi_jurisdiction.md 5).
             "charter_axes": _charter_axes(),
@@ -311,7 +314,13 @@ class AutonetBridge:
         st.jurisdiction_key = jurisdiction_key(c)
 
         errors: list[str] = []
-        if self.network_joined:
+        from .config import NO_JURISDICTION_MESSAGE, jurisdiction_configured
+        # Addresses set in config.yaml configure a jurisdiction too.
+        st.jurisdiction_configured = (jurisdiction_configured()
+                                      or bool(getattr(c, "substrate_address", "")))
+        if self.network_joined and not st.jurisdiction_configured:
+            errors.append(NO_JURISDICTION_MESSAGE)
+        elif self.network_joined:
             conflict = getattr(c, "registry_conflict", "")
             if conflict:
                 errors.append(conflict)

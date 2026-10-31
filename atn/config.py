@@ -790,8 +790,11 @@ _REGISTRY_READ_ABI = [
 #
 # A daemon participates in one jurisdiction at a time. The owner's choice is
 # saved as <data_dir>/jurisdiction.json: {chain_id, rpc_url, dao_registry,
-# dao, name}. Switching rewrites it and restarts the daemon. Without it the
-# daemon uses the packaged registry.json's jurisdiction.
+# dao, name}, or {packaged: true} for the jurisdiction this release ships
+# (registry.json). Switching rewrites it and restarts the daemon. Without it
+# (and without ATN_JURISDICTION_REGISTRY / ATN_REGISTRY_URL) the daemon has no
+# jurisdiction: agents and tools work locally, nothing joins a network, and
+# the CLI and the app say so (issue #50).
 
 SELECTION_FILE = "jurisdiction.json"
 
@@ -811,10 +814,73 @@ def load_selected_jurisdiction(data_dir: Path | None = None) -> dict[str, Any] |
     except Exception:
         log.warning("jurisdiction selection %s unreadable; ignoring it", path)
         return None
+    if isinstance(sel, dict) and sel.get("packaged"):
+        pk = packaged_jurisdiction()
+        if pk is None:
+            log.warning("network registry unavailable: %s names the packaged "
+                        "jurisdiction, but this release ships none", path)
+        return pk
     if not isinstance(sel, dict) or not sel.get("dao_registry") or not sel.get("chain_id"):
         log.warning("jurisdiction selection %s incomplete; ignoring it", path)
         return None
     return sel
+
+
+def packaged_jurisdiction() -> dict[str, Any] | None:
+    """The jurisdiction this release ships (registry.json), shaped like a
+    selection plus ``packaged: True``; None when registry.json names none."""
+    try:
+        data = json.loads(_packaged_registry_path().read_text(encoding="utf-8"))
+        entry = data["jurisdictions"]["autonet"]
+    except Exception:
+        return None
+    contracts, net = entry.get("contracts", {}), entry.get("network", {})
+    if not contracts.get("dao") or not net.get("chain_id"):
+        return None
+    return {"packaged": True, "chain_id": int(net["chain_id"]),
+            "rpc_url": str(net.get("rpc_url") or ""),
+            "dao_registry": str(contracts.get("dao_registry") or ""),
+            "dao": str(contracts["dao"]), "name": str(entry.get("name") or "")}
+
+
+NO_JURISDICTION_MESSAGE = (
+    "No jurisdiction configured. Agents and tools work locally, but nothing "
+    "joins a network until you choose one: the app's Jurisdiction tab, or "
+    "`atn jurisdiction packaged` (or `atn jurisdiction <dao_registry> "
+    "<rpc_url>`), then restart.")
+
+
+def jurisdiction_configured(data_dir: Path | None = None) -> bool:
+    """Whether this daemon has a jurisdiction to join: a saved selection,
+    or ATN_JURISDICTION_REGISTRY / ATN_REGISTRY_URL."""
+    if os.environ.get("ATN_JURISDICTION_REGISTRY", "").strip() or _registry_override_url():
+        return True
+    return load_selected_jurisdiction(data_dir or _selection_data_dir()) is not None
+
+
+def migrate_legacy_selection(data_dir: Path | None, agents_dir: Path | None) -> bool:
+    """A data dir from before issue #50 joined the packaged jurisdiction
+    without saving a selection. If any of its agents is registered there,
+    save {packaged: true} so the upgrade does not drop it off the network.
+    Returns True when it wrote the selection."""
+    if jurisdiction_configured(data_dir) or agents_dir is None:
+        return False
+    pk = packaged_jurisdiction()
+    if pk is None:
+        return False
+    key = f"{pk['chain_id']}:{pk['dao'].lower()}"
+    for ident in Path(agents_dir).glob("*/identity.json"):
+        try:
+            data = json.loads(ident.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        regs = data.get("registrations")
+        if (key in regs) if isinstance(regs, dict) else data.get("registered_on_chain"):
+            save_selected_jurisdiction({"packaged": True}, data_dir)
+            log.info("Agent %s is registered in the packaged jurisdiction; "
+                     "saved it as this daemon's jurisdiction", ident.parent.name)
+            return True
+    return False
 
 
 def save_selected_jurisdiction(sel: dict[str, Any], data_dir: Path | None = None) -> Path:
@@ -822,6 +888,10 @@ def save_selected_jurisdiction(sel: dict[str, Any], data_dir: Path | None = None
     path = _selection_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
+    if sel.get("packaged"):
+        tmp.write_text(json.dumps({"packaged": True}, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+        return path
     tmp.write_text(json.dumps({
         "chain_id": int(sel["chain_id"]),
         "rpc_url": str(sel.get("rpc_url") or ""),
@@ -835,8 +905,8 @@ def save_selected_jurisdiction(sel: dict[str, Any], data_dir: Path | None = None
 
 def boot_jurisdiction_key(data_dir: Path | None = None) -> str:
     """``<chain_id>:<DAO address>`` of the jurisdiction this process runs,
-    known at boot without touching the network: the saved selection, else
-    the packaged registry.json's entry. "" when neither names a DAO.
+    known at boot without touching the network: the saved selection
+    (possibly the packaged one). "" when there is none (issue #50).
 
     An operator who points the daemon at a launched jurisdiction with
     ATN_JURISDICTION_REGISTRY gets that jurisdiction's key (its DAO read from
@@ -847,16 +917,9 @@ def boot_jurisdiction_key(data_dir: Path | None = None) -> str:
     if env_key is not None:
         return env_key
     sel = load_selected_jurisdiction(data_dir)
-    if sel is not None:
-        dao, chain_id = str(sel.get("dao") or ""), int(sel.get("chain_id") or 0)
-    else:
-        try:
-            data = json.loads(_packaged_registry_path().read_text(encoding="utf-8"))
-            entry = data["jurisdictions"]["autonet"]
-            dao = str(entry.get("contracts", {}).get("dao") or "")
-            chain_id = int(entry.get("network", {}).get("chain_id") or 0)
-        except Exception:
-            return ""
+    if sel is None:
+        return ""
+    dao, chain_id = str(sel.get("dao") or ""), int(sel.get("chain_id") or 0)
     if not dao or not chain_id:
         return ""
     return f"{chain_id}:{dao.strip().lower()}"
@@ -901,7 +964,7 @@ def _onchain_registry_target() -> tuple[str, str]:
     addr = os.environ.get("ATN_JURISDICTION_REGISTRY", "").strip()
     if not addr:
         sel = load_selected_jurisdiction(_selection_data_dir())
-        if sel is None:
+        if sel is None or sel.get("packaged"):
             return "", ""
         return str(sel["dao_registry"]), str(sel.get("rpc_url") or "")
     rpc = os.environ.get("ATN_JURISDICTION_RPC", "").strip()
@@ -979,9 +1042,14 @@ def _load_registry_seed(jurisdiction_id: str = "autonet") -> dict[str, Any]:
          Registry read on chain (jurisdiction.<id>.* keys);
       3. else (or if those fail) the packaged registry.json;
       4. else {} with one warning.
+    With no jurisdiction configured (issue #50) it reads nothing and
+    returns {}.
 
     Returns a flat dict suitable for merging into the RPBConfig builder.
     """
+    if not jurisdiction_configured():
+        log.info(NO_JURISDICTION_MESSAGE)
+        return {}
     data: dict[str, Any] | None = None
     source = "packaged"
     url = _registry_override_url()
@@ -1049,7 +1117,13 @@ def _selection_data_dir() -> Path | None:
 def _default_dao() -> str:
     """The DAO a daemon names before it joins: the packaged registry.json's,
     so the pre-join status and the boot key (boot_jurisdiction_key) agree;
-    atn.jurisdiction's constant only when the registry names none."""
+    atn.jurisdiction's constant only when the registry names none. None
+    without a jurisdiction (issue #50)."""
+    if not jurisdiction_configured():
+        return ""
+    sel = load_selected_jurisdiction(_selection_data_dir())
+    if sel is not None and sel.get("dao"):
+        return str(sel["dao"])
     try:
         data = json.loads(_packaged_registry_path().read_text(encoding="utf-8"))
         dao = str(data["jurisdictions"]["autonet"]["contracts"].get("dao") or "")

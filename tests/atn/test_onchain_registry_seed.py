@@ -1,6 +1,15 @@
 """A launched jurisdiction's contracts can come from its DAO Registry on chain
 (ATN_JURISDICTION_REGISTRY), so joining it needs no registry.json release."""
+import pytest
+
 import atn.config as cfg
+
+
+@pytest.fixture(autouse=True)
+def _own_selection_dir(tmp_path, monkeypatch):
+    """No saved selection unless a test writes one (other files leave the
+    module-level selection dir pointing at theirs)."""
+    monkeypatch.setattr(cfg, "_SELECTION_DATA_DIR", tmp_path)
 
 
 def test_onchain_registry_used_when_env_set(monkeypatch):
@@ -32,7 +41,7 @@ def test_unreadable_onchain_registry_falls_back_to_packaged(monkeypatch):
     assert seed.get("substrate_address")
 
 
-def test_no_env_means_packaged(monkeypatch):
+def test_no_env_means_no_jurisdiction_unless_packaged_chosen(monkeypatch, tmp_path):
     monkeypatch.delenv("ATN_REGISTRY_URL", raising=False)
     monkeypatch.delenv("ATN_JURISDICTION_REGISTRY", raising=False)
 
@@ -40,6 +49,9 @@ def test_no_env_means_packaged(monkeypatch):
         raise AssertionError("must not read the chain")
 
     monkeypatch.setattr(cfg, "_fetch_onchain_registry", boom)
+    monkeypatch.setattr(cfg, "_SELECTION_DATA_DIR", tmp_path)
+    assert cfg._load_registry_seed("autonet") == {}
+    cfg.save_selected_jurisdiction({"packaged": True}, tmp_path)
     assert cfg._load_registry_seed("autonet").get("substrate_address")
 
 

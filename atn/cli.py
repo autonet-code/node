@@ -663,6 +663,11 @@ async def run_cli() -> None:
     )
     console.print(f"  [dim]data_dir:   {config.data_dir}[/]")
     console.print(f"  [dim]agents_dir: {config.agents_dir}[/]")
+    from .config import NO_JURISDICTION_MESSAGE, jurisdiction_configured
+    if jurisdiction_configured(config.data_dir):
+        console.print(f"  [dim]jurisdiction: {runtime.jurisdiction or '(from the registry)'}[/]")
+    else:
+        console.print(f"  [bold yellow]{NO_JURISDICTION_MESSAGE}[/]")
     if config.providers:
         for name, prov in config.providers.items():
             key_hint = (prov.api_key[:4] + "...") if len(prov.api_key) > 4 else ("(not set)" if not prov.api_key else "***")
@@ -985,6 +990,41 @@ def _send_main(argv: list[str]) -> int:
     return 0 if reply.get("ok") else 1
 
 
+def _jurisdiction_main(argv: list[str]) -> int:
+    """``atn jurisdiction``: show or choose this daemon's jurisdiction
+    without the app (issue #50). Takes effect at the next start.
+
+        atn jurisdiction                          show the choice
+        atn jurisdiction packaged                 the one this release ships
+        atn jurisdiction <dao_registry> <rpc_url> a launched jurisdiction
+    """
+    from .config import (_DEFAULT_DIR, NO_JURISDICTION_MESSAGE, check_jurisdiction,
+                         load_selected_jurisdiction, save_selected_jurisdiction)
+    if not argv:
+        sel = load_selected_jurisdiction(_DEFAULT_DIR)
+        if sel is None:
+            print(NO_JURISDICTION_MESSAGE)
+        else:
+            print(f"{sel.get('name') or 'jurisdiction'}: chain {sel['chain_id']}, "
+                  f"DAO {sel.get('dao')}{' (packaged)' if sel.get('packaged') else ''}")
+        return 0
+    if argv[0] == "packaged":
+        save_selected_jurisdiction({"packaged": True}, _DEFAULT_DIR)
+        print("Saved: the packaged jurisdiction. Restart the daemon to join it.")
+        return 0
+    if len(argv) != 2:
+        print(_jurisdiction_main.__doc__ or "", file=sys.stderr)
+        return 2
+    check = check_jurisdiction(argv[0], argv[1])
+    if not check["ok"]:
+        print("can't join: " + "; ".join(check["errors"]), file=sys.stderr)
+        return 1
+    save_selected_jurisdiction(check, _DEFAULT_DIR)
+    print(f"Saved: DAO {check.get('dao')} on chain {check.get('chain_id')}. "
+          "Restart the daemon to join it.")
+    return 0
+
+
 def main() -> None:
     # Offline subcommands: run and exit without booting the daemon.
     if len(sys.argv) > 1 and sys.argv[1] == "guide":
@@ -1001,6 +1041,8 @@ def main() -> None:
         # chain, no agents, no model. See docs/p2p_networking.md.
         from nodes.relay import main as _relay_main
         sys.exit(_relay_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "jurisdiction":
+        sys.exit(_jurisdiction_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "integration-token":
         from .integration_token_cli import main as _token_main
         sys.exit(_token_main(sys.argv[2:]))

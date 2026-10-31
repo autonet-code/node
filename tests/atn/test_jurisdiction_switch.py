@@ -39,7 +39,15 @@ def test_selection_round_trip_and_boot_key(tmp_path):
     assert cfg.boot_jurisdiction_key(tmp_path) == KEY_A
 
 
-def test_boot_key_defaults_to_packaged(tmp_path):
+def test_boot_key_without_selection_is_empty(tmp_path, monkeypatch):
+    """Issue #50: no selection, no jurisdiction (the packaged one is a
+    choice, not a default)."""
+    monkeypatch.delenv("ATN_JURISDICTION_REGISTRY", raising=False)
+    assert cfg.boot_jurisdiction_key(tmp_path) == ""
+
+
+def test_boot_key_of_the_packaged_selection(tmp_path):
+    cfg.save_selected_jurisdiction({"packaged": True}, tmp_path)
     packaged = json.loads(cfg._packaged_registry_path().read_text())["jurisdictions"]["autonet"]
     assert cfg.boot_jurisdiction_key(tmp_path) == (
         f"{packaged['network']['chain_id']}:{packaged['contracts']['dao'].lower()}")
@@ -96,18 +104,24 @@ def test_registration_is_per_jurisdiction(tmp_path):
     assert set(ident_a.registrations) == {KEY_A, KEY_B}
 
 
-def test_legacy_identity_file_maps_to_current(tmp_path):
+def test_legacy_identity_file_maps_to_current(tmp_path, monkeypatch):
+    """A pre-2026-10-17 identity file registered in the packaged
+    jurisdiction: the data dir keeps that jurisdiction (issue #50) and the
+    flag maps to it."""
+    monkeypatch.delenv("ATN_JURISDICTION_REGISTRY", raising=False)
+    monkeypatch.delenv("ATN_REGISTRY_URL", raising=False)
     data_dir = tmp_path / "data"
-    rt = _runtime(data_dir)
-    reg = rt.registry
-    vault = _Vault()
-    vault.put_secret(reg._key_secret_name("old"), KEY)
-    reg._keystore = lambda: vault
-    path = reg._identity_path("old")
+    path = tmp_path / "agents" / "old" / "identity.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"public_key": "", "address": ADDR,
                                 "registered_on_chain": True,
                                 "registration_tx": "0xold"}))
+    rt = _runtime(data_dir)
+    reg = rt.registry
+    assert cfg.load_selected_jurisdiction(data_dir)["packaged"]
+    vault = _Vault()
+    vault.put_secret(reg._key_secret_name("old"), KEY)
+    reg._keystore = lambda: vault
     ident = reg._load_identity("old")[0]
     assert ident.registered_on_chain is True
     assert ident.registrations == {reg.jurisdiction: "0xold"}

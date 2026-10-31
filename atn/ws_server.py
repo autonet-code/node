@@ -3018,6 +3018,28 @@ class WebSocketBridge:
             # identity, registration is per jurisdiction.
             dao_registry = str(msg.get("dao_registry") or "").strip()
             rpc_url = str(msg.get("rpc_url") or "").strip()
+            if msg.get("packaged"):
+                # The jurisdiction this release ships (issue #50): its
+                # registry.json is the source, nothing to read on chain.
+                from .config import packaged_jurisdiction, save_selected_jurisdiction
+                pk = packaged_jurisdiction()
+                if pk is None:
+                    return {"msg_id": msg_id, "ok": False,
+                            "error": "this release ships no jurisdiction"}
+                key = f"{pk['chain_id']}:{pk['dao'].lower()}"
+                if key == self.runtime.jurisdiction:
+                    return {"msg_id": msg_id, "ok": True,
+                            "result": {**pk, "key": key, "switched": False,
+                                       "note": "already in this jurisdiction"}}
+                save_selected_jurisdiction({"packaged": True},
+                                           getattr(self.runtime._config, "data_dir", None))
+                if msg.get("restart", True):
+                    from . import cli as _cli_module
+                    _cli_module._restart_requested = True
+                    self.runtime._shutdown_event.set()
+                return {"msg_id": msg_id, "ok": True,
+                        "result": {**pk, "key": key, "switched": True,
+                                   "restarting": bool(msg.get("restart", True))}}
             if not dao_registry or not rpc_url:
                 return {"msg_id": msg_id, "ok": False,
                         "error": "autonet_switch needs 'dao_registry' and 'rpc_url'"}
@@ -6173,11 +6195,18 @@ class WebSocketBridge:
             for key in (getattr(ident, "registrations", None) or {}):
                 row = known.setdefault(key, {"key": key, "agents": []})
                 row["agents"].append(defn.id)
+        from .config import NO_JURISDICTION_MESSAGE, packaged_jurisdiction
         sel = load_selected_jurisdiction(getattr(self.runtime._config, "data_dir", None))
+        configured = bool(st.jurisdiction_configured)
         return {
+            # False: no jurisdiction chosen yet (issue #50); the app offers
+            # ``packaged`` as the one-click choice.
+            "configured": configured,
+            "message": "" if configured else NO_JURISDICTION_MESSAGE,
+            "packaged": packaged_jurisdiction(),
             "current": {
                 "key": current,
-                "selection": sel,          # None = the packaged default
+                "selection": sel,          # None = no jurisdiction
                 "dao_registry": st.dao_registry_address,
                 "dao": st.dao_address,
                 "chain_id": st.chain_id,
