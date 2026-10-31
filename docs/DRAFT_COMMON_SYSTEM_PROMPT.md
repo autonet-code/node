@@ -1,5 +1,7 @@
 # Draft: Common System Prompt for ATN Cognitive Agents
 
+> **History** (marked 2026-10-31, #28): a draft that has since been implemented (`atn/delegate_prompts.py`); the code is the reference. The current system is described in `docs/architecture.md` and `docs/economy_design.md`.
+
 > This is a DRAFT for review. The final version will live in `delegate_prompts.py`
 > as the shared base that every cognitive agent receives, regardless of type.
 

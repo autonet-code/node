@@ -73,6 +73,8 @@ tuning:
 
 ## 3. Voice: why influence can't be cheaply bought or faked
 
+> **Note** (2026-10-31, #28): this section predates ToolBond. Reviews are now commit-reveal and paid by leave-one-out accuracy (times novelty), weighted by household REP; credibility and review centroids are retired. `docs/economy_design.md` has the current rules.
+
 REP (voice) is decoupled from ATN (money) everywhere it matters:
 
 - **REP is a pull claim on *ratified earnings only*, 1:1, DAO-side

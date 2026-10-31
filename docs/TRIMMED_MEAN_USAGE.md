@@ -1,5 +1,7 @@
 # Trimmed Mean Aggregation - Usage Guide
 
+> **History** (marked 2026-10-31, #28): the FedAvg aggregator of the pre-substrate network; the code under `nodes/aggregator/` is unused. The current system is described in `docs/architecture.md` and `docs/economy_design.md`.
+
 ## Overview
 
 Trimmed Mean is a Byzantine-resistant aggregation method added to the Autonet Aggregator node. It protects against malicious nodes by trimming extreme values before averaging model updates.

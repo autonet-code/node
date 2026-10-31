@@ -1,5 +1,7 @@
 # Head-to-head: text-claim substrate vs tool substrate
 
+> **History** (marked 2026-10-31, #28): a pre-merge comparison in retired terms (CONs, vet gates). The current system is described in `docs/architecture.md` and `docs/economy_design.md`.
+
 Purpose: the pre-merge comparison requested 2026-07-04: what the
 pre-tool substrate promised, what the tool substrate delivers, and what
 merging `tool-substrate` into master does and does not foreclose.

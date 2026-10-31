@@ -1,5 +1,7 @@
 # Two-plane substrate: consensus plane vs data plane
 
+> **History** (marked 2026-10-31, #28): a finished design with its addenda; the code is the reference. The current system is described in `docs/architecture.md` and `docs/economy_design.md`.
+
 Decision (2026-07-03): the claim graph is demoted from knowledge
 representation to **verdict layer**. Artifacts (full work-unit payloads)
 live in the blob store and a daemon-local embedding index; graph nodes

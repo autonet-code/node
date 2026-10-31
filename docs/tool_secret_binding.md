@@ -1,6 +1,6 @@
 # Tool–Secret Binding
 
-**Status:** BUILT 2026-07-29, uncommitted. All four changes landed.
+**Status:** BUILT 2026-07-29, committed (664ad0a). All four changes landed.
 Tests: `tests/atn/test_tool_secret_binding.py` (23),
 `tests/atn/test_tool_guard_hosts.py` (8+1 skip). Regression: 142 tests
 across the tool/secrets surfaces green.

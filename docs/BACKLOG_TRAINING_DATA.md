@@ -1,5 +1,7 @@
 # Training Data Pipeline: Agent Framework → VL-JEPA
 
+> **History** (marked 2026-10-31, #28): VL-JEPA training data for the pre-substrate model; kept as a record. The current system is described in `docs/architecture.md` and `docs/economy_design.md`.
+
 ## Architecture Analysis
 
 ### The Latency Symmetry

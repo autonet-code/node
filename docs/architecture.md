@@ -22,7 +22,8 @@ in the packaged jurisdiction keeps it. It:
 - runs tools under containment (`tool_guard`, consensus tiers);
 - gossips events over libp2p, serves blobs, runs the federated close,
   votes epoch elections and submits claims through the operator key;
-- reviews on its agents' behalf (commit-reveal) and reveals at epoch end;
+- reviews on its agents' behalf (commit-reveal): commits when its close
+  fires, reveals once that epoch is anchored;
 - keeps working when the chain is silent; only settlement waits.
 
 It has three listeners:
@@ -79,7 +80,7 @@ agent directory.
 ## How things connect
 
 - Daemon to daemon: libp2p gossip per jurisdiction (topic
-  `<chain_id>:<DAO address>`), over TCP or WebSocket. Before closing an
+  `/autonet/world-events/<chain_id>:<DAO address>`), over TCP or WebSocket. Before closing an
   epoch, a daemon asks its peers (relays first) for that epoch's batches it
   missed (`/autonet/batches/1.0.0`), so a late joiner or a daemon that lost
   its peers closes the same set as everyone else. Behind NAT a daemon
@@ -92,8 +93,13 @@ agent directory.
   provider's on-chain peer id, direct or one hop through a relay (so NAT'd
   providers can sell); the provider's wss endpoint only when libp2p cannot
   deliver.
-- Daemon to chain: one RPC URL. Addresses come from the jurisdiction's
-  Registry, read pinned to the previous anchor so every daemon agrees.
+- Daemon to chain: one RPC URL. Contract addresses come from the
+  jurisdiction's Registry, read at each start (latest block). The close's
+  parameters (REP, charter, sanctions, containment, epoch rules) are read
+  pinned to the previous anchor so every daemon agrees. A jurisdiction
+  won't start without `substrate`, `rep_token`, `tool_bond`, `dao` and
+  `timelock` in its Registry and `epoch_rules` "2". Chain calls run off the
+  daemon's event loop.
 - Household on chain: the owner wallet claims ATN and REP; the daemon's
   operator key registers bound to it, gets the owner's REP by delegation,
   proposes and votes epoch elections, and submits claims.

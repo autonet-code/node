@@ -77,7 +77,7 @@ Status conventions used below:
 
 ## Moved from root (2026-07-06)
 
-- [BACKLOG.md](BACKLOG.md): THE project board. User decisions, ratified-unbuilt designs, follow-ups, experiments, critical path. Update in place.
+- [BACKLOG.md](BACKLOG.md): the project board until 2026-10-28 (history). Work is now tracked in GitHub issues on `autonet-code/node`, project "node".
 - [PLAN.md](PLAN.md): the original architectural blueprint (historical; the maintained map is the root README + CLAUDE.md).
 - [VALIDATION_FINDINGS.md](VALIDATION_FINDINGS.md): VL-JEPA validation record (historical; do not edit).
 

@@ -1,5 +1,7 @@
 # ATN Architecture Audit: Fractal Agent Unification
 
+> **History** (marked 2026-10-31, #28): a 2026-03-25 snapshot. The current system is described in `docs/architecture.md` and `docs/economy_design.md`.
+
 **Date:** 2026-03-25
 **Scope:** Full codebase audit of `atn/` runtime, focusing on root agent vs. child agent divergences
 **Goal:** Produce a refactoring plan to make every agent, from root agent to deepest sub-agent, behave identically

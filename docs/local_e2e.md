@@ -1,5 +1,7 @@
 # Local end-to-end: tool economy composes
 
+> **Note** (2026-10-31, #28): the tool-mint split described below is the v4.1 one (author keeps 100%). Since ToolBond, reviewers take `reviewerShareBps` (40% by default) of each tool's mint, paid by accuracy; see `docs/economy_design.md`. The election anchorer (AnchorElection) is also not shown in stage 6.
+
 `scripts/local_e2e_tool_economy.py` is the tool-substrate session's
 capstone. It proves the whole tool-economy architecture (daemon,
 substrate consensus, and chain) composes on a single local deployment,

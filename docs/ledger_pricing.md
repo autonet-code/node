@@ -22,7 +22,7 @@ its supply-pegged β cap were both DELETED. The close now computes MONEY
 ONLY: the ATN epoch pool is burned service fees only (no base emission),
 distributed pro-rata over usage shares; REP is claimed DAO-side (RepToken)
 on ratified ATN earnings, never minted by the close. The authoritative
-payload is schema 4 (schema 3 plus `carry_cid`, the verifiable
+payload was schema 4 when this was written (the code is at schema 6, `nodes/common/authoritative_encoding.py` `SCHEMA_VERSION`): schema 3 plus `carry_cid`, the verifiable
 carry-over commitment) with a 2-field `(agent, amount)` merkle leaf. This
 still does not touch the pricing MODE machinery here: `federated_epoch_close`
 keeps `pricing="ledger" | "equilibrated"`, default `"ledger"`, and Changes

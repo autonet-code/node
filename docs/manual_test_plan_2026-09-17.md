@@ -1,5 +1,7 @@
 # Manual end-to-end test plan (2026-09-17)
 
+> **History** (marked 2026-10-31, #28): a dated test plan from before ToolBond reviews. The current system is described in `docs/architecture.md` and `docs/economy_design.md`.
+
 Walk the platform the way a new user would, in the order of the video script.
 Start from an empty fleet. Every step has an expected result; anything else is
 a bug. Report failures by section and step number.

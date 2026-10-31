@@ -1,5 +1,7 @@
 # VL-JEPA Validation Findings
 
+> **History** (marked 2026-10-31, #28): the VL-JEPA validation record; the experiment's files are gone. The current system is described in `docs/architecture.md` and `docs/economy_design.md`.
+
 Tracking empirical results from validating the VL-JEPA architecture for Autonet's
 distributed inference pipeline. The core question: **can a K-vector latent plan
 bottleneck transmit enough image-specific information for useful text generation?**
