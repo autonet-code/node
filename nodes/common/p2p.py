@@ -887,6 +887,11 @@ class AutonetHost:
             return str(self._host.get_id())
         return ""
 
+    def connected_relays(self) -> List[str]:
+        """Connected peers that advertised the relay role."""
+        return [p for p in self.get_connected_peers()
+                if "relay" in (getattr(self._known_capabilities.get(p), "roles", None) or [])]
+
     @property
     def addrs(self) -> List[str]:
         if self._host:
@@ -2126,8 +2131,7 @@ class AutonetHost:
         relays kept (0 when they already had them)."""
         if not self._host or not cids:
             return 0
-        relays = [p for p in self.get_connected_peers()
-                  if "relay" in (getattr(self._known_capabilities.get(p), "roles", None) or [])]
+        relays = self.connected_relays()
         frame = json.dumps({"cids": list(cids)[:BLOB_OFFER_MAX_CIDS]}).encode("utf-8")
         kept = [0]
 

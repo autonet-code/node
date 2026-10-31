@@ -1324,11 +1324,13 @@ class WebSocketBridge:
         substrate = (state.get("substrate_address")
                      or getattr(cfg, "substrate_address", "") or "")
         peers: int | None = None
+        relays: int | None = None
         addrs: list[str] = []
         host = getattr(autonet, "_p2p_host", None) if autonet else None
         if host is not None:
             try:
                 peers = len(host.get_connected_peers())
+                relays = len(host.connected_relays())
             except Exception:                              # noqa: BLE001
                 peers = None
             try:
@@ -1367,6 +1369,7 @@ class WebSocketBridge:
             "p2p": {
                 "running": host is not None,
                 "peers": peers,
+                "relays": relays,
                 "gossip": getattr(service, "_event_gossip", None) is not None,
                 "addrs": addrs,
             },
