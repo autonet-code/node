@@ -265,15 +265,29 @@ def test_registry_url_override_falls_back_to_packaged(_isolate_registry,
     assert any("ATN_REGISTRY_URL" in r.getMessage() for r in caplog.records)
 
 
-def test_bridge_ensure_network_config_joins(_isolate_registry):
-    """The registration path's join hook resolves the registry and refreshes
-    the bridge state the UI reads."""
+def test_bridge_reads_a_chosen_jurisdiction_at_boot(_isolate_registry):
+    """A jurisdiction the owner chose is read when the bridge starts (issue
+    #50), so the app shows its contracts before any registration."""
     from atn.autonet_service import AutonetBridge
 
+    bridge = AutonetBridge(cfg.RPBConfig())
+    assert bridge.network_joined is True
+    assert bridge.state.substrate_address == "0x5UB000000000000000000000000000000000beef"
+    assert _isolate_registry["fetched"] == []
+
+
+def test_bridge_ensure_network_config_joins(_isolate_registry, monkeypatch):
+    """With no jurisdiction chosen nothing is read at boot; the registration
+    path's join hook resolves the registry (here one chosen after boot) and
+    refreshes the bridge state the UI reads."""
+    from atn.autonet_service import AutonetBridge
+
+    (_isolate_registry["data_dir"] / cfg.SELECTION_FILE).unlink()
     bridge = AutonetBridge(cfg.RPBConfig())
     assert bridge.network_joined is False
     assert bridge.state.substrate_address == ""
 
+    cfg.save_selected_jurisdiction({"packaged": True}, _isolate_registry["data_dir"])
     assert bridge.ensure_network_config() is True
     assert bridge.network_joined is True
     assert bridge.state.substrate_address == "0x5UB000000000000000000000000000000000beef"

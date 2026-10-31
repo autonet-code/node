@@ -210,9 +210,14 @@ class AutonetBridge:
         if config.chain_id:
             self.state.chain_id = config.chain_id
 
-        # Surface whatever the config already holds (the registry is only
-        # resolved at join).
+        # Surface whatever the config already holds. A jurisdiction the owner
+        # chose (issue #50) is read at boot: its Registry names the contracts
+        # the app shows and registration needs. Without a choice nothing is
+        # read until something joins.
         self._mirror_jurisdiction()
+        from .config import _selection_data_dir, load_selected_jurisdiction
+        if load_selected_jurisdiction(_selection_data_dir()) is not None:
+            self.ensure_network_config()
 
         # Subscribe to execution events for training data feed
         if self._events:
