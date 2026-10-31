@@ -5779,7 +5779,9 @@ class WebSocketBridge:
         # Pre-flight: agent address needs gas to pay for registerAgent.
         try:
             w3 = svc._get_web3()
-            balance = w3.eth.get_balance(w3.to_checksum_address(identity.address))
+            # Off the loop: an RPC round trip must not stall the WS server.
+            balance = await asyncio.to_thread(
+                w3.eth.get_balance, w3.to_checksum_address(identity.address))
             if balance == 0:
                 return {
                     "success": False,
@@ -6081,7 +6083,8 @@ class WebSocketBridge:
         address = Account.from_key(key).address
         try:
             w3 = svc._get_web3()
-            if w3.eth.get_balance(w3.to_checksum_address(address)) == 0:
+            if await asyncio.to_thread(
+                    w3.eth.get_balance, w3.to_checksum_address(address)) == 0:
                 return {"success": False, "mode": "needs_funding",
                         "error": "Operator address has no gas balance; fund it first.",
                         "operator": address, "chain_id": config.chain_id}

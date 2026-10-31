@@ -1835,8 +1835,13 @@ class AutonetBridge:
             })
 
             signed = account.sign_transaction(tx)
-            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            def _send_and_wait():
+                h = w3.eth.send_raw_transaction(signed.raw_transaction)
+                return h, w3.eth.wait_for_transaction_receipt(h, timeout=120)
+
+            # Off the loop: up to two minutes waiting for the receipt.
+            tx_hash, receipt = await asyncio.to_thread(_send_and_wait)
 
             if receipt.status == 1:
                 # Parse UserContractCreated event to get user contract address
