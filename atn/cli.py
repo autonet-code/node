@@ -1095,8 +1095,13 @@ def main() -> None:
             # this one, so the console's shell takes the terminal back and
             # an interactive daemon reads EOF and stops. Run the new daemon
             # as a child on this console and exit with its code instead.
+            # Ctrl+C reaches every process on the console: the daemon
+            # handles it, this waiting parent ignores it (no traceback).
+            import signal
             import subprocess
-            os._exit(subprocess.call(args))
+            child = subprocess.Popen(args)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            os._exit(child.wait())
         os.execv(sys.executable, args)
     # Force-exit to avoid hanging on lingering non-daemon threads or asyncio
     # transports during interpreter shutdown (numpy/scipy Fortran runtime,
