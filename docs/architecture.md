@@ -10,10 +10,11 @@ in `economy_design.md`. Items marked **OPEN** are not settled yet.
 its state is that user's `~/.atn` (lock per data dir), and it belongs to one
 household. It joins one jurisdiction at a time (switching restarts it).
 With none chosen it still starts: agents and tools work locally, nothing
-joins a network, and the CLI banner and the app say so. The app offers the
-packaged jurisdiction (the release's `registry.json`) in one click next to
-choosing another; headless, `atn jurisdiction packaged` or `atn jurisdiction
-<dao_registry> <rpc_url>`. A data dir whose agents were already registered
+joins a network, and the CLI banner and the app say so. The app lists the
+network's jurisdictions from the DAO directory (homebase Firestore), the one
+in `contracts/<network>.recommendedJurisdiction` marked recommended and
+first; the owner chooses. Headless: `atn jurisdiction packaged` (the
+release's `registry.json`) or `atn jurisdiction <dao_registry> <rpc_url>`. A data dir whose agents were already registered
 in the packaged jurisdiction keeps it. It:
 
 - hosts agents and keeps their keys (age-encrypted vault);
@@ -99,7 +100,7 @@ agent directory.
 
 | who | runs | how |
 |---|---|---|
-| Desktop user | app + daemon | install, open the app, choose a jurisdiction (one click for the packaged one), connect a wallet |
+| Desktop user | app + daemon | install, open the app, choose a jurisdiction (the recommended one is marked), connect a wallet |
 | Coding-agent user | daemon + MCP server | `pip install autonet-computer`, `atn jurisdiction packaged`, `atn --headless`, `claude mcp add atn -e ATN_MCP_AGENT=<id> -- python -m atn.mcp_server`; the agent reads the guide |
 | Server / cloud VM | daemon in Docker (`docker/Dockerfile.daemon`) | NAT'd, HTTPS egress only; agents connect as guests |
 | Network supporter | `atn relay` | a public host; its hostname goes in the Registry |
