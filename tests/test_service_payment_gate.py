@@ -54,6 +54,9 @@ def _make_runtime(tmp_path: Path, *, chain: bool):
     if chain:
         # Make OnChainService.available true (substrate_address + rpc_url).
         config.autonet.substrate_address = SUBSTRATE_ADDR
+        # No jurisdiction is chosen in the test home (#50), so there is no
+        # packaged RPC default to fall back on.
+        config.autonet.rpc_url = "http://127.0.0.1:8545"
         config.autonet.payment_channel_address = CHANNEL_ADDR
         config.autonet.service_registry_address = SUBSTRATE_ADDR
     return Runtime(EventBus(), data_dir=data_dir, config=config)

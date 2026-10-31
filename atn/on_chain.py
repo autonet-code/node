@@ -30,8 +30,12 @@ will need substrate-native equivalents — see ws_server stubs.
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import hashlib
+import inspect
 import logging
+import threading
 from typing import Any, TYPE_CHECKING
 from nodes.common.tx_nonce import next_nonce
 
@@ -682,6 +686,42 @@ def _to_peer_id_bytes(peer_id: str | bytes) -> bytes:
         return peer_id.encode("utf-8")
 
 
+_off_loop_state = threading.local()
+
+
+def _off_the_loop(cls):
+    """Run every ``async def`` of ``cls`` on a worker thread.
+
+    The methods are async in name only: their bodies make blocking web3
+    calls (RPC reads, and writes that wait for a receipt). Awaited on the
+    daemon's event loop, each one froze the loop for the whole round trip;
+    behind a slow egress proxy that stalled the WS server and gossip ingest
+    for minutes (issues #40, #49). Each call now runs on its own loop in a
+    worker thread; a method calling a sibling from there runs inline."""
+
+    def wrap(fn):
+        @functools.wraps(fn)
+        async def run(*args, **kwargs):
+            if getattr(_off_loop_state, "active", False):
+                return await fn(*args, **kwargs)
+
+            def worker():
+                _off_loop_state.active = True
+                try:
+                    return asyncio.run(fn(*args, **kwargs))
+                finally:
+                    _off_loop_state.active = False
+
+            return await asyncio.to_thread(worker)
+        return run
+
+    for name, fn in list(vars(cls).items()):
+        if inspect.iscoroutinefunction(fn):
+            setattr(cls, name, wrap(fn))
+    return cls
+
+
+@_off_the_loop
 class OnChainService:
     """Daemon-side helper for Substrate.sol reads + writes.
 
@@ -1647,6 +1687,7 @@ class OnChainService:
 # ---------------------------------------------------------------------------
 
 
+@_off_the_loop
 class ServiceMarketClient:
     """Daemon-side helper for ServiceMarket.sol (ServiceRegistry +
     PaymentChannel).
