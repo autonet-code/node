@@ -436,14 +436,35 @@ async def _handle_command(line: str, runtime: Runtime) -> bool:
 
 
 async def _input_loop(runtime: Runtime) -> None:
-    """Read commands from stdin in a thread so we don't block the event loop."""
+    """Read commands from stdin in a thread so we don't block the event loop.
+
+    The reader is a daemon thread of its own, not the loop's executor:
+    asyncio.run waits for executor threads at exit, and a readline blocked
+    on the console kept a shutdown (or a restart into another jurisdiction)
+    hanging at "Bye." until Enter was pressed."""
+    import threading
+
     loop = asyncio.get_event_loop()
+    lines: asyncio.Queue[str] = asyncio.Queue()
+
+    def _reader() -> None:
+        while True:
+            try:
+                line = sys.stdin.readline()
+            except Exception:
+                line = ""
+            try:
+                loop.call_soon_threadsafe(lines.put_nowait, line)
+            except RuntimeError:
+                return  # the loop has closed: the daemon is exiting
+            if not line:
+                return
+
+    threading.Thread(target=_reader, name="atn-stdin", daemon=True).start()
     while True:
         try:
             # Race between stdin input and shutdown signal
-            read_task = asyncio.ensure_future(
-                loop.run_in_executor(None, sys.stdin.readline)
-            )
+            read_task = asyncio.ensure_future(lines.get())
             shutdown_task = asyncio.ensure_future(runtime._shutdown_event.wait())
             done, pending = await asyncio.wait(
                 [read_task, shutdown_task],
@@ -1068,7 +1089,15 @@ def main() -> None:
             sys.stdout.flush()
         except Exception:
             pass
-        os.execv(sys.executable, [sys.executable, *sys.argv])
+        args = [sys.executable, "-m", "atn", *sys.argv[1:]]
+        if os.name == "nt":
+            # Windows has no real exec: execv starts a new process and ends
+            # this one, so the console's shell takes the terminal back and
+            # an interactive daemon reads EOF and stops. Run the new daemon
+            # as a child on this console and exit with its code instead.
+            import subprocess
+            os._exit(subprocess.call(args))
+        os.execv(sys.executable, args)
     # Force-exit to avoid hanging on lingering non-daemon threads or asyncio
     # transports during interpreter shutdown (numpy/scipy Fortran runtime,
     # libp2p protobuf threads, etc.). All persistent state has already been
