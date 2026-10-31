@@ -335,14 +335,19 @@ class RPBConfig:
     explicit_fields: list[str] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
-        """Apply jurisdiction defaults for empty fields."""
+        """Apply jurisdiction defaults for empty fields: the chosen
+        jurisdiction's chain, none without a jurisdiction (issue #50), the
+        packaged network's when only the env names one."""
         from .jurisdiction import RPC_URL, CHAIN_ID
         if not self.dao_address:
             self.dao_address = _default_dao()
+        if not jurisdiction_configured():
+            return
+        sel = load_selected_jurisdiction(_selection_data_dir())
         if not self.rpc_url:
-            self.rpc_url = RPC_URL
+            self.rpc_url = str((sel or {}).get("rpc_url") or "") or RPC_URL
         if not self.chain_id:
-            self.chain_id = CHAIN_ID
+            self.chain_id = int((sel or {}).get("chain_id") or 0) or CHAIN_ID
 
 
 # Backward-compat alias
@@ -747,7 +752,31 @@ def check_jurisdiction(dao_registry: str, rpc_url: str,
     return {"ok": not errors, "errors": errors, "chain_id": an.chain_id,
             "dao": an.dao_address, "dao_registry": dao_registry,
             "rpc_url": rpc_url, "key": jurisdiction_key(an),
-            "name": seed.get("name", "")}
+            "name": seed.get("name", "") or dao_name(an.dao_address, rpc_url)}
+
+
+_DAO_NAMES: dict[tuple[str, str], str] = {}
+
+
+def dao_name(dao: str, rpc_url: str) -> str:
+    """The DAO's own name (its governor's ``name()``), which is what a
+    jurisdiction is called. "" when it can't be read. Cached per process."""
+    if not dao or not rpc_url:
+        return ""
+    key = (dao.lower(), rpc_url)
+    if key not in _DAO_NAMES:
+        try:
+            from web3 import Web3
+            w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={
+                "timeout": _REGISTRY_FETCH_TIMEOUT}))
+            gov = w3.eth.contract(address=Web3.to_checksum_address(dao), abi=[
+                {"name": "name", "type": "function", "stateMutability": "view",
+                 "inputs": [], "outputs": [{"name": "", "type": "string"}]}])
+            _DAO_NAMES[key] = str(gov.functions.name().call())
+        except Exception as exc:
+            log.debug("DAO name read from %s failed: %s", dao, exc)
+            return ""
+    return _DAO_NAMES[key]
 
 
 def jurisdiction_key(an: "RPBConfig") -> str:

@@ -312,6 +312,15 @@ class AutonetBridge:
         from .config import CURRENT_EPOCH_RULES
         st.epoch_rules = (getattr(c, "epoch_rules", "") or CURRENT_EPOCH_RULES)
         st.jurisdiction_key = jurisdiction_key(c)
+        st.rpc_url = c.rpc_url or ""
+        st.chain_id = int(c.chain_id or 0)
+        # A jurisdiction is called by its DAO's name: the saved choice's,
+        # else the governor's name() once joined.
+        from .config import _selection_data_dir, dao_name, load_selected_jurisdiction
+        sel = load_selected_jurisdiction(_selection_data_dir())
+        st.jurisdiction_name = ((sel or {}).get("name") or
+                                (dao_name(c.dao_address, c.rpc_url)
+                                 if self.network_joined else ""))
 
         errors: list[str] = []
         from .config import NO_JURISDICTION_MESSAGE, jurisdiction_configured

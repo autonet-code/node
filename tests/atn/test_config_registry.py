@@ -80,7 +80,8 @@ def test_no_jurisdiction_joins_nothing(_isolate_registry, monkeypatch):
     assert not cfg.jurisdiction_configured()
     assert cfg._load_registry_seed("autonet") == {}
     assert cfg.boot_jurisdiction_key(_isolate_registry["data_dir"]) == ""
-    assert cfg.RPBConfig().dao_address == ""
+    an = cfg.RPBConfig()
+    assert (an.dao_address, an.rpc_url, an.chain_id) == ("", "", 0)
 
 
 def test_packaged_selection_names_the_packaged_dao(_isolate_registry):
