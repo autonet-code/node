@@ -35,11 +35,11 @@ import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol
 /// Substrate is a PURE MONEY contract (Decision 2026-07-10, fees-only
 /// emission + REP-from-earnings): it moves ATN, takes the service fee,
 /// and records earnings. It mints NO reputation. Reputation (== the DAO
-/// governance token == review weight) lives DAO-side as pull claims on
-/// the two on-chain earnings ledgers materialized here — cumulative
-/// tool-pool mint (agentMintTotal) and cumulative net service revenue
-/// (serviceEarnings) — at a hardcoded 1:1. You cannot lie about REP
-/// because you cannot lie about ATN you provably received.
+/// governance token == review weight) lives DAO-side as a pull claim on
+/// the cumulative tool-pool mint (agentMintTotal) at a hardcoded 1:1.
+/// Net service revenue (serviceEarnings) is recorded here too but earns
+/// money only, no REP (Decision 2026-10-27). You cannot lie about REP
+/// because you cannot lie about ATN you provably earned from the pool.
 ///
 /// What is deliberately NOT here
 /// -----------------------------
@@ -1260,10 +1260,10 @@ contract Substrate is EIP712 {
         emit ServiceFeeBpsSet(oldBps, newBps);
     }
 
-    /// @notice Cumulative net service revenue per recipient (the second REP
-    ///         claim base). Bumped by payForService with the post-fee `net`.
-    ///         Service providers claim REP DAO-side on this counter 1:1
-    ///         (Decision 2026-07-10). Monotonic.
+    /// @notice Cumulative net service revenue per recipient. Bumped by
+    ///         payForService with the post-fee `net`. A record only: service
+    ///         revenue earns no REP (Decision 2026-10-27; AutonetRepClaim
+    ///         claims on agentMintTotal alone). Monotonic.
     mapping(address => uint256) public serviceEarnings;
 
     // -------------------------------------------------------------------------
