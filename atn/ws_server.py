@@ -1324,12 +1324,19 @@ class WebSocketBridge:
         substrate = (state.get("substrate_address")
                      or getattr(cfg, "substrate_address", "") or "")
         peers: int | None = None
+        addrs: list[str] = []
         host = getattr(autonet, "_p2p_host", None) if autonet else None
         if host is not None:
             try:
                 peers = len(host.get_connected_peers())
             except Exception:                              # noqa: BLE001
                 peers = None
+            try:
+                # What peers dial (with /p2p/<id>): the address this daemon
+                # would be listed under as a seed in the Registry.
+                addrs = list(host.addrs)
+            except Exception:                              # noqa: BLE001
+                addrs = []
         service = getattr(autonet, "_service", None) if autonet else None
         epoch: dict[str, Any] = {"running": False, "epoch_id": None}
         closed = 0
@@ -1361,6 +1368,7 @@ class WebSocketBridge:
                 "running": host is not None,
                 "peers": peers,
                 "gossip": getattr(service, "_event_gossip", None) is not None,
+                "addrs": addrs,
             },
             "epoch": epoch,
             "epochs_closed": closed,
