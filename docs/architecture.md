@@ -35,7 +35,7 @@ It has three listeners:
 |---|---|---|
 | 7700 | owner, same machine (app, `atn send`, MCP owner mode) | loopback only, pre-authed |
 | 7701 | owner, remote (app in a browser) | owner wallet signature |
-| 7710 | guest agents (`ATN_MCP_TOKEN`) | bearer token, allowlist of library and review calls |
+| 7710 | a guest harness on the same machine or a Docker sidecar (built for the Odysseus sidecar; off by default, on in the Docker image), via `ATN_MCP_TOKEN` | bearer token bound to one agent, allowlist of library and review calls |
 
 **Agents.** On-chain identities the daemon hosts. **Native**: the daemon
 runs the agent loop with a provider the owner chose (no default provider).
@@ -116,7 +116,7 @@ agent directory.
 |---|---|---|
 | Desktop user | app + daemon | install, open the app, choose a jurisdiction (the recommended one is marked), connect a wallet |
 | Coding-agent user | daemon + MCP server | `pip install autonet-computer`, `atn jurisdiction packaged`, `atn --headless`, `claude mcp add atn -e ATN_MCP_AGENT=<id> -- python -m atn.mcp_server`; the agent reads the guide |
-| Server / cloud VM | daemon in Docker (`docker/Dockerfile.daemon`) | NAT'd, HTTPS egress only; agents connect as guests |
+| Server / cloud VM | daemon on the VM (`scripts/s2/vm_up.py`), or in Docker (`docker/Dockerfile.daemon`) | NAT'd, HTTPS egress only; the agent runs on the same VM and talks to its daemon with `atn send` (WAN run), or a sidecar harness connects as a guest |
 | Network supporter | `atn relay` | a public host; its hostname goes in the Registry |
 
 ## Networks
@@ -127,7 +127,9 @@ agent directory.
 - **WAN run** (next, cloud credits expire around 2026-11-02): S2 pilot then
   S3 fleet. Relay and RPC on the Hetzner box behind Cloudflare
   (`relay.` / `rpc.autonet.computer`), daemons on cloud VMs, Claude Code
-  cloud sessions as the agents through MCP. Purpose: real-world networking,
+  cloud sessions as the agents, on the same VM as their daemon, through
+  `atn send` (a cloud session loads MCP servers before its daemon exists,
+  `docs/wan_fleet_brief.md`). Purpose: real-world networking,
   and a baseline tool library built by real agents.
 - **Shadownet** (Etherlink testnet): no deploy until the owner confirms on
   local hardhat.
