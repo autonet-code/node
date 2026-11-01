@@ -806,6 +806,11 @@ async def run_cli() -> None:
             await runtime.stop()
         lock.release_lock()
         console.print("[dim]Bye.[/]")
+        # Leave now: asyncio.run would wait for executor threads, and a
+        # chain call or p2p thread that never returns kept a restart into
+        # another jurisdiction hanging after "Bye." (old epochs still
+        # closing) until Ctrl+C. Everything is flushed by this point.
+        _exit_after_shutdown()
 
 
 def _build_updater(runtime: Runtime, config: ATNConfig):
@@ -1065,6 +1070,12 @@ def main() -> None:
         asyncio.run(run_cli())
     except KeyboardInterrupt:
         pass
+    _exit_after_shutdown()
+
+
+def _exit_after_shutdown() -> None:
+    """End the process once state is flushed: restart if one was asked for
+    (exit code for the Windows launcher, exec elsewhere), else exit 0."""
     if _restart_requested:
         try:
             sys.stdout.flush()
