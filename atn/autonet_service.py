@@ -1232,15 +1232,40 @@ class AutonetBridge:
                 "chain submission (federated-close driver)", service,
                 timeout=timeout, poll=0.5):
             return
-        # Only a daemon with a registered agent takes part in consensus and
-        # closes epochs; a joined-only one follows the anchored state.
+        # Only a daemon with a registered agent, or a registered operator
+        # (the key that proposes and votes epoch elections for the
+        # household), takes part in consensus and closes epochs; a
+        # joined-only one follows the anchored state.
         registry = self._agent_registry
+        operator_live = {"value": False, "checked": 0.0}
+
+        def _operator_registered() -> bool:
+            import time as _time
+            now = _time.time()
+            if operator_live["value"] or now - operator_live["checked"] < 60:
+                return operator_live["value"]
+            operator_live["checked"] = now
+            try:
+                from eth_account import Account
+                from .on_chain import OnChainService
+                svc = OnChainService(self.config)
+                if not svc.available:
+                    return False
+                addr = Account.from_key(registry.operator_key()).address
+                w3 = svc._get_web3()
+                operator_live["value"] = bool(
+                    svc._get_contract(w3).functions.isLive(addr).call())
+            except Exception as e:
+                log.debug("operator registration check failed: %s", e)
+            return operator_live["value"]
 
         def _participating() -> bool:
             if registry is None:
                 return False
-            return any(d.identity and d.identity.registered_on_chain
-                       for d, _ in registry.list_agents())
+            if any(d.identity and d.identity.registered_on_chain
+                   for d, _ in registry.list_agents()):
+                return True
+            return _operator_registered()
 
         try:
             service._federated_close_driver.participating = _participating
