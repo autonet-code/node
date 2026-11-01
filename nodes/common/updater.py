@@ -2,8 +2,8 @@
 Auto-Update Mechanism for Autonet Nodes.
 
 Checks for new versions of the node software and applies updates.
-Supports multiple sources: PyPI (default for the daemon), git, HTTP, or
-blob store.
+Supports PyPI (the daemon's source), HTTP, or blob store. The git source
+(fetch/pull in the working directory) is retired.
 
 Story 6.5: Auto-update mechanism.
 
@@ -20,7 +20,6 @@ import hashlib
 import json
 import logging
 import os
-import subprocess
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -39,7 +38,6 @@ PENDING_MARKER = "pending.json"
 
 class UpdateSource(Enum):
     PYPI = "pypi"
-    GIT = "git"
     HTTP = "http"
     BLOB_STORE = "blob_store"
 
@@ -194,8 +192,6 @@ class AutonetUpdater:
         try:
             if source == UpdateSource.PYPI.value:
                 info = self._check_pypi()
-            elif source == UpdateSource.GIT.value:
-                info = self._check_git()
             elif source == UpdateSource.HTTP.value:
                 info = self._check_http()
             elif source == UpdateSource.BLOB_STORE.value:
@@ -438,7 +434,6 @@ class AutonetUpdater:
         """
         Apply an update. Returns True on success.
 
-        For git: performs git pull.
         For HTTP: downloads and verifies the package.
         For blob_store: fetches from blob store.
         """
@@ -452,9 +447,7 @@ class AutonetUpdater:
             if source == UpdateSource.PYPI.value:
                 # PyPI uses the stage→boot-apply path, not in-process install.
                 return self.stage_update(info)
-            if source == UpdateSource.GIT.value:
-                return self._apply_git()
-            elif source == UpdateSource.HTTP.value:
+            if source == UpdateSource.HTTP.value:
                 return self._apply_http(info)
             elif source == UpdateSource.BLOB_STORE.value:
                 return self._apply_blob_store(info)
@@ -463,87 +456,6 @@ class AutonetUpdater:
                 return False
         except Exception as e:
             logger.error(f"Update apply failed: {e}")
-            return False
-
-    # -- Git source --
-
-    def _check_git(self) -> Optional[UpdateInfo]:
-        """Check for updates via git fetch."""
-        self._last_check = time.time()
-
-        try:
-            # Fetch latest
-            subprocess.run(
-                ["git", "fetch", "--quiet"],
-                cwd=self.repo_path,
-                capture_output=True,
-                timeout=30,
-            )
-
-            # Compare local HEAD with remote
-            local = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=self.repo_path,
-                capture_output=True, text=True, timeout=10,
-            ).stdout.strip()
-
-            remote = subprocess.run(
-                ["git", "rev-parse", "origin/master"],
-                cwd=self.repo_path,
-                capture_output=True, text=True, timeout=10,
-            ).stdout.strip()
-
-            # Get changelog
-            changelog = ""
-            if local != remote:
-                result = subprocess.run(
-                    ["git", "log", "--oneline", f"{local}..{remote}"],
-                    cwd=self.repo_path,
-                    capture_output=True, text=True, timeout=10,
-                )
-                changelog = result.stdout.strip()
-
-            info = UpdateInfo(
-                current_version=local[:8],
-                available_version=remote[:8],
-                source="git",
-                changelog=changelog,
-            )
-
-            self._last_info = info
-
-            if info.has_update:
-                logger.info(
-                    f"Update available: {info.current_version} -> {info.available_version}"
-                )
-            else:
-                logger.debug("No git updates available")
-
-            return info
-
-        except FileNotFoundError:
-            logger.warning("git not found on PATH")
-            return None
-        except subprocess.TimeoutExpired:
-            logger.warning("git fetch timed out")
-            return None
-
-    def _apply_git(self) -> bool:
-        """Apply update via git pull."""
-        try:
-            result = subprocess.run(
-                ["git", "pull", "--ff-only"],
-                cwd=self.repo_path,
-                capture_output=True, text=True, timeout=60,
-            )
-            if result.returncode == 0:
-                logger.info(f"Git update applied: {result.stdout.strip()}")
-                return True
-            else:
-                logger.error(f"Git pull failed: {result.stderr.strip()}")
-                return False
-        except Exception as e:
-            logger.error(f"Git pull error: {e}")
             return False
 
     # -- HTTP source --

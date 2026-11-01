@@ -184,7 +184,7 @@ class ResourceConfig:
 class UpdateConfig:
     """Auto-update configuration (Epic 6)."""
     check_interval: int = 3600           # Seconds between update checks
-    update_source: str = "git"           # "git", "http", or "blob_store"
+    update_source: str = "pypi"          # "pypi", "http", or "blob_store"
     update_url: str = ""                 # URL for http source
     auto_apply: bool = False             # Auto-apply updates
 

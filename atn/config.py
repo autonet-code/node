@@ -392,13 +392,13 @@ class AutoUpdateConfig:
         auto_update:
           enabled: true
           check_interval_secs: 86400   # daily
-          source: pypi                 # pypi | git | http | blob_store
+          source: pypi                 # pypi | http | blob_store
           pypi_index_url: ""           # "" → pypi.org default
           package_name: autonet-computer
     """
     enabled: bool = True
     check_interval_secs: int = 86400     # daily
-    source: str = "pypi"                 # pypi | git | http | blob_store
+    source: str = "pypi"                 # pypi | http | blob_store
     pypi_index_url: str = ""             # "" → pypi.org JSON API default
     package_name: str = "autonet-computer"
 

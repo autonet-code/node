@@ -97,11 +97,11 @@ class TestUpdateInfo(unittest.TestCase):
     """Tests for UpdateInfo."""
 
     def test_has_update_true(self):
-        info = UpdateInfo(current_version="0.1.0", available_version="0.2.0", source="git")
+        info = UpdateInfo(current_version="0.1.0", available_version="0.2.0", source="pypi")
         self.assertTrue(info.has_update)
 
     def test_has_update_false(self):
-        info = UpdateInfo(current_version="0.1.0", available_version="0.1.0", source="git")
+        info = UpdateInfo(current_version="0.1.0", available_version="0.1.0", source="pypi")
         self.assertFalse(info.has_update)
 
 
@@ -113,7 +113,7 @@ class TestAutonetUpdater(unittest.TestCase):
         import tempfile
         self._tmp = tempfile.mkdtemp(prefix="updater_test_")
 
-    def _make_config(self, source="git", interval=3600):
+    def _make_config(self, source="pypi", interval=3600):
         cfg = AutonetConfig()
         cfg.update = UpdateConfig(update_source=source, check_interval=interval)
         return cfg
@@ -142,38 +142,8 @@ class TestAutonetUpdater(unittest.TestCase):
         """Apply returns True when no update needed."""
         cfg = self._make_config()
         u = AutonetUpdater(config=cfg, data_dir=self._tmp)
-        info = UpdateInfo(current_version="0.1.0", available_version="0.1.0", source="git")
+        info = UpdateInfo(current_version="0.1.0", available_version="0.1.0", source="pypi")
         self.assertTrue(u.apply_update(info))
-
-    @patch("subprocess.run")
-    def test_git_check(self, mock_run):
-        """Git check fetches and compares revisions."""
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="", stderr=""),  # git fetch
-            MagicMock(returncode=0, stdout="abc12345\n", stderr=""),  # local HEAD
-            MagicMock(returncode=0, stdout="abc12345\n", stderr=""),  # remote HEAD
-        ]
-        cfg = self._make_config(source="git")
-        u = AutonetUpdater(config=cfg, data_dir=self._tmp)
-        info = u.check_update()
-        self.assertIsNotNone(info)
-        self.assertFalse(info.has_update)
-
-    @patch("subprocess.run")
-    def test_git_check_update_available(self, mock_run):
-        """Git check detects when remote is ahead."""
-        mock_run.side_effect = [
-            MagicMock(returncode=0),  # git fetch
-            MagicMock(returncode=0, stdout="abc12345\n"),  # local HEAD
-            MagicMock(returncode=0, stdout="def67890\n"),  # remote HEAD (different)
-            MagicMock(returncode=0, stdout="New feature\n"),  # changelog
-        ]
-        cfg = self._make_config(source="git")
-        u = AutonetUpdater(config=cfg, data_dir=self._tmp)
-        info = u.check_update()
-        self.assertIsNotNone(info)
-        self.assertTrue(info.has_update)
-        self.assertIn("New feature", info.changelog)
 
 
 class TestAutonetService(unittest.TestCase):

@@ -2,8 +2,8 @@
 Autonet Node Service — Managed Daemon Process.
 
 Top-level entry point that runs a solver node as a managed background service.
-Handles signal-based lifecycle (SIGTERM/SIGINT), resource monitoring,
-auto-updates, and graceful shutdown.
+Handles signal-based lifecycle (SIGTERM/SIGINT), resource monitoring
+and graceful shutdown. Updates are the atn daemon's (PyPI, atn/cli.py).
 
 Story 6.1: Solver node as daemon background service.
 """
@@ -18,7 +18,6 @@ from typing import Any, Dict, Optional
 
 from .common.config import AutonetConfig, load_config
 from .common.resource_monitor import ResourceMonitor
-from .common.updater import AutonetUpdater
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,6 @@ class ServiceStatus:
     cycles_completed: int = 0
     errors: int = 0
     paused_reason: Optional[str] = None
-    last_update_check: float = 0.0
 
 
 class AutonetService:
@@ -48,7 +46,7 @@ class AutonetService:
 
     Lifecycle:
         1. start() — initialize subsystems, enter main loop
-        2. Main loop: cycle training, check resources, check updates
+        2. Main loop: run the consensus cycle
         3. stop() — graceful shutdown of all subsystems
 
     Signal handling:
@@ -74,7 +72,6 @@ class AutonetService:
 
         # Subsystems (lazy-init in start())
         self._resource_monitor: Optional[ResourceMonitor] = None
-        self._updater: Optional[AutonetUpdater] = None
         self._node = None  # Solver or other node type
 
         # Training data feed (Story 3.2) — bridges agent activity → JEPA training
@@ -136,7 +133,6 @@ class AutonetService:
                 self._resource_monitor.paused_reason
                 if self._resource_monitor else None
             ),
-            last_update_check=self._updater._last_check if self._updater else 0.0,
         )
 
     def start(self):
@@ -167,15 +163,9 @@ class AutonetService:
         # Initialize subsystems
         try:
             self._resource_monitor = ResourceMonitor(self.config)
-            self._updater = AutonetUpdater(
-                config=self.config,
-                current_version=self._get_version(),
-            )
-            # Pre-set last-check times so the first cycle doesn't trigger
-            # expensive git-fetch / psutil calls immediately.
-            now = time.time()
-            self._resource_monitor._last_check = now
-            self._updater._last_check = now
+            # Pre-set the last-check time so the first cycle doesn't
+            # trigger psutil calls immediately.
+            self._resource_monitor._last_check = time.time()
 
             # JEPA training feed retired — the world-model substrate is the
             # only training path. TrainingDataFeed remains on disk but is no
@@ -255,7 +245,7 @@ class AutonetService:
         )
 
     def _main_loop(self):
-        """Core service loop: train, monitor, update."""
+        """Core service loop: run the cycle, sleep, repeat."""
         cycle_delay = self.config.node.cycle_delay
         max_cycles = self.config.node.max_cycles
 
@@ -273,11 +263,7 @@ class AutonetService:
                 self._run_cycle()
                 self._cycles += 1
 
-                # 3. Check for updates (periodic)
-                if self._updater and self._updater.should_check():
-                    self._check_updates()
-
-                # 4. Sleep between cycles
+                # Sleep between cycles
                 time.sleep(cycle_delay)
 
             except Exception as e:
@@ -506,23 +492,6 @@ class AutonetService:
             kwargs["latest_delta_cid"] = delta_cid
         host.update_model_state(**kwargs)
         logger.debug("Model state updated in P2P gossip")
-
-    def _check_updates(self):
-        """Check for and optionally apply updates."""
-        try:
-            info = self._updater.check_update()
-            if info and info.has_update:
-                logger.info(
-                    f"Update available: {info.current_version} -> {info.available_version}"
-                )
-                if self.config.update.auto_apply:
-                    logger.info("Auto-applying update...")
-                    if self._updater.apply_update(info):
-                        logger.info("Update applied. Restart recommended.")
-                    else:
-                        logger.error("Update apply failed")
-        except Exception as e:
-            logger.error(f"Update check error: {e}")
 
     def _install_signal_handlers(self):
         """Install SIGTERM and SIGINT handlers for graceful shutdown."""
