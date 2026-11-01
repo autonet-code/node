@@ -106,7 +106,9 @@ contract Substrate is EIP712 {
         address vaultMinter_,
         address governor_,
         address anchorer_,
-        bytes32 genesisRoot_
+        bytes32 genesisRoot_,
+        string memory name_,
+        string memory symbol_
     )
         EIP712("AutonetSubstrate", "1")
     {
@@ -118,6 +120,8 @@ contract Substrate is EIP712 {
         latestCutoff = block.timestamp;
         anchorer = anchorer_;
         genesisRoot = genesisRoot_;
+        name = name_;
+        symbol = symbol_;
         emit AnchorerSet(address(0), anchorer_);
     }
 
@@ -1052,13 +1056,23 @@ contract Substrate is EIP712 {
     // not a Substrate asset — it is a DAO-side pull claim on earnings.
     // Training mints ATN and accrues the earnings ledger; ATN moves freely.
     //
-    // ERC20-shaped surface: balanceOf, transfer, approve, transferFrom,
-    // allowance. Deliberately minimal — no name/symbol/decimals/totalSupply
-    // (those belong on a wrapper if we ever want a standard ERC20 facade).
+    // ERC20-shaped surface: name, symbol, decimals, balanceOf, transfer,
+    // approve, transferFrom, allowance. Name and symbol are set per
+    // jurisdiction at deploy (the setup derives them from the DAO, e.g.
+    // "Tetepare ATN" / "REPATN") so wallets tell jurisdictions' ATN apart;
+    // decimals is fixed at 6 (1 ATN = 1e6 base units, the scale of the
+    // close's mint amounts and of AutonetVault's parity).
     // No external mint or burn function. The mint paths are claimFor
     // (epoch pool), mintFromVault (purchased) and claimGenesis (fork
     // carry-over). No admin keys.
     // =========================================================================
+
+    string public name;
+    string public symbol;
+
+    function decimals() external pure returns (uint8) {
+        return 6;
+    }
 
     mapping(address => uint256) private _atnBalance;
     mapping(address => mapping(address => uint256)) private _atnAllowance;

@@ -27,6 +27,16 @@
      "internalType": "bytes32",
      "name": "genesisRoot_",
      "type": "bytes32"
+    },
+    {
+     "internalType": "string",
+     "name": "name_",
+     "type": "string"
+    },
+    {
+     "internalType": "string",
+     "name": "symbol_",
+     "type": "string"
     }
    ],
    "stateMutability": "nonpayable",
@@ -1429,6 +1439,19 @@
   },
   {
    "inputs": [],
+   "name": "decimals",
+   "outputs": [
+    {
+     "internalType": "uint8",
+     "name": "",
+     "type": "uint8"
+    }
+   ],
+   "stateMutability": "pure",
+   "type": "function"
+  },
+  {
+   "inputs": [],
    "name": "deployedAt",
    "outputs": [
     {
@@ -2020,6 +2043,19 @@
   },
   {
    "inputs": [],
+   "name": "name",
+   "outputs": [
+    {
+     "internalType": "string",
+     "name": "",
+     "type": "string"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
    "name": "networkMintTotal",
    "outputs": [
     {
@@ -2267,6 +2303,19 @@
    "name": "setServiceFeeBps",
    "outputs": [],
    "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "symbol",
+   "outputs": [
+    {
+     "internalType": "string",
+     "name": "",
+     "type": "string"
+    }
+   ],
+   "stateMutability": "view",
    "type": "function"
   },
   {

@@ -62,6 +62,8 @@ def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
         deployer,  # governor (anchors directly)
         "0x0000000000000000000000000000000000000000",  # anchorer (none)
         bytes(32),  # genesisRoot (none)
+        "Test ATN",
+        "REPATN",
     ).transact(
         {"from": deployer, "gas": 8_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)

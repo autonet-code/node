@@ -19,6 +19,10 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 
 ## Money (ATN)
 
+- Each jurisdiction's Substrate is its own ATN token, so wallets can tell
+  them apart: named `<DAO name> ATN`, symbol `<first 8 characters of the
+  REP symbol>ATN` (REP gives REPATN), set at setup. 6 decimals: 1 ATN is
+  1e6 base units.
 - The tool pool is funded only by **burned service fees**: each
   `payForService` takes a 2.5% fee, half to the DAO treasury and half
   burned, and an epoch's mint is capped on-chain at the fees burned between

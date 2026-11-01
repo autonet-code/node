@@ -51,6 +51,8 @@ def deploy_substrate(
     governor: Optional[str] = None,
     anchorer: str = ZERO,
     genesis_root: bytes = bytes(32),
+    name: str = "Test ATN",
+    symbol: str = "REPATN",
 ) -> str:
     """Deploy Substrate. ``governor`` defaults to ``deployer``: the
     account the tests anchor from."""
@@ -60,7 +62,7 @@ def deploy_substrate(
     governor = deployer if governor is None else governor
     factory = w3.eth.contract(abi=abi, bytecode=bytecode)
     tx = factory.constructor(treasury, vault_minter, governor, anchorer,
-                             genesis_root).transact(
+                             genesis_root, name, symbol).transact(
         {"from": deployer, "gas": 12_000_000})
     receipt = w3.eth.wait_for_transaction_receipt(tx)
     assert receipt.status == 1

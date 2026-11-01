@@ -211,7 +211,7 @@ async function main() {
   const Substrate = await ethers.getContractFactory("Substrate");
   const substrate = await Substrate.deploy(
     deployer.address, deployer.address, deployer.address, ethers.ZeroAddress,
-    ethers.ZeroHash);
+    ethers.ZeroHash, "Test ATN", "REPATN");
   await substrate.waitForDeployment();
   const substrateAddr = await substrate.getAddress();
 

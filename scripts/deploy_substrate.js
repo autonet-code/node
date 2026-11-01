@@ -67,7 +67,11 @@ async function main() {
     process.env.ANCHORER || ethers.ZeroAddress,
     // Fork/split carry-over root (scripts/build_atn_genesis.py); zero for a
     // fresh network.
-    process.env.GENESIS_ROOT || ethers.ZeroHash
+    process.env.GENESIS_ROOT || ethers.ZeroHash,
+    // Wallet-facing token metadata; the werule setup derives these from the
+    // DAO (governor name + " ATN", RepToken symbol + "ATN").
+    process.env.ATN_NAME || "Autonet ATN",
+    process.env.ATN_SYMBOL || "REPATN"
   );
   await substrate.waitForDeployment();
   const address = await substrate.getAddress();
