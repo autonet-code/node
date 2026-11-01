@@ -132,6 +132,7 @@ def _print_status(runtime: Runtime) -> None:
 # to re-exec the same Python process after cleanup completes (picks up
 # code changes). Plain `quit` leaves this False and the process exits.
 _restart_requested = False
+_RESTART_CODE = 75     # a supervised daemon's exit code asking to be started again
 
 
 def _print_help() -> None:
@@ -1068,6 +1069,23 @@ def main() -> None:
         from .integration_token_cli import main as _token_main
         sys.exit(_token_main(sys.argv[2:]))
 
+    if os.name == "nt" and not os.environ.get("ATN_SUPERVISED"):
+        # Windows has no real exec. A restart is the daemon exiting with
+        # _RESTART_CODE and this launcher starting it again on the same
+        # console. The launcher never reads stdin (a relaunching daemon's
+        # stdin thread used to keep stealing console input from its child)
+        # and ignores Ctrl+C, which reaches the daemon too.
+        import signal
+        import subprocess
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        env = dict(os.environ, ATN_SUPERVISED="1")
+        args = [sys.executable, "-m", "atn", *sys.argv[1:]]
+        while True:
+            rc = subprocess.Popen(args, env=env).wait()
+            if rc != _RESTART_CODE:
+                os._exit(rc)
+            print("Re-launching daemon...", flush=True)
+
     # Auto-update: apply any staged release BEFORE importing heavy runtime
     # modules, so a pip-install can cleanly replace them, then re-exec once.
     # Import-light and self-contained (stdlib only); no-ops when nothing is
@@ -1084,25 +1102,14 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     if _restart_requested:
-        console.print("[bold green]Re-launching daemon...[/]")
         try:
             sys.stdout.flush()
         except Exception:
             pass
-        args = [sys.executable, "-m", "atn", *sys.argv[1:]]
-        if os.name == "nt":
-            # Windows has no real exec: execv starts a new process and ends
-            # this one, so the console's shell takes the terminal back and
-            # an interactive daemon reads EOF and stops. Run the new daemon
-            # as a child on this console and exit with its code instead.
-            # Ctrl+C reaches every process on the console: the daemon
-            # handles it, this waiting parent ignores it (no traceback).
-            import signal
-            import subprocess
-            child = subprocess.Popen(args)
-            signal.signal(signal.SIGINT, signal.SIG_IGN)
-            os._exit(child.wait())
-        os.execv(sys.executable, args)
+        if os.environ.get("ATN_SUPERVISED"):
+            os._exit(_RESTART_CODE)        # the Windows launcher starts us again
+        console.print("[bold green]Re-launching daemon...[/]")
+        os.execv(sys.executable, [sys.executable, "-m", "atn", *sys.argv[1:]])
     # Force-exit to avoid hanging on lingering non-daemon threads or asyncio
     # transports during interpreter shutdown (numpy/scipy Fortran runtime,
     # libp2p protobuf threads, etc.). All persistent state has already been
