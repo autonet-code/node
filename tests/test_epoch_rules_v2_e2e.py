@@ -155,7 +155,7 @@ def _build_net(tmp_path, households: bool = False):
             _tx(w3, rep.functions.delegate(a), a)
     timelock = _deploy(w3, tl_art, 0, [], ["0x" + "00" * 20], deployer)
     gov = _deploy(w3, hb, rep.address, timelock.address, "Test DAO",
-                  1, 3, 0, 4, deployer)
+                  1, 3, 0, 4, deployer, 6667)
     election_addr = _next_address(w3, deployer, ahead=1)
     sub_addr = deploy_substrate(w3, sub_art["abi"], sub_art["bytecode"],
                                 deployer, governor=timelock.address,

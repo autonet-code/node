@@ -843,7 +843,9 @@ class WebSocketBridge:
                     sched = scheduler.status()
                     sched.pop("opened_at", None)
                     epoch.update(sched)
-                closed = len(world_service.epoch_history)
+                closed = (world_service.epochs_recorded
+                          if hasattr(world_service, "epochs_recorded")
+                          else len(world_service.epoch_history))
             except Exception:                              # noqa: BLE001
                 pass
         return {

@@ -380,6 +380,14 @@ class WorldPersistence:
         logger.debug("epoch record written: %s", path)
         return path
 
+    def delete_epoch_record(self, epoch_id: str) -> None:
+        safe_eid = re.sub(r"[^A-Za-z0-9_.-]", "_", str(epoch_id)) or "unknown"
+        with self._lock:
+            try:
+                (self.epochs_dir / f"{safe_eid}.json").unlink()
+            except FileNotFoundError:
+                pass
+
     def read_epoch_record(self, epoch_id: str) -> Optional[Dict[str, Any]]:
         safe_eid = re.sub(r"[^A-Za-z0-9_.-]", "_", str(epoch_id)) or "unknown"
         path = self.epochs_dir / f"{safe_eid}.json"

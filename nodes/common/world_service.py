@@ -71,6 +71,9 @@ from .world_model_substrate.coverage import CoverageIndex
 
 logger = logging.getLogger(__name__)
 
+# Closed local epochs kept (in memory and on disk); older ones are dropped.
+EPOCH_HISTORY_KEEP = 500
+
 
 _DEFAULT_BANDWIDTH = 1.5
 # Phase 2.2 (dim_sweep): 64 retains 95% of native-384 categorical
@@ -251,6 +254,9 @@ class WorldService:
         # candle window accrues to the next epoch automatically.
         self._emission_clock: float = 0.0
         self._epoch_history: List[Dict[str, Any]] = []  # closed epochs
+        # Epochs recorded since boot plus the rehydrated ones: a cache key
+        # that keeps moving once the history is capped.
+        self._epochs_recorded = 0
 
         # Phase 12.25: cached 2D topic projection per node id, used to
         # anchor PCA axes between recomputes so the layout stays
@@ -403,7 +409,13 @@ class WorldService:
                 if rec is not None:
                     loaded.append(rec)
             loaded.sort(key=lambda r: r.get("closed_at", 0.0))
+            # The history is capped: drop older records left on disk.
+            stale = loaded[:-EPOCH_HISTORY_KEEP]
+            loaded = loaded[-EPOCH_HISTORY_KEEP:]
+            for r in stale:
+                self._persistence.delete_epoch_record(str(r.get("epoch_id", "")))
             self._epoch_history = loaded
+            self._epochs_recorded = len(loaded)
             if loaded:
                 logger.info(
                     "rehydrated %d closed-epoch records from disk", len(loaded),
@@ -553,6 +565,12 @@ class WorldService:
             "emission_clock": self._emission_clock or None,
             "rpb_address": self.rpb_address,
         }
+
+    @property
+    def epochs_recorded(self) -> int:
+        """Local epochs closed: the kept history plus those dropped by the
+        cap since this daemon started."""
+        return self._epochs_recorded
 
     @property
     def epoch_history(self) -> List[Dict[str, Any]]:
@@ -1937,7 +1955,7 @@ class WorldService:
         not comparable.
         """
         with self._lock:
-            cache_key = (parent_id, len(self._epoch_history))
+            cache_key = (parent_id, self._epochs_recorded)
             cached = self._subtree_projection_cache.get(cache_key)
             if cached is not None:
                 self._subtree_projection_cache.move_to_end(cache_key)
@@ -2643,10 +2661,19 @@ class WorldService:
             "scope": "local",
         }
         self._epoch_history.append(record)
+        self._epochs_recorded += 1
         try:
             self._persistence.write_epoch_record(record)
         except Exception as e:
             logger.warning("failed to persist epoch record: %s", e)
+        # Capped: with a short epoch this was one record a minute, kept
+        # forever, in memory and on disk.
+        while len(self._epoch_history) > EPOCH_HISTORY_KEEP:
+            old = self._epoch_history.pop(0)
+            try:
+                self._persistence.delete_epoch_record(str(old.get("epoch_id", "")))
+            except Exception as e:
+                logger.debug("failed to delete epoch record: %s", e)
         # Notify subscribers (e.g. the daemon's WS bridge) once the
         # caller releases the world lock (``_deliver_epoch_closed``).
         self._pending_close_records.append(record)
@@ -2664,7 +2691,7 @@ class WorldService:
             "epoch_id": eid,
             "n_events": len(events),
         })
-        logger.info(
+        (logger.info if events else logger.debug)(
             "WorldService epoch closed: rpb=%s, epoch=%s, "
             "%d events, total mint=%.4f, total novelty=%.4f",
             self.rpb_address, eid, len(events),

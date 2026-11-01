@@ -1556,6 +1556,8 @@ class AutonetBridge:
         loop = asyncio.get_running_loop()
 
         def _on_close(record: dict) -> None:
+            if not record.get("n_events"):
+                return          # an empty local epoch: nothing to report
             # Slim payload: full record is durable on disk.
             payload = {
                 "epoch_id": record.get("epoch_id"),

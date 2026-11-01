@@ -92,7 +92,7 @@ def stack():
     timelock = _deploy(w3, tl_art, 0, [], ["0x" + "00" * 20], deployer)
     # 1 minute voting delay, 3 minutes voting, threshold 0, quorum 4%.
     governor = _deploy(w3, hb, rep.address, timelock.address, "Test DAO",
-                       1, 3, 0, 4, deployer)
+                       1, 3, 0, 4, deployer, 6667)
 
     # Substrate takes the election's address before it exists.
     election_addr = _next_address(w3, deployer, ahead=1)

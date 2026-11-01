@@ -127,6 +127,19 @@ class TestWorldServiceEpochStatus:
         assert reborn.epoch_history[-1]["closed_at"] >= \
             reborn.epoch_history[0]["closed_at"]
 
+    def test_history_is_capped_in_memory_and_on_disk(self, tmp_path, monkeypatch):
+        import nodes.common.world_service as ws_mod
+        monkeypatch.setattr(ws_mod, "EPOCH_HISTORY_KEEP", 2)
+        svc = self._service(tmp_path)
+        for i in range(4):
+            svc.open_epoch(f"e_cap_{i}")
+            svc.close_epoch(apply_gate=False)
+        assert [r["epoch_id"] for r in svc.epoch_history] == ["e_cap_2", "e_cap_3"]
+        assert svc.epochs_recorded == 4
+        svc.shutdown()
+        reborn = self._service(tmp_path)
+        assert [r["epoch_id"] for r in reborn.epoch_history] == ["e_cap_2", "e_cap_3"]
+
     def test_combined_shape_matches_spec(self, tmp_path):
         """The ws handler merges the two halves; the merged dict must
         cover every field EPOCH_OBSERVABILITY_SPEC.md §2 documents."""
