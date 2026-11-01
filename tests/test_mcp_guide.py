@@ -6,7 +6,7 @@ from mcp import types
 
 
 def _server(monkeypatch, **env):
-    for k in ("ATN_MCP_TOKEN", "ATN_MCP_AGENT", "ATN_MCP_URL"):
+    for k in ("ATN_MCP_AGENT", "ATN_MCP_URL"):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)

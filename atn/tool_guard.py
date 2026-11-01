@@ -39,18 +39,8 @@ Policy shape (all deny by default):
             the audit hook entirely. It raises the cost of a stealth
             call in ordinary Python. It is NOT an egress firewall.
 
-Two GUEST-only fields (origin="integration" tools, atn/guest_sandbox.py):
-
-  - deny_loopback — refuse any connect/sendto to a loopback, unspecified
-            or link-local address, "localhost", or an AF_UNIX path, even
-            with net=True. Keeps a guest tool off the daemon's own
-            listeners (owner socket :7700) at the Python layer. The
-            OS-level check is the owner listener's peer-credential test
-            (ws_auth.local_peer_denied); this is the tripwire before it.
-  - deny_paths    — path prefixes refused for open/listdir/scandir even
-            with fs=True (the daemon data dir, keystore, /proc). Matters
-            on the same-uid fallback; under uid isolation the OS already
-            refuses them.
+  - deny_paths — path prefixes refused for open/listdir/scandir even
+            with fs=True (the daemon data dir, keystore).
 
 An undeclared capability raises PermissionError: the tool process dies
 with a traceback naming the capability, the ToolStore surfaces it as an
@@ -67,7 +57,6 @@ friction, and the CON evidence rail sit around this.
 """
 from __future__ import annotations
 
-import ipaddress
 import json
 import os
 import runpy
@@ -97,7 +86,6 @@ def main() -> None:
         if str(h).strip()
     }
 
-    deny_loopback = bool(policy.get("deny_loopback"))
     deny_paths = tuple(
         _real(str(p)) for p in (policy.get("deny_paths") or []) if str(p).strip()
     )
@@ -157,42 +145,6 @@ def main() -> None:
             raise PermissionError(
                 f"destination not authorized: {dest} "
                 f"(allowed: {', '.join(sorted(allow_hosts))})")
-
-    def _is_local_dest(dest) -> bool:
-        if isinstance(dest, bytes):
-            dest = dest.decode("utf-8", errors="replace")
-        if not isinstance(dest, str):
-            return False
-        h = dest.strip().lower().rstrip(".").strip("[]")
-        if h in ("", "localhost", "localhost.localdomain", "ip6-localhost",
-                 "ip6-loopback") or h.endswith(".localhost"):
-            return True
-        try:
-            ip = ipaddress.ip_address(h.split("%", 1)[0])
-        except ValueError:
-            return False
-        mapped = getattr(ip, "ipv4_mapped", None)
-        if mapped is not None:
-            ip = mapped
-        return ip.is_loopback or ip.is_unspecified or ip.is_link_local
-
-    def _check_local(event: str, args: tuple) -> None:
-        """deny_loopback: no connect/sendto toward this host's own sockets."""
-        if event == "socket.getaddrinfo" and args:
-            if _is_local_dest(args[0]):
-                raise PermissionError(
-                    f"guest tool may not reach local addresses ({args[0]})")
-            return
-        if event not in ("socket.connect", "socket.sendto", "socket.sendmsg"):
-            return
-        addr = args[1] if len(args) > 1 else None
-        if isinstance(addr, (str, bytes)):
-            # AF_UNIX path (or abstract socket): a local IPC endpoint.
-            raise PermissionError("guest tool may not connect to unix sockets")
-        if isinstance(addr, (tuple, list)) and addr:
-            if _is_local_dest(addr[0]):
-                raise PermissionError(
-                    f"guest tool may not reach local addresses ({addr[0]})")
 
     def _denied_path(path) -> bool:
         if not deny_paths or path is None or isinstance(path, int):
@@ -266,8 +218,6 @@ def main() -> None:
         if not allow_net and event.startswith("socket."):
             _refuse(f"undeclared capability: net ({event})")
         if allow_net and event.startswith("socket."):
-            if deny_loopback:
-                _check_local(event, args)
             _check_dest(event, args)
         if deny_paths and event in fs_path_events:
             if _denied_path(args[0] if args else None):

@@ -586,27 +586,6 @@ def _try_reclaim_port(port: int) -> int | None:
     return None
 
 
-def _integration_listener_settings(an) -> tuple[str, int, float, int]:
-    """(host, port, rate, burst) for the integration listener; host "" means
-    disabled. Env ATN_INTEGRATION_WS / _HOST / _PORT override the config."""
-    enabled = bool(getattr(an, "integration_ws_enabled", False)) if an else False
-    env_on = os.environ.get("ATN_INTEGRATION_WS", "").strip().lower()
-    if env_on:
-        enabled = env_on in ("1", "true", "yes", "on")
-    host = (os.environ.get("ATN_INTEGRATION_WS_HOST", "").strip()
-            or (getattr(an, "integration_ws_host", "") if an else "")
-            or "127.0.0.1")
-    try:
-        port = int(os.environ.get("ATN_INTEGRATION_WS_PORT", "").strip()
-                   or (getattr(an, "integration_ws_port", 0) if an else 0)
-                   or 7710)
-    except ValueError:
-        port = 7710
-    rate = float(getattr(an, "integration_rate_per_sec", 5.0) or 5.0) if an else 5.0
-    burst = int(getattr(an, "integration_burst", 20) or 20) if an else 20
-    return (host if enabled else ""), port, rate, burst
-
-
 def _remote_listener_settings(an) -> tuple[str, int, str]:
     """(host, port, owner_wallet) for the remote (wallet-auth) listener; host
     "" means disabled. Env ATN_REMOTE_WS_HOST / ATN_REMOTE_WS_PORT override
@@ -725,7 +704,6 @@ async def run_cli() -> None:
     ws_bridge: WebSocketBridge | None = None
     _an = getattr(runtime._config, "autonet", None)
     _remote_host, _remote_port, _owner_wallet = _remote_listener_settings(_an)
-    _int_host, _int_port, _int_rate, _int_burst = _integration_listener_settings(_an)
     # The privileged local listener's port. Configurable (autonet.local_ws_port)
     # so a second daemon can coexist on one machine; 0/unset keeps 7700.
     _local_port = int(getattr(_an, "local_ws_port", 0) or 0) if _an else 0
@@ -741,8 +719,6 @@ async def run_cli() -> None:
             runtime, host="localhost", port=_local_port,
             remote_host=_remote_host, remote_port=_remote_port,
             owner_wallet=_owner_wallet,
-            integration_host=_int_host, integration_port=_int_port,
-            integration_rate=_int_rate, integration_burst=_int_burst,
         )
         try:
             await ws_bridge.start()
@@ -757,15 +733,6 @@ async def run_cli() -> None:
                 console.print(
                     f"  [green]Remote (auth: {_modes}) WS on "
                     f"ws://{_remote_host}:{ws_bridge.remote_port}[/]")
-            if _int_host and ws_bridge._integration_server is not None:
-                console.print(
-                    f"  [green]Integration (bearer token, agent-clamped) WS on "
-                    f"ws://{_int_host}:{_int_port}[/]")
-                from .guest_sandbox import boot_warning as _guest_warning
-                _gw = _guest_warning()
-                if _gw:
-                    log.warning("Guest tools: %s", _gw)
-                    console.print(f"  [yellow]Guest tools: {_gw}[/]")
             break
         except OSError as exc:
             ws_bridge = None
@@ -1065,9 +1032,6 @@ def main() -> None:
         sys.exit(_relay_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "jurisdiction":
         sys.exit(_jurisdiction_main(sys.argv[2:]))
-    if len(sys.argv) > 1 and sys.argv[1] == "integration-token":
-        from .integration_token_cli import main as _token_main
-        sys.exit(_token_main(sys.argv[2:]))
 
     if os.name == "nt" and not os.environ.get("ATN_SUPERVISED"):
         # Windows has no real exec. A restart is the daemon exiting with

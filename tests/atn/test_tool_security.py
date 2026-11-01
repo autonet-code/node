@@ -554,9 +554,6 @@ class TestWsSurface:
             r = await srv._handle_message({"type": t, "msg_id": "1", "digest": D1,
                                            "allowed": True}, _sess(scoped=True))
             assert r["ok"] is False and "owner-only" in r["error"], t
-        from atn.ws_server import INTEGRATION_DENIED_MESSAGES
-        assert {"set_tool_run_optin", "list_tool_run_optins",
-                "tool_bond_status"} <= INTEGRATION_DENIED_MESSAGES
 
     async def test_set_tool_published_stakes(self, tmp_path):
         rt = _make_runtime(tmp_path)

@@ -2,7 +2,7 @@
 
 All paths are relative to the repository root. Every claim comes from reading the code. No documentation was consulted. The `docs/*.md` files and `atn/external_agents.md` that the code refers to were not in the copy this was written from.
 
-This document describes HEAD as of commit 157796c. It was first written from commit 782bdc8 and then updated for the 13 commits after it. Passages rewritten for those commits cite HEAD line numbers. Unchanged passages keep the 782bdc8 line numbers, which can be a few lines off in files those commits touched (`atn/tool_store.py`, `atn/ws_auth.py`, `atn/autonet_service.py`, `atn/agent_tools.py`, `atn/runtime/__init__.py`).
+This document describes HEAD as of commit 157796c, minus the guest integration listener (port 7710, integration tokens, guest tool containment), which was removed afterwards: every external agent now uses the MCP proxy with `ATN_MCP_AGENT` (section 4). It was first written from commit 782bdc8 and then updated for the 13 commits after it. Passages rewritten for those commits cite HEAD line numbers. Unchanged passages keep the 782bdc8 line numbers, which can be a few lines off in files those commits touched (`atn/tool_store.py`, `atn/ws_auth.py`, `atn/autonet_service.py`, `atn/agent_tools.py`, `atn/runtime/__init__.py`).
 
 ---
 
@@ -18,14 +18,13 @@ This document describes HEAD as of commit 157796c. It was first written from com
 
 ### 1.2 `atn` dispatch (`atn/cli.py:985-1036`)
 
-`main()` checks `sys.argv[1]`. Four offline subcommands run and exit without booting the daemon:
+`main()` checks `sys.argv[1]`. Three offline subcommands run and exit without booting the daemon:
 
 | Subcommand | Behavior | Source |
 |---|---|---|
 | `atn guide` | Prints `atn/external_agents.md` to stdout. The file is declared as package data (`pyproject.toml:148`) but is absent from this copy. | `atn/cli.py:987-992` |
 | `atn send '<json>' [--url ws://...]` | Opens one WebSocket to the daemon (default `ws://127.0.0.1:7700`), adds a `msg_id` if missing, waits up to 600 s for the reply with the same `msg_id`, and prints it. Exit codes: 0 when `ok`, 1 when not ok, 2 for usage or bad JSON, 3 when no daemon is reachable. | `atn/cli.py:945-982` |
 | `atn relay ...` | Calls `nodes.relay.main`, a networking-only node. Flags: `--port` (env `AUTONET_P2P_PORT`, 4001), `--host` (`AUTONET_P2P_HOST`, 0.0.0.0), `--announce`, `--bootstrap`, `--jurisdiction` (repeatable, env `AUTONET_RELAY_JURISDICTIONS`), `--data-dir` (`AUTONET_RELAY_DIR`, `~/.autonet-relay`), `--transport tcp|ws` (`AUTONET_P2P_TRANSPORT`), `--no-upnp`, `--advertise-interval`. | `atn/cli.py:995-1000`, `nodes/relay.py:64-90` |
-| `atn integration-token create --agent <id> [--label L] [--force]`, `revoke <id-or-label>`, `list [--json]`, global `--data-dir` | Edits `<data_dir>/integration_tokens.json` offline. `create` refuses owner sentinels and, unless `--force`, refuses agents not found on disk. The plaintext token is printed once on stdout. | `atn/integration_token_cli.py:50-112` |
 
 Any other argv boots the daemon:
 1. `apply_staged_update_if_any()` runs first (`atn/cli.py:1009-1014`).
@@ -41,7 +40,6 @@ The only daemon flag is `--headless` (`atn/cli.py:780`). Headless mode also swit
 | `python -m atn.ws_server` | Standalone daemon. Local listener only. Stdin accepts `r`/`restart` (full re-init) and `q`/`quit`. | `atn/ws_server.py:6266-6430` |
 | `python -m atn.mcp_server` | stdio MCP proxy to a running daemon (section 4). | `atn/mcp_server.py:222-228` |
 | `python atn/substrate_mcp.py` | Second stdio MCP server with tools `substrate_capsule`, `substrate_query` and `substrate_status`. Writes capsule JSONL under `ATN_DATA_DIR/agents/<id>/conversations`. | `atn/substrate_mcp.py:1-130, 279-330`, `substrate-mcp.json` |
-| `python -m atn.guest_launcher` | Root launcher with `--daemon-uid`, `--daemon-gid`, `--guest-uid`, `--guest-uid-count`, `--guest-gid` (ignored), `--guest-root`, then `-- cmd`. Internal modes: `--stage <fd>` and `--reap <run_id>`. | `atn/guest_launcher.py:419-488` |
 | `python -m atn.agent_worker` | Per-agent worker process spawned by the daemon over an inherited pipe. Its environment is scrubbed of any variable whose name contains KEY, SECRET, TOKEN, AUTH and similar markers. | `atn/agent_worker.py:1-40`, `atn/runtime/worker_manager.py:192-213, 286-295` |
 | `atn-vault-setup` | Creates the age identity and the service-to-policy map, tightens permissions, and prints the steps for running the broker under a separate uid. | `atn/vault_setup.py:72-98` |
 
@@ -75,7 +73,7 @@ The only daemon flag is `--headless` (`atn/cli.py:780`). Headless mode also swit
 7. `_load_agents()`: loads YAML from `agents_dir`, runs the legacy routing pin migration, unregisters removed agents, registers each new agent with `legacy=True` and reloads already-registered ones in place with `runtime.reload_agent` (`atn/cli.py:490-507`), heals dangling parents, and auto-activates agents that have `schedule` or `heartbeat` (`atn/cli.py:464-541`).
 8. `seed_default_fleet()` seeds agent `kevin` and writes a `seeded kevin` stamp in `data_dir`. It is skipped, and stamped, when the install already has agents. It is retried on later boots while no provider is configured. If the stamp records the seed but the fleet is empty and Kevin's YAML is gone, Kevin is restored once (`atn/cli.py:675-681`, `atn/fleet_seed.py:131-210`).
 9. `maybe_autostart_autonet_for_registered_agents()` starts autonet if any agent has `registered_on_chain` (`atn/cli.py:686-691`, `atn/runtime/__init__.py:886-911`).
-10. `WebSocketBridge.start()`: local listener, then remote, then integration. Then `runtime.register_surface(ws_bridge)`. On `OSError` with an unconfigured port, the CLI tries `_try_reclaim_port` once (`atn/cli.py:695-754`).
+10. `WebSocketBridge.start()`: local listener, then remote. Then `runtime.register_surface(ws_bridge)`. On `OSError` with an unconfigured port, the CLI tries `_try_reclaim_port` once (`atn/cli.py:695-754`).
 11. If `auto_update.enabled` and this is not a dev environment, start `_update_poll_loop` (`atn/cli.py:760-778`).
 12. Headless mode waits on `runtime._shutdown_event`. Interactive mode prints help and runs `_input_loop` (`atn/cli.py:780-795`).
 13. Shutdown: cancel the update poll, stop the bridge, `runtime.stop()`, release the lock (`atn/cli.py:798-811`).
@@ -115,15 +113,14 @@ The only daemon flag is `--headless` (`atn/cli.py:780`). Headless mode also swit
 
 | Listener | Bind | Port | Enabled when | Auth | Source |
 |---|---|---|---|---|---|
-| Local (privileged) | `"localhost"` (hardcoded in the CLI) | `autonet.local_ws_port`, else 7700 | Always | None. Every connection is pre-authed as the full-fleet owner, unless the peer is a guest tool process. | `atn/cli.py:701-716`, `atn/ws_server.py:58, 467-473, 627-664` |
+| Local (privileged) | `"localhost"` (hardcoded in the CLI) | `autonet.local_ws_port`, else 7700 | Always | None. Every connection is pre-authed as the full-fleet owner, unless the peer is a daemon-spawned process (section 2.2). | `atn/cli.py:701-716`, `atn/ws_server.py:58, 467-473, 627-664` |
 | Remote | `ATN_REMOTE_WS_HOST` or `autonet.remote_ws_host` | `ATN_REMOTE_WS_PORT` or `autonet.remote_ws_port` (config default 7701); the bridge falls back to `port+1` only when given 0 | Host is non-empty | Wallet signature challenge: owner, or agent self-auth | `atn/cli.py:585-610`, `atn/ws_server.py:409, 484-496`, `atn/config.py:211-212` |
-| Integration | `ATN_INTEGRATION_WS_HOST`, else `autonet.integration_ws_host`, else 127.0.0.1 | `ATN_INTEGRATION_WS_PORT`, else `autonet.integration_ws_port`, else 7710 | `ATN_INTEGRATION_WS` when set (truthy enables, any other non-empty value disables, overriding config); otherwise `autonet.integration_ws_enabled` | `Authorization: Bearer atn_it_...` token bound to one agent | `atn/cli.py:564-582`, `atn/ws_server.py:503-527` |
 
 On both owner listeners, each connection gets an outbound event queue of 2000. When the queue is full, events for that client are dropped and counted (`atn/ws_server.py:682-683, 6225-6237`).
 
 ### 2.2 Local listener
 
-- **Peer check.** `ws_auth.local_peer_denied` runs before any session is created. If guest uids are configured (`ATN_GUEST_UID`), Linux resolves the client socket's uid from `/proc/net/tcp{,6}` by the full 4-tuple and refuses guest uids. An unresolvable uid is refused (fail closed). While any daemon-spawned run is tracked in `atn/contained_pids.py`, the client PID (via psutil) is refused if it is a tracked PID or a descendant of one. Tracked kinds are guest tools, authored and adopted pinned tools, agent shell commands run in the daemon, and agent worker processes (`atn/tool_store.py:1262, 1433`, `atn/shell_tools.py:259`, `atn/runtime/worker_manager.py:303`, `atn/guest_sandbox.py:181-201`). Entries carry the process start time so a reused PID never matches. When the socket table cannot name the client PID (macOS without root), the tracked trees' own sockets are scanned, and an incomplete scan refuses. A refusal closes the socket with code 4403 (`atn/ws_auth.py:187-261`, `atn/contained_pids.py:1-148`, `atn/ws_server.py:635-653`).
+- **Peer check.** `ws_auth.local_peer_denied` runs before any session is created. While any daemon-spawned run is tracked in `atn/contained_pids.py`, the client PID (via psutil) is refused if it is a tracked PID or a descendant of one. Tracked kinds are authored and adopted pinned tools, agent shell commands run in the daemon, and agent worker processes (`atn/tool_store.py:1262, 1433`, `atn/shell_tools.py:259`, `atn/runtime/worker_manager.py:303`). Entries carry the process start time so a reused PID never matches. When the socket table cannot name the client PID (macOS without root), the tracked trees' own sockets are scanned, and an incomplete scan refuses. A refusal closes the socket with code 4403 (`atn/ws_auth.py:187-261`, `atn/contained_pids.py:1-148`, `atn/ws_server.py:635-653`).
 - **Session state.** `local=True, authed=True, owner=True, scope_ids=None` (`atn/ws_server.py:658-663`). A full snapshot is sent immediately (`:690`).
 - **Scope of trust.** Daemon-spawned runs and their descendants are excluded while they run. Any other local process gets owner rights, including the app, `atn send` and an MCP proxy the user starts. A descendant that detaches and outlives its tracked ancestor is no longer linked to it (`atn/contained_pids.py:20-22`).
 
@@ -170,36 +167,6 @@ The gates run in this order:
 - **Agent edits and files:** `reset_agent_conversation`, `set_agent_model`, `remove_agent`, `attachment_upload` (15 MiB cap, stored as `<data_dir>/attachments/<sha16>.<ext>`) (`:4101-4175`).
 - **Keys:** `export_operator_key` (local plus full-fleet owner), `export_agent_key` (local) (`:4181-4211`).
 - **Secrets:** `secrets_*` (`:4262-4637`).
-
-### 2.5 Integration listener (`atn/ws_server.py:903-1241`, `atn/ws_auth.py:393-645`)
-
-**Tokens**
-- Format: `atn_it_` followed by `token_urlsafe(32)`. Only the sha256 is stored. The token id is the first 12 hex characters of the hash (`atn/ws_auth.py:550-567`).
-- Store: `<data_dir>/integration_tokens.json`, written atomically with mode 0600. It is re-read when its mtime or size changes. A corrupt file means no token is valid (`:475-546`).
-- A token may not be bound to `""` or `"user"` (`:403, 411-419`).
-
-**Upgrade checks** (`process_request`): 401 for a missing, invalid or revoked token or an unknown bound agent. 429 when the token already has 4 live connections (`integration_max_conns`, not configurable) (`atn/ws_server.py:398, 930-942`). The first frame is `integration_ready {agent_id, token_id, allowed}` (`:1052-1057`).
-
-**Per-message checks, in order** (`:1080-1200`):
-1. The token is still active (a revoke closes the socket with code 4401).
-2. Per-token rate limit, a token bucket of 5/s with burst 20 from `integration_rate_per_sec` / `integration_burst`.
-3. `INTEGRATION_DENIED_MESSAGES` (`:287-336`) answers `owner_only`.
-4. Anything outside `INTEGRATION_ALLOWED_MESSAGES` answers `not_allowed`. The allowed set is `status`, `list_tools`, `probe_tools`, `use_tool`, `attest_tools`, `publish_tool`, `adopt_tool`, `register_tool`, `find_services`, `tool_reviews`, `network_status` (`:239-255`). An import-time assert keeps the two sets disjoint (`:337-339`).
-5. The bound agent must still exist and not be owner-like.
-6. Any of `caller_id`, `agent_id`, `target`, `parent_id`, `id`, `author`, `author_id`, `caller` naming another identity is refused (`:345-346`).
-7. Protocol keys, identity keys and `_`-prefixed keys are stripped.
-8. `list_tools` is forced to `category=registered`.
-9. `use_tool` must target a REGISTERED tool that does not reach a connector.
-10. `register_tool` is validated by `_integration_register_args` (`:954-1026`):
-    - no `connector_id`, `provider`, `entrypoint` or `endpoint`; no `publish`;
-    - `code` required; snake_case name of 3-64 characters without reserved prefixes;
-    - the name must not be taken by another author or by a non-registered tool;
-    - capabilities limited to `net`, `fs`, `spawn` (booleans);
-    - dependencies must be visible to the agent and connector-free;
-    - then `_origin="integration"` is set.
-11. `execute_tool(..., caller_id=<bound agent>)`.
-
-`find_services`, `tool_reviews` and `network_status` are answered inline as public reads (`:1202-1241`). `network_status` carries no RPC URL and no wallet (`:1293-1359`).
 
 ---
 
@@ -304,9 +271,8 @@ The gates run in this order:
 ## 4. MCP server (`atn/mcp_server.py`)
 
 - It is a stdio MCP server that proxies each tool call over a fresh WebSocket. It never boots a runtime (`:1-33, 85-127`). The call timeout is 300 s.
-- **Owner mode** (no token): connects to `ATN_MCP_URL` or `ws://localhost:7700`, which is the local, pre-authed owner listener. It lists every core tool definition (`:154-158`). With `ATN_MCP_AGENT=<id>`, every call except `create_agent`, `get_agent` and `list_agents` gets `caller_id=<id>` (`:59-60, 97-98`).
-- **Guest mode** (`ATN_MCP_TOKEN` set): connects to `ATN_MCP_URL` or `ws://127.0.0.1:7710` with the bearer header (`:53-55, 123-127`). It lists only the `allowed` set from `integration_ready`, plus generic schemas for `status`, `network_status` and `tool_reviews` (`:130-169`).
-- Both modes add a local `atn_guide` tool that returns `external_agents.md` (`:62, 80-82, 176-189`). They also set server `instructions` that tell the agent to call `atn_guide`, search with `probe_tools`, run with `use_tool`, review with `attest_tools` and publish with a novelty claim (`:63-72`).
+- It connects to `ATN_MCP_URL` or `ws://localhost:7700`, which is the local, pre-authed owner listener, and lists every core tool definition. With `ATN_MCP_AGENT=<id>`, every call except `create_agent`, `get_agent` and `list_agents` gets `caller_id=<id>`. This is the one path for every external agent harness.
+- It adds a local `atn_guide` tool that returns `external_agents.md` (`:62, 80-82, 176-189`). They also set server `instructions` that tell the agent to call `atn_guide`, search with `probe_tools`, run with `use_tool`, review with `attest_tools` and publish with a novelty claim (`:63-72`).
 
 ---
 
@@ -329,7 +295,7 @@ The gates run in this order:
 | `connectors.<id>` | `mode` (local/npx/uvx), `package`, `entry`, `command`, `args`, `env`, `env_required` | `:1478-1491` |
 | `voice` | `enabled`, `backend`, `ptt_keys`, `mute_key`, `voice_volume`, `tools_volume`, `effects_volume`, `narrate_tools`, `announcements`, `output_device`, `input_device`, `kokoro_model_dir`, `piper_module_dir` | `:1394-1412` |
 | `chat` | `enabled`, `platform` (discord), `token_env` (`DISCORD_BOT_TOKEN`), `channel_id`, `bound_agent`, `policy` (open/operator/credit), `operator_ids`, `credit_window_secs`, `credit_default_limit`, `root_label`, `excluded_agents` | `:1414-1428` |
-| `autonet` (merged over `rpb`, over `blockchain.{rpc_url,chain_id,contracts.AutonetDAO}`) | `enabled`, `config_path`, `rpc_url`, `chain_id`, `gas_symbol`, `gas_decimals`, `private_key`, `wallet_address`, `owner_wallet`, `local_ws_port`, `remote_ws_host`, `remote_ws_port` (7701), `integration_ws_enabled`, `integration_ws_host`, `integration_ws_port`, `integration_rate_per_sec`, `integration_burst`, `public_ws_endpoint`, `firestore_project`, `dao_address`, `jurisdiction_id`, `rpb_contract_address`, `substrate_address`, `rep_token_address`, `charter_hash`, `charter_uri`, `charter_text`, `epoch_rules`, `bootstrap_peers`, `containment_deny_harm`, `containment_trust_harm`, `containment_trust_mass_bps`, `deploy_block`, `anchor_election_address`, `rep_claim_address`, `dao_registry_address`, `tool_bond_address`, `registry_address`, `service_registry_address`, `payment_channel_address`, `token_address`, `economy_address`, `timelock_address`, `min_alignment_threshold`, `generate_keypairs`, `sponsor_inference`, `sponsor_provider`, `sponsor_model`, `sponsor_address`, `ws_input_policy` | `:1185-1280` |
+| `autonet` (merged over `rpb`, over `blockchain.{rpc_url,chain_id,contracts.AutonetDAO}`) | `enabled`, `config_path`, `rpc_url`, `chain_id`, `gas_symbol`, `gas_decimals`, `private_key`, `wallet_address`, `owner_wallet`, `local_ws_port`, `remote_ws_host`, `remote_ws_port` (7701), `public_ws_endpoint`, `firestore_project`, `dao_address`, `jurisdiction_id`, `rpb_contract_address`, `substrate_address`, `rep_token_address`, `charter_hash`, `charter_uri`, `charter_text`, `epoch_rules`, `bootstrap_peers`, `containment_deny_harm`, `containment_trust_harm`, `containment_trust_mass_bps`, `deploy_block`, `anchor_election_address`, `rep_claim_address`, `dao_registry_address`, `tool_bond_address`, `registry_address`, `service_registry_address`, `payment_channel_address`, `token_address`, `economy_address`, `timelock_address`, `min_alignment_threshold`, `generate_keypairs`, `sponsor_inference`, `sponsor_provider`, `sponsor_model`, `sponsor_address`, `ws_input_policy` | `:1185-1280` |
 | `trace_logging` | `enabled`, `trace_dir`, `include_user_data`, `min_turns` | `:1433-1440` |
 | `auto_update` | `enabled` (true), `check_interval_secs` (86400), `source` (pypi), `pypi_index_url`, `package_name` | `:402-406, 1443-1452` |
 | `worker_isolation` | `enabled` (true), `memory_cap_mb` | `:1119-1134` |
@@ -349,12 +315,9 @@ The WS writes back to config.yaml through `save_owner_wallet_to_config`, `save_s
 | `ATN_JURISDICTION_REGISTRY`, `ATN_JURISDICTION_RPC` | Launched-jurisdiction DAO Registry and its RPC | `atn/config.py:861-904` |
 | `ATN_OWNER_WALLET` | Fills an unset owner wallet | `atn/cli.py:602-609` |
 | `ATN_REMOTE_WS_HOST`, `ATN_REMOTE_WS_PORT` | Remote listener | `atn/cli.py:594-600` |
-| `ATN_INTEGRATION_WS`, `ATN_INTEGRATION_WS_HOST`, `ATN_INTEGRATION_WS_PORT` | Integration listener | `atn/cli.py:568-579` |
-| `ATN_MCP_TOKEN`, `ATN_MCP_URL`, `ATN_MCP_AGENT` | MCP proxy | `atn/mcp_server.py:53-59` |
+| `ATN_MCP_URL`, `ATN_MCP_AGENT` | MCP proxy | `atn/mcp_server.py` |
 | `ATN_DAEMON_WS`, `ATN_DATA_DIR`, `ATN_SUBSTRATE_AGENT`, `CLAUDE_NAME` | substrate_mcp | `atn/substrate_mcp.py:60-78` |
-| `ATN_DATA_DIR` | Also used by update_boot and the guest deny paths | `atn/update_boot.py:33-41`, `atn/guest_sandbox.py:147` |
-| `ATN_GUEST_REQUIRE_UID`, `ATN_GUEST_ALLOW_SAME_UID`, `ATN_GUEST_LAUNCHER_FD`, `ATN_GUEST_UID` | Guest containment mode | `atn/guest_sandbox.py:92-118` |
-| `ATN_GUEST_TOOL_TIMEOUT_S` (30), `_CPU_S`, `_MEM_MB` (512), `_FSIZE_MB` (64), `_NPROC` (64) | Guest limits | `atn/guest_sandbox.py:79-89` |
+| `ATN_DATA_DIR` | Also used by update_boot | `atn/update_boot.py:33-41` |
 | `ATN_AUTHORED_TOOLS_BARE=1` | Run authored tools without the guard. The env stays scrubbed and the PID stays tracked | `atn/tool_store.py:1016-1020, 1038-1039` |
 | `ATN_TOOL_POLICY` | Guard policy, set by the daemon and popped by the guard | `atn/tool_guard.py:85` |
 | `ATN_TOOL_SECRETS` | Bound secret names advertised to a tool | `atn/tool_secret_api.py:57` |
@@ -384,7 +347,7 @@ Host discovery also reads many third-party variable names (for example `GITHUB_T
 ### 6.1 Records and storage
 
 - `ToolStore(runtime, data_dir/tools)` keeps `registry.jsonl`, `receipts.jsonl`, `attestations.jsonl`, `adoption_proposals.json`, `blobs/`, `code_cache/`, `sandbox/` and `run_optins.json` (`atn/tool_store.py:208-274`, `atn/tool_security.py:127-137`).
-- A `ToolRecord` has the manifest digest, `grants`, `enabled`, `published`/`published_in`, `jurisdiction`, `local_author`, `origin` (`authored`/`adopted`/`integration`), `core_replacement_ack` and `last_evidence_digest` (`atn/tool_store.py:89-174`).
+- A `ToolRecord` has the manifest digest, `grants`, `enabled`, `published`/`published_in`, `jurisdiction`, `local_author`, `origin` (`authored`/`adopted`; rows with any other origin are dropped at load), `core_replacement_ack` and `last_evidence_digest` (`atn/tool_store.py:89-174`).
 - `author` is the consensus 0x identity. `author_id` is the local agent id (`:141-149`).
 
 ### 6.2 Registration
@@ -395,7 +358,6 @@ Host discovery also reads many third-party variable names (for example `GITHUB_T
 - The author is the caller (`"user"` for the owner).
 
 **`ToolStore.register`** (`atn/tool_store.py:280-524`)
-- Guest-origin rules: code required, no connector/provider/entrypoint, capabilities limited to net/fs/spawn, no dependencies on connector tools or tools that declare secrets or env.
 - Normalizes `capabilities.secrets` and `capabilities.provides`.
 - Code limit is 512 KiB. Trust class is `pinned` with code, otherwise `attested`.
 - Dependencies must exist locally and be enabled.
@@ -439,42 +401,26 @@ Host discovery also reads many third-party variable names (for example `GITHUB_T
 - Every network-tool run is traced. Guard refusals are returned in `containment.denied` and raise a security alarm (`atn/tool_store.py:923-947, 1148-1163`).
 - Search (`probe_tools` annotation) drops a tool whose harm verdict is final, meaning `denied` on a standing read without harm still in its appeal window. Harm still under appeal contains the tool but does not hide it. Unknown standing is shown (`atn/tool_security.py:214-228, 520-521`).
 
-### 6.7 Execution by origin (`_exec_spec`, `_call_pinned`, `_call_guest`; `atn/tool_store.py:974-1318`)
+### 6.7 Execution by origin (`_exec_spec`, `_call_pinned`; `atn/tool_store.py:974-1318`)
 
 | Origin | Process | Environment | cwd | Guard policy |
 |---|---|---|---|---|
 | authored | `python tool_guard.py script` (or bare with `ATN_AUTHORED_TOOLS_BARE=1`, which drops only the guard) | Scrubbed, same as adopted (`_contained_env`), plus `ATN_TOOL_POLICY` (`atn/tool_store.py:1036-1058`) | Inherited | Declared net/fs/spawn; if none declared, all allowed; `deny_paths` as for adopted; `hosts` from secrets' authorized hosts (`atn/tool_store.py:1041-1056`) |
 | adopted | `python tool_guard.py script` | Scrubbed by `_contained_env`: PATH (interpreter dir), TEMP/TMP (sandbox), PYTHONIOENCODING, SystemRoot/WINDIR, declared `env` names; with bound secrets also `ATN_TOOL_SECRETS`, `VAULT_BROKER_SOCK` and `ATN_VAULT_BROKER_SOCK` if set (`atn/tool_store.py:1094-1120`) | `tools/sandbox/<digest16>` | Tier caps; `deny_paths` = keystore plus data dir children outside tools (`atn/tool_store.py:1060-1092, 1153`) |
-| integration (guest) | `spawn_guest` through the launcher (uid) or same-uid fallback | Built from scratch; no secrets, no env pass-through (`atn/guest_sandbox.py:210-227`, `atn/guest_launcher.py:94-108`) | Fresh temp sandbox | Declared net/fs; spawn only under uid isolation; `deny_loopback`; `deny_paths` (`atn/guest_sandbox.py:159-170`) |
 | connector-backed | MCP call through `ConnectorManager` | n/a | n/a | n/a (`atn/tool_store.py:965-966`) |
 
-- The timeout is 120 s for authored and adopted tools. For guests it is the guest timeout (+2 s under the launcher) (`atn/tool_store.py:56`, `_exec_timeout`).
-- Every pinned tool subprocess (authored, adopted, guest) is registered in `atn/contained_pids.py` for the life of the run, so the local listener refuses it (section 2.2).
+- The timeout is 120 s for authored and adopted tools (`atn/tool_store.py:56`).
+- Every pinned tool subprocess (authored, adopted) is registered in `atn/contained_pids.py` for the life of the run, so the local listener refuses it (section 2.2).
 - Composites with declared dependencies use a line-framed call rail with a maximum depth of 4. Nested calls run under the original caller's authority (`:1320-1360`).
 
 ### 6.8 `tool_guard.py`
 
 - An audit hook enforces `net` (socket events), `fs` (path events outside cwd, the Python prefix and the script dir) and `spawn` (subprocess/exec/fork) (`atn/tool_guard.py:265-289`).
-- It also enforces the `hosts` allowlist on `getaddrinfo`/`connect`, `deny_loopback` and `deny_paths` (`:118-202`).
+- It also enforces the `hosts` allowlist on `getaddrinfo`/`connect` and `deny_paths` (`:118-202`).
 - An optional trace records file, net and spawn events plus `denied` records (`:204-302`).
 - Its own docstring calls it a tripwire that native code can bypass (`:30-40, 60-66`).
 
-### 6.9 Guest containment (`atn/guest_sandbox.py`, `atn/guest_launcher.py`)
-
-Mode selection (`atn/guest_sandbox.py:121-142`):
-- `uid` when `ATN_GUEST_LAUNCHER_FD` is set on POSIX;
-- otherwise `refused`, unless `ATN_GUEST_ALLOW_SAME_UID=1` and not `ATN_GUEST_REQUIRE_UID=1`, in which case `same-uid`.
-
-**uid path**
-- The daemon sends `run` plus four fds over SCM_RIGHTS, then JSON on the ctl socket (`atn/guest_sandbox.py:358-421`).
-- The launcher takes a uid from the pool (verified clean by a reap), stages the run as that uid with rlimits and a wall clock, reaps all processes of that uid before and after, and releases the uid (`atn/guest_launcher.py:251-416`).
-- The launcher never runs the daemon as root (`:443-462`).
-
-**same-uid path**
-- Same-uid runs get rlimits (no NPROC), their own session or process group, tree kill, and PID tracking used by the local-listener gate. The PID registry is now the shared one in `atn/contained_pids.py` (`atn/guest_sandbox.py:174-201`).
-- The boot banner warns when the mode is `same-uid` or `refused` (`atn/cli.py:734-738`).
-
-### 6.10 Tool secrets
+### 6.9 Tool secrets
 
 - A pinned tool that declares `capabilities.secrets` gets its own broker session bound to the tool's PID. The binding is clamped to the caller's allowance (`atn/tool_store.py:1097-1126, 1221-1252`).
 - The tool reads values through `atn.tool_secret_api` (named pipe on Windows, AF_UNIX on POSIX) (`atn/tool_secret_api.py:1-100`).
@@ -490,7 +436,7 @@ Mode selection (`atn/guest_sandbox.py:121-142`):
 
    The re-registration then generates a new keypair (`:708-738`) and does not re-save `agent.yaml` unless budget keys moved (`atn/runtime/__init__.py:1206-1219`). The on-chain identity is lost and the agent disappears on the next boot. The comment ("Reload, not removal", `atn/cli.py:502-503`) says the opposite was intended.
 2. **Owner wallet and the remote listener.** The config comment says the owner wallet must be preconfigured for the remote listener to start (`atn/config.py:195-197`), and the `start()` docstring says the same (`atn/ws_server.py:452-453, 475-477`). The code starts the remote listener whenever a host is set and allows agent self-auth without an owner wallet (`:478-489`).
-3. **Remote port default.** The config comment says the remote port defaults to `local_ws_port + 1` (`atn/config.py:203-204`). The loader defaults `remote_ws_port` to 7701 (`:1266`), so the `port+1` fallback (`atn/ws_server.py:409`) is reached only with an explicit 0. The `atn send` default URL (`atn/cli.py:952`) and the MCP default URL (`atn/mcp_server.py:54-55`) also ignore `local_ws_port` and the integration port config.
+3. **Remote port default.** The config comment says the remote port defaults to `local_ws_port + 1` (`atn/config.py:203-204`). The loader defaults `remote_ws_port` to 7701 (`:1266`), so the `port+1` fallback (`atn/ws_server.py:409`) is reached only with an explicit 0. The `atn send` default URL (`atn/cli.py:952`) and the MCP default URL (`atn/mcp_server.py:54-55`) also ignore `local_ws_port`.
 4. **`secrets_config` read access.** Comments say an empty-payload `secrets_config` is a remotely reachable read-only GET (`atn/ws_server.py:154-157`). The whole type is in `KEY_LOCAL_ONLY_MESSAGES` (`:114`), so remote GETs are refused.
 5. **`ws_input_policy` has no effect.** Both branches return `AllowAll` (`atn/runtime/__init__.py:1167-1176`), while the single-writer arbiter always gates WS `send_agent_message` and `delegate_message` (`atn/runtime/session_manager.py:123-127`, `atn/input_arbiter.py:214-230`). The config comment says `"allow"` lets every client drive (`atn/config.py:320-325`).
 6. **`_handle_register_on_chain` docstring.** It describes a root-agent mode with a frontend `private_key` or unsigned call data (`atn/ws_server.py:5662-5672`). The parameters `is_root`, `private_key` and `sponsor_address` are never used in the body (`:5673-5809`). Registration is always daemon-signed.
@@ -501,22 +447,22 @@ Mode selection (`atn/guest_sandbox.py:121-142`):
    - The scheduler stores `_freshness_ok`, which nothing reads (`atn/runtime/scheduler.py:72, 179-183`), and it passes `registry_address` where `autonet_service` passes `dao_registry_address`. The config seed sets `registry_address` to the ServiceRegistry (`atn/config.py:646-647`).
    - `blockchain._session_nonce` (from `warm_right`) is never read (`nodes/common/blockchain.py:84-89`).
    - `_cache.py` lists itself as core-protected (`:19`) but `_CORE_FILES` omits it and `_iter_sources` skips it (`:46-54, 85`). Its constants are byte-encoded "to avoid literal grep matches" (`:65-68`).
-9. **`ATN_DATA_DIR` disagreement.** `update_boot` claims to mirror `atn.config` by honoring `ATN_DATA_DIR` (`atn/update_boot.py:33-37`), but `atn.config` never reads it. Meanwhile the updater stages into `config.data_dir` (`atn/cli.py:837`). A custom `data_dir` in config.yaml means staged updates are never applied. `substrate_mcp` and `guest_sandbox` also use `ATN_DATA_DIR` or `~/.atn` rather than the config.
+9. **`ATN_DATA_DIR` disagreement.** `update_boot` claims to mirror `atn.config` by honoring `ATN_DATA_DIR` (`atn/update_boot.py:33-37`), but `atn.config` never reads it. Meanwhile the updater stages into `config.data_dir` (`atn/cli.py:837`). A custom `data_dir` in config.yaml means staged updates are never applied. `substrate_mcp` also uses `ATN_DATA_DIR` or `~/.atn` rather than the config.
 10. **Fixed in b1678ec: authored tools get the adopted-tool scrubbed env and `deny_paths` (`atn/tool_store.py:1036-1058, 1094-1120`); the guard docstring was not changed.** Original finding, at 782bdc8: **Authored tools inherit the daemon environment and filesystem.** Authored tools get `env = dict(os.environ)` with no deny paths (`atn/tool_store.py:1031-1045`). That environment can hold `BROKER_OWNER_SECRET` and provider keys, which the worker scrub (`atn/runtime/worker_manager.py:192-213`) and the startup invariant (`atn/runtime/__init__.py:232-245`) exist to keep away from lower-trust code. The keystore (`identity.age-key`, `vault.age`) is also readable unless `fs` is declared false. The `tool_guard` docstring says it is "for ADOPTED pinned tools" (`atn/tool_guard.py:1`), but it also wraps authored tools.
-11. **Fixed in b1678ec: the local listener refuses tracked tool, shell-command and worker PIDs and their descendants (`atn/contained_pids.py`, `atn/ws_auth.py:239-261`). A detached descendant that outlives its tracked ancestor is not covered.** Original finding, at 782bdc8: **The local listener trusts more than the comments suggest.** It pre-auths any loopback process except guest-tool uids and PIDs (`atn/ws_auth.py:187-230`). Agent shell tools, workers and authored tools can therefore connect to :7700 as owner and call `export_agent_key` or `approve_adoption`, or act as any agent through `caller_id` (`atn/ws_server.py:4236-4237`). `ATN_MCP_AGENT` and the external-agent tool defaults are advisory on that listener for the same reason.
+11. **Fixed in b1678ec: the local listener refuses tracked tool, shell-command and worker PIDs and their descendants (`atn/contained_pids.py`, `atn/ws_auth.py:239-261`). A detached descendant that outlives its tracked ancestor is not covered.** Original finding, at 782bdc8: **The local listener trusts more than the comments suggest.** It pre-auths any loopback process (`atn/ws_auth.py:187-230`). Agent shell tools, workers and authored tools can therefore connect to :7700 as owner and call `export_agent_key` or `approve_adoption`, or act as any agent through `caller_id` (`atn/ws_server.py:4236-4237`). `ATN_MCP_AGENT` and the external-agent tool defaults are advisory on that listener for the same reason.
 12. **Vault hardening conflicts with daemon reads.** `vault_setup` advises chowning the keystore to a separate `vault-svc` uid so agents cannot read the age key (`atn/vault_setup.py:143-154`), and `keystore.get_secret` says "Broker-side only" (`atn/_vendor/kevin/keystore.py:139-145`). Yet the daemon itself reads agent, owner and operator keys and `app.*` credentials straight from the keystore (`atn/runtime/agent_registry.py:296, 878, 900`, `atn/credentials.py:160`). Following the hardening steps would make every agent identity fail to load and regenerate (`atn/runtime/agent_registry.py:303-306`). The keystore docstring also still describes `C:\code\secrets\keystore` and an `acl.json` (`:24-29`).
 13. **Broker socket paths differ.** On POSIX the tool-side default is `VAULT_BROKER_SOCK` or `/tmp/vault-broker.sock` (`atn/tool_secret_api.py:90`). The broker and daemon use `ATN_VAULT_BROKER_SOCK` or `<KEYSTORE_DIR>/vault-broker.sock` (`atn/_vendor/kevin/vault/vault_broker.py:93-95`, `atn/runtime/broker_client.py:48-51`). Pinned tools get a scrubbed env. Since b1678ec a secret-bound tool is handed `VAULT_BROKER_SOCK` and `ATN_VAULT_BROKER_SOCK` when the daemon has them set (`atn/tool_store.py:1113-1118`), but the tool reads only `VAULT_BROKER_SOCK`, so with only `ATN_VAULT_BROKER_SOCK` set, or neither, the default mismatch still applies. `broker_client.py:85` refers to `atn vault setup`; the command is `atn-vault-setup`.
 14. **Fixed in 5693a81: recovery to `author_pubkey` counts only when Substrate binds it to `author`, and approval re-reads `busted` (`atn/tool_store.py:2193-2208, 2258-2339`).** Original finding, at 782bdc8: **Manifest signature check.** `_verify_manifest_sig` accepts a signature that recovers to either `author` or `author_pubkey`, and both values sit inside the payload being verified (`atn/tool_store.py:2205-2234`). A signer can claim any `author` as long as it stamps its own address as `author_pubkey`. The approval comment calls this check a re-attribution guard (`:2121-2139`). The `busted` check reads the stored proposal, not re-fetched state (`:2151-2155`), despite the surrounding "re-verify" comment.
-15. **Fixed in 981d7a5: connector tools need the `connectors` grant in `ToolRegistry` and are hidden from `list_tools` without it (`atn/tool_registry.py:97-99, 199-205`).** Original finding, at 782bdc8: **`use_tool` reaches MCP connector tools without a caller check** (`atn/tool_registry.py:196-197, 255`). An agent granted only `unified_tools` can call `mcp_<cid>_<op>` without the `connectors` bundle. The integration listener blocks this explicitly (`atn/ws_server.py:1155-1177`); the agent path does not.
+15. **Fixed in 981d7a5: connector tools need the `connectors` grant in `ToolRegistry` and are hidden from `list_tools` without it (`atn/tool_registry.py:97-99, 199-205`).** Original finding, at 782bdc8: **`use_tool` reaches MCP connector tools without a caller check** (`atn/tool_registry.py:196-197, 255`). An agent granted only `unified_tools` can call `mcp_<cid>_<op>` without the `connectors` bundle.
 16. **Fixed in b124d7e: an agent caller may register only itself or its subtree (`atn/agent_tools.py:4776-4785`).** Original finding, at 782bdc8: **`register_on_chain` (agent tool) does not check the caller against `agent_id`** (`atn/agent_tools.py:4752-4811`). Any agent with `identity` can register any local agent whose parent is registered.
 17. **Standalone `python -m atn.ws_server` diverges from the CLI** (`atn/ws_server.py:6294-6345`):
-    - no remote or integration listener, fleet seeding or auto-update;
+    - no remote listener, fleet seeding or auto-update;
     - `register_surface` is not called, so `runtime.ws_bridge` stays None and the WS policy is not wired;
     - agents register without `legacy=True` and without a try/except, so a single agent lacking a budget can abort boot (compare `atn/cli.py:499-510`).
 18. **`_try_reclaim_port` is effectively dead.** It kills a process whose cmdline contains `atn.mcp_server` and that listens on 7700 (`atn/cli.py:543-561`). Both MCP servers are stdio-only (`atn/mcp_server.py:213-219`, `atn/substrate_mcp.py:375`) and never listen.
 19. **Auto-update default and duplicated check.** The CLI comment calls auto-update "opt-in via config" (`atn/cli.py:756`), but `AutoUpdateConfig.enabled` defaults to True (`atn/config.py:372, 402`). The dev-environment check runs twice (`atn/cli.py:762-771` and `:864-875`).
 20. **External agents and `run`.** `trigger_run` returns None for external agents (`atn/runtime/execution_engine.py:128-131`), which the CLI `run` command reports as "At concurrency limit" (`atn/cli.py:249-255`).
-21. **Stale names in the guest launcher.** Its docstring names `GuestLauncherClient in atn/guest_sandbox.py` (`atn/guest_launcher.py:55`); the class is `_LauncherProcess` (`atn/guest_sandbox.py:340`). `--guest-gid` is accepted and ignored (`atn/guest_launcher.py:429-430`).
+21. **Resolved: the guest launcher was deleted with the integration listener.**
 22. **Run opt-ins no longer gate anything.** `RunOptIns` is kept but "no longer changes what runs" (`atn/tool_security.py:20-21, 74-79`). Only the UI uses it.
 23. **`_resolve_household` always returns `""`** (`atn/agent_tools.py:3350-3355`), so `author_household` is never set (`:3344-3346`).
 24. **`VoiceConfig` fields not loadable.** `tools_voice`, `tools_backend`, `piper_mandatory_for_alarm` and `local_overlay` exist on the dataclass but are never read from config.yaml (`atn/config.py:115-131` vs `:1396-1412`). The comment marks `local_overlay` as reserved.

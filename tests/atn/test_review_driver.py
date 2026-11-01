@@ -349,7 +349,7 @@ class TestDriver:
 
 async def test_review_batches_ws_is_owner_only(tmp_path):
     from types import SimpleNamespace
-    from atn.ws_server import INTEGRATION_DENIED_MESSAGES, WebSocketBridge
+    from atn.ws_server import WebSocketBridge
     rt, bond, addr, store, drv = await _driver_setup(tmp_path)
     srv = WebSocketBridge.__new__(WebSocketBridge)
     srv.runtime = rt
@@ -359,4 +359,3 @@ async def test_review_batches_ws_is_owner_only(tmp_path):
     assert r["ok"] and r["result"]["batches"][0]["status"] == "pending"
     r = await srv._handle_message({"type": "review_batches", "msg_id": "2"}, scoped)
     assert r["ok"] is False and "owner-only" in r["error"]
-    assert "review_batches" in INTEGRATION_DENIED_MESSAGES

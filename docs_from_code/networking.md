@@ -263,9 +263,8 @@ Neither the repo-root `registry.json` nor `atn/registry.json` contains a `bootst
 - Autonet, and with it p2p, starts only when `autonet.enabled: true` is set, or when an agent is or becomes registered on chain (`atn/runtime/__init__.py:840-855`, `__init__.py:874-901`).
 - Agents register with the daemon's libp2p peer id, which is now stable across restarts (section 3.1, `atn/ws_server.py:5738-5805`).
 - Other listeners, which are not part of the P2P layer:
-  - the local owner WS (default `ws://127.0.0.1:7700`, `atn/cli.py:953`). It pre-auths connections as the owner, so it refuses any peer whose socket belongs to a process the daemon spawned (guest tools, authored and adopted tools, agent shell commands, agent workers), checked by peer credential (`atn/ws_auth.py:187-260`, `atn/ws_server.py:635-645`);
+  - the local owner WS (default `ws://127.0.0.1:7700`, `atn/cli.py:953`). It pre-auths connections as the owner, so it refuses any peer whose socket belongs to a process the daemon spawned (authored and adopted tools, agent shell commands, agent workers), checked by peer credential (`atn/ws_auth.py:187-260`, `atn/ws_server.py:635-645`);
   - an optional remote wallet-auth WS (`ATN_REMOTE_WS_HOST`/`_PORT`, `atn/cli.py:586-611`);
-  - an integration listener (`ATN_INTEGRATION_WS`, `_HOST`, `_PORT`, default 7710, `atn/cli.py:565-583`);
   - optional publication of `public_ws_endpoint` to a Firestore agent directory (`atn/runtime/__init__.py:865-877`).
 
 ### 10.2 Headless daemon
@@ -276,8 +275,8 @@ Neither the repo-root `registry.json` nor `atn/registry.json` contains a `bootst
 ### 10.3 Docker (`docker/Dockerfile.daemon`)
 
 - Two-stage build on python:3.11-slim. State lives on one volume at `/data/atn`, with `~/.atn` symlinked to it.
-- The entrypoint is tini plus `atn.guest_launcher`, and the default command is `atn --headless` (`Dockerfile.daemon:127-129`).
-- `AUTONET_P2P_PORT=4001` and `EXPOSE 7710 4001` (`Dockerfile.daemon:117-120`). The comments name 4001 as the only public port (`Dockerfile.daemon:14-21`, compose snippet `:36-61`).
+- It runs as user `atn`; the entrypoint is tini and the default command is `atn --headless`.
+- `AUTONET_P2P_PORT=4001` and `EXPOSE 4001`: 4001 is the only port that leaves the container. Agent harnesses reach the owner socket from inside the container through the MCP proxy.
 - No transport, announce or bootstrap env is set. A container behind Docker NAT therefore relies on UPnP or auto-reach (which usually fails inside a bridge network), or on `AUTONET_P2P_ANNOUNCE` set by the operator.
 - The build copies `README.md` (`Dockerfile.daemon:76`), so a source tree without it (such as a docs-stripped copy) fails at that step. The repo has one.
 

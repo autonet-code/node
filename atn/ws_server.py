@@ -227,127 +227,11 @@ SCOPED_REQUIRES_AGENT = frozenset({
 # the target straight from the message and ignore caller_id.
 _TARGET_ARG_KEYS = ("agent_id", "target", "parent_id", "id")
 
-# ---------------------------------------------------------------------------
-# Integration listener (third socket, default 127.0.0.1:7710); see
-# docs/integration_listener.md. A guest harness authenticates with a per-agent
-# bearer token and is CLAMPED to that one agent. Dispatch is a strict
-# ALLOW-list: nothing in _handle_message is reachable from this listener; the
-# allowlisted names go straight to execute_tool with caller_id forced to the
-# bound agent (so the H2 agent-callable gate and the agent's bundle grant
-# both still apply on top).
-# ---------------------------------------------------------------------------
-INTEGRATION_ALLOWED_MESSAGES = frozenset({
-    "status",          # handled here: who am I bound as, what may I call
-    "list_tools",      # clamped to category=registered
-    "probe_tools",     # library search (scoped to the bound agent)
-    "use_tool",        # REGISTERED tools only, via tool_store.call -> tool_guard
-    "attest_tools",    # post-use reviews (per-axis scores), as the bound agent
-    "publish_tool",    # author-only, and only if the agent holds the grant
-    "adopt_tool",      # PROPOSES adoption; approval stays owner-only
-    "register_tool",   # GUEST authoring: pinned code only, origin="integration",
-                       # always run on the guest containment path
-                       # (atn/guest_sandbox.py: separate uid when available)
-    # Public reads (see INTEGRATION_PUBLIC_READS): network state any peer can
-    # already see. Handled inline; they carry no agent authority.
-    "find_services",   # the on-chain services market (read-only)
-    "tool_reviews",    # reviews + drifted position of a tool the agent can see
-    "network_status",  # node/chain/epoch/peer summary, no secrets
-})
-
-# Allowlisted messages that read PUBLIC network state (the on-chain service
-# registry, the close's economy graph, chain id and peer count). They are
-# answered inline instead of through execute_tool: they act as nobody, move
-# nothing, and need no bundle grant (a guest agent should not need the
-# `services` bundle, which also carries pay_for_service, just to browse the
-# market). Paying, requesting and every other money action stay denied here
-# and go through the owner's wallet-authed remote listener.
-# Guest register_tool names (enforced here, not only by the client): the
-# prefixes belong to the node's own surfaces (atn_* harness modules, reg_*
-# digest refs, pipelines, connectors, MCP).
-import re as _re
-_GUEST_TOOL_NAME_RE = _re.compile(r"^[a-z][a-z0-9_]{2,63}$")
-_GUEST_RESERVED_PREFIXES = ("atn_", "reg_", "pipeline_", "tool_",
-                            "connector_", "mcp_")
-
-INTEGRATION_PUBLIC_READS = frozenset({"find_services", "tool_reviews",
-                                      "network_status"})
-assert INTEGRATION_PUBLIC_READS <= INTEGRATION_ALLOWED_MESSAGES
-
-# Chain ids the integration surface names in network_status. Anything else is
-# reported by number only; the label must never imply value that isn't there.
+# Chain ids network_status names. Anything else is reported by number
+# only; the label must never imply value that isn't there.
 _CHAIN_LABELS = {
     127823: "Etherlink Shadownet (testnet)",
 }
-
-# Defense in depth: every owner-only / custody / money / fleet-mutating
-# message type, named explicitly. The allowlist already excludes them; this
-# set exists so a careless future allowlist edit fails at import (the
-# disjointness assert below) instead of silently opening an owner surface,
-# and so a denied call gets a precise error.
-INTEGRATION_DENIED_MESSAGES = frozenset({
-    # Key custody + vault (values, exports, private-key payloads).
-    *KEY_LOCAL_ONLY_MESSAGES,
-    *_SECRETS_MESSAGES,
-    # Owner-global tools a scoped session already may not call.
-    *OWNER_ONLY_TOOLS,
-    # Owner decisions on the adoption / tool-grant rails.
-    "approve_adoption", "reject_adoption", "list_adoption_proposals",
-    "list_distros", "core_replacement_evidence",
-    "grant_tool", "revoke_tool", "set_tool_enabled", "set_tool_published",
-    "list_tool_run_optins", "set_tool_run_optin", "tool_bond_status",
-    "vet_tool", "tool_security_status", "review_batches",
-    # Tool AUTHORING is allowed (register_tool, above) only because guest
-    # records are flagged origin="integration" and never run on the authored
-    # path (daemon env + cwd). See _integration_register_args.
-    # Ownership, wallets, chain registration + signing, money movement.
-    "set_owner_wallet", "rotate_owner", "owner_binding_status",
-    "operator_status", "register_operator", "export_operator_key",
-    "sweep_to_owner", "submit_delegation",
-    "owner_claim_status", "autonet_wallet_connect", "autonet_wallet_disconnect",
-    "autonet_set_chain", "autonet_start", "autonet_stop",
-    "register_agent_on_chain", "confirm_agent_registration",
-    "check_agent_registration", "register_on_chain", "rpb_reconcile_registrations",
-    "pay_for_service", "request_service", "close_service_channel",
-    "invoke_service", "register_service",
-    "retire_service", "service_request",
-    # Budgets + sponsor inference.
-    "set_budget", "get_budget", "update_sponsor_budget", "create_sponsor_agent",
-    "set_my_sponsor", "remove_sponsor_binding", "disable_sponsor_inference",
-    "get_my_budget_status", "get_usage", "metering_report",
-    # Agent lifecycle / fleet shape.
-    "create_agent", "remove_agent", "update_agent", "clone_agent", "merge_clone",
-    "activate_agent", "deactivate_agent", "kill_agent", "kill_execution",
-    "trigger_run", "post_message", "send_agent_message",
-    "delegate_message", "delegate_status", "delegate_collect",
-    "interrupt_delegate", "approve_task",
-    "agent_processes_list", "agent_process_output", "agent_process_stop",
-    "reject_task", "propose_task", "set_local_model",
-    # Providers, connectors, OAuth, daemon control, profile.
-    "provider_configure", "provider_remove", "custom_provider_add",
-    "custom_provider_remove", "provider_list", "provider_refresh_usage",
-    "provider_rate_limits", "provider_record", "provider_bridge_update",
-    "add_connector", "remove_connector", "use_connector", "oauth_start",
-    "oauth_status", "daemon_restart", "update_status", "skip_onboarding",
-    "autonet_publish_standards", "autonet_set_capture_config",
-    "autonet_switch", "autonet_jurisdictions", "sanctions",
-    "claude_sessions", "claude_session_import",
-    "robot_status", "robot_export_packs", "robot_attest",
-    # Whole-fleet reads (snapshot carries owner-global sections).
-    "snapshot", "get_snapshot", "list_agents",
-})
-assert not (INTEGRATION_ALLOWED_MESSAGES & INTEGRATION_DENIED_MESSAGES), (
-    "integration allowlist overlaps the owner deny-list: "
-    f"{sorted(INTEGRATION_ALLOWED_MESSAGES & INTEGRATION_DENIED_MESSAGES)}")
-
-# Message keys that name an identity. On the integration listener each one,
-# if present, must equal the bound agent: a request that names any other
-# agent is refused outright (not silently rewritten), so a confused client
-# learns it is pinned.
-_INTEGRATION_IDENTITY_KEYS = ("caller_id", "agent_id", "target", "parent_id",
-                              "id", "author", "author_id", "caller")
-
-# Max inbound frame on the integration listener (manifests carry code).
-_INTEGRATION_MAX_FRAME = 2 * 1024 * 1024
 
 
 from dataclasses import dataclass
@@ -391,12 +275,7 @@ class WebSocketBridge:
 
     def __init__(self, runtime: Runtime, host: str = "localhost", port: int = DEFAULT_PORT,
                  *, remote_host: str = "", remote_port: int = 0,
-                 owner_wallet: str = "",
-                 integration_host: str = "",
-                 integration_port: int = ws_auth.DEFAULT_INTEGRATION_PORT,
-                 integration_rate: float = 5.0,
-                 integration_burst: int = 20,
-                 integration_max_conns: int = 4) -> None:
+                 owner_wallet: str = "") -> None:
         self.runtime = runtime
         self.host = host
         self.port = port
@@ -411,17 +290,6 @@ class WebSocketBridge:
         self.owner_wallet = owner_wallet
         self._server: WSServer | None = None          # local (privileged) listener
         self._remote_server: WSServer | None = None    # remote (auth) listener
-        # The INTEGRATION (bearer-token, agent-clamped) listener. Empty host
-        # => disabled (the default). See docs/integration_listener.md.
-        self.integration_host = integration_host
-        self.integration_port = integration_port or ws_auth.DEFAULT_INTEGRATION_PORT
-        self.integration_rate = float(integration_rate)
-        self.integration_burst = int(integration_burst)
-        self.integration_max_conns = int(integration_max_conns)
-        self._integration_server: WSServer | None = None
-        self._integration_store: ws_auth.IntegrationTokenStore | None = None
-        self._integration_sessions: dict[ServerConnection, ws_auth.IntegrationSession] = {}
-        self._integration_buckets: dict[str, ws_auth.TokenBucket] = {}
         # Per-connection auth/scope state (replaces the old flat client set).
         self._sessions: dict[ServerConnection, ClientSession] = {}
         self._event_handler_registered = False
@@ -503,40 +371,9 @@ class WebSocketBridge:
                 "WebSocket server (remote, auth-required: %s) listening on "
                 "ws://%s:%d", "+".join(auth_modes), self.remote_host, self.remote_port)
 
-        # Integration listener: bearer token bound to ONE agent, strict
-        # allowlist. Disabled unless a bind host is configured.
-        # A bind failure here is logged, not raised: the CLI treats an OSError
-        # from start() as "the LOCAL port is taken" and would try to reclaim
-        # 7700 from whoever holds it.
-        if self.integration_host:
-            try:
-                await self.start_integration_listener()
-            except OSError as exc:
-                self._integration_server = None
-                log.error("Integration listener failed to bind %s:%d: %s",
-                          self.integration_host, self.integration_port, exc)
-
-    async def start_integration_listener(self) -> None:
-        """Start the third (integration) listener. Tokens are read from
-        ``<data_dir>/integration_tokens.json``; a missing file means no token
-        is valid (every handshake is refused with 401)."""
-        if self._integration_store is None:
-            self._integration_store = ws_auth.IntegrationTokenStore(
-                self.runtime._config.data_dir)
-        self._integration_server = await websockets.serve(
-            self._handle_integration_client,
-            self.integration_host,
-            self.integration_port,
-            process_request=self._integration_process_request,
-            max_size=_INTEGRATION_MAX_FRAME,
-        )
-        log.info("WebSocket server (integration, bearer-token, agent-clamped) "
-                 "listening on ws://%s:%d", self.integration_host,
-                 self.integration_port)
-
     async def stop(self) -> None:
         """Stop the WebSocket server(s)."""
-        for srv_attr in ("_server", "_remote_server", "_integration_server"):
+        for srv_attr in ("_server", "_remote_server"):
             srv = getattr(self, srv_attr)
             if srv:
                 srv.close()
@@ -642,9 +479,9 @@ class WebSocketBridge:
         remote = ws.remote_address
         if local:
             # The local listener pre-auths as OWNER, so no process the daemon
-            # spawned to run lower-trust code (guest uid, or a tracked tool,
-            # shell command or worker PID and its descendants, see
-            # atn/contained_pids.py) may get a session here. Peer credential,
+            # spawned to run lower-trust code (a tracked tool, shell command
+            # or worker PID and its descendants, see atn/contained_pids.py)
+            # may get a session here. Peer credential,
             # not address: they all connect from loopback too.
             local_addr = getattr(ws, "local_address", None) or ()
             if len(local_addr) < 2:
@@ -905,350 +742,6 @@ class WebSocketBridge:
                 return "", "ambiguous root address"
         return "", f"unknown agent root: {root}"
 
-    # ------------------------------------------------------------------
-    # Integration listener (bearer token -> exactly one agent)
-    # ------------------------------------------------------------------
-
-    def _integration_verify_header(self, headers: Any) -> ws_auth.IntegrationToken | None:
-        """Verify the upgrade request's Authorization header against the
-        token store. None on any failure (fails closed)."""
-        store = self._integration_store
-        if store is None:
-            return None
-        try:
-            raw = headers.get("Authorization") if headers is not None else None
-        except Exception:
-            raw = None
-        rec = store.verify(ws_auth.parse_bearer(raw))
-        if rec is None:
-            return None
-        if not self._integration_agent_ok(rec.agent_id):
-            return None
-        return rec
-
-    def _integration_agent_ok(self, agent_id: str) -> bool:
-        """The clamp invariant: the bound id is a real agent in this fleet and
-        is NOT anything is_owner_caller() would treat as the owner."""
-        from .agent_tools import is_owner_caller
-        if not ws_auth.is_bindable_agent_id(agent_id):
-            return False
-        if is_owner_caller(agent_id):
-            return False
-        return self.runtime.get_agent(agent_id) is not None
-
-    async def _integration_process_request(self, connection: ServerConnection,
-                                           request: Any) -> Any:
-        """Reject before the WebSocket upgrade: 401 for a missing/invalid/
-        revoked token or an unavailable bound agent, 429 when the token
-        already has its maximum number of live connections."""
-        rec = self._integration_verify_header(request.headers)
-        if rec is None:
-            return connection.respond(401, "invalid or revoked integration token\n")
-        live = sum(1 for s in self._integration_sessions.values()
-                   if s.token_hash == rec.token_hash)
-        if live >= self.integration_max_conns:
-            return connection.respond(429, "too many connections for this token\n")
-        return None
-
-    def _integration_reaches_connector(self, digest: str | None) -> bool:
-        """True if the registered tool ``digest`` is connector-backed or
-        declares (transitively, bounded) a connector-backed dependency.
-        Unresolvable digests count as reaching nothing; the store itself
-        rejects unknown tools."""
-        store = getattr(self.runtime, "tool_store", None)
-        if store is None or not digest:
-            return False
-        return store.reaches_connector(digest)
-
-    def _integration_register_args(self, args: dict[str, Any],
-                                   agent_id: str) -> tuple[str, str] | None:
-        """Validate (and mark) a guest register_tool request in place.
-
-        Returns None when OK, else ``(code, error)``: "not_allowed" when the
-        request names something a guest may never reach (a connector, an
-        endpoint), "bad_request" otherwise. On success ``args["_origin"]`` is
-        set to "integration" AFTER the "_"-key strip, so a guest cannot choose
-        its own origin and the record always runs on the guest containment
-        path."""
-        from .guest_sandbox import GUEST_CAPABILITY_KEYS, GUEST_ORIGIN
-        for key in ("connector_id", "provider", "entrypoint", "endpoint"):
-            if args.get(key):
-                return ("not_allowed", "guest tools are pinned code only; "
-                        "connector-, provider- and endpoint-backed tools are "
-                        "refused")
-        if args.get("publish"):
-            return ("bad_request", "register_tool never publishes; call publish_tool")
-        code = args.get("code")
-        if not isinstance(code, str) or not code.strip():
-            return ("bad_request", "Missing required field: 'code' (guest tools are pinned code)")
-        for key in ("name", "description"):
-            if not isinstance(args.get(key), str) or not args[key].strip():
-                return ("bad_request", f"Missing required field: '{key}'")
-        name = args["name"]
-        if not _GUEST_TOOL_NAME_RE.match(name):
-            return ("bad_request", "name must be snake_case, 3-64 chars, "
-                    "starting with a letter")
-        if name.startswith(_GUEST_RESERVED_PREFIXES):
-            return ("bad_request", "name may not start with "
-                    + ", ".join(_GUEST_RESERVED_PREFIXES))
-        # A name another author already uses would make ToolStore.resolve
-        # ambiguous and break that author's use_tool-by-name.
-        store = getattr(self.runtime, "tool_store", None)
-        if store is not None:
-            for rec in list(getattr(store, "_records", {}).values()):
-                if rec.name == name and rec.author_id != agent_id:
-                    return ("not_allowed", f"tool name {name!r} is taken")
-        registry = getattr(self.runtime, "tool_registry", None)
-        if registry is not None:
-            from .tool_registry import ToolCategory
-            existing = registry.get_tool(name)
-            if existing is not None and existing.category != ToolCategory.REGISTERED:
-                return ("not_allowed", f"tool name {name!r} is taken")
-        if not isinstance(args.get("input_schema"), dict):
-            return ("bad_request", "input_schema must be a JSON-schema object")
-        caps = args.get("capabilities")
-        if caps is not None:
-            if not isinstance(caps, dict):
-                return ("bad_request", "capabilities must be an object {net, fs, spawn}")
-            extra = set(caps) - GUEST_CAPABILITY_KEYS
-            if extra:
-                return ("bad_request",
-                        "guest tools may declare only net, fs and spawn "
-                        f"(not {', '.join(sorted(extra))})")
-            if not all(isinstance(v, bool) for v in caps.values()):
-                return ("bad_request", "capabilities values must be booleans")
-        deps = args.get("dependencies")
-        if deps is not None:
-            if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
-                return ("bad_request", "dependencies must be a list of manifest digests")
-            store = self.runtime.tool_store
-            for d in deps:
-                rec = store.resolve(d)
-                if rec is None or not store.allowed(agent_id, rec):
-                    return ("bad_request", f"Unknown dependency: {d[:16]}")
-                if self._integration_reaches_connector(rec.digest):
-                    return ("not_allowed", "guest tools may not depend on a "
-                            "connector-backed tool")
-        if not isinstance(args.get("version_of"), str):
-            args.pop("version_of", None)
-        args["_origin"] = GUEST_ORIGIN
-        return None
-
-    def _integration_bucket(self, token_hash: str) -> ws_auth.TokenBucket:
-        bucket = self._integration_buckets.get(token_hash)
-        if bucket is None:
-            bucket = ws_auth.TokenBucket(self.integration_rate, self.integration_burst)
-            self._integration_buckets[token_hash] = bucket
-        return bucket
-
-    async def _handle_integration_client(self, ws: ServerConnection) -> None:
-        """One integration connection. The token was checked in
-        process_request; it is re-verified here (the store may have changed
-        between the two) and then on every message."""
-        rec = self._integration_verify_header(
-            getattr(getattr(ws, "request", None), "headers", None))
-        if rec is None:
-            await ws.close(code=4401, reason="unauthorized")
-            return
-        isession = ws_auth.IntegrationSession(
-            token_id=rec.token_id, token_hash=rec.token_hash,
-            agent_id=rec.agent_id, label=rec.label,
-            conn_id=ws_auth.new_nonce())
-        self._integration_sessions[ws] = isession
-        log.info("Integration client connected: token=%s agent=%s",
-                 rec.token_id, rec.agent_id)
-        try:
-            await ws.send(json.dumps({
-                "type": "integration_ready",
-                "agent_id": isession.agent_id,
-                "token_id": isession.token_id,
-                "allowed": sorted(INTEGRATION_ALLOWED_MESSAGES),
-            }))
-            async for raw in ws:
-                try:
-                    msg = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
-                    await ws.send(json.dumps({"ok": False, "error": "Invalid JSON"}))
-                    continue
-                if not isinstance(msg, dict):
-                    await ws.send(json.dumps({"ok": False, "error": "Expected a JSON object"}))
-                    continue
-                response = await self._handle_integration_message(msg, isession)
-                await ws.send(json.dumps(response, default=str))
-                if response.get("code") == "token_revoked":
-                    await ws.close(code=4401, reason="token revoked")
-                    break
-        except websockets.ConnectionClosed:
-            pass
-        except Exception:
-            log.exception("Integration client handler error")
-        finally:
-            self._integration_sessions.pop(ws, None)
-            log.info("Integration client disconnected: token=%s", isession.token_id)
-
-    async def _handle_integration_message(
-            self, msg: dict[str, Any],
-            isession: ws_auth.IntegrationSession) -> dict[str, Any]:
-        """Dispatch one integration request. Order: revocation re-check, rate
-        limit, deny-list, allow-list, clamp, then execute_tool with caller_id
-        forced to the bound agent. Never reaches _handle_message."""
-        msg_id = msg.get("msg_id")
-        msg_type = msg.get("type", "")
-
-        def _err(error: str, code: str) -> dict[str, Any]:
-            return {"msg_id": msg_id, "ok": False, "error": error, "code": code}
-
-        if not msg_type or not isinstance(msg_type, str):
-            return _err("Missing 'type' field", "bad_request")
-
-        # 1. Token still active (CLI revoke takes effect mid-connection).
-        store = self._integration_store
-        rec = store.lookup_active(isession.token_hash) if store is not None else None
-        if rec is None or rec.agent_id != isession.agent_id:
-            return _err("integration token revoked", "token_revoked")
-
-        # 2. Per-token rate limit (shared across the token's connections).
-        if not self._integration_bucket(isession.token_hash).allow():
-            return _err("rate limit exceeded", "rate_limited")
-
-        # 3/4. Deny-list, then allow-list.
-        if msg_type in INTEGRATION_DENIED_MESSAGES:
-            return _err(f"'{msg_type}' is owner-only and not available on the "
-                        "integration listener", "owner_only")
-        if msg_type not in INTEGRATION_ALLOWED_MESSAGES:
-            return _err(f"'{msg_type}' is not available on the integration "
-                        "listener", "not_allowed")
-
-        # 5. Clamp. The bound agent must still be a real, non-owner agent.
-        agent_id = isession.agent_id
-        if not self._integration_agent_ok(agent_id):
-            return _err("the agent this token is bound to is unavailable",
-                        "agent_unavailable")
-        for key in _INTEGRATION_IDENTITY_KEYS:
-            if key in msg and msg[key] not in (None, agent_id):
-                return _err(f"this token is bound to agent '{agent_id}'; "
-                            f"'{key}' may not name another identity",
-                            "wrong_agent")
-
-        if msg_type == "status":
-            defn = self.runtime.get_agent(agent_id)
-            return {"msg_id": msg_id, "ok": True, "result": {
-                "agent_id": agent_id,
-                "agent_name": getattr(defn, "name", agent_id),
-                "token_id": isession.token_id,
-                "label": isession.label,
-                "allowed": sorted(INTEGRATION_ALLOWED_MESSAGES),
-                "rate_limit": {"per_sec": self.integration_rate,
-                               "burst": self.integration_burst},
-            }}
-
-        if msg_type in INTEGRATION_PUBLIC_READS:
-            return await self._handle_integration_public_read(
-                msg_type, msg, msg_id, agent_id)
-
-        # Tool arguments: drop protocol fields, identity fields (validated
-        # above) and any private "_"-prefixed key (e.g. a forged _caller_id).
-        args = {k: v for k, v in msg.items()
-                if k not in ("msg_id", "type")
-                and k not in _INTEGRATION_IDENTITY_KEYS
-                and not (isinstance(k, str) and k.startswith("_"))}
-
-        if msg_type == "list_tools":
-            # Only registered tools are callable here; do not advertise the
-            # daemon's connectors / pipelines / core surface.
-            args["category"] = "registered"
-        elif msg_type == "register_tool":
-            refusal = self._integration_register_args(args, agent_id)
-            if refusal is not None:
-                return _err(refusal[1], refusal[0])
-        elif msg_type == "use_tool":
-            # use_tool can name ANY unified tool, including core tools
-            # (create_agent, pay_for_service, ...) and the owner's MCP
-            # connectors. Restrict it to tool-substrate REGISTERED tools,
-            # which execute through tool_store.call -> tool_guard.
-            from .tool_registry import ToolCategory
-            name = args.get("name")
-            if not isinstance(name, str) or not name:
-                return _err("Missing required field: 'name'", "bad_request")
-            tool = self.runtime.tool_registry.get_tool(name)
-            if tool is None:
-                return _err(f"Unknown tool: {name}", "unknown_tool")
-            if tool.category != ToolCategory.REGISTERED:
-                return _err("only registered (tool-substrate) tools may be "
-                            "called on the integration listener", "not_allowed")
-            if not isinstance(args.get("arguments", {}), dict):
-                return _err("'arguments' must be an object", "bad_request")
-            # A connector-backed manifest (or a composite reaching one through
-            # its declared deps) runs the OWNER's MCP connector with the
-            # owner's credentials. Not a guest capability.
-            if self._integration_reaches_connector(tool.digest):
-                return _err("connector-backed tools are not callable on the "
-                            "integration listener", "not_allowed")
-
-        # Last-line assertion: never dispatch with an owner-trusted caller.
-        from .agent_tools import is_owner_caller
-        if is_owner_caller(agent_id):
-            return _err("refusing owner-trusted caller", "agent_unavailable")
-        result = await execute_tool(msg_type, args, self.runtime, caller_id=agent_id)
-        if not isinstance(result, dict):
-            result = {"value": result}
-        if result.get("error"):
-            return {"msg_id": msg_id, "ok": False, "error": result["error"],
-                    "code": "tool_error"}
-        if msg_type == "list_tools":
-            # The manifest `author` is the consensus 0x identity; a guest UI
-            # needs to know which listed tools ITS agent authored here.
-            store = self.runtime.tool_store
-            for row in result.get("tools") or []:
-                rec = store.get(str(row.get("digest") or "")) if isinstance(row, dict) else None
-                if rec is not None:
-                    row["mine"] = (rec.author_id == agent_id
-                                   and rec.origin in ("authored", "integration"))
-                    row["origin"] = rec.origin
-                    row["published"] = bool(rec.published)
-        return {"msg_id": msg_id, "ok": True, "result": result}
-
-    async def _handle_integration_public_read(
-            self, msg_type: str, msg: dict[str, Any], msg_id: Any,
-            agent_id: str) -> dict[str, Any]:
-        """Answer an INTEGRATION_PUBLIC_READS message. The caller has already
-        passed the revocation, rate-limit and clamp checks."""
-        def _err(error: str, code: str) -> dict[str, Any]:
-            return {"msg_id": msg_id, "ok": False, "error": error, "code": code}
-
-        if msg_type == "find_services":
-            from .agent_tools import _find_services
-            result = await _find_services(self.runtime, {
-                "query": msg.get("query") or "", "limit": msg.get("limit")})
-            if result.get("error"):
-                return _err(result["error"], "tool_error")
-            return {"msg_id": msg_id, "ok": True, "result": result}
-
-        if msg_type == "tool_reviews":
-            digest = str(msg.get("digest") or "").strip().lower()
-            if not digest:
-                return _err("Missing 'digest' field", "bad_request")
-            store = self.runtime.tool_store
-            record = store.get(digest)
-            # Local review rows only for a tool the bound agent can see (the
-            # same author-lineage visibility list_tools applies). A digest
-            # this daemon doesn't hold still gets its public close state.
-            if record is not None and not store.allowed(agent_id, record):
-                return _err(f"Unknown tool: {digest[:16]}", "unknown_tool")
-            try:
-                payload = self._tool_reviews_payload(
-                    digest, msg.get("limit"), include_local=record is not None)
-            except Exception as exc:                       # noqa: BLE001
-                return _err(str(exc), "tool_error")
-            return {"msg_id": msg_id, "ok": True, "result": payload}
-
-        if msg_type == "network_status":
-            return {"msg_id": msg_id, "ok": True,
-                    "result": self._network_status_payload()}
-
-        return _err(f"'{msg_type}' is not available on the integration "
-                    "listener", "not_allowed")
-
     def _world_service(self) -> Any:
         autonet = getattr(self.runtime, "autonet", None)
         service = getattr(autonet, "_service", None) if autonet else None
@@ -1257,8 +750,7 @@ class WebSocketBridge:
     def _tool_reviews_payload(self, digest: str, limit: Any = None, *,
                               include_local: bool = True) -> dict[str, Any]:
         """Reviews, drifted position, vetting and usage for one tool digest.
-        Shared by the owner `tool_reviews` handler and the integration
-        listener's public read."""
+        Backs the owner `tool_reviews` handler."""
         try:
             limit = int(limit or 50)
         except (TypeError, ValueError):
@@ -1300,7 +792,7 @@ class WebSocketBridge:
         }
 
     def _network_status_payload(self) -> dict[str, Any]:
-        """Node, chain, epoch and peer summary for a guest UI. Public facts
+        """Node, chain, epoch and peer summary. Public facts
         only: no RPC URL (it can embed a provider key), no wallet, no keys.
         Before the daemon joined the network (a chosen jurisdiction, first registration or
         autonet.enabled) it is local-only: the payload says "not joined"
@@ -3507,8 +2999,8 @@ class WebSocketBridge:
         # the EpochScheduler half (mode, candle window, T_max, seed
         # source).
         if msg_type == "network_status":
-            # The same public summary guests get; the owner's dashboards and
-            # the WAN run's telemetry read it here.
+            # Public summary; the owner's dashboards and the WAN run's
+            # telemetry read it here.
             return {"msg_id": msg_id, "ok": True,
                     "result": self._network_status_payload()}
 

@@ -88,11 +88,6 @@ def build_tool_manifest(
     # lineage
     version_of: Optional[str] = None,
     created_ts: int = 0,
-    # provenance: "integration" when a guest harness holding only an
-    # integration token wrote the code (atn/guest_sandbox.py) and the node
-    # signs it on the guest's behalf. Signed with the rest of the manifest,
-    # so adopters see who really wrote it.
-    authored_via: str = "",
     # novelty claim (docs/tool_substrate.md, Decision 2026-10-13 item 2):
     # {"statement": str, "prior_art": [digest, ...]}. Optional here (peers
     # validate older manifests); REQUIRED to publish (publish_novelty_errors).
@@ -137,8 +132,6 @@ def build_tool_manifest(
         manifest["dependencies"] = list(dependencies)
     if capabilities:
         manifest["capabilities"] = dict(capabilities)
-    if authored_via:
-        manifest["authored_via"] = str(authored_via)
     if novelty is not None:
         manifest["novelty"] = normalize_novelty(novelty)
 

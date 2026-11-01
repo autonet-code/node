@@ -32,15 +32,10 @@ two-listener split is unspoofable.
 """
 from __future__ import annotations
 
-import hashlib
 import ipaddress
-import json
-import os
 import secrets
-import sys
-import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 # Hosts that count as loopback even when ipaddress can't classify the literal.
@@ -79,7 +74,7 @@ def is_loopback(remote_address) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Local owner listener: peer-credential gate against guest tool processes
+# Local owner listener: peer-credential gate against daemon-spawned processes
 # ---------------------------------------------------------------------------
 
 def _norm_ip(host) -> ipaddress._BaseAddress | None:
@@ -102,66 +97,10 @@ def _endpoint(addr) -> tuple[ipaddress._BaseAddress, int] | None:
     return (ip, port) if ip is not None else None
 
 
-def _proc_endpoint(field: str) -> tuple[ipaddress._BaseAddress, int] | None:
-    """Decode a /proc/net/tcp{,6} ``HEXADDR:HEXPORT`` column. The address is
-    the kernel's raw bytes printed as host-order 32-bit words."""
-    try:
-        hexaddr, hexport = field.rsplit(":", 1)
-        port = int(hexport, 16)
-        raw = bytes.fromhex(hexaddr)
-    except ValueError:
-        return None
-    if len(raw) not in (4, 16):
-        return None
-    packed = b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4))
-    if sys.byteorder == "big":
-        packed = raw
-    ip = ipaddress.ip_address(packed)
-    mapped = getattr(ip, "ipv4_mapped", None)
-    return (mapped if mapped is not None else ip), port
-
-
-def _linux_peer_uid(peer, server) -> int | None:
-    """Uid owning the CLIENT end of a TCP connection (from /proc/net/tcp{,6}).
-
-    ``peer`` is the accepted connection's remote address, ``server`` its local
-    address (both (host, port) tuples). The row must match the full 4-tuple
-    (local == peer, remote == server). Rows whose local port is the server
-    port are skipped: they are the daemon's own accepted sockets and the
-    listener. More than one matching row is ambiguous and resolves to None
-    (the caller refuses)."""
-    want_local = _endpoint(peer)
-    want_remote = _endpoint(server)
-    if want_local is None or want_remote is None:
-        return None
-    found: list[int] = []
-    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
-        try:
-            with open(table, encoding="ascii") as fh:
-                next(fh, None)
-                for line in fh:
-                    cols = line.split()
-                    if len(cols) < 8:
-                        continue
-                    local = _proc_endpoint(cols[1])
-                    remote = _proc_endpoint(cols[2])
-                    if local is None or remote is None:
-                        continue
-                    if local[1] == want_remote[1]:
-                        continue
-                    if local == want_local and remote == want_remote:
-                        try:
-                            found.append(int(cols[7]))
-                        except ValueError:
-                            return None
-        except OSError:
-            continue
-    return found[0] if len(found) == 1 else None
-
-
 def _peer_pid(peer, server) -> int | None:
     """Pid owning the client end of a TCP connection (psutil), matched on the
-    full 4-tuple like _linux_peer_uid. None when it cannot be resolved (another
+    full 4-tuple (rows on the server port are the daemon's own sockets and
+    are skipped). None when it cannot be resolved (another
     uid's socket, no permission) or when the match is ambiguous."""
     want_local = _endpoint(peer)
     want_remote = _endpoint(server)
@@ -194,28 +133,20 @@ def local_peer_denied(remote_address, local_address) -> str | None:
 
     The local listener pre-auths every connection as the OWNER, so no
     process the daemon spawned to run lower-trust code may be served there:
-    guest tools (atn/guest_sandbox.py), authored and adopted tools, agent
-    shell commands and agent workers (atn/contained_pids.py). Checked by peer
-    credential, never by address (they all connect from loopback too). The
-    client socket is found by the full 4-tuple, never by ports alone:
-
-    - separate-uid guests (ATN_GUEST_UID, set by atn.guest_launcher): the
-      client socket's owning uid, from /proc/net/tcp. Unresolvable or
-      ambiguous while uid isolation is configured => refused (fail closed).
-    - daemon-spawned runs (same uid): the client socket's owning pid
-      (psutil) is a tracked PID or a descendant of one. Checked only while
-      such a run is live. When the system socket table cannot name the pid
-      (macOS without root), the tracked process trees' own sockets are
-      scanned instead; a scan that cannot complete => refused.
+    authored and adopted tools, agent shell commands and agent workers
+    (atn/contained_pids.py). Checked by peer credential, never by address
+    (they all connect from loopback too). The client socket is found by the
+    full 4-tuple, never by ports alone: its owning pid (psutil) is a tracked
+    PID or a descendant of one. Checked only while such a run is live. When
+    the system socket table cannot name the pid (macOS without root), the
+    tracked process trees' own sockets are scanned instead; a scan that
+    cannot complete => refused.
 
     Owner clients (app, ``atn send``, the user's MCP proxy) are not spawned
     by the daemon, so they resolve to an untracked pid and are accepted.
-    With no guest uid configured and no tracked run live, this is a no-op."""
-    from .guest_sandbox import guest_uids
+    With no tracked run live, this is a no-op."""
     from . import contained_pids
-    uids = guest_uids()
-    live = contained_pids.live()
-    if not uids and not live:
+    if not contained_pids.live():
         return None
     if isinstance(local_address, int):
         local_address = ("127.0.0.1", local_address)
@@ -223,17 +154,7 @@ def local_peer_denied(remote_address, local_address) -> str | None:
         return "peer address unavailable"
     if _endpoint(local_address) is None:
         return "listener address unavailable"
-    if uids:
-        if not sys.platform.startswith("linux"):
-            return None if not live else _pid_gate(remote_address, local_address)
-        uid = _linux_peer_uid(remote_address, local_address)
-        if uid is None:
-            return "peer credentials unavailable while guest uid isolation is on"
-        if uid in uids:
-            return f"peer uid {uid} is a guest tool uid"
-    if live:
-        return _pid_gate(remote_address, local_address)
-    return None
+    return _pid_gate(remote_address, local_address)
 
 
 def _pid_gate(peer, server) -> str | None:
@@ -394,273 +315,3 @@ def assert_local_key_access(session: "ClientSession") -> bool:
     extract keys. Gating on the listener (not remote_address) is what makes
     this unspoofable behind a reverse proxy."""
     return session.local
-
-
-# ---------------------------------------------------------------------------
-# Integration listener: per-agent bearer tokens (docs/integration_listener.md)
-# ---------------------------------------------------------------------------
-#
-# A THIRD listener (default 127.0.0.1:7710) for a guest harness (e.g. the
-# Odysseus sidecar) that must act as exactly ONE agent without holding that
-# agent's private key or the owner wallet. The credential is an opaque bearer
-# token minted by the owner on the daemon host (``atn integration-token
-# create``). Only its sha256 is stored; the plaintext is shown once at mint.
-# Each token is bound to exactly one agent id, and the server forces
-# caller_id to that id on every call: the token is never the owner and never
-# any other agent. It is NOT a money key: it reaches no wallet, transfer,
-# signing or key-export path (see INTEGRATION_ALLOWED_MESSAGES in
-# ws_server.py).
-
-INTEGRATION_TOKENS_FILE = "integration_tokens.json"
-INTEGRATION_TOKEN_PREFIX = "atn_it_"
-DEFAULT_INTEGRATION_PORT = 7710
-DEFAULT_INTEGRATION_HOST = "127.0.0.1"
-
-# Agent ids an integration token may NEVER be bound to: every string that
-# atn.agent_tools.is_owner_caller() treats as the owner ("", "user"; None is
-# excluded by the str check). Literals rather than an
-# import so this module stays import-light; tests/test_integration_listener.py
-# asserts the two agree.
-_OWNER_SENTINELS = frozenset({"", "user"})
-
-
-def hash_integration_token(token: str) -> str:
-    """sha256 hex of a presented token (what is stored and compared)."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def is_bindable_agent_id(agent_id: object) -> bool:
-    """True iff ``agent_id`` is a non-empty, whitespace-free-at-the-edges
-    string that is not an owner sentinel. The integration clamp relies on
-    this: a token bound to a sentinel would make every call owner-trusted
-    downstream (is_owner_caller)."""
-    if not isinstance(agent_id, str):
-        return False
-    aid = agent_id.strip()
-    return bool(aid) and aid == agent_id and aid not in _OWNER_SENTINELS
-
-
-def parse_bearer(header_value: str | None) -> str:
-    """Extract the token from an ``Authorization: Bearer <token>`` header.
-    Returns "" when absent or malformed (fails closed)."""
-    if not header_value or not isinstance(header_value, str):
-        return ""
-    parts = header_value.strip().split(None, 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        return ""
-    token = parts[1].strip()
-    if not token.startswith(INTEGRATION_TOKEN_PREFIX):
-        return ""
-    return token
-
-
-@dataclass
-class IntegrationToken:
-    """One stored token record. ``token_hash`` is sha256(plaintext); the
-    plaintext is never persisted. ``token_id`` is a short public handle (a
-    hash prefix) used by list/revoke and in logs."""
-
-    token_id: str
-    token_hash: str
-    agent_id: str
-    label: str = ""
-    created_at: float = 0.0
-    revoked_at: float | None = None
-
-    @property
-    def active(self) -> bool:
-        return self.revoked_at is None
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.token_id,
-            "hash": self.token_hash,
-            "agent_id": self.agent_id,
-            "label": self.label,
-            "created_at": self.created_at,
-            "revoked_at": self.revoked_at,
-        }
-
-    def public_view(self) -> dict:
-        """Listing view: everything but the hash."""
-        return {
-            "id": self.token_id,
-            "agent_id": self.agent_id,
-            "label": self.label,
-            "created_at": self.created_at,
-            "revoked_at": self.revoked_at,
-            "active": self.active,
-        }
-
-
-class IntegrationTokenStore:
-    """Hashed bearer-token store at ``<data_dir>/integration_tokens.json``.
-
-    The CLI writes it; the daemon reads it. The daemon re-reads the file
-    whenever its mtime/size changes and re-validates on EVERY message, so a
-    ``revoke`` from the CLI takes effect on live connections without a
-    restart. Writes are atomic (temp file + os.replace) and 0600 on POSIX.
-    """
-
-    def __init__(self, data_dir: Path | str) -> None:
-        self.path = Path(data_dir) / INTEGRATION_TOKENS_FILE
-        self._lock = threading.Lock()
-        self._records: dict[str, IntegrationToken] = {}   # keyed by token_hash
-        self._stamp: tuple[int, int] | None = None
-        self._loaded = False
-
-    # -- persistence -------------------------------------------------------
-
-    def _file_stamp(self) -> tuple[int, int] | None:
-        try:
-            st = self.path.stat()
-        except OSError:
-            return None
-        return (st.st_mtime_ns, st.st_size)
-
-    def _reload_if_changed(self) -> None:
-        stamp = self._file_stamp()
-        if self._loaded and stamp == self._stamp:
-            return
-        records: dict[str, IntegrationToken] = {}
-        if stamp is not None:
-            try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                # Unreadable/corrupt store: fail CLOSED (no token valid)
-                # rather than keep serving a stale in-memory copy.
-                raw = {}
-            rows = raw.get("tokens") if isinstance(raw, dict) else None
-            for row in rows if isinstance(rows, list) else []:
-                try:
-                    rec = IntegrationToken(
-                        token_id=str(row["id"]),
-                        token_hash=str(row["hash"]),
-                        agent_id=str(row["agent_id"]),
-                        label=str(row.get("label") or ""),
-                        created_at=float(row.get("created_at") or 0.0),
-                        revoked_at=(float(row["revoked_at"])
-                                    if row.get("revoked_at") is not None else None),
-                    )
-                except (KeyError, TypeError, ValueError, AttributeError):
-                    continue
-                records[rec.token_hash] = rec
-        self._records = records
-        self._stamp = stamp
-        self._loaded = True
-
-    def _write(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        body = json.dumps(
-            {"version": 1,
-             "tokens": [r.to_dict() for r in self._records.values()]},
-            indent=2)
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(body)
-        os.replace(tmp, self.path)
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
-        self._stamp = self._file_stamp()
-
-    # -- operations --------------------------------------------------------
-
-    def create(self, agent_id: str, label: str = "") -> tuple[str, IntegrationToken]:
-        """Mint a token bound to ``agent_id``. Returns (plaintext, record);
-        the plaintext is not recoverable afterwards."""
-        if not is_bindable_agent_id(agent_id):
-            raise ValueError(
-                f"refusing to bind an integration token to {agent_id!r}: "
-                "owner sentinels (empty, 'user') are never "
-                "a valid integration identity")
-        with self._lock:
-            self._reload_if_changed()
-            token = INTEGRATION_TOKEN_PREFIX + secrets.token_urlsafe(32)
-            h = hash_integration_token(token)
-            rec = IntegrationToken(token_id=h[:12], token_hash=h,
-                                   agent_id=agent_id, label=label,
-                                   created_at=time.time())
-            self._records[h] = rec
-            self._write()
-            return token, rec
-
-    def revoke(self, ident: str) -> list[IntegrationToken]:
-        """Revoke by token id (hash prefix) or exact label. Returns the
-        records newly revoked (empty if nothing matched)."""
-        if not ident:
-            return []
-        with self._lock:
-            self._reload_if_changed()
-            hit = [r for r in self._records.values()
-                   if r.active and (r.token_id == ident or r.label == ident)]
-            now = time.time()
-            for r in hit:
-                r.revoked_at = now
-            if hit:
-                self._write()
-            return hit
-
-    def list(self) -> list[IntegrationToken]:
-        with self._lock:
-            self._reload_if_changed()
-            return sorted(self._records.values(), key=lambda r: r.created_at)
-
-    def verify(self, token: str) -> IntegrationToken | None:
-        """The active record for a presented plaintext token, else None.
-        Re-reads the store if it changed on disk (CLI revocation)."""
-        if not token or not token.startswith(INTEGRATION_TOKEN_PREFIX):
-            return None
-        h = hash_integration_token(token)
-        with self._lock:
-            self._reload_if_changed()
-            rec = self._records.get(h)
-        if rec is None or not rec.active:
-            return None
-        if not is_bindable_agent_id(rec.agent_id):
-            return None     # hand-edited store binding a sentinel: refuse
-        return rec
-
-    def lookup_active(self, token_hash: str) -> IntegrationToken | None:
-        """The active record for a stored hash (per-message re-check)."""
-        with self._lock:
-            self._reload_if_changed()
-            rec = self._records.get(token_hash)
-        if rec is None or not rec.active:
-            return None
-        return rec
-
-
-class TokenBucket:
-    """Per-token rate limiter, shared across that token's connections.
-    Refills ``rate`` units/sec up to ``burst``."""
-
-    def __init__(self, rate: float, burst: int) -> None:
-        self.rate = float(rate)
-        self.burst = float(burst)
-        self._level = float(burst)
-        self._last = time.monotonic()
-
-    def allow(self, now: float | None = None) -> bool:
-        now = now if now is not None else time.monotonic()
-        self._level = min(self.burst, self._level + (now - self._last) * self.rate)
-        self._last = now
-        if self._level >= 1.0:
-            self._level -= 1.0
-            return True
-        return False
-
-
-@dataclass
-class IntegrationSession:
-    """Per-connection state on the integration listener. ``agent_id`` is
-    fixed at the handshake from the token record and is the ONLY caller_id
-    this connection ever dispatches with."""
-
-    token_id: str
-    token_hash: str
-    agent_id: str
-    label: str = ""
-    conn_id: str = ""

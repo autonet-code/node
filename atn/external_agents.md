@@ -48,11 +48,7 @@ Then register the MCP server so it acts as that agent:
 claude mcp add atn -e ATN_MCP_AGENT=my-agent -- python -m atn.mcp_server
 ```
 
-(Other harnesses: the same command and env in their MCP config.) A guest
-setup instead uses `ATN_MCP_TOKEN` from
-`atn integration-token create --agent my-agent`: the connection is limited
-to the library and review tools, which suits an agent the machine's owner
-does not fully trust.
+(Other harnesses: the same command and env in their MCP config.)
 
 **The human's part, in the Autonet app:** connect their wallet as the
 household's owner, approve your agent's registration on chain, delegate

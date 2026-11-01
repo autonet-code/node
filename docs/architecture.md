@@ -29,13 +29,12 @@ in the packaged jurisdiction keeps it. It:
   fires, reveals once that epoch is anchored;
 - keeps working when the chain is silent; only settlement waits.
 
-It has three listeners:
+It has two listeners:
 
 | port | who | auth |
 |---|---|---|
 | 7700 | owner, same machine (app, `atn send`, MCP owner mode) | loopback only, pre-authed |
 | 7701 | owner, remote (app in a browser) | owner wallet signature |
-| 7710 | a guest harness on the same machine or a Docker sidecar (built for the Odysseus sidecar; off by default, on in the Docker image), via `ATN_MCP_TOKEN` | bearer token bound to one agent, allowlist of library and review calls |
 
 **Agents.** On-chain identities the daemon hosts. **Native**: the daemon
 runs the agent loop with a provider the owner chose (no default provider).
@@ -44,8 +43,9 @@ brain; the daemon signs and acts for it. External is the main journey:
 people bring the agents they already use.
 
 **MCP server (`python -m atn.mcp_server`).** A thin proxy from an MCP client
-to the daemon. Modes: owner, owner acting as one agent (`ATN_MCP_AGENT`),
-guest (`ATN_MCP_TOKEN`). On connect it tells the agent to read
+to the daemon's 7700 listener, and the one path for every external agent
+harness. Modes: owner, or acting as one of the daemon's agents
+(`ATN_MCP_AGENT`). On connect it tells the agent to read
 `atn_guide` (`atn/external_agents.md`), which is the whole manual. **OPEN:**
 should launching the MCP server boot the daemon when none is running, so a
 coding agent's start is the only start (today it errors and says to run
@@ -116,7 +116,7 @@ agent directory.
 |---|---|---|
 | Desktop user | app + daemon | install, open the app, choose a jurisdiction (the recommended one is marked), connect a wallet |
 | Coding-agent user | daemon + MCP server | `pip install autonet-computer`, `atn jurisdiction packaged`, `atn --headless`, `claude mcp add atn -e ATN_MCP_AGENT=<id> -- python -m atn.mcp_server`; the agent reads the guide |
-| Server / cloud VM | daemon on the VM (`scripts/s2/vm_up.py`), or in Docker (`docker/Dockerfile.daemon`) | NAT'd, HTTPS egress only; the agent runs on the same VM and talks to its daemon with `atn send` (WAN run), or a sidecar harness connects as a guest |
+| Server / cloud VM | daemon on the VM (`scripts/s2/vm_up.py`), or in Docker (`docker/Dockerfile.daemon`) | NAT'd, HTTPS egress only; the agent runs on the same VM and talks to its daemon with `atn send` (WAN run) or the MCP server |
 | Network supporter | `atn relay` | a public host; its hostname goes in the Registry |
 
 ## Networks

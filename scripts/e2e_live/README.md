@@ -32,7 +32,7 @@ flutter test integration_test/live -d windows --dart-define=DAEMON_WS=ws://127.0
 | hardhat node | `127.0.0.1:18545`, chain 1337 | started with `node node_modules/hardhat/.../cli.js node`. No `hardhat run`, so `deployments/*.json` is never written |
 | contracts | deployed with web3.py from `artifacts/`, signed by hardhat account 0 | Substrate, ServiceRegistry, PaymentChannel (charter hash goes in the registry as `charter`, no contract) |
 | stub | `127.0.0.1:18080` (`stub_server.py`) | `POST /v1/chat/completions` (JSON and SSE) replies `E2E-STUB-REPLY <last user message>`; trigger words in the newest user message switch it: `E2E-TOOL` (or `E2E-TOOL:<name>`) makes one tool call then finishes in text, `E2E-STALL` never answers, `E2E-FAIL` returns a 503. `GET /registry.json` is the `ATN_REGISTRY_URL` target and lists local addresses only. `GET /health` |
-| daemon | `ws://127.0.0.1:7799` | `python -m atn --headless`. Home is `<state>/home`. Remote and integration listeners are off |
+| daemon | `ws://127.0.0.1:7799` | `python -m atn --headless`. Home is `<state>/home`. The remote listener is off |
 
 **Fixtures.** All of these are seeded through the daemon's own WS frames:
 
@@ -60,7 +60,7 @@ Everything is also written to `<state>/state.json`, together with the logs (`dae
 | Env | Default |
 |---|---|
 | `E2E_LIVE_DIR` | `%TEMP%\atn_e2e_live` (the state dir: home, logs, state.json) |
-| `E2E_LIVE_WS_PORT` | `7799` (7700/7701/7710 are refused) |
+| `E2E_LIVE_WS_PORT` | `7799` (7700/7701 are refused) |
 | `E2E_LIVE_RPC_PORT` | `18545` |
 | `E2E_LIVE_STUB_PORT` | `18080` |
 | `ATN_WEB_DIR` | `C:\code\atn_web` (runner only) |
@@ -81,7 +81,7 @@ Everything is also written to `<state>/state.json`, together with the logs (`dae
 **Provider isolation**
 - `ATN_DISABLE_PROVIDER_AUTODETECT=1` stops the daemon from probing the Claude Max and Codex bridges. Without it, the harness daemon adopted this machine's Claude Max login even with its home redirected.
 - `up` fails if a subscription provider is active.
-- `ATN_USEFULNESS_EMBEDDER=hashing` avoids downloading an embedding model into the empty home. `ATN_AUTO_UPDATE=0` and `ATN_INTEGRATION_WS=0` are also set.
+- `ATN_USEFULNESS_EMBEDDER=hashing` avoids downloading an embedding model into the empty home. `ATN_AUTO_UPDATE=0` is also set.
 
 **App side** (`atn_web/integration_test/live/live_harness.dart`)
 - Refuses a `DAEMON_WS` that is missing, not loopback, or on 7700/7701/7710.

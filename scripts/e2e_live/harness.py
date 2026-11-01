@@ -18,7 +18,7 @@ One command up, one down, one status:
      18080): the daemon's model provider AND the ``ATN_REGISTRY_URL`` target;
   3. a real ``python -m atn`` daemon whose home is ``<state dir>/home``
      (USERPROFILE/HOME redirect + KEYSTORE_DIR), privileged local listener on
-     E2E_LIVE_WS_PORT (default 7799), remote and integration listeners off.
+     E2E_LIVE_WS_PORT (default 7799), remote listener off.
 
 Then it seeds fixtures over the daemon's own WS surface (the same frames the
 app sends): three agents, an owner-authored pinned tool, the first agent
@@ -74,7 +74,7 @@ RPC_URL = f"http://127.0.0.1:{RPC_PORT}"
 WS_URL = f"ws://127.0.0.1:{WS_PORT}"
 STUB_URL = f"http://127.0.0.1:{STUB_PORT}"
 CHAIN_ID = 1337           # hardhat.config.js network "hardhat"
-FORBIDDEN_WS_PORTS = {7700, 7701, 7710}   # the user's daemon listeners
+FORBIDDEN_WS_PORTS = {7700, 7701}   # the user's daemon listeners
 
 # Hardhat's well-known mnemonic accounts. LOCAL CHAIN ONLY.
 HH_ACCOUNTS = [
@@ -381,7 +381,6 @@ def daemon_config(contracts: Dict[str, str]) -> Dict[str, Any]:
             "local_ws_port": WS_PORT,
             "remote_ws_host": "",
             "remote_ws_port": WS_PORT + 1,
-            "integration_ws_enabled": False,
             "owner_wallet": OWNER[0],
             "private_key": OWNER[1],
             "rpc_url": RPC_URL,
@@ -402,7 +401,6 @@ def daemon_env(home: Path) -> Dict[str, str]:
     env = xd.daemon_env(home)
     env["KEYSTORE_DIR"] = str(home / ".atn" / "keystore")
     env["ATN_REGISTRY_URL"] = f"{STUB_URL}/registry.json"
-    env["ATN_INTEGRATION_WS"] = "0"
     env["ATN_AUTO_UPDATE"] = "0"
     env["AUTONET_CONFIG"] = str(home / "autonet.yaml")
     # Hash-based usefulness coords: deterministic, and no sentence-embedding
@@ -412,8 +410,7 @@ def daemon_env(home: Path) -> Dict[str, str]:
     # probe adopting this machine's subscription logins.
     env["ATN_DISABLE_PROVIDER_AUTODETECT"] = "1"
     # Never inherit listener / owner overrides from the caller's shell.
-    for k in ("ATN_REMOTE_WS_HOST", "ATN_REMOTE_WS_PORT", "ATN_OWNER_WALLET",
-              "ATN_INTEGRATION_WS_HOST", "ATN_INTEGRATION_WS_PORT"):
+    for k in ("ATN_REMOTE_WS_HOST", "ATN_REMOTE_WS_PORT", "ATN_OWNER_WALLET"):
         env.pop(k, None)
     return env
 

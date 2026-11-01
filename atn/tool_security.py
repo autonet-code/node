@@ -384,7 +384,7 @@ async def _publish_staked(runtime: Any, record: Any) -> dict[str, Any]:
                  "amount": res.get("amount")}
     try:
         store.set_published(record.digest, True)
-    except ValueError as exc:  # orphan-author / guest-stamp gates
+    except ValueError as exc:  # orphan-author gate
         return {"error": str(exc), "stake": stake}
     _forget_status(runtime, record.digest)
     return {"digest": record.digest, "name": record.name, "published": True,

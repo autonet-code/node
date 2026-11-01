@@ -18,16 +18,11 @@ Claude Code config (.mcp.json):
       }
     }
 
-Guest mode: with ``ATN_MCP_TOKEN`` set (an integration token from
-``atn integration-token create --agent <id>``), the proxy connects to the
-daemon's integration listener instead (docs/integration_listener.md,
-default ``ws://127.0.0.1:7710``) and acts as that one agent: only the
-listener's allowlist is offered (probe, use, review, author, publish
-tools), and what it earns is that agent's. ``ATN_MCP_URL`` overrides the
-daemon URL in either mode (e.g. several daemons on one machine).
-
-Owner mode with ``ATN_MCP_AGENT=<id>`` acts as that external agent (the
-proxy fills ``caller_id``), so a harness needs no identity plumbing. The
+With ``ATN_MCP_AGENT=<id>`` the proxy acts as that one of the daemon's
+agents (it fills ``caller_id``), so a harness needs no identity plumbing;
+without it, it is the owner. This is the one path for every external
+agent harness. ``ATN_MCP_URL`` overrides the daemon URL (e.g. several
+daemons on one machine). The
 server's MCP ``instructions`` and its local ``atn_guide`` tool hand the
 connecting agent ``atn/external_agents.md``.
 """
@@ -50,11 +45,10 @@ from .ws_server import DEFAULT_PORT
 
 log = logging.getLogger(__name__)
 
-GUEST_TOKEN = os.environ.get("ATN_MCP_TOKEN", "").strip()
-DAEMON_URL = os.environ.get("ATN_MCP_URL", "").strip() or (
-    "ws://127.0.0.1:7710" if GUEST_TOKEN else f"ws://localhost:{DEFAULT_PORT}")
+DAEMON_URL = (os.environ.get("ATN_MCP_URL", "").strip()
+              or f"ws://localhost:{DEFAULT_PORT}")
 _CALL_TIMEOUT = 300.0  # seconds; some tools (trigger_run, delegate) run long
-# Owner mode: the agent this connection acts as, so a harness never has to
+# The agent this connection acts as, so a harness never has to
 # send caller_id itself. Calls that name the owner's own fleet stay owner's.
 AGENT_ID = os.environ.get("ATN_MCP_AGENT", "").strip()
 _OWNER_CALLS = frozenset({"create_agent", "get_agent", "list_agents"})
@@ -94,7 +88,7 @@ async def _call_daemon(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     payload = dict(arguments)
     payload["type"] = name
     payload["msg_id"] = mid
-    if AGENT_ID and not GUEST_TOKEN and name not in _OWNER_CALLS:
+    if AGENT_ID and name not in _OWNER_CALLS:
         payload.setdefault("caller_id", AGENT_ID)
 
     try:
@@ -121,52 +115,14 @@ async def _call_daemon(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _connect(websockets: Any):
-    """A connection to the daemon; in guest mode it carries the bearer token."""
-    headers = {"Authorization": f"Bearer {GUEST_TOKEN}"} if GUEST_TOKEN else None
-    return websockets.connect(DAEMON_URL, max_size=None, open_timeout=5,
-                              additional_headers=headers)
+    """A connection to the daemon's local listener."""
+    return websockets.connect(DAEMON_URL, max_size=None, open_timeout=5)
 
 
-async def _guest_allowed() -> list[str]:
-    """The message types the integration listener allows this token (its
-    first frame, ``integration_ready``)."""
-    import websockets
-    try:
-        async with _connect(websockets) as ws:
-            async with asyncio.timeout(10):
-                async for frame in ws:
-                    msg = json.loads(frame)
-                    if isinstance(msg, dict) and msg.get("type") == "integration_ready":
-                        return list(msg.get("allowed") or [])
-    except Exception as exc:
-        log.warning("guest handshake with %s failed: %s", DAEMON_URL, exc)
-    return []
-
-
-# Allowlisted guest calls with no agent-tool definition of their own.
-_GUEST_EXTRA = {
-    "status": "Who this connection acts as and what it may call.",
-    "network_status": "Node, chain, epoch and peer summary of the network.",
-    "tool_reviews": "Reviews and the drifted position of a tool, by digest.",
-}
-
-
-def _tool_list(allowed: list[str] | None) -> list[types.Tool]:
-    defs = get_tool_definitions()
-    if allowed is None:
-        return [types.Tool(name=t.name, description=t.description,
-                           inputSchema=t.input_schema) for t in defs]
-    keep = set(allowed)
-    tools = [types.Tool(name=t.name, description=t.description,
-                        inputSchema=t.input_schema)
-             for t in defs if t.name in keep]
-    known = {t.name for t in tools}
-    for name, desc in _GUEST_EXTRA.items():
-        if name in keep and name not in known:
-            tools.append(types.Tool(name=name, description=desc,
-                                    inputSchema={"type": "object",
-                                                 "additionalProperties": True}))
-    return tools
+def _tool_list() -> list[types.Tool]:
+    return [types.Tool(name=t.name, description=t.description,
+                       inputSchema=t.input_schema)
+            for t in get_tool_definitions()]
 
 
 def create_server() -> Server:
@@ -175,7 +131,7 @@ def create_server() -> Server:
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        tools = _tool_list(await _guest_allowed() if GUEST_TOKEN else None)
+        tools = _tool_list()
         return [types.Tool(
             name=GUIDE_TOOL,
             description=("How to use Autonet from this connection: setup, the "
@@ -207,7 +163,7 @@ async def run_server() -> None:
 
     log.info(
         "ATN MCP proxy ready (%s), forwarding to %s (daemon not started here)",
-        "guest agent" if GUEST_TOKEN else "owner", DAEMON_URL,
+        f"agent {AGENT_ID}" if AGENT_ID else "owner", DAEMON_URL,
     )
 
     server = create_server()

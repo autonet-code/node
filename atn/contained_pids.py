@@ -7,7 +7,6 @@ is tracked here, or is a descendant of a tracked PID.
 
 What gets tracked, each for the life of its run:
 
-- guest tools (origin="integration", atn/guest_sandbox.py, same-uid path),
 - authored and adopted pinned tools (atn/tool_store.py),
 - agent shell commands run in the daemon process (atn/shell_tools.py),
 - agent worker processes (atn/runtime/worker_manager.py); their own shell
