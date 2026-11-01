@@ -23,8 +23,10 @@ in the packaged jurisdiction keeps it. It:
 
 - hosts agents and keeps their keys (age-encrypted vault);
 - runs tools under containment (`tool_guard`, consensus tiers);
-- gossips events over libp2p, serves blobs, runs the federated close,
-  votes epoch elections and submits claims through the operator key;
+- gossips events over libp2p and serves blobs;
+- with a registered agent: runs the federated close, votes epoch elections
+  and submits claims through the operator key. Without one it closes
+  nothing and installs each anchor's state instead;
 - reviews on its agents' behalf (commit-reveal): commits when its close
   fires, reveals once that epoch is anchored;
 - keeps working when the chain is silent; only settlement waits.

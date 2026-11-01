@@ -180,6 +180,11 @@ class FederatedCloseDriver:
         # each built on this daemon's own view of the unanchored ones
         # before it, every input pinned to the previous epoch's cutoff.
         self.chain_source: Optional[Callable[[], Dict[str, Any]]] = None
+        # Zero-arg hook: does this daemon take part in consensus (has a
+        # registered agent)? False => it follows the anchors and closes
+        # nothing (_follow). None => always participates.
+        self.participating: Optional[Callable[[], bool]] = None
+        self._followed_count: Optional[int] = None
         # (from_ts, to_ts) -> ATN burned by fees between them, from
         # Substrate's on-chain checkpoints: with a target share set, an
         # epoch ends on that volume (voice_state.volume_cutoff).
@@ -1249,6 +1254,27 @@ class FederatedCloseDriver:
             snapshot_anchor_count=self.snapshot_anchor_count,
         )
 
+    def _follow(self, anchor_count: int,
+                anchored: Dict[int, Dict[str, Any]]) -> None:
+        """A daemon not in consensus (no registered agent) closes nothing:
+        it installs each new anchor's state and drops buffered batches the
+        anchors have passed. Its own unanchored closes, if any, are void."""
+        if self._local_epochs:
+            self._local_epochs = []
+            self._save_local_epochs()
+        if anchor_count != self._followed_count:
+            if self._install_anchored_state(anchor_count, anchored):
+                self._followed_count = anchor_count
+            else:
+                # Retried next tick; and if this daemon starts participating
+                # first, its first close installs the anchored state.
+                self._rewind_pending = True
+        last = anchored.get(anchor_count)
+        take = getattr(self.gossip, "take_epoch_batches", None)
+        if last and last.get("cutoff") and take is not None:
+            take([], drop_at_or_before=float(last["cutoff"]))
+        return None
+
     def _run_pipelined(self, local_close_result: Dict[str, Any]
                        ) -> Optional[FederatedCloseResult]:
         """One tick of the pipelined mode: reconcile with the chain, rewind
@@ -1262,6 +1288,8 @@ class FederatedCloseDriver:
             logger.warning("federated close: chain read failed, not closing: %s", e)
             return None
         self._chain_at_genesis = anchor_count == 0
+        if self.participating is not None and not self.participating():
+            return self._follow(anchor_count, anchored)
         self._reconcile(anchor_count, anchored)
         if anchor_count and not self._local_epochs and self._carry_files_missing():
             self._rewind_pending = True   # a joiner: start from the chain

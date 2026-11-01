@@ -143,3 +143,37 @@ def test_a_different_winner_rewinds_and_recloses():
     assert re2.epoch_id.split("-")[2] == other_root[:16]
     # Batch 1 belonged to the anchored epoch 1's window: not re-closed.
     assert re2.n_batches == 1
+
+
+def test_a_daemon_with_no_registered_agent_follows_and_closes_nothing():
+    c = _Chain()
+    buf = _Buffer(c.kp, [c.batch(BASE + 10), c.batch(BASE + 310)])
+    chain = {"anchor_count": 0, "anchors": []}
+    now = [BASE + 2 * L + G]
+    d = _driver(buf, chain, now)
+    registered = [False]
+    d.participating = lambda: registered[0]
+
+    assert d.run({}) is None and d.local_epochs == []
+    assert len(buf.pending_epoch_batches()) == 2
+
+    # Another household's epoch 1 is anchored: its state is installed and the
+    # batches it passed are dropped.
+    chain["anchor_count"] = 1
+    chain["anchors"] = [{"number": 1, "epoch_id": f"epoch-1-{'0' * 16}-{BASE + L}",
+                         "root": "ee" * 32, "cutoff": BASE + L}]
+    installed = []
+    d.carry_source = lambda: (installed.append(1), SimpleNamespace(
+        status="ok", epoch_id=chain["anchors"][0]["epoch_id"],
+        carry={"tool_registrations": {}, "tool_vetting": {},
+               "tool_positions": {}}))[1]
+    assert d.run({}) is None and installed == [1]
+    assert [x.batch_seq for x in buf.pending_epoch_batches()] == [2]
+    d.run({})
+    assert installed == [1]          # the same anchor is installed once
+
+    # Once an agent registers, it closes epoch 2 on the anchored root.
+    registered[0] = True
+    e2 = d.run({})
+    assert e2 is not None and e2.epoch_number == 2
+    assert e2.parent_root == "ee" * 32

@@ -1298,6 +1298,20 @@ class AutonetBridge:
                 "chain submission (federated-close driver)", service,
                 timeout=timeout, poll=0.5):
             return
+        # Only a daemon with a registered agent takes part in consensus and
+        # closes epochs; a joined-only one follows the anchored state.
+        registry = self._agent_registry
+
+        def _participating() -> bool:
+            if registry is None:
+                return False
+            return any(d.identity and d.identity.registered_on_chain
+                       for d, _ in registry.list_agents())
+
+        try:
+            service._federated_close_driver.participating = _participating
+        except AttributeError:          # a driver without the hook
+            pass
         try:
             blob_resolver = self._build_libp2p_blob_resolver()
             ok = service.attach_chain_submission(
