@@ -768,6 +768,34 @@ def dao_name(dao: str, rpc_url: str) -> str:
     return _DAO_NAMES[key]
 
 
+_TOKEN_SYMBOLS: dict[tuple[str, str], str] = {}
+
+
+def token_symbol(token: str, rpc_url: str) -> str:
+    """A token contract's ``symbol()`` (the jurisdiction's REP or ATN, which
+    the DAO names at setup). "" when unset or unreadable, e.g. a Substrate
+    deployed before ATN had a symbol. Cached per process once read."""
+    from web3.exceptions import BadFunctionCallOutput, ContractLogicError
+    if not token or not rpc_url:
+        return ""
+    key = (token.lower(), rpc_url)
+    if key not in _TOKEN_SYMBOLS:
+        try:
+            from web3 import Web3
+            w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={
+                "timeout": _REGISTRY_FETCH_TIMEOUT}))
+            c = w3.eth.contract(address=Web3.to_checksum_address(token), abi=[
+                {"name": "symbol", "type": "function", "stateMutability": "view",
+                 "inputs": [], "outputs": [{"name": "", "type": "string"}]}])
+            _TOKEN_SYMBOLS[key] = str(c.functions.symbol().call())
+        except (ContractLogicError, BadFunctionCallOutput):
+            _TOKEN_SYMBOLS[key] = ""     # the contract has no symbol(): final
+        except Exception as exc:
+            log.debug("symbol read from %s failed: %s", token, exc)
+            return ""
+    return _TOKEN_SYMBOLS[key]
+
+
 def jurisdiction_key(an: "RPBConfig") -> str:
     """``<chain_id>:<DAO address>``: the jurisdiction's identity, used as its
     gossip topic and the key its local substrate data is parked under."""

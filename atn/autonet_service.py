@@ -114,6 +114,10 @@ class AutonetState:
     # balances without hardcoding 'ETH').
     gas_symbol: str = "XTZ"
     gas_decimals: int = 18
+    # The jurisdiction's token symbols, read from its RepToken and
+    # Substrate; the app labels with these and falls back to REP / ATN.
+    rep_symbol: str = ""
+    atn_symbol: str = ""
     registry_address: str = ""
     token_address: str = ""
     economy_address: str = ""
@@ -170,6 +174,8 @@ class AutonetState:
             "substrate_address": self.substrate_address,
             "gas_symbol": self.gas_symbol,
             "gas_decimals": self.gas_decimals,
+            "rep_symbol": self.rep_symbol,
+            "atn_symbol": self.atn_symbol,
             "registry_address": self.registry_address,
             "token_address": self.token_address,
             "economy_address": self.economy_address,
@@ -349,6 +355,9 @@ class AutonetBridge:
         st.jurisdiction_name = ((sel or {}).get("name") or
                                 (dao_name(c.dao_address, c.rpc_url)
                                  if self.network_joined else ""))
+        from .config import token_symbol
+        st.rep_symbol = token_symbol(getattr(c, "rep_token_address", ""), c.rpc_url)
+        st.atn_symbol = token_symbol(st.substrate_address, c.rpc_url)
 
         errors: list[str] = []
         from .config import NO_JURISDICTION_MESSAGE, jurisdiction_configured
