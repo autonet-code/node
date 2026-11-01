@@ -4890,7 +4890,7 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
     from .on_chain import OnChainService
     svc = OnChainService(autonet.config if autonet is not None else runtime._config.rpb)
     if not svc.available:
-        return {"error": "On-chain service not configured (missing rpb_contract_address or rpc_url)."}
+        return {"error": "On-chain service not configured (missing substrate_address or rpc_url)."}
 
     # Substrate.registerAgent needs the daemon's libp2p PeerId. Registering is
     # the signal to join the network, so start autonet if the host is not up
