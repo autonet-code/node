@@ -266,20 +266,10 @@ class AutonetService:
                 break
 
             try:
-                # 1. Resource check
-                if self._resource_monitor and not self._resource_monitor.should_train():
-                    if self._state != ServiceState.PAUSED:
-                        self._state = ServiceState.PAUSED
-                        logger.info(
-                            f"Training paused: {self._resource_monitor.paused_reason}"
-                        )
-                    time.sleep(cycle_delay)
-                    continue
-                elif self._state == ServiceState.PAUSED:
-                    self._state = ServiceState.RUNNING
-                    logger.info("Training resumed")
-
-                # 2. Run one training cycle
+                # No CPU gate: this cycle is consensus work (substrate feed,
+                # gossip outbox, the epoch scheduler's close tick), and a
+                # busy machine skipping it missed closes the network made.
+                # The gate was for JEPA training, which is retired.
                 self._run_cycle()
                 self._cycles += 1
 
