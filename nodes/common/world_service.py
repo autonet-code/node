@@ -468,7 +468,7 @@ class WorldService:
             self._epoch_event_ts = list(self._carry_event_ts)
             self._carry_events = []
             self._carry_event_ts = []
-            logger.info(
+            logger.debug(
                 "WorldService epoch opened: rpb=%s, epoch=%s%s",
                 self.rpb_address, eid,
                 f" ({len(self._epoch_events)} events rolled forward)"

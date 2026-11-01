@@ -693,7 +693,10 @@ class AutonetService:
             interval = float(getattr(self.config, "epoch_interval_seconds", 60.0))
 
             def _on_close(result: Dict[str, Any]) -> None:
-                logger.info(
+                # Empty local epochs (an idle or follower daemon) stay at
+                # debug so they don't fill the console every minute.
+                logger.log(
+                    logging.INFO if result.get("n_events") else logging.DEBUG,
                     "Epoch closed: id=%s, n_events=%d, total_mint=%.4f, "
                     "agents=%d",
                     result.get("epoch_id"),

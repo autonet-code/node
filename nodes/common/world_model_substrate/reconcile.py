@@ -453,7 +453,8 @@ def reconcile_epoch(
     if emission_pool is not None:
         result = apply_emission_pool(result, emission_pool)
 
-    logger.info(
+    logger.log(
+        logging.INFO if (node_mint or agent_mint) else logging.DEBUG,
         "epoch reconciliation: %d nodes, %d agents, total mint %.4f (pool %s), "
         "total novelty %.4f",
         len(node_mint), len(agent_mint), result["total_mint"],
