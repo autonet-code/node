@@ -148,9 +148,6 @@ include = ["atn*", "nodes*", "bridge", "world_model*"]
 "atn" = ["registry.json", "external_agents.md"]
 "atn.connectors" = ["*/connector.json"]
 # The bundled Chrome extension Browser Control loads with --load-extension.
-# Keyed on the child package: package-data patterns resolve relative to the
-# package they are keyed under, and browser_relay is itself a package.
-"atn.connectors.browser_relay" = ["extension/*", "extension/icons/*"]
 # No lockfile: bridge deps resolve per install (atn/providers/bridge_updater.py).
 "bridge" = ["*.ts", "package.json"]
 "atn._vendor.kevin.vault" = ["*.md"]
