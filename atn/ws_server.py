@@ -1302,7 +1302,7 @@ class WebSocketBridge:
     def _network_status_payload(self) -> dict[str, Any]:
         """Node, chain, epoch and peer summary for a guest UI. Public facts
         only: no RPC URL (it can embed a provider key), no wallet, no keys.
-        Before the daemon joined the network (first registration or
+        Before the daemon joined the network (a chosen jurisdiction, first registration or
         autonet.enabled) it is local-only: the payload says "not joined"
         instead of reporting chain data."""
         cfg = getattr(self.runtime._config, "rpb", None)

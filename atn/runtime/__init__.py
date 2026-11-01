@@ -869,7 +869,14 @@ class Runtime:
         #   (b) the user clicks "register on chain" on the first agent;
         #       the registration handler starts autonet just-in-time
         #       so it can read the libp2p PeerId before signing the tx.
-        if self._config.autonet.enabled:
+        # (c) a chosen jurisdiction: joining it is joining its network
+        #     (gossip, the tool substrate, tool use); registering an
+        #     agent only adds consensus. Env-configured daemons (tests,
+        #     E2E scripts) keep the registration-driven start.
+        from ..config import load_selected_jurisdiction
+        chosen = load_selected_jurisdiction(
+            getattr(self._config, "data_dir", None)) is not None
+        if self._config.autonet.enabled or chosen:
             await self.autonet.start()
             # Wire P2P host into provider manager for substrate
             # provider discovery (only meaningful once p2p is up).

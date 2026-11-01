@@ -14,7 +14,10 @@ joins a network, and the CLI banner and the app say so. The app lists the
 network's jurisdictions from the DAO directory (homebase Firestore), the one
 in `contracts/<network>.recommendedJurisdiction` marked recommended and
 first; the owner chooses, and the daemon reads the chosen one's Registry
-at every start. Headless: `atn jurisdiction packaged` (the
+at every start. Joining starts its network at once (gossip, the tool
+substrate, tool use, the seed address); registering an agent is optional
+and only adds consensus (closes, elections, claims), which is how a
+household earns. Headless: `atn jurisdiction packaged` (the
 release's `registry.json`) or `atn jurisdiction <dao_registry> <rpc_url>`. A data dir whose agents were already registered
 in the packaged jurisdiction keeps it. It:
 
