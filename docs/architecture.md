@@ -60,7 +60,8 @@ tabs. Household: owner (wallet, ATN, voice, claims), operator key
 app does; everything else in governance is werule's), agents
 (registration, owner binding), governance read-only with a link to werule,
 and this daemon's network (with its seed address, to propose for the
-Registry's seed list). Jurisdiction: contracts, charter, epochs, the
+Registry's seed list). Jurisdiction: contracts, charter, epochs (the anchored ones, read from
+Substrate by `epoch_history`; never the daemon's local ticks), the
 switch, and the Substrate view. The home section keeps Docs and the
 Novelty map. Each agent's window keeps only
 its own identity, registration indicator and substrate position. The app

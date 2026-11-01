@@ -1053,6 +1053,39 @@ def _anchor_cutoff(anchor: Any) -> int:
     return int(anchor[8]) if c is None else c
 
 
+def read_recent_anchors(substrate_address: str, rpc_url: str, last_n: int = 20,
+                        *, timeout: float = 8.0) -> Dict[str, Any]:
+    """The jurisdiction's anchored epochs: {"anchor_count": N, "anchors":
+    [...]} with the last ``last_n`` anchors, oldest first. Each anchor is
+    {number, epoch_id, epoch_root, cutoff, closed_at (= cutoff),
+    anchored_at (block time), block_number, submitter, window_burned,
+    mint_pool, minted} (amounts as wei strings). Raises when the chain is
+    unreadable."""
+    from web3 import Web3
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": timeout}))
+    c = w3.eth.contract(address=Web3.to_checksum_address(substrate_address),
+                        abi=_VOICE_ABI)
+    n = int(c.functions.anchorCount().call())
+    anchors: List[Dict[str, Any]] = []
+    for i in range(max(0, n - max(0, int(last_n))), n):
+        a = c.functions.getAnchor(i).call()
+        cutoff = _anchor_cutoff(a)
+        anchors.append({
+            "number": i + 1,
+            "epoch_id": str(a[0]),
+            "epoch_root": "0x" + bytes(a[1]).hex(),
+            "cutoff": cutoff,
+            "closed_at": cutoff,
+            "anchored_at": int(a[8]),
+            "block_number": int(a[7]),
+            "submitter": str(a[6]),
+            "window_burned": str(int(a[10])) if len(a) > 10 else "0",
+            "mint_pool": str(int(a[11])) if len(a) > 11 else "0",
+            "minted": str(int(a[12])) if len(a) > 12 else "0",
+        })
+    return {"anchor_count": n, "anchors": anchors}
+
+
 def _window_after(w3: Any, contract: Any, anchor_count: int, anchor: Any,
                   records: List[Dict[str, Any]], jurisdiction_id: str,
                   governor_address: str,

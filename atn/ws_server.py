@@ -747,6 +747,32 @@ class WebSocketBridge:
         service = getattr(autonet, "_service", None) if autonet else None
         return getattr(service, "_world_service", None) if service else None
 
+    async def _anchored_epochs(self, last_n: int = 20) -> dict[str, Any]:
+        """The jurisdiction's anchored epochs from Substrate (newest last):
+        {epochs, total_closed, running, source: "anchored", reason?}. Never
+        the local projection ticks: when the anchors are unreadable the list
+        is empty and ``reason`` says why."""
+        cfg = getattr(self.runtime._config, "rpb", None)
+        if not getattr(cfg, "network_joined", False):
+            return {"epochs": [], "total_closed": 0, "running": False,
+                    "source": "anchored", "reason": "not joined"}
+        substrate = getattr(cfg, "substrate_address", "") or ""
+        rpc_url = getattr(cfg, "rpc_url", "") or ""
+        if not substrate or not rpc_url:
+            return {"epochs": [], "total_closed": 0, "running": True,
+                    "source": "anchored",
+                    "reason": "no Substrate address or RPC configured"}
+        try:
+            from nodes.common.voice_state import read_recent_anchors
+            got = await asyncio.to_thread(read_recent_anchors, substrate,
+                                          rpc_url, last_n)
+        except Exception as exc:                           # noqa: BLE001
+            return {"epochs": [], "total_closed": 0, "running": True,
+                    "source": "anchored",
+                    "reason": f"anchors unreadable: {exc}"[:200]}
+        return {"epochs": got["anchors"], "total_closed": got["anchor_count"],
+                "running": True, "source": "anchored"}
+
     def _tool_reviews_payload(self, digest: str, limit: Any = None, *,
                               include_local: bool = True) -> dict[str, Any]:
         """Reviews, drifted position, vetting and usage for one tool digest.
@@ -791,8 +817,11 @@ class WebSocketBridge:
             "usage": usage,
         }
 
-    def _network_status_payload(self) -> dict[str, Any]:
-        """Node, chain, epoch and peer summary. Public facts
+    def _network_status_payload(self, anchored: dict[str, Any] | None = None
+                                ) -> dict[str, Any]:
+        """Node, chain, epoch and peer summary. ``epochs_closed`` is the
+        jurisdiction's anchored epochs (``anchored``, from _anchored_epochs),
+        never the local projection ticks. Public facts
         only: no RPC URL (it can embed a provider key), no wallet, no keys.
         Before the daemon joined the network (a chosen jurisdiction, first registration or
         autonet.enabled) it is local-only: the payload says "not joined"
@@ -833,7 +862,7 @@ class WebSocketBridge:
                 addrs = []
         service = getattr(autonet, "_service", None) if autonet else None
         epoch: dict[str, Any] = {"running": False, "epoch_id": None}
-        closed = 0
+        anchored = anchored or {}
         world_service = self._world_service()
         if world_service is not None:
             try:
@@ -843,9 +872,6 @@ class WebSocketBridge:
                     sched = scheduler.status()
                     sched.pop("opened_at", None)
                     epoch.update(sched)
-                closed = (world_service.epochs_recorded
-                          if hasattr(world_service, "epochs_recorded")
-                          else len(world_service.epoch_history))
             except Exception:                              # noqa: BLE001
                 pass
         return {
@@ -868,7 +894,10 @@ class WebSocketBridge:
                 "addrs": addrs,
             },
             "epoch": epoch,
-            "epochs_closed": closed,
+            "epochs_closed": int(anchored.get("total_closed") or 0),
+            "epochs_closed_source": "anchored",
+            **({"epochs_closed_reason": anchored["reason"]}
+               if anchored.get("reason") else {}),
             "service_market": bool(getattr(cfg, "service_registry_address", "")),
         }
 
@@ -3001,8 +3030,9 @@ class WebSocketBridge:
         if msg_type == "network_status":
             # Public summary; the owner's dashboards and the WAN run's
             # telemetry read it here.
+            anchored = await self._anchored_epochs(last_n=0)
             return {"msg_id": msg_id, "ok": True,
-                    "result": self._network_status_payload()}
+                    "result": self._network_status_payload(anchored)}
 
         if msg_type == "epoch_status":
             autonet = getattr(self.runtime, "autonet", None)
@@ -3026,28 +3056,18 @@ class WebSocketBridge:
             except Exception as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
-        # Closed-epoch records, newest last. Full close-record shape
-        # (cutoff_ts, events_rolled_forward, emission_pool, per-agent
-        # and per-node mint) — the slim WORLD_EPOCH_CLOSED push event
-        # is the refresh trigger; this is the detail read.
+        # The jurisdiction's anchored epochs (Substrate anchors), newest
+        # last: {epochs: [{number, epoch_id, cutoff, closed_at, anchored_at,
+        # ...}], total_closed, running, source, reason?}. Not the local
+        # projection ticks (WorldService.epoch_history), which close every
+        # minute and say nothing about settlement.
         if msg_type == "epoch_history":
-            autonet = getattr(self.runtime, "autonet", None)
-            service = getattr(autonet, "_service", None) if autonet else None
-            world_service = getattr(service, "_world_service", None) if service else None
-            if world_service is None:
-                # Degrade like economy_graph: autonet off is a normal state.
-                return {"msg_id": msg_id, "ok": True,
-                        "result": {"epochs": [], "total_closed": 0,
-                                   "running": False}}
             try:
                 last_n = max(1, min(int(msg.get("last_n", 20)), 200))
-                history = world_service.epoch_history
-                return {"msg_id": msg_id, "ok": True,
-                        "result": {"epochs": history[-last_n:],
-                                   "total_closed": len(history),
-                                   "running": True}}
-            except Exception as exc:
-                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
+            except (TypeError, ValueError):
+                last_n = 20
+            return {"msg_id": msg_id, "ok": True,
+                    "result": await self._anchored_epochs(last_n)}
 
         # Daemon auto-update status: current/available/staged version + state.
         # The updater stages verified releases; they apply on the next restart.
