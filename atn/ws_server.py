@@ -92,11 +92,11 @@ _OPERATOR_TX_GAS = 500_000
 KEY_LOCAL_ONLY_MESSAGES = frozenset({
     "export_agent_key",
     "export_operator_key",
+    # DEPRECATED (pre-substrate Autonet.sol, removed Phase 5.6a): the
+    # handlers now return a gone-marker. Kept in the set so an old client
+    # that still sends a private key in the payload is refused on the remote
+    # listener before the payload is read at all.
     "autonet_publish_standards",
-    # DEPRECATED (pre-substrate Autonet.sol, removed Phase 5.6a): the handler
-    # now returns a gone-marker. Kept in the set so an old client that still
-    # sends a private key in the payload is refused on the remote listener
-    # before the payload is read at all.
     "autonet_claim_reward",
     "register_agent_on_chain",
     # Vault mutations carry a raw secret VALUE in the payload; over a
@@ -206,7 +206,7 @@ SCOPED_INLINE_ALLOWED = frozenset({
     "probe_tools", "tool_reviews", "tool_surface", "list_registered_tools",
     "autonet_status", "epoch_status", "epoch_history", "economy_graph",
     "market_services", "list_services", "service_topics",
-    "autonet_standards", "autonet_alignment", "rpb_state",
+    "rpb_state",
     "rpb_substrate_distribution", "rpb_substrate_nodes",
     "rpb_substrate_subtree_projection",
 })
@@ -2626,29 +2626,6 @@ class WebSocketBridge:
             await self.runtime.autonet._emit("AUTONET_STATUS", {"action": "chain_changed", **result})
             return {"msg_id": msg_id, "ok": True, "result": result}
 
-        # Standards publication (Story 3.2)
-        if msg_type == "autonet_standards":
-            try:
-                result = self.runtime.autonet.get_standards(
-                    user_profile=self.runtime.user_profile,
-                )
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "autonet_publish_standards":
-            private_key = msg.get("private_key", "")
-            if not private_key:
-                return {"msg_id": msg_id, "ok": False, "error": "Missing 'private_key' field"}
-            try:
-                result = await self.runtime.autonet.publish_standards(
-                    user_profile=self.runtime.user_profile,
-                    private_key=private_key,
-                )
-                return {"msg_id": msg_id, "ok": result.get("status") != "error", "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
         # Pre-substrate earnings/governance handlers (Stories 3.5 / 3.6 / 3.7).
         # They read Autonet.sol (claimParticipantReward, totalInferenceBurned,
         # EvolutionProposal, ...), which was deleted wholesale in Phase 5.6a;
@@ -2657,53 +2634,24 @@ class WebSocketBridge:
         # the panel instead of showing a chain error it cannot act on.
         # The live rails are Substrate.claimFor, surfaced by
         # 'tool_earnings' and 'owner_claim_status'.
+        # Retired with them: standards publication (Autonet.sol
+        # createUserContract), the alignment dashboard and the JEPA-era
+        # screen/browser capture settings. No app screen calls these.
         _DEPRECATED_AUTONET = {
             "autonet_earnings", "autonet_claim_reward",
             "autonet_proposals", "autonet_governance",
+            "autonet_standards", "autonet_publish_standards",
+            "autonet_alignment", "autonet_capture_config",
+            "autonet_set_capture_config", "autonet_enumerate_sources",
         }
         if msg_type in _DEPRECATED_AUTONET:
             return {
                 "msg_id": msg_id, "ok": False,
-                "error": f"'{msg_type}' read the pre-substrate Autonet.sol "
-                         "contract, which was removed in Phase 5.6a. Use "
-                         "'tool_earnings' / 'owner_claim_status' for the "
-                         "Substrate.sol mint rail.",
+                "error": f"'{msg_type}' belonged to the pre-substrate design "
+                         "(Autonet.sol, removed in Phase 5.6a, and JEPA "
+                         "capture) and is gone. Use 'tool_earnings' / "
+                         "'owner_claim_status' for the Substrate.sol mint rail.",
             }
-
-        # Alignment dashboard (Story 3.8)
-        if msg_type == "autonet_alignment":
-            try:
-                result = self.runtime.autonet.get_alignment(
-                    user_profile=self.runtime.user_profile,
-                )
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        # Data capture & privacy (Story 3.4)
-        if msg_type == "autonet_capture_config":
-            try:
-                result = self.runtime.autonet.get_capture_config()
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "autonet_set_capture_config":
-            try:
-                result = self.runtime.autonet.set_capture_config(
-                    capture=msg.get("capture"),
-                    privacy=msg.get("privacy"),
-                )
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        if msg_type == "autonet_enumerate_sources":
-            try:
-                result = self.runtime.autonet.enumerate_sources()
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
         # ---------------------------------------------------------------
         # Sponsor / dependent inference ("work AI")
