@@ -112,7 +112,7 @@ class AutonetState:
     substrate_address: str = ""        # Phase 12: deployed Substrate.sol
     # Native gas token metadata (mirrored from config so the UI can label
     # balances without hardcoding 'ETH').
-    gas_symbol: str = "XTZ"
+    gas_symbol: str = "gas"
     gas_decimals: int = 18
     # The jurisdiction's token symbols, read from its RepToken and
     # Substrate; the app labels with these and falls back to REP / ATN.
@@ -323,11 +323,13 @@ class AutonetBridge:
         it can't start, if it can't (docs/multi_jurisdiction.md decisions
         3-5). Every address comes from one resolution of the chosen DAO's
         Registry (or the packaged registry.json that names it)."""
-        from .config import epoch_rules_error, jurisdiction_key, missing_prerequisites
+        from .config import (epoch_rules_error, gas_symbol_for_chain,
+                             jurisdiction_key, missing_prerequisites)
 
         c = self.config
         st = self.state
-        st.gas_symbol = getattr(c, "gas_symbol", "XTZ") or "XTZ"
+        st.gas_symbol = (getattr(c, "gas_symbol", "") or
+                         gas_symbol_for_chain(getattr(c, "chain_id", 0)))
         st.gas_decimals = int(getattr(c, "gas_decimals", 18) or 18)
         st.dao_address = c.dao_address
         st.rpb_contract_address = c.rpb_contract_address

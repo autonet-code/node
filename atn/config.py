@@ -182,7 +182,7 @@ class RPBConfig:
     chain_id: int = 0                   # Defaults to jurisdiction.CHAIN_ID
     # Native gas token — published so the UI can label balances correctly
     # without hardcoding "ETH". Defaults match Etherlink Shadownet.
-    gas_symbol: str = "XTZ"
+    gas_symbol: str = ""                # "" = derived from chain_id (gas_symbol_for_chain)
     gas_decimals: int = 18
     private_key: str = ""               # Hex private key for signing attestation txns
     # Wallet is managed externally (MetaMask etc.) — we just track the address
@@ -556,6 +556,20 @@ class ATNConfig:
 NOT_JOINED_MESSAGE = "Not joined: register an agent to join the network."
 # Short worst-case wait for an ATN_REGISTRY_URL override fetch.
 _REGISTRY_FETCH_TIMEOUT = 4.0
+
+
+# The native gas token per chain id, for jurisdictions whose registry names
+# none. Every one of these uses 18 decimals.
+_GAS_SYMBOLS = {31337: "ETH", 127823: "XTZ", 42793: "XTZ", 137: "POL",
+                42161: "ETH"}
+
+
+def gas_symbol_for_chain(chain_id: Any) -> str:
+    """The native gas token's symbol on ``chain_id``; "gas" when unknown."""
+    try:
+        return _GAS_SYMBOLS.get(int(chain_id or 0), "gas")
+    except (TypeError, ValueError):
+        return "gas"
 
 
 def not_joined_state() -> dict[str, Any]:
@@ -1186,7 +1200,7 @@ def _seed_defaults() -> dict[str, Any]:
     the atn.jurisdiction fallbacks). The registry may replace these."""
     from .jurisdiction import RPC_URL, CHAIN_ID
     return {"rpc_url": RPC_URL, "chain_id": CHAIN_ID,
-            "dao_address": _default_dao(), "gas_symbol": "XTZ",
+            "dao_address": _default_dao(), "gas_symbol": "",
             "gas_decimals": 18, "jurisdiction_id": "autonet"}
 
 
@@ -1410,7 +1424,7 @@ def _load_autonet_config(raw: dict[str, Any]) -> RPBConfig:
         config_path=resolved.get("config_path", ""),
         rpc_url=resolved.get("rpc_url", ""),
         chain_id=resolved.get("chain_id", 0),
-        gas_symbol=resolved.get("gas_symbol", "XTZ"),
+        gas_symbol=resolved.get("gas_symbol", ""),
         gas_decimals=int(resolved.get("gas_decimals", 18)),
         private_key=resolved.get("private_key", ""),
         wallet_address=resolved.get("wallet_address", ""),
