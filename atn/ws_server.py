@@ -2463,8 +2463,6 @@ class WebSocketBridge:
         # Autonet network service
         # ---------------------------------------------------------------
         if msg_type == "autonet_status":
-            # Lazily load constitution CID from chain on first status request
-            await self.runtime.autonet.load_constitution()
             return {"msg_id": msg_id, "ok": True, "result": self.runtime.autonet.get_status()}
 
         # Claude Code sessions on this machine (atn/claude_sessions.py): list

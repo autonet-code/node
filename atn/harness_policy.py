@@ -12,7 +12,7 @@ compete ("the headroom is policy"), so they now live in one value,
 
 What stays OUT of the policy (the safety kernel, never distro-settable):
 budget gate + usage recorder, tool dispatch and its containment, the
-constitutional preamble, the governance heartbeat, history storage, the
+governance heartbeat, history storage, the
 per-run plan tool's validation, orphan/history repair.
 
 Resolution order for one agent run:

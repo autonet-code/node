@@ -32,15 +32,11 @@ def test_custom_prompt_replaces_the_body_and_keeps_the_default_for_reset():
     assert "Generalist Focus" in parts["default_body"]
 
 
-def test_constitution_is_prepended_only_for_registered_agents():
-    rt = _runtime("Life is precious.")
-    plain = system_prompt_parts(rt, _agent())
-    assert plain["constitution"] and not plain["constitution_applies"]
-    assert "Life is precious." not in plain["prompt"]
-    reg = system_prompt_parts(rt, _agent(identity=SimpleNamespace(registered_on_chain=True),
-                                         system_prompt="Be terse."))
-    assert reg["constitution_applies"]
-    assert reg["prompt"].startswith(reg["constitution"]) and reg["prompt"].endswith("Be terse.")
+def test_no_jurisdiction_text_is_prepended_even_for_registered_agents():
+    reg = system_prompt_parts(_runtime(), _agent(identity=SimpleNamespace(registered_on_chain=True),
+                                                 system_prompt="Be terse."))
+    assert reg["constitution"] == "" and not reg["constitution_applies"]
+    assert reg["prompt"] == "Be terse."
 
 
 def test_imported_claude_code_session_gets_nothing_from_atn():

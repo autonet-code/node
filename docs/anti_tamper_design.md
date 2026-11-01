@@ -29,6 +29,7 @@ tampered node is *excluded by the network*, not merely asked nicely to stop.
   execution_engine (chokepoint), autonet_service (loader/cache),
   delegate_prompts (preamble template), runtime/__init__ (bridge wiring),
   models.py (`registered_on_chain` field), constitution/v1_udhr.txt (text).
+  (Retired 2026-11-01: no constitution text goes into agent prompts.)
   Constitution is loaded on-chain-first with local-file fallback.
 - **The address bootstrap hole is the linchpin.** `atn/jurisdiction.py` holds
   the ONLY hardcoded root: `GOVERNOR_ADDRESS` + RPC + chain id. Everything else

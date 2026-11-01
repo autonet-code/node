@@ -886,9 +886,6 @@ class Runtime:
         # registered_on_chain = true" — runs after agents load. See
         # ``maybe_autostart_autonet_for_registered_agents``.
 
-        # Load constitution text (needed for prompt injection on registered agents)
-        await self.autonet.load_constitution()
-
         # Attach trace logger to event bus (subscribes to AGENT_TOOL_USE_* events)
         self.trace_logger.attach(self.events)
 

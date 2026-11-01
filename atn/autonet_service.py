@@ -134,9 +134,9 @@ class AutonetState:
     jurisdiction_errors: list[str] = field(default_factory=list)
     # False until a jurisdiction is chosen (issue #50).
     jurisdiction_configured: bool = True
-    # Constitution CID loaded from registry
+    # Retired (agent prompts carry no jurisdiction text); always empty, kept
+    # on the wire because the app's AutonetState still parses them.
     constitution_cid: str = ""
-    # Full constitution text (loaded from RPB.constitution() or local file)
     constitution_text: str = ""
 
     _MAX_LOSS_HISTORY: int = 100
@@ -276,11 +276,6 @@ class AutonetBridge:
             for evt in (EventType.AGENT_REGISTERED, EventType.AGENT_UNREGISTERED,
                         EventType.AGENT_ACTIVATED, EventType.AGENT_DEACTIVATED):
                 self._events.subscribe(evt, self._on_agent_changed)
-
-        # Constitution CID loaded lazily from on-chain Registry
-        self._constitution_loaded = False
-        # Raw constitution text (loaded once, cached for prompt injection)
-        self._constitution_text: str = ""
 
     @property
     def sanctions(self) -> Any:
@@ -922,76 +917,6 @@ class AutonetBridge:
                 source="autonet",
                 data=data or self.state.to_dict(),
             ))
-
-    async def load_constitution(self) -> str | None:
-        """Load constitution text from on-chain RPB contract (once).
-
-        Tries in order:
-        1. RPB.constitution() — the actual text stored on-chain
-        2. Local file fallback (constitution/v1_udhr.txt) for offline dev
-
-        Called lazily on first state request or at startup.
-        Returns the CID string or None.
-        """
-        if self._constitution_loaded:
-            return self.state.constitution_cid or None
-        self._constitution_loaded = True
-        if not self.config.rpb_contract_address:
-            # No chain config — fall back to local file
-            self._load_constitution_text_local()
-            self._push_constitution_to_training_feed()
-            return None
-        try:
-            from .on_chain import OnChainService
-            svc = OnChainService(self.config)
-            # Try reading the full text directly from the RPB contract
-            text = await svc.get_constitution_text()
-            if text:
-                self._constitution_text = text.strip()
-                log.info("Constitution text loaded from RPB contract (%d chars)", len(self._constitution_text))
-            else:
-                log.debug("No constitution text on-chain, falling back to local file")
-                self._load_constitution_text_local()
-            # Also grab the CID from Registry if available
-            if self.config.registry_address:
-                cid = await svc.get_constitution_cid()
-                if cid:
-                    self.state.constitution_cid = cid
-            self._push_constitution_to_training_feed()
-            return self.state.constitution_cid or None
-        except Exception as e:
-            log.debug("Failed to load constitution from chain: %s", e)
-            self._load_constitution_text_local()
-            self._push_constitution_to_training_feed()
-            return None
-
-    def _push_constitution_to_training_feed(self) -> None:
-        """Push loaded constitution text to the training feed and state."""
-        # Always sync to state (for WS API)
-        self.state.constitution_text = self._constitution_text
-        if not self._constitution_text or not self._service:
-            return
-        feed = getattr(self._service, "_training_feed", None)
-        if feed and hasattr(feed, "config"):
-            feed.config.constitution_text = self._constitution_text
-            log.debug("Constitution text pushed to training feed (%d chars)", len(self._constitution_text))
-
-    def _load_constitution_text_local(self) -> None:
-        """Load the raw constitution text from local file (offline fallback)."""
-        try:
-            from nodes.common.rpb_prompt import V1_PROMPT_FILE
-            if V1_PROMPT_FILE.exists():
-                self._constitution_text = V1_PROMPT_FILE.read_text(encoding="utf-8").strip()
-                log.info("Constitution text loaded from local file (%d chars)", len(self._constitution_text))
-            else:
-                log.warning("No constitution text available at %s", V1_PROMPT_FILE)
-        except Exception as e:
-            log.debug("Failed to load constitution text: %s", e)
-
-    @property
-    def constitution_text(self) -> str:
-        """The raw constitution text, empty if not loaded."""
-        return self._constitution_text
 
     async def _on_execution_completed(self, event) -> None:
         """Handle EXECUTION_COMPLETED events from the EventBus.

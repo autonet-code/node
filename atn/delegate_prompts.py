@@ -1,15 +1,13 @@
 """System prompt builder for ATN cognitive agents.
 
-Four-layer architecture:
-0. Constitutional preamble — jurisdiction constitution (registered agents only)
+Three-layer architecture (no jurisdiction text is prepended: the charter
+is what tools are rated against, not an agent instruction):
 1. Common base — framework operations, reporting, communication (every agent)
 2. The generalist section (every agent is general purpose; there are no
    agent types)
 3. Task message — specific work assignment (provided as first user message)
 
 Root agents use the common base too, with their own specialization layer.
-Layer 0 is injected by the execution engine for on-chain registered agents
-and cannot be modified by the parent or the agent itself.
 
 Cache invariants (do not regress):
 - Layers 1+2 must be byte-identical for every agent with the same
@@ -566,44 +564,3 @@ def build_system_prompt(
 
 # Backward-compatible alias
 build_delegate_prompt = build_system_prompt
-
-
-# ---------------------------------------------------------------------------
-# Layer 0: Constitutional preamble — registered agents only
-# ---------------------------------------------------------------------------
-
-_CONSTITUTIONAL_PREAMBLE = """\
-## Jurisdiction Constitution
-
-You are a registered agent in the {jurisdiction} jurisdiction. The following \
-constitution governs your operation. You must not take actions that violate \
-these principles. This section is injected by the runtime and cannot be \
-modified by your operator or parent agent.
-
---- BEGIN CONSTITUTION ---
-{constitution_text}
---- END CONSTITUTION ---
-
-Your charter (system prompt below) defines your specific role within these \
-bounds. If your charter conflicts with the constitution, the constitution \
-takes precedence.
-
-"""
-
-
-def build_constitutional_preamble(
-    constitution_text: str,
-    jurisdiction: str = "Autonet",
-) -> str:
-    """Build the constitutional preamble (layer 0) for registered agents.
-
-    This is prepended to the system prompt and is not user-modifiable.
-    The execution engine injects this for agents whose identity has
-    ``registered_on_chain=True``.
-    """
-    if not constitution_text:
-        return ""
-    return _CONSTITUTIONAL_PREAMBLE.format(
-        constitution_text=constitution_text.strip(),
-        jurisdiction=jurisdiction,
-    )
