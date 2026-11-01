@@ -972,7 +972,7 @@ class AutonetBridge:
             from nodes.common.config import load_config as load_autonet_config
             from nodes.service import AutonetService
 
-            # Load autonet config (discovers autonet.yaml)
+            # Load autonet config (explicit path, AUTONET_CONFIG or ~/.autonet)
             config_path = self.config.config_path or None
             self._autonet_config = load_autonet_config(config_path)
 
@@ -2460,7 +2460,6 @@ class AutonetBridge:
                 config_path = os.environ.get("AUTONET_CONFIG")
             if not config_path:
                 candidates = [
-                    Path("autonet.yaml"),
                     Path.home() / ".autonet" / "config.yaml",
                 ]
                 for c in candidates:

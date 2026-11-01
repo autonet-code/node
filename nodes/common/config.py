@@ -6,12 +6,13 @@ Loads from YAML file with environment variable overrides.
 
 Priority order (highest wins):
   1. Environment variables (AUTONET_*)
-  2. Config file (autonet.yaml)
+  2. Config file (explicit path, AUTONET_CONFIG, or ~/.autonet/config.yaml;
+     never ./autonet.yaml from the working directory)
   3. Defaults
 
 Usage:
     from nodes.common.config import load_config
-    cfg = load_config()              # auto-discovers autonet.yaml
+    cfg = load_config()              # AUTONET_CONFIG or ~/.autonet/config.yaml
     cfg = load_config("path.yaml")   # explicit path
     cfg.device                       # "cpu" or "cuda"
     cfg.rpc_url                      # blockchain RPC
@@ -203,8 +204,9 @@ class GuildConfig:
 @dataclass
 class NodeConfig:
     """Per-node runtime config."""
-    # 0 = run forever. A daemon reads autonet.yaml only from its cwd, so
-    # these are what every installed daemon runs with: the old 10 stopped
+    # 0 = run forever. A daemon reads a config file only when one is named
+    # (or ~/.autonet/config.yaml exists), so these are what every installed
+    # daemon runs with: the old 10 stopped
     # the service (and its epoch closes) after ~40s.
     max_cycles: int = 0
     cycle_delay: float = 30.0
@@ -389,8 +391,9 @@ def load_config(path: Optional[str] = None) -> AutonetConfig:
     Args:
         path: Explicit path to config file. If None, searches:
               1. AUTONET_CONFIG env var
-              2. ./autonet.yaml
-              3. ~/.autonet/config.yaml
+              2. ~/.autonet/config.yaml
+              The working directory is never searched: a daemon started
+              from a checkout must not pick up whatever yaml sits there.
               Falls back to defaults if no file found.
 
     Returns:
@@ -404,7 +407,6 @@ def load_config(path: Optional[str] = None) -> AutonetConfig:
 
     if path is None:
         candidates = [
-            Path("autonet.yaml"),
             Path.home() / ".autonet" / "config.yaml",
         ]
         for candidate in candidates:

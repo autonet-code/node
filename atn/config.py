@@ -176,7 +176,7 @@ class RPBConfig:
     contract discovery.
     """
     enabled: bool = False               # Whether the autonet service starts
-    config_path: str = ""               # Path to autonet.yaml (auto-discovered if empty)
+    config_path: str = ""               # Nodes-side yaml; empty = AUTONET_CONFIG or ~/.autonet/config.yaml
     # Blockchain connection — defaults from atn.jurisdiction
     rpc_url: str = ""                   # Defaults to jurisdiction.RPC_URL
     chain_id: int = 0                   # Defaults to jurisdiction.CHAIN_ID
