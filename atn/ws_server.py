@@ -3332,8 +3332,15 @@ class WebSocketBridge:
                 # against here. Governance REP itself is DAO-side (RepToken).
                 rep_supply_raw = int(raw.get("rep_supply_raw", 0))
                 fleet_rep_raw = int(raw.get("fleet_reputation_raw", 0))
-                share = ((fleet_rep_raw / rep_supply_raw)
-                         if rep_supply_raw > 0 else 0.0)
+                # The weight the close uses: household REP / REP supply.
+                # Without a RepToken read, fall back to the earnings share.
+                h_rep = raw.get("household_rep_raw")
+                rep_total = raw.get("rep_total_supply_raw")
+                if h_rep is not None and rep_total:
+                    share = h_rep / rep_total
+                else:
+                    share = ((fleet_rep_raw / rep_supply_raw)
+                             if rep_supply_raw > 0 else 0.0)
                 return {"msg_id": msg_id, "ok": True, "result": {
                     "owner": raw["owner"],
                     "available": True,
@@ -3356,6 +3363,9 @@ class WebSocketBridge:
                     # ATN supply. It is a protocol version tag, not a label.
                     "weight_source": "reputation",
                     "voice_weight": round(_eps + share, 6),
+                    # REP (18 decimals) the weight is read from.
+                    "household_rep": (h_rep / 1e18) if h_rep is not None else None,
+                    "rep_total_supply": (rep_total / 1e18) if rep_total else None,
                     "epsilon": _eps,
                     "agents": agents,
                 }}

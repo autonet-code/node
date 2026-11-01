@@ -1422,8 +1422,35 @@ class OnChainService:
                     continue
             supply_raw = int(contract.functions.atnTotalSupply().call())
             rep_supply_raw = int(contract.functions.networkMintTotal().call())
+            # The household's REP (RepToken balances: owner + bound agents)
+            # over REP supply: what the close weighs reviews and usage by
+            # (nodes/common/voice_state.py, balances not votes). Current
+            # values; the close pins them to the previous anchor.
+            rep_balance_raw = rep_total_raw = None
+            rep_addr = getattr(self.config, "rep_token_address", "") or ""
+            if rep_addr:
+                try:
+                    rep = w3.eth.contract(
+                        address=w3.to_checksum_address(rep_addr), abi=[
+                            {"name": "balanceOf", "type": "function",
+                             "stateMutability": "view",
+                             "inputs": [{"name": "a", "type": "address"}],
+                             "outputs": [{"name": "", "type": "uint256"}]},
+                            {"name": "totalSupply", "type": "function",
+                             "stateMutability": "view", "inputs": [],
+                             "outputs": [{"name": "", "type": "uint256"}]}])
+                    rep_balance_raw = int(rep.functions.balanceOf(owner_addr).call())
+                    for a in agents:
+                        rep_balance_raw += int(rep.functions.balanceOf(
+                            w3.to_checksum_address(a["agent_id"])).call())
+                    rep_total_raw = int(rep.functions.totalSupply().call())
+                except Exception as e:
+                    log.debug("fleet_voice: REP read failed: %s", e)
+                    rep_balance_raw = rep_total_raw = None
             return {
                 "owner": str(owner_addr),
+                "household_rep_raw": rep_balance_raw,
+                "rep_total_supply_raw": rep_total_raw,
                 "owner_balance_raw": owner_raw,
                 "fleet_total_raw": fleet_raw,
                 "fleet_reputation_raw": fleet_rep_raw,
