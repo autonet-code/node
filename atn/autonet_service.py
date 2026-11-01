@@ -52,6 +52,29 @@ def _charter_axes() -> list[dict[str, str]]:
         return []
 
 
+def _stable_p2p_port(data_dir, host: str = "0.0.0.0") -> int:
+    """The p2p port saved in ``<data_dir>/p2p.port``; on first use a free
+    port is picked and saved. 0 (random) when neither works."""
+    import socket
+    from pathlib import Path as _Path
+    path = _Path(data_dir) / "p2p.port"
+    try:
+        port = int(path.read_text(encoding="utf-8").strip())
+        if 0 < port < 65536:
+            return port
+    except Exception:  # noqa: BLE001 (missing or unreadable: pick one)
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, 0))
+            port = s.getsockname()[1]
+        path.write_text(str(port), encoding="utf-8")
+        return port
+    except Exception:  # noqa: BLE001
+        log.warning("could not save a p2p port in %s; using a random one", path)
+        return 0
+
+
 @dataclass
 class AutonetState:
     """Observable state of the autonet service."""
@@ -492,6 +515,10 @@ class AutonetBridge:
 
         listen_port = cfg.p2p.listen_port if cfg else 0
         listen_host = cfg.p2p.listen_host if cfg else "0.0.0.0"
+        if not listen_port and self._data_dir:
+            # Keep one port across restarts: the daemon's address can be a
+            # Registry seed, and a new random port each start made it stale.
+            listen_port = _stable_p2p_port(self._data_dir, listen_host)
         # Phase 12: a fresh install with no user-configured bootstrap
         # falls back to community-published bootstrap peers, so daemons
         # can join without manual multiaddr configuration.
@@ -534,7 +561,7 @@ class AutonetBridge:
             enable_upnp=cfg.p2p.enable_upnp if cfg else True,
             auto_reach=cfg.p2p.auto_reach if cfg else True,
             reach_interval=cfg.p2p.reach_interval if cfg else 300,
-            transport=cfg.p2p.transport if cfg else "tcp",
+            transport=cfg.p2p.transport if cfg else "ws",
             seed_source=seed_source,
             seed_refresh_interval=cfg.p2p.seed_refresh_interval if cfg else 300,
         )

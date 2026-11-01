@@ -51,7 +51,7 @@ async def test_stable_peer_id_from_seed():
 @trio_test
 async def test_gossip_and_blobs_cross_the_relay(tmp_path):
     args = relay.parse_args([
-        "--port", "0", "--host", "127.0.0.1", "--no-upnp",
+        "--port", "0", "--host", "127.0.0.1", "--no-upnp", "--transport", "tcp",
         "--jurisdiction", JURISDICTION, "--data-dir", str(tmp_path / "relay"),
         "--advertise-interval", "0.5"])
     topic = topic_for_rpb(JURISDICTION)
@@ -125,7 +125,7 @@ async def test_service_requests_cross_the_relay(tmp_path):
     """A paid service request from one NAT'd daemon reaches another through
     the relay node, which forwards it and serves nothing itself."""
     args = relay.parse_args([
-        "--port", "0", "--host", "127.0.0.1", "--no-upnp",
+        "--port", "0", "--host", "127.0.0.1", "--no-upnp", "--transport", "tcp",
         "--data-dir", str(tmp_path / "relay"), "--service-timeout", "30"])
     assert args.service_timeout == 30
 
@@ -174,7 +174,7 @@ async def test_offered_state_outlives_the_daemon_that_computed_it(tmp_path):
     """Issue #44: a daemon offers its close's state blobs to the relay; the
     relay keeps them, so a joiner can fetch them after that daemon is gone."""
     args = relay.parse_args([
-        "--port", "0", "--host", "127.0.0.1", "--no-upnp",
+        "--port", "0", "--host", "127.0.0.1", "--no-upnp", "--transport", "tcp",
         "--jurisdiction", JURISDICTION, "--data-dir", str(tmp_path / "relay"),
         "--advertise-interval", "0.5"])
     blob = b"anchored-payload-only-c-holds"

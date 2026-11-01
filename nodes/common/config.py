@@ -126,7 +126,8 @@ class P2PConfig:
     # "tcp" or "ws": one transport per network (py-libp2p runs one per host).
     # "ws" lets relays sit behind an HTTPS proxy and HTTPS-only machines
     # dial out through HTTP_PROXY / HTTPS_PROXY (nodes/common/ws_proxy.py).
-    transport: str = "tcp"
+    # Default "ws": the format Registry seeds use (werule validates /ws|wss).
+    transport: str = "ws"
     enable_quic: bool = False
     # Without announce_addrs: map the listen port on the home router (UPnP)
     # and announce our public address once a peer confirms it can connect.

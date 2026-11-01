@@ -87,7 +87,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument("--data-dir", default=env("AUTONET_RELAY_DIR",
                                               str(Path.home() / ".autonet-relay")))
     ap.add_argument("--transport", choices=("tcp", "ws"),
-                    default=env("AUTONET_P2P_TRANSPORT", "tcp"),
+                    default=env("AUTONET_P2P_TRANSPORT", "ws"),
                     help="ws: serve WebSocket, e.g. behind an HTTPS proxy as wss on 443")
     ap.add_argument("--no-upnp", action="store_true")
     ap.add_argument("--advertise-interval", type=float, default=60.0)

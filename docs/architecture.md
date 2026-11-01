@@ -83,7 +83,10 @@ agent directory.
 ## How things connect
 
 - Daemon to daemon: libp2p gossip per jurisdiction (topic
-  `/autonet/world-events/<chain_id>:<DAO address>`), over TCP or WebSocket. Before closing an
+  `/autonet/world-events/<chain_id>:<DAO address>`), over WebSocket by
+  default (TCP by `AUTONET_P2P_TRANSPORT`; one transport per network), on a
+  port kept across restarts (`p2p.port` in the data dir) so the address can
+  be a seed. Before closing an
   epoch, a daemon asks its peers (relays first) for that epoch's batches it
   missed (`/autonet/batches/1.0.0`), so a late joiner or a daemon that lost
   its peers closes the same set as everyone else. Behind NAT a daemon
