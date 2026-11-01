@@ -371,7 +371,7 @@ The WS writes back to config.yaml through `save_owner_wallet_to_config`, `save_s
 | `NPM_CONFIG_REGISTRY` | Bridge updater | `atn/providers/bridge_updater.py:172` |
 | `ATN_ROBOT_SPONSOR_PROBE=assume` | Robot heartbeat | `atn/robot/service.py:107` |
 | `AUTONET_CONFIG` | autonet.yaml path when saving | `atn/autonet_service.py:2369` |
-| `ELEVENLABS_API_KEY`, `GOOGLE_CLIENT_SECRET`/`GOOGLE_CLIENT_ID`, `DORG_API_BASE`, `HOSTNAME`, `<chat.token_env>` | Voice, OAuth, connectors, lock info, chat | `atn/voice_service.py:389`, `atn/oauth.py:32`, `atn/runtime/__init__.py:1129` |
+| `ELEVENLABS_API_KEY`, `GOOGLE_CLIENT_SECRET`/`GOOGLE_CLIENT_ID`, `HOSTNAME`, `<chat.token_env>` | Voice, OAuth, connectors, lock info, chat | `atn/voice_service.py:389`, `atn/oauth.py:32`, `atn/runtime/__init__.py:1129` |
 | `ATN_IS_WORKER` | Set inside workers, read by the worker loop | `atn/agent_worker.py:448`, `atn/runtime/worker_loop.py:539` |
 | `ATN_UPDATE_APPLIED` | Re-exec guard for update_boot | `atn/update_boot.py:30` |
 

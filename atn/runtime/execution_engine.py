@@ -1129,7 +1129,7 @@ class ExecutionEngine:
 
             # Start this agent's declared connectors and add their tools. The
             # pipeline path does this too; cognitive agents need it for the
-            # same reason — e.g. the support agent's dorg_members connector.
+            # same reason.
             # get_all_tools returns ToolDefinition objects; the bridge surface
             # is list[dict], so convert.
             if self.connectors and defn.connector_ids:
