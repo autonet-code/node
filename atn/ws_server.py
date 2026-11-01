@@ -3603,9 +3603,6 @@ class WebSocketBridge:
                     bridge = self.runtime.autonet
                     if hasattr(bridge, "_autonet_config") and bridge._autonet_config:
                         bridge._autonet_config.model.backbone_model_id = model_id
-                    # Update active training feed config
-                    if bridge._service and bridge._service._training_feed:
-                        bridge._service._training_feed.config.backbone_model_id = model_id
                 return {
                     "msg_id": msg_id, "ok": True,
                     "result": {"model_id": model_id, "status": "set" if model_id else "cleared"},

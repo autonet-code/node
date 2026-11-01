@@ -1669,11 +1669,9 @@ class AutonetBridge:
         """Pull real-time training metrics into state.
 
         Substrate-native: the world substrate feed is the live training
-        path (JEPA feed retired). Falls back to the legacy feed attribute
-        only if a deployment still has one wired.
+        path (JEPA feed retired).
         """
-        feed = (getattr(self._service, "_world_substrate_feed", None)
-                or getattr(self._service, "_training_feed", None))
+        feed = getattr(self._service, "_world_substrate_feed", None)
         if not feed:
             return
         self.state.pending_events = feed._pending_events

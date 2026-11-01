@@ -74,8 +74,6 @@ class AutonetService:
         self._resource_monitor: Optional[ResourceMonitor] = None
         self._node = None  # Solver or other node type
 
-        # Training data feed (Story 3.2) — bridges agent activity → JEPA training
-        self._training_feed = None
         self._data_dir = data_dir  # ATN data dir (~/.atn), passed from AutonetBridge
 
         # World-model substrate (Phase 2 of native integration).
@@ -167,11 +165,6 @@ class AutonetService:
             # trigger psutil calls immediately.
             self._resource_monitor._last_check = time.time()
 
-            # JEPA training feed retired — the world-model substrate is the
-            # only training path. TrainingDataFeed remains on disk but is no
-            # longer initialized; self._training_feed stays None and every
-            # reference is guarded.
-
             # Initialize world-model substrate (always available; feeding
             # is gated by config and data dir presence).
             self._init_world_service()
@@ -187,7 +180,6 @@ class AutonetService:
                 f"AutonetService initialized: "
                 f"device={self.config.device}, "
                 f"arch={self.config.model.architecture}, "
-                f"training_feed={'active' if self._training_feed else 'disabled'}, "
                 f"world_substrate={'active' if self._world_substrate_feed else 'disabled'}"
             )
 
@@ -334,165 +326,6 @@ class AutonetService:
             logger.warning("Failed to initialize blob store: %s", e)
             self._blob_store = None
 
-    def _submit_training_delta(self, weight_delta: Dict[str, Any], metrics: Dict[str, Any]) -> Optional[str]:
-        """Upload training contribution to blob store and record on RPB.
-
-        Two contribution formats are supported:
-
-          - JEPA path: weight_delta is a dict of named tensors. Uploaded
-            as {"weight_delta": ...}; contribution = num_batches.
-          - World-model substrate path: weight_delta carries the events
-            stream and score snapshot. Uploaded as the contribution
-            payload itself; contribution = previous-epoch mint amount
-            looked up from the global model (or 1 if first epoch).
-
-        Routing is by metrics["substrate"]: if "world-model", takes the
-        substrate path; otherwise default to JEPA.
-        """
-        is_substrate = metrics.get("substrate") == "world-model"
-
-        # Step 1: Upload to blob store
-        delta_cid = None
-        if self._blob_store:
-            try:
-                if is_substrate:
-                    update = {
-                        "events": weight_delta.get("events", []),
-                        "score_snapshot_after": weight_delta.get(
-                            "score_snapshot_after", {}),
-                        "agent_id": weight_delta.get("agent_id", ""),
-                        "metrics": metrics,
-                        "substrate": "world-model",
-                        "source": "autonomous",
-                    }
-                else:
-                    update = {
-                        "weight_delta": {k: v.tolist() if hasattr(v, "tolist") else v
-                                         for k, v in weight_delta.items()},
-                        "metrics": metrics,
-                        "source": "autonomous",
-                    }
-                delta_cid = self._blob_store.add_json(update)
-                if delta_cid:
-                    logger.info("Training payload uploaded: %s (substrate=%s)",
-                                delta_cid[:16], is_substrate)
-            except Exception as e:
-                logger.warning("Failed to upload payload to blob store: %s", e)
-
-        # Step 2: Record training on-chain via RPB
-        governance = getattr(self, "_governance", None)
-        if governance and delta_cid:
-            try:
-                registry = governance.registry
-                if is_substrate:
-                    # Substrate path: contribution = mint earned in
-                    # previous epoch (looked up from prior aggregation).
-                    # Falls back to 1 on first epoch / lookup failure.
-                    contribution = self._lookup_prior_mint() or 1
-                else:
-                    contribution = metrics.get("num_batches", 1)
-                account = registry.blockchain.account
-                if account:
-                    result = registry.send("RPB", "recordTraining", contribution)
-                    if result.success:
-                        logger.info(
-                            "Training recorded on-chain: contribution=%s, payload=%s",
-                            contribution, delta_cid[:16],
-                        )
-                    else:
-                        logger.warning("On-chain recordTraining failed: %s", result.error)
-            except Exception as e:
-                logger.warning("Failed to record training on-chain: %s", e)
-
-        return delta_cid
-
-    def _lookup_prior_mint(self) -> int:
-        """Look up this agent's mint amount from the previous epoch's
-        aggregated global model.
-
-        The aggregator publishes serialized world payloads that include
-        an `agent_mint` map. We fetch the latest mature model CID,
-        download the payload, and read this agent's entry. Returns an
-        integer (mint values are scaled to ints to match the contract's
-        uint256 contribution field).
-
-        Returns 0 if no prior model or no entry for this agent.
-        """
-        try:
-            governance = getattr(self, "_governance", None)
-            if not governance or not self._blob_store:
-                return 0
-            registry = governance.registry
-            try:
-                cid_result = registry.call("RPB", "getMatureModel")
-                cid = cid_result[0] if isinstance(cid_result, (list, tuple)) else cid_result
-            except Exception:
-                return 0
-            if not cid:
-                return 0
-            payload = self._blob_store.get_json(cid)
-            if not payload:
-                return 0
-            agent_mint = payload.get("agent_mint", {}) or {}
-            account = registry.blockchain.account
-            if not account:
-                return 0
-            my_mint = float(agent_mint.get(str(account), 0.0))
-            # Scale to integer units; mint values typically in [0, ~10]
-            return max(1, int(my_mint * 1_000_000)) if my_mint > 0 else 0
-        except Exception as e:
-            logger.debug("prior-mint lookup failed: %s", e)
-            return 0
-
-    def _update_gossip_model_state(self, metrics: Dict[str, Any], delta_cid: Optional[str] = None) -> None:
-        """Push training metrics + on-chain state into P2P gossip.
-
-        Called after a training cycle completes.  Updates this node's
-        ModelState in the NodeCapability, which gets broadcast to peers
-        on the next advertise_capability() call.
-        """
-        try:
-            from .common.p2p import AutonetHost
-        except ImportError:
-            return
-
-        # Find the P2P host — it's managed by AutonetBridge, not us directly.
-        # The service doesn't own the host, so we check if it was set externally.
-        host = getattr(self, "_p2p_host", None)
-        if not host or not isinstance(host, AutonetHost):
-            return
-
-        # Read on-chain state if governance bridge is available
-        on_chain = {}
-        governance = getattr(self, "_governance", None)
-        if governance:
-            try:
-                rpb = governance.get_contract("RPB")
-                if rpb:
-                    on_chain["model_version"] = rpb.functions.modelVersion().call()
-                    raw_hash = rpb.functions.currentModelHash().call()
-                    on_chain["model_hash"] = "0x" + raw_hash.hex() if raw_hash else ""
-                    on_chain["current_epoch"] = rpb.functions.currentEpoch().call()
-                    on_chain["total_training_tokens"] = rpb.functions.totalTrainingTokens().call()
-            except Exception as e:
-                logger.debug("Failed to read on-chain model state: %s", e)
-
-        kwargs = dict(
-            model_version=on_chain.get("model_version", 0),
-            model_hash=on_chain.get("model_hash", ""),
-            current_epoch=on_chain.get("current_epoch", 0),
-            total_training_tokens=on_chain.get("total_training_tokens", 0),
-            local_cycles_completed=self._training_feed.cycles_completed if self._training_feed else 0,
-            last_loss=metrics.get("loss", 0.0),
-            last_cosine_similarity=metrics.get("cosine_similarity", 0.0),
-            architecture=metrics.get("architecture", ""),
-            param_count=metrics.get("param_count", 0),
-        )
-        if delta_cid:
-            kwargs["latest_delta_cid"] = delta_cid
-        host.update_model_state(**kwargs)
-        logger.debug("Model state updated in P2P gossip")
-
     def _install_signal_handlers(self):
         """Install SIGTERM and SIGINT handlers for graceful shutdown."""
         def _handler(signum, frame):
@@ -506,88 +339,6 @@ class AutonetService:
         except (OSError, ValueError):
             # signal handlers can only be set in main thread
             logger.debug("Could not install signal handlers (not main thread?)")
-
-    def _init_governance(self):
-        """Initialize the governance bridge for on-chain attestation.
-
-        Returns a GovernanceBridge if blockchain config has a private_key,
-        or None for offline mode (training still works, just no attestation).
-        """
-        if not self.config.blockchain.private_key:
-            logger.info("No blockchain private_key configured, governance offline")
-            return None
-
-        try:
-            from .common.blockchain import BlockchainInterface
-            from .common.contracts import ContractRegistry
-            from .common.governance import GovernanceBridge
-
-            blockchain = BlockchainInterface(
-                rpc_url=self.config.blockchain.rpc_url,
-                private_key=self.config.blockchain.private_key,
-                chain_id=self.config.blockchain.chain_id,
-            )
-
-            if not blockchain.web3 or not blockchain.web3.is_connected():
-                logger.warning("Blockchain not reachable, governance offline")
-                return None
-
-            registry = ContractRegistry(blockchain)
-
-            governance = GovernanceBridge(
-                registry=registry,
-                node_id=f"service-{blockchain.account.address[:10]}" if blockchain.account else "service-anon",
-            )
-
-            logger.info(
-                "Governance bridge initialized (rpc=%s, account=%s)",
-                self.config.blockchain.rpc_url,
-                blockchain.account.address if blockchain.account else "none",
-            )
-            return governance
-
-        except Exception as e:
-            logger.warning("Failed to initialize governance bridge: %s", e)
-            return None
-
-    def _init_training_feed(self):
-        """Initialize the training data feed from ATN agent activity.
-
-        Story 3.2: Reads conversations and execution records from the ATN
-        data directory and feeds them into JEPA training.
-        """
-        try:
-            from .common.training_feed import TrainingDataFeed, TrainingFeedConfig
-
-            feed_config = TrainingFeedConfig(
-                data_dir=self._data_dir,
-                # Map from nodes config
-                vocab_size=getattr(self.config.model, "vocab_size", 260),
-                max_seq_length=getattr(self.config.model, "max_seq_length", 2048),
-                embed_dim=getattr(self.config.model, "embed_dim", 64),
-                num_heads=getattr(self.config.model, "num_heads", 4),
-                encoder_depth=getattr(self.config.model, "encoder_depth", 2),
-                predictor_depth=getattr(self.config.model, "predictor_depth", 1),
-                predictor_embed_dim=getattr(self.config.model, "predictor_embed_dim", 32),
-                epochs=self.config.training.epochs,
-                learning_rate=self.config.training.learning_rate,
-                batch_size=self.config.training.batch_size,
-                backbone_model_id=getattr(self.config.model, "backbone_model_id", ""),
-                scrub_pii=getattr(self.config, "privacy", None) is not None
-                    and getattr(self.config.privacy, "scrub_pii", True),
-            )
-
-            self._governance = self._init_governance()
-            self._training_feed = TrainingDataFeed(feed_config, governance=self._governance)
-            logger.info(
-                "Training data feed initialized (data_dir=%s, governance=%s)",
-                self._data_dir,
-                "online" if self._governance else "offline",
-            )
-
-        except Exception as e:
-            logger.warning("Failed to initialize training data feed: %s", e)
-            self._training_feed = None
 
     def _init_world_service(self):
         """Initialize the persistent World service (Phase 2 native
@@ -742,8 +493,6 @@ class AutonetService:
         async event loop thread), and read in _run_cycle() (from the
         service's blocking thread).
         """
-        if self._training_feed:
-            self._training_feed.notify_execution(agent_id, execution_id, status)
         if self._world_substrate_feed:
             self._world_substrate_feed.notify_execution(agent_id, execution_id, status)
 
