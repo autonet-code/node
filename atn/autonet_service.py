@@ -98,7 +98,8 @@ class AutonetState:
     loss_history: list[float] = field(default_factory=list)
     # Behavioral profile
     profile_hash: str = ""
-    # Resource usage (from ResourceMonitor)
+    # Resource usage: no longer sampled (the CPU gate and JEPA training are
+    # retired); kept at zero for the app's status shape.
     cpu_percent: float = 0.0
     memory_mb: float = 0.0
     gpu_available: bool = False
@@ -1646,18 +1647,6 @@ class AutonetBridge:
                     self.state.status = AutonetStatus.PAUSED
                 elif svc_status.state.value == "running":
                     self.state.status = AutonetStatus.RUNNING
-                # Pull resource snapshot if available
-                if self._service._resource_monitor:
-                    snap = self._service._resource_monitor.last_snapshot
-                    if snap:
-                        self.state.cpu_percent = snap.cpu_percent
-                        self.state.memory_mb = snap.memory_mb
-                        self.state.gpu_memory_mb = snap.gpu_memory_mb
-                        try:
-                            import torch
-                            self.state.gpu_available = torch.cuda.is_available()
-                        except ImportError:
-                            self.state.gpu_available = False
                 # Pull training feed metrics
                 self._sync_training_metrics()
             except Exception:

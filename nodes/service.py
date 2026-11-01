@@ -2,8 +2,7 @@
 Autonet Node Service — Managed Daemon Process.
 
 Top-level entry point that runs a solver node as a managed background service.
-Handles signal-based lifecycle (SIGTERM/SIGINT), resource monitoring
-and graceful shutdown. Updates are the atn daemon's (PyPI, atn/cli.py).
+Handles signal-based lifecycle (SIGTERM/SIGINT) and graceful shutdown. Updates are the atn daemon's (PyPI, atn/cli.py).
 
 Story 6.1: Solver node as daemon background service.
 """
@@ -17,7 +16,6 @@ from enum import Enum
 from typing import Any, Dict, Optional
 
 from .common.config import AutonetConfig, load_config
-from .common.resource_monitor import ResourceMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +69,6 @@ class AutonetService:
         self._shutdown_requested = False
 
         # Subsystems (lazy-init in start())
-        self._resource_monitor: Optional[ResourceMonitor] = None
         self._node = None  # Solver or other node type
 
         self._data_dir = data_dir  # ATN data dir (~/.atn), passed from AutonetBridge
@@ -127,10 +124,6 @@ class AutonetService:
             uptime_seconds=uptime,
             cycles_completed=self._cycles,
             errors=self._errors,
-            paused_reason=(
-                self._resource_monitor.paused_reason
-                if self._resource_monitor else None
-            ),
         )
 
     def start(self):
@@ -160,11 +153,6 @@ class AutonetService:
 
         # Initialize subsystems
         try:
-            self._resource_monitor = ResourceMonitor(self.config)
-            # Pre-set the last-check time so the first cycle doesn't
-            # trigger psutil calls immediately.
-            self._resource_monitor._last_check = time.time()
-
             # Initialize world-model substrate (always available; feeding
             # is gated by config and data dir presence).
             self._init_world_service()
