@@ -47,3 +47,14 @@ def test_rep_token_reaches_the_close_config(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("", encoding="utf-8")
     assert load_config(str(config_path)).blockchain.rep_token_address == rep
+
+
+def test_chosen_jurisdiction_skips_the_packaged_fallback(tmp_path):
+    # A chosen jurisdiction's addresses come from the atn side; the packaged
+    # (Shadownet) ones must not fill the gaps.
+    from nodes.common.config import load_config
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("", encoding="utf-8")
+    bc = load_config(str(config_path), registry_fallback=False).blockchain
+    assert not bc.substrate_address and not bc.rep_token_address
+    assert not bc.governor_address and not bc.deploy_block

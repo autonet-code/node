@@ -384,7 +384,8 @@ def _dict_to_config(raw: dict) -> AutonetConfig:
     return cfg
 
 
-def load_config(path: Optional[str] = None) -> AutonetConfig:
+def load_config(path: Optional[str] = None, *,
+                registry_fallback: bool = True) -> AutonetConfig:
     """
     Load config from YAML file + env overrides.
 
@@ -395,6 +396,11 @@ def load_config(path: Optional[str] = None) -> AutonetConfig:
               The working directory is never searched: a daemon started
               from a checkout must not pick up whatever yaml sits there.
               Falls back to defaults if no file found.
+
+        registry_fallback: fill empty contract addresses from the packaged
+              registry.json. The atn daemon passes False once a
+              jurisdiction is chosen: it resolved the addresses itself, and
+              the packaged (Shadownet) ones must not leak into another DAO.
 
     Returns:
         AutonetConfig with all values resolved.
@@ -432,13 +438,26 @@ def load_config(path: Optional[str] = None) -> AutonetConfig:
     # Convert to typed config
     cfg = _dict_to_config(raw)
 
+    if registry_fallback:
+        _seed_from_registry(cfg, path)
+
+    logger.info(
+        f"Config: device={cfg.device}, arch={cfg.model.architecture}, "
+        f"task_type={cfg.training.task_type}, rpc={cfg.blockchain.rpc_url}"
+    )
+
+    return cfg
+
+
+def _seed_from_registry(cfg: AutonetConfig, config_path: Optional[str]) -> None:
+    """Fill contract addresses yaml/env left empty from registry.json."""
     # Seed the substrate address from registry.json when yaml/env left
     # it empty. registry.json is the single source of truth the atn
     # config loader and publish_network_config.py already share, so a
     # contract redeploy only has to touch one file for the chain
     # candle seed and chain submission to follow.
     if not cfg.blockchain.substrate_address:
-        seeded = _registry_substrate_address(path)
+        seeded = _registry_substrate_address(config_path)
         if seeded:
             cfg.blockchain.substrate_address = seeded
             logger.info(
@@ -447,32 +466,25 @@ def load_config(path: Optional[str] = None) -> AutonetConfig:
             )
     if not cfg.blockchain.tool_bond_address:
         cfg.blockchain.tool_bond_address = _registry_substrate_address(
-            path, key="tool_bond")
+            config_path, key="tool_bond")
     if not cfg.blockchain.rep_token_address:
         cfg.blockchain.rep_token_address = _registry_substrate_address(
-            path, key="rep_token")
+            config_path, key="rep_token")
     if not cfg.blockchain.dao_registry_address:
         cfg.blockchain.dao_registry_address = _registry_substrate_address(
-            path, key="dao_registry")
+            config_path, key="dao_registry")
     if not cfg.blockchain.governor_address:
         cfg.blockchain.governor_address = _registry_substrate_address(
-            path, key="dao")
+            config_path, key="dao")
     if not cfg.blockchain.anchor_election_address:
         cfg.blockchain.anchor_election_address = _registry_substrate_address(
-            path, key="anchor_election")
+            config_path, key="anchor_election")
     if not cfg.blockchain.deploy_block:
         try:
             cfg.blockchain.deploy_block = int(
-                _registry_substrate_address(path, key="deploy_block") or 0)
+                _registry_substrate_address(config_path, key="deploy_block") or 0)
         except (TypeError, ValueError):
             cfg.blockchain.deploy_block = 0
-
-    logger.info(
-        f"Config: device={cfg.device}, arch={cfg.model.architecture}, "
-        f"task_type={cfg.training.task_type}, rpc={cfg.blockchain.rpc_url}"
-    )
-
-    return cfg
 
 
 def _registry_substrate_address(

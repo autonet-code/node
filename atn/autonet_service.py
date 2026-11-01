@@ -974,9 +974,14 @@ class AutonetBridge:
             from nodes.common.config import load_config as load_autonet_config
             from nodes.service import AutonetService
 
-            # Load autonet config (explicit path, AUTONET_CONFIG or ~/.autonet)
+            # Load autonet config (explicit path, AUTONET_CONFIG or ~/.autonet).
+            # With a jurisdiction chosen, the atn side resolved every
+            # address: the node's packaged (Shadownet) seed stays out.
+            from .config import _selection_data_dir, jurisdiction_configured
+            chosen = jurisdiction_configured(_selection_data_dir())
             config_path = self.config.config_path or None
-            self._autonet_config = load_autonet_config(config_path)
+            self._autonet_config = load_autonet_config(
+                config_path, registry_fallback=not chosen)
 
             # Apply any ATN-level overrides
             if self.config.rpc_url:
@@ -995,7 +1000,9 @@ class AutonetBridge:
                     log.warning("operator key unavailable: %s", e)
             # Contract addresses: the atn side resolved them at join (packaged
             # registry, ATN_REGISTRY_URL or a launched jurisdiction's DAO
-            # Registry), so its values win over the node's packaged seed.
+            # Registry), so its values win over the node's packaged seed,
+            # empty ones too once a jurisdiction is chosen (a contract the
+            # chosen DAO lacks must stay unset, not borrow Shadownet's).
             # rep_token must reach the close or every review weighs the same.
             bc = self._autonet_config.blockchain
             for atn_key, node_key in (("substrate_address", "substrate_address"),
@@ -1007,10 +1014,10 @@ class AutonetBridge:
                                       ("dao_registry_address", "dao_registry_address"),
                                       ("dao_address", "governor_address")):
                 value = getattr(self.config, atn_key, "") or ""
-                if value:
+                if value or chosen:
                     setattr(bc, node_key, value)
-            if getattr(self.config, "deploy_block", 0):
-                bc.deploy_block = int(self.config.deploy_block)
+            if getattr(self.config, "deploy_block", 0) or chosen:
+                bc.deploy_block = int(self.config.deploy_block or 0)
             # The jurisdiction's identity keys its gossip topic and its
             # parked substrate data (docs/multi_jurisdiction.md decision 2).
             self._autonet_config.jurisdiction_key = self.state.jurisdiction_key
