@@ -4,26 +4,9 @@ Autonet Node Implementations
 This package provides the node implementations for the Autonet distributed
 AI training and inference network.
 
-Autonomous training path only — task-driven nodes (Proposer, Solver,
-Coordinator) have been deprecated.
+The daemon's node service (nodes.service), the relay (nodes.relay) and the
+shared substrate, p2p and chain code (nodes.common). Importing a submodule
+loads nothing else.
 """
 
 __version__ = "0.1.0"
-
-from .core import (
-    Node,
-    NodeRole,
-    Constitution,
-    DEFAULT_CONSTITUTION,
-    create_node,
-)
-from .aggregator import AggregatorNode
-
-__all__ = [
-    "Node",
-    "NodeRole",
-    "Constitution",
-    "DEFAULT_CONSTITUTION",
-    "create_node",
-    "AggregatorNode",
-]

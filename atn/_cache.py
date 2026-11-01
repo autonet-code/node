@@ -6,8 +6,8 @@ config loader and scheduler.
 
 The integrity system uses a two-tier fingerprint:
 
-1. **Core fingerprint** — covers only the files that enforce constitutional
-   injection, lineage verification, and this integrity check itself.  This
+1. **Core fingerprint** — covers only the files that enforce the agent
+   prompt, lineage verification, and this integrity check itself.  This
    is the hash published on-chain and verified at runtime.
 
 2. **Full fingerprint** — covers all .py files in atn/ and nodes/.  This is
@@ -18,12 +18,11 @@ The integrity system uses a two-tier fingerprint:
 Core-protected files (changes here require a governance-published hash update):
   - atn/_cache.py              (this module — integrity verification)
   - atn/jurisdiction.py        (hardcoded jurisdiction identity)
-  - atn/runtime/execution_engine.py  (constitution injection point)
-  - atn/delegate_prompts.py    (constitutional preamble template)
+  - atn/runtime/execution_engine.py  (agent run loop)
+  - atn/delegate_prompts.py    (system prompt template)
   - atn/agent_identity.py      (lineage hash chain)
   - atn/on_chain.py            (alignment hash, registration encoding)
-  - atn/autonet_service.py     (constitution loading from chain)
-  - nodes/core/constitution.py (constitutional framework)
+  - atn/autonet_service.py     (network bridge)
 
 Everything else is extensible: providers, tools, agents, connectors,
 voice, steps, shell_tools, config, CLI, etc.
@@ -50,7 +49,6 @@ _CORE_FILES = frozenset({
     "atn/agent_identity.py",
     "atn/on_chain.py",
     "atn/autonet_service.py",
-    "nodes/core/constitution.py",
 })
 
 # Cached values populated lazily

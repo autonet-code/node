@@ -40,7 +40,6 @@ _CORE_FILES = frozenset({
     "atn/agent_identity.py",
     "atn/on_chain.py",
     "atn/autonet_service.py",
-    "nodes/core/constitution.py",
 })
 
 
