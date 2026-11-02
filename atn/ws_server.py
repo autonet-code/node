@@ -1922,6 +1922,8 @@ class WebSocketBridge:
                         payload = art.get("payload")
                         if not is_tool_manifest(payload):
                             continue
+                        if str(payload.get("name") or "").startswith("atn_"):
+                            continue  # the daemon's harness modules
                         digest = art.get("digest", "")
                         pos = positions.get(digest) or {}
                         mass = [float(x) for x in (pos.get("mass") or [])]

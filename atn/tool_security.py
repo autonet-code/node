@@ -389,14 +389,24 @@ async def _publish_staked(runtime: Any, record: Any) -> dict[str, Any]:
         identity = getattr(defn, "identity", None) if defn else None
         address = str(getattr(identity, "address", "") or "")
         if not address or not getattr(identity, "registered_on_chain", False):
-            return {"error": f"agent '{local_author}' is not registered on-chain; "
-                             "register it (register_on_chain), then register "
-                             "the tool again so the agent is its author"}
+            return {"error": f"agent '{local_author}' is not registered on chain "
+                             "yet. Publishing needs it: ask the owner to "
+                             "connect their wallet in the Autonet app and "
+                             "approve your registration (Household), and to "
+                             "fund you with some ATN for the tool's stake. "
+                             "Then publish again; nothing else to redo."}
         if str(manifest.get("author") or "").lower() != address.lower():
-            return {"error": "this manifest's author is "
-                             f"{manifest.get('author')!r}, not the agent's own "
-                             f"address {address}: register the tool again now "
-                             "that the agent is registered, then publish that"}
+            # Registered before the agent was: re-author it now, the same
+            # tool under the agent's on-chain identity (a new digest).
+            try:
+                restamped = store.restamp_author(record.digest)
+            except ValueError as exc:
+                return {"error": str(exc)}
+            record = store.get(restamped["digest"])
+            manifest = record.manifest
+            if str(manifest.get("author") or "").lower() != address.lower():
+                return {"error": "could not re-author this tool as "
+                                 f"{address}; register it again"}
         key = runtime.registry.get_agent_key(local_author)
         if not key:
             return {"error": f"No private key stored for agent '{local_author}'."}

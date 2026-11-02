@@ -1288,17 +1288,20 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="register_on_chain",
         description=(
-            "Register a child agent on-chain in the jurisdiction's Substrate. "
-            "Its registered parent signs the owner binding, so the child joins "
-            "the parent's household; the daemon sends the transaction with the "
-            "child's stored private key. Returns the transaction hash on success."
+            "Register a CHILD agent (one you created) on chain in the "
+            "jurisdiction's Substrate. Its registered parent signs the owner "
+            "binding, so the child joins the parent's household; the daemon "
+            "sends the transaction with the child's stored key. A top-level "
+            "agent (one with no parent, which an external agent usually is) "
+            "cannot register itself: the owner approves it in the Autonet app "
+            "with their wallet. Returns the transaction hash on success."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "agent_id": {"type": "string", "description": "The child agent to register."},
+                "agent_id": {"type": "string", "description": "The child agent to register (default: you)."},
             },
-            "required": ["agent_id"],
+            "required": [],
         },
     ),
     ToolDefinition(
@@ -3410,6 +3413,8 @@ def local_tool_matches(
         words = query.lower().split()
     scored: list[tuple[int, dict[str, Any]]] = []
     for record in tool_store.visible_to(caller_id):
+        if record.name.startswith("atn_"):
+            continue  # the daemon's own harness modules, not library tools
         hay = f"{record.name} {record.manifest.get('description', '')}".lower()
         score = sum(1 for w in words if w in hay)
         if not score:
@@ -4946,8 +4951,11 @@ async def register_parent_signed(runtime: Runtime, svc: Any, defn: Any,
     parent = runtime.get_agent(defn.parent_id) if defn.parent_id else None
     if parent is None:
         return {"success": False,
-                "error": f"Agent '{defn.id}' has no parent agent; a root agent "
-                         "registers with the owner wallet's signature (frontend)."}
+                "error": f"Agent '{defn.id}' is a top-level agent: it registers "
+                         "with the owner wallet's signature, which only the "
+                         "owner can give. Ask them to connect their wallet in "
+                         "the Autonet app and approve your registration "
+                         "(Household); then retry what needed it."}
     pid = getattr(parent, "identity", None)
     if pid is None or not pid.registered_on_chain:
         return {"success": False,
@@ -4972,7 +4980,9 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
     """Register a child agent on-chain via the daemon's stored private key.
     The parent agent signs the binding, so the child joins the parent's
     household without the owner wallet."""
-    agent_id = input["agent_id"]
+    agent_id = str(input.get("agent_id") or input.get("_caller_id") or "")
+    if not agent_id or is_owner_caller(agent_id):
+        return {"error": "Missing required field: 'agent_id'"}
 
     # An agent may register only itself or an agent in its own subtree
     # (fractal doctrine: each level manages what sits beneath it). The

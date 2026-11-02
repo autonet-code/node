@@ -624,6 +624,30 @@ class ToolStore:
         from nodes.common.world_model_substrate.tool_manifest import (
             normalize_novelty, validate_manifest,
         )
+        return self._restamp(digest, {"novelty": normalize_novelty(novelty)},
+                             "novelty claim")
+
+    def restamp_author(self, digest: str) -> dict[str, Any]:
+        """The manifest of ``digest`` re-authored as its local agent's
+        current consensus identity (its 0x address, once registered on
+        chain), so a tool registered before the agent was registered can be
+        published without registering it again. Same rules as
+        ``restamp_novelty``."""
+        record = self._records.get(digest)
+        if record is None:
+            raise ValueError(f"Unknown tool: {digest[:16]}")
+        author = self._consensus_identity(record.local_author)
+        updates: dict[str, Any] = {"author": author}
+        pubkey = self._author_address(record.local_author)
+        if pubkey:
+            updates["author_pubkey"] = pubkey
+        return self._restamp(digest, updates, "author")
+
+    def _restamp(self, digest: str, updates: dict[str, Any],
+                 what: str) -> dict[str, Any]:
+        from nodes.common.world_model_substrate.tool_manifest import (
+            validate_manifest,
+        )
         record = self._records.get(digest)
         if record is None:
             raise ValueError(f"Unknown tool: {digest[:16]}")
@@ -631,10 +655,10 @@ class ToolStore:
             raise ValueError("adopted tools cannot be re-published")
         if record.published:
             raise ValueError("a published manifest is immutable; register a "
-                             "successor (version_of) with the new claim")
+                             "successor (version_of) with the change")
         manifest = {k: v for k, v in record.manifest.items()
                     if k != "author_sig"}
-        manifest["novelty"] = normalize_novelty(novelty)
+        manifest.update(updates)
         errors = validate_manifest(manifest)
         if errors:
             raise ValueError("invalid tool manifest: " + "; ".join(errors))
@@ -649,7 +673,8 @@ class ToolStore:
                 digest=new_digest, manifest=manifest,
                 grants=set(record.grants), enabled=record.enabled,
                 local_author=record.local_author,
-                registered_ts=int(time.time()), origin=record.origin)
+                registered_ts=int(time.time()), origin=record.origin,
+                source_path=record.source_path)
             self._records[new_digest] = existing
         referenced = any(digest in (r.manifest.get("dependencies") or [])
                          for r in self._records.values())
@@ -659,7 +684,7 @@ class ToolStore:
             self._records.pop(digest, None)
             replaced = digest
         self._persist()
-        log.info("stamped novelty claim on %r: %s -> %s", record.name,
+        log.info("stamped %s on %r: %s -> %s", what, record.name,
                  digest[:16], new_digest[:16])
         return {"digest": new_digest, "manifest": existing.manifest,
                 "replaced": replaced}

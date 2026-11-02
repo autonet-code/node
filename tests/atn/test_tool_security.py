@@ -316,7 +316,8 @@ class TestPublish:
         res = await _register(rt, "a", novelty=NOVEL)
         out = await execute_tool("publish_tool", {"digest": res["digest"]}, rt,
                                  caller_id="a")
-        assert "not registered on-chain" in out["error"] and client.bonds == []
+        assert "not registered on chain" in out["error"] and client.bonds == []
+        assert "Autonet app" in out["error"]
 
     async def test_dev_override_skips_chain(self, tmp_path, monkeypatch):
         monkeypatch.setenv(DEV_OVERRIDE_ENV, "1")
@@ -589,3 +590,21 @@ def test_trust_label_is_zero_until_reviews_clear_a_tool():
     store.security_standing_provider = boom
     assert trust_for_digest(rt, "ab" * 32)[1] == ZERO_TRUST
     assert REVIEWED.startswith("cleared")
+
+
+async def test_publish_after_registration_reauthors_without_a_redo(tmp_path):
+    rt = _make_runtime(tmp_path)
+    rt._config.autonet.owner_wallet = "0x" + "44" * 20
+    defn = await _agent(rt, "a", on_chain=False)
+    rt.tool_bond_client = client = FakeClient()
+    res = await _register(rt, "a", novelty=NOVEL)
+    before = rt.tool_store.get(res["digest"]).manifest["author"]
+    defn.identity.registered_on_chain = True     # the owner approved it
+    out = await execute_tool("publish_tool", {"digest": res["digest"]}, rt,
+                             caller_id="a")
+    assert out.get("published") is True, out
+    new = rt.tool_store.get(out["digest"])
+    assert new.manifest["author"].lower() == defn.identity.address.lower()
+    if before.lower() != defn.identity.address.lower():
+        assert out["digest"] != res["digest"]
+    assert client.bonds and client.bonds[-1][1] == out["digest"]

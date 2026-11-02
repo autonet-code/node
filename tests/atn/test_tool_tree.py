@@ -212,3 +212,42 @@ async def test_a_single_script_checks_out_as_a_codebase(tmp_path):
     meta = json.loads((dest / tool_tree.MANIFEST_FILE).read_text())
     assert meta["entrypoint"] == "main.py" and meta["name"] == "net_tool"
     assert tool_tree.snapshot(dest)[0]["name"] == "net_tool"
+
+
+@pytest.mark.asyncio
+async def test_publish_reauthors_a_tool_registered_before_the_agent(tmp_path, monkeypatch):
+    """Registered while the agent had no on-chain identity: once it has
+    one, the store re-authors the same tool under it (a new digest)."""
+    rt = _make_runtime(tmp_path)
+    await _family(rt)
+    root = _codebase(tmp_path / "work" / "greet")
+    res = await execute_tool("register_tool", {"path": str(root)}, rt,
+                             caller_id="child")
+    store = rt.tool_store
+    addr = rt.get_agent("child").identity.address
+    monkeypatch.setattr(store, "_consensus_identity", lambda author: addr)
+    out = store.restamp_author(res["digest"])
+    new = store.get(out["digest"])
+    assert out["digest"] != res["digest"] and new.manifest["author"] == addr
+    assert new.manifest["tree_digest"] == tool_tree.snapshot(root)[1]
+    assert new.source_path == str(root.resolve())
+    assert out["replaced"] == res["digest"] and store.get(res["digest"]) is None
+
+
+@pytest.mark.asyncio
+async def test_search_leaves_out_the_harness_modules(tmp_path):
+    from atn.agent_tools import local_tool_matches
+    rt = _make_runtime(tmp_path)
+    await _family(rt)
+    await execute_tool("register_tool", {"path": str(_codebase(tmp_path / "g"))},
+                       rt, caller_id="child")
+    names = [m["name"] for m in local_tool_matches(rt.tool_store, "greets shell profile", 10)]
+    assert "greet" in names and not any(n.startswith("atn_") for n in names)
+
+
+@pytest.mark.asyncio
+async def test_register_on_chain_explains_the_owner_step(tmp_path):
+    rt = _make_runtime(tmp_path)
+    await _family(rt)
+    out = await execute_tool("register_on_chain", {}, rt, caller_id="grandparent")
+    assert "error" in out and "'agent_id'" not in out["error"]
