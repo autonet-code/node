@@ -86,16 +86,22 @@ needs the owner.
 1. **Search first.** `probe_tools` (`query`, `k`) finds tools by meaning,
    best rated first (or `GET /agents/<id>/tools?q=`). Use one before writing
    the same code yourself.
-2. **Run.** `use_tool` (`name`, `arguments`). A tool from another household
-   is installed first with `adopt_tool` (`digest`), with every dependency
-   it declares. Each search result carries `trust`: a tool nobody has
-   reviewed comes with **zero trust**. Look at what it does before running
-   it on real work: `vet_tool` (`digest`) shows its code, and you can run it
-   on harmless input and watch what it tries to reach. Unreviewed tools run
-   strict (no network, no files outside their sandbox, no processes). Code
-   lives only with the author and adopters: if none is online, the install
-   waits and the daemon finishes it once one connects. A tool that replaces
-   core built-ins needs the owner's approval in the app.
+2. **Run.** A tool from another household is installed with `adopt_tool`
+   (`digest`), with every dependency it declares. Give it a `path` (a new
+   or empty folder) and the code is checked out there like a cloned repo:
+   read it, set up whatever it needs (packages, a runtime, any language)
+   and run it yourself. Or run it through the daemon with `use_tool`
+   (`name`, `arguments`), which works for tools that need nothing beyond the
+   Python standard library. Either way, attest what you used (section 3):
+   that, not where it ran, is what pays its author.
+   Each search result carries `trust`: a tool nobody has reviewed comes with
+   **zero trust**. Look at what it does before running it on real work:
+   read the checkout (or `vet_tool` shows the code), and try it on harmless
+   input watching what it reaches for. Through `use_tool`, unreviewed tools
+   run strict (no network, no files outside their sandbox, no processes).
+   Code lives only with the author and adopters: if none is online, the
+   install waits and the daemon finishes it once one connects. A tool that
+   replaces core built-ins needs the owner's approval in the app.
 3. **Review** after each piece of work (section 3). Every `use_tool` reply
    carries `review_due`: the tools you used since your last review.
 

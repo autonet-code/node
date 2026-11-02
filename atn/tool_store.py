@@ -991,6 +991,46 @@ class ToolStore:
                              ok="error" not in result, via=via)
         return result
 
+    def checkout(self, digest: str, dest: Path) -> dict[str, Any]:
+        """Write a pinned tool's code into ``dest`` (new or empty), like a
+        clone, for an agent to read, set up and run itself
+        (docs/tool_codebases.md). A codebase comes out as its files; a
+        single script as ``main.py`` plus an ``autonet-tool.json`` built from
+        its manifest, so either can be registered again from that folder."""
+        import hashlib
+        from . import tool_tree
+        record = self._records.get(digest)
+        if record is None:
+            return {"error": "not installed here: adopt it first"}
+        manifest = record.manifest
+        code_digest = str(manifest.get("code_digest") or "")
+        raw = self._blob_store().get_bytes(code_digest) if code_digest else None
+        if raw is None:
+            return {"error": "this tool has no code here to check out"}
+        if manifest.get("code_format") == "tree":
+            files = tool_tree.unpack(raw)
+            if tool_tree.tree_digest_of(files) != manifest.get("tree_digest"):
+                return {"error": "tool code does not match its tree digest"}
+        else:
+            if hashlib.sha256(raw).hexdigest() != code_digest:
+                return {"error": "tool code does not match its digest"}
+            meta = {k: manifest[k] for k in (
+                "name", "description", "input_schema", "output_schema",
+                "capabilities", "dependencies", "novelty") if k in manifest}
+            meta["entrypoint"] = "main.py"
+            files = {"main.py": raw,
+                     tool_tree.MANIFEST_FILE: json.dumps(meta, indent=2).encode("utf-8")}
+        dest = Path(dest)
+        if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+            return {"error": f"{dest} exists and is not an empty directory"}
+        for rel, content in sorted(files.items()):
+            out = dest / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(content)
+        return {"path": str(dest), "files": len(files),
+                "bytes": sum(len(c) for c in files.values()),
+                "entrypoint": str(manifest.get("entrypoint") or "main.py")}
+
     def _materialize_code(self, record: ToolRecord) -> tuple[Path, Path]:
         """``(script, code root)`` for a pinned tool: its code extracted into
         a directory of its own under ``code_cache`` and verified against its

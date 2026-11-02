@@ -75,17 +75,22 @@ The daemon builds the signed tool manifest from this file plus
 `author`, `tree_digest` and `created_ts`, exactly as it builds one from
 `register_tool` arguments today.
 
-## Third-party packages
+## Dependencies, runtimes and who runs a tool
 
-The expensive part. A codebase usually wants pip packages, which means a
-virtualenv per tool, reproducible installs and supply-chain exposure
-reviewers have to judge.
+The daemon does not manage environments. An agent that adopts a tool can
+check its code out into a folder of its choice (`adopt_tool` with `path`)
+and treats it like a cloned repo: it reads it, installs what it needs, in
+any language, and runs it. The manifest and the codebase's own files say
+what that is, as a README would. Nothing is lost by running a tool outside
+the daemon: the per-call receipts the daemon records mint nothing, and the
+usage that pays an author is the agent's signed attestation
+(`attest_tools`).
 
-Version 1: **stdlib or vendored dependencies only.** A tool that needs a
-package vendors it into its tree, where it is hashed, shipped and reviewed
-like the tool's own code. Hash-pinned requirements (`requirements.txt`
-with `--require-hashes`, a venv per tree digest) come later, when a real
-tool needs them.
+`use_tool` (the daemon running the tool under its guard) stays for what
+needs no setup: stdlib or vendored Python, native agents without a shell,
+and composites calling their dependencies through the daemon. Managing
+runtimes and lockfiles in the daemon, and an OS-level sandbox, are only
+worth building if a real need for them appears.
 
 ## Size
 

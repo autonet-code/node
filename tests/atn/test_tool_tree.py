@@ -166,3 +166,46 @@ async def test_vet_tool_shows_a_codebase_as_files(tmp_path):
                              caller_id="parent")
     assert out["files"]["pkg/words.py"].strip() == "GREETING = 'hi'", out
     assert "main.py" in out["files"] and out["code"] is None
+
+
+@pytest.mark.asyncio
+async def test_adopt_with_path_checks_the_code_out(tmp_path):
+    from tests.atn.test_tool_store import TestAdoption, _register_agent
+    author = _make_runtime(tmp_path / "author_daemon")
+    await _register_agent(author, "foreign-author")
+    root = _codebase(tmp_path / "work" / "greet")
+    res = await execute_tool("register_tool", {"path": str(root)}, author,
+                             caller_id="foreign-author")
+    rt = await TestAdoption()._adopter(tmp_path, author.tool_store._blob_store())
+    dest = tmp_path / "mine" / "greet"
+    out = await execute_tool("adopt_tool", {"digest": res["digest"], "path": str(dest)},
+                             rt, caller_id="worker")
+    assert out["checkout"]["path"] == str(dest.resolve()), out
+    assert (dest / "pkg" / "words.py").read_text().strip() == "GREETING = 'hi'"
+    assert not (dest / "notes.log").exists()      # it was never in the snapshot
+    assert "attest" in out["note"]
+    # The checkout registers again as is (same content, same tree digest).
+    assert tool_tree.snapshot(dest)[1] == rt.tool_store.get(res["digest"]).manifest["tree_digest"]
+
+    # Already installed: a second checkout elsewhere; a non-empty folder is refused.
+    again = await execute_tool("adopt_tool", {"digest": res["digest"],
+                                              "path": str(tmp_path / "copy2")},
+                               rt, caller_id="worker")
+    assert again["checkout"]["files"] == out["checkout"]["files"]
+    busy = await execute_tool("adopt_tool", {"digest": res["digest"], "path": str(dest)},
+                              rt, caller_id="worker")
+    assert "not an empty directory" in busy["checkout_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_single_script_checks_out_as_a_codebase(tmp_path):
+    from tests.atn.test_tool_store import TestAdoption
+    author, digest, blobs = await TestAdoption()._publish_on_author_daemon(tmp_path)
+    rt = await TestAdoption()._adopter(tmp_path, blobs)
+    dest = tmp_path / "echo"
+    out = await execute_tool("adopt_tool", {"digest": digest, "path": str(dest)},
+                             rt, caller_id="worker")
+    assert out["checkout"]["entrypoint"] == "main.py", out
+    meta = json.loads((dest / tool_tree.MANIFEST_FILE).read_text())
+    assert meta["entrypoint"] == "main.py" and meta["name"] == "net_tool"
+    assert tool_tree.snapshot(dest)[0]["name"] == "net_tool"

@@ -783,6 +783,7 @@ _TOOLS: list[ToolDefinition] = [
             "properties": {
                 "digest": {"type": "string", "description": "64-hex manifest digest of the published tool."},
                 "reason": {"type": "string", "description": "Optional: what work needs it (kept with the install)."},
+                "path": {"type": "string", "description": "Optional: an empty or new directory to check the tool's code out into, like a clone, so you can read it, prepare its environment and run it yourself. Works for a tool already installed too."},
             },
             "required": ["digest"],
         },
@@ -2925,15 +2926,14 @@ def _review_due(runtime: Runtime, agent_id: str) -> dict[str, str]:
     return book.setdefault(agent_id, {})
 
 
-def _snapshot_codebase(runtime: Runtime, raw_path: str) -> dict[str, Any]:
-    """Snapshot the codebase at ``raw_path`` (atn/tool_tree.py), refusing
-    the daemon's own data and the vault."""
+def _resolve_tool_path(runtime: Runtime, raw_path: str):
+    """``(path, None)`` for a codebase location an agent names, or
+    ``(None, error)``: never the daemon's own data or the vault."""
     from pathlib import Path
-    from . import tool_tree
     try:
         root = Path(raw_path).expanduser().resolve()
     except (OSError, RuntimeError) as exc:
-        return {"error": f"bad path: {exc}"}
+        return None, {"error": f"bad path: {exc}"}
     forbidden = []
     data_dir = getattr(getattr(runtime, "_config", None), "data_dir", None)
     if data_dir is not None:
@@ -2945,8 +2945,17 @@ def _snapshot_codebase(runtime: Runtime, raw_path: str) -> dict[str, Any]:
         pass
     for f in forbidden:
         if root == f or f in root.parents or root in f.parents:
-            return {"error": "a tool's codebase cannot be (or contain) the "
-                             "daemon's data or vault"}
+            return None, {"error": "a tool's codebase cannot be (or contain) "
+                                   "the daemon's data or vault"}
+    return root, None
+
+
+def _snapshot_codebase(runtime: Runtime, raw_path: str) -> dict[str, Any]:
+    """Snapshot the codebase at ``raw_path`` (atn/tool_tree.py)."""
+    from . import tool_tree
+    root, err = _resolve_tool_path(runtime, raw_path)
+    if err:
+        return err
     if not root.is_dir():
         return {"error": f"no directory at {root}"}
     try:
@@ -3133,9 +3142,17 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
     reason = str(input.get("reason") or "").strip()
     caller_id = input.get("_caller_id")
     caller = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
+    dest = None
+    if input.get("path"):
+        dest, err = _resolve_tool_path(runtime, str(input["path"]))
+        if err:
+            return err
+    store = runtime.tool_store
+    if dest is not None and store.get(digest.lower()) is not None:
+        # Already installed: just check it out.
+        return _checked_out(runtime, digest.lower(), dest, {"digest": digest.lower()})
     try:
-        proposal = await runtime.tool_store.propose_adoption(
-            caller, digest, reason=reason)
+        proposal = await store.propose_adoption(caller, digest, reason=reason)
     except Exception as exc:
         return {"error": str(exc)}
     # No owner approval (Decision 2026-11-02): the agent installs, the trust
@@ -3152,7 +3169,23 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
         return {"error": str(exc)}
     from .tool_security import trust_for_digest
     tier, trust = trust_for_digest(runtime, proposal["digest"])
-    return {**result, "containment": tier, "trust": trust}
+    result = {**result, "containment": tier, "trust": trust}
+    if dest is not None and not result.get("error") and result.get("origin") == "adopted":
+        return _checked_out(runtime, proposal["digest"], dest, result)
+    return result
+
+
+def _checked_out(runtime: Runtime, digest: str, dest, result: dict[str, Any]) -> dict[str, Any]:
+    """Add the checkout of ``digest`` into ``dest`` to an adopt reply."""
+    out = runtime.tool_store.checkout(digest, dest)
+    if out.get("error"):
+        return {**result, "checkout_error": out["error"]}
+    return {**result, "checkout": out,
+            "note": ("the code is in " + out["path"] + ". Read it before "
+                     "running it; set up what it needs as you would for any "
+                     "repo, run it yourself or through use_tool, and attest "
+                     "what you used (attest_tools): that is what pays its "
+                     "author.")}
 
 
 async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
