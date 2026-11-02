@@ -2210,6 +2210,9 @@ async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
     from .provider_identity import EXTERNAL_PROVIDER
     if input.get("provider") == EXTERNAL_PROVIDER:
         return await _create_external_agent(runtime, input, caller_id)
+    from .native_mode import REFUSAL, native_agents_enabled
+    if not native_agents_enabled(runtime):
+        return {"error": REFUSAL}
 
     if mode_str == "cognitive":
         # --- Cognitive mode: autonomous LLM session ---

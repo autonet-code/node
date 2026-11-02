@@ -936,7 +936,13 @@ class WebSocketBridge:
     def _redact_snapshot(self, snap: dict, session: ClientSession) -> dict:
         """Strip owner-global sections from a SCOPED session's snapshot. A
         full-fleet session (local owner, or remote owner rooted at the full
-        fleet) keeps them."""
+        fleet) keeps them. Every snapshot says whether native agents are on
+        (atn/native_mode.py), which is what the app shows or hides."""
+        try:
+            from .native_mode import native_agents_enabled
+            snap = {**snap, "native_agents": native_agents_enabled(self.runtime)}
+        except Exception:  # noqa: BLE001
+            log.debug("native_agents flag unavailable", exc_info=True)
         if session.scope_ids is None:
             return snap            # full fleet => unchanged
         return {k: v for k, v in snap.items() if k not in self._SECRET_SECTIONS}
@@ -3748,6 +3754,18 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": {"address": Account.from_key(key).address,
                                "private_key": key}}
+
+        if msg_type == "set_native_agents":
+            # The owner's switch for the native agent framework
+            # (atn/native_mode.py). Takes effect at once; existing native
+            # agents are kept either way.
+            if not session.owner:
+                return {"msg_id": msg_id, "ok": False,
+                        "error": "only the owner switches native agents"}
+            from .native_mode import set_native_agents
+            enabled = set_native_agents(self.runtime, bool(msg.get("enabled")))
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"native_agents": enabled}}
 
         if msg_type == "agent_api_url":
             # Where an agent on this machine starts (atn/agent_api.py); the

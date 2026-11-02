@@ -24,6 +24,9 @@ import pytest
 
 _SESSION_KEYSTORE = tempfile.mkdtemp(prefix="atn-test-keystore-")
 os.environ["KEYSTORE_DIR"] = _SESSION_KEYSTORE
+# Most tests exercise native agents; a fresh daemon has them off
+# (atn/native_mode.py). Tests of the mode itself clear this.
+os.environ.setdefault("ATN_NATIVE_AGENTS", "1")
 
 
 def _repoint(module, base: str) -> None:
