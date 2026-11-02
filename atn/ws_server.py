@@ -3808,7 +3808,7 @@ class WebSocketBridge:
         # (e.g. post_message).  We strip it since the JSON object can't have two
         # "type" keys anyway — clients should use "message_type" for post_message.
         args = {k: v for k, v in msg.items()
-                if k not in ("msg_id", "type", "_activity_logged")}
+                if k not in ("msg_id", "type", "_activity_logged", "_note")}
         # Tag client-initiated post_message with source="user" so the target
         # agent can distinguish user messages from agent messages.
         if msg_type == "post_message" and "source" not in args:
@@ -3863,18 +3863,20 @@ class WebSocketBridge:
         tool = msg.get("type", "")
         use_id = uuid.uuid4().hex
         shown = {k: v for k, v in msg.items()
-                 if k not in ("type", "msg_id", "caller_id")}
+                 if k not in ("type", "msg_id", "caller_id", "_note")}
+        note = str(msg.get("_note") or "")
         await self.runtime.events.emit(Event(
             type=EventType.AGENT_TOOL_USE_START, source=agent_id,
             data={"agent_id": agent_id, "tool_use_id": use_id,
-                  "tool_name": tool, "input": shown}))
+                  "tool_name": tool, "input": shown, "note": note}))
         started = now()
         resp = await self._handle_message({**msg, "_activity_logged": True}, session)
         ok = bool(resp.get("ok"))
         try:
             entry = await asyncio.to_thread(
                 self._activity_log().record, agent_id, tool, shown, ok,
-                resp.get("result") if ok else resp.get("error"), started, now())
+                resp.get("result") if ok else resp.get("error"), started, now(),
+                note)
         except Exception as exc:
             log.debug("activity log write failed for %s: %s", agent_id, exc)
             entry = {"result": ""}

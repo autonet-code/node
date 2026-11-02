@@ -171,19 +171,24 @@ class AgentAPI:
                 "use it. You act here as one of the household's agents."),
             "start": [
                 "Read GET /guide once: it is the whole manual.",
-                "Create your agent once: POST /agents with "
+                "GET /agents lists this daemon's external agents: if one is "
+                "yours from an earlier session, reuse it.",
+                "Otherwise create yours once: POST /agents with "
                 "{\"id\": \"<short-id>\", \"name\": \"...\", "
-                "\"harness\": \"claude-code\"}. Reuse the id in later "
-                "sessions; GET /agents/<id> tells you if it exists.",
+                "\"harness\": \"claude-code\"}. The reply holds your token, "
+                "shown once: keep it somewhere your later sessions can read.",
                 "Then act as it: POST /agents/<id>/<command> with the "
-                "command's arguments as a JSON body.",
+                "command's arguments as a JSON body and the header "
+                "Authorization: Bearer <token>.",
             ],
             "observability": (
                 "Every call you make under /agents/<id>/ is shown to the "
-                "owner in their app."),
+                "owner in their app. Add \"note\": \"<why>\" to any call's "
+                "body to tell them why you made it."),
             "links": {
                 "guide": "/guide",
                 "commands": "/commands",
+                "agents": "/agents",
                 "create_agent": "POST /agents",
                 "your_agent": "/agents/<id>",
                 "search_tools": "/agents/<id>/tools?q=<what you need>",
@@ -192,7 +197,7 @@ class AgentAPI:
             },
         }
 
-    def _commands(self) -> dict[str, Any]:
+    def _commands(self, everything: bool = False) -> dict[str, Any]:
         groups: dict[str, list[dict[str, str]]] = {g: [] for g in _GROUP_ORDER}
         for name, d in sorted(self._definitions().items()):
             if name in _BLOCKED or name == "create_agent":
@@ -202,11 +207,21 @@ class AgentAPI:
                 "summary": _first_line(d.get("description", "")),
                 "details": f"/commands/{name}",
             })
-        return {
+        shown = _GROUP_ORDER if everything else tuple(
+            g for g in _GROUP_ORDER if g != "other")
+        out: dict[str, Any] = {
             "call": "POST /agents/<id>/<command> with the arguments as a "
-                    "JSON body (GET works for calls without arguments).",
-            "groups": {g: groups[g] for g in _GROUP_ORDER if groups[g]},
+                    "JSON body and Authorization: Bearer <token> (GET works "
+                    "for calls without arguments). Any call may carry "
+                    "\"note\": why you made it, shown to the owner.",
+            "groups": {g: groups[g] for g in shown if groups[g]},
         }
+        if not everything and groups["other"]:
+            out["more"] = (f"/commands?all=1 also lists {len(groups['other'])} "
+                           "commands for managing agents the daemon runs "
+                           "itself (goals, delegates, budgets, groups); you "
+                           "rarely need them.")
+        return out
 
     def _command(self, name: str) -> dict[str, Any]:
         d = self._definitions().get(name)
@@ -222,13 +237,27 @@ class AgentAPI:
 
     # -- dispatch ------------------------------------------------------
 
-    def _agent_session(self, agent_id: str):
+    def _data_dir(self) -> Path:
+        return Path(self.bridge.runtime._config.data_dir)
+
+    def _agent_session(self, agent_id: str, headers: dict[str, str]):
+        from . import agent_tokens
         from .ws_auth import ClientSession, new_nonce
         registry = self.bridge.runtime.registry
         if agent_id not in registry._agents:
             raise _HTTPError(
                 404, f"no agent '{agent_id}' on this daemon",
                 create="POST /agents with {\"id\", \"name\", \"harness\"}")
+        auth = headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not agent_tokens.verify(self._data_dir(), agent_id, token):
+            if not agent_tokens.has_token(self._data_dir(), agent_id):
+                raise _HTTPError(
+                    401, f"agent '{agent_id}' has no token yet",
+                    claim=f"POST /agents/{agent_id}/token issues it (once)")
+            raise _HTTPError(
+                401, "missing or wrong token: send Authorization: Bearer <token>",
+                lost=f"the owner can issue a new one: atn agent-token {agent_id}")
         s = ClientSession(local=False, is_loopback=True, conn_id=new_nonce())
         s.authed = True
         s.owner = False
@@ -249,6 +278,9 @@ class AgentAPI:
         if msg_type in _BLOCKED:
             raise _HTTPError(403, f"'{msg_type}' is not available to agents")
         msg = dict(args)
+        note = msg.pop("note", None)
+        if note:
+            msg["_note"] = str(note)[:500]
         msg["type"] = msg_type
         msg["msg_id"] = uuid.uuid4().hex
         if session.root_agent_id:
@@ -272,10 +304,40 @@ class AgentAPI:
         if body.get("description"):
             args["description"] = str(body["description"])
         result = await self._call(self._owner_session(), "create_agent", args)
-        return {"agent": result, "next": f"/agents/{aid}"}
+        from . import agent_tokens
+        token = agent_tokens.issue(self._data_dir(), aid)
+        return {"agent": result, "token": token,
+                "keep_the_token": (
+                    "It is shown once. Send it as Authorization: Bearer "
+                    "<token> on every call under /agents/" + aid + "/, and "
+                    "keep it where your later sessions can read it."),
+                "next": f"/agents/{aid}"}
+
+    def _list_agents(self) -> dict[str, Any]:
+        from . import agent_tokens
+        from .agent_activity import ActivityLog
+        from .provider_identity import is_external
+        log_ = ActivityLog(self._data_dir())
+        rows = []
+        for aid, defn in sorted(self.bridge.runtime.registry._agents.items()):
+            if not is_external(defn):
+                continue
+            last = log_.read(aid, limit=1)
+            rows.append({
+                "id": aid,
+                "name": getattr(defn, "name", "") or aid,
+                "harness": getattr(defn, "description", "") or "",
+                "has_token": agent_tokens.has_token(self._data_dir(), aid),
+                "last_active": last[0]["ts"] if last else None,
+            })
+        return {"agents": rows,
+                "note": "yours from an earlier session? reuse it with its "
+                        "token; otherwise POST /agents"}
 
     async def _route(self, method: str, path: str, query: dict[str, str],
-                     body: dict[str, Any]) -> tuple[int, Any]:
+                     body: dict[str, Any],
+                     headers: dict[str, str] | None = None) -> tuple[int, Any]:
+        headers = headers or {}
         parts = [unquote(p) for p in path.strip("/").split("/") if p]
         if not parts:
             return 200, self._index()
@@ -286,16 +348,28 @@ class AgentAPI:
             return 200, text
         if head == "commands":
             if len(parts) == 1:
-                return 200, self._commands()
+                return 200, self._commands(everything=bool(query.get("all")))
             if len(parts) == 2:
                 return 200, self._command(parts[1])
         if head == "agents":
             if len(parts) == 1:
                 if method == "POST":
                     return 200, await self._create_agent(body)
-                raise _HTTPError(405, "POST /agents creates your agent")
+                return 200, self._list_agents()
             agent_id = parts[1]
-            session = self._agent_session(agent_id)
+            if len(parts) == 3 and parts[2] == "token" and method == "POST":
+                # The first claim of an agent made without one (in the app,
+                # or before tokens existed). Later resets are the owner's.
+                from . import agent_tokens
+                if agent_id not in self.bridge.runtime.registry._agents:
+                    raise _HTTPError(404, f"no agent '{agent_id}' on this daemon")
+                if agent_tokens.has_token(self._data_dir(), agent_id):
+                    raise _HTTPError(
+                        403, "this agent already has a token",
+                        lost=f"the owner can issue a new one: atn agent-token {agent_id}")
+                return 200, {"token": agent_tokens.issue(self._data_dir(), agent_id),
+                             "keep_the_token": "It is shown once."}
+            session = self._agent_session(agent_id, headers)
             if len(parts) == 2:
                 agent = await self._call(session, "get_agent",
                                          {"agent_id": agent_id})
@@ -405,7 +479,8 @@ class AgentAPI:
                     raise _HTTPError(400, "body must be a JSON object")
             url = urlsplit(target)
             query = {k: v[-1] for k, v in parse_qs(url.query).items()}
-            status, payload = await self._route(method, url.path, query, body)
+            status, payload = await self._route(method, url.path, query, body,
+                                                headers)
         except _HTTPError as e:
             status, payload = e.status, e.body
         except Exception as exc:  # noqa: BLE001
@@ -418,7 +493,8 @@ class AgentAPI:
             else:
                 data = json.dumps(payload, indent=2, default=str).encode("utf-8")
                 ctype = "application/json"
-            reason = {200: "OK", 400: "Bad Request", 403: "Forbidden",
+            reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized",
+                      403: "Forbidden",
                       404: "Not Found", 405: "Method Not Allowed",
                       413: "Payload Too Large"}.get(status, "Error")
             writer.write(

@@ -13,16 +13,18 @@ The daemon listens on loopback; its banner prints the address (by default
   one-line summary, and `GET /commands/<name>` gives its description and
   input schema.
 - You act as one agent, named in the path: `POST /agents/<id>/<command>`
-  with the command's arguments as a JSON body. Every call you make is shown
-  to the owner in their app.
+  with the command's arguments as a JSON body and your token in the header
+  `Authorization: Bearer <token>`. Every call you make is shown to the owner
+  in their app; add `"note": "<why>"` to any call's body to tell them why.
 - Shortcuts: `GET /agents/<id>/tools?q=<what you need>` searches the tool
   library, `GET /agents/<id>/services?q=<topic>` the services,
   `GET /agents/<id>/activity` shows your own recent calls.
 - A failed call returns an `error` and a `help` link to the command's schema.
 
 ```bash
-curl -s localhost:7702/agents/my-agent/tools?q=parse%20csv
-curl -s localhost:7702/agents/my-agent/use_tool -d '{"name": "csv_parse", "arguments": {"path": "a.csv"}}'
+H="Authorization: Bearer $ATN_TOKEN"
+curl -s -H "$H" localhost:7702/agents/my-agent/tools?q=parse%20csv
+curl -s -H "$H" localhost:7702/agents/my-agent/use_tool -d '{"name": "csv_parse", "arguments": {"path": "a.csv"}, "note": "monthly invoices"}'
 ```
 
 ## What Autonet is
@@ -39,7 +41,8 @@ curl -s localhost:7702/agents/my-agent/use_tool -d '{"name": "csv_parse", "argum
 
 ## 1. Setup (once)
 
-If `GET /agents/<your id>` finds your agent, skip this.
+`GET /agents` lists this daemon's external agents. If one is yours from an
+earlier session and you still have its token, skip this.
 
 If no daemon is running (nothing answers), the human installs and starts it:
 
@@ -65,6 +68,12 @@ Create your agent (pick a short, stable id and reuse it in later sessions):
 ```bash
 curl -s localhost:7702/agents -d '{"id": "my-agent", "name": "My agent", "harness": "claude-code"}'
 ```
+
+The reply holds your **token, shown once**. Keep it where your later
+sessions can read it (a file in your working directory your harness
+remembers, for example). If it is lost, the owner issues a new one with
+`atn agent-token <id>`. An agent made in the app has no token yet: claim it
+once with `POST /agents/<id>/token`.
 
 You are the agent's brain: the daemon keeps its key in its encrypted vault
 and signs for it, but never runs it.

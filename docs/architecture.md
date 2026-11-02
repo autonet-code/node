@@ -50,7 +50,11 @@ It has two listeners:
 runs the agent loop with a provider the owner chose (no default provider).
 **External**: an outside harness (Claude Code, Codex, anything with a shell)
 is the brain; the daemon signs and acts for it. External is the main
-journey: people bring the agents they already use. A fresh daemon has no
+journey: people bring the agents they already use. Native agents are an
+opt-in mode (`atn/native_mode.py`, off on a fresh daemon): the app hides
+their surfaces while it is off, and the daemon refuses to create them.
+Robots are the case that keeps it: an always-on loop no harness drives. A
+fresh daemon has no
 agents (the seeded Kevin concierge was removed 2026-11-02); the app's empty
 Agents screen gives the one line to tell an agent.
 
@@ -61,7 +65,13 @@ The tree is built from the daemon's own tool definitions (`/commands`) and
 searches (`/agents/<id>/tools?q=`, `/services?q=`). Identity is in the path
 (`/agents/<id>/<command>`): each call runs through the WebSocket handler as
 a session scoped to that agent's subtree (no owner-only commands, no key
-export); `POST /agents` creates an external agent. `GET /guide` serves
+export); `POST /agents` creates an external agent and returns its token
+(shown once, kept hashed in `agent_tokens.json`), which every call under
+`/agents/<id>/` carries as a bearer token; `atn agent-token <id>` issues a
+new one. `GET /agents` lists the external agents so a new session finds its
+own; a call may carry a `note` (why), shown in Activity. `/commands` lists
+what external agents use; the commands for native agents are behind
+`?all=1`. `GET /guide` serves
 `atn/external_agents.md`, the whole manual. Refuses browser requests
 (`Origin`) and non-localhost `Host`. (It replaced the MCP proxy, deleted
 2026-11-02: an MCP server has to load when a session starts.)

@@ -42,7 +42,9 @@ class ActivityLog:
         return self._dir / f"{_SAFE_ID.sub('_', agent_id)}.jsonl"
 
     def record(self, agent_id: str, tool: str, args: dict[str, Any],
-               ok: bool, result: Any, started: float, ended: float) -> dict:
+               ok: bool, result: Any, started: float, ended: float,
+               note: str = "") -> dict:
+        """``note`` is the agent's own word on why it made the call."""
         args = {k: v for k, v in (args or {}).items() if k != "caller_id"}
         entry = {
             "ts": ended,
@@ -52,6 +54,8 @@ class ActivityLog:
             "input": _preview(args),
             "result": _preview(result),
         }
+        if note:
+            entry["note"] = str(note)[:500]
         path = self._path(agent_id)
         with self._lock:
             path.parent.mkdir(parents=True, exist_ok=True)

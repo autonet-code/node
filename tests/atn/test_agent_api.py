@@ -10,11 +10,17 @@ from atn.agent_api import AgentAPI
 
 
 class _StubBridge:
-    def __init__(self):
+    def __init__(self, data_dir):
+        from atn import agent_tokens
         self.calls = []
-        agents = {"ext": SimpleNamespace(provider="external")}
-        self.runtime = SimpleNamespace(registry=SimpleNamespace(
-            _agents=agents, get_subtree_ids=lambda aid: {aid}))
+        agents = {"ext": SimpleNamespace(provider="external", name="Ext",
+                                         description="claude-code")}
+        self.runtime = SimpleNamespace(
+            registry=SimpleNamespace(_agents=agents,
+                                     get_subtree_ids=lambda aid: {aid}),
+            _config=SimpleNamespace(data_dir=data_dir))
+        self.token = agent_tokens.issue(data_dir, "ext")
+        self.auth = {"Authorization": f"Bearer {self.token}"}
 
     async def _handle_message(self, msg, session):
         self.calls.append((msg, session))
@@ -51,10 +57,10 @@ async def _request(port, method, path, body=None, headers=None):
 
 
 @pytest.fixture
-def api_run():
+def api_run(tmp_path):
     def run(coro_fn):
         async def main():
-            bridge = _StubBridge()
+            bridge = _StubBridge(tmp_path)
             api = AgentAPI(bridge, "127.0.0.1", 0)
             api._server = await asyncio.start_server(api._serve, "127.0.0.1", 0)
             port = api._server.sockets[0].getsockname()[1]
@@ -88,20 +94,20 @@ def test_index_guide_and_commands(api_run):
 def test_agent_calls_are_scoped_to_the_agent(api_run):
     async def go(port, bridge):
         s, r = await _request(port, "POST", "/agents/ext/use_tool",
-                              {"name": "csv_parse", "arguments": {}})
+                              {"name": "csv_parse", "arguments": {}}, headers=bridge.auth)
         assert s == 200 and r == {"echo": "use_tool"}
         msg, session = bridge.calls[-1]
         assert msg["caller_id"] == "ext"
         assert session.root_agent_id == "ext" and session.scope_ids == {"ext"}
         assert not session.local and not session.owner
 
-        s, r = await _request(port, "POST", "/agents/ext/use_tool", {})
+        s, r = await _request(port, "POST", "/agents/ext/use_tool", {}, headers=bridge.auth)
         assert s == 400 and r["help"] == "/commands/use_tool"
 
-        s, r = await _request(port, "GET", "/agents/ext/tools?q=parse%20csv")
+        s, r = await _request(port, "GET", "/agents/ext/tools?q=parse%20csv", headers=bridge.auth)
         assert r["matches"][0]["next"]["use"].startswith("POST /agents/ext/use_tool")
 
-        s, r = await _request(port, "POST", "/agents/ext/export_agent_key", {})
+        s, r = await _request(port, "POST", "/agents/ext/export_agent_key", {}, headers=bridge.auth)
         assert s in (403, 404)
         s, r = await _request(port, "GET", "/agents/ghost")
         assert s == 404 and "create" in r
@@ -136,7 +142,7 @@ def test_join_recommended_jurisdiction_is_logged_as_the_agent(api_run):
         s, index = await _request(port, "GET", "/")
         assert "join_recommended_jurisdiction" in index["jurisdiction"]
         s, r = await _request(port, "POST",
-                              "/agents/ext/join_recommended_jurisdiction", {})
+                              "/agents/ext/join_recommended_jurisdiction", {}, headers=bridge.auth)
         assert s == 200
         msg, session = bridge.calls[-1]
         assert msg["type"] == "autonet_switch" and msg["recommended"] is True
@@ -180,3 +186,45 @@ def test_switch_to_recommended_pins_the_dao(tmp_path, monkeypatch):
     saved = json.loads((tmp_path / "jurisdiction.json").read_text())
     assert saved["dao"] == rec["dao"] and saved["name"] == "Repo DAO"
     assert "packaged" not in saved
+
+
+def test_tokens_guard_every_agent_call(api_run):
+    async def go(port, bridge):
+        s, r = await _request(port, "POST", "/agents/ext/use_tool", {"name": "x"})
+        assert s == 401 and "atn agent-token ext" in r["lost"]
+        s, r = await _request(port, "POST", "/agents/ext/use_tool", {"name": "x"},
+                              headers={"Authorization": "Bearer nope"})
+        assert s == 401
+        # A new agent gets its token once, at creation.
+        s, r = await _request(port, "POST", "/agents", {"id": "cc2"})
+        tok = r["token"]
+        assert tok.startswith("atn_")
+        s, r = await _request(port, "GET", "/agents/cc2/autonet_status",
+                              headers={"Authorization": f"Bearer {tok}"})
+        assert s == 200
+        # An agent made elsewhere claims its token once; later it's the owner's.
+        bridge.runtime.registry._agents["app_made"] = SimpleNamespace(
+            provider="external", name="A", description="")
+        s, r = await _request(port, "POST", "/agents/app_made/token", {})
+        assert s == 200 and r["token"].startswith("atn_")
+        s, r = await _request(port, "POST", "/agents/app_made/token", {})
+        assert s == 403
+    api_run(go)
+
+
+def test_listing_notes_and_the_short_command_list(api_run):
+    async def go(port, bridge):
+        s, r = await _request(port, "GET", "/agents")
+        assert [a["id"] for a in r["agents"]] == ["ext"]
+        assert r["agents"][0]["has_token"] is True
+        assert r["agents"][0]["harness"] == "claude-code"
+        await _request(port, "POST", "/agents/ext/use_tool",
+                       {"name": "x", "note": "checking before I write my own"},
+                       headers=bridge.auth)
+        msg, _ = bridge.calls[-1]
+        assert msg["_note"] == "checking before I write my own" and "note" not in msg
+        s, short = await _request(port, "GET", "/commands")
+        s, full = await _request(port, "GET", "/commands?all=1")
+        assert "other" not in short["groups"] and "more" in short
+        assert "other" in full["groups"]
+    api_run(go)

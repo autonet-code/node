@@ -67,11 +67,13 @@ def test_external_calls_are_logged_once(tmp_path, monkeypatch):
     monkeypatch.setattr(ws_server.WebSocketBridge, "_handle_message", handle)
     owner = ClientSession(local=True, authed=True, owner=True)
     resp = asyncio.run(bridge._handle_message(
-        {"type": "probe_tools", "caller_id": "ext", "query": "q"}, owner))
+        {"type": "probe_tools", "caller_id": "ext", "query": "q",
+         "_note": "looking first"}, owner))
     assert resp["ok"] and len(seen) == 1
     entries = bridge._activity_log().read("ext")
     assert len(entries) == 1 and entries[0]["tool"] == "probe_tools"
     assert '"query": "q"' in entries[0]["input"]
+    assert entries[0]["note"] == "looking first" and "_note" not in entries[0]["input"]
     assert [e.type.value for e in emitted] == [
         "agent.tool_use_start", "agent.tool_use_result"]
 

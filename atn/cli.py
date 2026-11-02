@@ -1007,6 +1007,16 @@ def main() -> None:
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "send":
         sys.exit(_send_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "agent-token":
+        # Issue a new agent API token (atn/agent_tokens.py), e.g. when an
+        # agent lost its own. Replaces the old one at once.
+        from .agent_tokens import issue
+        from .config import _DEFAULT_DIR
+        if len(sys.argv) != 3:
+            sys.stderr.write("usage: atn agent-token <agent id>\n")
+            sys.exit(2)
+        print(issue(_DEFAULT_DIR, sys.argv[2]))
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "relay":
         # Relay mode: networking only, a low-cost node that supports the
         # network (seed, gossip and blob relay, reach checks). No close, no
