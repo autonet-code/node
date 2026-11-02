@@ -4,6 +4,9 @@ import pytest
 
 import atn.config as cfg
 
+# The release ships no jurisdiction now; these test the packaged path on a sample.
+pytestmark = pytest.mark.usefixtures("sample_packaged_registry")
+
 
 @pytest.fixture(autouse=True)
 def _own_selection_dir(tmp_path, monkeypatch):

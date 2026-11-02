@@ -1,30 +1,4 @@
 {
   "version": 1,
-  "jurisdictions": {
-    "autonet": {
-      "name": "Autonet",
-      "network": {
-        "rpc_url": "https://node.shadownet.etherlink.com",
-        "chain_id": 127823,
-        "network_name": "Etherlink Shadownet",
-        "gas_symbol": "XTZ",
-        "gas_decimals": 18
-      },
-      "contracts": {
-        "dao": "0x966089301cE5F575a31B7ba296B2b2a793d28005",
-        "timelock": "0x048920649F8B40a727747Ec94dAf08879A70954d",
-        "rep_token": "0x65D9c88092B9107D17b2c5D7136661239809415D",
-        "dao_registry": "0x652d28e8Aad703130D26f5d660Bd1BF327B2c5E7",
-        "rpb": "",
-        "substrate": "0x201701C8Ae1DDDb60579a64324109C8C0F3FA256",
-        "autonet_vault": "0x90D7A965B4885224d01EdD1E14A17A599Cb9039A",
-        "reputation_mirror": "",
-        "rep_claim": "0x5Ff1851a88d8e8A5dc3219d8f662984426F48e66",
-        "service_registry": "0xA8176D9E4e6fb6B71097cCDf608C74adBfA170D1",
-        "payment_channel": "0x76EB32F652Efd50c5f8e7F050104EA919355BA73",
-        "tool_bond": "0x058fe8167e59925c2209320a103830cafE90a636",
-        "economy": "0xa3d0300F33300eEF6991377974A347104E786Cae"
-      }
-    }
-  }
+  "jurisdictions": {}
 }

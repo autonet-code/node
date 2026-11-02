@@ -13,6 +13,9 @@ from atn.events import EventBus
 from atn.models import AgentIdentity
 from atn.tool_store import ToolRecord, ToolStore
 
+# The release ships no jurisdiction now; these test the packaged path on a sample.
+pytestmark = pytest.mark.usefixtures("sample_packaged_registry")
+
 A = {"chain_id": 31337, "rpc_url": "http://a", "dao_registry": "0xRA", "dao": "0xDAOA"}
 B = {"chain_id": 31337, "rpc_url": "http://b", "dao_registry": "0xRB", "dao": "0xDAOB"}
 KEY_A = "31337:0xdaoa"

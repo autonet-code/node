@@ -509,7 +509,7 @@ def _registry_substrate_address(
     if config_path:
         candidates.append(Path(config_path).resolve().parent / "registry.json")
     candidates.append(Path("registry.json"))
-    for candidate in candidates:
+    for i, candidate in enumerate(candidates):
         try:
             if not candidate.exists():
                 continue
@@ -518,6 +518,10 @@ def _registry_substrate_address(
                 addr = entry.get("contracts", {}).get(key, "")
                 if addr:
                     return str(addr)
+            if i == 0:
+                # The packaged copy is authoritative even when it names no
+                # jurisdiction: a stale copy elsewhere must not fill in.
+                return ""
         except Exception as e:
             logger.warning("registry.json read failed at %s: %s", candidate, e)
     return ""

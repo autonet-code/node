@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from nodes.common.config import _registry_substrate_address
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -15,10 +16,9 @@ REPO = Path(__file__).resolve().parents[1]
 def _packaged_substrate() -> str:
     data = json.loads((REPO / "atn" / "registry.json").read_text(encoding="utf-8"))
     return next(
-        e["contracts"]["substrate"]
-        for e in data["jurisdictions"].values()
-        if e.get("contracts", {}).get("substrate")
-    )
+        (e["contracts"]["substrate"]
+         for e in data["jurisdictions"].values()
+         if e.get("contracts", {}).get("substrate")), "")
 
 
 def test_packaged_registry_beats_stale_copy_next_to_config(tmp_path):
@@ -28,6 +28,8 @@ def test_packaged_registry_beats_stale_copy_next_to_config(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("", encoding="utf-8")
 
+    # The packaged copy wins, and it wins even when it names nothing (the
+    # release ships no jurisdiction now): the stale copy never fills in.
     assert _registry_substrate_address(str(config_path)) == _packaged_substrate()
 
 
@@ -42,8 +44,8 @@ def test_rep_token_reaches_the_close_config(tmp_path):
     # the same and voice weights are all epsilon.
     from nodes.common.config import load_config
     data = json.loads((REPO / "atn" / "registry.json").read_text(encoding="utf-8"))
-    rep = next(e["contracts"]["rep_token"] for e in data["jurisdictions"].values()
-               if e.get("contracts", {}).get("rep_token"))
+    rep = next((e["contracts"]["rep_token"] for e in data["jurisdictions"].values()
+                if e.get("contracts", {}).get("rep_token")), "")
     config_path = tmp_path / "config.yaml"
     config_path.write_text("", encoding="utf-8")
     assert load_config(str(config_path)).blockchain.rep_token_address == rep

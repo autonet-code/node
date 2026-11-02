@@ -63,3 +63,16 @@ def _fresh_tx_nonces():
     from nodes.common import tx_nonce
     tx_nonce.reset()
     yield
+
+
+@pytest.fixture
+def sample_packaged_registry(monkeypatch):
+    """The release ships no jurisdiction (registry.json is empty until one
+    exists). Tests of the packaged path point it at a sample instead: the
+    retired Shadownet stack, which nothing reaches."""
+    from pathlib import Path
+
+    import atn.config as cfg
+    sample = Path(__file__).parent / "fixtures_sample_registry.json"
+    monkeypatch.setattr(cfg, "_packaged_registry_path", lambda: sample)
+    return sample
