@@ -10,7 +10,6 @@ import pytest
 from atn.agent_tools import _create_agent, _update_agent
 from atn.config import ATNConfig, ProviderConfig
 from atn.events import EventBus
-from atn.fleet_seed import seed_route
 from atn.models import AgentDefinition, AgentMode
 from atn.provider_identity import routing_error, tool_binding_error
 from atn.providers import jev as jev_mod
@@ -185,7 +184,7 @@ async def test_agent_loop_is_one_judgment_with_usage_and_cost(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Daemon wiring: routing, tool binding, catalog, seeding
+# Daemon wiring: routing, tool binding, catalog
 # ---------------------------------------------------------------------------
 
 def _runtime(tmp_path, *, key="sk-test") -> Runtime:
@@ -266,15 +265,3 @@ async def test_provider_card_and_catalog(tmp_path):
     ids = [m["id"] for m in card["models"]]
     assert ids == ["jev-latest", "jev-1.13.0", "jev-preview"]
     assert all(m["capability_tier"] == 1 for m in card["models"])
-
-
-def test_kevin_is_never_seeded_on_jev():
-    from types import SimpleNamespace
-    models = {"jev": [{"id": "jev-latest", "capability_tier": 1}],
-              "ollama": [{"id": "qwen3:4b", "capability_tier": 2}]}
-    providers = SimpleNamespace(
-        registered_provider_ids=lambda: ["jev", "ollama"],
-        get_available_models=lambda pid: models.get(pid, []))
-    assert seed_route(SimpleNamespace(providers=providers)) == ("ollama", "qwen3:4b")
-    providers.registered_provider_ids = lambda: ["jev"]
-    assert seed_route(SimpleNamespace(providers=providers)) is None

@@ -3737,6 +3737,13 @@ class WebSocketBridge:
                     "result": {"address": Account.from_key(key).address,
                                "private_key": key}}
 
+        if msg_type == "agent_api_url":
+            # Where an agent on this machine starts (atn/agent_api.py); the
+            # app shows it on the empty Agents screen.
+            api = getattr(self, "agent_api", None)
+            return {"msg_id": msg_id, "ok": True,
+                    "result": {"url": api.url if api is not None else ""}}
+
         if msg_type == "agent_activity":
             # The calls an external agent made through the MCP proxy
             # (atn/agent_activity.py), newest first.

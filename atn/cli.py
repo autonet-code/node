@@ -565,27 +565,6 @@ async def _load_agents(runtime: Runtime, config: ATNConfig) -> int:
     return loaded
 
 
-def _try_reclaim_port(port: int) -> int | None:
-    """If *port* is held by an ATN MCP server (our own child), kill it.
-
-    Returns the PID that was killed, or None.
-    """
-    import psutil
-
-    for conn in psutil.net_connections(kind="tcp"):
-        if conn.laddr.port == port and conn.status == "LISTEN":
-            try:
-                proc = psutil.Process(conn.pid)
-                cmdline = " ".join(proc.cmdline())
-                if "atn.mcp_server" in cmdline or "atn/mcp_server" in cmdline:
-                    proc.kill()
-                    proc.wait(timeout=3)
-                    return conn.pid
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
-                pass
-    return None
-
-
 def _remote_listener_settings(an) -> tuple[str, int, str]:
     """(host, port, owner_wallet) for the remote (wallet-auth) listener; host
     "" means disabled. Env ATN_REMOTE_WS_HOST / ATN_REMOTE_WS_PORT override
@@ -679,16 +658,6 @@ async def run_cli() -> None:
     # Load agents from YAML files
     await _load_agents(runtime, config)
 
-    # First-boot seeding: a fresh install gets the default onboarding
-    # concierge. One-shot per install — removing it later is respected.
-    try:
-        from .fleet_seed import seed_default_fleet
-        seeded = await seed_default_fleet(runtime, config)
-        if seeded:
-            console.print(f"  [green]Seeded default agent '{seeded}' (onboarding concierge)[/]")
-    except Exception as exc:
-        console.print(f"  [yellow]Default-fleet seeding failed: {exc}[/]")
-
     # Phase 12: if any loaded agent already has on-chain registration,
     # auto-start autonet — the user opted in earlier and the daemon
     # should reflect that on every boot, not require another click.
@@ -740,13 +709,6 @@ async def run_cli() -> None:
             break
         except OSError as exc:
             ws_bridge = None
-            if _attempt == 0 and not _port_configured:
-                # Try to find and kill the process holding the port
-                killed = _try_reclaim_port(_local_port)
-                if killed:
-                    console.print(f"  [yellow]Reclaimed port {_local_port} from stale process (PID {killed})[/]")
-                    await asyncio.sleep(0.5)
-                    continue
             console.print(
                 f"  [red]WebSocket server failed to start: {exc}[/]\n"
                 f"  [dim]Port {_local_port} is in use. Find the process: "

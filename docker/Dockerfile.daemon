@@ -15,8 +15,8 @@
 #   AUTONET_P2P_PORT (4001) - libp2p event gossip / blob transfer.
 # The local owner WS (:7700) binds 127.0.0.1 inside the container and is
 # deliberately NOT exposed. An agent harness reaches it from inside the
-# container through the MCP proxy, e.g.
-# `docker exec -i <ctr> env ATN_MCP_AGENT=<id> python -m atn.mcp_server`.
+# container through the agent API on 127.0.0.1:7702 (atn/agent_api.py), e.g.
+# `docker exec <ctr> curl -s localhost:7702/`.
 #
 # Compose snippet (hardened):
 #

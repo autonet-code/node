@@ -3,8 +3,7 @@
 No daemon-wide default provider/model, no inheritance from a parent agent and
 no hardcoded fallback model: every cognitive agent names its provider and
 model at create time, can change but never clear them, and an agent that
-names neither fails loud instead of being routed. Kevin is seeded on the first
-configured provider with an explicit model, and agents written before the
+names neither fails loud instead of being routed, and agents written before the
 decision are pinned once to what they already ran on.
 """
 from __future__ import annotations
@@ -17,7 +16,6 @@ import yaml
 from atn.agent_tools import _create_agent, _update_agent
 from atn.config import ATNConfig, ProviderConfig, load_config
 from atn.events import EventBus
-from atn.fleet_seed import KEVIN_ID, seed_default_fleet, seed_route
 from atn.legacy_routing_migration import (
     STAMP_NAME,
     _drop_legacy_defaults_section,
@@ -242,76 +240,6 @@ async def test_update_agent_model_moves_the_stats_the_picker_reads(tmp_path):
     assert r.get("status") == "updated", r
     assert convo.get_session_stats()["active_model"] == "echo-2"
     assert rt.registry.get_agent_key("a")
-
-
-# ---------------------------------------------------------------------------
-# Kevin seeding
-# ---------------------------------------------------------------------------
-
-def _fake_rt(order, models):
-    providers = SimpleNamespace(
-        registered_provider_ids=lambda: list(order),
-        get_available_models=lambda pid: models.get(pid, []))
-    return SimpleNamespace(providers=providers)
-
-
-def test_seed_route_rule():
-    models = {
-        "service": [],
-        "claude_max": [
-            {"id": "claude-sonnet-5", "capability_tier": 3},
-            {"id": "claude-opus-4-8", "capability_tier": 4},
-            {"id": "claude-fable-5", "capability_tier": 4},
-        ],
-        "ollama": [{"id": "qwen3:4b", "capability_tier": 2}],
-    }
-    # First provider WITH models; highest tier; ties by list order.
-    assert seed_route(_fake_rt(["service", "claude_max", "ollama"], models)) \
-        == ("claude_max", "claude-opus-4-8")
-    assert seed_route(_fake_rt(["ollama", "claude_max"], models)) \
-        == ("ollama", "qwen3:4b")
-    assert seed_route(_fake_rt([], models)) is None
-
-
-@pytest.mark.asyncio
-async def test_seeding_defers_until_a_provider_is_configured(tmp_path):
-    rt = _runtime(tmp_path, stub=False)
-    cfg = rt._config
-    assert await seed_default_fleet(rt, cfg) is None
-    assert not (cfg.data_dir / ".fleet_seeded").exists()
-    assert rt.get_agent(KEVIN_ID) is None
-
-    # The user configures a provider: the deferred seed runs on it. (The
-    # real add_custom_provider probes the endpoint; register it directly.)
-    async def _add(provider_id, name, base_url, api_key="", label="",
-                   models=None):
-        from atn.models import StepType
-        from atn.providers.openai_compat import OpenAICompatibleProvider
-        cfg.providers[provider_id] = ProviderConfig(
-            name=provider_id, base_url=base_url, api_key=api_key,
-            models=list(models or []))
-        rt.providers._custom_providers.add(provider_id)
-        rt.providers._executors[StepType.COGNITIVE].register_provider(
-            OpenAICompatibleProvider(name=provider_id, base_url=base_url,
-                                     api_key=api_key))
-        return {"status": "ok"}
-
-    rt.providers.add_custom_provider = _add
-    await rt.add_custom_provider(STUB, "Stub", "http://127.0.0.1:9/v1",
-                                 api_key="x", models=["echo-1"])
-    kevin = rt.get_agent(KEVIN_ID)
-    assert kevin is not None
-    assert (kevin.provider, kevin.cognitive_model) == (STUB, "echo-1")
-    assert (cfg.data_dir / ".fleet_seeded").read_text().startswith("seeded")
-
-
-@pytest.mark.asyncio
-async def test_seeding_at_boot_uses_the_configured_provider(tmp_path):
-    rt = _runtime(tmp_path)
-    assert await seed_default_fleet(rt, rt._config) == KEVIN_ID
-    kevin = rt.get_agent(KEVIN_ID)
-    assert (kevin.provider, kevin.cognitive_model) == (STUB, "echo-1")
-
 
 # ---------------------------------------------------------------------------
 # One-time migration of pre-decision agents

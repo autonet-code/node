@@ -41,9 +41,11 @@ It has two listeners:
 
 **Agents.** On-chain identities the daemon hosts. **Native**: the daemon
 runs the agent loop with a provider the owner chose (no default provider).
-**External**: an outside harness (Claude Code, Codex, any MCP client) is the
-brain; the daemon signs and acts for it. External is the main journey:
-people bring the agents they already use.
+**External**: an outside harness (Claude Code, Codex, anything with a shell)
+is the brain; the daemon signs and acts for it. External is the main
+journey: people bring the agents they already use. A fresh daemon has no
+agents (the seeded Kevin concierge was removed 2026-11-02); the app's empty
+Agents screen gives the one line to tell an agent.
 
 **Agent API (`atn/agent_api.py`, HTTP on the WebSocket port + 2).** The
 path for every external agent: anything with a shell explores it from
@@ -54,9 +56,8 @@ searches (`/agents/<id>/tools?q=`, `/services?q=`). Identity is in the path
 a session scoped to that agent's subtree (no owner-only commands, no key
 export); `POST /agents` creates an external agent. `GET /guide` serves
 `atn/external_agents.md`, the whole manual. Refuses browser requests
-(`Origin`) and non-localhost `Host`. The older MCP proxy
-(`python -m atn.mcp_server`) still works but is no longer the documented
-path.
+(`Origin`) and non-localhost `Host`. (It replaced the MCP proxy, deleted
+2026-11-02: an MCP server has to load when a session starts.)
 
 **Activity.** Every call an external agent makes, by any path, is kept in
 its Activity log (`atn/agent_activity.py`) and streamed to the app.

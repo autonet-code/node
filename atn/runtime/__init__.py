@@ -1561,30 +1561,13 @@ class Runtime:
         return await self.providers.provider_list(probe=probe)
 
     async def configure_provider(self, provider_id: str, api_key: str = "") -> dict[str, Any]:
-        result = await self.providers.configure_provider(provider_id, api_key)
-        await self._seed_default_fleet_if_deferred()
-        return result
-
-    async def _seed_default_fleet_if_deferred(self) -> None:
-        """First-boot seeding waits for a configured provider (Kevin is
-        pinned to an explicit provider+model). Retry it now that one exists;
-        a no-op once the install is stamped."""
-        try:
-            from ..fleet_seed import seed_default_fleet
-            seeded = await seed_default_fleet(self, self._config)
-            if seeded:
-                log.info("Seeded default agent '%s' on the newly configured "
-                         "provider", seeded)
-        except Exception:
-            log.warning("Deferred default-fleet seeding failed", exc_info=True)
+        return await self.providers.configure_provider(provider_id, api_key)
 
     async def remove_provider(self, provider_id: str) -> dict[str, str]:
         return await self.providers.remove_provider(provider_id)
 
     async def add_custom_provider(self, provider_id: str, name: str, base_url: str, api_key: str = "", default_model: str = "", models: list[Any] | None = None) -> dict[str, Any]:
-        result = await self.providers.add_custom_provider(provider_id, name, base_url, api_key, default_model, models)
-        await self._seed_default_fleet_if_deferred()
-        return result
+        return await self.providers.add_custom_provider(provider_id, name, base_url, api_key, default_model, models)
 
     async def remove_custom_provider(self, provider_id: str) -> dict[str, str]:
         return await self.providers.remove_custom_provider(provider_id)

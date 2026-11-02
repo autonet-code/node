@@ -1,4 +1,4 @@
-"""User dossier (USER.md) store, profile tool pair, and first-boot seeding."""
+"""User dossier (USER.md) store and profile tool pair."""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +14,6 @@ from atn.agent_tools import (
     _TOOL_CATEGORIES,
     resolve_tool_surface,
 )
-from atn.fleet_seed import seed_default_fleet, KEVIN_ID
 
 
 SAMPLE = """\
@@ -131,54 +130,3 @@ def test_profile_category_bundle():
     assert _TOOL_CATEGORIES["profile"] == {"get_user_profile", "update_user_profile"}
     names = {t["name"] for t in resolve_tool_surface(["profile"])}
     assert names == {"get_user_profile", "update_user_profile"}
-
-
-# ---------------------------------------------------------------------------
-# Seeding
-# ---------------------------------------------------------------------------
-
-def _seed_env(tmp_path: Path, agents: list | None = None):
-    registered: list = []
-
-    async def register_agent(defn, *, legacy=False):
-        registered.append((defn, legacy))
-        return defn.id
-
-    # One configured provider: Kevin is seeded on it with its top-tier model.
-    providers = SimpleNamespace(
-        registered_provider_ids=lambda: ["claude_max"],
-        get_available_models=lambda pid: [
-            {"id": "claude-sonnet-5", "capability_tier": 3},
-            {"id": "claude-fable-5", "capability_tier": 4},
-        ])
-    runtime = SimpleNamespace(
-        list_agents=lambda: list(agents or []),
-        register_agent=register_agent,
-        providers=providers,
-    )
-    config = SimpleNamespace(data_dir=tmp_path, agents_dir=tmp_path / "agents")
-    return runtime, config, registered
-
-
-def test_seed_fresh_install(tmp_path: Path):
-    runtime, config, registered = _seed_env(tmp_path)
-    assert asyncio.run(seed_default_fleet(runtime, config)) == KEVIN_ID
-    (defn, legacy) = registered[0]
-    assert defn.id == KEVIN_ID and legacy is True
-    assert (defn.provider, defn.cognitive_model) == ("claude_max",
-                                                     "claude-fable-5")
-    assert "profile" in defn.tools and "sdk_builtin" in defn.tools
-    assert (tmp_path / ".fleet_seeded").exists()
-    # The definition is persisted so the loader finds Kevin on the next boot
-    # (registration alone is in-memory; the stamp forbids re-seeding).
-    assert (tmp_path / "agents" / KEVIN_ID / "agent.yaml").exists()
-    # Second boot: stamp short-circuits, even with zero agents (Kevin removed).
-    assert asyncio.run(seed_default_fleet(runtime, config)) is None
-    assert len(registered) == 1
-
-
-def test_seed_existing_fleet_stamps_and_skips(tmp_path: Path):
-    runtime, config, registered = _seed_env(tmp_path, agents=["existing"])
-    assert asyncio.run(seed_default_fleet(runtime, config)) is None
-    assert registered == []
-    assert (tmp_path / ".fleet_seeded").exists()

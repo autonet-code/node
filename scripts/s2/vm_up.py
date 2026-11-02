@@ -110,8 +110,8 @@ async def amain(a) -> int:
     procs.start("telemetry", side, cwd=REPO, env=s0.base_env(), log_path=run / "telemetry.log")
 
     for h in households:
-        s0.log(f"MCP for {h.name}: claude mcp add atn-{h.name} -e ATN_MCP_AGENT={h.agent_id} "
-               f"-e ATN_MCP_URL={h.client_url()} -- {sys.executable} -m atn.mcp_server")
+        s0.log(f"Agent API for {h.name}: http://localhost:{h.ws_port + 2}/ "
+               f"(agent id {h.agent_id})")
     s0.log("all households up; keep this process running")
     try:
         while True:
