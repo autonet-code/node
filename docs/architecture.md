@@ -64,7 +64,10 @@ Registry's seed list). Jurisdiction: contracts, charter, epochs (the anchored on
 Substrate by `epoch_history`; never the daemon's local ticks), the
 switch, and the Substrate view. The home section keeps Docs and the
 Novelty map. Each agent's window keeps only
-its own identity, registration indicator and substrate position. The app
+its own identity, registration indicator and substrate position; an
+external agent's window shows, in place of a chat, its Activity: every call
+it made through the MCP server, kept by the daemon (`agent_activity`, the
+newest 500 per agent in `<data_dir>/activity/`). The app
 also approves adoptions. It talks to the daemon's 7700 locally or 7701
 remotely. Agents don't need it.
 

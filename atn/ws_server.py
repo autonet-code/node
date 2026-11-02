@@ -202,6 +202,7 @@ SCOPED_INLINE_ALLOWED = frozenset({
     "agent_processes_list", "agent_process_output", "agent_process_stop",
     "session_stats", "session_context", "context_breakdown",
     "agent_system_prompt", "attachment_upload", "post_message",
+    "agent_activity",
     # Public network and library reads (no owner state, no authority).
     "probe_tools", "tool_reviews", "tool_surface", "list_registered_tools",
     "autonet_status", "epoch_status", "epoch_history", "economy_graph",
@@ -218,7 +219,7 @@ SCOPED_REQUIRES_AGENT = frozenset({
     "get_delegates", "get_delegate_output", "reset_agent_conversation",
     "agent_processes_list", "agent_process_output", "agent_process_stop",
     "session_stats", "session_context", "context_breakdown",
-    "agent_system_prompt",
+    "agent_system_prompt", "agent_activity",
 })
 
 # For scoped sessions, the message keys that name a target agent. Every one
@@ -3707,6 +3708,17 @@ class WebSocketBridge:
                     "result": {"address": Account.from_key(key).address,
                                "private_key": key}}
 
+        if msg_type == "agent_activity":
+            # The calls an external agent made through the MCP proxy
+            # (atn/agent_activity.py), newest first.
+            agent_id = str(msg.get("agent_id") or "")
+            if not agent_id:
+                return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
+            limit = int(msg.get("limit") or 200)
+            return {"msg_id": msg_id, "ok": True, "result": {
+                "agent_id": agent_id,
+                "entries": self._activity_log().read(agent_id, limit)}}
+
         if msg_type == "export_agent_key":
             if not ws_auth.assert_local_key_access(session):
                 return {"msg_id": msg_id, "ok": False,
@@ -3752,13 +3764,62 @@ class WebSocketBridge:
             caller_id = msg.get("caller_id") or ""
         else:
             caller_id = session.root_agent_id
-        result = await execute_tool(msg_type, args, self.runtime, caller_id=caller_id)
+        if self._is_external_agent(caller_id):
+            result = await self._execute_logged(msg_type, args, caller_id)
+        else:
+            result = await execute_tool(msg_type, args, self.runtime, caller_id=caller_id)
 
         # Tools signal errors by returning {"error": "..."} with a truthy value.
         # Some tools include "error": None as a data field — that's not an error.
         if result.get("error"):
             return {"msg_id": msg_id, "ok": False, "error": result["error"]}
         return {"msg_id": msg_id, "ok": True, "result": result}
+
+    def _activity_log(self):
+        log_ = getattr(self, "_activity", None)
+        if log_ is None:
+            from .agent_activity import ActivityLog
+            log_ = self._activity = ActivityLog(self.runtime._config.data_dir)
+        return log_
+
+    def _is_external_agent(self, agent_id: str) -> bool:
+        if not agent_id:
+            return False
+        from .provider_identity import is_external
+        defn = self.runtime.registry._agents.get(agent_id)
+        return defn is not None and is_external(defn)
+
+    async def _execute_logged(self, tool: str, args: dict, caller_id: str) -> dict:
+        """Run an external agent's call and keep it in its activity log, with
+        the same tool-use events a native agent's loop emits, so an open
+        window updates live."""
+        import uuid
+        from .agent_activity import now
+        use_id = uuid.uuid4().hex
+        shown = {k: v for k, v in args.items() if k != "caller_id"}
+        await self.runtime.events.emit(Event(
+            type=EventType.AGENT_TOOL_USE_START, source=caller_id,
+            data={"agent_id": caller_id, "tool_use_id": use_id,
+                  "tool_name": tool, "input": shown}))
+        started = now()
+        try:
+            result = await execute_tool(tool, args, self.runtime, caller_id=caller_id)
+        except Exception as exc:
+            result = {"error": str(exc)}
+        ok = not result.get("error")
+        try:
+            entry = await asyncio.to_thread(
+                self._activity_log().record, caller_id, tool, shown, ok,
+                result.get("error") if not ok else result, started, now())
+        except Exception as exc:
+            log.debug("activity log write failed for %s: %s", caller_id, exc)
+            entry = {"result": ""}
+        await self.runtime.events.emit(Event(
+            type=EventType.AGENT_TOOL_USE_RESULT, source=caller_id,
+            data={"agent_id": caller_id, "tool_use_id": use_id,
+                  "tool_name": tool, "is_error": not ok,
+                  "result_preview": entry.get("result", "")}))
+        return result
 
     # ------------------------------------------------------------------
     # Secrets vault surface (owner-only; values are WRITE-ONLY)
