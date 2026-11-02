@@ -78,6 +78,9 @@ async def test_register_by_path_and_run_the_snapshot(tmp_path):
     res = await execute_tool("register_tool", {"path": str(root)}, rt,
                              caller_id="child")
     assert "error" not in res, res
+    snap = res["snapshot"]
+    assert snap["files"] == 4 and snap["sent_bytes"] > 0
+    assert "exclude" in snap["note"]
     record = rt.tool_store.get(res["digest"])
     m = record.manifest
     assert m["code_format"] == "tree" and m["entrypoint"] == "main.py"

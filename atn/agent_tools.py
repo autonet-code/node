@@ -2963,10 +2963,22 @@ def _snapshot_codebase(runtime: Runtime, raw_path: str) -> dict[str, Any]:
         return {"error": f"no directory at {root}"}
     try:
         meta, tree_digest, archive = tool_tree.snapshot(root)
+        files = tool_tree.unpack(archive)
     except tool_tree.TreeError as exc:
         return {"error": str(exc)}
+    largest = sorted(((len(c), p) for p, c in files.items()), reverse=True)[:5]
+    summary = {
+        "files": len(files),
+        "bytes": sum(len(c) for c in files.values()),
+        "sent_bytes": len(archive),
+        "largest": [{"path": p, "bytes": n} for n, p in largest],
+        "note": ("this is exactly what every household that adopts the tool "
+                 "receives. If anything here should not leave this machine "
+                 "(logs, local data, secrets), add it to 'exclude' in "
+                 f"{tool_tree.MANIFEST_FILE} and register again."),
+    }
     return {"meta": meta, "tree_digest": tree_digest, "archive": archive,
-            "path": str(root)}
+            "path": str(root), "summary": summary}
 
 
 async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -3082,6 +3094,8 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
         "published": result["published"],
         "unified_name": f"reg_{result['digest'][:12]}",
     }
+    if tree:
+        out["snapshot"] = tree["summary"]
     if input.get("publish") and not result["published"]:
         from .tool_security import publish_with_stake
         record = runtime.tool_store.get(result["digest"])
