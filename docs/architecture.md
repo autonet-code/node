@@ -27,7 +27,9 @@ daemon). Also `atn jurisdiction <dao_registry> <rpc_url>`, or `packaged`
 registered in the packaged jurisdiction keeps it. It:
 
 - hosts agents and keeps their keys (age-encrypted vault);
-- runs tools under containment (`tool_guard`, consensus tiers);
+- runs tools under containment (`tool_guard`, consensus tiers); a tool is a
+  codebase anywhere on the machine, snapshotted by content
+  (`docs/tool_codebases.md`), or a single script;
 - gossips events over libp2p and serves blobs;
 - with a registered agent or operator: runs the federated close, votes epoch elections
   and submits claims through the operator key. Without one it closes

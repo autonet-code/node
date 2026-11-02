@@ -90,11 +90,17 @@ def main() -> None:
         _real(str(p)) for p in (policy.get("deny_paths") or []) if str(p).strip()
     )
 
+    # A tool's own code: the directory holding only it (atn/tool_store.py
+    # _materialize_code), first on sys.path so a codebase imports its
+    # modules. Never a directory shared with other tools' code.
+    code_root = str(policy.get("code_root") or "") or os.path.dirname(_real(script))
+    if code_root not in sys.path:
+        sys.path.insert(0, code_root)
     allowed_prefixes = tuple({
         _real(os.getcwd()),
         _real(sys.prefix),
         _real(sys.base_prefix),
-        _real(os.path.dirname(_real(script))),
+        _real(code_root),
     })
 
     # os.fork / os.forkpty too: a forked child can setsid() out of the

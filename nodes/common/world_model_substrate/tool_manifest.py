@@ -64,6 +64,12 @@ def build_tool_manifest(
     code_digest: str = "",
     entrypoint: str = "",
     runtime: str = "",
+    # A codebase tool (docs/tool_codebases.md): code_digest is the archive
+    # blob, tree_digest the content it holds, entrypoint the file to run.
+    code_format: str = "",
+    tree_digest: str = "",
+    # Optional provenance {repo, commit}; never the identity.
+    source: Optional[Dict[str, Any]] = None,
     # attested
     endpoint: str = "",
     provider: str = "",
@@ -118,6 +124,13 @@ def build_tool_manifest(
         manifest["code_digest"] = code_digest
     if entrypoint:
         manifest["entrypoint"] = entrypoint
+    if code_format:
+        manifest["code_format"] = code_format
+    if tree_digest:
+        manifest["tree_digest"] = tree_digest
+    if source:
+        manifest["source"] = {"repo": str(source.get("repo") or ""),
+                              "commit": str(source.get("commit") or "")}
     if runtime:
         manifest["runtime"] = runtime
     if endpoint:
@@ -167,6 +180,15 @@ def validate_manifest(payload: Dict[str, Any]) -> List[str]:
     elif trust == TRUST_PINNED:
         if not payload.get("code_digest"):
             errors.append("pinned manifest requires code_digest")
+        fmt = payload.get("code_format")
+        if fmt not in (None, "tree"):
+            errors.append(f"unknown code_format {fmt!r}")
+        if fmt == "tree":
+            td = str(payload.get("tree_digest") or "")
+            if len(td) != 64 or any(c not in "0123456789abcdef" for c in td):
+                errors.append("a tree tool needs a 64-hex tree_digest")
+            if not str(payload.get("entrypoint") or "").strip():
+                errors.append("a tree tool needs an entrypoint")
     elif trust == TRUST_ATTESTED:
         if not payload.get("connector_id"):
             errors.append("attested manifest requires connector_id")

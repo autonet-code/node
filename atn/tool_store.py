@@ -144,6 +144,9 @@ class ToolRecord:
     # replacing a core built-in (blob store). Surfaced so an accuser can copy
     # it into ToolBond.accuse(digest, evidenceCid). Telemetry, not consensus.
     last_evidence_digest: str = ""
+    # Where the author's codebase lives on this machine (local state, never
+    # in the manifest): registering it again snapshots a new version.
+    source_path: str = ""
 
     @property
     def author(self) -> str:
@@ -172,6 +175,7 @@ class ToolRecord:
             "published_in": sorted(self.published_in),
             **({"jurisdiction": self.jurisdiction} if self.jurisdiction else {}),
             "local_author": self.local_author,
+            "source_path": self.source_path,
             "registered_ts": self.registered_ts,
             "origin": self.origin,
             **({"core_replacement_ack": True}
@@ -326,6 +330,10 @@ class ToolStore:
         dependencies: list[str] | None = None,
         capabilities: dict[str, Any] | None = None,
         novelty: dict[str, Any] | None = None,
+        archive: bytes | None = None,
+        tree_digest: str = "",
+        source: dict[str, Any] | None = None,
+        source_path: str = "",
     ) -> dict[str, Any]:
         """Build, sign, store, and index a tool manifest. Returns
         ``{"digest", "manifest"}`` or raises ValueError on bad input.
@@ -398,7 +406,17 @@ class ToolStore:
                 capabilities = None
 
         code_digest = ""
-        if code:
+        code_format = ""
+        if archive is not None:
+            # A codebase tool (atn/tool_tree.py): the archive is the blob,
+            # the tree digest names its content.
+            if code:
+                raise ValueError("give either code or a codebase path, not both")
+            if not tree_digest or not entrypoint:
+                raise ValueError("a codebase tool needs its tree digest and entrypoint")
+            code_digest = blobs.add_bytes(archive)
+            code_format = "tree"
+        elif code:
             raw = code.encode("utf-8")
             if len(raw) > _MAX_CODE_BYTES:
                 raise ValueError(
@@ -458,6 +476,8 @@ class ToolStore:
                     and m.get("name") == name
                     and m.get("trust_class") == trust_class
                     and (m.get("code_digest") or "") == code_digest
+                    and (m.get("tree_digest") or "") == (tree_digest if code_format else "")
+                    and (m.get("source") or None) == (source or None)
                     and (m.get("entrypoint") or "") == entrypoint
                     and (m.get("provider") or "") == provider
                     and (m.get("connector_id") or "") == connector_id
@@ -469,6 +489,9 @@ class ToolStore:
                     and m.get("input_schema") == input_schema):
                 if publish and not existing.published:
                     self.set_published(existing.digest, True)
+                if source_path and existing.source_path != source_path:
+                    existing.source_path = source_path
+                    self._persist()
                 log.debug("register: content-identical to %s; reusing",
                           existing.digest[:16])
                 return {"digest": existing.digest,
@@ -488,6 +511,9 @@ class ToolStore:
             code_digest=code_digest,
             entrypoint=entrypoint,
             runtime="python3" if code_digest else "",
+            code_format=code_format,
+            tree_digest=tree_digest if code_format else "",
+            source=source if code_format else None,
             provider=provider,
             connector_id=connector_id,
             version_of=version_of,
@@ -507,6 +533,7 @@ class ToolStore:
                           else set()),
             local_author=author,
             registered_ts=int(time.time()),
+            source_path=source_path,
         )
         self._records[digest] = record
         self._persist()
@@ -964,12 +991,58 @@ class ToolStore:
                              ok="error" not in result, via=via)
         return result
 
+    def _materialize_code(self, record: ToolRecord) -> tuple[Path, Path]:
+        """``(script, code root)`` for a pinned tool: its code extracted into
+        a directory of its own under ``code_cache`` and verified against its
+        digest before every run, so no tool can change another's code (or
+        its own between runs)."""
+        import hashlib
+        manifest = record.manifest
+        code_digest = str(manifest.get("code_digest") or "")
+        cache_dir = self._dir / "code_cache"
+        if manifest.get("code_format") == "tree":
+            from . import tool_tree
+            tree = str(manifest.get("tree_digest") or "")
+            root = cache_dir / "trees" / tree
+            if not (root.is_dir() and tool_tree.verify_dir(root, tree)):
+                raw = self._blob_store().get_bytes(code_digest)
+                if raw is None:
+                    raise ValueError(f"code blob {code_digest[:16]}... not in local store")
+                root = tool_tree.materialize(raw, tree, cache_dir / "trees")
+            entry = str(manifest.get("entrypoint") or "").replace("\\", "/")
+            script = (root / entry).resolve()
+            if root.resolve() not in script.parents:
+                raise ValueError("entrypoint escapes the tool's code")
+            return script, root
+        root = cache_dir / "scripts" / code_digest
+        script = root / "tool.py"
+        ok = False
+        if script.is_file():
+            try:
+                ok = (hashlib.sha256(script.read_bytes()).hexdigest() == code_digest
+                      and [p.name for p in root.iterdir()] == ["tool.py"])
+            except OSError:
+                ok = False
+        if not ok:
+            raw = self._blob_store().get_bytes(code_digest)
+            if raw is None:
+                raise ValueError(f"code blob {code_digest[:16]}... not in local store")
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+            root.mkdir(parents=True, exist_ok=True)
+            script.write_bytes(raw)
+        return script, root
+
     def _exec_spec(
         self, record: ToolRecord, script: Path,
         secrets: frozenset[str] | None = None,
         trace_path: str | None = None,
+        code_root: Path | None = None,
     ) -> tuple[list[str], dict[str, str] | None, str | None]:
         """(argv, env, cwd) for a pinned tool subprocess.
+
+        ``code_root`` is the tool's own extracted code: readable, first on
+        ``sys.path``, and the only code it can reach.
 
         ADOPTED tools run fully contained (docs/tool_substrate.md — Adoption):
 
@@ -1036,6 +1109,8 @@ class ToolStore:
                     policy["hosts"] = sorted(hosts)
             if trace_path:
                 policy["trace_path"] = str(trace_path)
+            if code_root is not None:
+                policy["code_root"] = str(code_root)
             env["ATN_TOOL_POLICY"] = json.dumps(policy)
             return ([sys.executable, str(guard), str(script)], env, None)
 
@@ -1070,6 +1145,8 @@ class ToolStore:
             # Evidence capture (Decision 2026-10-12): the guard appends one
             # JSON line per observed open / socket / spawn audit event.
             policy["trace_path"] = str(trace_path)
+        if code_root is not None:
+            policy["code_root"] = str(code_root)
         env["ATN_TOOL_POLICY"] = json.dumps(policy)
         return ([sys.executable, str(guard), str(script)], env, str(sandbox))
 
@@ -1085,6 +1162,10 @@ class ToolStore:
             "TEMP": str(sandbox),
             "TMP": str(sandbox),
             "PYTHONIOENCODING": "utf-8",
+            # Bytecode caches live in the tool's sandbox, never beside its
+            # code: Python would load a .pyc planted there instead of the
+            # verified source.
+            "PYTHONPYCACHEPREFIX": str(sandbox / "pycache"),
         }
         # Windows: python/network runtime needs SystemRoot.
         for keep in ("SYSTEMROOT", "SystemRoot", "WINDIR"):
@@ -1210,21 +1291,15 @@ class ToolStore:
         If the manifest declares secrets AND the caller's allowance covers
         them, a short-lived broker session is bound to the subprocess PID for
         the duration of the call (docs/tool_secret_binding.md)."""
-        code_digest = record.manifest["code_digest"]
-        blobs = self._blob_store()
-        raw = blobs.get_bytes(code_digest)
-        if raw is None:
-            return {"error": f"code blob {code_digest[:16]}... not in local store"}
-
-        cache_dir = self._dir / "code_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        script = cache_dir / f"{code_digest}.py"
-        if not script.exists():
-            script.write_bytes(raw)
+        try:
+            script, code_root = self._materialize_code(record)
+        except (ValueError, OSError) as exc:
+            return {"error": str(exc)}
 
         session, services = self._tool_secret_session(record, caller_id)
         argv, env, cwd = self._exec_spec(record, script, services,
-                                         trace_path=trace_path)
+                                         trace_path=trace_path,
+                                         code_root=code_root)
         from . import contained_pids
         tracked_pid: int | None = None
         try:
@@ -1303,12 +1378,7 @@ class ToolStore:
         nested mechanical receipt self-records tagged to this composite,
         and ``_depth=depth+1`` so ``_COMPOSITE_MAX_DEPTH`` bounds recursion.
         """
-        code_digest = record.manifest["code_digest"]
         declared: set[str] = set(record.manifest.get("dependencies") or [])
-        blobs = self._blob_store()
-        raw = blobs.get_bytes(code_digest)
-        if raw is None:
-            return {"error": f"code blob {code_digest[:16]}... not in local store"}
 
         if depth >= _COMPOSITE_MAX_DEPTH:
             return {"error": f"composition depth exceeded {_COMPOSITE_MAX_DEPTH}"}
@@ -1316,11 +1386,10 @@ class ToolStore:
         timeout = float(_PINNED_EXEC_TIMEOUT_S)
         from . import contained_pids
         tracked_pid: int | None = None
-        cache_dir = self._dir / "code_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        script = cache_dir / f"{code_digest}.py"
-        if not script.exists():
-            script.write_bytes(raw)
+        try:
+            script, code_root = self._materialize_code(record)
+        except (ValueError, OSError) as exc:
+            return {"error": str(exc)}
 
         # Same tool-secret binding as the sealed path. Nested dep calls
         # run under the ORIGINAL caller's authority (see the frame handler
@@ -1328,7 +1397,8 @@ class ToolStore:
         # the same L_agent — a composite cannot lend its secrets to a
         # dependency.
         session, services = self._tool_secret_session(record, caller_id)
-        argv, env, cwd = self._exec_spec(record, script, services)
+        argv, env, cwd = self._exec_spec(record, script, services,
+                                         code_root=code_root)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -2267,6 +2337,16 @@ class ToolStore:
             # Not a refusal: nobody holding the code is online right now.
             # approve_adoption keeps the approval and retries (#46).
             return None, _NO_CODE_HOLDER
+        if payload.get("code_format") == "tree":
+            # A codebase: the archive must unpack safely and hold exactly
+            # the content its tree digest names.
+            from . import tool_tree
+            try:
+                files = tool_tree.unpack(code_raw)
+            except (tool_tree.TreeError, ValueError, OSError) as exc:
+                return None, f"tool code is not a valid snapshot: {exc}"
+            if tool_tree.tree_digest_of(files) != str(payload.get("tree_digest") or ""):
+                return None, "tool code does not match its tree digest"
 
         # Provenance is LOAD-BEARING here, not decoration. propose_adoption
         # assembles {signed, greenlit, busted, vets} for the owner to read,
@@ -2688,7 +2768,7 @@ class ToolStore:
         code_raw = await self.fetch_bytes(code_digest) if code_digest else None
 
         if verdict is None:
-            return {
+            out = {
                 "digest": digest,
                 "manifest": manifest,
                 "code": (code_raw.decode("utf-8", errors="replace")
@@ -2696,6 +2776,31 @@ class ToolStore:
                 "note": ("review the code against the manifest, then call "
                          "again with verdict 'pass' or 'fail' and a report"),
             }
+            if manifest.get("code_format") == "tree" and code_raw is not None:
+                # A codebase: its files, not the archive bytes. Large or
+                # binary files are listed with their hash only.
+                import hashlib
+                from . import tool_tree
+                try:
+                    files = tool_tree.unpack(code_raw)
+                except tool_tree.TreeError as exc:
+                    return {"error": f"tool code is not a valid snapshot: {exc}"}
+                shown: dict[str, Any] = {}
+                for rel, content in sorted(files.items()):
+                    text = None
+                    if len(content) <= 256 * 1024:
+                        try:
+                            text = content.decode("utf-8")
+                        except UnicodeDecodeError:
+                            text = None
+                    shown[rel] = text if text is not None else {
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                        "bytes": len(content)}
+                out["code"] = None
+                out["files"] = shown
+                out["note"] = ("a codebase: 'files' holds every file (the "
+                               "entrypoint is the manifest's). " + out["note"])
+            return out
 
         if verdict not in ("pass", "fail"):
             return {"error": "verdict must be 'pass' or 'fail'"}
@@ -3191,6 +3296,7 @@ class ToolStore:
                                  or (cur if origin == "adopted" else "")),
                 local_author=str(row.get("local_author") or ""),
                 registered_ts=int(row.get("registered_ts") or 0),
+                source_path=str(row.get("source_path") or ""),
                 origin=origin,
                 core_replacement_ack=bool(row.get("core_replacement_ack")),
                 last_evidence_digest=str(row.get("last_evidence_digest") or ""),

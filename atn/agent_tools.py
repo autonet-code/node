@@ -700,10 +700,16 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="register_tool",
         description=(
-            "Author a new tool. Provide either `code` (a Python script reading JSON "
-            "arguments on stdin and printing a JSON result — becomes a PINNED tool, "
-            "behavior locked by content hash) or a `connector_id` (ATTESTED, "
-            "connector-backed). Registration is ALWAYS private: local capability "
+            "Author a new tool. Best: `path`, a codebase anywhere on this machine "
+            "with an autonet-tool.json at its root (name, description, "
+            "input_schema, entrypoint, and optionally capabilities, dependencies, "
+            "novelty, exclude, source {repo, commit}); the daemon snapshots the "
+            "tree into a content-addressed PINNED tool, and registering the path "
+            "again after edits makes a new version (pass version_of). Or `code`, "
+            "a single Python script, or a `connector_id` (ATTESTED, "
+            "connector-backed). A tool's entrypoint reads JSON arguments on stdin "
+            "and prints a JSON result; stdlib or vendored packages only. "
+            "Registration is ALWAYS private: local capability "
             "scoped to you and your superiors; only the user can grant it outside "
             "that lineage. You own what you author. Publishing to the substrate "
             "(where other agents can find, review and adopt it, and you earn a "
@@ -722,7 +728,8 @@ _TOOLS: list[ToolDefinition] = [
                     "description": "JSON schema of the tool's arguments.",
                     "additionalProperties": True,
                 },
-                "code": {"type": "string", "description": "Python source (pinned tools). Reads JSON args on stdin, prints JSON result on stdout."},
+                "path": {"type": "string", "description": "A codebase directory on this machine with autonet-tool.json at its root. Its fields replace name, description, input_schema, capabilities, dependencies and novelty."},
+                "code": {"type": "string", "description": "Python source (single-script pinned tools). Reads JSON args on stdin, prints JSON result on stdout."},
                 "connector_id": {"type": "string", "description": "MCP connector backing this tool (attested); the tool name must match a connector operation."},
                 "provider": {"type": "string", "description": "External provider identity for attested tools (e.g. 'google')."},
                 "dependencies": {"type": "array", "items": {"type": "string"}, "description": "Digests of published tools this tool calls at runtime (pinned only). Declaration = the runtime allowlist; nested calls run under the ORIGINAL caller's authority. Composite tools use the line-framed sandbox protocol (see docs/tool_substrate.md)."},
@@ -730,7 +737,7 @@ _TOOLS: list[ToolDefinition] = [
                 "version_of": {"type": "string", "description": "Digest of YOUR OWN earlier tool this revises (artifact lineage; the successor carries its predecessor's rating until its own reviews settle). Another author's tool is refused: publish a new tool with its own novelty claim instead."},
                 "novelty": _NOVELTY_SCHEMA,
             },
-            "required": ["name", "description", "input_schema"],
+            "required": [],
         },
     ),
     ToolDefinition(
@@ -2918,6 +2925,38 @@ def _review_due(runtime: Runtime, agent_id: str) -> dict[str, str]:
     return book.setdefault(agent_id, {})
 
 
+def _snapshot_codebase(runtime: Runtime, raw_path: str) -> dict[str, Any]:
+    """Snapshot the codebase at ``raw_path`` (atn/tool_tree.py), refusing
+    the daemon's own data and the vault."""
+    from pathlib import Path
+    from . import tool_tree
+    try:
+        root = Path(raw_path).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        return {"error": f"bad path: {exc}"}
+    forbidden = []
+    data_dir = getattr(getattr(runtime, "_config", None), "data_dir", None)
+    if data_dir is not None:
+        forbidden.append(Path(data_dir).resolve())
+    try:
+        from ._vendor.kevin import keystore as _ks
+        forbidden.append(Path(_ks.KEYSTORE_DIR).resolve())
+    except Exception:  # noqa: BLE001
+        pass
+    for f in forbidden:
+        if root == f or f in root.parents or root in f.parents:
+            return {"error": "a tool's codebase cannot be (or contain) the "
+                             "daemon's data or vault"}
+    if not root.is_dir():
+        return {"error": f"no directory at {root}"}
+    try:
+        meta, tree_digest, archive = tool_tree.snapshot(root)
+    except tool_tree.TreeError as exc:
+        return {"error": str(exc)}
+    return {"meta": meta, "tree_digest": tree_digest, "archive": archive,
+            "path": str(root)}
+
+
 async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Author a tool manifest on the tool substrate (docs/tool_substrate.md).
 
@@ -2925,6 +2964,15 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
     is derived, never accepted as input. Owner callers author as "user".
     """
     from .tool_store import OWNER_AUTHOR
+    tree: dict[str, Any] | None = None
+    if input.get("path"):
+        tree = _snapshot_codebase(runtime, str(input["path"]))
+        if "error" in tree:
+            return tree
+        meta = tree["meta"]
+        input = {**input, **{k: meta[k] for k in (
+            "name", "description", "input_schema", "capabilities",
+            "dependencies", "novelty") if k in meta}}
     name = str(input.get("name") or "").strip()
     if not name:
         return {"error": "Missing required field: 'name'"}
@@ -3006,6 +3054,10 @@ async def _register_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, A
             dependencies=dependencies,
             capabilities=capabilities or None,
             novelty=novelty,
+            **({"archive": tree["archive"], "tree_digest": tree["tree_digest"],
+                "entrypoint": tree["meta"]["entrypoint"],
+                "source": tree["meta"].get("source"),
+                "source_path": tree["path"]} if tree else {}),
         )
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}

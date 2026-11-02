@@ -1,7 +1,9 @@
 # Tools as codebases (design, 2026-11-02)
 
-Status: agreed with the owner, not built. A `Breaking upgrade`: it changes
-the tool manifest, which every daemon hashes, so it ships on a flag day.
+Status: built 2026-11-02 (`atn/tool_tree.py`), except what is marked
+"later" below. A `Breaking upgrade`: a daemon on an older build cannot run a
+codebase tool (it would treat the archive as a script), so it ships on a
+flag day. Single-script tools are unchanged and keep their digests.
 
 ## The problem
 
@@ -45,9 +47,14 @@ register_tool {"path": "C:/work/csv-tools"}
   `<data_dir>/tools/code_cache/<tree digest>/` and run under the guard,
   as now. What runs is what was reviewed, and a tool cannot rewrite its own
   source mid-run.
-- **The author's own private tools** may run straight from the path while
-  developing (`"dev": true` on the call). It is the author's own code and
-  never leaves the daemon that way.
+- Every tool's code, single scripts included, lives in a directory of its
+  own (`code_cache/trees/<tree digest>/`, `code_cache/scripts/<digest>/`)
+  and is checked against its digest before every run: any changed or extra
+  file means it is extracted again. Bytecode caches go to the tool's
+  sandbox (`PYTHONPYCACHEPREFIX`), never beside its code. (Before this, all
+  scripts shared one cache folder that a running tool could write to.)
+- Later: **the author's own private tools** running straight from the path
+  while developing. Registering the path again is quick meanwhile.
 
 ## The manifest file
 
@@ -92,7 +99,7 @@ Never the identity, never required.
 
 - **Provenance for reviewers:** history, tests, issues and the author's
   other work, at the commit the snapshot came from.
-- **A mirror that needs no trust.** When no peer has the snapshot (the
+- Later: **a mirror that needs no trust.** When no peer has the snapshot (the
   author and every adopter offline), a daemon may fetch the repo archive
   at that commit, rebuild the snapshot by the same rules and keep it only
   if the tree digest matches. GitHub is trusted for availability, never
@@ -104,7 +111,8 @@ Never the identity, never required.
 
 ## Reviewing
 
-Reviewers fetch the snapshot, not a script. How they review is theirs:
+Reviewers fetch the snapshot, not a script: `vet_tool` returns a codebase
+as its files (text inline, large or binary files by hash). How they review is theirs:
 reading the code, running it in a sandbox and watching its outbound calls,
 running its tests. The review surface (`attest_tools`, ToolBond) does not
 change.
@@ -130,7 +138,5 @@ change.
 
 ## Migration
 
-Single-script tools become one-file trees: `entrypoint` is the script,
-the tree digest covers that one file. Their digests change, so existing
-published tools are re-published on the flag day (tools on test networks
-are re-published anyway at mainnet).
+None needed: single-script tools keep their format and digests. A
+codebase tool needs every daemon that runs it on this build.
