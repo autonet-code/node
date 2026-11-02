@@ -78,12 +78,25 @@ async def _write_framed(stream, data: bytes):
     await stream.close()
 
 
-async def _read_framed(stream) -> bytes:
+# A peer announces each frame's length; refuse it at the header instead of
+# reading whatever is announced. Blob replies (anchored state included) may
+# be large; every other message is small.
+MAX_FRAME_BYTES = 32 * 1024 * 1024
+MAX_BLOB_FRAME_BYTES = 256 * 1024 * 1024
+
+
+def _check_length(length: int, max_len: int) -> None:
+    if length > max_len:
+        raise ValueError(f"frame of {length} bytes exceeds the {max_len}-byte cap")
+
+
+async def _read_framed(stream, max_len: int = MAX_FRAME_BYTES) -> bytes:
     """Read a length-prefixed frame and return the payload."""
     header = await stream.read(4)
     if len(header) < 4:
         raise ValueError("Truncated frame header")
     length = struct.unpack(">I", header)[0]
+    _check_length(length, max_len)
     if length == 0:
         await stream.close()
         return b""
@@ -111,12 +124,13 @@ async def _write_frame_no_close(stream, data: bytes):
         offset += len(chunk)
 
 
-async def _read_frame_no_close(stream) -> bytes:
+async def _read_frame_no_close(stream, max_len: int = MAX_FRAME_BYTES) -> bytes:
     """Read a length-prefixed frame without closing the stream (for request-response)."""
     header = await stream.read(4)
     if len(header) < 4:
         raise ValueError("Truncated frame header")
     length = struct.unpack(">I", header)[0]
+    _check_length(length, max_len)
     if length == 0:
         return b""
     parts = []
@@ -1601,7 +1615,7 @@ class AutonetHost:
             # Read response with timeout
             data = b""
             with trio.move_on_after(timeout):
-                data = await _read_frame_no_close(stream)
+                data = await _read_frame_no_close(stream, MAX_BLOB_FRAME_BYTES)
             await stream.close()
 
             if data:
