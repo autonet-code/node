@@ -61,9 +61,18 @@ async def test_use_tool_reports_review_due(tmp_path, monkeypatch):
     monkeypatch.setattr(rt.tool_registry, "call_tool", call_tool)
     monkeypatch.setattr(rt.tool_registry, "get_tool",
                         lambda name: SimpleNamespace(digest="d" * 64))
+    origin = {"value": "adopted"}
+    monkeypatch.setattr(rt.tool_store, "get",
+                        lambda d: SimpleNamespace(origin=origin["value"]))
     out = await _use_tool(rt, {"name": "word_count", "_caller_id": "cc"})
     assert out["review_due"] == ["word_count"]
     assert _review_due(rt, "cc") == {"d" * 64: "word_count"}
+
+    # The household's own tools are never due: nobody reviews their own.
+    rt.__dict__["_external_review_due"] = {}
+    origin["value"] = "authored"
+    out = await _use_tool(rt, {"name": "word_count", "_caller_id": "cc"})
+    assert "review_due" not in out
 
 
 def test_local_owner_key_is_stable(tmp_path):

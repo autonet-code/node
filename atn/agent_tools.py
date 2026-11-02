@@ -2918,7 +2918,11 @@ async def _use_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         due = _review_due(runtime, caller_id)
         tool = runtime.tool_registry.get_tool(name)
         digest = getattr(tool, "digest", "") if tool is not None else ""
-        if digest and not result.get("error"):
+        record = runtime.tool_store.get(digest) if digest else None
+        # Only another household's tools are reviewable: your own (and your
+        # household's) tools can't be reviewed by you, so they are not due.
+        foreign = record is not None and record.origin == "adopted"
+        if digest and foreign and not result.get("error"):
             due[digest] = name
         if due:
             result = {**result, "review_due": sorted(set(due.values()))}
