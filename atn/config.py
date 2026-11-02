@@ -822,7 +822,8 @@ def jurisdiction_key(an: "RPBConfig") -> str:
 
 def _fetch_registry(url: str) -> dict[str, Any] | None:
     """Fetch a registry document from ``url``. None on any failure; never
-    raises. Only used for the ATN_REGISTRY_URL override."""
+    raises. Used for the ATN_REGISTRY_URL override and the recommended
+    jurisdiction."""
     try:
         import httpx
 
@@ -903,10 +904,51 @@ def packaged_jurisdiction() -> dict[str, Any] | None:
             "dao": str(contracts["dao"]), "name": str(entry.get("name") or "")}
 
 
+# The recommended jurisdiction lives in the repo, not the release
+# (docs/tool_codebases.md, related decisions 2026-11-02): a contract fix and
+# migration while the founders hold a supermajority of REP needs no new
+# release. Joining it pins its DAO in the data dir, so a later change to the
+# file moves no running daemon. ATN_RECOMMENDED_URL overrides the source.
+RECOMMENDED_REGISTRY_URL = (
+    "https://raw.githubusercontent.com/autonet-code/node/master/registry.json")
+
+
+def _selection_from_registry(data: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        entry = data["jurisdictions"]["autonet"]
+    except Exception:
+        return None
+    contracts, net = entry.get("contracts", {}), entry.get("network", {})
+    if not contracts.get("dao") or not contracts.get("dao_registry") \
+            or not net.get("chain_id"):
+        return None
+    return {"chain_id": int(net["chain_id"]),
+            "rpc_url": str(net.get("rpc_url") or ""),
+            "dao_registry": str(contracts["dao_registry"]),
+            "dao": str(contracts["dao"]), "name": str(entry.get("name") or "")}
+
+
+def recommended_jurisdiction() -> dict[str, Any] | None:
+    """The recommended jurisdiction as a selection to pin, with ``source``:
+    the repo's registry.json, else (unreachable) the copy in this release.
+    None when neither names one."""
+    url = os.environ.get("ATN_RECOMMENDED_URL", "").strip() or RECOMMENDED_REGISTRY_URL
+    data = _fetch_registry(url)
+    sel = _selection_from_registry(data) if data else None
+    if sel is not None:
+        return {**sel, "source": url}
+    try:
+        data = json.loads(_packaged_registry_path().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    sel = _selection_from_registry(data)
+    return {**sel, "source": "release"} if sel else None
+
+
 NO_JURISDICTION_MESSAGE = (
     "No jurisdiction configured. Agents and tools work locally, but nothing "
     "joins a network until you choose one: the app's Jurisdiction tab, or "
-    "`atn jurisdiction packaged` (or `atn jurisdiction <dao_registry> "
+    "`atn jurisdiction recommended` (or `atn jurisdiction <dao_registry> "
     "<rpc_url>`), then restart.")
 
 

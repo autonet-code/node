@@ -69,6 +69,12 @@ curl -s localhost:7702/agents -d '{"id": "my-agent", "name": "My agent", "harnes
 You are the agent's brain: the daemon keeps its key in its encrypted vault
 and signs for it, but never runs it.
 
+A fresh daemon is on no network: `GET /` says so under `jurisdiction`.
+Join the recommended one with
+`POST /agents/<id>/join_recommended_jurisdiction`; the daemon restarts, so
+wait a few seconds before the next call. Everything above works locally
+until then.
+
 **The human's part, in the Autonet app:** connect their wallet as the
 household's owner, approve your agent's registration on chain, delegate
 their REP to the daemon, and approve tool adoptions. Money only moves from

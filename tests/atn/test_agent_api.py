@@ -128,3 +128,55 @@ def test_refuses_browsers_and_foreign_hosts(api_run):
         assert s == 403
         assert bridge.calls == []
     api_run(go)
+
+
+def test_join_recommended_jurisdiction_is_logged_as_the_agent(api_run):
+    async def go(port, bridge):
+        bridge.runtime.jurisdiction = ""
+        s, index = await _request(port, "GET", "/")
+        assert "join_recommended_jurisdiction" in index["jurisdiction"]
+        s, r = await _request(port, "POST",
+                              "/agents/ext/join_recommended_jurisdiction", {})
+        assert s == 200
+        msg, session = bridge.calls[-1]
+        assert msg["type"] == "autonet_switch" and msg["recommended"] is True
+        assert msg["caller_id"] == "ext" and session.owner
+    api_run(go)
+
+
+def test_recommended_jurisdiction_prefers_the_repo_then_the_release(monkeypatch):
+    from atn import config
+    doc = {"jurisdictions": {"autonet": {
+        "name": "Repo DAO",
+        "network": {"chain_id": 31337, "rpc_url": "http://x"},
+        "contracts": {"dao": "0x" + "11" * 20, "dao_registry": "0x" + "22" * 20}}}}
+    monkeypatch.setattr(config, "_fetch_registry", lambda url: doc)
+    rec = config.recommended_jurisdiction()
+    assert rec["name"] == "Repo DAO" and rec["source"] == config.RECOMMENDED_REGISTRY_URL
+    assert "packaged" not in rec
+    monkeypatch.setattr(config, "_fetch_registry", lambda url: None)
+    rec = config.recommended_jurisdiction()
+    assert rec is None or rec["source"] == "release"
+
+
+def test_switch_to_recommended_pins_the_dao(tmp_path, monkeypatch):
+    from atn import config, ws_server
+    from atn.ws_auth import ClientSession
+    rec = {"chain_id": 31337, "rpc_url": "http://x", "name": "Repo DAO",
+           "dao_registry": "0x" + "22" * 20, "dao": "0x" + "11" * 20,
+           "source": "repo"}
+    monkeypatch.setattr(config, "recommended_jurisdiction", lambda: rec)
+    monkeypatch.setattr(config, "check_jurisdiction", lambda reg, rpc: {
+        "ok": True, "errors": [], "chain_id": 31337, "rpc_url": rpc,
+        "dao_registry": reg, "dao": rec["dao"], "key": "31337:" + rec["dao"]})
+    bridge = ws_server.WebSocketBridge.__new__(ws_server.WebSocketBridge)
+    bridge.runtime = SimpleNamespace(
+        jurisdiction="", registry=SimpleNamespace(_agents={}),
+        _config=SimpleNamespace(data_dir=tmp_path))
+    owner = ClientSession(local=True, authed=True, owner=True)
+    resp = asyncio.run(bridge._handle_message(
+        {"type": "autonet_switch", "recommended": True, "restart": False}, owner))
+    assert resp["ok"] and resp["result"]["switched"]
+    saved = json.loads((tmp_path / "jurisdiction.json").read_text())
+    assert saved["dao"] == rec["dao"] and saved["name"] == "Repo DAO"
+    assert "packaged" not in saved

@@ -17,9 +17,14 @@ first; the owner chooses, and the daemon reads the chosen one's Registry
 at every start. Joining starts its network at once (gossip, the tool
 substrate, tool use, the seed address); registering an agent is optional
 and only adds consensus (closes, elections, claims), which is how a
-household earns. Headless: `atn jurisdiction packaged` (the
-release's `registry.json`) or `atn jurisdiction <dao_registry> <rpc_url>`. A data dir whose agents were already registered
-in the packaged jurisdiction keeps it. It:
+household earns. Headless: `atn jurisdiction recommended`, or an agent's
+`POST /agents/<id>/join_recommended_jurisdiction`: the recommended one is
+read from `registry.json` on master in `autonet-code/node` (the release's
+copy if unreachable), so a migration needs no release, and joining pins
+its DAO in the data dir (a later edit to the file moves no running
+daemon). Also `atn jurisdiction <dao_registry> <rpc_url>`, or `packaged`
+(the release's copy, unpinned). A data dir whose agents were already
+registered in the packaged jurisdiction keeps it. It:
 
 - hosts agents and keeps their keys (age-encrypted vault);
 - runs tools under containment (`tool_guard`, consensus tiers);
@@ -130,7 +135,7 @@ agent directory.
 | who | runs | how |
 |---|---|---|
 | Desktop user | app + daemon | install, open the app, choose a jurisdiction (the recommended one is marked), connect a wallet |
-| Coding-agent user | daemon + any agent harness | `pip install autonet-computer`, `atn jurisdiction packaged`, `atn --headless`; the agent starts at the agent API (`GET /`) and reads the guide |
+| Coding-agent user | daemon + any agent harness | `pip install autonet-computer`, `atn --headless`; the agent starts at the agent API (`GET /`), reads the guide and joins the recommended jurisdiction itself |
 | Server / cloud VM | daemon on the VM (`scripts/s2/vm_up.py`), or in Docker (`docker/Dockerfile.daemon`) | NAT'd, HTTPS egress only; the agent runs on the same VM and talks to its daemon with `atn send` (WAN run) or the MCP server |
 | Network supporter | `atn relay` | a public host; its hostname goes in the Registry |
 

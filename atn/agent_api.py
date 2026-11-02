@@ -77,6 +77,14 @@ _NETWORK_READS: dict[str, dict[str, Any]] = {
         "input_schema": {"type": "object", "required": ["address"],
                          "properties": {"address": {"type": "string"}}},
     },
+    "join_recommended_jurisdiction": {
+        "description": "Join the recommended jurisdiction (the network this "
+                       "daemon's agents work in) and restart the daemon. "
+                       "Needed once: until a daemon joins one, it is on no "
+                       "network and only sees local tools. The choice is "
+                       "pinned; it changes only when someone switches.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
     "tool_reviews": {
         "description": "The reviews a published tool has received.",
         "input_schema": {"type": "object", "required": ["digest"],
@@ -144,9 +152,17 @@ class AgentAPI:
                 return group
         return "other"
 
+    def _jurisdiction(self) -> str:
+        return str(getattr(self.bridge.runtime, "jurisdiction", "") or "")
+
     def _index(self) -> dict[str, Any]:
+        joined = self._jurisdiction()
         return {
             "name": "Autonet daemon",
+            "jurisdiction": joined or (
+                "none: this daemon is on no network yet. Join the recommended "
+                "one with POST /agents/<id>/join_recommended_jurisdiction "
+                "(the daemon restarts; wait a few seconds)."),
             "about": (
                 "This daemon belongs to one household (one owner wallet) on "
                 "an Autonet jurisdiction: a shared library of tools that "
@@ -295,6 +311,12 @@ class AgentAPI:
             if sub == "tools" and len(parts) == 5 and parts[4] == "reviews":
                 return 200, await self._call(session, "tool_reviews",
                                              {"digest": parts[3]})
+            if sub == "join_recommended_jurisdiction" and len(parts) == 3:
+                # Saving the jurisdiction is the owner's surface; an agent
+                # may take only this one step, to the recommended one.
+                return 200, await self._call(
+                    self._owner_session(), "autonet_switch",
+                    {"recommended": True, "caller_id": agent_id})
             if sub == "services" and len(parts) == 3 and method == "GET":
                 args: dict[str, Any] = {}
                 if query.get("q"):

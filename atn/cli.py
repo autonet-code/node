@@ -955,6 +955,7 @@ def _jurisdiction_main(argv: list[str]) -> int:
     without the app (issue #50). Takes effect at the next start.
 
         atn jurisdiction                          show the choice
+        atn jurisdiction recommended              the recommended one, pinned
         atn jurisdiction packaged                 the one this release ships
         atn jurisdiction <dao_registry> <rpc_url> a launched jurisdiction
     """
@@ -967,6 +968,17 @@ def _jurisdiction_main(argv: list[str]) -> int:
         else:
             print(f"{sel.get('name') or 'jurisdiction'}: chain {sel['chain_id']}, "
                   f"DAO {sel.get('dao')}{' (packaged)' if sel.get('packaged') else ''}")
+        return 0
+    if argv[0] == "recommended":
+        from .config import recommended_jurisdiction
+        rec = recommended_jurisdiction()
+        if rec is None:
+            print("no recommended jurisdiction found", file=sys.stderr)
+            return 1
+        save_selected_jurisdiction(rec, _DEFAULT_DIR)
+        print(f"Saved: {rec.get('name') or 'the recommended jurisdiction'} "
+              f"(DAO {rec['dao']} on chain {rec['chain_id']}, from "
+              f"{rec['source']}). Restart the daemon to join it.")
         return 0
     if argv[0] == "packaged":
         save_selected_jurisdiction({"packaged": True}, _DEFAULT_DIR)
