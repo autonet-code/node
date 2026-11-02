@@ -64,7 +64,11 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 - **Excluded**: denied tools, and usage by sanctioned households.
 - **Reviewer share** (40% of each tool's mint by default, ToolBond
   `reviewerShareBps`): paid by review accuracy (leave-one-out against the
-  consensus) times novelty (less-reviewed tools pay more), not by stake. The ATN stake is only the bet: each review loses
+  consensus) times novelty (less-reviewed tools pay more), not by stake;
+  a review needs a stake above zero to be paid at all (any amount), and a
+  household with no REP can't commit without one. Reviews written before
+  the household registers are held by its daemon and submitted to the open
+  round once it does. The ATN stake is only the bet: each review loses
   stake x (1 - accuracy) to the round's pool, paid out by stake x accuracy;
   an unrevealed batch loses its whole stake to the treasury. REP moves the
   same way (see Voice).

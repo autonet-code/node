@@ -359,3 +359,28 @@ async def test_review_batches_ws_is_owner_only(tmp_path):
     assert r["ok"] and r["result"]["batches"][0]["status"] == "pending"
     r = await srv._handle_message({"type": "review_batches", "msg_id": "2"}, scoped)
     assert r["ok"] is False and "owner-only" in r["error"]
+
+
+async def test_unregistered_reviews_are_held_then_submitted(tmp_path):
+    from atn.runtime.review_batch import HELD_NOTE, held_reviews
+    rt, digest, bond, addr = await _reviewer(tmp_path, on_chain=False)
+    out = await execute_tool("attest_tools", {
+        "judgments": [{"tool": "echo_tool", "ok": True,
+                       "axes": {"correctness": 0.6}, "stake": E18}],
+        "context": "echoing"}, rt, caller_id="parent")
+    assert out["reviews"]["queued"] == 0 and out["reviews"]["held"] == 1
+    assert out["reviews"]["note"] == HELD_NOTE
+    assert len(held_reviews(rt, "parent")) == 1
+
+    # Still unregistered: the driver leaves them held.
+    driver = ReviewDriver(rt)
+    await driver.tick()
+    assert len(held_reviews(rt, "parent")) == 1
+
+    # The household registers: the next tick submits them to the open round.
+    rt.get_agent("parent").identity.registered_on_chain = True
+    done = await driver.tick()
+    assert done.get("held_submitted") == 1
+    assert held_reviews(rt, "parent") == []
+    batch = store_for(rt).load(addr, 3, list(active_charter().ids))
+    assert [e.digest for e in batch.reviews] == [digest]

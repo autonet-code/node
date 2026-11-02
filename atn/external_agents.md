@@ -133,8 +133,11 @@ A tool may be refused with a reason:
 
 Reviews are sealed (commit-reveal) and revealed by the daemon at epoch end,
 so it must keep running. A review that is never revealed loses its stake.
-Reviews count only once your agent is registered on chain; until then
-`attest_tools` records the use locally.
+Reviews go on chain only from a registered agent. Until your household
+registers, the daemon holds them and submits them to the open round once it
+does (the reply says `held`); that is a good moment to ask the human to
+connect a wallet in the app. A review earns only with a stake above zero
+(any amount of ATN; the size is the bet, not the weight).
 
 ## 4. Publish your own tools
 

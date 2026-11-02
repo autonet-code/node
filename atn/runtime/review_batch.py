@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -442,6 +443,83 @@ def client_for(runtime: Any) -> Any:
     return client if client is not None else ReviewBondClient(runtime)
 
 
+# Reviews from an agent that is not registered yet are held, not dropped
+# (Decision 2026-11-02, docs/tool_codebases.md): they are submitted to the
+# open round once the household registers.
+HELD_DIR = "held_reviews"
+HELD_MAX = 500
+HELD_NOTE = (
+    "held: reviews go on chain from a registered agent. This one is kept "
+    "and submitted to the open round once your household is registered "
+    "(the owner connects a wallet in the Autonet app and approves your "
+    "registration). To earn from a review it also needs a stake, any "
+    "amount of ATN; your reviews weigh by your household's REP.")
+
+
+def _held_path(runtime: Any, agent_id: str) -> Path:
+    import re
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", agent_id)
+    return Path(runtime._config.data_dir) / HELD_DIR / f"{safe}.json"
+
+
+def held_reviews(runtime: Any, agent_id: str) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(_held_path(runtime, agent_id).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 (none held, or unreadable)
+        return []
+    held = data.get("reviews") if isinstance(data, dict) else None
+    return held if isinstance(held, list) else []
+
+
+def hold_reviews(runtime: Any, agent_id: str,
+                 reviews: list[dict[str, Any]]) -> int:
+    """Keep ``reviews`` for ``agent_id`` until it registers (newest
+    ``HELD_MAX``). Returns how many are held now."""
+    held = held_reviews(runtime, agent_id)
+    now = int(time.time())
+    held.extend({**dict(r), "held_ts": now} for r in reviews)
+    held = held[-HELD_MAX:]
+    path = _held_path(runtime, agent_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"agent_id": agent_id, "reviews": held}),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+    return len(held)
+
+
+async def flush_held_reviews(runtime: Any) -> int:
+    """Submit held reviews of agents that have registered since. Returns how
+    many were queued. Never raises."""
+    root = Path(runtime._config.data_dir) / HELD_DIR
+    if not root.is_dir():
+        return 0
+    queued = 0
+    for path in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(data, dict) or not data.get("reviews"):
+            path.unlink(missing_ok=True)
+            continue
+        agent_id = str(data.get("agent_id") or "")
+        defn = runtime.get_agent(agent_id) if agent_id else None
+        if defn is None:
+            continue
+        data = data["reviews"]
+        identity = getattr(defn, "identity", None)
+        if not getattr(identity, "registered_on_chain", False):
+            continue
+        reviews = [{k: v for k, v in r.items() if k != "held_ts"} for r in data]
+        out = await queue_reviews(runtime, agent_id, reviews)
+        if out.get("epoch") is not None:
+            queued += int(out.get("queued") or 0)
+            path.unlink(missing_ok=True)
+            log.info("submitted %d held review(s) of %s", out.get("queued"), agent_id)
+    return queued
+
+
 def normalize_review(raw: dict[str, Any], axis_ids: list[str]) -> Optional[ReviewEntry]:
     """A review step's {digest, axes?, harm?, stake?, evidence_hash?} as a
     ReviewEntry, or None when it carries nothing ToolBond can settle (no
@@ -501,8 +579,11 @@ async def queue_reviews(runtime: Any, agent_id: str,
     identity = getattr(defn, "identity", None) if defn else None
     address = str(getattr(identity, "address", "") or "")
     if not address or not getattr(identity, "registered_on_chain", False):
-        out["note"] = ("reviews go on chain from a registered agent; this "
-                       "caller is not registered, so nothing was queued")
+        if defn is None:
+            out["note"] = "no such agent; nothing was queued"
+            return out
+        out["held"] = hold_reviews(runtime, agent_id, reviews)
+        out["note"] = HELD_NOTE
         return out
     client = client_for(runtime)
     if not client.available():

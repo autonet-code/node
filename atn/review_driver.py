@@ -161,6 +161,13 @@ class ReviewDriver:
         epoch = await client.current_epoch()
         if epoch is None:
             return done
+        try:
+            from .runtime.review_batch import flush_held_reviews
+            held = await flush_held_reviews(self._runtime)
+            if held:
+                done["held_submitted"] = held
+        except Exception as exc:  # noqa: BLE001
+            log.debug("review driver: held reviews not flushed: %s", exc)
         now = await client.chain_time()
         keys = self._agent_keys()
         if self._close_pending:
