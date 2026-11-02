@@ -575,3 +575,17 @@ class TestWsSurface:
                                       _sess())
         row = next(t for t in r["result"]["tools"] if t["digest"] == new)
         assert row["novelty"] == NOVEL
+
+
+def test_trust_label_is_zero_until_reviews_clear_a_tool():
+    from types import SimpleNamespace
+    from atn.tool_security import REVIEWED, ZERO_TRUST, trust_for_digest
+    store = SimpleNamespace(security_standing_provider=None)
+    rt = SimpleNamespace(tool_store=store, _config=None)
+    assert trust_for_digest(rt, "ab" * 32) == ("strict", ZERO_TRUST)
+
+    def boom(digest):
+        raise RuntimeError("chain down")
+    store.security_standing_provider = boom
+    assert trust_for_digest(rt, "ab" * 32)[1] == ZERO_TRUST
+    assert REVIEWED.startswith("cleared")

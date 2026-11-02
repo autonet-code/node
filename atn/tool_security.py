@@ -211,6 +211,33 @@ def containment_tier(runtime: Any, record: Any) -> tuple[str, str]:
     return tier_for_standing(standing, containment_params(runtime))
 
 
+# What an agent is told about a network tool's trust (Decision 2026-11-02,
+# docs/tool_codebases.md): adoption needs no owner approval, so the label is
+# the warning.
+ZERO_TRUST = ("zero trust: nobody has reviewed this tool enough to clear it. "
+              "Look at what it does (vet_tool shows its code; run it in a "
+              "sandbox and watch what it calls) before running it on real "
+              "work. It runs strict: no network, no files outside its "
+              "sandbox, no processes.")
+REVIEWED = ("cleared by reviews: reviewers holding enough REP found it "
+            "harmless as declared. It runs with its declared capabilities.")
+
+
+def trust_for_digest(runtime: Any, digest: str) -> tuple[str, str]:
+    """``(containment tier, trust label)`` for a network tool by digest;
+    never raises. Unknown standing is zero trust."""
+    store = getattr(runtime, "tool_store", None)
+    provider = getattr(store, "security_standing_provider", None)
+    standing = None
+    if provider is not None:
+        try:
+            standing = provider(str(digest))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("security standing read failed: %s", exc)
+    tier = tier_for_standing(standing, containment_params(runtime))[0]
+    return tier, (REVIEWED if tier == CONTAINMENT_DECLARED else ZERO_TRUST)
+
+
 def finally_denied(runtime: Any, digest: str) -> bool:
     """True once the network's harm verdict on ``digest`` is past appeal
     (settled and not overruled, or its appeal window expired). Containment
@@ -550,6 +577,10 @@ async def _annotate(runtime: Any, rows: list[dict[str, Any]]) -> list[dict[str, 
         else:
             row.update({"bonded": True if override else None,
                         **rating_view(None)})
+        local = getattr(getattr(runtime, "tool_store", None), "_records", {}) or {}
+        rec = local.get(digest)
+        if rec is None or getattr(rec, "origin", "") == "adopted":
+            row["containment"], row["trust"] = trust_for_digest(runtime, digest)
         author = str(row.get("author") or "").lower()
         others = {d: n for d, n in by_author.get(author, {}).items() if d != digest}
         other_rows = []

@@ -760,30 +760,31 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="adopt_tool",
         description=(
-            "Propose adopting a tool published on the network (find digests "
-            "with the substrate probe). Adoption installs FOREIGN CODE on "
-            "this host, so you only PROPOSE: the owner sees the manifest, "
-            "its declared capabilities (the sandbox policy it will run "
-            "under, deny-by-default), signature, and its ToolBond rating, and "
-            "approves or rejects per tool. If approved, the tool becomes "
-            "callable by you and your lineage, runs contained, and its "
-            "ORIGINAL author keeps earning from your attestations. Give a "
-            "concrete reason: what work needs it."
+            "Install a tool published on the network (find digests with "
+            "probe_tools) so you can run it. This installs FOREIGN CODE, and "
+            "a tool nobody has reviewed comes with ZERO TRUST: look at what "
+            "it does first (vet_tool shows its code; run it in a sandbox and "
+            "watch what it calls). It installs at once, with any dependencies "
+            "it declares, for you and your lineage, and runs contained "
+            "(strict until reviews clear it). Its ORIGINAL author keeps "
+            "earning from your use. A tool that replaces core built-ins "
+            "(it would see every command and file you touch) still needs "
+            "the owner's approval in the app."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "digest": {"type": "string", "description": "64-hex manifest digest of the published tool."},
-                "reason": {"type": "string", "description": "Why you need it — shown to the owner."},
+                "reason": {"type": "string", "description": "Optional: what work needs it (kept with the install)."},
             },
-            "required": ["digest", "reason"],
+            "required": ["digest"],
         },
     ),
     ToolDefinition(
         name="vet_tool",
         description=(
-            "Inspect a published tool's pinned code and review it "
-            "(validator role, separately granted). Call with only a digest "
+            "Inspect a published tool's pinned code and review it. Call "
+            "with only a digest "
             "to INSPECT: you receive the manifest and the pinned source "
             "code to read. Then call again with verdict 'pass' (code "
             "adheres to the manifest) or 'fail', a report stating what you "
@@ -3078,16 +3079,28 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
     if not digest:
         return {"error": "Missing required field: 'digest'"}
     reason = str(input.get("reason") or "").strip()
-    if not reason:
-        return {"error": "Missing required field: 'reason' — the owner "
-                         "decides on your justification"}
     caller_id = input.get("_caller_id")
     caller = OWNER_AUTHOR if is_owner_caller(caller_id) else str(caller_id)
     try:
-        return await runtime.tool_store.propose_adoption(
+        proposal = await runtime.tool_store.propose_adoption(
             caller, digest, reason=reason)
     except Exception as exc:
         return {"error": str(exc)}
+    # No owner approval (Decision 2026-11-02): the agent installs, the trust
+    # label is the warning. Core replacements stay the owner's call.
+    if proposal.get("error") or proposal.get("status") != "pending":
+        return proposal
+    if proposal.get("core_replacement"):
+        return {**proposal, "note": "this tool replaces core built-ins ("
+                + ", ".join(proposal["core_replacement"]) + "): the owner "
+                "approves it in the app"}
+    try:
+        result = await runtime.tool_store.approve_adoption(proposal["digest"])
+    except Exception as exc:
+        return {"error": str(exc)}
+    from .tool_security import trust_for_digest
+    tier, trust = trust_for_digest(runtime, proposal["digest"])
+    return {**result, "containment": tier, "trust": trust}
 
 
 async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:

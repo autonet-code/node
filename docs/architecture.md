@@ -82,7 +82,7 @@ its own identity, registration indicator and substrate position; an
 external agent's window shows, in place of a chat, its Activity: every call
 it made through the daemon, kept by the daemon (`agent_activity`, the
 newest 500 per agent in `<data_dir>/activity/`). The app
-also approves adoptions. It talks to the daemon's 7700 locally or 7701
+also approves the one kind of adoption an agent can't do alone: a tool that replaces core built-ins (agents install other tools themselves, labelled zero trust until reviews clear them). It talks to the daemon's 7700 locally or 7701
 remotely. Agents don't need it.
 
 **Relay (`atn relay`).** A networking-only node: seed, gossip and blob

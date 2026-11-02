@@ -664,22 +664,20 @@ class TestAdoption:
         rt = await self._adopter(tmp_path, blobs)
         store = rt.tool_store
 
-        out = await execute_tool(
+        # The agent installs it itself (Decision 2026-11-02): no owner
+        # approval, and the reply says the tool comes with zero trust.
+        approved = await execute_tool(
             "adopt_tool", {"digest": digest, "reason": "need echo for X"},
             rt, caller_id="worker")
-        assert out["status"] == "pending"
-        assert store.get(digest) is None            # NOT installed yet
-
-        pending = store.list_adoption_proposals("pending")
-        assert len(pending) == 1
-        assert pending[0]["proposed_by"] == "worker"
+        assert approved["origin"] == "adopted"
+        assert approved["containment"] == "strict"
+        assert approved["trust"].startswith("zero trust")
+        done = store.list_adoption_proposals("approved")
+        assert len(done) == 1 and done[0]["proposed_by"] == "worker"
         # The author daemon has no owner wallet, so the tool's author is a
         # local id the agent key cannot be chain-bound to: the signature is
         # valid but proves nothing about `author` (unproven, not forged).
-        assert pending[0]["provenance"]["signed"] is None
-
-        approved = await store.approve_adoption(digest)
-        assert approved["origin"] == "adopted"
+        assert done[0]["provenance"]["signed"] is None
         record = store.get(digest)
         assert record is not None
         assert record.origin == "adopted"
@@ -695,16 +693,19 @@ class TestAdoption:
         assert result["containment"]["tier"] == "strict"
 
     @pytest.mark.asyncio
-    async def test_reason_required_and_reject_flow(self, tmp_path):
+    async def test_reason_optional_and_reject_flow(self, tmp_path):
         _, digest, blobs = await self._publish_on_author_daemon(tmp_path)
         rt = await self._adopter(tmp_path, blobs)
         out = await execute_tool(
             "adopt_tool", {"digest": digest}, rt, caller_id="worker")
-        assert "reason" in out["error"]
+        assert out["origin"] == "adopted"
 
-        await execute_tool(
-            "adopt_tool", {"digest": digest, "reason": "want it"},
-            rt, caller_id="worker")
+        # The owner's own proposal path still exists (propose, then reject).
+        _, other, blobs2 = await self._publish_on_author_daemon(tmp_path / "b")
+        rt2 = await self._adopter(tmp_path / "b", blobs2)
+        await rt2.tool_store.propose_adoption("worker", other, reason="want it")
+        rt = rt2
+        digest = other
         rej = rt.tool_store.reject_adoption(digest, reason="not needed")
         assert rej["status"] == "rejected"
         assert rt.tool_store.get(digest) is None

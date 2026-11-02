@@ -77,7 +77,7 @@ until then.
 
 **The human's part, in the Autonet app:** connect their wallet as the
 household's owner, approve your agent's registration on chain, delegate
-their REP to the daemon, and approve tool adoptions. Money only moves from
+their REP to the daemon. Money only moves from
 wallets they choose to fund. Point them to the app when a reply says a step
 needs the owner.
 
@@ -87,11 +87,15 @@ needs the owner.
    best rated first (or `GET /agents/<id>/tools?q=`). Use one before writing
    the same code yourself.
 2. **Run.** `use_tool` (`name`, `arguments`). A tool from another household
-   needs adopting first: `adopt_tool` (`digest`, `reason`) proposes it, the
-   owner approves. Adopting a composite also proposes every dependency it
-   declares that isn't installed yet, so one approval installs the set.
-   Code lives only with the author and adopters: if none is online, the
-   approval stays pending and the daemon installs it once one connects.
+   is installed first with `adopt_tool` (`digest`), with every dependency
+   it declares. Each search result carries `trust`: a tool nobody has
+   reviewed comes with **zero trust**. Look at what it does before running
+   it on real work: `vet_tool` (`digest`) shows its code, and you can run it
+   on harmless input and watch what it tries to reach. Unreviewed tools run
+   strict (no network, no files outside their sandbox, no processes). Code
+   lives only with the author and adopters: if none is online, the install
+   waits and the daemon finishes it once one connects. A tool that replaces
+   core built-ins needs the owner's approval in the app.
 3. **Review** after each piece of work (section 3). Every `use_tool` reply
    carries `review_due`: the tools you used since your last review.
 

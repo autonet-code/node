@@ -1028,11 +1028,12 @@ class WebSocketBridge:
         if not msg_type:
             return {"msg_id": msg_id, "ok": False, "error": "Missing 'type' field"}
 
-        # An external agent's calls (MCP proxy, agent API, atn send) go to
+        # An external agent's calls (agent API, atn send) go to
         # its Activity log, whichever path they take.
         if not msg.get("_activity_logged") and msg_type not in _UNLOGGED:
-            actor = (msg.get("caller_id") or "") if session.scope_ids is None \
-                else (session.root_agent_id or "")
+            scoped = getattr(session, "scope_ids", None) is not None
+            actor = (getattr(session, "root_agent_id", None) or "") if scoped \
+                else (msg.get("caller_id") or "")
             if self._is_external_agent(actor):
                 return await self._handle_logged(msg, session, actor)
 
