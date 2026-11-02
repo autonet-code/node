@@ -30,17 +30,12 @@ def test_trims_and_truncates(tmp_path, monkeypatch):
     assert len(out[0]["result"]) <= agent_activity.PREVIEW_CHARS + 3
 
 
-def test_ws_logs_external_calls_only(tmp_path, monkeypatch):
+def _bridge(tmp_path, emitted):
     from atn import ws_server
-    emitted = []
 
     async def emit(ev):
         emitted.append(ev)
 
-    async def fake_execute(tool, args, runtime, caller_id=""):
-        return {"ok": True, "tool": tool}
-
-    monkeypatch.setattr(ws_server, "execute_tool", fake_execute)
     agents = {"ext": SimpleNamespace(provider="external"),
               "nat": SimpleNamespace(provider="anthropic")}
     bridge = ws_server.WebSocketBridge.__new__(ws_server.WebSocketBridge)
@@ -48,13 +43,42 @@ def test_ws_logs_external_calls_only(tmp_path, monkeypatch):
         registry=SimpleNamespace(_agents=agents),
         events=SimpleNamespace(emit=emit),
         _config=SimpleNamespace(data_dir=tmp_path))
+    return bridge
+
+
+def test_external_calls_are_logged_once(tmp_path, monkeypatch):
+    from atn import ws_server
+    from atn.ws_auth import ClientSession
+    emitted = []
+    bridge = _bridge(tmp_path, emitted)
     assert bridge._is_external_agent("ext")
     assert not bridge._is_external_agent("nat")
     assert not bridge._is_external_agent("")
 
-    res = asyncio.run(bridge._execute_logged("probe_tools", {"query": "q"}, "ext"))
-    assert res["tool"] == "probe_tools"
+    seen = []
+    real = ws_server.WebSocketBridge._handle_message
+
+    async def handle(self, msg, session):
+        if not msg.get("_activity_logged"):
+            return await real(self, msg, session)
+        seen.append(msg)
+        return {"msg_id": msg.get("msg_id"), "ok": True, "result": {"n": 1}}
+
+    monkeypatch.setattr(ws_server.WebSocketBridge, "_handle_message", handle)
+    owner = ClientSession(local=True, authed=True, owner=True)
+    resp = asyncio.run(bridge._handle_message(
+        {"type": "probe_tools", "caller_id": "ext", "query": "q"}, owner))
+    assert resp["ok"] and len(seen) == 1
     entries = bridge._activity_log().read("ext")
-    assert entries[0]["tool"] == "probe_tools" and entries[0]["ok"]
+    assert len(entries) == 1 and entries[0]["tool"] == "probe_tools"
+    assert '"query": "q"' in entries[0]["input"]
     assert [e.type.value for e in emitted] == [
         "agent.tool_use_start", "agent.tool_use_result"]
+
+    # A native agent's call and the log read itself are not logged.
+    asyncio.run(bridge._handle_message(
+        {"type": "tool_reviews", "caller_id": "nat"}, owner))
+    asyncio.run(bridge._handle_message(
+        {"type": "agent_activity", "caller_id": "ext", "agent_id": "ext"}, owner))
+    assert len(bridge._activity_log().read("ext")) == 1
+    assert bridge._activity_log().read("nat") == []

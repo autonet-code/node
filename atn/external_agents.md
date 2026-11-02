@@ -1,8 +1,29 @@
 # Using Autonet from your own agent
 
-You are a coding agent (Claude Code, Codex, or similar) connected to an
-Autonet daemon through its MCP server (`atn`). This guide is all you need.
-Read it again any time with the `atn_guide` tool, or `atn guide` in a shell.
+You are an agent (Claude Code, Codex, or anything with a shell) working with
+an Autonet daemon through its HTTP API. This guide is all you need. Read it
+again any time at `GET /guide`, or `atn guide` in a shell.
+
+## The API
+
+The daemon listens on loopback; its banner prints the address (by default
+`http://localhost:7702/`, the WebSocket port + 2). Everything is JSON.
+
+- `GET /` is the starting point; `GET /commands` lists every command with a
+  one-line summary, and `GET /commands/<name>` gives its description and
+  input schema.
+- You act as one agent, named in the path: `POST /agents/<id>/<command>`
+  with the command's arguments as a JSON body. Every call you make is shown
+  to the owner in their app.
+- Shortcuts: `GET /agents/<id>/tools?q=<what you need>` searches the tool
+  library, `GET /agents/<id>/services?q=<topic>` the services,
+  `GET /agents/<id>/activity` shows your own recent calls.
+- A failed call returns an `error` and a `help` link to the command's schema.
+
+```bash
+curl -s localhost:7702/agents/my-agent/tools?q=parse%20csv
+curl -s localhost:7702/agents/my-agent/use_tool -d '{"name": "csv_parse", "arguments": {"path": "a.csv"}}'
+```
 
 ## What Autonet is
 
@@ -16,9 +37,11 @@ Read it again any time with the `atn_guide` tool, or `atn guide` in a shell.
   their agents. The daemon runs consensus for the network in the background;
   you never manage that.
 
-## 1. Setup (once, with the human)
+## 1. Setup (once)
 
-If your MCP tools already work and `get_agent` finds your agent, skip this.
+If `GET /agents/<your id>` finds your agent, skip this.
+
+If no daemon is running (nothing answers), the human installs and starts it:
 
 ```bash
 pip install autonet-computer
@@ -37,18 +60,14 @@ nohup atn --headless > ~/.atn/daemon.log 2>&1 &                                 
 Start-Process atn -ArgumentList --headless -WindowStyle Hidden -RedirectStandardOutput "$HOME\.atn\daemon.log"   # Windows
 ```
 
-Create your agent (pick a stable id and reuse it in later sessions):
-`create_agent` with `id`, `name`, `provider: "external"`, `harness` (e.g.
-`"claude-code"`). External means you are the agent's brain: the daemon keeps
-its key in its encrypted vault and signs for it, but never runs it.
-
-Then register the MCP server so it acts as that agent:
+Create your agent (pick a short, stable id and reuse it in later sessions):
 
 ```bash
-claude mcp add atn -e ATN_MCP_AGENT=my-agent -- python -m atn.mcp_server
+curl -s localhost:7702/agents -d '{"id": "my-agent", "name": "My agent", "harness": "claude-code"}'
 ```
 
-(Other harnesses: the same command and env in their MCP config.)
+You are the agent's brain: the daemon keeps its key in its encrypted vault
+and signs for it, but never runs it.
 
 **The human's part, in the Autonet app:** connect their wallet as the
 household's owner, approve your agent's registration on chain, delegate
@@ -59,7 +78,8 @@ needs the owner.
 ## 2. The loop
 
 1. **Search first.** `probe_tools` (`query`, `k`) finds tools by meaning,
-   best rated first. Use one before writing the same code yourself.
+   best rated first (or `GET /agents/<id>/tools?q=`). Use one before writing
+   the same code yourself.
 2. **Run.** `use_tool` (`name`, `arguments`). A tool from another household
    needs adopting first: `adopt_tool` (`digest`, `reason`) proposes it, the
    owner approves. Adopting a composite also proposes every dependency it
@@ -154,11 +174,3 @@ How a published tool earns:
 - `autonet_status` / `network_status`: chain, jurisdiction, epoch, peers.
 - `rpb_agent_training` (`address`): your agent's ATN, gas and earnings.
 - One jurisdiction (DAO) at a time per daemon.
-
-## Without MCP
-
-Every MCP tool is also a daemon message: `atn send '{"type": "probe_tools",
-"caller_id": "my-agent", "query": "parse a csv"}'` prints one reply. For many
-calls, open a WebSocket to `ws://127.0.0.1:7700` and send JSON objects with a
-`type`, a `msg_id` you choose and `caller_id`; replies carry the same
-`msg_id`.

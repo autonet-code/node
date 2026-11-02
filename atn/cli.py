@@ -728,6 +728,10 @@ async def run_cli() -> None:
             # port-retry loop stay CLI-owned.
             runtime.register_surface(ws_bridge)
             console.print(f"  [green]WebSocket server listening on ws://localhost:{_local_port}[/]")
+            if getattr(ws_bridge, "agent_api", None) is not None:
+                console.print(
+                    f"  [green]Agent API on {ws_bridge.agent_api.url} "
+                    f"(agents: start with GET /)[/]")
             if _remote_host:
                 _modes = ("owner+agent-self" if _owner_wallet else "agent-self")
                 console.print(

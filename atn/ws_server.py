@@ -207,7 +207,7 @@ SCOPED_INLINE_ALLOWED = frozenset({
     "probe_tools", "tool_reviews", "tool_surface", "list_registered_tools",
     "autonet_status", "epoch_status", "epoch_history", "economy_graph",
     "market_services", "list_services", "service_topics",
-    "rpb_state",
+    "rpb_state", "network_status", "rpb_agent_training",
     "rpb_substrate_distribution", "rpb_substrate_nodes",
     "rpb_substrate_subtree_projection",
 })
@@ -221,6 +221,11 @@ SCOPED_REQUIRES_AGENT = frozenset({
     "session_stats", "session_context", "context_breakdown",
     "agent_system_prompt", "agent_activity",
 })
+
+# Not logged to an external agent's Activity: reading the log itself and the
+# connection handshake.
+_UNLOGGED = frozenset({"agent_activity", "auth_response", "auth_status",
+                       "snapshot"})
 
 # For scoped sessions, the message keys that name a target agent. Every one
 # present must resolve to an agent inside the session's subtree, else the call
@@ -349,6 +354,18 @@ class WebSocketBridge:
         )
         log.info("WebSocket server (local) listening on ws://%s:%d", self.host, self.port)
 
+        # The agent API (atn/agent_api.py): plain HTTP on loopback for agents
+        # in other harnesses. ATN_API_PORT overrides; default port + 2.
+        self.agent_api = None
+        try:
+            from .agent_api import AgentAPI
+            api_port = int(os.environ.get("ATN_API_PORT") or (self.port + 2))
+            api = AgentAPI(self, "127.0.0.1", api_port)
+            await api.start()
+            self.agent_api = api
+        except Exception as exc:                          # noqa: BLE001
+            log.warning("Agent API did not start: %s", exc)
+
         # Remote listener — auth-required, export-denied. Refuses to start
         # without a pre-configured owner_wallet (no trust-on-first-use on a
         # network-reachable socket).
@@ -380,6 +397,10 @@ class WebSocketBridge:
                 srv.close()
                 await srv.wait_closed()
                 setattr(self, srv_attr, None)
+        api = getattr(self, "agent_api", None)
+        if api is not None:
+            await api.stop()
+            self.agent_api = None
         if self._event_handler_registered:
             self.runtime.events.unsubscribe(None, self._on_event)
             self._event_handler_registered = False
@@ -1006,6 +1027,14 @@ class WebSocketBridge:
 
         if not msg_type:
             return {"msg_id": msg_id, "ok": False, "error": "Missing 'type' field"}
+
+        # An external agent's calls (MCP proxy, agent API, atn send) go to
+        # its Activity log, whichever path they take.
+        if not msg.get("_activity_logged") and msg_type not in _UNLOGGED:
+            actor = (msg.get("caller_id") or "") if session.scope_ids is None \
+                else (session.root_agent_id or "")
+            if self._is_external_agent(actor):
+                return await self._handle_logged(msg, session, actor)
 
         # --- Gate 1: key custody (localhost-only) --------------------------
         if msg_type in KEY_LOCAL_ONLY_MESSAGES and not ws_auth.assert_local_key_access(session):
@@ -3741,7 +3770,8 @@ class WebSocketBridge:
         # Note: "type" is the routing field but also a valid arg for some tools
         # (e.g. post_message).  We strip it since the JSON object can't have two
         # "type" keys anyway — clients should use "message_type" for post_message.
-        args = {k: v for k, v in msg.items() if k not in ("msg_id", "type")}
+        args = {k: v for k, v in msg.items()
+                if k not in ("msg_id", "type", "_activity_logged")}
         # Tag client-initiated post_message with source="user" so the target
         # agent can distinguish user messages from agent messages.
         if msg_type == "post_message" and "source" not in args:
@@ -3764,10 +3794,7 @@ class WebSocketBridge:
             caller_id = msg.get("caller_id") or ""
         else:
             caller_id = session.root_agent_id
-        if self._is_external_agent(caller_id):
-            result = await self._execute_logged(msg_type, args, caller_id)
-        else:
-            result = await execute_tool(msg_type, args, self.runtime, caller_id=caller_id)
+        result = await execute_tool(msg_type, args, self.runtime, caller_id=caller_id)
 
         # Tools signal errors by returning {"error": "..."} with a truthy value.
         # Some tools include "error": None as a data field — that's not an error.
@@ -3789,37 +3816,37 @@ class WebSocketBridge:
         defn = self.runtime.registry._agents.get(agent_id)
         return defn is not None and is_external(defn)
 
-    async def _execute_logged(self, tool: str, args: dict, caller_id: str) -> dict:
-        """Run an external agent's call and keep it in its activity log, with
-        the same tool-use events a native agent's loop emits, so an open
-        window updates live."""
+    async def _handle_logged(self, msg: dict, session: ClientSession,
+                             agent_id: str) -> dict:
+        """Handle an external agent's call and keep it in its activity log,
+        with the same tool-use events a native agent's loop emits, so an
+        open window updates live."""
         import uuid
         from .agent_activity import now
+        tool = msg.get("type", "")
         use_id = uuid.uuid4().hex
-        shown = {k: v for k, v in args.items() if k != "caller_id"}
+        shown = {k: v for k, v in msg.items()
+                 if k not in ("type", "msg_id", "caller_id")}
         await self.runtime.events.emit(Event(
-            type=EventType.AGENT_TOOL_USE_START, source=caller_id,
-            data={"agent_id": caller_id, "tool_use_id": use_id,
+            type=EventType.AGENT_TOOL_USE_START, source=agent_id,
+            data={"agent_id": agent_id, "tool_use_id": use_id,
                   "tool_name": tool, "input": shown}))
         started = now()
-        try:
-            result = await execute_tool(tool, args, self.runtime, caller_id=caller_id)
-        except Exception as exc:
-            result = {"error": str(exc)}
-        ok = not result.get("error")
+        resp = await self._handle_message({**msg, "_activity_logged": True}, session)
+        ok = bool(resp.get("ok"))
         try:
             entry = await asyncio.to_thread(
-                self._activity_log().record, caller_id, tool, shown, ok,
-                result.get("error") if not ok else result, started, now())
+                self._activity_log().record, agent_id, tool, shown, ok,
+                resp.get("result") if ok else resp.get("error"), started, now())
         except Exception as exc:
-            log.debug("activity log write failed for %s: %s", caller_id, exc)
+            log.debug("activity log write failed for %s: %s", agent_id, exc)
             entry = {"result": ""}
         await self.runtime.events.emit(Event(
-            type=EventType.AGENT_TOOL_USE_RESULT, source=caller_id,
-            data={"agent_id": caller_id, "tool_use_id": use_id,
+            type=EventType.AGENT_TOOL_USE_RESULT, source=agent_id,
+            data={"agent_id": agent_id, "tool_use_id": use_id,
                   "tool_name": tool, "is_error": not ok,
                   "result_preview": entry.get("result", "")}))
-        return result
+        return resp
 
     # ------------------------------------------------------------------
     # Secrets vault surface (owner-only; values are WRITE-ONLY)

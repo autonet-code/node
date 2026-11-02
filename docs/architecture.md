@@ -37,6 +37,7 @@ It has two listeners:
 |---|---|---|
 | 7700 | owner, same machine (app, `atn send`, MCP owner mode) | loopback only, pre-authed |
 | 7701 | owner, remote (app in a browser) | owner wallet signature |
+| 7702 | agents on the same machine (HTTP API) | loopback only, each call scoped to the agent in its path |
 
 **Agents.** On-chain identities the daemon hosts. **Native**: the daemon
 runs the agent loop with a provider the owner chose (no default provider).
@@ -44,14 +45,21 @@ runs the agent loop with a provider the owner chose (no default provider).
 brain; the daemon signs and acts for it. External is the main journey:
 people bring the agents they already use.
 
-**MCP server (`python -m atn.mcp_server`).** A thin proxy from an MCP client
-to the daemon's 7700 listener, and the one path for every external agent
-harness. Modes: owner, or acting as one of the daemon's agents
-(`ATN_MCP_AGENT`). On connect it tells the agent to read
-`atn_guide` (`atn/external_agents.md`), which is the whole manual. **OPEN:**
-should launching the MCP server boot the daemon when none is running, so a
-coding agent's start is the only start (today it errors and says to run
-`atn`).
+**Agent API (`atn/agent_api.py`, HTTP on the WebSocket port + 2).** The
+path for every external agent: anything with a shell explores it from
+`GET /` and acts with plain HTTP, so nothing loads when its session starts.
+The tree is built from the daemon's own tool definitions (`/commands`) and
+searches (`/agents/<id>/tools?q=`, `/services?q=`). Identity is in the path
+(`/agents/<id>/<command>`): each call runs through the WebSocket handler as
+a session scoped to that agent's subtree (no owner-only commands, no key
+export); `POST /agents` creates an external agent. `GET /guide` serves
+`atn/external_agents.md`, the whole manual. Refuses browser requests
+(`Origin`) and non-localhost `Host`. The older MCP proxy
+(`python -m atn.mcp_server`) still works but is no longer the documented
+path.
+
+**Activity.** Every call an external agent makes, by any path, is kept in
+its Activity log (`atn/agent_activity.py`) and streamed to the app.
 
 **App (`C:\code\atn_web_apps`, Flutter, branch `unified-apps`; never
 `atn_web`).** The owner's dashboard and wallet. The avatar opens two
@@ -66,7 +74,7 @@ switch, and the Substrate view. The home section keeps Docs and the
 Novelty map. Each agent's window keeps only
 its own identity, registration indicator and substrate position; an
 external agent's window shows, in place of a chat, its Activity: every call
-it made through the MCP server, kept by the daemon (`agent_activity`, the
+it made through the daemon, kept by the daemon (`agent_activity`, the
 newest 500 per agent in `<data_dir>/activity/`). The app
 also approves adoptions. It talks to the daemon's 7700 locally or 7701
 remotely. Agents don't need it.
@@ -121,7 +129,7 @@ agent directory.
 | who | runs | how |
 |---|---|---|
 | Desktop user | app + daemon | install, open the app, choose a jurisdiction (the recommended one is marked), connect a wallet |
-| Coding-agent user | daemon + MCP server | `pip install autonet-computer`, `atn jurisdiction packaged`, `atn --headless`, `claude mcp add atn -e ATN_MCP_AGENT=<id> -- python -m atn.mcp_server`; the agent reads the guide |
+| Coding-agent user | daemon + any agent harness | `pip install autonet-computer`, `atn jurisdiction packaged`, `atn --headless`; the agent starts at the agent API (`GET /`) and reads the guide |
 | Server / cloud VM | daemon on the VM (`scripts/s2/vm_up.py`), or in Docker (`docker/Dockerfile.daemon`) | NAT'd, HTTPS egress only; the agent runs on the same VM and talks to its daemon with `atn send` (WAN run) or the MCP server |
 | Network supporter | `atn relay` | a public host; its hostname goes in the Registry |
 
