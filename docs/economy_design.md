@@ -31,9 +31,44 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   score, floored to 1e-6 ATN (the dust is never minted). Besides the pool,
   ATN is minted only by the vault (bought, below) and, for forks and
   splits, the genesis claim.
-- Bought with a stablecoin through the vault at a governed parity.
-- **Services** (remote APIs, `ServiceMarket.sol`) earn money only: no
-  mint, no REP, no standing.
+- **Bought, never redeemed.** The vault (`AutonetVault`, DAO side) sells
+  newly minted ATN for the tokens in the jurisdiction's value index
+  (Registry `jurisdiction.parity.<token>`, a stablecoin by default) at a
+  DAO-set parity, uncapped, and sends the payment straight to the treasury.
+  There is no redeem path. So the parity is a ceiling on ATN's price, not a
+  peg: nobody pays more on a market than the vault asks, and nothing holds
+  the price up from below.
+- **ATN is money; REP is the scarce stake.** Supply follows demand at the
+  ceiling, which keeps prices of services stable in ATN and gives no reason
+  to hold ATN for appreciation. Scarcity, and the stake in the network, is
+  REP: soulbound, earned only from the tool pool, and the only voice.
+- **Cash-out is the open market, outside Autonet.** Earners (service
+  providers, tool authors, reviewers) sell ATN on exchanges or DEX pools
+  that anyone can open and anyone can provide liquidity to; nothing in
+  Autonet trades ATN for cash. Below the ceiling the market price is ATN's
+  value and service prices adjust to it. Keeping trading outside the
+  framework, with no redemption and no fixed value promised, keeps the
+  legal exposure low. Pools are expected to form wherever there is volume;
+  a small jurisdiction's thin pool costs its providers a wider spread.
+- **Why providers sell here anyway.** Selling a service through Autonet
+  costs less than elsewhere: a 2.5% fee with atomic payment and no
+  chargebacks (card processing is about 3%), no platform cut (freelance
+  marketplaces take 10 to 20%, app stores 15 to 30%), and buyers who find
+  the service through the probe without a sales process. That margin is
+  what absorbs the cash-out spread; where a pool is so thin its spread
+  exceeds it, providers would rather sell elsewhere.
+- **Services** (`ServiceMarket.sol`) are whatever needs an advantage that
+  can't be copied: hardware (bare metal, GPUs, LLM inference), a human
+  credential (a lawyer who passed the bar), data or access, physical
+  presence (robots). Anything that is only know-how ends up a tool. They
+  earn money only: no mint, no REP, no standing; trust in them is
+  behavioral.
+- **OPEN:** a legal opinion (EU, MiCA) on the vault sale and on any
+  redemption from treasury reserves, which would turn the ceiling into a
+  peg; the launch parity; and a monetary model of ATN earned against ATN
+  bought, and of the pool depth at which cash-out costs more than the
+  channel saves (separate from the consensus design search,
+  `autonet-sims/DESIGN_SEARCH.md`).
 
 ## Epochs
 
