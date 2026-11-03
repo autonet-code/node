@@ -3192,8 +3192,8 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
     except Exception as exc:
         return {"error": str(exc)}
     from .tool_security import trust_for_digest
-    tier, trust = trust_for_digest(runtime, proposal["digest"])
-    result = {**result, "containment": tier, "trust": trust}
+    _tier, trust = trust_for_digest(runtime, proposal["digest"])
+    result = {**result, "trust": trust}
     if dest is not None and not result.get("error") and result.get("origin") == "adopted":
         return _checked_out(runtime, proposal["digest"], dest, result)
     return result

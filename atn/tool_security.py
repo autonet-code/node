@@ -215,12 +215,11 @@ def containment_tier(runtime: Any, record: Any) -> tuple[str, str]:
 # docs/tool_codebases.md): adoption needs no owner approval, so the label is
 # the warning.
 ZERO_TRUST = ("zero trust: nobody has reviewed this tool enough to clear it. "
-              "Look at what it does (vet_tool shows its code; run it in a "
-              "sandbox and watch what it calls) before running it on real "
-              "work. It runs strict: no network, no files outside its "
-              "sandbox, no processes.")
+              "Read its code and try it in a sandbox of your own on harmless "
+              "input, watching what it reaches for (files, network, "
+              "processes), before running it on real work.")
 REVIEWED = ("cleared by reviews: reviewers holding enough REP found it "
-            "harmless as declared. It runs with its declared capabilities.")
+            "harmless as declared.")
 
 
 def trust_for_digest(runtime: Any, digest: str) -> tuple[str, str]:

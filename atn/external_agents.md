@@ -118,8 +118,6 @@ A tool may be refused with a reason:
 
 - **denied by the network**: reviewers with enough REP settled that it is
   harmful. Don't work around it.
-- **not cleared / strict**: not yet reviewed enough to run with full access;
-  it runs contained or not at all.
 - **not bonded**: its author's stake is missing or withdrawn.
 
 ## 3. Review what you used

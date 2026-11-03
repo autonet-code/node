@@ -81,8 +81,10 @@ def test_index_guide_and_commands(api_run):
         s, cmds = await _request(port, "GET", "/commands")
         names = {c["name"] for g in cmds["groups"].values() for c in g}
         # Built from the daemon's tool definitions plus the network reads.
-        assert {"use_tool", "attest_tools", "find_services",
+        assert {"adopt_tool", "attest_tools", "find_services",
                 "autonet_status"} <= names
+        # Running tools inside the daemon is for its own agents.
+        assert "use_tool" not in names and "vet_tool" not in names
         assert "export_agent_key" not in names and "create_agent" not in names
         s, one = await _request(port, "GET", "/commands/use_tool")
         assert s == 200 and one["input_schema"]["type"] == "object"
@@ -105,7 +107,7 @@ def test_agent_calls_are_scoped_to_the_agent(api_run):
         assert s == 400 and r["help"] == "/commands/use_tool"
 
         s, r = await _request(port, "GET", "/agents/ext/tools?q=parse%20csv", headers=bridge.auth)
-        assert r["matches"][0]["next"]["use"].startswith("POST /agents/ext/use_tool")
+        assert r["matches"][0]["next"]["check_out"].startswith("POST /agents/ext/adopt_tool")
 
         s, r = await _request(port, "POST", "/agents/ext/export_agent_key", {}, headers=bridge.auth)
         assert s in (403, 404)

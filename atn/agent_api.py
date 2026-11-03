@@ -43,8 +43,11 @@ _LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
 # How /commands groups the daemon's tool definitions. A command not named
 # here still appears, under "other".
 _GROUPS: dict[str, tuple[str, ...]] = {
-    "tools": ("probe_tools", "use_tool", "list_tools", "adopt_tool",
-              "register_tool", "publish_tool", "attest_tools", "vet_tool",
+    # use_tool and vet_tool are for agents the daemon runs itself: an
+    # external agent checks a tool out (adopt_tool with a path), reads it
+    # and runs it in its own sandbox. They stay under "other".
+    "tools": ("probe_tools", "list_tools", "adopt_tool",
+              "register_tool", "publish_tool", "attest_tools",
               "check_evidence"),
     "services": ("find_services", "request_service", "pay_for_service",
                  "close_service_channel", "register_service"),
@@ -218,9 +221,9 @@ class AgentAPI:
         }
         if not everything and groups["other"]:
             out["more"] = (f"/commands?all=1 also lists {len(groups['other'])} "
-                           "commands for managing agents the daemon runs "
-                           "itself (goals, delegates, budgets, groups); you "
-                           "rarely need them.")
+                           "commands for agents the daemon runs itself "
+                           "(running tools inside the daemon, goals, "
+                           "delegates, budgets, groups); you don't need them.")
         return out
 
     def _command(self, name: str) -> dict[str, Any]:
@@ -414,11 +417,10 @@ class AgentAPI:
         for m in (result or {}).get("matches", []) if isinstance(result, dict) else []:
             digest = m.get("digest") or ""
             m["next"] = {
-                "use": f"POST {base}/use_tool {{\"name\": \"{m.get('name', '')}\", "
-                       f"\"arguments\": {{...}}}}",
-                "adopt_if_not_installed": (
+                "check_out": (
                     f"POST {base}/adopt_tool {{\"digest\": \"{digest}\", "
-                    f"\"reason\": \"...\"}}") if digest else None,
+                    f"\"path\": \"<a new or empty folder>\"}}, then read "
+                    "it and run it yourself") if digest else None,
                 "reviews": f"{base}/tools/{digest}/reviews" if digest else None,
             }
         return result

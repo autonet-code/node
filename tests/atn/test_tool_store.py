@@ -670,7 +670,6 @@ class TestAdoption:
             "adopt_tool", {"digest": digest, "reason": "need echo for X"},
             rt, caller_id="worker")
         assert approved["origin"] == "adopted"
-        assert approved["containment"] == "strict"
         assert approved["trust"].startswith("zero trust")
         done = store.list_adoption_proposals("approved")
         assert len(done) == 1 and done[0]["proposed_by"] == "worker"
