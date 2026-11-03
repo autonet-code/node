@@ -51,7 +51,8 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   legal exposure low. Pools are expected to form wherever there is volume;
   a small jurisdiction's thin pool costs its providers a wider spread.
 - **Why providers sell here anyway.** Selling a service through Autonet
-  costs less than elsewhere: a 2.5% fee with atomic payment and no
+  costs less than elsewhere: a fee (2.5% by default; the DAO sets it
+  between 0.5% and 10%) with atomic payment and no
   chargebacks (card processing is about 3%), no platform cut (freelance
   marketplaces take 10 to 20%, app stores 15 to 30%), and buyers who find
   the service through the probe without a sales process. That margin is
