@@ -89,7 +89,7 @@ async function main() {
   // (treasury, vaultMinter, governor): Decision 2026-10-16.
   const substrate = await Substrate.deploy(
     deployer.address, deployer.address, deployer.address, ethers.ZeroAddress,
-    ethers.ZeroHash, "Test ATN", "REPATN"
+    ethers.ZeroHash, "Test ATN", "REPATN", 250, 5000
   );
   _vaultMinter = deployer;
   await substrate.waitForDeployment();

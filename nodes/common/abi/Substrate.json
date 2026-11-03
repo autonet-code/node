@@ -37,6 +37,16 @@
      "internalType": "string",
      "name": "symbol_",
      "type": "string"
+    },
+    {
+     "internalType": "uint16",
+     "name": "serviceFeeBps_",
+     "type": "uint16"
+    },
+    {
+     "internalType": "uint16",
+     "name": "feeTreasuryBps_",
+     "type": "uint16"
     }
    ],
    "stateMutability": "nonpayable",
@@ -583,6 +593,25 @@
    "anonymous": false,
    "inputs": [
     {
+     "indexed": false,
+     "internalType": "uint16",
+     "name": "oldBps",
+     "type": "uint16"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint16",
+     "name": "newBps",
+     "type": "uint16"
+    }
+   ],
+   "name": "FeeTreasuryBpsSet",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
      "indexed": true,
      "internalType": "address",
      "name": "account",
@@ -831,7 +860,7 @@
   },
   {
    "inputs": [],
-   "name": "FEE_TREASURY_BPS",
+   "name": "MAX_FEE_TREASURY_BPS",
    "outputs": [
     {
      "internalType": "uint16",
@@ -1501,6 +1530,19 @@
      "internalType": "uint256[]",
      "name": "extensions",
      "type": "uint256[]"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "feeTreasuryBps",
+   "outputs": [
+    {
+     "internalType": "uint16",
+     "name": "",
+     "type": "uint16"
     }
    ],
    "stateMutability": "view",
@@ -2288,6 +2330,19 @@
     }
    ],
    "name": "setAnchorer",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "uint16",
+     "name": "newBps",
+     "type": "uint16"
+    }
+   ],
+   "name": "setFeeTreasuryBps",
    "outputs": [],
    "stateMutability": "nonpayable",
    "type": "function"

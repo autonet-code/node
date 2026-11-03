@@ -33,7 +33,9 @@ async function deploySubstrateWith(opts = {}) {
   const substrate = await Substrate.deploy(
     treasury, vaultMinter, governor, ethers.ZeroAddress,
     opts.genesisRoot !== undefined ? opts.genesisRoot : ethers.ZeroHash,
-    "Test ATN", "REPATN");
+    "Test ATN", "REPATN",
+    opts.serviceFeeBps !== undefined ? opts.serviceFeeBps : 250,
+    opts.feeTreasuryBps !== undefined ? opts.feeTreasuryBps : 5000);
   await substrate.waitForDeployment();
   _ctx[(await substrate.getAddress()).toLowerCase()] = {
     vaultFaucet: vaultMinter === vaultSigner.address ? vaultSigner : null,

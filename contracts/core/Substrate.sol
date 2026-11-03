@@ -108,11 +108,19 @@ contract Substrate is EIP712 {
         address anchorer_,
         bytes32 genesisRoot_,
         string memory name_,
-        string memory symbol_
+        string memory symbol_,
+        uint16 serviceFeeBps_,
+        uint16 feeTreasuryBps_
     )
         EIP712("AutonetSubstrate", "1")
     {
         if (governor_ == address(0)) revert NoAnchorAuthority();
+        if (serviceFeeBps_ < MIN_SERVICE_FEE_BPS || serviceFeeBps_ > MAX_SERVICE_FEE_BPS) {
+            revert FeeOutOfBounds(serviceFeeBps_);
+        }
+        if (feeTreasuryBps_ > MAX_FEE_TREASURY_BPS) revert FeeOutOfBounds(feeTreasuryBps_);
+        serviceFeeBps = serviceFeeBps_;
+        feeTreasuryBps = feeTreasuryBps_;
         treasury = treasury_;
         vaultMinter = vaultMinter_;
         governor = governor_;
@@ -1230,21 +1238,25 @@ contract Substrate is EIP712 {
     //     fees into a pool you only ever share pro-rata;
     //   - the TREASURY share transfers to the immutable DAO treasury.
     //
-    // PROVISIONAL VALUES pending user blessing (economics parameters).
+    // Both are set at deploy (the werule setup's defaults: 2.5% and half) and
+    // governed afterwards: the right values change as the jurisdiction grows.
     // -------------------------------------------------------------------------
 
     /// @notice Fee on payForService, in basis points of the gross amount.
-    ///         Governed (setServiceFeeBps) — the fee is the one real lever
-    ///         on the price of REP (Decision 2026-07-10). PROVISIONAL
-    ///         default pending an economics sweep.
-    uint16 public serviceFeeBps = 250;                 // 2.5%
-    /// @notice Share OF THE FEE that goes to the treasury; the rest burns.
-    uint16 public constant FEE_TREASURY_BPS = 5000;    // half/half
+    ///         Set at deploy, then governed (setServiceFeeBps).
+    uint16 public serviceFeeBps;
+    /// @notice Share OF THE FEE that goes to the treasury; the rest burns
+    ///         and funds the next tool pool. Set at deploy, then governed
+    ///         (setFeeTreasuryBps).
+    uint16 public feeTreasuryBps;
     uint16 public constant BPS_DENOM = 10_000;
 
-    /// @notice Hardcoded bounds on the governed service fee: 0.5%–10%.
+    /// @notice Hardcoded bounds on the governed service fee: 0.5% to 10%.
     uint16 public constant MIN_SERVICE_FEE_BPS = 50;
     uint16 public constant MAX_SERVICE_FEE_BPS = 1000;
+    /// @notice At least 10% of every fee burns, so no DAO vote can switch
+    ///         the tool pool off.
+    uint16 public constant MAX_FEE_TREASURY_BPS = 9000;
 
     /// @notice DAO treasury (set at construction; no admin key to repoint).
     address public immutable treasury;
@@ -1255,6 +1267,8 @@ contract Substrate is EIP712 {
 
     /// @notice Emitted when the governor retunes the service fee.
     event ServiceFeeBpsSet(uint16 oldBps, uint16 newBps);
+    /// @notice Emitted when the governor retunes the fee's treasury share.
+    event FeeTreasuryBpsSet(uint16 oldBps, uint16 newBps);
 
     error NotGovernor();
     error FeeOutOfBounds(uint16 bps);
@@ -1272,6 +1286,18 @@ contract Substrate is EIP712 {
         uint16 oldBps = serviceFeeBps;
         serviceFeeBps = newBps;
         emit ServiceFeeBpsSet(oldBps, newBps);
+    }
+
+    /// @notice Retune the fee's treasury share (the rest burns).
+    ///         Governor-only; reverts above 9000 (90%).
+    function setFeeTreasuryBps(uint16 newBps) external {
+        if (msg.sender != governor || governor == address(0)) {
+            revert NotGovernor();
+        }
+        if (newBps > MAX_FEE_TREASURY_BPS) revert FeeOutOfBounds(newBps);
+        uint16 oldBps = feeTreasuryBps;
+        feeTreasuryBps = newBps;
+        emit FeeTreasuryBpsSet(oldBps, newBps);
     }
 
     /// @notice Cumulative net service revenue per recipient. Bumped by
@@ -1361,7 +1387,7 @@ contract Substrate is EIP712 {
         // epoch's emission pool by the close), treasury share transfers.
         uint256 fee = (amount * serviceFeeBps) / BPS_DENOM;
         uint256 toTreasury = treasury != address(0)
-            ? (fee * FEE_TREASURY_BPS) / BPS_DENOM
+            ? (fee * feeTreasuryBps) / BPS_DENOM
             : 0;
         uint256 burned = fee - toTreasury;
         uint256 net = amount - fee;

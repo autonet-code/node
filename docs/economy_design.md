@@ -24,8 +24,10 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   REP symbol>ATN` (REP gives REPATN), set at setup. 6 decimals: 1 ATN is
   1e6 base units.
 - The tool pool is funded only by **burned service fees**: each
-  `payForService` takes a 2.5% fee, half to the DAO treasury and half
-  burned, and an epoch's mint is capped on-chain at the fees burned between
+  `payForService` takes a fee (setup default 2.5%, the DAO retunes it
+  between 0.5% and 10%), split between the DAO treasury and a burn (setup
+  default half each; the DAO retunes the treasury share up to 90%, so at
+  least a tenth always burns), and an epoch's mint is capped on-chain at the fees burned between
   the two previous cutoffs (the mint lags the burns by one epoch). Zero
   volume, zero mint. The pool is shared in proportion to each tool's usage
   score, floored to 1e-6 ATN (the dust is never minted). Besides the pool,

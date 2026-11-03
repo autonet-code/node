@@ -71,7 +71,11 @@ async function main() {
     // Wallet-facing token metadata; the werule setup derives these from the
     // DAO (governor name + " ATN", RepToken symbol + "ATN").
     process.env.ATN_NAME || "Autonet ATN",
-    process.env.ATN_SYMBOL || "REPATN"
+    process.env.ATN_SYMBOL || "REPATN",
+    // Service fee and the fee's treasury share (the rest burns), in bps.
+    // Set here, governed afterwards (setServiceFeeBps, setFeeTreasuryBps).
+    Number(process.env.SERVICE_FEE_BPS || 250),
+    Number(process.env.FEE_TREASURY_BPS || 5000)
   );
   await substrate.waitForDeployment();
   const address = await substrate.getAddress();
