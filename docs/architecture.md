@@ -42,7 +42,7 @@ It has two listeners:
 
 | port | who | auth |
 |---|---|---|
-| 7700 | owner, same machine (app, `atn send`, MCP owner mode) | loopback only, pre-authed |
+| 7700 | owner, same machine (app, `atn send`, MCP owner mode) | loopback only, pre-authed; changing the owner wallet and exporting a key also need the owner wallet's signature, since agents on the machine can reach it too |
 | 7701 | owner, remote (app in a browser) | owner wallet signature |
 | 7702 | agents on the same machine (HTTP API) | loopback only, each call scoped to the agent in its path |
 

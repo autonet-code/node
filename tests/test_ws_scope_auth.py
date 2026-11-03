@@ -72,14 +72,67 @@ async def test_local_session_snapshot_unrestricted(tmp_path):
     assert set(resp["result"]["agents"].keys()) == {"lead", "a", "a.1", "b"}
 
 
+async def _owner_signed(bridge, acct, msg):
+    """``msg`` with a fresh owner challenge signed by ``acct``."""
+    ch = await bridge._handle_message(
+        {"type": "owner_challenge", "action": msg["type"], "msg_id": "c"}, _local_session())
+    sig = acct.sign_message(encode_defunct(text=ch["result"]["challenge"])).signature.hex()
+    return {**msg, "owner_nonce": ch["result"]["nonce"], "owner_sig": sig}
+
+
 @pytest.mark.asyncio
 async def test_local_session_can_export_key(tmp_path):
-    rt = await _fleet(tmp_path)
-    bridge = _bridge(rt)
-    resp = await bridge._handle_message(
-        {"type": "export_agent_key", "agent_id": "a.1", "msg_id": "1"}, _local_session())
+    owner = Account.create()
+    rt = await _fleet(tmp_path, owner_wallet=owner.address)
+    bridge = _bridge(rt, owner_wallet=owner.address)
+    msg = {"type": "export_agent_key", "agent_id": "a.1", "msg_id": "1"}
+    resp = await bridge._handle_message(await _owner_signed(bridge, owner, msg), _local_session())
     assert resp["ok"] is True
     assert resp["result"]["private_key"] == "deadbeef" * 8
+
+
+@pytest.mark.asyncio
+async def test_local_key_export_needs_the_owner_wallet(tmp_path):
+    # The local listener trusts the machine; an agent on it has no wallet.
+    owner, stranger = Account.create(), Account.create()
+    rt = await _fleet(tmp_path, owner_wallet=owner.address)
+    bridge = _bridge(rt, owner_wallet=owner.address)
+    msg = {"type": "export_agent_key", "agent_id": "a.1", "msg_id": "1"}
+    bare = await bridge._handle_message(msg, _local_session())
+    assert bare["ok"] is False and bare["owner_signature_required"] is True
+    wrong = await bridge._handle_message(await _owner_signed(bridge, stranger, msg),
+                                         _local_session())
+    assert wrong["ok"] is False and "not this household's owner" in wrong["error"]
+    # A challenge is one-use.
+    signed = await _owner_signed(bridge, owner, msg)
+    assert (await bridge._handle_message(signed, _local_session()))["ok"] is True
+    assert (await bridge._handle_message(signed, _local_session()))["ok"] is False
+    # And bound to its action.
+    other = await _owner_signed(bridge, owner, {"type": "export_operator_key", "msg_id": "2"})
+    other["type"] = "export_agent_key"
+    other["agent_id"] = "a.1"
+    assert (await bridge._handle_message(other, _local_session()))["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_owner_wallet_first_time_and_change(tmp_path, monkeypatch):
+    monkeypatch.setattr("atn.config.save_owner_wallet_to_config", lambda a: None)
+    first, second, agent = Account.create(), Account.create(), Account.create()
+    rt = await _fleet(tmp_path)
+    bridge = _bridge(rt)
+    # First owner: signed by the address being set.
+    msg = {"type": "set_owner_wallet", "address": first.address, "msg_id": "1"}
+    assert (await bridge._handle_message(await _owner_signed(bridge, first, msg),
+                                         _local_session()))["ok"] is True
+    # An agent can't move ownership to its own key.
+    msg2 = {"type": "set_owner_wallet", "address": agent.address, "msg_id": "2"}
+    resp = await bridge._handle_message(await _owner_signed(bridge, agent, msg2), _local_session())
+    assert resp["ok"] is False
+    # The current owner can.
+    msg3 = {"type": "set_owner_wallet", "address": second.address, "msg_id": "3"}
+    assert (await bridge._handle_message(await _owner_signed(bridge, first, msg3),
+                                         _local_session()))["ok"] is True
+    assert bridge.owner_wallet == second.address
 
 
 # ---------------------------------------------------------------------------

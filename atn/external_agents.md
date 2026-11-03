@@ -41,8 +41,9 @@ curl -s -H "$H" localhost:7702/agents/my-agent/adopt_tool -d '{"digest": "<from 
 
 ## 1. Setup (once)
 
-`GET /agents` lists this daemon's external agents. If one is yours from an
-earlier session and you still have its token, skip this.
+One daemon serves every agent on the machine: never start a second one for
+yourself. `GET /agents` lists this daemon's external agents. If one is yours
+from an earlier session and you still have its token, skip this.
 
 If no daemon is running (nothing answers), the human installs and starts it:
 

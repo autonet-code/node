@@ -119,6 +119,24 @@ KEY_LOCAL_ONLY_MESSAGES = frozenset({
     "set_owner_wallet",
 })
 
+# Messages that hand over ownership or a key. The local listener trusts the
+# machine, and an external agent runs on the same machine with a shell, so
+# these also need the owner wallet's signature over a one-use challenge
+# (``owner_challenge``): the agent has no access to the owner's wallet.
+OWNER_SIGNED_MESSAGES = frozenset({
+    "export_agent_key",
+    "export_operator_key",
+    "set_owner_wallet",
+})
+_OWNER_CHALLENGE_TTL_S = 300
+
+
+def owner_challenge_text(action: str, nonce: str) -> str:
+    """What the owner's wallet signs (EIP-191 personal_sign) to authorize
+    one ``action``."""
+    return f"Autonet owner action: {action}\nnonce: {nonce}"
+
+
 # Messages a STRANGER may send on the remote (auth-required) listener without
 # completing the owner/agent-self handshake, because they carry their OWN
 # authorization and are useless without it.
@@ -294,6 +312,8 @@ class WebSocketBridge:
         self.remote_host = remote_host
         self.remote_port = remote_port or (port + 1)
         self.owner_wallet = owner_wallet
+        # One-use owner challenges: nonce -> (action, expiry).
+        self._owner_challenges: dict[str, tuple[str, float]] = {}
         self._server: WSServer | None = None          # local (privileged) listener
         self._remote_server: WSServer | None = None    # remote (auth) listener
         # Per-connection auth/scope state (replaces the old flat client set).
@@ -1048,6 +1068,15 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": False,
                     "error": "Key operations are localhost-only and were "
                              "refused (connection is not on the local listener)."}
+
+        # --- Gate 1b: ownership and keys need the owner's wallet -----------
+        if msg_type == "owner_challenge":
+            return self._issue_owner_challenge(msg)
+        if msg_type in OWNER_SIGNED_MESSAGES:
+            refusal = await self._owner_proof_refusal(msg, msg_type)
+            if refusal:
+                return {"msg_id": msg_id, "ok": False, "error": refusal,
+                        "owner_signature_required": True}
 
         # --- Auth handshake messages (the only ones allowed pre-auth) ------
         if msg_type == "auth_response":
@@ -5484,6 +5513,71 @@ class WebSocketBridge:
             identity.registration_tx = result.get("tx_hash")
             self.runtime.registry.persist_identity(agent_id)
         return result
+
+    def _issue_owner_challenge(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """A one-use challenge for one owner-signed action."""
+        import secrets
+        import time
+        action = str(msg.get("action") or "")
+        if action not in OWNER_SIGNED_MESSAGES:
+            return {"msg_id": msg.get("msg_id"), "ok": False,
+                    "error": f"no owner signature is needed for {action!r}"}
+        now = time.time()
+        self._owner_challenges = {n: v for n, v in self._owner_challenges.items()
+                                  if v[1] > now}
+        if len(self._owner_challenges) >= 64:
+            return {"msg_id": msg.get("msg_id"), "ok": False,
+                    "error": "too many open owner challenges; try again shortly"}
+        nonce = secrets.token_hex(16)
+        self._owner_challenges[nonce] = (action, now + _OWNER_CHALLENGE_TTL_S)
+        return {"msg_id": msg.get("msg_id"), "ok": True, "result": {
+            "action": action, "nonce": nonce,
+            "challenge": owner_challenge_text(action, nonce)}}
+
+    async def _owner_of_record(self) -> str:
+        """The household's owner: the wallet the operator is bound to on
+        chain, else the configured owner wallet."""
+        configured = (getattr(self.runtime._config.autonet, "owner_wallet", "")
+                      or self.owner_wallet or "").strip()
+        try:
+            status = await self._operator_status()
+            bound = str(status.get("bound_owner") or "")
+            if bound and int(bound, 16):
+                return bound
+        except Exception:  # noqa: BLE001  (no chain: the configured wallet)
+            pass
+        return configured
+
+    async def _owner_proof_refusal(self, msg: dict[str, Any], action: str) -> str:
+        """Why ``msg`` lacks a valid owner signature for ``action``, or ""."""
+        import time
+        nonce = str(msg.get("owner_nonce") or "")
+        sig = msg.get("owner_sig") or ""
+        entry = self._owner_challenges.pop(nonce, None) if nonce else None
+        if not entry or not sig:
+            return ("this needs the owner's wallet: request owner_challenge "
+                    f"with action {action!r}, sign its challenge in the owner "
+                    "wallet, and send owner_nonce and owner_sig with the call")
+        issued_for, expiry = entry
+        if issued_for != action or time.time() > expiry:
+            return "the owner challenge expired or was issued for another action"
+        try:
+            from eth_account import Account
+            from eth_account.messages import encode_defunct
+            signer = Account.recover_message(
+                encode_defunct(text=owner_challenge_text(action, nonce)),
+                signature=sig)
+        except Exception:  # noqa: BLE001
+            return "the owner signature is not valid"
+        owner = await self._owner_of_record()
+        if not owner:
+            if action != "set_owner_wallet":
+                return "this daemon has no owner wallet yet"
+            # First owner: whoever proves control of the address they set.
+            owner = str(msg.get("address") or "")
+        if signer.lower() != owner.lower():
+            return f"signed by {signer}, which is not this household's owner"
+        return ""
 
     def _operator_key(self) -> str:
         """The key the daemon anchors, votes and claims with: the configured
