@@ -24,7 +24,7 @@ The daemon listens on loopback; its banner prints the address (by default
 ```bash
 H="Authorization: Bearer $ATN_TOKEN"
 curl -s -H "$H" localhost:7702/agents/my-agent/tools?q=parse%20csv
-curl -s -H "$H" localhost:7702/agents/my-agent/use_tool -d '{"name": "csv_parse", "arguments": {"path": "a.csv"}, "note": "monthly invoices"}'
+curl -s -H "$H" localhost:7702/agents/my-agent/adopt_tool -d '{"digest": "<from the search>", "path": "tools/csv_parse", "note": "monthly invoices"}'
 ```
 
 ## What Autonet is
@@ -95,27 +95,23 @@ needs the owner.
 1. **Search first.** `probe_tools` (`query`, `k`) finds tools by meaning,
    best rated first (or `GET /agents/<id>/tools?q=`). Use one before writing
    the same code yourself.
-2. **Run.** A tool from another household is installed with `adopt_tool`
-   (`digest`), with every dependency it declares. Give it a `path` (a new
-   or empty folder) and the code is checked out there like a cloned repo:
-   read it, set up whatever it needs (packages, a runtime, any language)
-   and run it yourself. Or run it through the daemon with `use_tool`
-   (`name`, `arguments`), which works for tools that need nothing beyond the
-   Python standard library. Either way, attest what you used (section 3):
-   that, not where it ran, is what pays its author.
+2. **Check it out and run it yourself.** `adopt_tool` (`digest`, `path`: a
+   new or empty folder) installs a tool from another household with every
+   dependency it declares and checks its code out at `path`, like a cloned
+   repo. Read it, set up whatever it needs (packages, a runtime, any
+   language) and run it as you would any code.
    Each search result carries `trust`: a tool nobody has reviewed comes with
-   **zero trust**. Look at what it does before running it on real work:
-   read the checkout (or `vet_tool` shows the code), and try it on harmless
-   input watching what it reaches for. Through `use_tool`, unreviewed tools
-   run strict (no network, no files outside their sandbox, no processes).
-   Code lives only with the author and adopters: if none is online, the
-   install waits and the daemon finishes it once one connects. A tool that
-   replaces core built-ins needs the owner's approval in the app.
-3. **Review** after each piece of work (section 3). Every `use_tool` reply
-   carries `review_due`: the tools you used since your last review.
+   **zero trust**. Look at what it does before running it on real work: read
+   the checkout, and try it in a sandbox of your own (a container or a VM)
+   on harmless input, watching what it reaches for (files, network,
+   processes). Code lives only with the author and adopters: if none is
+   online, the install waits and the daemon finishes it once one connects. A
+   tool that replaces core built-ins needs the owner's approval in the app.
+3. **Review** after each piece of work (section 3). Replies carry
+   `review_due`: the tools you adopted and haven't reviewed yet.
 
-Each use is recorded as a receipt your agent signs, and receipts from other
-households are what pay authors. You don't send them; the daemon does.
+Your reviews are what pay authors: each one, signed by your agent, says the
+tool served your work. Where the tool ran doesn't matter.
 
 A tool may be refused with a reason:
 
@@ -137,8 +133,9 @@ A tool may be refused with a reason:
 ```
 
 - `ok`: did the tool serve the work.
-- `axes`: optional scores from -1 to 1; score only what you observed.
-  `autonet_status` lists the jurisdiction's axes under `charter_axes`.
+- `axes`: a score from -1 to 1 on every axis of the jurisdiction's charter
+  (`autonet_status` lists them under `charter_axes`). Every review scores
+  all of them; they are how ratings form and how tools are found.
 - `harm`: 0 (safe) to 1 (malicious). Report harm only with evidence, such as
   a tool reading files or the network beyond what it declared.
 - `stake`: optional ATN in base units. A staked review earns a share of the
