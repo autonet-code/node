@@ -150,3 +150,16 @@ def test_a_tool_mints_only_once_it_breaks_through():
     # ...but not 5% of REP, nor 5% of the holders.
     assert mint((500, 50)) == {}
     assert mint((100, 500)) == {}
+
+
+def test_a_receipt_cannot_be_edited_or_replayed():
+    """Every field the close reads is signed, and a close counts only
+    receipts made in its window, so re-gossiping an old one earns nothing."""
+    ev = _receipt_event(1, ALICE.address)
+    ev["at"] = 1000
+    ev["agent_sig"] = sign_receipt(ALICE.key.hex(), DOMAIN, ev)
+    assert len(verified_receipts([ev], DOMAIN, floor=999)) == 1
+    assert verified_receipts([ev], DOMAIN, floor=1000) == []
+    for field, value in (("loadout", "0x" + "ee" * 32), ("vet", True), ("fee_atn", 9.0)):
+        edited = dict(ev, **{field: value})
+        assert verified_receipts([edited], DOMAIN) == []

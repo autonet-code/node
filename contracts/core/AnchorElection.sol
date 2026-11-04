@@ -62,7 +62,7 @@ interface IPastVotes {
 /// agent with REP share s (votes at the proposal's creation / total REP)
 /// is drawn when hash(chain, this, epoch, attempt, agent) falls below
 /// `proposers * s` of the hash range, so about `proposers` agents are
-/// drawn per epoch. From attempt `openAfterAttempts` on, any live agent
+/// drawn per epoch. From attempt `openAfterAttempts` on, any live agent with REP
 /// may register: an epoch never stalls because no drawn agent showed up.
 contract AnchorElection {
     struct Option {
@@ -174,11 +174,11 @@ contract AnchorElection {
     function isDrawn(uint256 epochNumber, uint256 attempt, address account,
                      uint256 timepoint) public view returns (bool) {
         if (!substrate.isLive(account)) return false;
-        if (attempt >= openAfterAttempts) return true;
         uint256 supply = repToken.getPastTotalSupply(timepoint);
         if (supply == 0) return false;
         uint256 votes = repToken.getPastVotes(account, timepoint);
         if (votes == 0 || votes * PPM < proposerFloorPpm * supply) return false;
+        if (attempt >= openAfterAttempts) return true;
         uint256 h = uint256(keccak256(abi.encode(
             block.chainid, address(this), epochNumber, attempt, account)));
         // h / 2^256 < proposers * votes / supply, without overflow.

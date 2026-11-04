@@ -1959,6 +1959,7 @@ class ToolStore:
                     "score": score,
                     "problem_coords": list(problem_coords),
                     "review_digest": review_digest,
+                    "at": int(time.time()),
                 }
                 # No axes on the wire: reviews settle on ToolBond.
                 if own_share is not None:

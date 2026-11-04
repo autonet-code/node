@@ -404,6 +404,9 @@ def compute_tool_mint(
     # the agent they name for it (nodes/common/tool_receipts.py). None (no
     # chain, tests) = receipts unchecked.
     receipt_domain: Optional[str] = None,
+    # The window's start: receipts made at or before it are old, however
+    # they arrived.
+    receipt_floor: Optional[float] = None,
     # Tools the network denied at the snapshot: they mint nothing.
     denied_tools: Optional[List[str]] = None,
     # Sanctioned households: their usage credits no tool.
@@ -560,7 +563,7 @@ def compute_tool_mint(
         known_regs.setdefault(ev["artifact_digest"], meta)
 
     from .tool_receipts import verified_receipts
-    usage = tool_usage_from_events(verified_receipts(events, receipt_domain))
+    usage = tool_usage_from_events(verified_receipts(events, receipt_domain, receipt_floor))
     by_digest = _artifact_standing(world)
 
     # ------------------------------------------------------------------
@@ -803,7 +806,8 @@ def compute_tool_mint(
     from .world_model_substrate.tool_usage import loadout_adoption_from_events
     # Same receipt rule as usage: unsigned or forged attestations credit
     # no adoption either.
-    adoption = loadout_adoption_from_events(verified_receipts(events, receipt_domain))
+    adoption = loadout_adoption_from_events(
+        verified_receipts(events, receipt_domain, receipt_floor))
     for loadout in sorted(set(adoption) & set(known_regs)):
         shares = _composition_shares(loadout, deps_of,
                                      root_shares=root_share_of)
@@ -1304,6 +1308,8 @@ def federated_epoch_close(
     sanctioned_households: Optional[List[str]] = None,
     # Gossip domain for signed receipts (compute_tool_mint).
     receipt_domain: Optional[str] = None,
+    # The window's start: older receipts earn nothing (compute_tool_mint).
+    receipt_floor: Optional[float] = None,
     # Tools denied at the snapshot (compute_tool_mint).
     denied_tools: Optional[List[str]] = None,
     # Breakthrough gate (compute_tool_mint).
@@ -1460,6 +1466,7 @@ def federated_epoch_close(
         rep_shares=rep_shares,
         review_snapshot=review_snapshot,
         receipt_domain=receipt_domain,
+        receipt_floor=receipt_floor,
         denied_tools=denied_tools,
         sanctioned_households=sanctioned,
         mint_gate=mint_gate,

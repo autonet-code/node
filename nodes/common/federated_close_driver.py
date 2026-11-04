@@ -1147,6 +1147,7 @@ class FederatedCloseDriver:
                 # Chain-backed closes count only agent-signed receipts.
                 receipt_domain=(str(getattr(self.gossip, "rpb_address", "") or "")
                                 if self.review_snapshot is not None else None),
+                receipt_floor=(self.epoch_window or {}).get("start"),
             )
         except Exception as e:
             logger.error(
