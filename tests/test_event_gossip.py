@@ -333,3 +333,30 @@ def test_sender_chain_survives_a_restart(tmp_path):
     c = second._sign_and_publish([{"n": 3}])
     assert (a.batch.batch_seq, b.batch.batch_seq, c.batch.batch_seq) == (1, 2, 3)
     assert c.batch.prev_batch_hash == b.batch.content_hash()
+
+
+def test_open_epoch_batches_survive_a_restart(tmp_path):
+    """A week's buffer is not lost to a reboot: batches come back from the
+    log for the close and for peers catching up, and a cut last line is fine."""
+    from nodes.common.event_gossip import EventGossip, InMemoryHub, InMemoryTransport, Keypair
+
+    class World:
+        rpb_address = "0x" + "22" * 20
+
+    path = tmp_path / "batches.jsonl"
+    kp = Keypair.generate()
+
+    def daemon():
+        return EventGossip(rpb_address=World.rpb_address, keypair=kp,
+                           transport=InMemoryTransport(InMemoryHub()),
+                           world_service=World(), batch_log_path=path)
+
+    first = daemon()
+    a = first._sign_and_publish([{"n": 1}])
+    b = first._sign_and_publish([{"n": 2}])
+    with path.open("a", encoding="utf-8") as f:
+        f.write('{"h": "ab", "ts"')
+    second = daemon()
+    held = {x.content_hash() for x in second.pending_epoch_batches()}
+    assert held == {a.batch.content_hash(), b.batch.content_hash()}
+    assert len(second.batch_log.since(0.0, set())) == 2

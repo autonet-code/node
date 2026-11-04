@@ -539,6 +539,8 @@ class AutonetService:
                 world_service=self._world_service,
                 seq_path=(Path(self._data_dir) / "world" / "gossip" / "sender_seq.json"
                           if self._data_dir else None),
+                batch_log_path=(Path(self._data_dir) / "world" / "gossip" / "batches.jsonl"
+                                if self._data_dir else None),
             )
             logger.info(
                 "Event gossip attached for rpb=%s (sender_pubkey=%s...)",

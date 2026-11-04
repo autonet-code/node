@@ -355,20 +355,56 @@ class BatchLog:
     """Recently seen signed batches, kept as wire bytes so a peer that
     missed them can ask (issue #41: GossipSub keeps no history, so a daemon
     that joins or loses its peers mid-epoch never sees the batches sent
-    before). Entries older than ``retention`` seconds are dropped. Daemons
-    and relays both keep one; requesters verify every batch themselves."""
+    before). Entries older than ``retention`` seconds are dropped: two
+    weeks, so a whole epoch stays available however late a peer asks. Daemons
+    and relays both keep one; requesters verify every batch themselves. With
+    a ``path`` the log survives a restart."""
 
-    def __init__(self, retention: float = 7200.0, max_entries: int = 20000,
-                 clock: Callable[[], float] = time.time):
+    def __init__(self, retention: float = 14 * 86400.0, max_entries: int = 100000,
+                 clock: Callable[[], float] = time.time,
+                 path: Optional[Any] = None):
         self.retention = float(retention)
         self.max_entries = int(max_entries)
         self.clock = clock
         self._lock = threading.Lock()
         self._entries: Dict[bytes, tuple] = {}  # content hash -> (timestamp, wire)
+        self._path = Path(path) if path else None
+        self._load()
+
+    def _load(self) -> None:
+        """Read the file back, then rewrite it without what has expired."""
+        if self._path is None or not self._path.exists():
+            return
+        with self._path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    self._entries[bytes.fromhex(r["h"])] = (
+                        float(r["ts"]), r["w"].encode("utf-8"))
+                except Exception:   # a line cut short by a crash
+                    continue
+        self._prune_locked(force=True)
+        tmp = self._path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            for h, (ts, w) in self._entries.items():
+                f.write(self._line(h, ts, w))
+        os.replace(tmp, self._path)
+
+    @staticmethod
+    def _line(h: bytes, ts: float, wire: bytes) -> str:
+        return json.dumps({"h": h.hex(), "ts": ts, "w": wire.decode("utf-8")}) + chr(10)
+
+    def wires(self) -> List[bytes]:
+        """Every kept batch, oldest first."""
+        with self._lock:
+            return [w for _, w in sorted(self._entries.values(), key=lambda e: e[0])]
 
     def add(self, content_hash: bytes, timestamp: float, wire: bytes) -> None:
         with self._lock:
             self._entries[content_hash] = (float(timestamp), wire)
+            if self._path is not None:
+                with self._path.open("a", encoding="utf-8") as f:
+                    f.write(self._line(content_hash, float(timestamp), wire))
             if len(self._entries) > self.max_entries:
                 self._prune_locked(force=True)
 
@@ -428,6 +464,7 @@ class EventGossip:
         *,
         dedupe_cache_size: int = 4096,
         seq_path: Optional[Any] = None,
+        batch_log_path: Optional[Any] = None,
     ):
         self.rpb_address = rpb_address
         self.keypair = keypair
@@ -458,7 +495,16 @@ class EventGossip:
         self.max_skew_seconds: Optional[float] = None
         self.clock = time.time
         # Batches we accepted, served to peers catching up (issue #41).
-        self.batch_log = BatchLog(clock=lambda: self.clock())
+        self.batch_log = BatchLog(clock=lambda: self.clock(), path=batch_log_path)
+        # The open epoch's batches come back after a restart; the close
+        # keeps only those signed after its window's start.
+        for wire in self.batch_log.wires():
+            try:
+                batch = SignedBatch.from_wire(wire).batch
+            except Exception:
+                continue
+            self._note_seen_locked(batch.content_hash())
+            self._epoch_batches.append(batch)
 
         # Subscribe to the topic so peers' batches reach us.
         self.transport.subscribe(self.topic, self._on_message)

@@ -194,6 +194,8 @@ class FederatedCloseDriver:
         # to the gossip (issue #41). Called once per window, before closing.
         self.catchup: Optional[Callable[[float], int]] = None
         self._caught_up: Optional[tuple] = None
+        self._catchup_key: Optional[tuple] = None
+        self._catchup_rounds = 0
         # Times this daemon found an epoch anchored differently from its own
         # close and rewound onto the anchored state (a run collector metric).
         self.rewinds: int = 0
@@ -568,6 +570,12 @@ class FederatedCloseDriver:
             if got:
                 logger.info("federated close: caught up %d batch(es) for epoch %d",
                             got, number)
+                # A peer serves 500 at a time: ask again until nothing is new,
+                # up to a limit so a peer cannot keep the close waiting.
+                self._catchup_rounds = self._catchup_rounds + 1 if self._catchup_key == ckey else 1
+                self._catchup_key = ckey
+                if self._catchup_rounds < 20:
+                    self._caught_up = None
                 return self._select_window()
         members = [b for b in live if float(b.timestamp) <= cutoff]
         self.gossip.take_epoch_batches(members, drop_at_or_before=cutoff)

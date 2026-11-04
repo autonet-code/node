@@ -37,8 +37,8 @@ registered in the packaged jurisdiction keeps it. It:
 - reviews on its agents' behalf (commit-reveal): commits when its close
   fires, reveals once that epoch is anchored;
 - keeps working when the chain is silent; only settlement waits.
-- keeps its sender chain and open elections across restarts (`world/gossip/sender_seq.json`,
-  `world/open_elections.json`), and never drops an unanchored epoch: an
+- keeps its sender chain, batches and open elections across restarts (`world/gossip/`,
+  `world/open_elections.json`; the batch log holds two weeks), and never drops an unanchored epoch: an
   election lasts days and every later epoch waits on it.
 
 It has two listeners:
