@@ -46,7 +46,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -351,6 +351,12 @@ class InMemoryHub:
 # ---------------------------------------------------------------------------
 
 
+# Limits on what one sender can make every daemon hold and replay. Far above
+# honest use; a sender over them is dropped for the hour.
+MAX_BATCH_BYTES = 256 * 1024
+MAX_SENDER_BATCHES_PER_HOUR = 600
+
+
 class BatchLog:
     """Recently seen signed batches, kept as wire bytes so a peer that
     missed them can ask (issue #41: GossipSub keeps no history, so a daemon
@@ -483,6 +489,7 @@ class EventGossip:
         self._dedupe_cache_size = dedupe_cache_size
         self._stats = GossipStats()
         self._known_seq_by_sender: Dict[bytes, int] = {}
+        self._sender_hour: Dict[bytes, Tuple[int, int]] = {}  # sender -> (hour, count)
         # Per-epoch buffer of accepted batches (own + peer). Drained
         # by the federated-close driver at epoch boundaries to build
         # the canonical order. Held under self._lock.
@@ -670,6 +677,9 @@ class EventGossip:
     def _accept(self, data: bytes, catchup_floor: Optional[float] = None) -> bool:
         """Verify one wire batch and buffer it for the close; True when it
         was new. ``catchup_floor`` marks a batch served for catch-up."""
+        if len(data) > MAX_BATCH_BYTES:
+            logger.warning("oversized batch dropped (%d bytes)", len(data))
+            return False
         try:
             signed = SignedBatch.from_wire(data)
         except Exception as e:
@@ -723,6 +733,14 @@ class EventGossip:
         with self._lock:
             if h in self._seen:
                 self._stats.batches_duplicate += 1
+                return False
+            hour = int(ts // 3600)
+            seen_hour, count = self._sender_hour.get(signed.batch.sender_pubkey, (hour, 0))
+            count = count + 1 if seen_hour == hour else 1
+            self._sender_hour[signed.batch.sender_pubkey] = (hour, count)
+            if count > MAX_SENDER_BATCHES_PER_HOUR:
+                logger.warning("batch from %s dropped: over the hourly limit",
+                               signed.batch.sender_pubkey.hex()[:16])
                 return False
             self._note_seen_locked(h)
             self._stats.batches_received += 1
