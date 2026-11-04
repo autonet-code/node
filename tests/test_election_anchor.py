@@ -164,7 +164,7 @@ def test_two_daemons_agree_and_anchor(stack):
     assert anchored[0] == option[0] and anchored[13] == option[7]
     # Agreeing daemons registered one option between them.
     pid = ea_a.proposal_id(e_a)
-    assert stack["election"].functions.optionCount(pid).call() == 1
+    assert stack["election"].functions.optionCount(pid).call() == 2   # reject + one
 
 
 def test_split_vote_resolves_to_one_anchor(stack):
@@ -209,3 +209,42 @@ def test_pipelined_elections_land_in_order(stack):
         _travel(w3, 20)
     assert sub.functions.anchorCount().call() == 2
     assert [sub.functions.getAnchor(i).call()[0] for i in (0, 1)] == [opt1[0], opt2[0]]
+
+
+def test_a_proposal_opened_early_cannot_anchor_a_fake_root(stack):
+    """A small holder opens the election and registers a fake root before any
+    honest close exists. Honest daemons register their close during voting,
+    outvote it, and the honest root anchors in the same attempt."""
+    (ea_a, v_a), (ea_b, v_b) = stack["daemon_a"], stack["daemon_b"]
+    w3, el, gov, sub = stack["w3"], stack["election"], stack["governor"], stack["substrate"]
+    honest, fake = _option(stack, "honest"), _option(stack, "fake")
+    e_fake = ea_b.open(fake[0], fake)
+    ea_b.step(e_fake, v_b[:1])        # proposes and registers the fake option
+    _travel(w3, 70)
+    ea_b.step(e_fake, v_b[:1])        # Active: votes for it
+    e_a = ea_a.open(honest[0], honest)
+    _run(stack, [((ea_a, v_a), e_a)])
+    assert sub.functions.anchorCount().call() == 1
+    assert bytes(sub.functions.getAnchor(0).call()[1]) == honest[1]
+
+
+def test_reject_wins_when_no_option_matches(stack):
+    """Honest agents not drawn or out of options vote reject, nothing anchors
+    on that attempt, and the next attempt is opened."""
+    (ea_a, v_a), (ea_b, v_b) = stack["daemon_a"], stack["daemon_b"]
+    w3, el = stack["w3"], stack["election"]
+    honest, fake = _option(stack, "honest"), _option(stack, "fake")
+    e_fake = ea_b.open(fake[0], fake)
+    ea_b.step(e_fake, v_b[:1])
+    _travel(w3, 70)
+    ea_b.step(e_fake, v_b[:1])
+    e_a = ea_a.open(honest[0], honest)
+    ea_a._register = lambda e, voters: None     # this daemon's agents were not drawn
+    attempt0 = e_a.attempt
+    for _ in range(40):
+        ea_a.step(e_a, v_a)
+        if e_a.attempt != attempt0:
+            break
+        _travel(w3, 20)
+    assert e_a.attempt == attempt0 + 1
+    assert stack["substrate"].functions.anchorCount().call() == 0

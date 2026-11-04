@@ -83,8 +83,10 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 - Every daemon with a registered agent or operator computes the close from
   gossiped events, bit-identically. A daemon without one closes nothing: it
   follows the anchored state.
-  The anchor is an AnchorElection: drawn agents register closes, REP
-  votes, the winner is anchored.
+  The anchor is an AnchorElection: drawn agents register closes, while the
+  election is open, REP votes for one or for reject (daemons reject when no
+  close matches theirs), and the winner is anchored. If reject wins, nothing
+  is and the next attempt opens.
 - A silent chain pauses settlement only; work continues.
 
 ## Tool mint (the only mint rail)
