@@ -93,11 +93,14 @@ class TestCloseCatchup:
 
         def catchup(floor):
             calls.append(floor)
+            if b2 in short_buf._b:
+                return 0
             short_buf._b.append(b2)
             return 1
         short.catchup = catchup
         fa, fb = full.run({"epoch_id": "a"}), short.run({"epoch_id": "b"})
-        assert calls == [float(_window()["start"])]
+        # Asked again after a reply with something new, until nothing is.
+        assert calls == [float(_window()["start"])] * 2
         assert fa.epoch_id == fb.epoch_id == make_epoch_id(2, ROOT, BASE)
         assert fa.n_batches == fb.n_batches == 2
         assert (fa.close_result["authoritative_payload"]
