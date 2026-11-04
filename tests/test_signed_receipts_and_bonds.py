@@ -163,3 +163,25 @@ def test_a_receipt_cannot_be_edited_or_replayed():
     for field, value in (("loadout", "0x" + "ee" * 32), ("vet", True), ("fee_atn", 9.0)):
         edited = dict(ev, **{field: value})
         assert verified_receipts([edited], DOMAIN) == []
+
+
+def test_a_gossiped_registration_cannot_change_what_a_digest_declares():
+    """The close reads a tool's fields from manifest bytes its digest proves,
+    so a first-come spoof of deps or trust class is ignored."""
+    import hashlib
+    import json
+    raw = json.dumps({"trust_class": "pinned", "author": AUTHOR, "dependencies": []})
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def reg(meta, sender):
+        return {"kind": "sub_claim_sprouted", "artifact_digest": digest, "seq": 1,
+                "author_agent": "0x00", "manifest_meta": meta, "sender": sender}
+
+    spoof = reg({"trust_class": "other", "author": AUTHOR, "deps": "ee" * 32,
+                 "sender": "victim"}, "attacker")
+    honest = reg({"manifest": raw, "sender": "victim"}, "author-key")
+    out = compute_tool_mint(_world(), [spoof, honest], registrations={},
+                            review_snapshot=_bonded(), receipt_domain=DOMAIN)
+    meta = out["registrations_next"][digest]
+    assert meta["trust_class"] == "pinned" and meta["deps"] == ""
+    assert meta["sender"] == "author-key"

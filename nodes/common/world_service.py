@@ -1077,6 +1077,10 @@ class WorldService:
                 equilibrate_tolerance=equilibrate_tolerance,
                 artifact_digest=digest,
                 manifest_meta={
+                    # The manifest's own bytes: its digest proves them, so
+                    # the close reads the fields below from here and no
+                    # gossiped copy can change them.
+                    "manifest": json.dumps(manifest, sort_keys=True),
                     "trust_class": str(manifest.get("trust_class", "")),
                     "author": str(manifest.get("author", "")),
                     # Composition fan-out DAG (consensus-carried like

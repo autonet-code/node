@@ -386,6 +386,25 @@ def tool_rating_position(entry: Optional[Dict[str, Any]], axis_ids: List[str],
     }
 
 
+def _proven_meta(digest: str, raw: str) -> Optional[Dict[str, str]]:
+    """The registration fields of the manifest whose bytes hash to
+    ``digest``, or None when they don't."""
+    import hashlib
+    import json
+    if not raw or hashlib.sha256(raw.encode("utf-8")).hexdigest() != digest:
+        return None
+    try:
+        manifest = json.loads(raw)
+    except ValueError:
+        return None
+    meta = {"trust_class": str(manifest.get("trust_class", "")),
+            "author": str(manifest.get("author", "")),
+            "deps": ",".join(manifest.get("dependencies") or [])}
+    if manifest.get("version_of"):
+        meta["version_of"] = str(manifest["version_of"])
+    return meta
+
+
 def compute_tool_mint(
     world: World,
     events: List[Dict[str, Any]],
@@ -555,11 +574,19 @@ def compute_tool_mint(
     reg_events.sort(key=lambda e: (e.get("author_agent", ""), e.get("seq", 0)))
     for ev in reg_events:
         meta = dict(ev["manifest_meta"])
+        raw = meta.pop("manifest", "")
+        if receipt_domain is not None:
+            # Chain-backed: only what the digest proves counts, whoever
+            # gossiped it first.
+            meta = _proven_meta(ev["artifact_digest"], raw)
+            if meta is None:
+                continue
         # Registration batch's signing key, for the wire-level self-
         # attestation dedup below. Carried registrations keep the key
         # from their original epoch (persisted in the carry-over map).
+        meta.pop("sender", None)
         if ev.get("sender"):
-            meta.setdefault("sender", str(ev["sender"]))
+            meta["sender"] = str(ev["sender"])
         known_regs.setdefault(ev["artifact_digest"], meta)
 
     from .tool_receipts import verified_receipts
