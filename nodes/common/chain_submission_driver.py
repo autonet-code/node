@@ -32,10 +32,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .authoritative_submitter import (
@@ -45,6 +47,7 @@ from .authoritative_submitter import (
 )
 from .blob_resolver import BlobResolver, InMemoryBlobResolver
 from .epoch_anchorer import (
+    AnchorFields,
     AnchorResult,
     EpochAnchorer,
     EpochAnchorerConfig,
@@ -128,6 +131,7 @@ class ChainSubmissionDriver:
         gossip: Optional[Any] = None,
         tick_interval: float = 15.0,
         submitter_web3: Optional[Any] = None,
+        elections_path: Optional[Any] = None,
         **_ignored: Any,
     ):
         self.config = config
@@ -158,6 +162,10 @@ class ChainSubmissionDriver:
         self._pending: "OrderedDict[str, AnchorProposal]" = OrderedDict()
         self._ticker: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # Open elections outlive a restart: one lasts days, and an epoch
+        # nobody follows any more holds up every later one.
+        self._elections_path = Path(elections_path) if elections_path else None
+        self._load_elections()
 
     def governed_anchorer(self) -> Optional[GovernedAnchorer]:
         if self._governed is None and self._anchorer is not None:
@@ -279,6 +287,7 @@ class ChainSubmissionDriver:
                     else:
                         with self._lock:
                             self._elections[fed.epoch_id] = election
+                            self._save_elections()
                         self._ensure_ticker()
                         return out
             elif ga is not None and ga.direct:
@@ -501,23 +510,53 @@ class ChainSubmissionDriver:
                         self._elections.pop(epoch_id, None)
                     continue
                 anchored = self._step_election(election) == "executed"
-            done = anchored
-            if not anchored and time.monotonic() - election.created > _MAX_PROPOSAL_AGE_S:
-                logger.warning("epoch %s: anchor election open too long, "
-                               "giving up", epoch_id)
-                done = True
+            # An unanchored epoch is never dropped: nothing would reopen it,
+            # and every later epoch waits on it.
             if anchored:
                 logger.info("epoch %s anchored by election; submitting mints",
                             epoch_id)
                 self._submit_agents(epoch_id)
-            if done:
                 with self._lock:
                     self._elections.pop(epoch_id, None)
+
+    def _load_elections(self) -> None:
+        if self._elections_path is None or not self._elections_path.exists():
+            return
+        try:
+            rows = json.loads(self._elections_path.read_text(encoding="utf-8"))
+            for r in rows:
+                option = tuple(bytes.fromhex(v["hex"]) if isinstance(v, dict) else v
+                               for v in r["option"])
+                self._elections[r["epoch_id"]] = Election(
+                    epoch_id=r["epoch_id"], epoch_number=int(r["epoch_number"]),
+                    option=option, option_hash=bytes.fromhex(r["option_hash"]),
+                    attempt=int(r["attempt"]))
+                self._fields_by_number[int(r["epoch_number"])] = AnchorFields(*option)
+        except Exception as e:
+            logger.warning("open elections unreadable (%s): starting without them", e)
+            self._elections.clear()
+            self._fields_by_number.clear()
+        if self._elections:
+            self._ensure_ticker()
+
+    def _save_elections(self) -> None:
+        if self._elections_path is None:
+            return
+        with self._lock:
+            rows = [{"epoch_id": e.epoch_id, "epoch_number": e.epoch_number,
+                     "option": [{"hex": v.hex()} if isinstance(v, (bytes, bytearray))
+                                else v for v in e.option],
+                     "option_hash": e.option_hash.hex(), "attempt": e.attempt}
+                    for e in self._elections.values()]
+        tmp = self._elections_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rows), encoding="utf-8")
+        os.replace(tmp, self._elections_path)
 
     def tick(self) -> None:
         """Advance every pending anchor proposal and election one step;
         submit agent mints for the ones whose anchor landed."""
         self._tick_elections()
+        self._save_elections()
         with self._lock:
             pending = list(self._pending.items())
         for epoch_id, proposal in pending:

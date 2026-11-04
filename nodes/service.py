@@ -529,6 +529,7 @@ class AutonetService:
             return False
 
         try:
+            from pathlib import Path
             keypair = self._load_or_create_gossip_keypair()
             transport = LibP2PTransport(p2p_host)
             self._event_gossip = EventGossip(
@@ -536,6 +537,8 @@ class AutonetService:
                 keypair=keypair,
                 transport=transport,
                 world_service=self._world_service,
+                seq_path=(Path(self._data_dir) / "world" / "gossip" / "sender_seq.json"
+                          if self._data_dir else None),
             )
             logger.info(
                 "Event gossip attached for rpb=%s (sender_pubkey=%s...)",
@@ -888,11 +891,14 @@ class AutonetService:
             rep_claim_address=getattr(bc, "rep_claim_address", "") or "",
             owner_wallet=owner_wallet,
         )
+        from pathlib import Path
         try:
             driver = ChainSubmissionDriver(
                 config=cfg,
                 agent_chain_resolver=agent_chain_resolver,
                 blob_resolver=blob_resolver,
+                elections_path=(Path(self._data_dir) / "world" / "open_elections.json"
+                                if self._data_dir else None),
             )
         except Exception as e:
             logger.warning("ChainSubmissionDriver build failed: %s", e)

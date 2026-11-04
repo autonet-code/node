@@ -398,3 +398,31 @@ def test_operator_claims_rep_after_atn_for_households_with_earnings():
                                         private_key="0x" + "4" * 64))
     assert claimed == ["0x" + "a" * 40]
     assert w3.eth.send_raw_transaction.call_count == 1
+
+
+def test_open_election_survives_a_restart_and_is_never_dropped(tmp_path):
+    """An epoch's election lasts days: a restart keeps it, and however long
+    it stays open the daemon keeps following it."""
+    from nodes.common.anchor_election import Election
+    path = tmp_path / "open_elections.json"
+    option = ("epoch-3-ab-100", b"\x01" * 32, b"\x02" * 32, b"\x03" * 32,
+              "cid", b"\x04" * 32, b"\x05" * 32, 100)
+    d = _make_driver()
+    d._elections_path = path
+    d._elections["epoch-3-ab-100"] = Election(
+        epoch_id="epoch-3-ab-100", epoch_number=3, option=option,
+        option_hash=b"\x06" * 32, attempt=1, created=-10 ** 9)
+    d._save_elections()
+
+    again = _make_driver()
+    again._elections_path = path
+    again._load_elections()
+    restored = again._elections["epoch-3-ab-100"]
+    assert restored.option == option and restored.attempt == 1
+    assert again._fields_by_number[3].cutoff == 100
+    again._stop.set()
+
+    d._step_election = lambda e: "active"
+    d._election_settled = lambda e: False
+    d._tick_elections()
+    assert "epoch-3-ab-100" in d._elections

@@ -308,3 +308,28 @@ def test_events_without_peers_wait_and_are_signed_when_sent(tmp_path: Path):
     finally:
         svc_a.shutdown()
         svc_b.shutdown()
+
+
+def test_sender_chain_survives_a_restart(tmp_path):
+    """A daemon restart inside an epoch keeps its batch_seq and hash chain,
+    so peers keep the whole of its epoch."""
+    from nodes.common.event_gossip import EventGossip, InMemoryHub, InMemoryTransport, Keypair
+
+    class World:
+        rpb_address = "0x" + "11" * 20
+
+    path = tmp_path / "sender_seq.json"
+    kp = Keypair.generate()
+
+    def daemon():
+        return EventGossip(rpb_address=World.rpb_address, keypair=kp,
+                           transport=InMemoryTransport(InMemoryHub()),
+                           world_service=World(), seq_path=path)
+
+    first = daemon()
+    a = first._sign_and_publish([{"n": 1}])
+    b = first._sign_and_publish([{"n": 2}])
+    second = daemon()
+    c = second._sign_and_publish([{"n": 3}])
+    assert (a.batch.batch_seq, b.batch.batch_seq, c.batch.batch_seq) == (1, 2, 3)
+    assert c.batch.prev_batch_hash == b.batch.content_hash()

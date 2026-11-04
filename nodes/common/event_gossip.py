@@ -41,9 +41,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol
 
 
@@ -425,6 +427,7 @@ class EventGossip:
         world_service: Any,
         *,
         dedupe_cache_size: int = 4096,
+        seq_path: Optional[Any] = None,
     ):
         self.rpb_address = rpb_address
         self.keypair = keypair
@@ -435,6 +438,10 @@ class EventGossip:
         self._lock = threading.RLock()
         self._next_batch_seq = 1
         self._last_published_hash = b""
+        # Where the sender chain survives a restart: peers reject a sender
+        # whose batch_seq jumps back, which loses its whole epoch.
+        self._seq_path = Path(seq_path) if seq_path else None
+        self._load_seq()
         self._seen: List[bytes] = []  # FIFO of recent batch hashes
         self._dedupe_cache_size = dedupe_cache_size
         self._stats = GossipStats()
@@ -528,6 +535,29 @@ class EventGossip:
                 events = self._outbox.pop(0)
             last = self._sign_and_publish(events)
 
+    def _load_seq(self) -> None:
+        if self._seq_path is None or not self._seq_path.exists():
+            return
+        try:
+            data = json.loads(self._seq_path.read_text(encoding="utf-8"))
+            self._next_batch_seq = int(data["next_batch_seq"])
+            self._last_published_hash = bytes.fromhex(data["last_hash"])
+        except Exception as e:
+            logger.warning("gossip sequence state unreadable (%s): "
+                           "restarting the sender chain", e)
+
+    def _save_seq(self) -> None:
+        """Written before the batch goes out: a crash then costs one gap,
+        never two different batches under one seq."""
+        if self._seq_path is None:
+            return
+        tmp = self._seq_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "next_batch_seq": self._next_batch_seq,
+            "last_hash": self._last_published_hash.hex(),
+        }), encoding="utf-8")
+        os.replace(tmp, self._seq_path)
+
     def _sign_and_publish(self, events: List[Dict[str, Any]]) -> Optional[SignedBatch]:
         with self._lock:
             seq = self._next_batch_seq
@@ -552,6 +582,7 @@ class EventGossip:
             self._note_seen_locked(batch.content_hash())
             self._epoch_batches.append(batch)
             self._stats.batches_published += 1
+            self._save_seq()
         self.batch_log.add(batch.content_hash(), batch.timestamp, wire)
 
         try:
