@@ -150,7 +150,7 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 - A **sanction** is an ordinary governor proposal at its quorum: it
   withholds the households' mint (not redistributed) and weighs their
   reviews at 0. Burning their farmed REP (`RepToken.burn`, the timelock is
-  its admin) makes the proposal constitutional: two thirds of For + Against.
+  its admin) makes the proposal constitutional: For from two thirds of all REP.
 - Holds below about a third of REP bribed; above half, the honest side
   **forks**.
 - **These rules assume a spread of REP.** While a few founders hold most of
