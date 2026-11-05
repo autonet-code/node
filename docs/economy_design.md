@@ -153,6 +153,9 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   its admin) makes the proposal constitutional: two thirds of For + Against.
 - Holds below about a third of REP bribed; above half, the honest side
   **forks**.
+- **These rules assume a spread of REP.** While a few founders hold most of
+  it, the network runs on their goodwill: nothing here stops them. The
+  design is judged from the end of that stage (the owner below half of REP).
 
 ## Splits, reunions, forks (`resilience.md` 5.1)
 
