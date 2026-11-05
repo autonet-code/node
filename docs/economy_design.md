@@ -148,9 +148,9 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 - Detection is off-chain and per node (nodes notice, report, coordinate).
   It ends attacks; the deterministic rules only price and slow them.
 - A **sanction** is an ordinary governor proposal at its quorum: it
-  withholds the households' mint (not redistributed), weighs their reviews
-  at 0 and burns their farmed REP (`RepToken.burn`, the timelock is its
-  admin).
+  withholds the households' mint (not redistributed) and weighs their
+  reviews at 0. Burning their farmed REP (`RepToken.burn`, the timelock is
+  its admin) makes the proposal constitutional: two thirds of For + Against.
 - Holds below about a third of REP bribed; above half, the honest side
   **forks**.
 
