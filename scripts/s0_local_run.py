@@ -551,8 +551,8 @@ class Activity:
         log(f"published {len(self.published)} tools")
 
     async def adopt(self) -> None:
-        """Each household proposes the other households' tools and its owner
-        approves them. Called again later until the blobs have travelled."""
+        """Each household's agent installs the other households' tools.
+        Called again later until the blobs have travelled."""
         for h in self.hs:
             for digest, meta in self.published.items():
                 if meta["author"] == h.name or digest in self.adopted[h.name]:
@@ -562,10 +562,14 @@ class Activity:
                                     "adopt_tool", tool=meta["name"])
                 if "error" in r and "already" not in str(r["error"]):
                     continue
-                a = await self.call(h, {"type": "approve_adoption", "digest": digest},
-                                    "approve_adoption", tool=meta["name"])
-                if "error" not in a:
-                    self.adopted[h.name][digest] = meta["name"]
+                # Agents install by themselves (Decision 2026-11-02); only a
+                # core replacement still waits for the owner's approval.
+                if r.get("core_replacement"):
+                    a = await self.call(h, {"type": "approve_adoption", "digest": digest},
+                                        "approve_adoption", tool=meta["name"])
+                    if "error" in a:
+                        continue
+                self.adopted[h.name][digest] = meta["name"]
         for h in self.hs:
             r = await self.call(h, {"type": "list_tools", "caller_id": h.agent_id}, "list_tools")
             for t in r.get("tools", []) if isinstance(r.get("tools"), list) else []:

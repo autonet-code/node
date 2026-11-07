@@ -1228,6 +1228,11 @@ def federated_epoch_close(
         minted_raw = sum(int(round(float(v) * ATN_BASE_UNITS))
                          for v in result["agent_mint"].values())
         rounds_next["pool_carry"] = max(0, pool_raw - minted_raw)
+        logger.info(
+            "tool mint: %d tool(s) concluded, minted %.6f of a %.6f pool, "
+            "%.6f carried over", len(tool_result["per_digest"]),
+            minted_raw / ATN_BASE_UNITS, pool_raw / ATN_BASE_UNITS,
+            rounds_next["pool_carry"] / ATN_BASE_UNITS)
     result["tool_rounds"] = rounds_next
     result["tool_positions"] = tool_result["positions_next"]
     result["epoch_root"] = canonical.epoch_root().hex()

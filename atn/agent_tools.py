@@ -3207,9 +3207,9 @@ def _checked_out(runtime: Runtime, digest: str, dest, result: dict[str, Any]) ->
     return {**result, "checkout": out,
             "note": ("the code is in " + out["path"] + ". Read it before "
                      "running it; set up what it needs as you would for any "
-                     "repo, run it yourself or through use_tool, and attest "
-                     "what you used (attest_tools): that is what pays its "
-                     "author.")}
+                     "repo, run it yourself or through use_tool, and review "
+                     "what you used (attest_tools): reviews from enough "
+                     "REP are what pay a tool and its reviewers.")}
 
 
 async def _vet_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
