@@ -1,5 +1,13 @@
 # Local end-to-end: tool economy composes
 
+> **Superseded for the mint** (2026-11-08): this script predates the review
+> mint (Decision 2026-11-07, `economy_design.md`): it drives the mint with
+> attestations and bypasses ToolBond, so its mint stages no longer hold.
+> The review mint is proven end to end by `scripts/s0_local_run.py`: four
+> daemons on the full jurisdiction, staked reviews on ToolBond, rounds
+> concluding, the pool carry-over, and a bounty paid per round. Its run log
+> ends with `MINT:` and `BOUNTY:` lines.
+
 > **Note** (2026-10-31, #28): the tool-mint split described below is the v4.1 one (author keeps 100%). Since ToolBond, reviewers take `reviewerShareBps` (40% by default) of each tool's mint, paid by accuracy; see `docs/economy_design.md`. The election anchorer (AnchorElection) is also not shown in stage 6.
 
 `scripts/local_e2e_tool_economy.py` is the tool-substrate session's
