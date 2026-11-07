@@ -1,7 +1,6 @@
 """Staked reviews at the federated close (docs/multi_jurisdiction.md
-decision 10): positions are the ToolBond ratings, the reviewer share of a
-tool's mint (stake x accuracy x novelty), the reviewed composition split
-(own_share), and successor merit carry. Plus the pure ToolBond log fold that
+decision 10): positions are the ToolBond ratings and successor rating
+carry. (The mint paid from concluded rounds is in test_review_mint.py.) Plus the pure ToolBond log fold that
 builds the pinned review snapshot, and determinism of all of it under input
 reordering.
 """
@@ -19,11 +18,9 @@ from eth_utils import keccak
 from nodes.common.canonical_ordering import canonical_order
 from nodes.common.event_gossip import Keypair
 from nodes.common.federated_reconcile import (
-    COMPOSITE_ROOT_SHARE,
     REVIEWER_SHARE_BPS_DEFAULT,
     compute_tool_mint,
     federated_epoch_close,
-    reviewer_weights,
 )
 from nodes.common.voice_state import tool_review_snapshot_from_logs
 from nodes.common.world_model_substrate.adapter import build_charter_world
@@ -87,127 +84,6 @@ def _agent_totals(out: Dict[str, Any]) -> Dict[str, float]:
 
 def _receipts(n: int = 2) -> List[Dict[str, Any]]:
     return [_receipt_event(i, f"caller-{i}") for i in range(1, n + 1)]
-
-
-# ---------------------------------------------------------------------------
-# 1. Reviewer share
-# ---------------------------------------------------------------------------
-
-
-class TestReviewerShare:
-    def test_redistributes_without_changing_total(self):
-        base = compute_tool_mint(_world(), _receipts(), registrations=REGS)
-        split = compute_tool_mint(
-            _world(), _receipts(), registrations=REGS,
-            review_snapshot=_snapshot([_rev(AUD_A, E18)]),
-        )
-        mint = base["per_digest"][DIGEST]["mint"]
-        totals = _agent_totals(split)
-        assert sum(totals.values()) == pytest.approx(mint, rel=1e-12)
-        assert totals[AUTHOR] == pytest.approx(mint * 0.6, rel=1e-12)
-        assert totals[AUD_A] == pytest.approx(mint * 0.4, rel=1e-12)
-        entry = split["per_digest"][DIGEST]
-        assert entry["mint"] == pytest.approx(mint)
-        assert entry["reviewers"] == 1
-        assert entry["reviewer_mint"] == pytest.approx(mint * 0.4)
-
-    def test_split_by_accuracy_not_stake(self):
-        # Stake is only the bet (2026-10-28): A staked 3x B and is twice as
-        # accurate, so A takes 2/3, not 6/7.
-        out = compute_tool_mint(
-            _world(), _receipts(), registrations=REGS,
-            review_snapshot=_snapshot([_rev(AUD_A, 3 * E18), _rev(AUD_B, 2 * E18, E18 // 2)],
-                                      bps=5000),
-        )
-        mint = out["per_digest"][DIGEST]["mint"]
-        totals = _agent_totals(out)
-        assert totals[AUD_A] == pytest.approx(mint * 0.5 * 2 / 3, rel=1e-12)
-        assert totals[AUD_B] == pytest.approx(mint * 0.5 * 1 / 3, rel=1e-12)
-        assert totals[AUTHOR] == pytest.approx(mint * 0.5, rel=1e-12)
-
-    def test_novelty_discounts_reviews_landing_on_settled_mass(self):
-        # Same stake and accuracy; B reviewed when the axis already held
-        # REP mass equal to the supply: novelty 1/2.
-        w = reviewer_weights([
-            {"epoch": 1, "supply": SUPPLY, "prior_mass": {}, "reviews": [_rev(AUD_A, E18)]},
-            {"epoch": 2, "supply": SUPPLY, "prior_mass": {"correctness": SUPPLY},
-             "reviews": [_rev(AUD_B, E18)]},
-        ])
-        assert w[AUD_A] == pytest.approx(1.0)
-        assert w[AUD_B] == pytest.approx(0.5)
-
-    def test_novelty_averages_over_scored_axes_and_harm(self):
-        w = reviewer_weights([{
-            "epoch": 1, "supply": SUPPLY,
-            "prior_mass": {"correctness": SUPPLY, "harm": 3 * SUPPLY},
-            "reviews": [_rev(AUD_A, E18, axes=("correctness", "simplicity"), harm=True)],
-        }])
-        assert w[AUD_A] == pytest.approx((0.5 + 1.0 + 0.25) / 3)
-
-    def test_zero_stake_and_uninformative_reviews_weigh_nothing(self):
-        w = reviewer_weights([{"epoch": 1, "supply": SUPPLY, "prior_mass": {},
-                               "reviews": [_rev(AUD_A, 0), _rev(AUD_B, E18, None)]}])
-        assert w == {}
-        out = compute_tool_mint(
-            _world(), _receipts(), registrations=REGS,
-            review_snapshot=_snapshot([_rev(AUD_A, 0), _rev(AUD_B, E18, None)]))
-        assert set(_agent_totals(out)) == {AUTHOR}
-        assert out["per_digest"][DIGEST]["reviewer_mint"] == 0.0
-
-    def test_default_bps_when_snapshot_omits_it(self):
-        out = compute_tool_mint(
-            _world(), _receipts(), registrations=REGS,
-            review_snapshot=_snapshot([_rev(AUD_A, 1)], bps=None),
-        )
-        mint = out["per_digest"][DIGEST]["mint"]
-        assert _agent_totals(out)[AUD_A] == pytest.approx(
-            mint * REVIEWER_SHARE_BPS_DEFAULT / 10_000, rel=1e-12)
-
-    def test_tool_without_reviewed_round_mints_exactly_as_before(self):
-        base = compute_tool_mint(_world(), _receipts(), registrations=REGS)
-        other = compute_tool_mint(
-            _world(), _receipts(), registrations=REGS,
-            review_snapshot=_snapshot([_rev(AUD_A, E18)], digest="ef" * 32),
-        )
-        assert other["node_agent"] == base["node_agent"]
-        assert other["per_digest"][DIGEST]["reviewers"] == 0
-        assert other["per_digest"][DIGEST]["reviewer_mint"] == 0.0
-
-    def test_reviewer_maps_onto_known_agent_spelling(self):
-        """A 0x reviewer that is also a caller under a checksum spelling is
-        credited under THAT id (one address, one mint leaf)."""
-        checksum = "0x" + "A1" * 20
-        events = _receipts() + [_receipt_event(9, checksum)]
-        out = compute_tool_mint(
-            _world(), events, registrations=REGS,
-            review_snapshot=_snapshot([_rev(AUD_A, 1)]),
-        )
-        totals = _agent_totals(out)
-        assert checksum in totals and AUD_A not in totals
-
-    def test_pool_conservation_through_close(self):
-        pool = 7.123457
-        kp_a, kp_c = Keypair.generate(), Keypair.generate()
-        batches = _batches([_registration_event(1)], kp_a) + _batches(
-            _receipts(3), kp_c)
-        snap = _snapshot([_rev(AUD_A, 2), _rev(AUD_B, 1)])
-        plain = federated_epoch_close(canonical_order(batches),
-                                      emission_pool=pool)
-        split = federated_epoch_close(canonical_order(batches),
-                                      emission_pool=pool,
-                                      review_snapshot=snap)
-        units = {a: round(v * 1_000_000) for a, v in split["agent_mint"].items()}
-        pool_units = round(pool * 1_000_000)
-        assert set(units) == {AUTHOR, AUD_A, AUD_B}
-        assert sum(units.values()) <= pool_units
-        # Flooring dust is at most one base unit per recipient.
-        assert pool_units - sum(units.values()) < len(units)
-        assert sum(split["agent_mint"].values()) == pytest.approx(
-            sum(plain["agent_mint"].values()), abs=3e-6)
-        # Equal accuracy: equal parts, whatever they staked.
-        assert units[AUD_A] == pytest.approx(units[AUD_B], abs=1)
-        assert split["tool_mint"][DIGEST]["reviewer_mint"] == pytest.approx(
-            pool * 0.4, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -407,95 +283,12 @@ class TestReviewSnapshotFold:
 
 
 # ---------------------------------------------------------------------------
-# 4. Reviewed composition split
-# ---------------------------------------------------------------------------
-
-
-def _own(seq: int, caller: str, own: float, digest: str = DIGEST):
-    ev = _receipt_event(seq, caller, digest=digest)
-    ev["own_share"] = own
-    return ev
-
-
-class TestReviewedRootShare:
-    REGS = {
-        DEP: {"trust_class": "pinned", "author": "dep-author"},
-        DIGEST: {"trust_class": "pinned", "author": AUTHOR, "deps": DEP},
-    }
-
-    def _world(self):
-        return _world(
-            _registration_event(1, digest=DEP, author="dep-author", axis=2),
-            _registration_event(2, digest=DIGEST, deps=DEP, axis=4),
-        )
-
-    def test_no_reviews_keeps_default(self):
-        out = compute_tool_mint(self._world(), [_receipt_event(1, "c1")],
-                                registrations=self.REGS)
-        pd = out["per_digest"]
-        ln = math.log1p(1)
-        assert pd[DIGEST]["usage_term"] == pytest.approx(ln * COMPOSITE_ROOT_SHARE)
-        assert pd[DEP]["usage_term"] == pytest.approx(ln * (1 - COMPOSITE_ROOT_SHARE))
-        assert "own_share" not in out["positions_next"][DIGEST]
-
-    def test_reviews_set_root_share_this_close(self):
-        out = compute_tool_mint(self._world(), [_own(1, "c1", 0.2)],
-                                registrations=self.REGS)
-        ln = math.log1p(1)
-        assert out["per_digest"][DIGEST]["usage_term"] == pytest.approx(ln * 0.2)
-        assert out["per_digest"][DEP]["usage_term"] == pytest.approx(ln * 0.8)
-        own = out["positions_next"][DIGEST]["own_share"]
-        assert own["sum"] / own["mass"] == pytest.approx(0.2)
-
-    def test_rep_weighted_mean_ignores_zero_rep_and_author(self):
-        events = [_own(1, "rich", 1.0), _own(2, "poor", 0.0),
-                  _own(3, "zero", 0.0), _own(4, AUTHOR, 0.0)]
-        out = compute_tool_mint(
-            self._world(), events, registrations=self.REGS,
-            rep_shares={"rich": 0.3, "poor": 0.1, AUTHOR: 0.5},
-        )
-        own = out["positions_next"][DIGEST]["own_share"]
-        assert own["sum"] / own["mass"] == pytest.approx(0.75)
-
-    def test_carried_estimate_applies_next_close(self):
-        first = compute_tool_mint(self._world(), [_own(1, "c1", 0.4)],
-                                  registrations=self.REGS)
-        second = compute_tool_mint(
-            self._world(), [_receipt_event(5, "c2")], registrations=self.REGS,
-            positions=first["positions_next"],
-        )
-        ln = math.log1p(1)
-        assert second["per_digest"][DIGEST]["usage_term"] == pytest.approx(ln * 0.4)
-        assert second["positions_next"][DIGEST]["own_share"] == \
-            first["positions_next"][DIGEST]["own_share"]
-
-    def test_padding_still_cannot_amplify(self):
-        """own_share = 0 hands everything to deps, but the damped total is
-        still conserved (damp-then-split)."""
-        out = compute_tool_mint(self._world(), [_own(1, "c1", 0.0)],
-                                registrations=self.REGS)
-        total = sum(e["usage_term"] for e in out["per_digest"].values())
-        assert total == pytest.approx(math.log1p(1))
-
-    def test_usage_aggregation_clamps_and_drops_garbage(self):
-        events = [_own(1, "c1", 1.7), _own(2, "c1", -3), _own(3, "c2", float("nan"))]
-        events.append({**_receipt_event(4, "c3"), "own_share": "x"})
-        usage = tool_usage_from_events(events)[DIGEST]["own_share_by_caller"]
-        assert usage == {"c1": {"sum": 1.0, "n": 2}}
-
-    def test_tool_used_event_serializes_own_share_only_when_set(self):
-        assert "own_share" not in ToolUsed().to_dict()
-        assert ToolUsed(own_share=0.25).to_dict()["own_share"] == 0.25
-
-
-# ---------------------------------------------------------------------------
 # 5. Successor merit carry
 # ---------------------------------------------------------------------------
 
 
 class TestSuccessorCarry:
-    PRED_POS = {DIGEST: {"head": [0.0] * 6, "mass": [0.0] * 6,
-                         "own_share": {"sum": 0.6, "mass": 2.0}}}
+    PRED_POS = {DIGEST: {"head": [0.0] * 6, "mass": [0.0] * 6}}
     PRED_RATING = {DIGEST: {"axes": {"correctness": {"sum": 50 * E18, "mass": E18}},
                             "harm": {"sum": 0, "mass": 0}}}
 
@@ -512,10 +305,9 @@ class TestSuccessorCarry:
                              "tools": copy.deepcopy(tools or self.PRED_RATING)},
         )
 
-    def test_same_author_inherits_own_share_and_rating(self):
+    def test_same_author_inherits_rating(self):
         out = self._run(AUTHOR)
         succ = out["positions_next"][SUCC]
-        assert succ["own_share"] == self.PRED_POS[DIGEST]["own_share"]
         assert succ["head"][CI] == pytest.approx(0.5)
         assert out["positions_next"][DIGEST]["head"][CI] == pytest.approx(0.5)
 
@@ -531,7 +323,6 @@ class TestSuccessorCarry:
         succ = out["positions_next"][SUCC]
         assert succ["head"] == [0.0] * 6
         assert succ["mass"] == [0.0] * 6
-        assert "own_share" not in succ
 
 
 # ---------------------------------------------------------------------------
@@ -546,8 +337,8 @@ class TestDeterminism:
             DIGEST: {"trust_class": "pinned", "author": AUTHOR, "deps": DEP},
             SUCC: {"trust_class": "pinned", "author": AUTHOR, "version_of": DIGEST},
         }
-        events = [_own(1, "c1", 0.3), _own(2, "c2", 0.9), _receipt_event(3, "c3"),
-                  _own(4, "c1", 0.5, digest=SUCC), _receipt_event(5, "c4", digest=DEP)]
+        events = [_receipt_event(1, "c1"), _receipt_event(3, "c3"),
+                  _receipt_event(4, "c1", digest=SUCC), _receipt_event(5, "c4", digest=DEP)]
         snap = {"reviewer_share_bps": 2500, "supply": SUPPLY,
                 "tools": {DIGEST: {"axes": {"correctness": {"sum": 7 * E18, "mass": E18},
                                             "simplicity": {"sum": 3 * E18, "mass": E18}},
@@ -556,8 +347,7 @@ class TestDeterminism:
                                      "reviews": [_rev(AUD_A, 7), _rev(AUD_B, 3)]}],
                            DEP: [{"epoch": 1, "supply": SUPPLY, "prior_mass": {},
                                   "reviews": [_rev(AUD_B, 1)]}]}}
-        positions = {DIGEST: {"head": [0.0] * 6, "mass": [0.0] * 6,
-                              "own_share": {"sum": 0.1, "mass": 0.5}}}
+        positions = {DIGEST: {"head": [0.0] * 6, "mass": [0.0] * 6}}
         rep = {"c1": 0.2, "c2": 0.1, "c3": 0.05, "c4": 0.3}
 
         def run(evs, snapshot, pos, shares):
@@ -576,9 +366,6 @@ class TestDeterminism:
             rng.shuffle(evs)
             snap2 = copy.deepcopy(snap)
             snap2["rounds"] = dict(reversed(list(snap2["rounds"].items())))
-            for rs in snap2["rounds"].values():
-                for r in rs:
-                    r["reviews"] = list(reversed(r["reviews"]))
             snap2["tools"] = {d: {"axes": dict(reversed(list(e["axes"].items()))),
                                   "harm": e["harm"]}
                               for d, e in snap2["tools"].items()}
@@ -589,7 +376,7 @@ class TestDeterminism:
     def test_close_bit_identical_across_batch_order(self):
         kp_a, kp_c = Keypair.generate(), Keypair.generate()
         batches = _batches([_registration_event(1)], kp_a) + _batches(
-            [_own(1, "c1", 0.4), _receipt_event(2, "c2")], kp_c)
+            [_receipt_event(1, "c1"), _receipt_event(2, "c2")], kp_c)
         snap = _snapshot([_rev(AUD_A, 5), _rev(AUD_B, 2)])
         r1 = federated_epoch_close(canonical_order(batches), emission_pool=3.0,
                                    review_snapshot=snap)
@@ -606,7 +393,9 @@ class TestDeterminism:
 # ---------------------------------------------------------------------------
 
 
-async def test_attest_tools_gossips_own_share_not_axes(tmp_path):
+async def test_attest_tools_gossips_nothing(tmp_path):
+    """Attestations stay local (Decision 2026-11-07): the row keeps the
+    composition estimate and the review, the store has no gossip rail."""
     from atn.agent_tools import execute_tool
     from tests.atn.test_tool_store import (
         _fake_embedder,
@@ -618,8 +407,7 @@ async def test_attest_tools_gossips_own_share_not_axes(tmp_path):
     await _family(rt)
     await _register_echo(rt)
     rt.tool_store._embedder = _fake_embedder
-    sunk: list = []
-    rt.tool_store.event_sink = sunk.append
+    assert not hasattr(rt.tool_store, "event_sink")
     out = await execute_tool(
         "attest_tools",
         {"judgments": [{"tool": "echo_tool", "ok": True, "own_share": 1.4,
@@ -629,9 +417,10 @@ async def test_attest_tools_gossips_own_share_not_axes(tmp_path):
         rt, caller_id="parent",
     )
     assert out["attested"] == 2
-    assert sunk[0]["own_share"] == 1.0
-    assert "own_share" not in sunk[1]
-    assert all("axes" not in ev and "harm" not in ev for ev in sunk)
+    rows = list(rt.tool_store._iter_attestations())
+    assert rows[0]["own_share"] == 1.0
+    assert rows[0]["axes"] == {"correctness": 0.5} and rows[0]["harm"] == 0.1
+    assert "own_share" not in rows[1]
 
 
 def test_tool_bond_event_abi_matches_contract():

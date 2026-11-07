@@ -14,8 +14,15 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   address). Agents and the daemon's operator key are bound to it; the
   operator proposes and votes with REP the owner delegates to it. No automatic delegation; a delegate
   who doesn't vote loses delegators, not REP.
-- **Use inside one household mints nothing.** Earning needs other
-  households.
+- **Reward pools** (decided 2026-11-06, being built): a passive income pool
+  on REP balance and a delegate pool paid only to delegates whose weight
+  received from others reaches a DAO-set share of all REP (default 1%), each
+  with a DAO-set budget. A delegate's pay is budget x received weight / total
+  REP, so the budget is a ceiling and the unclaimed rest stays in the treasury. Claiming both
+  through a second wallet is possible; each jurisdiction's code of conduct
+  and REP burns handle it.
+- **A household never earns from its own tools' reviews.** Earning needs
+  other households.
 
 ## Money (ATN)
 
@@ -27,16 +34,20 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   `payForService` takes a fee (setup default 2.5%, the DAO retunes it
   between 0.5% and 10%), split between the DAO treasury and a burn (setup
   default half each; the DAO retunes the treasury share up to 90%, so at
-  least a tenth always burns), and an epoch's mint is capped on-chain at the fees burned between
-  the two previous cutoffs (the mint lags the burns by one epoch). Zero
-  volume, zero mint. The pool is shared in proportion to each tool's usage
-  score, floored to 1e-6 ATN (the dust is never minted). Besides the pool,
+  least a tenth always burns). Each anchor adds the fees burned between
+  the two previous cutoffs to the pool (the mint lags the burns by one
+  epoch), and claims are capped on-chain at the cumulative pool
+  (`Substrate.mintPoolTotal`), so whatever a close leaves unminted carries
+  over to the next epoch's pool. Zero volume, zero mint. Amounts are
+  floored to 1e-6 ATN; the dust carries over too. Besides the pool,
   ATN is minted only by the vault (bought, below) and, for forks and
   splits, the genesis claim.
 - **Bought, never redeemed.** The vault (`AutonetVault`, DAO side) sells
   newly minted ATN for the tokens in the jurisdiction's value index
   (Registry `jurisdiction.parity.<token>`, a stablecoin by default) at a
   DAO-set parity, uncapped, and sends the payment straight to the treasury.
+  A parity edit is an ordinary proposal, not a constitutional one: the
+  DAO may need to adjust it often, and turnout is the DAO's job.
   There is no redeem path. So the parity is a ceiling on ATN's price, not a
   peg: nobody pays more on a market than the vault asks, and nothing holds
   the price up from below.
@@ -87,29 +98,48 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   votes, the winner is anchored.
 - A silent chain pauses settlement only; work continues.
 
-## Tool mint (the only mint rail)
+## Tool mint (the only mint rail; Decision 2026-11-07)
 
-- Usage = **signed receipts** (agent signature, gossip domain) of uses
-  from other households, **bonded, pinned (code) tools only**, damped per
-  household (log1p) and weighted by the household's REP share: a household
-  without REP adds nothing. Uses on the author's own daemon don't count, and
-  the owner wallet has no agent key, so its own uses sign no receipts.
-- **Composition**: a composite keeps 70% and fans 30% out over its declared
-  dependencies, up to depth 4. Cycles and missing deps forfeit.
-- **Breakthrough gate**: a tool mints only once its users hold 1% of REP
-  and are 0.5% of REP-holding households. No escrow: nothing is earned
-  before. The bar rises with the network.
-- **Excluded**: denied tools, and usage by sanctioned households.
-- **Reviewer share** (40% of each tool's mint by default, ToolBond
-  `reviewerShareBps`): paid by review accuracy (leave-one-out against the
-  consensus) times novelty (less-reviewed tools pay more), not by stake;
-  a review needs a stake above zero to be paid at all (any amount), and a
-  household with no REP can't commit without one. Reviews written before
-  the household registers are held by its daemon and submitted to the open
-  round once it does. The ATN stake is only the bet: each review loses
+- **Paid once, from staked reviews.** Nothing can observe a household's
+  private use, so attestations count for nothing and daemons no longer
+  gossip them (the local log only drives review reminders). A **bonded, pinned (code)** tool is paid once, in the close where
+  its ToolBond review rounds **conclude**; later rounds still rate it but
+  pay nothing.
+- **Conclusion = the breakthrough gate on reviewers**: the distinct
+  reviewing households (the author's own and sanctioned ones excluded) hold
+  1% of REP and are 0.5% of REP-holding households. Below it the rounds
+  carry over to the next close, faded by `review_decay` per close
+  (Registry, default 1 = no fade).
+- **Its share of the pool** is the REP behind its reviews: each review
+  counts its household's REP share / n, n = the reviews that household made
+  in that epoch, so reviewing many tools never multiplies a household's REP.
+  Concluding tools split the epoch's pool (carry-over included) by that
+  weight.
+- **Reviewers** take 40% (ToolBond `reviewerShareBps`) of the tool's share
+  **whatever the verdict**, split by accuracy (leave-one-out against the
+  round's consensus) x the round's fade, among reviewers whose household
+  holds at least `reviewer_min_rep_bps` of REP (Registry; default 0 = any
+  REP). REP is a bar, not a multiplier, so it doesn't compound.
+- **The author** takes the other 60% x the tool's rating (the mean of its
+  REP-weighted charter-axis scores, negatives counted as 0). A composite
+  keeps 70% of that and fans 30% over its declared dependencies, up to
+  depth 4; cycles, missing or unpayable deps forfeit. What the author
+  doesn't get stays unminted and carries over.
+- **Excluded**: denied tools and every tool that depends on one, directly or
+  further down (it can't be fetched whole; its author isn't slashed for
+  it), unbonded tools, and sanctioned households' mint (withheld).
+- **Bounty** (ToolBond, on chain): anyone can add ATN to a tool's bounty
+  (`addBounty`). As each round finalizes, every settled review takes
+  bounty x (its REP / the REP a tool needs to conclude) x its accuracy,
+  paid to its household; a household whose REP alone covers the
+  requirement can take it all. Sanctioned households get none. It is
+  author money, not mint, so it earns no REP and REP may weigh it. The
+  author gets the unspent rest back only with the bond.
+- **The ATN stake** only moves ATN inside a round: each review loses
   stake x (1 - accuracy) to the round's pool, paid out by stake x accuracy;
   an unrevealed batch loses its whole stake to the treasury. REP moves the
-  same way (see Voice).
+  same way (see Voice). Reviews written before the household registers are
+  held by its daemon and submitted to the open round once it does.
 
 ## Voice (REP)
 
@@ -120,8 +150,10 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   household REP it weighed, losing that x (1 - accuracy), reassigned to the
   round's reviews by REP x accuracy; none is created. An unrevealed batch
   loses the full amount per review. A tool settled harmful costs its author's
-  household H x `authorSlashBps` (100%) of its REP. So REP is earned only from
-  the tool pool, but can be won or lost by reviewing.
+  household H x `authorSlashBps` (100%) of its REP, which is **burned**, not
+  given to the reviewers (a false harm call must not buy voting weight; the
+  slashed bond still pays the reviewers who called harm right). So REP is
+  earned only from the tool pool, but can be won or lost by reviewing.
 
 ## Tools
 

@@ -1,5 +1,45 @@
 # Tool substrate v3: tools as the ONLY substrate item; reviews replace debates
 
+## Decision (2026-11-07): the mint reads staked reviews, not attestations
+
+Supersedes every rule below that mints from attested usage (`usage_term`,
+the combo damper over attesters, receipts as the mint input, loadout
+adoption credit, own_share composition estimates). The current rules are in
+`economy_design.md` ("Tool mint").
+
+- **Why.** An attestation is a signed boolean that a tool "served my work".
+  Nothing checks that the household fetched or ran the code, it costs
+  almost nothing to produce, and private use is unobservable in principle.
+  The GPU sims showed undetected farming of that signal paying +191%
+  (`autonet-sims/REPORT.md` 3.2); the report leaned on off-chain detection,
+  which isn't built. The staked ToolBond reviews already carry what an
+  attestation lacks: commit-reveal, REP at risk, a consensus to be accurate
+  against.
+- **Rules.** A tool is paid once, when its rounds conclude (the breakthrough
+  gate, applied to reviewers); rounds below it carry over with a
+  DAO-set fade. Its share of the pool = REP behind its reviews, a
+  household's REP split across the reviews it made that epoch. Reviewers
+  take the reviewer share whatever the verdict, by accuracy, above a REP
+  minimum (a bar, not a multiplier, so REP doesn't compound). The author
+  takes the rest x the rating, fanned over dependencies. Unpaid parts stay
+  unminted and the pool carries over (Substrate caps claims on the
+  cumulative pool). Denial passes up to composites. The author's slashed
+  REP is burned. An author-funded bounty, held and paid by ToolBond as each
+  round settles, pays reviewers by REP x accuracy toward the REP a tool
+  needs to conclude.
+- **Considered and dropped.** The review-scarcity factor (1 / (1 + M /
+  supply), wrongly called "novelty"): reviews should follow need, not the
+  hunt for under-reviewed tools. Paying the reviewer share by stake: it let
+  money buy accurate copies of public earlier rounds. Paying it by REP:
+  REP would compound toward the largest holders. Holding the close until a
+  tool concludes: reviews reveal only after their epoch is anchored, so it
+  would be circular; the pool carry-over gives the same growing incentive.
+- **Attack check (2026-11-07).** Junk-tool farming by reviewing many tools:
+  closed by the REP / n split. Copying earlier public rounds: bounded to one
+  equal share per household above the REP minimum. Negative verdicts:
+  nothing to gain without the harm label, and harm has the DAO appeal.
+  The sims have not run these rules yet.
+
 Status (current, beta on testnet, live on the Etherlink shadownet as of
 v0.7.0): FEES-ONLY EMISSION + REP-FROM-EARNINGS, ratified + BUILT
 2026-07-10 (see the `Decision (2026-07-10)` section, the current design of

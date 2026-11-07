@@ -315,3 +315,23 @@ def test_remote_origin_receipts_still_feed_coverage(tmp_path):
         origin="remote",
     )
     assert svc._coverage_index.has(d)
+
+
+def test_record_tool_coverage_is_local_only(tmp_path):
+    """Tool use is not gossiped (Decision 2026-11-07): an attestation
+    reaches the atlas through record_tool_coverage, which buffers no epoch
+    event and broadcasts nothing."""
+    svc = _svc(tmp_path)
+    embedder = HashingEmbedder(dim=EMBED_DIM)
+    d = svc.submit_tool_manifest(
+        _manifest(name="tool_z", description="a local data tool"),
+        agent_id="a", embedder=embedder,
+    )["manifest_digest"]
+    broadcast: list = []
+    svc._broadcast_local_events_locked = lambda evs: broadcast.extend(evs)
+    applied = svc._events_applied
+
+    coords = svc.coords_for_text("local work context", embedder=embedder)
+    assert svc.record_tool_coverage(d, coords, ts=1)
+    assert svc._coverage_index.has(d)
+    assert broadcast == [] and svc._events_applied == applied

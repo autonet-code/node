@@ -3354,13 +3354,12 @@ async def _probe_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
             from nodes.common.world_model_substrate.tool_manifest import (
                 is_tool_manifest,
             )
-            # v4.1 trust picture: join review mass + inspection count from
+            # v4.1 trust picture: join review mass from
             # the economy graph so each match carries how much earned voice
             # is behind its score (same close state the tool_reviews /
             # economy_graph surfaces read — no new close read invented).
             eg = _economy_graph_snapshot(world_service)
             positions = eg.get("positions", {})
-            vetting = eg.get("vetting", {})
             result = world_service.infer_artifacts(query, k=max(k * 3, 12))
             for art in result.get("artifacts", []):
                 payload = art.get("payload")
@@ -3372,7 +3371,7 @@ async def _probe_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any
                     score=art.get("final", 0.0),
                     rating=art.get("rating", 0.0),
                     axes=art.get("axes", []),
-                    positions=positions, vetting=vetting,
+                    positions=positions,
                     tool_store=runtime.tool_store,
                 ))
                 # Headroom: the bond pass below drops unbonded tools.
@@ -3434,7 +3433,6 @@ def local_tool_matches(
             "axes": [],
             "mass": [],
             "review_mass": 0.0,
-            "inspections": 0,
         }))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [row for _, row in scored[:k]]
@@ -3458,15 +3456,13 @@ def _trust_row(
     rating: Any,
     axes: Any,
     positions: dict[str, Any],
-    vetting: dict[str, Any],
     tool_store: Any,
 ) -> dict[str, Any]:
     """One probe_tools match enriched with the v4.1 trust picture:
-    review mass (how much earned voice is behind the score), inspection
-    count, and author household when resolvable locally."""
+    review mass (how much earned voice is behind the score) and author
+    household when resolvable locally."""
     pos = positions.get(digest) or {}
     mass = [float(x) for x in (pos.get("mass") or [])]
-    vet = vetting.get(digest) or {}
     author = payload.get("author", "")
     row: dict[str, Any] = {
         "digest": digest,
@@ -3479,10 +3475,9 @@ def _trust_row(
         "axes": axes,
         # Trust picture (v4.1): mass = per-axis review weight behind the
         # drifted score; review_mass = its peak (zero = nobody has
-        # reviewed — inspect before trusting); inspections = code reads.
+        # reviewed — inspect before trusting).
         "mass": mass,
         "review_mass": max(mass) if mass else 0.0,
-        "inspections": int(vet.get("validators") or 0),
     }
     household = _resolve_household(tool_store, author)
     if household:

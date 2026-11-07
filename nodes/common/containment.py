@@ -35,6 +35,28 @@ def mint_gate_from_writes(writes: Dict[str, str], jurisdiction_id: str) -> tuple
     return tuple(out)
 
 
+def review_params_from_writes(writes: Dict[str, str], jurisdiction_id: str) -> tuple:
+    """(review_decay, reviewer_min_rep_bps) from the Registry
+    (``jurisdiction.<id>.review_decay``, a factor in [0, 1] applied per
+    close to a tool's carried review rounds; ``.reviewer_min_rep_bps``, the
+    household REP a reviewer needs to be paid, as bps of REP supply).
+    Unset or malformed keys keep the defaults (1.0, 0)."""
+    decay, min_bps = 1.0, 0
+    raw = writes.get(f"jurisdiction.{jurisdiction_id}.review_decay")
+    if raw not in (None, ""):
+        try:
+            decay = max(0.0, min(1.0, float(str(raw).strip())))
+        except ValueError:
+            pass
+    raw = writes.get(f"jurisdiction.{jurisdiction_id}.reviewer_min_rep_bps")
+    if raw not in (None, ""):
+        try:
+            min_bps = max(0, min(10_000, int(str(raw).strip())))
+        except ValueError:
+            pass
+    return decay, min_bps
+
+
 def tier_for_standing(standing: Optional[Dict[str, Any]],
                       params: Dict[str, float]) -> tuple[str, str]:
     """Pure tier rule over ``{harm_sum, harm_mass, supply}`` (REP units)."""

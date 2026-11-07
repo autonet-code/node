@@ -106,7 +106,7 @@ def merge_carry(sources: List[SourceCarry]) -> MergeResult:
     """Deterministic union of carry bundles, first-listed source wins.
 
     tool_registrations and tool_positions are keyed by tool digest.
-    tool_vetting is ``{"manifests": {digest: ...}, "busts": {agent: n}}``,
+    tool_rounds is ``{"manifests": {digest: ...}, "busts": {agent: n}}``,
     so each of its sub-maps is unioned by key the same way.
     """
     if not sources:
@@ -118,21 +118,21 @@ def merge_carry(sources: List[SourceCarry]) -> MergeResult:
         out[key] = _merge_keyed(
             key, [(s.label, s.carry.get(key) or {}) for s in sources], conflicts)
     vet_subs = sorted({sub for s in sources
-                       for sub in (s.carry.get("tool_vetting") or {})})
+                       for sub in (s.carry.get("tool_rounds") or {})})
     vetting: Dict[str, Any] = {}
     for sub in vet_subs:
-        vals = [(s.label, (s.carry.get("tool_vetting") or {}).get(sub))
+        vals = [(s.label, (s.carry.get("tool_rounds") or {}).get(sub))
                 for s in sources
-                if sub in (s.carry.get("tool_vetting") or {})]
+                if sub in (s.carry.get("tool_rounds") or {})]
         if all(isinstance(v, dict) for _, v in vals):
-            vetting[sub] = _merge_keyed(f"tool_vetting.{sub}", vals, conflicts)
+            vetting[sub] = _merge_keyed(f"tool_rounds.{sub}", vals, conflicts)
         else:
             vetting[sub] = copy.deepcopy(vals[0][1])
             for label, v in vals[1:]:
                 if v != vals[0][1]:
-                    conflicts.append({"map": "tool_vetting", "key": sub,
+                    conflicts.append({"map": "tool_rounds", "key": sub,
                                       "kept": vals[0][0], "dropped": label})
-    out["tool_vetting"] = vetting
+    out["tool_rounds"] = vetting
     # Position heads are per charter axis: a source on a different charter
     # has a different dimension count, which the members should see.
     dims = sorted({len(p.get("head") or []) for p in out["tool_positions"].values()
@@ -282,11 +282,11 @@ def _load_source(spec: str, blob_dirs: List[Path]) -> SourceCarry:
 
 
 def _counts(carry: Dict[str, Any]) -> Dict[str, int]:
-    vet = carry.get("tool_vetting") or {}
+    vet = carry.get("tool_rounds") or {}
     return {
         "tool_registrations": len(carry.get("tool_registrations") or {}),
         "tool_positions": len(carry.get("tool_positions") or {}),
-        "tool_vetting.manifests": len(vet.get("manifests") or {}),
+        "tool_rounds.manifests": len(vet.get("manifests") or {}),
     }
 
 
@@ -331,11 +331,11 @@ def summary(report: Dict[str, Any]) -> str:
         lines.append(
             f"  {s['source']}  [{'chain-verified' if s['verified_against_chain'] else 'UNVERIFIED local file'}]"
             f"  epoch={s['epoch_id']}  tools={c['tool_registrations']}"
-            f"  positions={c['tool_positions']}  vetted={c['tool_vetting.manifests']}")
+            f"  positions={c['tool_positions']}  vetted={c['tool_rounds.manifests']}")
     m = report["merged_counts"]
     lines.append(f"Merged: tools={m['tool_registrations']}  "
                  f"positions={m['tool_positions']}  "
-                 f"vetted={m['tool_vetting.manifests']}")
+                 f"vetted={m['tool_rounds.manifests']}")
     lines.append(f"Conflicts: {len(report['conflicts'])}")
     for c in report["conflicts"]:
         lines.append(f"  {c['map']}[{c['key']}]: kept {c['kept']}, dropped {c['dropped']}")

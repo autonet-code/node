@@ -244,20 +244,16 @@ class ToolStore:
         self._blobs: Any = None  # lazy; None until substrate package needed
         self._embedder: Any = None  # lazy usefulness embedder; injectable for tests
         self._receipt_seq = 0
-        # Optional consensus sinks: when the autonet WorldService is up,
-        # event_sink submits ToolUsed events onto the substrate event
-        # rail (gossip + epoch buffer) and manifest_sink registers the
-        # manifest on the verdict layer (submit_tool_manifest). Local
-        # state is ALWAYS recorded first; sinks are best-effort
-        # federation — and idempotent, so backfill on late wiring is
-        # safe (manifest claims are content-addressed by digest).
-        self.event_sink: Any = None
+        # Optional sinks wired by the autonet bridge when the WorldService
+        # is up. Tool use is NOT gossiped (Decision 2026-11-07: the mint
+        # reads staked ToolBond review rounds only, and use events would
+        # reveal which household used which tool): coverage_sink feeds an
+        # attestation's problem_coords to the daemon-local coverage atlas
+        # (callable: digest, coords, ts), nothing leaves the machine.
+        # manifest_sink registers the manifest on the verdict layer
+        # (submit_tool_manifest; idempotent, content-addressed by digest).
+        self.coverage_sink: Any = None
         self.manifest_sink: Any = None
-        # Signs an attested receipt with the calling agent's key
-        # (callable: local agent id, event -> 0x signature or ""), wired by
-        # the autonet bridge. Chain-backed closes count only signed
-        # receipts (nodes/common/tool_receipts.py).
-        self.receipt_signer: Any = None
         # Optional network blob fetch (async callable: digest -> bytes
         # or None). Wired to the libp2p blob resolver when the autonet
         # host is up; lets validators vet (and later adopt) manifests
@@ -265,10 +261,6 @@ class ToolStore:
         # digest-verified (content addressing IS the auth) and cached
         # into the local blob store.
         self.blob_fetcher: Any = None
-        # Optional vet-status lookup (callable: digest -> dict | None)
-        # reading the federated close's vetting carry-over — feeds the
-        # provenance block on adoption proposals. Absent = "unknown".
-        self.vet_status_provider: Any = None
         # digest -> {harm_sum, harm_mass, supply} at the pinned snapshot, for
         # consensus containment tiers (wired by the autonet service).
         self.security_standing_provider: Any = None
@@ -461,6 +453,11 @@ class ToolStore:
                 raise ValueError(err)
         if novelty is not None:
             novelty = normalize_novelty(novelty)
+            # A new version is always compared against the one it replaces:
+            # its predecessor joins prior_art (Decision 2026-11-07).
+            pred = str(version_of or "").strip().lower().removeprefix("0x")
+            if pred and isinstance(novelty, dict) and pred not in novelty.get("prior_art", []):
+                novelty = {**novelty, "prior_art": [pred, *novelty.get("prior_art", [])]}
 
         # Idempotency — content-addressed in SPIRIT, not just bytes: the
         # manifest bakes ``created_ts``, so re-registering byte-identical
@@ -1639,16 +1636,13 @@ class ToolStore:
         ok: bool,
         via: str = "",
     ) -> None:
-        """Append a usage receipt and (best-effort) emit the consensus
-        ``tool_used`` event. Local ledger first — never lost to a
-        substrate outage; the sink failure is logged, not raised.
+        """Append a usage receipt to the local ledger. Nothing is gossiped
+        (Decision 2026-11-07): receipts are daemon-local stats.
 
         ``via`` (composition telemetry): when non-empty, this call was
         dispatched from a composite's sandbox call-rail; the digest is
-        recorded on the receipt row and the emitted event so nested
-        mechanical receipts stay attributable to the composite (mechanical
-        receipts still mint nothing — docs/tool_substrate.md, Composition
-        rule 2)."""
+        recorded on the receipt row so nested receipts stay attributable
+        to the composite."""
         import hashlib
 
         caller = caller_id if caller_id else OWNER_AUTHOR
@@ -1679,27 +1673,6 @@ class ToolStore:
         self._dir.mkdir(parents=True, exist_ok=True)
         with self._receipts_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(receipt) + "\n")
-
-        if self.event_sink is not None:
-            event = {
-                "kind": "tool_used",
-                "seq": self._receipt_seq,
-                # Consensus rail carries 0x identities (mint/damper/
-                # owner-map key space); local ids stay in the jsonl
-                # rows for display.
-                "author_agent": self._consensus_identity(caller),
-                "manifest_digest": record.digest,
-                "tool_author": record.author,
-                "receipt_digest": receipt_digest,
-                "ok": ok,
-                "fee_atn": fee,
-            }
-            if via:
-                event["via"] = via
-            try:
-                self.event_sink(event)
-            except Exception as exc:
-                log.warning("tool_used event sink failed: %s", exc)
 
     def balances(self) -> dict[str, Any]:
         """Off-chain fee ledger, derived from the receipts log.
@@ -1798,12 +1771,13 @@ class ToolStore:
         rows still record locally with ``problem_coords=[]`` — never crash the
         agent.
 
-        Reviews are NOT gossiped (docs/multi_jurisdiction.md decision 10):
-        the consensus ``tool_used`` event carries the usage (and the
-        composition ``own_share`` estimate), never the axis scores. Each
-        judgment's axes / harm / stake come back under ``_reviews`` for the
-        caller to queue as a staked ToolBond review; the local attestation
-        row keeps them for history and the UI."""
+        Nothing is gossiped (docs/multi_jurisdiction.md decision 10;
+        Decision 2026-11-07: the mint reads staked ToolBond review rounds,
+        so a use event would only reveal which household used which tool).
+        Each judgment's axes / harm / stake come back under ``_reviews`` for
+        the caller to queue as a staked ToolBond review; the local
+        attestation row keeps them for history, the UI and ``review_due``;
+        the work item's coordinates feed the local coverage atlas."""
         caller = caller_id if caller_id else OWNER_AUTHOR
 
         # Embed the work-item context once. Degrade to [] if the substrate
@@ -1943,40 +1917,11 @@ class ToolStore:
             with self._attestations_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row) + "\n")
 
-            if self.event_sink is not None:
-                event = {
-                    "kind": "tool_used",
-                    "seq": self._receipt_seq,
-                    # 0x identity on the consensus rail (see
-                    # _record_receipt).
-                    "author_agent": self._consensus_identity(caller),
-                    "manifest_digest": record.digest,
-                    "tool_author": record.author,
-                    "receipt_digest": receipt_digest,
-                    "ok": ok,
-                    "fee_atn": 0.0,
-                    "attested": True,
-                    "score": score,
-                    "problem_coords": list(problem_coords),
-                    "review_digest": review_digest,
-                }
-                # No axes on the wire: reviews settle on ToolBond.
-                if own_share is not None:
-                    event["own_share"] = own_share
-                if _loadout:
-                    event["loadout"] = _loadout
-                if self.receipt_signer is not None:
-                    try:
-                        sig = self.receipt_signer(caller, event)
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("receipt signing failed for %s: %s", caller, exc)
-                        sig = ""
-                    if sig:
-                        event["agent_sig"] = sig
+            if self.coverage_sink is not None and problem_coords:
                 try:
-                    self.event_sink(event)
+                    self.coverage_sink(record.digest, list(problem_coords), ts)
                 except Exception as exc:
-                    log.warning("attested tool_used event sink failed: %s", exc)
+                    log.warning("coverage sink failed: %s", exc)
 
             attested += 1
             if axes or harm is not None:
@@ -2060,11 +2005,8 @@ class ToolStore:
         real approval queue is legitimate. The proposal fetches and
         digest-verifies the manifest, then packages what the owner
         needs to decide: declared capabilities (the sandbox policy it
-        will run under), signature presence, and the tool's inspection
-        activity (v4.1: inspection is a review, not a gate — the carried
-        vetting fields now count code reads, they do not greenlight or
-        unlock anything) when the close state is available. Nothing
-        executes until approve_adoption.
+        will run under) and signature presence. Nothing executes until
+        approve_adoption.
         """
         caller = caller_id if caller_id else OWNER_AUTHOR
         digest = digest.strip().lower()
@@ -2107,13 +2049,6 @@ class ToolStore:
             from .sanctions import refusal
             return refusal(author, sanction, "adopt the tools of")
 
-        vet_status: dict[str, Any] | None = None
-        if self.vet_status_provider is not None:
-            try:
-                vet_status = self.vet_status_provider(digest)
-            except Exception as exc:
-                log.warning("vet status lookup failed: %s", exc)
-
         # A composite brings its declared dependencies (#37): every one not
         # installed here joins this proposal, so one owner approval installs
         # the set and the composite can actually run.
@@ -2147,12 +2082,6 @@ class ToolStore:
             "sanction": sanction,
             "provenance": {
                 "signed": signed,
-                "greenlit": (bool(vet_status.get("greenlit"))
-                             if vet_status else None),
-                "busted": (bool(vet_status.get("busted"))
-                           if vet_status else None),
-                "vets": (len(vet_status.get("vets") or {})
-                         if vet_status else None),
                 "dependencies": len(payload.get("dependencies") or []),
             },
             # Declared dependencies not installed here, installed together
@@ -2224,12 +2153,6 @@ class ToolStore:
                     out = refusal(author, sanction, "adopt the tools of")
                     out["dependency"] = dep
                     return [], out
-                vet_status: dict[str, Any] | None = None
-                if self.vet_status_provider is not None:
-                    try:
-                        vet_status = self.vet_status_provider(dep)
-                    except Exception as exc:
-                        log.warning("vet status lookup failed: %s", exc)
                 bundle.append({
                     "digest": dep,
                     "name": name,
@@ -2240,8 +2163,6 @@ class ToolStore:
                     "provenance": {
                         "signed": await asyncio.to_thread(
                             self._verify_manifest_sig, dep_payload),
-                        "busted": (bool(vet_status.get("busted"))
-                                   if vet_status else None),
                     },
                 })
                 nxt.extend(str(d).strip().lower()
@@ -2386,7 +2307,7 @@ class ToolStore:
     ) -> tuple[dict[str, Any] | None, str | None]:
         """The install-time checks one adopted tool must pass, against a
         freshly fetched manifest: resolvable, pinned, code fetchable,
-        signature not wrong, not denied by the network, not CON-busted.
+        signature not wrong, not denied by the network.
         Returns ``(payload, None)`` or ``(None, reason)``."""
         payload = await self.fetch_payload(digest)
         from nodes.common.world_model_substrate.tool_manifest import (
@@ -2414,7 +2335,7 @@ class ToolStore:
                 return None, "tool code does not match its tree digest"
 
         # Provenance is LOAD-BEARING here, not decoration. propose_adoption
-        # assembles {signed, greenlit, busted, vets} for the owner to read,
+        # assembles {signed, dependencies} for the owner to read,
         # but approval used to consult NONE of it — a manifest carrying a
         # WRONG signature installed exactly as readily as a valid one.
         #
@@ -2426,8 +2347,6 @@ class ToolStore:
         #   signed is None  -> unsigned / verification unavailable. ALLOWED,
         #     deliberately: most tools are unsigned today and refusing them
         #     would break the rail. Absence of a claim is not a false claim.
-        # A CON-busted tool is likewise refused: the network has already
-        # produced reproducible evidence against it.
         if await asyncio.to_thread(self._verify_manifest_sig, payload) is False:
             return None, ("manifest signature does not recover to its "
                           "claimed author — refusing to install "
@@ -2443,20 +2362,6 @@ class ToolStore:
                 tier, why = None, ""
             if tier == CONTAINMENT_DENIED:
                 return None, f"denied by the network: {why} — refusing to install"
-        # Busted: re-read now (a CON claim may have landed since the
-        # proposal); the stored flag still counts, so a failed read cannot
-        # clear a recorded bust.
-        busted = prov.get("busted") is True
-        vet_provider = getattr(self, "vet_status_provider", None)
-        if vet_provider is not None:
-            try:
-                fresh = vet_provider(digest)
-                busted = busted or bool((fresh or {}).get("busted"))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("vet status re-check failed: %s", exc)
-        if busted:
-            return None, ("tool is CON-busted on the substrate — refusing "
-                          "to install; clear the evidence claim first")
         return payload, None
 
     def _defer_for_code(
@@ -2573,7 +2478,7 @@ class ToolStore:
                 return out
             if "error" in out:
                 # The code arrived but a later check refused it (denied,
-                # busted, wrong signature): the approval ends here.
+                # wrong signature): the approval ends here.
                 proposal["status"] = "failed"
                 proposal["fail_reason"] = str(out["error"])
                 proposal["resolved_ts"] = int(time.time())
@@ -3169,9 +3074,7 @@ class ToolStore:
 
     def vet_summary(self) -> dict[str, dict[str, Any]]:
         """Per-digest vet aggregates from the local attestation log:
-        ``{vet_count, pass_count, last_ts}``. Local view only — the
-        authoritative candidate/greenlit state is the federated close's
-        vetting carry-over."""
+        ``{vet_count, pass_count, last_ts}``. Local view only."""
         summary: dict[str, dict[str, Any]] = {}
         for row in self._iter_attestations():
             if not row.get("vet"):

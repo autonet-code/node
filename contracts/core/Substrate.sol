@@ -159,8 +159,10 @@ contract Substrate is EIP712 {
         // order exact). mintPool = the PREVIOUS anchor's windowBurned: the
         // fees-only pool this epoch may mint (lag-1, the same window the
         // daemon close prices from; voice_state reads it from here).
-        // minted = cumulative claimFor amounts for this epoch,
-        // capped at mintPool. Appended last so prior tuple indexes hold.
+        // minted = cumulative claimFor amounts for this epoch (claims are
+        // capped on the network-wide total, mintPoolTotal, so an epoch may
+        // mint more than its own pool when earlier closes carried some
+        // over). Appended last so prior tuple indexes hold.
         uint256 windowBurned;
         uint256 mintPool;
         uint256 minted;
@@ -314,6 +316,7 @@ contract Substrate is EIP712 {
         // epoch's fee window (lag-1, fees-only); its own window is the fees
         // burned between the previous cutoff and its own.
         uint256 mintPool = nextMintPool();
+        mintPoolTotal += mintPool;
         uint256 burnedAtCutoff = burnedUpTo(cutoff);
         uint256 windowBurned = burnedAtCutoff - burnedAtLatestCutoff;
         burnedAtLatestCutoff = burnedAtCutoff;
@@ -874,6 +877,12 @@ contract Substrate is EIP712 {
     ///      agentMintTotal).
     uint256 public networkMintTotal;
 
+    /// @dev Cumulative fees-only pool: the sum of every anchor's mintPool.
+    ///      Claims are capped on this total, not per epoch (Decision
+    ///      2026-11-07): a close that leaves part of its pool unminted carries
+    ///      it over, and a later close allocates it.
+    uint256 public mintPoolTotal;
+
     using Checkpoints for Checkpoints.Trace208;
 
     /// @param amount The ATN (money) minted in this training event, from
@@ -950,15 +959,16 @@ contract Substrate is EIP712 {
             revert MintProofInvalid(epochIdHash);
         }
 
-        // On-chain conservation: the epoch's cumulative mint can never
-        // exceed its fees-only pool, whatever root was anchored.
+        // On-chain conservation: all earned mint together can never exceed
+        // the fees burned into the pool so far, whatever roots were
+        // anchored. The cap is cumulative so an unminted remainder carries
+        // over to later epochs.
         {
-            Anchor storage a = anchors[anchorIndexByEpochId[epochId] - 1];
-            uint256 mintedAfter = a.minted + amount;
-            if (mintedAfter > a.mintPool) {
-                revert EpochPoolExceeded(epochIdHash, a.mintPool, mintedAfter);
+            uint256 mintedAfter = networkMintTotal + amount;
+            if (mintedAfter > mintPoolTotal) {
+                revert EpochPoolExceeded(epochIdHash, mintPoolTotal, mintedAfter);
             }
-            a.minted = mintedAfter;
+            anchors[anchorIndexByEpochId[epochId] - 1].minted += amount;
         }
 
         // Record the ratified per-epoch amount, then accrue the

@@ -195,7 +195,7 @@ def test_bundle_round_trips_exact_floats():
     carry = {k: {} for k in CARRY_KEYS}
     carry["tool_positions"] = {DIGEST: {"head": [0.1 + 0.2, -0.0, 1e-9],
                                         "mass": [1.0, 2.5, 3.0]}}
-    carry["tool_vetting"] = {"h": 0.123456789}
+    carry["tool_rounds"] = {"h": 0.123456789}
     blob = encode_carry_bundle(carry, epoch_id="e9")
     out = decode_carry_bundle(blob)
     assert out["epoch_id"] == "e9"
@@ -205,7 +205,7 @@ def test_bundle_round_trips_exact_floats():
 
 def test_bundle_rejects_nan_and_missing_maps():
     carry = {k: {} for k in CARRY_KEYS}
-    carry["tool_vetting"] = {"h": float("nan")}
+    carry["tool_rounds"] = {"h": float("nan")}
     with pytest.raises(ValueError):
         encode_carry_bundle(carry, epoch_id="e1")
     with pytest.raises(ValueError):
@@ -224,7 +224,7 @@ def test_decode_rejects_non_canonical_or_malformed():
         decode_carry_bundle(json.dumps(wrong, sort_keys=True,
                                        separators=(",", ":")).encode())
     missing = json.loads(blob)
-    del missing["carry"]["tool_vetting"]
+    del missing["carry"]["tool_rounds"]
     with pytest.raises(ValueError):
         decode_carry_bundle(json.dumps(missing, sort_keys=True,
                                        separators=(",", ":")).encode())
@@ -463,7 +463,7 @@ def test_tampered_bundle_is_rejected(network, tmp_path, caplog):
     carry_cid = fetch_carry_over_from_chain(contract, real).carry_cid
     good = real.get(carry_cid)
     bundle = decode_carry_bundle(good)
-    bundle["carry"]["tool_vetting"] = {"attacker": 1.0}
+    bundle["carry"]["tool_rounds"] = {"attacker": 1.0}
     forged = encode_carry_bundle(bundle["carry"], epoch_id=bundle["epoch_id"])
 
     class LyingPeer:

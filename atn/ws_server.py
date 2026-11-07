@@ -817,7 +817,7 @@ class WebSocketBridge:
 
     def _tool_reviews_payload(self, digest: str, limit: Any = None, *,
                               include_local: bool = True) -> dict[str, Any]:
-        """Reviews, drifted position, vetting and usage for one tool digest.
+        """Reviews, drifted position and usage for one tool digest.
         Backs the owner `tool_reviews` handler."""
         try:
             limit = int(limit or 50)
@@ -827,12 +827,10 @@ class WebSocketBridge:
                    if include_local else [])
         world_service = self._world_service()
         position: dict[str, Any] = {}
-        vetting: dict[str, Any] = {}
         usage: dict[str, Any] = {}
         if world_service is not None:
             eg = world_service.read_economy_graph(last_n_epochs=10)
             position = dict(eg.get("positions", {}).get(digest) or {})
-            vetting = dict(eg.get("vetting", {}).get(digest) or {})
             # Usage/mint economics for the tool window: recent mint
             # over the window + the last close's per-digest entry
             # (ok_count, attesters, usage_term, mint).
@@ -855,7 +853,6 @@ class WebSocketBridge:
             "digest": digest,
             "reviews": reviews,
             "position": position,
-            "vetting": vetting,
             "usage": usage,
         }
 
@@ -1937,15 +1934,14 @@ class WebSocketBridge:
                     from nodes.common.world_model_substrate.tool_manifest import (
                         is_tool_manifest,
                     )
-                    # v4.1 trust picture: join review mass + inspection
-                    # count from the economy graph (same close state the
+                    # v4.1 trust picture: join review mass from the
+                    # economy graph (same close state the
                     # tool_reviews / economy_graph surfaces read).
                     try:
                         eg = world_service.read_economy_graph(last_n_epochs=10) or {}
                     except Exception:
                         eg = {}
                     positions = eg.get("positions", {})
-                    vetting = eg.get("vetting", {})
                     result = world_service.infer_artifacts(query, k=max(k * 3, 12))
                     for art in result.get("artifacts", []):
                         payload = art.get("payload")
@@ -1956,7 +1952,6 @@ class WebSocketBridge:
                         digest = art.get("digest", "")
                         pos = positions.get(digest) or {}
                         mass = [float(x) for x in (pos.get("mass") or [])]
-                        vet = vetting.get(digest) or {}
                         matches.append({
                             "digest": digest,
                             "name": payload.get("name", ""),
@@ -1969,10 +1964,9 @@ class WebSocketBridge:
                             "rating": art.get("rating", 0.0),
                             "axes": art.get("axes", []),
                             # v4.1 trust picture (see probe_tools tool desc):
-                            # per-axis review mass, its peak, inspection count.
+                            # per-axis review mass and its peak.
                             "mass": mass,
                             "review_mass": max(mass) if mass else 0.0,
-                            "inspections": int(vet.get("validators") or 0),
                         })
                         if len(matches) >= k * 2:
                             break
@@ -3222,7 +3216,7 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
-        # Tool-economy graph — registrations + declared-dep DAG + vetting
+        # Tool-economy graph — registrations + declared-dep DAG
         # + recent per-digest mint (world consensus state), merged with the
         # local tool store (display names) and the service store (asks).
         # Powers the economy visualization. Empty result when the world
@@ -3270,7 +3264,7 @@ class WebSocketBridge:
 
                 world = (world_service.read_economy_graph(last_n_epochs=last_n)
                          if world_service is not None else {
-                             "registrations": {}, "vetting": {},
+                             "registrations": {},
                              "recent_tool_mint": {}, "last_epoch": None,
                              "epochs_considered": 0,
                          })
@@ -3284,7 +3278,7 @@ class WebSocketBridge:
 
         # Recent reviews for one tool (v3) — the Substrate view's review
         # drawer. Local attestation rows (axes, score, note text) plus
-        # the tool's drifted position/vetting from the world service.
+        # the tool's drifted position from the world service.
         if msg_type == "tool_reviews":
             digest = str(msg.get("digest") or "").strip().lower()
             if not digest:

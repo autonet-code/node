@@ -105,7 +105,6 @@ def test_adoption_refused_for_agents_and_flagged_for_the_owner(tmp_path):
 
     store = ToolStore.__new__(ToolStore)
     store._records, store._proposals = {}, {}
-    store.vet_status_provider = None
     store.sanction_check = _list({f"sanction.{HOUSE}": "{}"},
                                  owners={AGENT: HOUSE}).check
     store._save_proposals = lambda: None

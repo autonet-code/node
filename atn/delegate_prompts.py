@@ -145,7 +145,7 @@ _REVIEW_TOOL = "attest_tools"
 
 # `use_tool` is a ROUTER (ToolRegistry.call_tool): it dispatches to
 # CONNECTOR, PIPELINE, CORE and REGISTERED tools alike, and only the
-# REGISTERED branch produces a tool_used receipt that enters consensus.
+# REGISTERED branch reaches a tool that can be reviewed (attest_tools).
 # Triggering the review step on the router name alone billed agents a
 # closing turn for Gmail-connector and core-tool calls, and the
 # attest_tools row it produced was then dropped by ToolStore.attest_usage

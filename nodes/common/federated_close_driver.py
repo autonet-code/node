@@ -124,7 +124,7 @@ class FederatedCloseDriver:
         canonical_tracker: Optional[Any] = None,
         pricing: str = "ledger",
         tool_registrations_path: Optional[Any] = None,
-        tool_vetting_path: Optional[Any] = None,
+        tool_rounds_path: Optional[Any] = None,
         tool_positions_path: Optional[Any] = None,
         canonical_world_path: Optional[Any] = None,
     ):
@@ -222,10 +222,10 @@ class FederatedCloseDriver:
         # registrations map — derived purely from canonical events and
         # replayed world state, so the on-disk copy is a rebuildable
         # cache, identical on every honest daemon.
-        self._tool_vetting_path: Optional[Path] = (
-            Path(tool_vetting_path) if tool_vetting_path else None
+        self._tool_rounds_path: Optional[Path] = (
+            Path(tool_rounds_path) if tool_rounds_path else None
         )
-        self._tool_vetting: Dict[str, Any] = self._load_tool_vetting()
+        self._tool_rounds: Dict[str, Any] = self._load_tool_rounds()
         # v3 position-drift carry-over (spec Decision 2026-07-08):
         # digest -> {"head": [n_dims], "mass": [n_dims]}: the mint-weighted review
         # centroid state. Same contract as registrations/vetting: derived
@@ -291,6 +291,8 @@ class FederatedCloseDriver:
         self.containment_params: Optional[Dict[str, float]] = None
         # Breakthrough gate pinned with the voice state (None = off).
         self.mint_gate: Optional[tuple] = None
+        # (review_decay, reviewer_min_rep_bps), pinned like mint_gate.
+        self.review_params: tuple = (1.0, 0)
         # Set to the new charter text once a pinned charter differs from
         # the active one: the close must not run on the old axes. The host
         # restarts the daemon onto the new charter (on_charter_change).
@@ -673,7 +675,7 @@ class FederatedCloseDriver:
         """The on-disk carry-over files every close reads as INPUTS."""
         return {
             "tool_registrations": self._tool_registrations_path,
-            "tool_vetting": self._tool_vetting_path,
+            "tool_rounds": self._tool_rounds_path,
             "tool_positions": self._tool_positions_path,
         }
 
@@ -681,7 +683,7 @@ class FederatedCloseDriver:
         """The in-memory carry-over (keyed like ``CARRY_KEYS``)."""
         return {
             "tool_registrations": self._tool_registrations,
-            "tool_vetting": self._tool_vetting,
+            "tool_rounds": self._tool_rounds,
             "tool_positions": self._tool_positions,
         }
 
@@ -700,12 +702,12 @@ class FederatedCloseDriver:
                 "carry-over install missing maps: " + ", ".join(missing))
         self._tool_registrations = dict(carry["tool_registrations"])
         self._save_tool_registrations()
-        self._tool_vetting = dict(carry["tool_vetting"])
-        self._save_tool_vetting()
+        self._tool_rounds = dict(carry["tool_rounds"])
+        self._save_tool_rounds()
         self._tool_positions = dict(carry["tool_positions"])
         self._save_tool_positions()
         self._tool_registrations = self._load_tool_registrations()
-        self._tool_vetting = self._load_tool_vetting()
+        self._tool_rounds = self._load_tool_rounds()
         self._tool_positions = self._load_tool_positions()
 
     def seed_marker_path(self) -> Optional[Path]:
@@ -946,6 +948,9 @@ class FederatedCloseDriver:
                 updates["containment_params"] = dict(state["containment_params"])
             if isinstance(state.get("mint_gate"), (list, tuple)) and len(state["mint_gate"]) == 2:
                 updates["mint_gate"] = (int(state["mint_gate"][0]), int(state["mint_gate"][1]))
+            if isinstance(state.get("review_params"), (list, tuple)) and len(state["review_params"]) == 2:
+                updates["review_params"] = (float(state["review_params"][0]),
+                                            int(state["review_params"][1]))
             houses = state.get("sanctioned_households")
             if isinstance(houses, list):
                 updates["sanctioned_households"] = sorted(
@@ -1135,7 +1140,7 @@ class FederatedCloseDriver:
                 voice_weights=(dict(self.voice_weights or {})
                                if self.voice_weights or chain_backed else None),
                 emission_pool=self.emission_pool,
-                tool_vetting=dict(self._tool_vetting),
+                tool_rounds=dict(self._tool_rounds),
                 tool_positions=dict(self._tool_positions),
                 rep_shares=(dict(self.rep_shares or {})
                             if self.rep_shares or chain_backed else None),
@@ -1144,9 +1149,8 @@ class FederatedCloseDriver:
                 sanctioned_households=list(self.sanctioned_households),
                 denied_tools=self._denied_tools(),
                 mint_gate=self.mint_gate,
-                # Chain-backed closes count only agent-signed receipts.
-                receipt_domain=(str(getattr(self.gossip, "rpb_address", "") or "")
-                                if self.review_snapshot is not None else None),
+                review_decay=float(self.review_params[0]),
+                reviewer_min_rep_bps=int(self.review_params[1]),
             )
         except Exception as e:
             logger.error(
@@ -1170,8 +1174,8 @@ class FederatedCloseDriver:
             close_result.get("tool_registrations") or {}
         )
         self._save_tool_registrations()
-        self._tool_vetting = dict(close_result.get("tool_vetting") or {})
-        self._save_tool_vetting()
+        self._tool_rounds = dict(close_result.get("tool_rounds") or {})
+        self._save_tool_rounds()
         self._tool_positions = dict(close_result.get("tool_positions") or {})
         self._save_tool_positions()
         # These are the AUTHORITATIVE positions: the ToolBond ratings pinned
@@ -1369,8 +1373,8 @@ class FederatedCloseDriver:
         except OSError as e:
             logger.warning("failed to persist tool registrations: %s", e)
 
-    def _load_tool_vetting(self) -> Dict[str, Any]:
-        path = self._tool_vetting_path
+    def _load_tool_rounds(self) -> Dict[str, Any]:
+        path = self._tool_rounds_path
         if path is None or not path.exists():
             return {}
         try:
@@ -1378,22 +1382,22 @@ class FederatedCloseDriver:
             if isinstance(data, dict):
                 return data
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("tool vetting cache unreadable (%s); starting "
+            logger.warning("tool rounds cache unreadable (%s); starting "
                            "empty — it rebuilds from canonical events", e)
         return {}
 
-    def _save_tool_vetting(self) -> None:
-        path = self._tool_vetting_path
+    def _save_tool_rounds(self) -> None:
+        path = self._tool_rounds_path
         if path is None:
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(json.dumps(self._tool_vetting, sort_keys=True),
+            tmp.write_text(json.dumps(self._tool_rounds, sort_keys=True),
                            encoding="utf-8")
             os.replace(tmp, path)
         except OSError as e:
-            logger.warning("failed to persist tool vetting state: %s", e)
+            logger.warning("failed to persist tool rounds state: %s", e)
 
     def _load_tool_positions(self) -> Dict[str, Dict[str, Any]]:
         path = self._tool_positions_path

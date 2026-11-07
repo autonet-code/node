@@ -25,7 +25,7 @@ from nodes.common.state_sync import CarryOverFetch
 
 CARRY = [
     "tool_registrations",
-    "tool_vetting",
+    "tool_rounds",
     "tool_positions",
 ]
 
@@ -190,7 +190,7 @@ def test_joiner_installs_verified_carry_and_closes(tmp_path):
         assert (me_dir / f"{k}.json").exists()
     assert me.participation_blockers() == []
     assert me._tool_positions == peer._tool_positions
-    assert me._tool_vetting == peer._tool_vetting
+    assert me._tool_rounds == peer._tool_rounds
 
 
 def test_joiner_first_epoch_only_observes(tmp_path, caplog):

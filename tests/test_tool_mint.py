@@ -1,17 +1,15 @@
-"""Tool mint at the federated epoch close (docs/tool_substrate.md).
+"""Tool mint plumbing at the federated epoch close (docs/tool_substrate.md).
 
-Author attribution ∝ effective standing × log1p(ok usage), anchored on
-the manifest's claim node, merged through the violator-pays gate path.
-Covers: end-to-end close with registration + receipts, bit-identical
-double close, shuffled-delivery determinism, attested decay through
-tool_receipt_history, carry-over registrations, and the no-tool-events
-null case.
+The mint itself is paid from concluded ToolBond review rounds (rules in
+tests/test_review_mint.py). This file covers the plumbing around it:
+registration attribution and carry-over, bit-identical and shuffled
+closes, the owner-wallet keying, composition shares, the driver's
+registration cache, and fees-pool conservation.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import random
 from typing import Any, Dict, List
 
@@ -25,6 +23,7 @@ from nodes.common.federated_reconcile import (
 )
 from nodes.common.world_model_substrate.adapter import N_DIMS, build_charter_world
 from nodes.common.world_model_substrate.aggregate import apply_events
+from nodes.common.world_model_substrate.charter import DEFAULT_CHARTER
 
 EMBED_DIM = 1024
 DIGEST = "ab" * 32
@@ -85,39 +84,6 @@ def _receipt_event(seq: int, caller: str, *, ok: bool = True,
     return ev
 
 
-def _vet_event(seq: int, vetter: str, *, digest: str = DIGEST,
-               ok: bool = True) -> Dict[str, Any]:
-    """Third receipt flavor (spec: Vetting section): validator read the
-    pinned code and attests code-adheres + no-malice. Not usage."""
-    return {
-        "kind": "tool_used",
-        "seq": seq,
-        "author_agent": vetter,
-        "manifest_digest": digest,
-        "tool_author": AUTHOR,
-        "receipt_digest": f"v{seq:02d}" * 8,
-        "ok": ok,
-        "fee_atn": 0.0,
-        "vet": True,
-    }
-
-
-def _vet_batches(digests: List[str], *, vetters: int = 2,
-                 seq0: int = 1) -> List[EventBatch]:
-    """Affirmative vets for each digest from ``vetters`` DISTINCT wire
-    identities (each vetter = own keypair, so neither the wire dedup
-    nor the fleet collapse bites). Two default vetters reach
-    VET_QUORUM and greenlight in the same close."""
-    out: List[EventBatch] = []
-    for v in range(1, vetters + 1):
-        events = [
-            _vet_event(seq0 + i, f"vetter-{v}", digest=d)
-            for i, d in enumerate(digests)
-        ]
-        out.extend(_batches(events, Keypair.generate()))
-    return out
-
-
 def _batches(events: List[Dict[str, Any]], keypair: Keypair) -> List[EventBatch]:
     chain: List[EventBatch] = []
     prev_hash = b""
@@ -135,141 +101,85 @@ def _batches(events: List[Dict[str, Any]], keypair: Keypair) -> List[EventBatch]
     return chain
 
 
-def _standard_batches(*, vetted: bool = True) -> List[EventBatch]:
-    """Registration and receipts arrive from DIFFERENT signing keys —
-    the wire-level self-attestation dedup excludes same-key callers, so
-    a realistic mint scenario needs a distinct caller wire identity.
-    ``vetted`` adds the distinct-fleet vets that greenlight the
-    candidate (mint-eligibility, spec: Vetting section)."""
-    kp_author = Keypair.generate()
-    kp_callers = Keypair.generate()
-    out = _batches([_registration_event(1)], kp_author) + _batches([
-        _receipt_event(1, "caller-1"),
-        _receipt_event(2, "caller-2"),
-        _receipt_event(3, "caller-1", ok=False),   # failure: no mint credit
-    ], kp_callers)
-    if vetted:
-        out += _vet_batches([DIGEST])
-    return out
+
+E18 = 10 ** 18
+R1, R2 = "0x" + "a1" * 20, "0x" + "b2" * 20
+AXES = list(DEFAULT_CHARTER.ids)
+SHARES = {R1: 0.3, R2: 0.2}
+
+
+def _snap(digest: str = DIGEST, *, reviewers=(R1, R2)) -> Dict[str, Any]:
+    """One concluding round for ``digest`` at rating 1.0."""
+    revs = [{"reviewer": r, "stake": 0, "accuracy": E18,
+             "axes": ["correctness"], "harm": False} for r in reviewers]
+    return {
+        "supply": 1000 * E18, "reviewer_share_bps": 4000,
+        "tools": {digest: {"axes": {a: {"sum": 100 * E18, "mass": E18} for a in AXES},
+                           "harm": {"sum": 0, "mass": 0}}},
+        "rounds": {digest: [{"epoch": 1, "supply": 1000 * E18,
+                             "prior_mass": {}, "reviews": revs}]},
+    }
+
+
+def _standard_batches() -> List[EventBatch]:
+    return _batches([_registration_event(1)], Keypair.generate())
+
+
+def _close(batches, **kw):
+    kw.setdefault("embedding_dim", EMBED_DIM)
+    kw.setdefault("emission_pool", 10.0)
+    kw.setdefault("rep_shares", SHARES)
+    kw.setdefault("review_snapshot", _snap())
+    return federated_epoch_close(canonical_order(batches), **kw)
 
 
 class TestToolMintClose:
-    def test_close_mints_to_author(self):
-        result = federated_epoch_close(canonical_order(_standard_batches()))
-        tm = result["tool_mint"]
-        assert DIGEST in tm
-        entry = tm[DIGEST]
-        assert entry["author"] == AUTHOR
-        assert entry["ok_count"] == 2                       # failure excluded
-        assert entry["mint"] > 0
-        # Combo damper: two attesting agents with one ok attestation
-        # each — usage_term = 2 * log1p(1), NOT log1p(total calls).
-        assert entry["attesters"] == 2
-        # v3: usage ALONE mints (no standing multiplier).
-        assert entry["mint"] == pytest.approx(2 * math.log1p(1))
-        assert "standing" not in entry
-        # Merged into the consensus attribution map.
-        assert result["agent_mint"].get(AUTHOR, 0) >= round(entry["mint"], 6) * 0.5
+    def test_close_mints_through_review_round(self):
+        result = _close(_standard_batches())
         assert result["tool_registrations"][DIGEST]["author"] == AUTHOR
+        assert result["tool_mint"][DIGEST]["author"] == AUTHOR
+        assert result["agent_mint"].get(AUTHOR, 0) > 0
+        assert result["agent_mint"].get(R1, 0) > 0
 
     def test_double_close_bit_identical(self):
         batches = _standard_batches()
-        r1 = federated_epoch_close(canonical_order(list(batches)))
-        r2 = federated_epoch_close(canonical_order(list(batches)))
-        for key in ("agent_mint", "tool_mint",
-                    "tool_registrations", "authoritative_payload"):
+        r1, r2 = _close(list(batches)), _close(list(batches))
+        for key in ("agent_mint", "tool_mint", "tool_registrations",
+                    "tool_rounds", "authoritative_payload"):
             assert json.dumps(r1[key]) == json.dumps(r2[key]), key
 
     def test_shuffled_delivery_deterministic(self):
         kp1, kp2 = Keypair.generate(), Keypair.generate()
-        chain1 = _batches([_registration_event(1), _receipt_event(2, "c1")], kp1)
-        chain2 = _batches([_receipt_event(1, "c2"), _receipt_event(2, "c3")], kp2)
-        all_batches = chain1 + chain2 + _vet_batches([DIGEST])
+        all_batches = (_batches([_registration_event(1)], kp1)
+                       + _batches([_registration_event(1, digest="cd" * 32,
+                                                       author="other")], kp2))
         rng = random.Random(11)
         results = []
         for _ in range(3):
             delivery = list(all_batches)
             rng.shuffle(delivery)
-            results.append(federated_epoch_close(canonical_order(delivery)))
+            results.append(_close(delivery))
         assert results[0]["tool_mint"] == results[1]["tool_mint"] == results[2]["tool_mint"]
         assert results[0]["agent_mint"] == results[1]["agent_mint"] == results[2]["agent_mint"]
 
-    def test_attested_mints_nothing(self):
-        """Pinned-only emission (spec v2): connector-backed tools are
-        publishable and debatable but draw nothing from the pool."""
-        kp = Keypair.generate()
-        batches = _batches([
-            _registration_event(1, trust_class="attested"),
-            _receipt_event(2, "caller-1"),
-        ], kp)
-        result = federated_epoch_close(canonical_order(batches))
+    def test_attested_registration_carries_and_mints_nothing(self):
+        batches = _batches([_registration_event(1, trust_class="attested")],
+                           Keypair.generate())
+        result = _close(batches)
         assert result["tool_mint"] == {}
-        # ...but the registration still carries over (attribution is
-        # permanent even for unminted classes).
         assert result["tool_registrations"][DIGEST]["trust_class"] == "attested"
-
-    def test_mechanical_receipts_do_not_mint(self):
-        """Only cognitive attestations count — per-call exhaust is
-        worth nothing (spec: Attestation section)."""
-        kp_author, kp_caller = Keypair.generate(), Keypair.generate()
-        batches = _batches([_registration_event(1)], kp_author) + _batches([
-            _receipt_event(1, "caller-1", attested=False),
-            _receipt_event(2, "caller-2", attested=False),
-        ], kp_caller)
-        result = federated_epoch_close(canonical_order(batches))
-        assert result["tool_mint"] == {}
-
-    def test_co_hosted_attestations_do_not_mint(self):
-        """Wire-level dedup: attestation batches signed with the same
-        key as the registration batch collapse to nothing — sybil
-        agents on the author's own daemon can't pump usage."""
-        kp = Keypair.generate()
-        batches = _batches([
-            _registration_event(1),
-            _receipt_event(2, "sybil-1"),
-            _receipt_event(3, "sybil-2"),
-            _receipt_event(4, "sybil-3"),
-        ], kp)  # ONE signing key for everything
-        result = federated_epoch_close(canonical_order(batches))
-        assert result["tool_mint"] == {}
-
-    def test_same_owner_attestations_do_not_mint(self):
-        """Owner-rooted exclusion (final form): callers registered under
-        the same owner wallet as the author are the author's own fleet —
-        their attestations don't count, even from a different daemon."""
-        batches = _standard_batches()  # caller-1/caller-2 on separate key
-        owner_map = {
-            AUTHOR: "0xOwnerA",
-            "caller-1": "0xOwnerA",     # same fleet as the author
-            "caller-2": "0xOwnerB",     # genuine third party
-        }
-        result = federated_epoch_close(
-            canonical_order(batches), agent_owner_map=owner_map)
-        entry = result["tool_mint"][DIGEST]
-        assert entry["attesters"] == 1          # only caller-2 counts
-        assert entry["mint"] == pytest.approx(math.log1p(1))  # v3 usage-only
 
     def test_mint_is_keyed_by_owner_wallet(self):
         """Decision 2026-10-27: the owner wallet claims. The anchored
         agent_mint names the author's lowercase owner, not the agent."""
-        batches = _standard_batches()
-        owner_map = {AUTHOR: "0xOwnerA", "caller-1": "0xOwnerB",
-                     "caller-2": "0xOwnerC"}
-        result = federated_epoch_close(
-            canonical_order(batches), agent_owner_map=owner_map)
-        assert set(result["agent_mint"]) == {"0xownera"}
+        owner_map = {AUTHOR: "0xOwnerA", R1: "0xOwnerB", R2: "0xOwnerC"}
+        # REP is read by household (owner wallet), so the shares are keyed by owner.
+        result = _close(_standard_batches(), agent_owner_map=owner_map,
+                        rep_shares={"0xownerb": 0.3, "0xownerc": 0.2})
+        assert "0xownera" in result["agent_mint"]
+        assert AUTHOR not in result["agent_mint"]
         assert result["agent_mint_by_agent"][AUTHOR] == result["agent_mint"]["0xownera"]
         assert result["authoritative_payload"]["agent_mint"] == result["agent_mint"]
-
-    def test_unknown_owner_is_not_excluded(self):
-        """Absent map entries = unknown owner = no exclusion (the map is
-        chain-derived; unregistered agents simply aren't in it)."""
-        batches = _standard_batches()
-        result = federated_epoch_close(
-            canonical_order(batches),
-            agent_owner_map={AUTHOR: "0xOwnerA"},  # callers unknown
-        )
-        assert result["tool_mint"][DIGEST]["attesters"] == 2
 
     def test_no_tool_events_null_case(self):
         kp = Keypair.generate()
@@ -283,125 +193,37 @@ class TestToolMintClose:
 
 
 class TestComputeToolMint:
-    def _world_with_registration(self):
-        world = build_charter_world(embedding_dim=EMBED_DIM)
-        apply_events(world, [_registration_event(1)], equilibrate_after=False)
-        return world
-
-    def test_carried_registration_attributes(self):
-        """Receipts-only epoch: the carried registration map still
-        attributes, provided the claim node exists in the (seeded)
-        world. v4.1: no greenlight needed to mint."""
-        world = self._world_with_registration()
-        events = [_receipt_event(1, "caller-9")]
-        out = compute_tool_mint(
-            world, events,
-            registrations={DIGEST: {"trust_class": "pinned", "author": AUTHOR}},
-        )
-        assert out["per_digest"][DIGEST]["author"] == AUTHOR
-        assert out["per_digest"][DIGEST]["mint"] > 0
-        assert out["registrations_next"][DIGEST]["author"] == AUTHOR
-
-    def test_carried_registration_wins_over_reregistration(self):
-        world = self._world_with_registration()
-        rereg = _registration_event(1)
-        rereg["manifest_meta"] = {"trust_class": "pinned", "author": "mallory"}
-        events = [rereg, _receipt_event(2, "caller-9")]
-        out = compute_tool_mint(
-            world, events,
-            registrations={DIGEST: {"trust_class": "pinned", "author": AUTHOR}},
-        )
-        assert out["per_digest"][DIGEST]["author"] == AUTHOR
-
-    def test_usage_without_any_registration_mints_nothing(self):
-        world = build_charter_world(embedding_dim=EMBED_DIM)
-        out = compute_tool_mint(world, [_receipt_event(1, "caller-1")])
-        assert out["per_digest"] == {}
-        assert out["registrations_next"] == {}
-
-
-def _vet_event_axes(seq: int, vetter: str, axes: Dict[str, float],
-                    *, digest: str = DIGEST) -> Dict[str, Any]:
-    """A v4.1 inspection-review vet event carrying per-axis scores. Since
-    staked reviews (docs/multi_jurisdiction.md 10) it moves nothing and
-    mints nothing; daemons no longer emit it."""
-    ev = _vet_event(seq, vetter, digest=digest)
-    ev["axes"] = dict(axes)
-    return ev
-
-
-class TestVetGateRemoved:
-    """v4.1 [R1][R2]: the vet GATE is gone — tools mint from first
-    attested use, author keeps 100%, and a vet survives only as an
-    inspection review that drifts position without minting."""
-
-    REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
-
     def _world(self):
         world = build_charter_world(embedding_dim=EMBED_DIM)
         apply_events(world, [_registration_event(1)], equilibrate_after=False)
         return world
 
-    def test_unvetted_tool_mints(self):
-        """v4.1 [R1]: no greenlight required — an attested, never-vetted
-        tool mints from first use, author keeps everything."""
-        result = federated_epoch_close(
-            canonical_order(_standard_batches(vetted=False)))
-        entry = result["tool_mint"][DIGEST]
-        assert entry["author"] == AUTHOR
-        assert entry["mint"] == pytest.approx(2 * math.log1p(1))
-        # Author keeps 100% — no validator royalty split.
-        node = result["agent_mint"]
-        assert node.get(AUTHOR, 0) > 0
+    REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
 
-    def test_author_keeps_full_mint_no_royalty(self):
-        """Even with vets present (now inspection reviews), the author's
-        mint is not split with validators."""
-        world = self._world()
-        out = compute_tool_mint(
-            world, [_receipt_event(1, "caller-9")],
-            registrations=self.REGS,
-        )
-        entry = out["per_digest"][DIGEST]
-        node = out["node_agent"][entry["node_id"]]
-        assert node == {AUTHOR: pytest.approx(entry["mint"])}
-        assert list(node.keys()) == [AUTHOR]
+    def test_carried_registration_attributes(self):
+        """A round concluding in a later epoch attributes through the carried map."""
+        out = compute_tool_mint(self._world(), [], registrations=self.REGS,
+                                rep_shares=SHARES, review_snapshot=_snap())
+        assert out["per_digest"][DIGEST]["author"] == AUTHOR
+        assert out["per_digest"][DIGEST]["mint"] > 0
+        assert out["registrations_next"][DIGEST]["author"] == AUTHOR
 
-    def test_vet_inspection_event_moves_and_mints_nothing(self):
-        """A vet event carrying axes (an old daemon's gossip review) mints
-        nothing and no longer moves the tool's position: inspections are
-        staked ToolBond reviews now (docs/multi_jurisdiction.md 10)."""
-        world = self._world()
-        vet = _vet_event_axes(1, "reviewer-1", {"correctness": 1.0})
-        vet["sender"] = "aa01"
-        out = compute_tool_mint(
-            world, [vet],
-            registrations=self.REGS,
-            rep_shares={"reviewer-1": 0.5},
-        )
+    def test_carried_registration_wins_over_reregistration(self):
+        rereg = _registration_event(1)
+        rereg["manifest_meta"] = {"trust_class": "pinned", "author": "mallory"}
+        out = compute_tool_mint(self._world(), [rereg], registrations=self.REGS,
+                                rep_shares=SHARES, review_snapshot=_snap())
+        assert out["per_digest"][DIGEST]["author"] == AUTHOR
+
+    def test_review_without_any_registration_mints_nothing(self):
+        world = build_charter_world(embedding_dim=EMBED_DIM)
+        out = compute_tool_mint(world, [], rep_shares=SHARES, review_snapshot=_snap())
         assert out["per_digest"] == {}
-        assert out["positions_next"][DIGEST]["head"][4] == 0.0
-        assert "tool_review_book_next" not in out
-
-    def test_vet_state_carried_tolerantly(self):
-        """v4.1 [R1]: old carried vetting state (greenlit/royalty fields)
-        is read without error and produces no mint effect."""
-        world = self._world()
-        legacy_vetting = {"manifests": {DIGEST: {
-            "vets": {"v1": []}, "greenlit": True, "royalty_left": 5,
-            "validators": ["v1"], "busted": False,
-        }}, "busts": {}}
-        out = compute_tool_mint(
-            world, [_receipt_event(1, "caller-9")],
-            registrations=self.REGS, vetting=legacy_vetting)
-        entry = out["per_digest"][DIGEST]
-        # Author still keeps 100% despite the legacy royalty window.
-        node = out["node_agent"][entry["node_id"]]
-        assert node == {AUTHOR: pytest.approx(entry["mint"])}
+        assert out["registrations_next"] == {}
 
 
 class TestCompositionFanOut:
-    """Conservation of attestation over the declared-dep DAG
+    """Composition shares over the declared-dep DAG
     (docs/tool_substrate.md — Composition rule 3)."""
 
     def test_shares_split_and_recursion(self):
@@ -428,130 +250,11 @@ class TestCompositionFanOut:
         assert shares["d2"] == pytest.approx(0.15)
         assert "dx" not in shares
 
-    def test_close_fans_attestation_over_deps(self):
-        """One attestation of a composite credits the composite AND its
-        declared dep — royalty flow, conserved."""
-        dep_digest = "cc" * 32
-        kp_authors, kp_caller = Keypair.generate(), Keypair.generate()
-        batches = _batches([
-            _registration_event(1, digest=dep_digest, author="dep-author",
-                                axis=2),
-            _registration_event(2, digest=DIGEST, author=AUTHOR,
-                                deps=dep_digest, axis=4),
-        ], kp_authors) + _batches([
-            _receipt_event(1, "caller-1"),        # attests the COMPOSITE
-        ], kp_caller) + _vet_batches([DIGEST, dep_digest])
-        result = federated_epoch_close(canonical_order(batches))
-        tm = result["tool_mint"]
-        assert DIGEST in tm and dep_digest in tm
-        # Damp-then-split: log1p applies ONCE (at the attested
-        # composite), the damped value distributes linearly — the
-        # anti-amplification order of operations.
-        damped = math.log1p(1)
-        assert tm[DIGEST]["usage_term"] == pytest.approx(damped * 0.7)
-        assert tm[dep_digest]["usage_term"] == pytest.approx(damped * 0.3)
-        assert tm[dep_digest]["author"] == "dep-author"
-        # Conservation of the damped quantity across the DAG.
-        assert (tm[DIGEST]["usage_term"] + tm[dep_digest]["usage_term"]
-                == pytest.approx(damped))
-        # v3: mint = usage share directly (no standing multiplier).
-        assert tm[DIGEST]["mint"] == pytest.approx(damped * 0.7)
-        assert tm[dep_digest]["mint"] == pytest.approx(damped * 0.3)
-
-    def test_self_dep_padding_cannot_amplify(self):
-        """An author padding a composite with their own junk deps moves
-        credit between their tools but total author mint never exceeds
-        the un-padded case (same standing assumed)."""
-        junk = "ee" * 32
-        kp_authors, kp_caller = Keypair.generate(), Keypair.generate()
-        padded = _batches([
-            _registration_event(1, digest=junk, author=AUTHOR, axis=2),
-            _registration_event(2, digest=DIGEST, author=AUTHOR,
-                                deps=junk, axis=4),
-        ], kp_authors) + _batches(
-            [_receipt_event(1, "caller-1")], kp_caller,
-        ) + _vet_batches([DIGEST, junk])
-        plain = _batches([
-            _registration_event(1, digest=DIGEST, author=AUTHOR, axis=4),
-        ], Keypair.generate()) + _batches(
-            [_receipt_event(1, "caller-1")], Keypair.generate(),
-        ) + _vet_batches([DIGEST])
-
-        r_padded = federated_epoch_close(canonical_order(padded))
-        r_plain = federated_epoch_close(canonical_order(plain))
-        # log1p is concave: log1p(0.7)+log1p(0.3) < 2*log1p(0.5) but
-        # more importantly <= ... the padded author total must not
-        # exceed the plain total given equal standings (both nodes
-        # standing ~1 from the author post).
-        padded_total = sum(e["mint"] for e in r_padded["tool_mint"].values())
-        plain_total = sum(e["mint"] for e in r_plain["tool_mint"].values())
-        assert padded_total <= plain_total + 1e-9
 
 
-class TestLoadoutAdoption:
-    """Resident grammar: distros earn by distinct-fleet adoption,
-    volume-blind, fanned over their module deps."""
-
-    MODULE = "11" * 32
-    DISTRO = "22" * 32
-
-    def _batches_with_adoption(self):
-        kp_auth = Keypair.generate()
-        kp_f1, kp_f2 = Keypair.generate(), Keypair.generate()
-        reg = _batches([
-            _registration_event(1, digest=self.MODULE, author="mod-author",
-                                axis=2),
-            _registration_event(2, digest=self.DISTRO, author="distro-author",
-                                deps=self.MODULE, axis=3),
-            _registration_event(3, digest=DIGEST, author=AUTHOR, axis=4),
-        ], kp_auth)
-        # Fleet 1: FIVE attestations under the distro (volume must not
-        # matter for adoption). Fleet 2: one.
-        f1 = _batches([
-            _receipt_event(i, "caller-1", loadout=self.DISTRO)
-            for i in range(1, 6)
-        ], kp_f1)
-        f2 = _batches([
-            _receipt_event(1, "caller-2", loadout=self.DISTRO),
-        ], kp_f2)
-        return reg + f1 + f2 + _vet_batches([self.MODULE, self.DISTRO, DIGEST])
-
-    def test_adoption_volume_blind_and_fanned(self):
-        owner_map = {
-            AUTHOR: "0xA", "mod-author": "0xM", "distro-author": "0xD",
-            "caller-1": "0xF1", "caller-2": "0xF2",
-        }
-        result = federated_epoch_close(
-            canonical_order(self._batches_with_adoption()),
-            agent_owner_map=owner_map)
-        tm = result["tool_mint"]
-        ln2 = math.log1p(1)
-        # Two distinct fleets, log1p(1) each, split 0.7 distro / 0.3 module.
-        assert tm[self.DISTRO]["usage_term"] == pytest.approx(2 * ln2 * 0.7)
-        assert tm[self.MODULE]["usage_term"] == pytest.approx(2 * ln2 * 0.3)
-        # Invoked credit for the tool itself stays volume-SENSITIVE:
-        # caller-1 attested 5 times, caller-2 once.
-        assert tm[DIGEST]["usage_term"] == pytest.approx(
-            math.log1p(5) + math.log1p(1))
-
-    def test_same_fleet_as_distro_author_excluded_but_module_credited(self):
-        """A fleet can't pump its own distro — but its adoption still
-        credits upstream modules it doesn't own (exclusions are
-        per-target)."""
-        owner_map = {
-            AUTHOR: "0xA", "mod-author": "0xM", "distro-author": "0xD",
-            "caller-1": "0xD",   # same fleet as the distro author
-            "caller-2": "0xF2",
-        }
-        result = federated_epoch_close(
-            canonical_order(self._batches_with_adoption()),
-            agent_owner_map=owner_map)
-        tm = result["tool_mint"]
-        ln2 = math.log1p(1)
-        # Distro: only fleet 2 counts.
-        assert tm[self.DISTRO]["usage_term"] == pytest.approx(1 * ln2 * 0.7)
-        # Module: both fleets count (module author's owner differs).
-        assert tm[self.MODULE]["usage_term"] == pytest.approx(2 * ln2 * 0.3)
+def _plain_event() -> Dict[str, Any]:
+    return {"kind": "observation_added", "seq": 1, "author_agent": "alice",
+            "obs_id": "obs_x", "coords": _coords(), "label": "plain work"}
 
 
 class TestDriverCarryOver:
@@ -578,20 +281,18 @@ class TestDriverCarryOver:
 
     def test_registration_carries_across_epochs_and_restart(self, tmp_path):
         driver = self._driver(tmp_path, [
-            [_registration_event(1), _receipt_event(2, "c1")],   # epoch 1
-            [_receipt_event(1, "c2")],                            # epoch 2
+            [_registration_event(1)],                             # epoch 1
+            [_plain_event()],                                     # epoch 2
         ])
         r1 = driver.run({"epoch_id": "e1"})
         assert r1.close_result["tool_registrations"][DIGEST]["author"] == AUTHOR
 
-        # Epoch 2 has receipts only — the carried registration still
-        # attributes (per_digest empty here only because the fresh
-        # charter world lacks the claim node; the REGISTRATION survives).
+        # Epoch 2 has no events: the registration still carries.
         r2 = driver.run({"epoch_id": "e2"})
         assert r2.close_result["tool_registrations"][DIGEST]["author"] == AUTHOR
 
         # Restart: a new driver instance reloads the cache from disk.
-        driver2 = self._driver(tmp_path, [[_receipt_event(1, "c3")]])
+        driver2 = self._driver(tmp_path, [[]])
         assert driver2._tool_registrations[DIGEST]["author"] == AUTHOR
 
 
@@ -605,134 +306,21 @@ class TestDriverCarryOver:
 # ---------------------------------------------------------------------------
 
 
-def _receipt_axes(seq: int, caller: str, axes: Dict[str, float],
-                  *, digest: str = DIGEST) -> Dict[str, Any]:
-    ev = _receipt_event(seq, caller, digest=digest)
-    ev["axes"] = dict(axes)
-    return ev
-
-
-class TestMoneyOnlyMint:
-    """Decision 2026-07-10: mint is MONEY ONLY — no beta cap, no rep/ATN
-    split. Usage mints ATN pro-rata over the ε-floored voice weights; the
-    close never emits agent_rep / node_agent_rep / beta."""
-
-    REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
-
-    def _world(self):
-        world = build_charter_world(embedding_dim=EMBED_DIM)
-        apply_events(world, [_registration_event(1)], equilibrate_after=False)
-        return world
-
-    def test_no_beta_no_rep_split_keys(self):
-        """The removed keys are gone from the output."""
-        world = self._world()
-        out = compute_tool_mint(
-            world, [_receipt_event(1, "zero-1"), _receipt_event(2, "zero-2")],
-            registrations=self.REGS,
-        )
-        assert "beta" not in out
-        assert "node_agent_rep" not in out
-        assert "rep_fraction" not in out["per_digest"][DIGEST]
-        # Local regime (no voice_weights) => weight 1.0 per household.
-        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
-            2 * math.log1p(1))
-
-    def test_mint_is_pro_rata_over_voice_weights(self):
-        """With voice_weights present, mint scales by each household's
-        ε-floored weight — no zero-rep throttle."""
-        world = self._world()
-        from nodes.common.federated_reconcile import VOICE_EPSILON
-        events = [
-            _receipt_event(1, "rep-holder"),
-            _receipt_event(2, "zero-1"),
-        ]
-        # voice_weights carries the ε-floored share (what voice_state emits).
-        voice_weights = {"rep-holder": 0.5, "zero-1": VOICE_EPSILON}
-        out = compute_tool_mint(
-            world, events, registrations=self.REGS,
-            voice_weights=voice_weights,
-        )
-        ln = math.log1p(1)
-        expected = ln * 0.5 + ln * VOICE_EPSILON
-        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
-            expected, rel=1e-6)
-
-    def test_checksummed_callers_find_lowercase_voice_and_owner(self):
-        """Decision 2026-10-26: chain-read maps key by lowercase 0x while
-        events carry checksummed ids. The lookup must be case-insensitive:
-        before the fix every checksummed caller fell to the epsilon weight
-        and escaped its owner's household (same-owner exclusion)."""
-        world = self._world()
-        caller = "0xAbCdEf0000000000000000000000000000000001"
-        sibling = "0xAbCdEf0000000000000000000000000000000002"
-        owner = "0x00000000000000000000000000000000000000Aa"
-        events = [_receipt_event(1, caller)]
-        voice_weights = {caller.lower(): 0.5}
-        out = compute_tool_mint(
-            world, events, registrations=self.REGS,
-            voice_weights=voice_weights,
-        )
-        assert out["per_digest"][DIGEST]["mint"] == pytest.approx(
-            math.log1p(1) * 0.5, rel=1e-9)
-        # The owner map is lowercase too: a checksummed author and caller
-        # under one owner are one household, so the caller mints nothing.
-        regs = {DIGEST: {"trust_class": "pinned", "author": sibling}}
-        out = compute_tool_mint(
-            world, events, registrations=regs,
-            agent_owner_map={caller.lower(): owner.lower(),
-                             sibling.lower(): owner.lower()},
-            voice_weights={owner.lower(): 0.5},
-        )
-        assert DIGEST not in out["per_digest"]
-
-    def test_close_emits_no_agent_rep(self):
-        """Through the full close, there is no agent_rep map (money only)."""
-        kp_author = Keypair.generate()
-        kp_caller = Keypair.generate()
-        batches = _batches([_registration_event(1)], kp_author) + _batches([
-            _receipt_event(1, "some-caller"),
-        ], kp_caller)
-        result = federated_epoch_close(
-            canonical_order(batches),
-            rep_shares={"some-caller": 0.5},
-        )
-        assert result["agent_mint"].get(AUTHOR, 0) > 0
-        assert "agent_rep" not in result
-        assert result["authoritative_payload"]["schema"] == 6
-        assert "agent_rep" not in result["authoritative_payload"]
-
 
 class TestFeesOnlyPool:
-    """Decision 2026-07-10: the emission pool is FEES-ONLY. A zero pool
-    (no burned fees this epoch) yields zero mint cleanly (no div-by-zero);
-    a positive pool is conserved — Σ agent_mint == the pool exactly."""
-
-    def _batches(self):
-        kp_author = Keypair.generate()
-        kp_caller = Keypair.generate()
-        return _batches([_registration_event(1)], kp_author) + _batches([
-            _receipt_event(1, "caller-1"),
-            _receipt_event(2, "caller-2"),
-        ], kp_caller)
+    """The emission pool is FEES-ONLY. A zero pool yields zero mint cleanly;
+    a pool is conserved: minted plus carried-over equals the pool."""
 
     def test_zero_fee_epoch_zero_mint_clean(self):
-        """emission_pool == 0.0 => empty agent_mint, no exception."""
-        result = federated_epoch_close(
-            canonical_order(self._batches()), emission_pool=0.0)
+        result = _close(_standard_batches(), emission_pool=0.0)
         assert result["agent_mint"] == {}
         assert result["total_mint"] == pytest.approx(0.0)
-        # tool_mint per-digest display values scale to zero too.
-        for entry in result["tool_mint"].values():
-            assert entry["mint"] == pytest.approx(0.0)
 
     def test_pool_conserved_exactly(self):
-        """A positive fees-only pool is distributed pro-rata and conserved:
-        Σ agent_mint == the burned-fee pool."""
         pool = 12.5
-        result = federated_epoch_close(
-            canonical_order(self._batches()), emission_pool=pool)
-        assert result["agent_mint"].get(AUTHOR, 0) > 0
-        assert sum(result["agent_mint"].values()) == pytest.approx(
-            pool, rel=1e-9)
-        assert result["total_mint"] == pytest.approx(pool, rel=1e-9)
+        result = _close(_standard_batches(), emission_pool=pool)
+        minted = sum(result["agent_mint"].values())
+        carried = result["tool_rounds"]["pool_carry"] / 1e6
+        assert minted > 0
+        assert minted + carried == pytest.approx(pool, rel=1e-9)
+        assert result["total_mint"] == pytest.approx(minted, rel=1e-9)

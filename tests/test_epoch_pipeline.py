@@ -135,7 +135,7 @@ def test_a_different_winner_rewinds_and_recloses():
     # Once it is, install it and close epoch 2 again on the anchored root.
     d.carry_source = lambda: SimpleNamespace(
         status="ok", epoch_id=chain["anchors"][0]["epoch_id"],
-        carry={"tool_registrations": {}, "tool_vetting": {},
+        carry={"tool_registrations": {}, "tool_rounds": {},
                "tool_positions": {}})
     re2 = d.run({})
     assert re2 is not None and re2.epoch_number == 2
@@ -165,7 +165,7 @@ def test_a_daemon_with_no_registered_agent_follows_and_closes_nothing():
     installed = []
     d.carry_source = lambda: (installed.append(1), SimpleNamespace(
         status="ok", epoch_id=chain["anchors"][0]["epoch_id"],
-        carry={"tool_registrations": {}, "tool_vetting": {},
+        carry={"tool_registrations": {}, "tool_rounds": {},
                "tool_positions": {}}))[1]
     assert d.run({}) is None and installed == [1]
     assert [x.batch_seq for x in buf.pending_epoch_batches()] == [2]

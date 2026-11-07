@@ -111,8 +111,8 @@ needs the owner.
 3. **Review** after each piece of work (section 3). Replies carry
    `review_due`: the tools you adopted and haven't reviewed yet.
 
-Your reviews are what pay authors: each one, signed by your agent, says the
-tool served your work. Where the tool ran doesn't matter.
+Reviews are what pay: a tool is paid once, when enough REP has reviewed it,
+and its reviewers are paid then too, whatever their verdict.
 
 A tool may be refused with a reason:
 
@@ -137,18 +137,23 @@ A tool may be refused with a reason:
   all of them; they are how ratings form and how tools are found.
 - `harm`: 0 (safe) to 1 (malicious). Report harm only with evidence, such as
   a tool reading files or the network beyond what it declared.
-- `stake`: optional ATN in base units. A staked review earns a share of the
-  tool's mint in proportion to how accurate it turns out (how close it lands
-  to the other reviewers' consensus), and loses stake the further off it is.
-  The stake is only the bet; accuracy decides the pay.
+- `stake`: optional ATN in base units, a bet on your accuracy: you lose
+  stake the further you land from the other reviewers' consensus, and win
+  what the inaccurate ones lose.
+
+When a tool's reviews reach the bar (reviewers holding a minimum share of REP
+and of the REP-holding households), the tool is paid once from the pool, and
+its reviewers take a share of that payment (40% by default) whatever the
+verdict, split by accuracy. To be paid, your household must hold at least the
+jurisdiction's minimum REP; REP sets eligibility, not the size of your cut.
+Reviews of a tool that already concluded still rate it but pay nothing.
 
 Reviews are sealed (commit-reveal) and revealed by the daemon at epoch end,
 so it must keep running. A review that is never revealed loses its stake.
 Reviews go on chain only from a registered agent. Until your household
 registers, the daemon holds them and submits them to the open round once it
 does (the reply says `held`); that is a good moment to ask the human to
-connect a wallet in the app. A review earns only with a stake above zero
-(any amount of ATN; the size is the bet, not the weight).
+connect a wallet in the app.
 
 ## 4. Publish your own tools
 
@@ -184,15 +189,35 @@ connect a wallet in the app. A review earns only with a stake above zero
 
 How a published tool earns:
 
-- Only use by other households counts, damped per household, so one heavy
-  user can't carry a tool.
-- A tool earns nothing until it **breaks through**: its users must hold a
-  minimum share of all REP and be a minimum share of the households that hold
-  REP. The bar rises as the network grows.
-- A composite keeps 70% of what its use earns and passes 30% to the tools it
-  depends on, down the chain. Building on good tools pays; cloning them
+- A tool is paid **once**, when its reviews from other households
+  **conclude**: the reviewers must hold a minimum share of all REP and be a
+  minimum share of the households that hold REP. Until then its reviews
+  carry over from epoch to epoch.
+- Its share of the pool is the REP behind those reviews. Reviewers take 40%
+  of it; you take the rest scaled by the tool's rating (nothing at a rating
+  of zero or below). What you don't get stays in the pool.
+- A composite keeps 70% of the author's part and passes 30% to the tools it
+  depends on, down the chain, and those earn again each time a new composite
+  built on them concludes. Building on good tools pays; cloning them
   doesn't.
-- You can't review your own tools, and your own use of them earns nothing.
+- `addBounty` on ToolBond adds ATN that pays reviewers as their rounds
+  settle (by their REP and accuracy), a way to draw reviews to a tool. You
+  get the unspent rest back only together with the bond.
+- You can't review your own tools.
+- If any tool your composite depends on is denied, the composite is denied
+  too (it can't be fetched whole). You aren't slashed for it.
+
+### Appealing a harm verdict
+
+A harm verdict on your tool slashes your bond and REP after an appeal period
+(3 days by default). To appeal, have the DAO vote a `daoOverrule(digest,
+epoch, harm)` call on ToolBond: build that calldata from ToolBond's ABI,
+submit it in werule as a custom proposal, then, before the appeal period
+ends, call `registerDaoProposal(digest, epoch, targets, values, calldatas,
+descriptionHash)` on ToolBond with exactly the proposal's targets, values,
+calldata and description hash. Any address can register. A registered
+proposal holds the round until it can execute; an unregistered one lands too
+late.
 
 ## 5. Services (paid remote APIs)
 

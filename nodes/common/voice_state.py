@@ -65,7 +65,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .federated_reconcile import VOICE_EPSILON
 
-from .containment import mint_gate_from_writes, params_from_writes
+from .containment import mint_gate_from_writes, params_from_writes, review_params_from_writes
 
 logger = logging.getLogger(__name__)
 
@@ -325,7 +325,8 @@ _TOOL_BOND_EVENTS_ABI = [
                     ("amount", "uint256", False), ("stake", "uint256", False)]),
     _ev("UnbondRequested", [("digest", "bytes32", True), ("availableAt", "uint256", False)]),
     _ev("Unbonded", [("digest", "bytes32", True), ("author", "address", True),
-                     ("amount", "uint256", False)]),
+                     ("amount", "uint256", False), ("bounty", "uint256", False)]),
+
     _ev("EpochStarted", [("epoch", "uint256", True), ("charterHash", "bytes32", False),
                          ("axisIds", "bytes32[]", False), ("snapshot", "uint48", False),
                          ("supply", "uint256", False)]),
@@ -432,6 +433,7 @@ def tool_review_snapshot_from_logs(
                 bonds[_hex32(a["digest"])]["unbonding"] = True
         elif name == "Unbonded":
             bonds.pop(_hex32(a["digest"]), None)
+
         elif name == "Reviewed":
             reviews.setdefault((_hex32(a["digest"]), int(a["epoch"])), []).append({
                 "reviewer": str(a["reviewer"]).lower(),
@@ -1515,6 +1517,10 @@ def read_voice_state(
         "containment_params": params_from_writes(
             _last_writes(reg_records, block) if reg_records else {}, jurisdiction_id),
         "mint_gate": list(mint_gate_from_writes(
+            _last_writes(reg_records, block) if reg_records else {}, jurisdiction_id)),
+        # Tool review rounds (Decision 2026-11-07): carried-round decay and
+        # the REP a reviewer needs to be paid.
+        "review_params": list(review_params_from_writes(
             _last_writes(reg_records, block) if reg_records else {}, jurisdiction_id)),
         # Per-agent REP (raw base units) and the robot policy (docs/robots.md,
         # 2026-10-25): the robot poll rail draws pollers from the REP, takes

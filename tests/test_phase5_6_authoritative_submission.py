@@ -205,7 +205,21 @@ def _build_close_and_anchor(
         batches.extend(_make_chain(rpb, kp, aid, n=2))
 
     canonical = canonical_order(batches)
-    result = federated_epoch_close(canonical)
+    # The mint reads staked reviews (Decision 2026-11-07): one concluding
+    # review round per registered tool, from a REP-holding reviewer.
+    regs = federated_epoch_close(canonical)["tool_registrations"]
+    reviewer = "0x" + "9e" * 20
+    snapshot = {
+        "supply": 10 ** 21, "reviewer_share_bps": 4000,
+        "tools": {d: {"axes": {"correctness": {"sum": 100 * 10 ** 18, "mass": 10 ** 18}},
+                      "harm": {"sum": 0, "mass": 0}} for d in regs},
+        "rounds": {d: [{"epoch": 1, "supply": 10 ** 21, "prior_mass": {},
+                        "reviews": [{"reviewer": reviewer, "stake": 0,
+                                     "accuracy": 10 ** 18, "axes": ["correctness"],
+                                     "harm": False}]}] for d in regs},
+    }
+    result = federated_epoch_close(
+        canonical, rep_shares={reviewer: 0.5}, review_snapshot=snapshot)
     result["epoch_id"] = epoch_id
 
     # Anchor on chain.
@@ -399,7 +413,8 @@ def test_three_agents_each_submit_independently(chain):
         )
         submissions[aid] = sub.submit_for_epoch(epoch_id)
 
-    expected = result["agent_mint"]
+    # The reviewer's own leaf is claimed by its own household, not here.
+    expected = {k: v for k, v in result["agent_mint"].items() if k != "0x" + "9e" * 20}
     assert set(expected) <= {a.lower() for a in agent_ids}
     network_total_expected = 0
     n_minted = 0

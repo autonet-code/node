@@ -24,14 +24,13 @@ from tests.test_staked_tool_close import (
     DIGEST,
     _batches,
     _fold,
-    _receipts,
     _registration_event,
-    _rev,
-    _snapshot,
 )
 from tests import test_staked_tool_close as stc
+from tests.test_signed_receipts_and_bonds import _snap
 from tests.test_tool_mint import AUTHOR
 
+E18 = 10 ** 18
 HOUSE = "0x" + "aa" * 20
 AGENT = "0x" + "a1" * 20
 
@@ -113,31 +112,39 @@ class TestReviews:
 
 class TestClose:
     POOL = 7.0
+    SHARES = {AUD_A: 0.3, AUD_B: 0.2}
 
     def _close(self, **kw):
-        kp_a, kp_c = Keypair.generate(), Keypair.generate()
-        batches = _batches([_registration_event(1)], kp_a) + _batches(
-            _receipts(3), kp_c)
+        kp_a = Keypair.generate()
+        batches = _batches([_registration_event(1)], kp_a)
+        kw.setdefault("rep_shares", self.SHARES)
         return federated_epoch_close(
             canonical_order(batches), emission_pool=self.POOL,
-            review_snapshot=_snapshot([_rev(AUD_A, 2), _rev(AUD_B, 1)]), **kw)
+            review_snapshot=_snap(), **kw)
 
-    def test_withheld_mint_stays_unminted(self):
+    def test_sanctioned_reviewer_earns_nothing_and_nobody_gains(self):
         plain = self._close()
         cut = self._close(sanctioned_households=[AUD_B])
         assert AUD_B not in cut["agent_mint"]
-        assert cut["withheld_mint"] == {AUD_B: plain["agent_mint"][AUD_B]}
-        # Nobody else gains from the sanction.
-        for agent in (AUTHOR, AUD_A):
-            assert cut["agent_mint"][agent] == plain["agent_mint"][agent]
-        assert cut["total_mint"] == pytest.approx(
-            plain["total_mint"] - plain["agent_mint"][AUD_B], abs=1e-6)
+        # The close zeroes a sanctioned household's REP, so as a reviewer it
+        # earns nothing to withhold (an author's mint is withheld below).
+        assert AUD_B not in cut["withheld_mint"]
+        assert cut["total_mint"] <= self.POOL + 1e-9
         assert cut["authoritative_payload"]["sanctioned_households"] == [AUD_B]
 
+    def test_sanctioned_author_is_withheld_reviewers_untouched(self):
+        plain = self._close()
+        cut = self._close(sanctioned_households=[AUTHOR])
+        assert AUTHOR not in cut["agent_mint"]
+        assert cut["withheld_mint"] == {AUTHOR: plain["agent_mint"][AUTHOR]}
+        for agent in (AUD_A, AUD_B):
+            assert cut["agent_mint"][agent] == plain["agent_mint"][agent]
+
     def test_household_of_a_bound_agent_is_withheld(self):
-        cut = self._close(sanctioned_households=[HOUSE],
-                          agent_owner_map={AUD_A: HOUSE})
-        assert AUD_A not in cut["agent_mint"]
+        owner = {AUD_A: HOUSE, AUD_B: AUD_B}
+        cut = self._close(sanctioned_households=[HOUSE], agent_owner_map=owner,
+                          rep_shares={HOUSE: 0.3, AUD_B: 0.2})
+        assert HOUSE not in cut["agent_mint"]
         assert AUD_B in cut["agent_mint"]
 
     def test_no_sanctions_changes_nothing_but_the_payload_field(self):

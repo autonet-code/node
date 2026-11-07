@@ -135,9 +135,6 @@ class TestHarnessDistroBootstrap:
         )
         assert "error" not in res
 
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
-
         out = await execute_tool(
             "attest_tools",
             {"judgments": [{"tool": "echo_tool", "ok": True, "score": 0.9}],
@@ -145,10 +142,8 @@ class TestHarnessDistroBootstrap:
             rt, caller_id="child",
         )
         assert out == {"attested": 1, "skipped": []}
-        assert len(sunk) == 1
-        assert sunk[0]["loadout"] == store.active_loadout
 
-        # And the attestation jsonl row carries it too.
+        # The attestation jsonl row carries it (nothing is gossiped).
         rows = list(store._iter_attestations())
         assert rows and rows[-1]["loadout"] == store.active_loadout
 
@@ -164,11 +159,8 @@ class TestHarnessDistroBootstrap:
             name="plain_tool", description="Echo.",
             input_schema=SCHEMA, author="user", code=ECHO_CODE,
         )
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
         out = store.attest_usage(
             "user", [{"tool": res["digest"], "ok": True}], "ctx")
         assert out["attested"] == 1
-        assert "loadout" not in sunk[0]
         rows = list(store._iter_attestations())
         assert "loadout" not in rows[-1]

@@ -1352,26 +1352,16 @@ class AutonetBridge:
             log.warning("event gossip attach failed: %s", e)
         self._serve_disk_blobs(host)
 
-        # Tool substrate: route tool_used receipts onto the substrate
-        # event rail (epoch buffer + gossip; the claim graph ignores
-        # them). Local receipt ledger keeps working when this isn't
-        # wired — see ToolStore._record_receipt.
+        # Tool substrate: tool use is never gossiped (Decision 2026-11-07).
+        # An attestation's work-item coordinates feed only this daemon's
+        # coverage atlas (retrieval ranking); manifests still register.
         world_service = getattr(service, "_world_service", None)
         tool_store = getattr(self._runtime, "tool_store", None) if self._runtime else None
         if world_service is not None and tool_store is not None:
-            def _sink(event: dict, _ws=world_service) -> None:
-                _ws.submit_events([event], equilibrate_after=False)
-            tool_store.event_sink = _sink
-
-            def _sign_receipt(caller: str, event: dict, _rt=self._runtime) -> str:
-                # The calling agent's own key signs its receipt for this
-                # jurisdiction; the owner (no agent key) cannot sign, so
-                # its receipts do not mint on a chain-backed close.
-                from nodes.common.tool_receipts import sign_receipt
-                key = _rt.registry.get_agent_key(caller) if caller else None
-                domain = self.state.jurisdiction_key or ""
-                return sign_receipt(key, domain, event) if key and domain else ""
-            tool_store.receipt_signer = _sign_receipt
+            def _coverage(digest: str, coords: list, ts: int,
+                          _ws=world_service) -> None:
+                _ws.record_tool_coverage(digest, coords, ts=ts)
+            tool_store.coverage_sink = _coverage
 
             def _manifest_sink(manifest: dict, author: str, _ws=world_service) -> None:
                 _ws.submit_tool_manifest(manifest, agent_id=author)
@@ -1407,18 +1397,6 @@ class AutonetBridge:
                 host = getattr(self, "_p2p_host", None)
                 return host.get_connected_peers() if host is not None else []
             tool_store.peer_lister = _peers
-
-            # Inspection status for adoption provenance: read the
-            # federated close driver's vetting carry-over per digest
-            # (v4.1: these fields track inspection activity, not a gate —
-            # kept for provenance display). Best-effort — absent = unknown.
-            def _vet_status(digest: str, _svc=service):
-                drv = getattr(_svc, "_federated_close_driver", None)
-                vetting = getattr(drv, "_tool_vetting", None) if drv else None
-                if isinstance(vetting, dict):
-                    return (vetting.get("manifests") or {}).get(digest)
-                return None
-            tool_store.vet_status_provider = _vet_status
 
             # Containment tiers (Decision 2026-10-27): a network tool's
             # sandbox follows its settled harm at the pinned snapshot.

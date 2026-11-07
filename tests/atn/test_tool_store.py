@@ -330,28 +330,28 @@ class TestResolutionAndExecution:
     @pytest.mark.asyncio
     async def test_receipts_and_usage_ledger(self, tmp_path):
         """Fees left tools with spec v2 (they belong to Services); the
-        receipt rail remains: local ledger + consensus events."""
+        receipt rail remains as a local ledger only (Decision 2026-11-07:
+        tool use is never gossiped)."""
         rt = _make_runtime(tmp_path)
         await _family(rt)
         res = await _register_echo(rt)
 
-        sunk: list[dict] = []
-        rt.tool_store.event_sink = sunk.append
+        # No gossip rail on the store at all.
+        assert not hasattr(rt.tool_store, "event_sink")
+        assert not hasattr(rt.tool_store, "receipt_signer")
+        sunk: list = []
+        rt.tool_store.coverage_sink = lambda *a, **k: sunk.append(a)
 
         await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="parent")
         await rt.tool_registry.call_tool("echo_tool", {"x": "2"}, caller_id="child")
 
-        # Consensus events emitted, caller attested. Identity mapping
-        # (ruling 2026-07-24): an agent's own 0x counts only once it is
-        # REGISTERED on-chain; unregistered agents map to the owner
-        # wallet, and this wallet-less env falls back to local ids
-        # (private plane only — publishing is gated on claimability).
-        assert len(sunk) == 2
-        assert sunk[0]["kind"] == "tool_used"
-        assert sunk[0]["author_agent"] == "parent"
-        assert sunk[0]["tool_author"] == "child"
-        assert sunk[0]["manifest_digest"] == res["digest"]
-        assert sunk[0]["ok"] is True
+        # Mechanical receipts touch nothing outside the local ledger.
+        assert sunk == []
+        rows = list(rt.tool_store._iter_receipts())
+        assert [r["caller"] for r in rows] == ["parent", "child"]
+        assert rows[0]["tool_author"] == "child"
+        assert rows[0]["manifest_digest"] == res["digest"]
+        assert rows[0]["ok"] is True
 
         balances = rt.tool_store.balances()
         assert balances["usage"][res["digest"]]["ok_count"] == 2
@@ -411,15 +411,18 @@ def _fake_embedder(text):
 
 class TestAttestation:
     @pytest.mark.asyncio
-    async def test_attest_end_to_end_emits_attested_event(self, tmp_path):
+    async def test_attest_end_to_end_records_locally(self, tmp_path):
+        """An attestation is recorded locally and feeds the local coverage
+        atlas; nothing is gossiped (Decision 2026-11-07)."""
         rt = _make_runtime(tmp_path)
         await _family(rt)
         res = await _register_echo(rt)  # author = child
         store = rt.tool_store
         store._embedder = _fake_embedder  # avoid heavy embedder
 
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
+        sunk: list = []
+        store.coverage_sink = lambda digest, coords, ts: sunk.append(
+            (digest, coords, ts))
 
         out = await execute_tool(
             "attest_tools",
@@ -430,18 +433,18 @@ class TestAttestation:
         )
         assert out == {"attested": 1, "skipped": []}
         assert len(sunk) == 1
-        ev = sunk[0]
-        assert ev["kind"] == "tool_used"
-        assert ev["attested"] is True
-        # child holds a keypair but is not registered on-chain; wallet-less
-        # env → local-id fallback (ruling 2026-07-24).
-        assert ev["author_agent"] == "child"
-        assert ev["tool_author"] == "child"
-        assert ev["manifest_digest"] == res["digest"]
-        assert ev["score"] == 0.9
-        assert ev["fee_atn"] == 0.0
-        assert ev["problem_coords"] == [0.1, 0.2, 0.3]
-        assert ev["review_digest"]  # note was blob-stored
+        digest, coords, ts = sunk[0]
+        assert digest == res["digest"]
+        assert coords == [0.1, 0.2, 0.3]
+        assert ts > 0
+        rows = list(store._iter_attestations())
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["caller"] == "child"
+        assert row["tool_author"] == "child"
+        assert row["manifest_digest"] == res["digest"]
+        assert row["score"] == 0.9
+        assert row["review_digest"]  # note was blob-stored
 
     @pytest.mark.asyncio
     async def test_out_of_lineage_judgment_skipped(self, tmp_path):
@@ -451,8 +454,8 @@ class TestAttestation:
         store = rt.tool_store
         store._embedder = _fake_embedder
 
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
+        sunk: list = []
+        store.coverage_sink = lambda *a: sunk.append(a)
 
         out = await execute_tool(
             "attest_tools",
@@ -465,7 +468,8 @@ class TestAttestation:
         errs = {s["tool"]: s["error"] for s in out["skipped"]}
         assert "lineage" in errs["echo_tool"]
         assert "not found" in errs["nonexistent"]
-        assert sunk == []  # nothing emitted for a wholly-skipped batch
+        assert sunk == []  # nothing recorded for a wholly-skipped batch
+        assert list(store._iter_attestations()) == []
 
     @pytest.mark.asyncio
     async def test_note_text_lands_in_blob_store(self, tmp_path):
@@ -475,9 +479,6 @@ class TestAttestation:
         store = rt.tool_store
         store._embedder = _fake_embedder
 
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
-
         await execute_tool(
             "attest_tools",
             {"judgments": [{"tool": "echo_tool", "ok": False, "score": 0.1,
@@ -485,7 +486,7 @@ class TestAttestation:
              "context": "stress-testing echo"},
             rt, caller_id="parent",
         )
-        review_digest = sunk[0]["review_digest"]
+        review_digest = list(store._iter_attestations())[0]["review_digest"]
         blob = store._blob_store().get_json(review_digest)
         assert blob["kind"] == "tool_review"
         assert blob["note"] == "flaky on empty input"
@@ -524,12 +525,11 @@ class TestAttestation:
         store = rt.tool_store
         store._embedder = _fake_embedder
 
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
-
         await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="child")
-        assert len(sunk) == 1
-        assert "attested" not in sunk[0]
+        rows = list(store._iter_receipts())
+        assert len(rows) == 1
+        assert "attested" not in rows[0]
+        assert list(store._iter_attestations()) == []
 
     @pytest.mark.asyncio
     async def test_seq_continuity_across_receipt_and_attestation(self, tmp_path):
@@ -539,15 +539,13 @@ class TestAttestation:
         store = rt.tool_store
         store._embedder = _fake_embedder
 
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
-
         await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="child")
         store.attest_usage(
             "child", [{"tool": "echo_tool", "ok": True}], "some work")
         await rt.tool_registry.call_tool("echo_tool", {"x": "2"}, caller_id="child")
 
-        seqs = [ev["seq"] for ev in sunk]
+        seqs = sorted([r["seq"] for r in store._iter_receipts()]
+                      + [r["seq"] for r in store._iter_attestations()])
         assert seqs == [1, 2, 3]  # unique + monotonic across both tiers
 
         # Seq counter spans both tiers on reload — no collision after restart.
@@ -564,13 +562,13 @@ class TestAttestation:
         store = rt.tool_store
         store._embedder = lambda text: (_ for _ in ()).throw(RuntimeError("no torch"))
 
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
+        sunk: list = []
+        store.coverage_sink = lambda *a: sunk.append(a)
 
         out = store.attest_usage(
             "child", [{"tool": "echo_tool", "ok": True}], "work item")
         assert out["attested"] == 1
-        assert sunk[0]["problem_coords"] == []
+        assert sunk == []  # no coordinates, no coverage point
 
 
 # ---------------------------------------------------------------------------
@@ -898,17 +896,18 @@ class TestAdoption:
         assert store.get(digest) is None
 
     @pytest.mark.asyncio
-    async def test_approve_rechecks_busted_from_fresh_state(self, tmp_path):
+    async def test_approve_rechecks_standing_from_fresh_state(self, tmp_path):
         _, digest, blobs = await self._publish_on_author_daemon(tmp_path)
         rt = await self._adopter(tmp_path, blobs)
         store = rt.tool_store
-        store.vet_status_provider = lambda d: {"busted": False}
         await store.propose_adoption("worker", digest, reason="r")
-        assert store.list_adoption_proposals()[0]["provenance"]["busted"] is False
-        # A CON claim lands after the proposal was written.
-        store.vet_status_provider = lambda d: {"busted": True}
+        prov = store.list_adoption_proposals()[0]["provenance"]
+        # The dead vetting carry-over fields are gone from provenance.
+        assert not {"greenlit", "busted", "vets"} & set(prov)
+        # Harm reviews settle after the proposal was written.
+        store.security_standing_provider = lambda d: {"harm_sum": 90 * 500, "harm_mass": 500, "supply": 10_000}
         out = await store.approve_adoption(digest)
-        assert "CON-busted" in out["error"]
+        assert "denied by the network" in out["error"]
         assert store.get(digest) is None
 
     # ---- composites bring their dependencies (#37) ------------------
@@ -980,9 +979,10 @@ class TestAdoption:
         rt = await self._adopter(tmp_path, blobs)
         store = rt.tool_store
         await store.propose_adoption("worker", comp, reason="r")
-        store.vet_status_provider = lambda d: {"busted": d == dep}
+        store.security_standing_provider = (
+            lambda d: {"harm_sum": 90 * 500, "harm_mass": 500, "supply": 10_000} if d == dep else None)
         out = await store.approve_adoption(comp)
-        assert "net_dep" in out["error"] and "CON-busted" in out["error"]
+        assert "net_dep" in out["error"] and "denied by the network" in out["error"]
         assert store.get(dep) is None and store.get(comp) is None
         assert store.list_adoption_proposals("pending")[0]["digest"] == comp
 
@@ -1127,10 +1127,10 @@ class TestAdoptionAwaitingCode:
         await store.propose_adoption("worker", digest, reason="r")
         await store.approve_adoption(digest)
         await store.stop_adoption_retries()
-        store.vet_status_provider = lambda d: {"busted": True}
+        store.security_standing_provider = lambda d: {"harm_sum": 90 * 500, "harm_mass": 500, "supply": 10_000}
         holder["online"] = True
         out = await store.retry_adoption(digest)
-        assert "CON-busted" in out["error"]
+        assert "denied by the network" in out["error"]
         assert store.get(digest) is None
         assert store.list_adoption_proposals()[0]["status"] == "failed"
         assert [e.data["status"] for e in events] == ["failed"]
@@ -1191,9 +1191,6 @@ class TestVetting:
         await _family(rt)
         res = await _register_echo(rt)
         store = rt.tool_store
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
-
         out = await execute_tool(
             "vet_tool",
             {"digest": res["digest"], "verdict": "pass",
@@ -1201,7 +1198,6 @@ class TestVetting:
             rt, caller_id="sibling",
         )
         assert out["verdict"] == "pass"
-        assert sunk == []
         report = store._blob_store().get_json(out["review_digest"])
         assert report["kind"] == "tool_vet_report"
         # sibling is not registered on-chain; wallet-less env → local-id
@@ -1222,9 +1218,6 @@ class TestVetting:
         await _family(rt)
         res = await _register_echo(rt)
         store = rt.tool_store
-        sunk: list[dict] = []
-        store.event_sink = sunk.append
-
         out = await execute_tool(
             "vet_tool",
             {"digest": res["digest"], "verdict": "pass",
@@ -1234,7 +1227,6 @@ class TestVetting:
             rt, caller_id="sibling",
         )
         assert out["verdict"] == "pass"
-        assert sunk == []
         report = store._blob_store().get_json(out["review_digest"])
         # Garbage axis dropped; valid axes clamped-through and sorted.
         assert report["axes"] == {"correctness": 0.9, "simplicity": 0.5}
@@ -1297,9 +1289,6 @@ class TestVetting:
         async def _fetch(digest: str) -> bytes | None:
             return author_blobs.get_bytes(digest)
         store_val.blob_fetcher = _fetch
-        sunk: list[dict] = []
-        store_val.event_sink = sunk.append
-
         inspect = await store_val.vet_tool("validator", res["digest"])
         assert inspect["code"] == ECHO_CODE
 
@@ -1308,7 +1297,7 @@ class TestVetting:
             report="fetched by digest; code matches manifest",
         )
         assert out["verdict"] == "pass"
-        assert out["digest"] == res["digest"] and sunk == []
+        assert out["digest"] == res["digest"]
         # The fetched blobs are now cached locally (content-addressed).
         assert store_val._blob_store().get_bytes(code_digest) is not None
 
@@ -1337,9 +1326,6 @@ class TestComposition:
         comp = await _register_composite(rt, dep["digest"])
         assert "error" not in comp
 
-        sunk: list[dict] = []
-        rt.tool_store.event_sink = sunk.append
-
         out = await rt.tool_registry.call_tool(
             "composite_tool", {"x": "hi", "dep": "echo_tool"},
             caller_id="child")
@@ -1348,17 +1334,13 @@ class TestComposition:
         assert out == {"result": {"wrapped": {"result": {"echo": "hi"}},
                                   "seen": "hi"}}
 
-        # TWO mechanical receipts: the nested dep call tagged via the
-        # composite digest, the top-level composite call not tagged.
-        assert len(sunk) == 2
-        by_digest = {ev["manifest_digest"]: ev for ev in sunk}
-        dep_ev = by_digest[dep["digest"]]
-        comp_ev = by_digest[comp["digest"]]
-        assert dep_ev["via"] == comp["digest"]
-        assert "via" not in comp_ev
-
-        # Same in the persisted ledger.
+        # TWO mechanical receipts in the local ledger: the nested dep call
+        # tagged via the composite digest, the top-level call not tagged.
         rows = list(rt.tool_store._iter_receipts())
+        assert len(rows) == 2
+        by_digest = {r["manifest_digest"]: r for r in rows}
+        assert by_digest[dep["digest"]]["via"] == comp["digest"]
+        assert "via" not in by_digest[comp["digest"]]
         via_rows = [r for r in rows if r.get("via")]
         assert len(via_rows) == 1
         assert via_rows[0]["manifest_digest"] == dep["digest"]
@@ -1713,24 +1695,23 @@ class TestOrphanPublishGate:
 
 
 class TestProbeTrustPicture:
-    """v4.1 probe_tools trust picture: each match joins review mass +
-    inspection count from the economy graph so agents can price risk."""
+    """v4.1 probe_tools trust picture: each match joins review mass
+    from the economy graph so agents can price risk."""
 
-    def test_trust_row_joins_mass_and_inspections(self):
+    def test_trust_row_joins_mass(self):
         from atn.agent_tools import _trust_row
 
         digest = "ab" * 32
         payload = {"name": "t", "description": "d", "author": "0xAuthor",
                    "trust_class": "pinned"}
         positions = {digest: {"mass": [0.0, 2.0, 5.0, 0.0, 3.0, 1.0]}}
-        vetting = {digest: {"validators": 4}}
         row = _trust_row(
             digest, payload, score=0.8, rating=0.6, axes=[0.1] * 6,
-            positions=positions, vetting=vetting, tool_store=None,
+            positions=positions, tool_store=None,
         )
         assert row["mass"] == [0.0, 2.0, 5.0, 0.0, 3.0, 1.0]
         assert row["review_mass"] == 5.0        # peak per-axis mass
-        assert row["inspections"] == 4
+        assert "inspections" not in row         # vetting carry-over is gone
         assert row["rating"] == 0.6
         assert "author_household" not in row    # empty → omitted
 
@@ -1742,12 +1723,11 @@ class TestProbeTrustPicture:
                    "trust_class": "pinned"}
         row = _trust_row(
             digest, payload, score=0.3, rating=0.0, axes=[],
-            positions={}, vetting={}, tool_store=None,
+            positions={}, tool_store=None,
         )
-        # No position, no inspections → the "nobody reviewed it" signal.
+        # No position → the "nobody reviewed it" signal.
         assert row["mass"] == []
         assert row["review_mass"] == 0.0
-        assert row["inspections"] == 0
 
 
 class TestProbeToolsLocalFallback:

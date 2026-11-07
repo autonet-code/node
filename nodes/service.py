@@ -616,7 +616,7 @@ class AutonetService:
         # world state (rebuildable from canonical events; see
         # FederatedCloseDriver). Missing state dir → in-memory only.
         tool_regs_path = None
-        tool_vetting_path = None
+        tool_rounds_path = None
         tool_positions_path = None
         canonical_world_path = None
         try:
@@ -625,7 +625,7 @@ class AutonetService:
             )
             if state_dir is not None:
                 tool_regs_path = state_dir / "tool_registrations.json"
-                tool_vetting_path = state_dir / "tool_vetting.json"
+                tool_rounds_path = state_dir / "tool_rounds.json"
                 # Positions carry the own_share estimates, a close INPUT.
                 # A daemon that restarts without them closes against an
                 # empty prior while its peers carry the accumulated one
@@ -637,7 +637,7 @@ class AutonetService:
                 canonical_world_path = state_dir / "canonical_world.json"
         except Exception:
             tool_regs_path = None
-            tool_vetting_path = None
+            tool_rounds_path = None
             tool_positions_path = None
             canonical_world_path = None
         self._federated_close_driver = FederatedCloseDriver(
@@ -646,7 +646,7 @@ class AutonetService:
             canonical_tracker=canonical_tracker,
             pricing=pricing,
             tool_registrations_path=tool_regs_path,
-            tool_vetting_path=tool_vetting_path,
+            tool_rounds_path=tool_rounds_path,
             tool_positions_path=tool_positions_path,
             canonical_world_path=canonical_world_path,
         )

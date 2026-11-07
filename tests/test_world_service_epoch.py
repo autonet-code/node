@@ -270,9 +270,9 @@ def test_checkpoint_records_intermediate_snapshot(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_local_close_mints_through_tool_rail_only(tmp_path: Path):
-    """Registration + attested receipts mint to the tool author at the
-    local close; concurrent prose activity earns nothing."""
+def test_local_close_mints_nothing_without_a_review_snapshot(tmp_path: Path):
+    """The local projection has no ToolBond review snapshot, so neither
+    receipts nor prose activity mint anything; the registration is recorded."""
     svc = WorldService(
         rpb_address="rpb_epoch_tools", data_root=tmp_path,
         embedding_dim=_TOOL_EMBED_DIM,
@@ -283,9 +283,7 @@ def test_local_close_mints_through_tool_rail_only(tmp_path: Path):
             [_tool_registration_event(1)], equilibrate_after=False,
         )
         svc.submit_events(
-            [_tool_vet_event(2, "vetter-1"),
-             _tool_vet_event(3, "vetter-2"),
-             _tool_receipt_event(4, "caller-1"),
+            [_tool_receipt_event(4, "caller-1"),
              _tool_receipt_event(5, "caller-2")],
             equilibrate_after=False,
         )
@@ -293,31 +291,22 @@ def test_local_close_mints_through_tool_rail_only(tmp_path: Path):
             _obs("prose", charter=(0.0, 0, 0.7, 0)), agent_id="A",
         )
         result = svc.close_epoch()
-        assert result["agent_mint"].get(_TOOL_AUTHOR, 0) > 0, result
-        assert "A" not in result["agent_mint"]
-        assert result["total_mint"] == pytest.approx(
-            sum(result["agent_mint"].values()))
-        entry = result["tool_mint"][_TOOL_DIGEST]
-        assert entry["author"] == _TOOL_AUTHOR
-        assert entry["attesters"] == 2
-        # Earnings surface (agent projection) sees the tool mint.
+        assert result["agent_mint"] == {}, result
+        assert result["tool_mint"] == {}
+        assert result["total_mint"] == pytest.approx(0.0)
+        assert svc._tool_registrations[_TOOL_DIGEST]["author"] == _TOOL_AUTHOR
         proj = svc.read_agent_projection(_TOOL_AUTHOR, last_n_epochs=5)
-        assert proj["total_mint_projection"] > 0
-        proj_a = svc.read_agent_projection("A", last_n_epochs=5)
-        assert proj_a["total_mint_projection"] == 0.0
+        assert proj["total_mint_projection"] == 0.0
     finally:
         svc.shutdown()
 
 
 def test_tool_registration_carries_across_local_epochs(tmp_path: Path):
-    """A tool registered + greenlit in an earlier epoch still
-    attributes mint when receipts land in a later epoch (registration
-    and vetting carry-over maps).
+    """A tool registered in an earlier epoch is still attributed in a later
+    one (the registration carry-over map); the local close mints nothing.
 
-    NOTE: in-process only — the world checkpoint doesn't persist
-    ``artifact_digest`` on nodes yet, so cross-RESTART standing is a
-    known persistence gap (the carry-over maps themselves do survive
-    restart via local_tool_registrations.json / local_tool_vetting.json).
+    NOTE: in-process only. The carry-over map itself survives restart via
+    local_tool_registrations.json.
     """
     rpb = "rpb_epoch_tools_carry"
     svc = WorldService(
@@ -326,23 +315,18 @@ def test_tool_registration_carries_across_local_epochs(tmp_path: Path):
     )
     try:
         svc.open_epoch("e_reg")
-        svc.submit_events(
-            [_tool_registration_event(1),
-             _tool_vet_event(2, "vetter-1"),
-             _tool_vet_event(3, "vetter-2")],
-            equilibrate_after=False,
-        )
+        svc.submit_events([_tool_registration_event(1)], equilibrate_after=False)
         r1 = svc.close_epoch()
-        # Registration + greenlight alone: no usage, no mint.
         assert r1["agent_mint"] == {}
+        assert svc._tool_registrations[_TOOL_DIGEST]["author"] == _TOOL_AUTHOR
 
         svc.open_epoch("e_use")
         svc.submit_events(
             [_tool_receipt_event(4, "caller-1")], equilibrate_after=False,
         )
         r2 = svc.close_epoch()
-        assert r2["agent_mint"].get(_TOOL_AUTHOR, 0) > 0, r2
-        assert r2["tool_mint"][_TOOL_DIGEST]["author"] == _TOOL_AUTHOR
+        assert r2["agent_mint"] == {}
+        assert svc._tool_registrations[_TOOL_DIGEST]["author"] == _TOOL_AUTHOR
     finally:
         svc.shutdown()
 

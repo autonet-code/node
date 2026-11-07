@@ -308,11 +308,9 @@ async def test_attestation_carries_the_agents_own_loadout(tmp_path):
                          input_schema={"type": "object"}, author="a1",
                          code="print(1)")
     store.get(res["digest"]).grants.add("a2")
-    sunk: list[dict] = []
-    store.event_sink = sunk.append
     store.attest_usage("a1", [{"tool": res["digest"], "ok": True}], "ctx")
     store.attest_usage("a2", [{"tool": res["digest"], "ok": True}], "ctx")
-    loadouts = [e.get("loadout") for e in sunk]
+    loadouts = [r.get("loadout") for r in store._iter_attestations()]
     assert loadouts[0] == fork
     assert loadouts[-1] == store.active_loadout
 

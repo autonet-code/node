@@ -332,15 +332,15 @@ class WorldService:
         )
         self._pending_remote_manifests_cap = 2048
         # Tool substrate: carry-over state for the LOCAL projection
-        # close (registration map digest -> manifest_meta, plus vetting
-        # state), mirroring the federated close driver's carry-over so
-        # a tool registered/greenlit in an earlier epoch still
+        # close (registration map digest -> manifest_meta, plus the review
+        # rounds), mirroring the federated close driver's carry-over so
+        # a tool registered in an earlier epoch still
         # attributes local tool-mint projections. Display-plane only:
         # derived, daemon-local, never gossiped, never anchored.
         self._tool_registrations_path = state_dir / "local_tool_registrations.json"
         self._tool_registrations: Dict[str, Dict[str, str]] = {}
-        self._tool_vetting_path = state_dir / "local_tool_vetting.json"
-        self._tool_vetting: Dict[str, Any] = {}
+        self._tool_rounds_path = state_dir / "local_tool_rounds.json"
+        self._tool_rounds: Dict[str, Any] = {}
         # v3 position drift carry-over: digest -> {"head": [n_dims], "mass": [n_dims]}.
         self._tool_positions_path = state_dir / "local_tool_positions.json"
         self._tool_positions: Dict[str, Dict[str, Any]] = {}
@@ -362,12 +362,12 @@ class WorldService:
                         str(k): dict(v) for k, v in raw.items()
                         if isinstance(v, dict)
                     }
-            if self._tool_vetting_path.exists():
+            if self._tool_rounds_path.exists():
                 raw = json.loads(
-                    self._tool_vetting_path.read_text(encoding="utf-8")
+                    self._tool_rounds_path.read_text(encoding="utf-8")
                 )
                 if isinstance(raw, dict):
-                    self._tool_vetting = raw
+                    self._tool_rounds = raw
             if self._tool_positions_path.exists():
                 raw = json.loads(
                     self._tool_positions_path.read_text(encoding="utf-8")
@@ -1025,6 +1025,18 @@ class WorldService:
                 "events_appended": 0,
                 "rounds": 0,
             }
+
+    def record_tool_coverage(
+        self, manifest_digest: str, coords: Any, *, ts: int = 0,
+    ) -> bool:
+        """Add one attested coverage point to this daemon's coverage atlas.
+
+        Tool use is not gossiped (Decision 2026-11-07), so an attestation
+        reaches the atlas here instead of through ``submit_events``.
+        Daemon-local derived state: never gossiped, never anchored."""
+        with self._lock:
+            return self._coverage_index.add_point(
+                manifest_digest, coords, attested=True, ts=int(ts or 0))
 
     def submit_tool_manifest(
         self,
@@ -2234,15 +2246,11 @@ class WorldService:
                 logger.debug("substrate distribution: tendency walk failed: %s", e)
 
         # Aggregate node_mint across recent epochs and project onto roots,
-        # split by item KIND. A node anchoring a tool manifest's mint is
-        # "tool" with a "vetting" slice while its royalty window is open
-        # (reconstructs the royalty rule; ``royalty_left`` in the record
-        # is the pre-decrement value). Everything else is "claim". Same
-        # best-effort caveat as the root projection: ``node_mint`` at an
-        # anchor blends the score-movement diagnostic into the tool slice.
-        from .federated_reconcile import VET_ROYALTY_SHARE
-
-        _KINDS = ("claim", "tool", "vetting")
+        # split by item KIND: a node anchoring a tool manifest's mint is
+        # "tool", everything else "claim". Same best-effort caveat as the
+        # root projection: ``node_mint`` at an anchor blends the
+        # score-movement diagnostic into the tool slice.
+        _KINDS = ("claim", "tool")
         root_mint: Dict[str, float] = {rid: 0.0 for rid in scores}
         root_kinds: Dict[str, Dict[str, float]] = {
             rid: {k: 0.0 for k in _KINDS} for rid in scores
@@ -2263,11 +2271,7 @@ class WorldService:
                     continue
                 entry = anchors.get(node_id)
                 if entry is not None:
-                    vet_slice = 0.0
-                    if (int(entry.get("royalty_left") or 0) > 0
-                            and int(entry.get("validators") or 0) > 0):
-                        vet_slice = m * VET_ROYALTY_SHARE
-                    slices = {"tool": m - vet_slice, "vetting": vet_slice}
+                    slices = {"tool": m}
                 else:
                     slices = {"claim": m}
                 root_id = node_to_root.get(node_id)
@@ -2293,7 +2297,7 @@ class WorldService:
 
         One read for everything the economy view needs: the consensus
         registration map (digest → author + declared dependency DAG),
-        vetting state, and recent per-digest mint summed over the last
+        and recent per-digest mint summed over the last
         ``n`` closed epochs. NAMES are not consensus data (manifest_meta
         carries author/trust_class/deps only) — callers resolve display
         names from the local tool store and fall back to the digest.
@@ -2301,7 +2305,6 @@ class WorldService:
         Returns:
           {
             "registrations": {digest: {author, trust_class, deps: [...]}},
-            "vetting": {digest: {greenlit, validators, royalty_left, busted}},
             "recent_tool_mint": {digest: float},
             "positions": {digest: {head: [n_dims], mass: [n_dims], rating: float}},
             "last_epoch": {epoch_id, closed_at, total_mint, tool_mint} | None,
@@ -2325,16 +2328,6 @@ class WorldService:
                              if d],
                 }
                 for digest, meta in self._tool_registrations.items()
-            }
-            vet_manifests = (self._tool_vetting or {}).get("manifests") or {}
-            vetting = {
-                digest: {
-                    "greenlit": bool(m.get("greenlit")),
-                    "validators": len(m.get("validators") or []),
-                    "royalty_left": int(m.get("royalty_left") or 0),
-                    "busted": bool(m.get("busted")),
-                }
-                for digest, m in vet_manifests.items()
             }
             positions = {}
             for digest, pos in self._tool_positions.items():
@@ -2372,7 +2365,6 @@ class WorldService:
             }
         return {
             "registrations": registrations,
-            "vetting": vetting,
             "recent_tool_mint": recent_mint,
             "positions": positions,
             "last_epoch": last_epoch,
@@ -2464,14 +2456,14 @@ class WorldService:
 
     def _save_tool_state_locked(self) -> None:
         """Persist the local tool carry-over state (registrations +
-        vetting; best-effort, display-plane only)."""
+        review rounds; best-effort, display-plane only)."""
         try:
             self._tool_registrations_path.write_text(
                 json.dumps(dict(sorted(self._tool_registrations.items()))),
                 encoding="utf-8",
             )
-            self._tool_vetting_path.write_text(
-                json.dumps(self._tool_vetting, sort_keys=True),
+            self._tool_rounds_path.write_text(
+                json.dumps(self._tool_rounds, sort_keys=True),
                 encoding="utf-8",
             )
             self._tool_positions_path.write_text(
@@ -2553,11 +2545,11 @@ class WorldService:
         tool_result = compute_tool_mint(
             self._world, events,
             registrations=dict(self._tool_registrations),
-            vetting=dict(self._tool_vetting),
+            tool_rounds=dict(self._tool_rounds),
             positions=dict(self._tool_positions),
         )
         self._tool_registrations = dict(tool_result["registrations_next"])
-        self._tool_vetting = dict(tool_result.get("vetting_next") or {})
+        self._tool_rounds = dict(tool_result.get("tool_rounds_next") or {})
         # Write the tool positions onto the live world (claim anchors +
         # observation coords) so retrieval ranking and the viz surfaces see
         # them.

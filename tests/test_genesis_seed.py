@@ -42,7 +42,7 @@ ZERO = "00" * 32
 def _carry(regs=None, positions=None, manifests=None, busts=None) -> Dict[str, Any]:
     return {
         "tool_registrations": regs or {},
-        "tool_vetting": {"manifests": manifests or {}, "busts": busts or {}},
+        "tool_rounds": {"manifests": manifests or {}, "busts": busts or {}},
         "tool_positions": positions or {},
     }
 
@@ -111,13 +111,13 @@ def test_merge_union_first_wins_and_reports_conflicts():
     assert list(m.carry["tool_registrations"]) == ["d1", "d2", "d3"]
     assert m.carry["tool_registrations"]["d2"] == {"author": "a"}
     assert set(m.carry["tool_positions"]) == {"d1", "d3"}
-    assert m.carry["tool_vetting"]["manifests"]["d1"] == {"greenlit": True}
-    assert m.carry["tool_vetting"]["busts"] == {"v": 1, "w": 1}
+    assert m.carry["tool_rounds"]["manifests"]["d1"] == {"greenlit": True}
+    assert m.carry["tool_rounds"]["busts"] == {"v": 1, "w": 1}
     got = {(c["map"], c["key"], c["kept"], c["dropped"]) for c in m.conflicts}
     # identical d1 registration is a duplicate, not a conflict
     assert got == {("tool_registrations", "d2", "A", "B"),
-                   ("tool_vetting.manifests", "d1", "A", "B"),
-                   ("tool_vetting.busts", "v", "A", "B")}
+                   ("tool_rounds.manifests", "d1", "A", "B"),
+                   ("tool_rounds.busts", "v", "A", "B")}
     # swapping the order flips the winner
     m2 = seedmod.merge_carry([_src("B", b), _src("A", a)])
     assert m2.carry["tool_registrations"]["d2"] == {"author": "b"}

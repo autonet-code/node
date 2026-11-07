@@ -285,7 +285,7 @@ CARRY_BUNDLE_SCHEMA = 1
 # docs/multi_jurisdiction.md decision 10: ratings are read from ToolBond.)
 CARRY_KEYS: Tuple[str, ...] = (
     "tool_registrations",
-    "tool_vetting",
+    "tool_rounds",
     "tool_positions",
 )
 
