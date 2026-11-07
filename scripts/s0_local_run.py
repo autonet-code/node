@@ -932,7 +932,18 @@ async def amain() -> int:
         # an agent's ATN to its owner.
         from eth_account import Account
         h = households[0]
-        exp = await act.call(h, {"type": "export_operator_key"}, "export_operator_key")
+        # Exporting a key needs the owner wallet's signature over a one-use
+        # challenge (atn/ws_server.py OWNER_SIGNED_MESSAGES).
+        from eth_account.messages import encode_defunct
+        ch = await act.call(h, {"type": "owner_challenge", "action": "export_operator_key"},
+                            "owner_challenge")
+        sig = ""
+        if ch.get("challenge"):
+            sig = h.owner.sign_message(encode_defunct(text=ch["challenge"])).signature.hex()
+        exp = await act.call(h, {"type": "export_operator_key",
+                                 "owner_nonce": ch.get("nonce", ""),
+                                 "owner_sig": "0x" + sig.removeprefix("0x")},
+                             "export_operator_key")
         key = exp.get("private_key") or exp.get("key") or ""
         log(f"export_operator_key matches the operator: "
             f"{bool(key) and Account.from_key(key).address.lower() == h.operator.lower()}")
