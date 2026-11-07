@@ -487,6 +487,8 @@ TOOLS = [
       "print(json.dumps({'chars': len(args['text']), "
       "'lines': args['text'].count(chr(10)) + 1, '_got': got[:6]}))")],
 ]
+LATE_TOOL = ("count_lines", "Count the lines in a text.",
+             "print(json.dumps({'lines': len(args['text'].splitlines())}))")
 CANARY = "text_stats"
 CONTROL = "upper_text"
 # The households whose agents report the canary as harmful (scripted).
@@ -540,6 +542,12 @@ class Activity:
             pool = int(self.sub.functions.mintPoolTotal().call())
             log(f"MINT: claimed {minted / 1e6:.6f} ATN of a cumulative pool of "
                 f"{pool / 1e6:.6f}")
+            for i in range(int(self.sub.functions.anchorCount().call())):
+                a = self.sub.functions.getAnchor(i).call()
+                own, got = int(a[11]), int(a[12])   # mintPool, minted
+                if got > own:
+                    log(f"MINT: anchor {i} claimed {got / 1e6:.6f} ATN, more than its "
+                        f"own pool {own / 1e6:.6f}: the carry-over was spent")
         except Exception as exc:  # noqa: BLE001
             log(f"MINT: read failed: {exc}")
         tb = w3.eth.contract(address=w3.to_checksum_address(self.j["autonet"]["toolBond"]),
@@ -579,24 +587,27 @@ class Activity:
     async def author(self) -> None:
         for h, tools in zip(self.hs, TOOLS):
             for name, desc, body in tools:
-                r = await self.call(h, {"type": "register_tool", "caller_id": h.agent_id,
-                                        "name": name, "description": desc,
-                                        "input_schema": TEXT_SCHEMA, "code": _prog(body),
-                                        "novelty": {"statement": f"{desc} Nothing comparable "
-                                                    "is in the library yet.",
-                                                    "prior_art": []}},
-                                    "register_tool", tool=name)
-                digest = r.get("digest") or (r.get("tool") or {}).get("digest") or ""
-                if not digest:
-                    log(f"{h.name} register_tool {name}: no digest in {str(r)[:300]}")
-                    continue
-                p = await self.call(h, {"type": "publish_tool", "caller_id": h.agent_id,
-                                        "digest": digest},
-                                    "publish_tool", tool=name)
-                if "error" not in p:
-                    self.published[p.get("digest") or digest] = {"name": name,
-                                                                 "author": h.name}
+                await self.publish_one(h, name, desc, body)
         log(f"published {len(self.published)} tools")
+
+    async def publish_one(self, h: "Household", name: str, desc: str, body: str) -> None:
+        r = await self.call(h, {"type": "register_tool", "caller_id": h.agent_id,
+                                "name": name, "description": desc,
+                                "input_schema": TEXT_SCHEMA, "code": _prog(body),
+                                "novelty": {"statement": f"{desc} Nothing comparable "
+                                            "is in the library yet.",
+                                            "prior_art": []}},
+                            "register_tool", tool=name)
+        digest = r.get("digest") or (r.get("tool") or {}).get("digest") or ""
+        if not digest:
+            log(f"{h.name} register_tool {name}: no digest in {str(r)[:300]}")
+            return
+        p = await self.call(h, {"type": "publish_tool", "caller_id": h.agent_id,
+                                "digest": digest},
+                            "publish_tool", tool=name)
+        if "error" not in p:
+            self.published[p.get("digest") or digest] = {"name": name,
+                                                         "author": h.name}
 
     async def adopt(self) -> None:
         """Each household's agent installs the other households' tools.
@@ -682,8 +693,17 @@ async def activity_loop(act: Activity, minutes: float) -> None:
         acc += share
         bounds.append((acc * total, length))
     phase_seen = None
+    late_done = False
     while time.time() - start < total:
         elapsed = time.time() - start
+        # Halfway, one more tool: it concludes into the pool that earlier
+        # closes carried over, so its claims exceed their own anchor's pool
+        # (Substrate caps claims on the cumulative pool).
+        if not late_done and elapsed > total / 2:
+            late_done = True
+            await act.publish_one(act.hs[1], *LATE_TOOL)
+            log(f"late tool published: {LATE_TOOL[0]}")
+            await act.adopt()
         length = next((l for b, l in bounds if elapsed < b), bounds[-1][1])
         if length != phase_seen:
             log(f"activity phase: payments aimed at {length}s epochs")
