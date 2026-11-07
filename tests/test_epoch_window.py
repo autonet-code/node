@@ -161,6 +161,22 @@ class TestTiming:
         out = d.run({})
         assert out.epoch_id == make_epoch_id(2, ROOT, BASE + 360)
 
+    def test_quiet_window_closes_empty(self):
+        # Reviews settle on ToolBond and tool use isn't gossiped, so an
+        # epoch with no batches still closes at its cutoff (2026-11-07).
+        kp = Keypair.generate()
+        d = _driver(_Buffer(kp, []), _window(), BASE + 119)
+        assert d.run({}) is None          # grace not over
+        d.clock = lambda: BASE + 120
+        out = d.run({})
+        assert out is not None and out.n_batches == 0
+        assert out.epoch_id == make_epoch_id(2, ROOT, BASE)
+
+    def test_first_epoch_still_waits_for_a_batch(self):
+        kp = Keypair.generate()
+        d = _driver(_Buffer(kp, []), _window(number=1, start=None), BASE + 1000)
+        assert d.run({}) is None
+
     def test_late_batch_before_start_is_dropped(self):
         kp = Keypair.generate()
         stale = _batch(kp, 1, BASE - 600)       # before start = BASE - 500

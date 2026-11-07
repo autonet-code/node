@@ -530,7 +530,11 @@ class FederatedCloseDriver:
         pending = self.gossip.pending_epoch_batches()
         live = [b for b in pending
                 if start is None or float(b.timestamp) > float(start)]
-        if not live:
+        # A quiet epoch closes too (Decision 2026-11-07): tool reviews settle
+        # on ToolBond and pay through the close, and tool use is no longer
+        # gossiped, so settlement can't wait for gossip. Epoch 1 still waits
+        # for a first batch (no window start yet).
+        if not live and start is None:
             return None
         grace = int(win["grace"])
         step = max(1, grace)
@@ -552,9 +556,10 @@ class FederatedCloseDriver:
             if vol is None:
                 return None
             cutoff = int(vol)
-        earliest = min(float(b.timestamp) for b in live)
-        if earliest > cutoff:
-            cutoff += step * math.ceil((earliest - cutoff) / step)
+        if live:
+            earliest = min(float(b.timestamp) for b in live)
+            if earliest > cutoff:
+                cutoff += step * math.ceil((earliest - cutoff) / step)
         if float(self.clock()) < cutoff + grace:
             return None
         # Before closing, ask peers for this epoch's batches we never saw
@@ -1073,7 +1078,9 @@ class FederatedCloseDriver:
             return None
 
         canonical = canonical_order(batches)
-        if not canonical.ordered_batches:
+        # An empty window still closes (a quiet epoch); a window whose every
+        # batch was dropped as invalid does not.
+        if batches and not canonical.ordered_batches:
             logger.debug(
                 "federated close: canonical empty after dropping invalid senders",
             )
