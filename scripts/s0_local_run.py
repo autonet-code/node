@@ -215,6 +215,9 @@ def artifact(rel: str) -> Dict[str, Any]:
     return json.loads((DAO_DIR / "artifacts" / "contracts" / rel).read_text(encoding="utf-8"))
 
 
+BOUNTY_ATN = 5_000_000   # 5 ATN, base units
+
+
 def abi(name: str) -> list:
     p = REPO / "nodes" / "common" / "abi" / f"{name}.json"
     data = json.loads(p.read_text(encoding="utf-8"))
@@ -527,6 +530,51 @@ class Activity:
         if not ok:
             log(f"{h.name} {kind} failed: {str(err)[:300]}")
         return res if ok else {"error": err or "failed"}
+
+    def report_mint(self) -> None:
+        """What the review mint did: claims against the cumulative pool,
+        and the bounty paid out per round."""
+        w3 = self.w3
+        try:
+            minted = int(self.sub.functions.networkMintTotal().call())
+            pool = int(self.sub.functions.mintPoolTotal().call())
+            log(f"MINT: claimed {minted / 1e6:.6f} ATN of a cumulative pool of "
+                f"{pool / 1e6:.6f}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"MINT: read failed: {exc}")
+        tb = w3.eth.contract(address=w3.to_checksum_address(self.j["autonet"]["toolBond"]),
+                             abi=artifact("ToolBond.sol/ToolBond.json")["abi"])
+        try:
+            paid = tb.events.BountyPaid.get_logs(from_block=0)
+            left = None
+            if getattr(self, "bounty", None):
+                left = int(tb.functions.bonds(bytes.fromhex(self.bounty)).call()[-1])
+            log(f"BOUNTY: {len(paid)} payout(s), {sum(int(e['args']['amount']) for e in paid) / 1e6:.6f} "
+                f"ATN paid, {'?' if left is None else left / 1e6} ATN left")
+        except Exception as exc:  # noqa: BLE001
+            log(f"BOUNTY: read failed: {exc}")
+
+    def add_bounty(self) -> None:
+        """h1's owner puts a bounty on h1's first published tool (ToolBond
+        addBounty): reviewers are paid from it as their rounds settle."""
+        h = self.hs[0]
+        digest = next((d for d, m in self.published.items()
+                       if m["author"] == h.name and m["name"] != CANARY), None)
+        if digest is None:
+            log("bounty: no tool to put it on")
+            return
+        w3 = self.w3
+        tb_addr = w3.to_checksum_address(self.j["autonet"]["toolBond"])
+        tb = w3.eth.contract(address=tb_addr,
+                             abi=artifact("ToolBond.sol/ToolBond.json")["abi"])
+        try:
+            send(w3, h.owner, self.sub.functions.approve(tb_addr, BOUNTY_ATN))
+            send(w3, h.owner, tb.functions.addBounty(bytes.fromhex(digest), BOUNTY_ATN))
+            self.bounty = digest
+            log(f"bounty: {BOUNTY_ATN / 1e6:g} ATN on {self.published[digest]['name']} "
+                f"({digest[:12]})")
+        except Exception as exc:  # noqa: BLE001
+            log(f"bounty failed: {exc}")
 
     async def author(self) -> None:
         for h, tools in zip(self.hs, TOOLS):
@@ -854,9 +902,11 @@ async def amain() -> int:
         col = asyncio.create_task(collector(run, households, j, w3, stop))
         act = Activity(run, households, j, w3)
         await act.author()
+        act.add_bounty()
         await act.adopt()
         await activity_loop(act, MINUTES)
         log(f"activity done: {json.dumps(act.counts, sort_keys=True)}")
+        act.report_mint()
 
         # 7. The owner-side handlers, live: export the operator key, sweep
         # an agent's ATN to its owner.
