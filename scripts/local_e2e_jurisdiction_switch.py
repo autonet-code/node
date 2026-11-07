@@ -127,10 +127,10 @@ async function main() {
   };
   async function launch(name, epochRules) {
     const params = {
-      name, symbol: "AREP", description: "", tokenKind: 0, underlying: ethers.ZeroAddress,
+      name, symbol: "AREP", description: "",
       initialMembers: [owner], initialAmounts: [ethers.parseEther(process.env.E2E_GENESIS_REP)],
       votingDelay: 0, votingPeriod: 2, proposalThreshold: ethers.parseEther("10"),
-      quorumFraction: 4, executionDelay: 0,
+      quorumFraction: 4, executionDelay: 0, supermajorityBps: 0,
     };
     const c = await factory.deployCore.staticCall(params);
     await (await factory.deployCore(params)).wait();
