@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import List, Tuple
 
 import pytest
 
@@ -38,11 +38,12 @@ from nodes.common.blob_resolver import InMemoryBlobResolver
 from nodes.common.canonical_ordering import canonical_order
 from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
 from nodes.common.event_gossip import EventBatch, Keypair
-from nodes.common.federated_reconcile import federated_epoch_close
 from tests.substrate_chain_helpers import (
     deploy_substrate,
     register_bound,
+    reviewed_close,
     seed_pool,
+    tool_registration_batch,
 )
 
 
@@ -94,59 +95,13 @@ def chain():
     }
 
 
-def _coord(charter, embed_idx, mag):
-    out = list(charter) + [0.0] * 1024
-    out[4 + embed_idx] = mag
-    return tuple(out)
-
-
-def _make_chain(rpb: str, kp: Keypair, agent_id: str, n: int = 2) -> List[EventBatch]:
-    """v3 mint fixture (mint = tool usage only): each agent authors a
-    pinned tool (digest derived from the agent id so agents don't
-    collide), vetted by a distinct fleet and used by third-party
-    attesting callers. Observation events alone no longer mint."""
+def _make_chain(rpb: str, kp: Keypair, agent_id: str) -> List[EventBatch]:
+    """Each agent authors a pinned tool (digest derived from the agent id
+    so agents don't collide); ``reviewed_close`` concludes its review round
+    so the author mints (Decision 2026-11-07)."""
     digest = hashlib.sha256(f"tool-{agent_id}".encode()).hexdigest()
-    coords = [0.0] * (6 + 1024)
-    coords[4] = 0.8
-    coords[6 + 3] = 0.5
-    reg = {
-        "kind": "tool_registered",
-        "seq": 1,
-        "author_agent": agent_id,
-        "artifact_digest": digest,
-        "manifest_meta": {"trust_class": "pinned", "author": agent_id},
-    }
-
-    def _vet(vetter, seq):
-        return {
-            "kind": "tool_used", "seq": seq, "author_agent": vetter,
-            "manifest_digest": digest, "tool_author": agent_id,
-            "receipt_digest": hashlib.sha256(
-                f"vet-{agent_id}-{vetter}".encode()).hexdigest(),
-            "ok": True, "fee_atn": 0.0, "vet": True,
-        }
-
-    def _receipt(caller, seq):
-        return {
-            "kind": "tool_used", "seq": seq, "author_agent": caller,
-            "manifest_digest": digest, "tool_author": agent_id,
-            "receipt_digest": hashlib.sha256(
-                f"use-{agent_id}-{caller}".encode()).hexdigest(),
-            "ok": True, "fee_atn": 0.0, "attested": True, "score": 0.8,
-        }
-
-    def _one(ev):
-        return EventBatch(
-            rpb_address=rpb, sender_pubkey=Keypair.generate().public_key,
-            batch_seq=1, events=[ev], prev_batch_hash=b"",
-            timestamp=1_700_000_000.0,
-        )
-
-    return [
-        _one(reg),
-        _one(_vet("vetter-1", 1)), _one(_vet("vetter-2", 1)),
-        _one(_receipt("caller-1", 1)), _one(_receipt("caller-2", 2)),
-    ]
+    return [tool_registration_batch(rpb, agent_id, digest,
+                                    sender=kp.public_key)]
 
 
 def _build_close_and_anchor(chain_fixture, agent_ids, *, epoch_id: str = "e_71",
@@ -156,9 +111,9 @@ def _build_close_and_anchor(chain_fixture, agent_ids, *, epoch_id: str = "e_71",
     senders = [Keypair.generate() for _ in agent_ids]
     batches: List[EventBatch] = []
     for kp, aid in zip(senders, agent_ids):
-        batches.extend(_make_chain(rpb, kp, aid, n=2))
+        batches.extend(_make_chain(rpb, kp, aid))
     canonical = canonical_order(batches)
-    result = federated_epoch_close(canonical)
+    result = reviewed_close(canonical)
     result["epoch_id"] = epoch_id
     anchorer = EpochAnchorer(
         config=EpochAnchorerConfig(epoch_anchor_address=chain_fixture["addr"]),

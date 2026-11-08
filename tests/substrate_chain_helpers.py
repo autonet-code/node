@@ -12,6 +12,8 @@ pool, so:
     governor;
   - ``seed_pool``: buy ATN, burn real service fees, anchor a seed epoch so
     the NEXT anchor's mintPool covers the test's mints (lag-1).
+  - ``reviewed_close``: a close whose review rounds conclude for every
+    registered tool, so the test has a mint to claim.
 
 Accounts 6..8 are reserved here; tests use 0..5.
 """
@@ -170,3 +172,56 @@ def register_bound(w3: Web3, contract, agent: str, peer_id: bytes, *,
     tx = contract.functions.registerAgentBound(
         peer_id, owner, parent, sig).transact({"from": agent, "gas": gas})
     return w3.eth.wait_for_transaction_receipt(tx)
+
+
+# --- review mint (Decision 2026-11-07) -------------------------------------
+
+REVIEWER = "0x" + "9e" * 20
+
+
+def tool_registration_batch(rpb: str, author: str, digest: str, *,
+                            sender: Optional[bytes] = None):
+    """One gossiped batch carrying a pinned tool's ``tool_registered``
+    event, authored by ``author``."""
+    from nodes.common.event_gossip import EventBatch, Keypair
+    ev = {
+        "kind": "tool_registered",
+        "seq": 1,
+        "author_agent": author,
+        "artifact_digest": digest,
+        "manifest_meta": {"trust_class": "pinned", "author": author},
+    }
+    return EventBatch(
+        rpb_address=rpb,
+        sender_pubkey=sender or Keypair.generate().public_key,
+        batch_seq=1, events=[ev], prev_batch_hash=b"",
+        timestamp=1_700_000_000.0,
+    )
+
+
+def review_snapshot(digests, reviewer: str = REVIEWER, *,
+                    supply: int = 10 ** 21) -> dict:
+    """A ToolBond review snapshot with one concluding round per tool: one
+    reviewer rates it 100 on correctness, accuracy 1, no harm."""
+    e18 = 10 ** 18
+    return {
+        "supply": supply, "reviewer_share_bps": 4000,
+        "tools": {d: {"axes": {"correctness": {"sum": 100 * e18, "mass": e18}},
+                      "harm": {"sum": 0, "mass": 0}} for d in digests},
+        "rounds": {d: [{"epoch": 1, "supply": supply, "prior_mass": {},
+                        "reviews": [{"reviewer": reviewer, "stake": 0,
+                                     "accuracy": e18, "axes": ["correctness"],
+                                     "harm": False}]}] for d in digests},
+    }
+
+
+def reviewed_close(canonical, *, reviewer: str = REVIEWER,
+                   rep_share: float = 0.5, **kw) -> dict:
+    """``federated_epoch_close`` in which every registered tool's review
+    round concludes, so its author (and the reviewer) mint. The only mint
+    rail since Decision 2026-11-07."""
+    from nodes.common.federated_reconcile import federated_epoch_close
+    regs = federated_epoch_close(canonical)["tool_registrations"]
+    return federated_epoch_close(
+        canonical, rep_shares={reviewer: rep_share},
+        review_snapshot=review_snapshot(regs, reviewer), **kw)
