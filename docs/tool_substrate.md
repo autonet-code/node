@@ -22,6 +22,25 @@
   had adopted. Lineage scoping is a boundary between native lineages,
   which keep their own keys; external sessions have no such boundary.
 
+## Decision (2026-11-09): search fusion weighs meaning over shared words
+
+- **Rule.** The reciprocal rank fusion (k 60) weighs the semantic list at
+  1.0 and the keyword list at 0.5. An exact-name hit takes keyword rank 1
+  at full weight: every token of the tool's name (split on `_`, `-` and
+  spaces) is a word of the query, or the query contains the full name as
+  a word. A name of stop words only never hits. Each match's `match`
+  carries `exact_name`.
+- **Why.** With equal weights a tool sharing one word with the query tied
+  a tool matching its meaning (each 1/(k+1)), and the digest decided. In
+  S0 the query "make a web address from a title" put title_case above
+  slugify_text. Keywords are there to catch exact names, which the
+  exact-name rule keeps.
+- **Limit.** A tool both lists rank keeps both terms, so a keyword hit
+  still lifts it above a tool that only the semantic list ranks one place
+  higher. In that S0 query the model itself ranks title_case first
+  (cosine 0.36 against 0.28 for slugify_text: the embedded text includes
+  the name), so that order is the model's, not the fusion's.
+
 ## Decision (2026-11-08): the world leaves the system
 
 - **What went.** The claim graph ("the world": the vendored engine under
@@ -68,8 +87,8 @@
   runs keyword (BM25 over name, description and schema property names)
   and semantic (cosine, full 384 dims) over every manifest the daemon
   holds: its own, adopted, and every remote manifest it fetched and
-  verified. The lists merge by reciprocal rank fusion (k 60), ties by
-  digest. Probe_tools, `GET /agents/<id>/tools?q=` and the app's Tools
+  verified. The lists merge by reciprocal rank fusion (k 60; weights and
+  exact-name hits per Decision 2026-11-09), ties by digest. Probe_tools, `GET /agents/<id>/tools?q=` and the app's Tools
   screen use it.
 - **One pinned model.** all-MiniLM-L6-v2 from
   `sentence-transformers/all-MiniLM-L6-v2` at revision `1110a243`:

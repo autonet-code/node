@@ -10,11 +10,15 @@ and every remote manifest it fetched and verified) and merges them:
   the local search model (all-MiniLM-L6-v2, full 384 dims,
   ``nodes/common/library/minilm.py``).
 
-The two ranked lists merge by reciprocal rank fusion (``RRF_K``); ties
-break on the digest, so the order is a pure function of the query and the
-manifests held. Order is relevance only: ratings, review mass, harm, bond
-state, author context and this household's own relation to the tool come
-back as metadata on each match, never as a weight.
+The two ranked lists merge by weighted reciprocal rank fusion (``RRF_K``,
+Decision 2026-11-09): the semantic list at ``SEMANTIC_WEIGHT`` (1.0), the
+keyword list at ``KEYWORD_WEIGHT`` (0.5), except that an exact-name hit
+(``exact_name_hit``) takes keyword rank 1 at full weight. Meaning carries
+the order; keywords are there to catch exact names. Ties break on the
+digest, so the order is a pure function of the query and the manifests
+held. Order is relevance only: ratings, review mass, harm, bond state,
+author context and this household's own relation to the tool come back as
+metadata on each match, never as a weight.
 
 Until the model is loaded (the first run downloads it), results are keyword
 matches and the reply says semantic search is not ready, with the download
@@ -50,8 +54,14 @@ from nodes.common.library.tool_manifest import (
 log = logging.getLogger(__name__)
 
 # Reciprocal rank fusion constant (Cormack et al. 2009): each list adds
-# 1 / (RRF_K + rank) for a manifest it ranks.
+# weight / (RRF_K + rank) for a manifest it ranks.
 RRF_K = 60
+# Fusion weights (Decision 2026-11-09). With equal weights a tool sharing
+# one word with the query tied a tool matching its meaning; keywords are
+# there to catch exact names, which EXACT_NAME_WEIGHT keeps.
+SEMANTIC_WEIGHT = 1.0
+KEYWORD_WEIGHT = 0.5
+EXACT_NAME_WEIGHT = 1.0
 # A semantic match below this cosine is not a match (unrelated texts sit
 # near 0..0.15 with this model).
 SEMANTIC_MIN = 0.2
@@ -65,11 +75,29 @@ its me my of on or our so that the their them this to up use using want
 was we what when which who will with you your
 """.split())
 _WORD = re.compile(r"[a-z0-9]+")
+_NAME_SPLIT = re.compile(r"[_\-\s]+")
 
 
 def tokenize(text: str) -> list[str]:
     """Lowercase alphanumeric words, stop words dropped."""
     return [w for w in _WORD.findall(str(text or "").lower()) if w not in _STOP]
+
+
+def exact_name_hit(query: str, name: str) -> bool:
+    """Does ``query`` name the tool? True when every token of ``name``
+    (split on ``_``, ``-`` and spaces) is a word of the query, or the query
+    contains the full name as a word. A name made of stop words only never
+    hits (a tool called ``it`` or ``to_do`` would otherwise top every query
+    with those words)."""
+    toks = [t for t in _NAME_SPLIT.split(str(name or "").lower()) if t]
+    if not toks or all(t in _STOP for t in toks):
+        return False
+    q = str(query or "").lower()
+    if set(toks) <= set(_WORD.findall(q)):
+        return True
+    full = str(name).lower().strip()
+    return re.search(r"(?<![a-z0-9])" + re.escape(full) + r"(?![a-z0-9])",
+                     q) is not None
 
 
 def keyword_tokens(manifest: dict[str, Any]) -> list[str]:
@@ -120,14 +148,25 @@ def bm25_ranking(query: str, docs: dict[str, list[str]]) -> list[tuple[str, floa
     return out
 
 
-def rrf_merge(*rankings: list[str], k: int = RRF_K) -> list[tuple[str, float]]:
-    """Reciprocal rank fusion of ranked digest lists: ``(digest, score)``
-    best first, ties by digest ascending."""
-    scores: dict[str, float] = {}
-    for ranking in rankings:
+def rrf_merge(*rankings: list[str], k: int = RRF_K,
+              weights: Optional[Iterable[float]] = None) -> list[tuple[str, float]]:
+    """Reciprocal rank fusion of ranked digest lists, each list's terms
+    times its weight (all 1.0 by default): ``(digest, score)`` best first,
+    ties by digest ascending."""
+    ws = list(weights) if weights is not None else [1.0] * len(rankings)
+    terms: dict[str, list[tuple[float, int]]] = {}
+    for w, ranking in zip(ws, rankings):
         for rank, digest in enumerate(ranking, start=1):
-            scores[digest] = scores.get(digest, 0.0) + 1.0 / (k + rank)
-    merged = [(d, round(s, 12)) for d, s in scores.items()]
+            terms.setdefault(digest, []).append((float(w), rank))
+    return fuse(terms, k=k)
+
+
+def fuse(terms: dict[str, list[tuple[float, int]]], *,
+         k: int = RRF_K) -> list[tuple[str, float]]:
+    """``digest -> [(weight, rank), ...]`` summed as weight / (k + rank):
+    ``(digest, score)`` best first, ties by digest ascending."""
+    merged = [(d, round(sum(w / (k + r) for w, r in ts), 12))
+              for d, ts in terms.items()]
     merged.sort(key=lambda p: (-p[1], p[0]))
     return merged
 
@@ -153,6 +192,7 @@ class ToolSearchIndex:
         self._lock = threading.RLock()
         self._texts: dict[str, str] = {}          # digest -> embedding text
         self._tokens: dict[str, list[str]] = {}   # digest -> keyword doc
+        self._names: dict[str, str] = {}          # digest -> manifest name
         self._vectors: dict[str, np.ndarray] = {}
         self._vector_model: dict[str, str] = {}
         self._load()
@@ -167,6 +207,7 @@ class ToolSearchIndex:
         with self._lock:
             self._texts[digest] = manifest_embedding_text(manifest)
             self._tokens[digest] = keyword_tokens(manifest)
+            self._names[digest] = str(manifest.get("name") or "")
 
     def known(self, digest: str) -> bool:
         return digest in self._tokens
@@ -207,7 +248,10 @@ class ToolSearchIndex:
     def rank(self, query: str, digests: Iterable[str], *,
              semantic: bool = True) -> list[dict[str, Any]]:
         """Fused ranking of ``digests`` (each must be noted) for ``query``.
-        Each entry: digest, score, keyword_rank, semantic_rank, similarity."""
+        Each entry: digest, score, keyword_rank, semantic_rank, similarity,
+        exact_name. Exact-name hits lead the keyword list (each at rank 1,
+        full weight), the other keyword matches follow in BM25 order at
+        ``KEYWORD_WEIGHT``; the semantic list counts at ``SEMANTIC_WEIGHT``."""
         cands = sorted(set(d for d in digests if d in self._tokens))
         kw = bm25_ranking(query, {d: self._tokens[d] for d in cands})
         sem: list[tuple[str, float]] = []
@@ -224,15 +268,29 @@ class ToolSearchIndex:
                         sem = [(d, round(float(s), 6)) for d, s in zip(have, sims)
                                if float(s) >= SEMANTIC_MIN]
                 sem.sort(key=lambda p: (-p[1], p[0]))
-        kw_rank = {d: i for i, (d, _) in enumerate(kw, start=1)}
+        bm25_pos = {d: i for i, (d, _) in enumerate(kw)}
+        exact = sorted((d for d in cands
+                        if exact_name_hit(query, self._names.get(d, ""))),
+                       key=lambda d: (bm25_pos.get(d, len(kw)), d))
+        exact_set = set(exact)
+        kw_list = exact + [d for d, _ in kw if d not in exact_set]
+        kw_rank = {d: 1 if d in exact_set else i
+                   for i, d in enumerate(kw_list, start=1)}
         sem_rank = {d: i for i, (d, _) in enumerate(sem, start=1)}
         sim = dict(sem)
+        terms: dict[str, list[tuple[float, int]]] = {}
+        for d in kw_list:
+            w = EXACT_NAME_WEIGHT if d in exact_set else KEYWORD_WEIGHT
+            terms.setdefault(d, []).append((w, kw_rank[d]))
+        for d, r in sem_rank.items():
+            terms.setdefault(d, []).append((SEMANTIC_WEIGHT, r))
         out = []
-        for digest, score in rrf_merge([d for d, _ in kw], [d for d, _ in sem]):
+        for digest, score in fuse(terms):
             out.append({"digest": digest, "score": score,
                         "keyword_rank": kw_rank.get(digest),
                         "semantic_rank": sem_rank.get(digest),
-                        "similarity": sim.get(digest)})
+                        "similarity": sim.get(digest),
+                        "exact_name": digest in exact_set})
         return out
 
     # ---- persistence -------------------------------------------------
@@ -471,7 +529,8 @@ def _base_row(digest: str, manifest: dict[str, Any], hit: dict[str, Any]) -> dic
         "score": hit["score"],
         "match": {"keyword_rank": hit["keyword_rank"],
                   "semantic_rank": hit["semantic_rank"],
-                  "similarity": hit["similarity"]},
+                  "similarity": hit["similarity"],
+                  "exact_name": hit["exact_name"]},
     }
 
 

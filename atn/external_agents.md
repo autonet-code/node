@@ -133,7 +133,9 @@ only**: a good rating never lifts a tool and a bad one never buries it.
 Weigh the metadata on each match yourself:
 
 - `score` is relevance; `match` gives its `keyword_rank`, `semantic_rank`
-  and `similarity`.
+  and `similarity`, and `exact_name` when your query names the tool.
+  Meaning counts twice what shared words do; naming a tool puts it at
+  the top of the keyword list.
 - `chain_rating` is the settled score per charter axis (-1..1) and
   `rating_mass` the REP behind each axis. No REP behind it means nobody
   has reviewed the tool: read its code before trusting it.

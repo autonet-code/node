@@ -346,3 +346,95 @@ async def test_ws_probe_and_model_status(tmp_path):
     r = await srv._handle_message({"type": "search_model_status", "msg_id": "2"}, owner)
     assert r["ok"] and r["result"]["model"] == minilm.MODEL_ID
     assert r["result"]["ready"] is False
+
+
+# ---------------------------------------------------------------------------
+# Fusion weights (Decision 2026-11-09): meaning first, keywords for names
+# ---------------------------------------------------------------------------
+
+# Digests chosen so the digest tie-break favors title_case: under equal
+# weights the shared word ("title") tied the closer meaning and won on it.
+D_TITLE = "0a" * 32
+D_SLUG = "fb" * 32
+TEXT_SCHEMA = {"type": "object", "properties": {"text": {"type": "string"}}}
+S0_TEXT_TOOLS = {
+    D_TITLE: {**_manifest("title_case", "Capitalize every word of a text."),
+              "input_schema": TEXT_SCHEMA},
+    D_SLUG: {**_manifest("slugify_text", "Turn a text into a lowercase url slug."),
+             "input_schema": TEXT_SCHEMA},
+}
+
+
+class WebAddressModel(StubModel):
+    """Ranks slugify_text first for a web-address query: url, slug, web and
+    address are one concept; nothing in title_case's text is."""
+
+    def embed_batch(self, texts):
+        out = np.zeros((len(texts), self.dim), dtype=np.float32)
+        for i, t in enumerate(texts):
+            for w in tool_search.tokenize(t.replace("_", " ")):
+                if w in ("url", "slug", "web", "address", "link"):
+                    out[i, 3] += 1.0
+            n = np.linalg.norm(out[i])
+            if n:
+                out[i] /= n
+        return out
+
+
+async def test_meaning_outranks_one_shared_word(tmp_path):
+    minilm.set_shared(WebAddressModel())
+    rt = _make_runtime(tmp_path)
+    _with_network(rt, S0_TEXT_TOOLS)
+    out = await search_tools(rt, "make a web address from a title", 5)
+    assert out["semantic"] == {"ready": True}
+    names = [m["name"] for m in out["matches"]]
+    assert names == ["slugify_text", "title_case"], out["matches"]
+    slug, title = out["matches"]
+    assert slug["match"]["semantic_rank"] == 1 and slug["match"]["keyword_rank"] is None
+    assert title["match"]["keyword_rank"] == 1 and title["match"]["semantic_rank"] is None
+    assert title["match"]["exact_name"] is False
+    assert slug["score"] == pytest.approx(1.0 / 61)
+    assert title["score"] == pytest.approx(0.5 / 61)
+    # Equal weights tie the two, and the digest put title_case first.
+    assert [d for d, _ in rrf_merge([D_TITLE], [D_SLUG])] == [D_TITLE, D_SLUG]
+
+
+async def test_an_exact_name_takes_keyword_rank_one_at_full_weight(tmp_path):
+    rt = _make_runtime(tmp_path)
+    d_count, d_essay = "c1" * 32, "c2" * 32
+    tools = {
+        d_count: _manifest("word_count", "Counts words."),
+        # Wins on BM25: it shares "essay" with the query too.
+        d_essay: _manifest("essay_stats",
+                           "Word count, line count and reading time of an essay."),
+    }
+    _with_network(rt, tools)
+    query = "word count of my essay"
+    docs = {d: tool_search.keyword_tokens(m) for d, m in tools.items()}
+    assert [d for d, _ in bm25_ranking(query, docs)] == [d_essay, d_count]
+    out = await search_tools(rt, query, 5)          # keyword-only: no model
+    assert [m["name"] for m in out["matches"]] == ["word_count", "essay_stats"]
+    exact, other = out["matches"]
+    assert exact["match"] == {"keyword_rank": 1, "semantic_rank": None,
+                              "similarity": None, "exact_name": True}
+    assert exact["score"] == pytest.approx(1.0 / 61)
+    assert other["match"]["keyword_rank"] == 2 and other["match"]["exact_name"] is False
+    assert other["score"] == pytest.approx(0.5 / 62)
+
+
+def test_exact_name_hit():
+    hit = tool_search.exact_name_hit
+    assert not hit("make a web address from a title", "title_case")
+    assert hit("put this in title case", "title_case")
+    assert hit("Title-Case it", "title_case")
+    assert hit("run slugify-text on it", "slugify-text")
+    assert hit("use x.y_tool here", "x.y_tool")       # the full name
+    assert not hit("resort the list", "sort")         # words, not substrings
+    assert not hit("fix it", "it")                    # stop words only
+
+
+def test_rrf_weights():
+    a, b = "aa" * 32, "bb" * 32
+    assert rrf_merge([a], [b], weights=[0.5, 1.0])[0][0] == b
+    assert rrf_merge([a], [b], weights=[1.0, 0.5])[0][0] == a
+    assert rrf_merge([a], [b]) == rrf_merge([a], [b], weights=[1.0, 1.0])
