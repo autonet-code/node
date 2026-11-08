@@ -1,5 +1,52 @@
 # Tool substrate v3: tools as the ONLY substrate item; reviews replace debates
 
+## Decision (2026-11-08): tool search is local, in relevance order
+
+- **Search is local to each daemon** (`atn/tool_search.py`). Every query
+  runs keyword (BM25 over name, description and schema property names)
+  and semantic (cosine, full 384 dims) over every manifest the daemon
+  holds: its own, adopted, and every remote manifest it fetched and
+  verified. The lists merge by reciprocal rank fusion (k 60), ties by
+  digest. Probe_tools, `GET /agents/<id>/tools?q=` and the app's Tools
+  screen use it.
+- **One pinned model.** all-MiniLM-L6-v2 from
+  `sentence-transformers/all-MiniLM-L6-v2` at revision `1110a243`:
+  `onnx/model.onnx` and `tokenizer.json`, each pinned by size and sha256
+  (`minilm.py`), run with onnxruntime and tokenizers (mean pool over the
+  attention mask, L2 norm). The daemon fetches them on its first run in
+  the background (Hugging Face first, then peers that serve them as
+  content-addressed blobs), checks the hashes at every start, and retries
+  with backoff. Until it loads, results are keyword-only and the reply
+  says so with the progress; manifests learned meanwhile are embedded
+  once it loads. Each vector records model and revision; others are
+  embedded again. The Docker image builds the model in.
+  WS: `search_model_status` returns `{model, revision, dim, state
+  (idle | checking | downloading | loading | ready | retrying), ready,
+  bytes_done, bytes_total, percent, source, files, attempt, retry_in,
+  error}`; the `search.model_status` event carries the same dict plus a
+  one-line `status`, on each state change and about every second of a
+  download.
+- **Relevance order, ratings as metadata.** The rating lift
+  (`base x (1 + tanh(rating))`) and the coverage density blend are gone,
+  and the coverage atlas with them. Each match carries the ToolBond
+  rating per axis with its REP mass, harm with its mass, bond state,
+  author context, and the household's relation: adopted here, authored
+  here, reviewed by us (our scores and harm, from the held reviews and
+  the batches on disk). Unbonded and denied tools stay excluded.
+- **No embedding in consensus.** The registration event should carry only
+  the charter axes: nothing in the close reads the embedding tail, and
+  the author's embedder output has no place in consensus. **Not built
+  yet**: a sprout's node id is content-addressed from its coords and
+  polarity axis only, so without the tail every tool registration lands
+  on one node (seen in a world built at `embedding_dim=0`). Until that is
+  settled the tail stays, authored with the same model projected to 64
+  dims (hashing until it loads).
+- **Why.** Ranking by rating sank niche tools and lifted rated ones above
+  better matches; agents can weigh the metadata themselves. Search needs
+  no consensus, so each daemon can run the same pinned model on its own
+  data, with no torch and no embedder output on the wire. Capability gaps
+  are funded explicitly through Projects, not through retrieval.
+
 ## Decision (2026-11-07): the mint reads staked reviews, not attestations
 
 Supersedes every rule below that mints from attested usage (`usage_term`,
@@ -1380,6 +1427,9 @@ REP is claimed DAO-side (RepToken) on ratified ATN earnings, never minted
 here. `rep_shares` survives only to weight POSITION DRIFT.]**
 
 ## Retrieval: density, not centroid
+
+Superseded 2026-11-08: search orders by relevance only and the coverage
+atlas is gone (Decision 2026-11-08 at the top).
 
 Attestation problem_coords accumulate into a per-tool demonstrated-
 coverage cloud: collectively, an atlas of what the network can do and

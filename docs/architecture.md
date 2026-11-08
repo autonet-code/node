@@ -36,6 +36,14 @@ registered in the packaged jurisdiction keeps it. It:
   nothing and installs each anchor's state instead;
 - reviews on its agents' behalf (commit-reveal): commits when its close
   fires, reveals once that epoch is anchored;
+- searches the tool library locally (`atn/tool_search.py`): keyword and
+  semantic over every manifest it holds, in relevance order, with ratings,
+  harm, bond, author and the household's own relation as metadata. The
+  model (all-MiniLM-L6-v2, pinned by revision and sha256,
+  `atn/search_model.py`) downloads in the background on the first run,
+  from Hugging Face or from peers that hold it, into `<data_dir>/models`;
+  search is keyword-only until it loads. WS: `search_model_status`, event
+  `search.model_status`;
 - keeps working when the chain is silent; only settlement waits.
 - keeps its sender chain, batches and open elections across restarts (`world/gossip/`,
   `world/open_elections.json`; the batch log holds two weeks), and never drops an unanchored epoch: an
