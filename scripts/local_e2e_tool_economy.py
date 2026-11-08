@@ -742,12 +742,11 @@ async def amain() -> int:
         assert not any("axes" in e for e in captured_events), \
             "review axes no longer ride the consensus rail"
 
-        # Pull the registration sprout events out of the WorldService's
-        # epoch buffer (the manifest sink routed them there). These are the
-        # full replayable events the mint needs; the tool_used receipts
-        # come from the captured event_sink.
+        # Pull the tool_registered events out of the WorldService's epoch
+        # buffer (the manifest sink routed them there); the tool_used
+        # receipts come from the captured event_sink.
         for ev in list(ws._epoch_events):
-            if (ev.get("kind") == "sub_claim_sprouted"
+            if (ev.get("kind") == "tool_registered"
                     and ev.get("artifact_digest") and ev.get("manifest_meta")):
                 reg_events_from_ws.append(dict(ev))
 
@@ -854,8 +853,7 @@ async def amain() -> int:
             gossip.sender_pubkey = kp_author.public_key
             gossip.drain_epoch_batches.return_value = list(all_batches)
             drv = FederatedCloseDriver(
-                gossip=gossip, embedding_dim=64,
-                tool_registrations_path=tmp_a / "tool_regs.json")
+                gossip=gossip, tool_registrations_path=tmp_a / "tool_regs.json")
             drv.agent_owner_map = owner_map
             return drv
 
@@ -982,10 +980,8 @@ async def amain() -> int:
         seed_res = anchorer.anchor_close_result(
             {"epoch_id": "e2e-seed-pool",
              "authoritative_payload": {
-                 "schema": 3, "epoch_root": "5e" * 32, "agent_mint": {},
-                 "agent_novelty": {}, "total_mint": 0.0,
-                 "total_novelty": 0.0, "output_decimals": 10,
-                 "gate_applied": False, "n_batches": 0, "n_events": 0},
+                 "epoch_root": "5e" * 32, "agent_mint": {}, "total_mint": 0.0,
+                 "output_decimals": 10, "n_batches": 0, "n_events": 0},
              "agent_mint": {}})
         if not seed_res.success:
             raise RuntimeError(f"seed anchor failed: {seed_res.error}")

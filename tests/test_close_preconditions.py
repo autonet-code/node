@@ -58,7 +58,7 @@ def _driver(tmp_path, *, voice_state=None, enforce=True, paths=True):
     kwargs = {}
     if paths:
         kwargs = {f"{k}_path": tmp_path / f"{k}.json" for k in CARRY}
-    d = FederatedCloseDriver(gossip=_gossip(), embedding_dim=8, **kwargs)
+    d = FederatedCloseDriver(gossip=_gossip(), **kwargs)
     d.enforce_preconditions = enforce
     if voice_state is not None:
         d.voice_source = lambda: dict(voice_state)

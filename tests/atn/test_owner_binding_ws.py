@@ -267,12 +267,9 @@ def _one_batch(rpb: str, ev: dict, kp: Keypair, seq: int) -> EventBatch:
 
 def _tool_batches(rpb: str, author_addr: str) -> List[EventBatch]:
     reg = {
-        "kind": "sub_claim_sprouted", "seq": 1,
-        "author_agent": author_addr, "tendency_id": "correctness",
-        "parent_id": "solver_root", "node_id": f"tm_{_DIGEST[:12]}",
-        "position": "pro", "coords": _coords6(),
-        "polarity_axis": _coords6(),
-        "content": f"tool {_DIGEST[:8]}", "author_post": True,
+        "kind": "tool_registered",
+        "seq": 1,
+        "author_agent": author_addr,
         "artifact_digest": _DIGEST,
         "manifest_meta": {"trust_class": "pinned", "author": author_addr},
     }

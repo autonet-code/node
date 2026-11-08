@@ -64,17 +64,9 @@ def _tool_coords():
 
 def _tool_registration_event(seq=1, digest=_TOOL_DIGEST, author=_TOOL_AUTHOR):
     return {
-        "kind": "sub_claim_sprouted",
+        "kind": "tool_registered",
         "seq": seq,
         "author_agent": author,
-        "tendency_id": "correctness",
-        "parent_id": "solver_root",
-        "node_id": f"tm_{digest[:12]}",
-        "position": "pro",
-        "coords": _tool_coords(),
-        "polarity_axis": _tool_coords(),
-        "content": f"tool {digest[:8]}: does a thing",
-        "author_post": True,
         "artifact_digest": digest,
         "manifest_meta": {"trust_class": "pinned", "author": author},
     }

@@ -244,19 +244,10 @@ class ChainSubmissionDriver:
         if not self.enabled:
             return out
 
-        # State sync: every daemon computed the same canonical-world
-        # checkpoint blob — publish it so rejoining peers can fetch it
-        # from anyone, not just the anchor winner.
-        if fed.world_checkpoint_blob:
-            try:
-                self._blob_resolver.put(fed.world_checkpoint_blob)
-                out["world_cid"] = fed.world_cid
-            except Exception as e:
-                logger.warning("world checkpoint blob put failed: %s", e)
-        # Verifiable carry-over (payload schema 4): same contract as the
-        # world blob. Every daemon computed the identical bundle, so every
-        # daemon serves it; a joiner verifies it against the anchored
-        # payload's carry_cid, so it doesn't matter which peer answers.
+        # Verifiable carry-over: every daemon computed the identical
+        # bundle, so every daemon serves it; a joiner verifies it against
+        # the anchored payload's carry_cid, so it doesn't matter which peer
+        # answers.
         carry_blob = getattr(fed, "carry_bundle_blob", b"")
         if carry_blob:
             try:
@@ -264,8 +255,7 @@ class ChainSubmissionDriver:
                 out["carry_cid"] = fed.carry_cid
             except Exception as e:
                 logger.warning("carry-over bundle blob put failed: %s", e)
-        self._offer_to_relays(fed.world_cid if fed.world_checkpoint_blob else "",
-                              fed.carry_cid if carry_blob else "")
+        self._offer_to_relays(fed.carry_cid if carry_blob else "")
 
         prepared = self._prepare(fed, out)
         if prepared is not None:

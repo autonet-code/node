@@ -789,11 +789,10 @@ async def amain() -> int:
         coords = [0.0] * (N_DIMS + 1024)
         coords[4], coords[N_DIMS + 3] = 0.8, 0.5
         registration = {
-            "kind": "sub_claim_sprouted", "seq": 1, "author_agent": author,
-            "tendency_id": "correctness", "parent_id": "solver_root",
-            "node_id": f"tm_{clean[:12]}", "position": "pro", "coords": coords,
-            "polarity_axis": coords, "content": "tool upper_case",
-            "author_post": True, "artifact_digest": clean,
+            "kind": "tool_registered",
+            "seq": 1,
+            "author_agent": author,
+            "artifact_digest": clean,
             "manifest_meta": {"trust_class": "pinned", "author": author},
         }
         callers = ["0x" + "c1" * 20, "0x" + "c2" * 20]

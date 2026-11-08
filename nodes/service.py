@@ -602,23 +602,12 @@ class AutonetService:
         except Exception as e:
             logger.warning("federated_close_driver import failed: %s", e)
             return
-        embedding_dim = getattr(self._world_service, "embedding_dim", 1024)
-        canonical_tracker = None
-        try:
-            from .common.state_sync import CanonicalWorldTracker
-            canonical_tracker = CanonicalWorldTracker(
-                embedding_dim=embedding_dim,
-            )
-        except Exception as e:
-            logger.warning("canonical world tracker unavailable: %s", e)
-        pricing = getattr(self._world_service, "pricing", "ledger")
         # Tool-substrate registration carry-over cache lives next to the
         # world state (rebuildable from canonical events; see
         # FederatedCloseDriver). Missing state dir → in-memory only.
         tool_regs_path = None
         tool_rounds_path = None
         tool_positions_path = None
-        canonical_world_path = None
         try:
             state_dir = getattr(
                 getattr(self._world_service, "_persistence", None), "_dir", None,
@@ -632,23 +621,15 @@ class AutonetService:
                 # (a deterministic fork). Same rebuildable-cache contract
                 # as the registration map above.
                 tool_positions_path = state_dir / "tool_positions.json"
-                # The canonical world tracker's latest checkpoint, restored
-                # at boot so world_cid keeps matching peers after a restart.
-                canonical_world_path = state_dir / "canonical_world.json"
         except Exception:
             tool_regs_path = None
             tool_rounds_path = None
             tool_positions_path = None
-            canonical_world_path = None
         self._federated_close_driver = FederatedCloseDriver(
             gossip=self._event_gossip,
-            embedding_dim=embedding_dim,
-            canonical_tracker=canonical_tracker,
-            pricing=pricing,
             tool_registrations_path=tool_regs_path,
             tool_rounds_path=tool_rounds_path,
             tool_positions_path=tool_positions_path,
-            canonical_world_path=canonical_world_path,
         )
         # Refuse (log + skip) any close this daemon can't compute
         # identically to its peers: no chain read access below, or no
@@ -794,24 +775,6 @@ class AutonetService:
 
             self._federated_close_driver.carry_source = _carry_source
 
-            # Same bootstrap for the canonical world tracker: the latest
-            # anchor's world_cid checkpoint, hash-verified against the chain.
-            def _world_source():
-                from web3 import Web3
-                from .common.state_sync import catch_up_from_chain
-                from .common.voice_state import _VOICE_ABI
-                csd = getattr(self, "_chain_submission_driver", None)
-                resolver = getattr(csd, "blob_resolver", None)
-                if resolver is None:
-                    return None
-                w3 = Web3(Web3.HTTPProvider(rpc_url))
-                contract = w3.eth.contract(
-                    address=Web3.to_checksum_address(substrate_addr),
-                    abi=_VOICE_ABI,
-                )
-                return catch_up_from_chain(contract, resolver)
-
-            self._federated_close_driver.world_source = _world_source
             logger.info(
                 "Voice/emission source wired (substrate=%s, rep_token=%s)",
                 substrate_addr, rep_token_addr or "(none)",

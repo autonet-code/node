@@ -465,7 +465,7 @@ def check_relay_state(w3, j, relay_dir: Path, rep: Report) -> None:
         row = {"epoch": a[0], "payload": (blobs / ph).exists()}
         if row["payload"]:
             payload = json.loads((blobs / ph).read_bytes())
-            for k in ("carry_cid", "world_cid"):
+            for k in ("carry_cid",):
                 if payload.get(k):
                     row[k] = (blobs / payload[k]).exists()
         rows.append(row)

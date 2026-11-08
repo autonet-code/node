@@ -1,7 +1,6 @@
 """Decision 2026-10-26, item 8: the consensus findings that ship with the
 epoch redesign.
 
-  - the canonical world tracker is restored at boot, not rebuilt;
   - a failed voice refresh blocks the close instead of reusing old state;
   - log scans start at the configured deployment block, and a failed read
     while searching for it raises instead of starting the scan late;
@@ -21,7 +20,6 @@ import pytest
 
 from nodes.common.event_gossip import EventBatch, EventGossip, Keypair
 from nodes.common.federated_close_driver import FederatedCloseDriver
-from nodes.common.state_sync import CanonicalWorldTracker
 from world_model.generalized import detmath
 
 
@@ -55,52 +53,8 @@ def _gossip(kp: Keypair, epochs):
     return g
 
 
-def _driver(gossip, state_dir, *, persist=True):
-    return FederatedCloseDriver(
-        gossip=gossip, embedding_dim=8,
-        canonical_tracker=CanonicalWorldTracker(embedding_dim=8),
-        canonical_world_path=(state_dir / "canonical_world.json"
-                              if persist else None),
-    )
-
-
-class TestTrackerRestore:
-    def test_restart_keeps_world_cid_in_step(self, tmp_path):
-        kp = Keypair.generate()
-        e1 = [_batch(kp, 1, "alice")]
-        e2 = [_batch(kp, 2, "bob")]
-
-        always_on = _driver(_gossip(kp, [e1, e2]), tmp_path / "a")
-        always_on.run({"epoch_id": "e1"})
-        want = always_on.run({"epoch_id": "e2"}).world_cid
-
-        first = _driver(_gossip(kp, [e1]), tmp_path / "b")
-        first.run({"epoch_id": "e1"})
-        restarted = _driver(_gossip(kp, [e2]), tmp_path / "b")
-        assert restarted._tracker_restored
-        assert restarted.run({"epoch_id": "e2"}).world_cid == want
-
-        # Without the persisted checkpoint (the old behavior) the
-        # restarted tracker starts from a fresh charter and forks.
-        lost = _driver(_gossip(kp, [e2]), tmp_path / "c", persist=False)
-        assert lost.run({"epoch_id": "e2"}).world_cid != want
-
-    def test_no_checkpoint_past_genesis_blocks(self, tmp_path):
-        kp = Keypair.generate()
-        d = _driver(_gossip(kp, []), tmp_path)
-        d._chain_at_genesis = False
-        assert any("canonical world checkpoint" in b
-                   for b in d.participation_blockers())
-        d._chain_at_genesis = True
-        assert not any("canonical world" in b
-                       for b in d.participation_blockers())
-
-    def test_tracker_failure_blocks_and_drops_the_close(self, tmp_path):
-        kp = Keypair.generate()
-        d = _driver(_gossip(kp, [[_batch(kp, 1, "alice")]]), tmp_path)
-        d.canonical_tracker.on_close = MagicMock(side_effect=RuntimeError("x"))
-        assert d.run({"epoch_id": "e1"}) is None
-        assert any("tracker failed" in b for b in d.participation_blockers())
+def _driver(gossip, state_dir):
+    return FederatedCloseDriver(gossip=gossip)
 
 
 class TestVoiceRefresh:

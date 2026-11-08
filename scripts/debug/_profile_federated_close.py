@@ -68,7 +68,7 @@ def run(embedding_dim: int, n_per_sender: int = 5):
     )
 
     t0 = time.time()
-    result = federated_epoch_close(canonical, embedding_dim=embedding_dim)
+    result = federated_epoch_close(canonical)
     t1 = time.time()
     print(f"federated_epoch_close: {t1-t0:.2f}s", flush=True)
     print(f"  agent_mint: {result['authoritative_payload']['agent_mint']}", flush=True)

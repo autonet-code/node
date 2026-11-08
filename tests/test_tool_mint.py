@@ -21,19 +21,11 @@ from nodes.common.federated_reconcile import (
     compute_tool_mint,
     federated_epoch_close,
 )
-from nodes.common.world_model_substrate.adapter import N_DIMS
 from nodes.common.library.charter import DEFAULT_CHARTER
 
 EMBED_DIM = 1024
 DIGEST = "ab" * 32
 AUTHOR = "toolsmith"
-
-
-def _coords(axis: int = 4, mag: float = 0.8) -> List[float]:
-    out = [0.0] * (N_DIMS + EMBED_DIM)
-    out[axis] = mag
-    out[N_DIMS + 3] = 0.5  # some embedding-tail mass
-    return out
 
 
 def _registration_event(seq: int = 1, *, trust_class: str = "pinned",
@@ -43,17 +35,9 @@ def _registration_event(seq: int = 1, *, trust_class: str = "pinned",
     if deps:
         meta["deps"] = deps
     return {
-        "kind": "sub_claim_sprouted",
+        "kind": "tool_registered",
         "seq": seq,
         "author_agent": author,
-        "tendency_id": "correctness",
-        "parent_id": "solver_root",       # remaps to the live root
-        "node_id": f"tm_{digest[:12]}",
-        "position": "pro",
-        "coords": _coords(axis=axis),
-        "polarity_axis": _coords(axis=axis),
-        "content": f"tool {digest[:8]}: does a thing",
-        "author_post": True,              # immediate unit standing
         "artifact_digest": digest,
         "manifest_meta": meta,
     }
@@ -125,7 +109,6 @@ def _standard_batches() -> List[EventBatch]:
 
 
 def _close(batches, **kw):
-    kw.setdefault("embedding_dim", EMBED_DIM)
     kw.setdefault("emission_pool", 10.0)
     kw.setdefault("rep_shares", SHARES)
     kw.setdefault("review_snapshot", _snap())
@@ -184,7 +167,7 @@ class TestToolMintClose:
         kp = Keypair.generate()
         batches = _batches([{
             "kind": "observation_added", "seq": 1, "author_agent": "alice",
-            "obs_id": "obs_x", "coords": _coords(), "label": "plain work",
+            "obs_id": "obs_x", "coords": [0.0] * 6, "label": "plain work",
         }], kp)
         result = federated_epoch_close(canonical_order(batches))
         assert result["tool_mint"] == {}
@@ -247,7 +230,7 @@ class TestCompositionFanOut:
 
 def _plain_event() -> Dict[str, Any]:
     return {"kind": "observation_added", "seq": 1, "author_agent": "alice",
-            "obs_id": "obs_x", "coords": _coords(), "label": "plain work"}
+            "obs_id": "obs_x", "coords": [0.0] * 6, "label": "plain work"}
 
 
 class TestDriverCarryOver:
@@ -268,8 +251,7 @@ class TestDriverCarryOver:
             _batches(evs, kp) for evs in events_per_epoch
         ]
         return FederatedCloseDriver(
-            gossip=gossip, embedding_dim=EMBED_DIM,
-            tool_registrations_path=tmp_path / "tool_registrations.json",
+            gossip=gossip, tool_registrations_path=tmp_path / "tool_registrations.json",
         )
 
     def test_registration_carries_across_epochs_and_restart(self, tmp_path):

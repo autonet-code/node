@@ -123,12 +123,9 @@ def _tool_batches(rpb: str, author_addr: str,
     callers. voice_weights=None here (local regime), so mint is per-fleet
     log1p; the on-chain ATN it settles is what these tests read back."""
     reg = {
-        "kind": "sub_claim_sprouted", "seq": 1,
-        "author_agent": author_addr, "tendency_id": "correctness",
-        "parent_id": "solver_root", "node_id": f"tm_{digest[:12]}",
-        "position": "pro", "coords": _coords6(),
-        "polarity_axis": _coords6(),
-        "content": f"tool {digest[:8]}", "author_post": True,
+        "kind": "tool_registered",
+        "seq": 1,
+        "author_agent": author_addr,
         "artifact_digest": digest,
         "manifest_meta": {"trust_class": "pinned", "author": author_addr},
     }

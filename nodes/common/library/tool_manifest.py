@@ -403,3 +403,34 @@ def manifest_lineage(blob_store: Any, digest: str, max_depth: int = 64) -> List[
             break
         current = payload.get("version_of")
     return chain
+
+
+# The kind of the gossiped tool registration (Decision 2026-11-08): the one
+# consensus event a published tool produces. The close reads its digest
+# and metadata; nothing else about a tool rides the wire.
+TOOL_REGISTERED = "tool_registered"
+
+
+def registration_event(manifest: Dict[str, Any], digest: str, *,
+                       agent_id: str) -> Dict[str, Any]:
+    """The ``tool_registered`` event for a published manifest.
+
+    ``manifest_meta`` carries what the close needs so a mint never depends
+    on blob replication: trust_class, author, the declared dependencies
+    (comma-joined, the composition fan-out) and ``version_of`` when set.
+    Values are strings on the wire.
+    """
+    meta = {
+        "trust_class": str(manifest.get("trust_class", "")),
+        "author": str(manifest.get("author", "")),
+        "deps": ",".join(manifest.get("dependencies") or []),
+    }
+    if manifest.get("version_of"):
+        meta["version_of"] = str(manifest["version_of"])
+    return {
+        "kind": TOOL_REGISTERED,
+        "seq": 1,
+        "author_agent": str(agent_id),
+        "artifact_digest": str(digest),
+        "manifest_meta": meta,
+    }

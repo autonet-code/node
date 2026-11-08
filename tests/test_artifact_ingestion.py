@@ -311,17 +311,9 @@ class TestRemoteManifestDiscovery:
 
     def _reg_event(self, digest: str) -> dict:
         return {
-            "kind": "sub_claim_sprouted",
+            "kind": "tool_registered",
             "seq": 1,
             "author_agent": "0xPeer",
-            "tendency_id": "correctness",
-            "parent_id": "root_correctness",
-            "node_id": "n_remote",
-            "position": "pro",
-            "coords": [0.0, 1.0],
-            "polarity_axis": [1.0, 0.0],
-            "content": "tool foo: does a thing",
-            "observation_id": "tm_" + digest[:16],
             "artifact_digest": digest,
             "manifest_meta": {"trust_class": "pinned", "author": "0xPeer"},
         }

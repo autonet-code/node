@@ -96,9 +96,8 @@ def chain():
 
 def _close(mint, epoch_id):
     payload = {
-        "schema": 3, "epoch_root": "22" * 32, "agent_mint": mint,
-        "agent_novelty": {}, "total_mint": sum(mint.values()),
-        "total_novelty": 0.0, "output_decimals": 10, "gate_applied": False,
+        "epoch_root": "22" * 32, "agent_mint": mint,
+        "total_mint": sum(mint.values()), "output_decimals": 10,
         "n_batches": 1, "n_events": len(mint),
     }
     return {"authoritative_payload": payload, "agent_mint": mint,

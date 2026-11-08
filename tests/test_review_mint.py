@@ -172,13 +172,13 @@ class TestCloseCarry:
         canonical = canonical_order(_batches([_registration_event(1)], kp))
         snap = _snap({DIGEST: [_round(1, _rev(R1))]}, rating=0.0)
         out = federated_epoch_close(
-            canonical, embedding_dim=EMBED_DIM, emission_pool=10.0,
+            canonical, emission_pool=10.0,
             tool_registrations=REGS, rep_shares=SHARES, review_snapshot=snap)
         # Only the reviewer share mints: 40% of the pool; 60% carries.
         assert sum(out["agent_mint"].values()) == pytest.approx(4.0)
         assert out["tool_rounds"]["pool_carry"] == 6_000_000
         nothing = federated_epoch_close(
-            canonical, embedding_dim=EMBED_DIM, emission_pool=1.0,
+            canonical, emission_pool=1.0,
             tool_registrations=REGS, rep_shares=SHARES,
             review_snapshot=_snap({}), tool_rounds=out["tool_rounds"])
         assert nothing["agent_mint"] == {}

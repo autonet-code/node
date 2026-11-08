@@ -12,14 +12,10 @@ import pytest
 from nodes.common.federated_reconcile import apply_emission_pool
 
 
-def _result(agent_mint, node_mint=None):
+def _result(agent_mint):
     return {
         "agent_mint": dict(agent_mint),
-        "agent_novelty": {},
-        "node_mint": dict(node_mint or {}),
-        "node_novelty": {},
         "total_mint": sum(agent_mint.values()),
-        "total_novelty": 0.0,
     }
 
 
@@ -33,14 +29,6 @@ class TestApplyEmissionPool:
         out = apply_emission_pool(_result({"a": 3.0, "b": 1.0}), 100.0)
         assert out["agent_mint"]["a"] == pytest.approx(75.0)
         assert out["agent_mint"]["b"] == pytest.approx(25.0)
-
-    def test_node_mint_scaled_consistently(self):
-        out = apply_emission_pool(
-            _result({"a": 2.0}, node_mint={"n1": 1.5, "n2": 0.5}), 10.0,
-        )
-        # scale = 10/2 = 5
-        assert out["node_mint"]["n1"] == pytest.approx(7.5)
-        assert out["node_mint"]["n2"] == pytest.approx(2.5)
 
     def test_zero_activity_no_division(self):
         out = apply_emission_pool(_result({}), 100.0)
@@ -89,20 +77,14 @@ class TestReconcileEpochPoolParam:
 
 
 class TestFederatedPoolDeterminism:
-    def test_federated_reconcile_pool_normalizes(self):
-        from nodes.common.federated_reconcile import federated_reconcile_epoch
-        from nodes.common.world_model_substrate.reconcile import EpochSnapshots
-        from nodes.common.world_model_substrate.adapter import build_charter_world
+    def test_quiet_epoch_carries_the_whole_pool(self):
+        from nodes.common.canonical_ordering import canonical_order
+        from nodes.common.federated_reconcile import federated_epoch_close
 
-        world = build_charter_world()
-        snaps = EpochSnapshots()
-        snaps.record_start(world)
-        snaps.record_close(world)
-        out = federated_reconcile_epoch(
-            world, snaps, [], apply_gate=False, emission_pool=25.0,
-        )
-        assert out["emission_pool"] == 25.0
+        out = federated_epoch_close(canonical_order([]), emission_pool=25.0)
         assert out["total_mint"] == 0.0
+        assert out["agent_mint"] == {}
+        assert out["tool_rounds"]["pool_carry"] == 25_000_000
 
 
 # ---------------------------------------------------------------------------

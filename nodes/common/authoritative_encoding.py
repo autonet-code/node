@@ -9,38 +9,28 @@ Spec
 
 The authoritative payload is a dict with these fields, in this order:
 
-  1. schema:           int (currently 6)
+  1. schema:           int (currently 7)
   2. epoch_id:         str
   3. epoch_root:       64-char lowercase hex string (sha256 digest)
   4. prev_epoch_root:  64-char lowercase hex string (sha256 digest)
   5. agent_mint:       dict[str, str] — claimant -> fixed-format float string.
-                       From schema 6 the claimant is the household's
-                       lowercase owner wallet (Decision 2026-10-27).
-  6. agent_novelty:    dict[str, str] — agent_id -> fixed-format float string
-  7. total_mint:       fixed-format float string
-  8. total_novelty:    fixed-format float string
-  9. output_decimals:  int
-  10. gate_applied:    bool
-  11. n_batches:       int
-  12. n_events:        int
-  13. world_cid:       str — sha256 cid of the canonical-world checkpoint
-                       blob for this epoch (state sync), or "" when no
-                       canonical tracker is wired. Added in schema 2;
-                       schema-1 anchors on chain predate it.
-  14. carry_cid:       str — sha256 cid of the carry-over bundle blob
-                       (``encode_carry_bundle``): the five tool maps this
-                       close produced, i.e. the INPUTS of the next close.
-                       Lets a daemon that first boots after anchors exist
-                       fetch + verify the carry-over instead of trusting a
-                       peer. Added in schema 4; schema <= 3 anchors on
-                       chain predate it (and cannot be joined trustlessly).
-  15. charter_hash:    str, sha256 hex of the charter the close ran
-                       against (a charter change is a fork boundary). Added
-                       in schema 5.
-  16. sanctioned_households: list[str], sorted lowercase households under
+                       The claimant is the household's lowercase owner
+                       wallet (Decision 2026-10-27).
+  6. total_mint:       fixed-format float string
+  7. output_decimals:  int
+  8. n_batches:        int
+  9. n_events:         int
+  10. carry_cid:       str — sha256 cid of the carry-over bundle blob
+                       (``encode_carry_bundle``): the tool maps this close
+                       produced, i.e. the INPUTS of the next close. A
+                       daemon that boots after anchors exist fetches and
+                       verifies it instead of trusting a peer.
+  11. charter_hash:    str, sha256 hex of the charter the close ran
+                       against (a charter change is a fork boundary).
+  12. sanctioned_households: list[str], sorted lowercase households under
                        a DAO sanction at the snapshot (their mint is
-                       withheld). Added in schema 5.
-  17. seed:            true, ONLY on a genesis seed anchor
+                       withheld).
+  13. seed:            true, ONLY on a genesis seed anchor
                        (docs/multi_jurisdiction.md decision 9): the
                        carry bundle is an adopted snapshot, not the output
                        of an observed epoch. Omitted entirely otherwise, so
@@ -58,7 +48,7 @@ float formatting.
 Dict ordering
 -------------
 
-agent_mint and agent_novelty have keys sorted ascending. The outer
+agent_mint has its keys sorted ascending. The outer
 dict has keys in the order listed above (NOT alphabetical) — this
 is the order we serialize, and it matches the documented field
 order in this spec.
@@ -90,6 +80,9 @@ import math
 from typing import Any, Dict, List, Tuple
 
 
+# Schema 7 (Decision 2026-11-08, the world leaves the system): the payload
+# drops agent_novelty, total_novelty, gate_applied and world_cid; the carry
+# bundle is the whole anchored state.
 # Schema 5 (Decision 2026-10-26): the payload commits ``charter_hash`` and
 # ``sanctioned_households``; both decide the mint, so two daemons that ran
 # against different charters or sanction lists must not sign the same hash.
@@ -102,7 +95,7 @@ from typing import Any, Dict, List, Tuple
 # ``agent_rep`` key (REP is claimed DAO-side now, never anchored). Schema 2
 # was the v4.1 era (3-field merkle leaf + agent_rep blob key); bumped so the
 # blob shape change is explicit, not silently reusing a different-shape number.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_DECIMALS = 10
 
 # The fixed top-level field order. Encoding will lay these out in
@@ -113,14 +106,10 @@ _FIELD_ORDER = [
     "epoch_root",
     "prev_epoch_root",
     "agent_mint",
-    "agent_novelty",
     "total_mint",
-    "total_novelty",
     "output_decimals",
-    "gate_applied",
     "n_batches",
     "n_events",
-    "world_cid",
     "carry_cid",
     "charter_hash",
     "sanctioned_households",
@@ -181,16 +170,10 @@ def encode_authoritative_payload(
         "agent_mint": _format_agent_dict(
             payload.get("agent_mint", {}), decimals,
         ),
-        "agent_novelty": _format_agent_dict(
-            payload.get("agent_novelty", {}), decimals,
-        ),
         "total_mint": _format_float(payload.get("total_mint", 0.0), decimals),
-        "total_novelty": _format_float(payload.get("total_novelty", 0.0), decimals),
         "output_decimals": decimals,
-        "gate_applied": bool(payload.get("gate_applied", False)),
         "n_batches": int(payload.get("n_batches", 0)),
         "n_events": int(payload.get("n_events", 0)),
-        "world_cid": str(payload.get("world_cid", "")),
         "carry_cid": str(payload.get("carry_cid", "")),
         "charter_hash": str(payload.get("charter_hash", "")).lower(),
         "sanctioned_households": sorted(
@@ -223,7 +206,7 @@ def encode_agent_mint_blob(
 
     Format:
       {
-        "schema": 6,
+        "schema": 7,
         "agent_mint": {claimant: float-as-str (sorted keys)}
       }
 
@@ -300,8 +283,7 @@ def encode_carry_bundle(carry: Dict[str, Any], *, epoch_id: str) -> bytes:
     ``epoch_id`` is the epoch whose close PRODUCED these maps (they are
     the inputs of the following close).
 
-    Why ``sort_keys`` is safe here (unlike world checkpoints, whose
-    insertion order is semantic): every consumer of these maps
+    Why ``sort_keys`` is safe here: every consumer of these maps
     (``compute_tool_mint`` and its ``_normalize_*`` helpers) iterates
     them in sorted-key order, and the close already emits them
     key-sorted, so key order carries no meaning. Sorting makes the bytes

@@ -1437,10 +1437,13 @@ class AutonetBridge:
             # propose adopting their tools.
             tool_store.sanction_check = lambda addr: self.sanctions.check(addr)
 
-            # Tools registered while the substrate was down get their
-            # verdict-layer claims now (content-addressed, so re-pushes
-            # dedup instead of double-sprouting).
-            pushed = tool_store.push_all_manifests()
+            # Tools registered while the network was down send their
+            # registration now; ones an anchor already holds need none.
+            drv = getattr(service, "_federated_close_driver", None)
+            anchored = set(((drv.carry_over_maps() if drv is not None else {})
+                            .get("tool_registrations") or {}))
+            pushed = tool_store.push_all_manifests(
+                skip=lambda digest: str(digest).lower() in anchored)
             log.info("ToolStore wired into WorldService rails "
                      "(%d manifests backfilled)", pushed)
 
@@ -1533,7 +1536,6 @@ class AutonetBridge:
                 "closed_at": record.get("closed_at"),
                 "n_events": record.get("n_events", 0),
                 "total_mint": record.get("total_mint", 0.0),
-                "total_novelty": record.get("total_novelty", 0.0),
                 "agent_mint": record.get("agent_mint", {}),
                 "authoritative": record.get("authoritative", False),
                 "scope": record.get("scope", "local"),
@@ -1561,9 +1563,6 @@ class AutonetBridge:
             # FederatedCloseResult → the winner-reveal payload the
             # epochs UI animates (EPOCH_OBSERVABILITY_SPEC.md §4b).
             try:
-                payload_auth = (
-                    fed.close_result.get("authoritative_payload") or {}
-                )
                 payload = {
                     "epoch_id": fed.epoch_id,
                     "n_batches": fed.n_batches,
@@ -1571,10 +1570,9 @@ class AutonetBridge:
                     "winner": fed.winner.hex() if fed.winner else "",
                     "is_us": bool(fed.is_winner),
                     "epoch_root": str(fed.close_result.get("epoch_root", "")),
-                    "world_cid": getattr(fed, "world_cid", ""),
+                    "carry_cid": getattr(fed, "carry_cid", ""),
                     "total_mint": fed.close_result.get("total_mint", 0.0),
                     "agent_mint": fed.close_result.get("agent_mint", {}),
-                    "gate_applied": bool(payload_auth.get("gate_applied", False)),
                 }
             except Exception:
                 log.exception("federated close payload build failed")

@@ -119,12 +119,9 @@ def _make_chain(rpb, kp, agent_id, charter_axis, n, embedding_dim):
     coords[4] = 0.8
     coords[6 + (charter_axis % embedding_dim)] = 0.5
     reg = {
-        "kind": "sub_claim_sprouted", "seq": 1,
-        "author_agent": agent_id, "tendency_id": "correctness",
-        "parent_id": "solver_root", "node_id": f"tm_{digest[:12]}",
-        "position": "pro", "coords": list(coords),
-        "polarity_axis": list(coords),
-        "content": f"tool {digest[:8]}", "author_post": True,
+        "kind": "tool_registered",
+        "seq": 1,
+        "author_agent": agent_id,
         "artifact_digest": digest,
         "manifest_meta": {"trust_class": "pinned", "author": agent_id},
     }
@@ -246,7 +243,7 @@ def main():
     canonical = canonical_order(batches)
     print(f"[close] canonical: {len(canonical.ordered_batches)} batches, "
           f"{len(canonical.per_sender_root)} senders")
-    close_result = federated_epoch_close(canonical, embedding_dim=embedding_dim)
+    close_result = federated_epoch_close(canonical)
     close_result["epoch_id"] = epoch_id
     payload_mint = close_result["authoritative_payload"]["agent_mint"]
     print(f"[close] payload agent_mint: {payload_mint}")

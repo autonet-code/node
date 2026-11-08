@@ -142,8 +142,7 @@ def main():
     )
     gossip_holder["ev"] = ev
     gossip_holder["driver"] = FederatedCloseDriver(
-        gossip=ev, embedding_dim=svc.embedding_dim,
-    )
+        gossip=ev, )
     print(f"[smoke] gossip pubkey={kp.public_key.hex()[:16]}", flush=True)
 
     # Autonomous loop: each daemon emits one obs every OBS_INTERVAL

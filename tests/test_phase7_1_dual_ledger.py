@@ -110,12 +110,9 @@ def _make_chain(rpb: str, kp: Keypair, agent_id: str, n: int = 2) -> List[EventB
     coords[4] = 0.8
     coords[6 + 3] = 0.5
     reg = {
-        "kind": "sub_claim_sprouted", "seq": 1,
-        "author_agent": agent_id, "tendency_id": "correctness",
-        "parent_id": "solver_root", "node_id": f"tm_{digest[:12]}",
-        "position": "pro", "coords": list(coords),
-        "polarity_axis": list(coords),
-        "content": f"tool {digest[:8]}", "author_post": True,
+        "kind": "tool_registered",
+        "seq": 1,
+        "author_agent": agent_id,
         "artifact_digest": digest,
         "manifest_meta": {"trust_class": "pinned", "author": agent_id},
     }

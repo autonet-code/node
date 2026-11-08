@@ -89,8 +89,7 @@ def _window(number=2, start=BASE - 500, length=0, grace=120, skew=60):
 
 def _driver(buffer, window, now, tmp_path=None):
     d = FederatedCloseDriver(
-        gossip=buffer, embedding_dim=8,
-        tool_registrations_path=(tmp_path / "tool_registrations.json"
+        gossip=buffer, tool_registrations_path=(tmp_path / "tool_registrations.json"
                                  if tmp_path else None))
     d.voice_source = lambda: {"epoch_window": dict(window),
                               "snapshot_block": 5,

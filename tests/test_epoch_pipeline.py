@@ -63,7 +63,7 @@ class _Buffer:
 
 
 def _driver(buf, chain_state, now):
-    d = FederatedCloseDriver(gossip=buf, embedding_dim=8)
+    d = FederatedCloseDriver(gossip=buf)
 
     def voice(pin=None):
         start = pin["cutoffs"][-1] if pin["cutoffs"] else None

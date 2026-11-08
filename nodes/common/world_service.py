@@ -654,14 +654,14 @@ class WorldService:
         """Queue unknown manifest digests seen on remote registrations.
 
         Same filter the close uses for registrations
-        (``federated_reconcile``: a ``sub_claim_sprouted`` carrying both
+        (``federated_reconcile``: a ``tool_registered`` event carrying both
         ``artifact_digest`` and ``manifest_meta``). Cheap and allocation-
         bounded: no blob fetch, no network, so a slow peer cannot stall
         gossip ingest.
         """
         for ev in events:
             try:
-                if ev.get("kind") != "sub_claim_sprouted":
+                if ev.get("kind") != "tool_registered":
                     continue
                 digest = str(ev.get("artifact_digest") or "")
                 meta = ev.get("manifest_meta")
@@ -714,28 +714,18 @@ class WorldService:
     def apply_federated_tool_positions(
         self, positions: Optional[Dict[str, Dict[str, Any]]],
     ) -> int:
-        """Adopt the federated close's authoritative tool positions.
-
-        The federated close is the one that reads the ToolBond ratings
-        pinned to the previous anchor (federated_close_driver passes the
-        review snapshot; the local projection has none). Writing its result
-        onto the live world is what makes library ranking
-        (``infer_artifacts`` reads the head off the observation coords)
-        agree with the on-chain ratings.
-
-        Returns the number of positions applied.
+        """Adopt the federated close's authoritative tool positions (the
+        ToolBond ratings pinned to the previous anchor) for the economy
+        graph. Returns the number of positions held.
         """
         if not isinstance(positions, dict) or not positions:
             return 0
-        from .federated_reconcile import apply_tool_positions
-
         with self._lock:
             self._tool_positions = {
                 str(k): dict(v) for k, v in positions.items()
                 if isinstance(v, dict)
             }
             self._federated_positions_seen = True
-            apply_tool_positions(self._world, self._tool_positions)
             self._save_tool_state_locked()
             return len(self._tool_positions)
 
@@ -1011,74 +1001,28 @@ class WorldService:
         manifest: Dict[str, Any],
         *,
         agent_id: str = "default",
-        embedder: Optional[Any] = None,
-        equilibrate_rounds: int = _DEFAULT_EQUILIBRATE_ROUNDS,
-        equilibrate_tolerance: float = _DEFAULT_EQUILIBRATE_TOLERANCE,
     ) -> Dict[str, Any]:
-        """Register a tool manifest on the substrate (docs/tool_substrate.md).
+        """Register a published tool manifest (docs/tool_substrate.md).
 
-        Same two-plane split as work units: the full manifest is the
-        data-plane artifact (blob store + ArtifactIndex); the verdict
-        plane gets one PRO claim node tagged with the manifest digest,
-        which subsequent debate (``submit_con``, failing-invocation
-        evidence) prices. The observation id is content-addressed from
-        the digest, so re-submitting the same manifest dedups instead
-        of double-sprouting.
+        The manifest goes into the daemon-local artifact index (search) and
+        one ``tool_registered`` event goes to the epoch buffer and to the
+        gossip: the close reads its digest and metadata.
         """
-        from .library.tool_manifest import (
-            manifest_embedding_text,
-            validate_manifest,
-        )
-        from .library.usefulness_coords import (
-            default_usefulness_embedder,
-        )
+        from .library.tool_manifest import registration_event, validate_manifest
 
         errors = validate_manifest(manifest)
         if errors:
             return {"error": "invalid tool manifest: " + "; ".join(errors)}
 
-        if embedder is None:
-            embedder = default_usefulness_embedder(dim=self.embedding_dim)
-
         with self._lock:
             digest = self._artifact_index.add_artifact(manifest)
-            claim = (f"tool {manifest['name']}: "
-                     f"{manifest['description']}")[:200]
-            coords = self.coords_for_text(
-                manifest_embedding_text(manifest), embedder=embedder,
-            )
-            obs = Observation(id="tm_" + digest[:16], coords=coords, label=claim)
-            receipt = self.submit_observation(
-                obs,
-                agent_id=agent_id,
-                sprout_under_charter=True,
-                sprout_rootless=True,
-                equilibrate_rounds=equilibrate_rounds,
-                equilibrate_tolerance=equilibrate_tolerance,
-                artifact_digest=digest,
-                manifest_meta={
-                    "trust_class": str(manifest.get("trust_class", "")),
-                    "author": str(manifest.get("author", "")),
-                    # Composition fan-out DAG (consensus-carried like
-                    # author — the close must never depend on blob
-                    # replication). Comma-joined: manifest_meta values
-                    # are strings on the wire.
-                    "deps": ",".join(manifest.get("dependencies") or []),
-                    # Successor merit carry (Decision 2026-10-13 §6): the
-                    # close needs the predecessor link as consensus data.
-                    # Only present when set, so manifests without a
-                    # predecessor keep their registration bytes.
-                    **({"version_of": str(manifest["version_of"])}
-                       if manifest.get("version_of") else {}),
-                },
-                # Registering a claim IS a claim: one unit-weight,
-                # CON-able self-post so a published tool has standing 1
-                # at birth and can mint from attested usage without
-                # waiting for third-party endorsement.
-                author_post=True,
-            )
-            receipt["manifest_digest"] = digest
-            return receipt
+            event = registration_event(manifest, digest, agent_id=agent_id)
+            self._buffer_epoch_events_locked([event])
+            self._broadcast_local_events_locked([event])
+            self._persistence.append_events([event], equilibrate_after=False)
+            self._events_applied += 1
+            self._events_since_snapshot += 1
+            return {"events_applied": 1, "manifest_digest": digest}
 
     def infer_artifacts(
         self, query_text: str, k: int = 5, render: bool = False,
@@ -2515,8 +2459,6 @@ class WorldService:
         # authoritative (ToolBond-rated) positions stand.
         if not self._federated_positions_seen:
             self._tool_positions = dict(tool_result.get("positions_next") or {})
-            from .federated_reconcile import apply_tool_positions
-            apply_tool_positions(self._world, self._tool_positions)
         self._save_tool_state_locked()
 
         # Stake-style agent weighting, as on the federated rail.

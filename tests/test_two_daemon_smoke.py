@@ -68,8 +68,7 @@ def _make_daemon(
         world_service=svc,
     )
     driver = FederatedCloseDriver(
-        gossip=gossip, embedding_dim=embedding_dim, pricing="equilibrated",
-    )
+        gossip=gossip, )
     return svc, gossip, driver
 
 

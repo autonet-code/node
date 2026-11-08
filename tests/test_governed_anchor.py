@@ -80,10 +80,8 @@ def _travel(w3, seconds: int) -> None:
 
 def _close(epoch_id: str) -> dict:
     payload = {
-        "schema": 3, "epoch_root": "5a" * 32, "agent_mint": {},
-        "agent_novelty": {}, "total_mint": 0.0, "total_novelty": 0.0,
-        "output_decimals": 10, "gate_applied": False,
-        "n_batches": 1, "n_events": 0,
+        "epoch_root": "5a" * 32, "agent_mint": {}, "total_mint": 0.0,
+        "output_decimals": 10, "n_batches": 1, "n_events": 0,
     }
     return {"authoritative_payload": payload, "agent_mint": {},
             "epoch_id": epoch_id}

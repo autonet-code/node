@@ -167,9 +167,7 @@ def test_encoding_rejects_non_finite_floats():
     payload = {
         "epoch_root": "00" * 32,
         "agent_mint": {"alice": float("inf")},
-        "agent_novelty": {},
         "total_mint": 0.0,
-        "total_novelty": 0.0,
         "n_batches": 0,
         "n_events": 0,
     }

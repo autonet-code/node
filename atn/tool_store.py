@@ -742,18 +742,20 @@ class ToolStore:
                             record.name, exc)
         return True
 
-    def push_all_manifests(self) -> int:
+    def push_all_manifests(self, skip: Any = None) -> int:
         """Re-submit every PUBLISHED manifest through manifest_sink.
 
-        Called when the substrate comes up after tools were registered
-        offline. Idempotent on the world side (content-addressed claim
-        node per digest). Private tools never leave the daemon. Returns
-        the number pushed."""
+        Called when the network comes up after tools were registered
+        offline. ``skip(digest)`` True leaves a manifest out (the caller
+        passes the anchored registrations, which need no second event).
+        Private tools never leave the daemon. Returns the number pushed."""
         if self.manifest_sink is None:
             return 0
         pushed = 0
         for record in self._records.values():
             if not record.published:
+                continue
+            if skip is not None and skip(record.digest):
                 continue
             author = str(record.manifest.get("author") or "")
             if not _is_claimable_identity(author):

@@ -69,7 +69,7 @@ def test_driver_skips_when_no_batches():
     gossip.known_senders.return_value = []
     gossip.sender_pubkey = b"x" * 32
 
-    driver = FederatedCloseDriver(gossip=gossip, embedding_dim=8)
+    driver = FederatedCloseDriver(gossip=gossip)
     out = driver.run(local_close_result={"epoch_id": "e1"})
     assert out is None
 
@@ -116,8 +116,8 @@ def test_driver_winner_is_consistent_across_daemons(tmp_path):
     gossip_b.known_senders.return_value = senders
     gossip_b.sender_pubkey = kp_b.public_key
 
-    driver_a = FederatedCloseDriver(gossip=gossip_a, embedding_dim=8)
-    driver_b = FederatedCloseDriver(gossip=gossip_b, embedding_dim=8)
+    driver_a = FederatedCloseDriver(gossip=gossip_a)
+    driver_b = FederatedCloseDriver(gossip=gossip_b)
 
     fed_a = driver_a.run(local_close_result={"epoch_id": "e1"})
     fed_b = driver_b.run(local_close_result={"epoch_id": "e1"})

@@ -1,32 +1,21 @@
-"""Federated reconciliation: bit-identical agent_mint maps across daemons.
+"""The federated epoch close: bit-identical mint maps across daemons.
 
-Phase 5.4 of native world-model integration.
+Every daemon that closes an epoch runs ``federated_epoch_close`` over the
+same canonical batch sequence (``canonical_ordering``), the carry-over the
+previous anchor committed (registrations, review rounds, positions) and the
+chain inputs pinned to that anchor (REP shares, the ToolBond review
+snapshot, the fee pool, sanctions). The only mint rail is the review mint
+(``compute_tool_mint``, Decision 2026-11-07). Two guarantees make the
+output bit-identical:
 
-Wraps ``world_model_substrate.reconcile.reconcile_epoch`` with two
-guarantees that the underlying function does NOT make on its own:
+  1. **Deterministic iteration order**. Float addition is
+     non-associative, so every sum runs over sorted keys (digest, then
+     agent) and every honest daemon performs the same sequence of float
+     operations.
 
-  1. **Deterministic iteration order**. The wrapped function iterates
-     a Python ``set`` of node ids and ``dict.items()`` of attribution
-     maps. Float addition is non-associative, so different iteration
-     orders produce different sums. We override the iteration to be
-     sorted (lexicographic on node_id, agent_id) so every honest
-     daemon performs the *same sequence of float operations*.
-
-  2. **Output normalization**. Even with sorted iteration, IEEE 754
-     edge cases (subnormals, ulp-level jitter from cross-platform
-     math libraries) can produce trivially-different float results.
-     We round all output mint/novelty values to ``OUTPUT_DECIMALS``
-     decimal places before returning. This is a normalization step,
-     not a precision loss for the chain side: the ``ChainSubmitter``
-     scales by 1e6 anyway.
-
-Why a wrapper rather than editing reconcile.py
-----------------------------------------------
-
-``reconcile_epoch`` is used by the existing per-task substrate path
-(``aggregator/main.py`` etc.) where bit-identicality is not required.
-A wrapper preserves backward compat while letting the federated
-codepath get the stricter guarantee.
+  2. **Output normalization**. Mints are rounded to ``OUTPUT_DECIMALS``
+     places and then floored to whole ATN base units within the pool,
+     which swamps any ulp-level jitter.
 """
 
 from __future__ import annotations
@@ -34,36 +23,16 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from world_model.generalized import World, equilibrate
-
 from .canonical_ordering import CanonicalOrder
-from .world_model_substrate.adapter import (
-    _all_node_ids,
-    _EventRecorder,
-    build_charter_world,
-)
-from .world_model_substrate.aggregate import apply_events
 from .library.charter import active_charter
-from .world_model_substrate.mint_gate import (
-    charter_violation_score,
-)
-from .world_model_substrate.reconcile import (
-    EpochSnapshots,
-    _attribute_node_mint,
-    _node_mint,
-    _node_novelty,
-    scale_node_agent_mint_by_violation,
-    snapshot_node_scores_ordered,
-)
 
 
 logger = logging.getLogger(__name__)
 
 
-# Number of decimal places we round mint/novelty outputs to.
-# Empirically: 10 is far below any meaningful precision (substrate
-# scores are typically O(10) to O(1000) and chain scaling truncates
-# at 6 decimals), but well above IEEE 754 jitter (~15 sig figs).
+# Number of decimal places mint outputs are rounded to: far below any
+# meaningful precision (chain scaling truncates at 6 decimals), well above
+# IEEE 754 jitter (~15 significant figures).
 OUTPUT_DECIMALS = 10
 
 # Composition fan-out (docs/tool_substrate.md, Composition section):
@@ -444,7 +413,7 @@ def compute_tool_mint(
     known_regs: Dict[str, Dict[str, str]] = dict(registrations or {})
     reg_events = [
         e for e in events
-        if e.get("kind") == "sub_claim_sprouted"
+        if e.get("kind") == "tool_registered"
         and e.get("artifact_digest") and e.get("manifest_meta")
     ]
     reg_events.sort(key=lambda e: (e.get("author_agent", ""), e.get("seq", 0)))
@@ -684,293 +653,24 @@ def compute_tool_mint(
     }
 
 
-def federated_reconcile_epoch(
-    world: World,
-    snapshots: EpochSnapshots,
-    events: List[Dict[str, Any]],
-    *,
-    agent_weights: Optional[Dict[str, float]] = None,
-    # v4.1 [R7] / divergence D2: default OFF, aligned with the outer
-    # federated_epoch_close (the violator-pays gate is DORMANT). A True
-    # default here silently reactivated the gate for direct callers.
-    apply_gate: bool = False,
-    gate_strength: float = 1.0,
-    output_decimals: int = OUTPUT_DECIMALS,
-    emission_pool: Optional[float] = None,
-    extra_node_agent_mint: Optional[Dict[str, Dict[str, float]]] = None,
-) -> Dict[str, Any]:
-    """Run reconcile_epoch deterministically.
-
-    Same inputs (world topology, snapshots, events list, optional
-    agent_weights) at every honest daemon produce **bit-identical**
-    output dicts.
-
-    ``emission_pool``: when set, post-gate mints are normalized to
-    shares of this fixed pool (see reconcile.apply_emission_pool). Under
-    fees-only emission (Decision 2026-07-10) this is the burned-fee total
-    for the epoch window (Σ ServiceFee.burned between anchors), read on
-    the same pinned rail as the voice weights; a zero pool yields zero
-    mint. MUST be derived from canonical data (never a daemon-local
-    clock) or the bit-identical guarantee breaks.
-
-    Returns the same shape as ``reconcile_epoch`` plus:
-      - ``output_decimals``: the rounding precision used.
-      - ``gate_applied``: whether the mint gate ran.
-
-    ONE EARNING RAIL (ratified 2026-07-04, late): score-movement mint
-    is RETIRED. Usage of a tool is a choice — attested usage is the
-    usefulness signal the economics run on, and text-claim score
-    movement double-counted the same "did it land" question with
-    weaker ground truth (phase8). ``agent_mint`` therefore consists
-    solely of ``extra_node_agent_mint`` (tool-author mint from
-    compute_tool_mint), gate-scaled and pool-normalized. The score/
-    standing machinery is fully retained — standing PRICES tool mint
-    and the gate reads charter debates — it just no longer pays for
-    prose. Work units remain data-plane retrieval artifacts (that
-    value was validated); they earn nothing directly. ``node_mint`` /
-    ``agent_novelty`` remain computed as diagnostics.
-    """
-    agent_weights = dict(agent_weights or {})
-
-    # Discover all node ids that appear in any snapshot. Sort them so
-    # the iteration order — and therefore the sequence of float adds
-    # into agent_mint — is deterministic across daemons.
-    all_node_ids: set[str] = set()
-    all_node_ids.update(snapshots.start.keys())
-    for cp in snapshots.checkpoints:
-        all_node_ids.update(cp.keys())
-    all_node_ids.update(snapshots.close.keys())
-    sorted_node_ids = sorted(all_node_ids)
-
-    node_mint: Dict[str, float] = {}
-    node_novelty: Dict[str, float] = {}
-    agent_mint: Dict[str, float] = {}
-    agent_novelty: Dict[str, float] = {}
-    # Per-(node, agent) mint breakdown, retained so the violator-pays
-    # gate can scale a flagged node's mint before it aggregates into
-    # per-agent totals. reconcile.py's uniform-ratio fallback discarded
-    # this; keeping it is what lets a CON win redistribute correctly.
-    node_agent_mint: Dict[str, Dict[str, float]] = {}
-
-    for node_id in sorted_node_ids:
-        nov = _node_novelty(node_id, snapshots)
-        score_mint = _node_mint(node_id, snapshots, world=world)
-        if nov > 0:
-            node_novelty[node_id] = nov
-        if score_mint > 0:
-            # DIAGNOSTIC ONLY (one earning rail): per-node score
-            # movement is reported but never enters agent_mint.
-            node_mint[node_id] = score_mint
-
-        # Attribute novelty proportionally over agents whose events
-        # landed under this node. Sort the attribution dict so the
-        # sum of float shares is associative-stable across daemons.
-        attribution = _attribute_node_mint(node_id, 1.0, events, world)
-        for agent in sorted(attribution.keys()):
-            share = attribution[agent]
-            agent_novelty[agent] = agent_novelty.get(agent, 0.0) + nov * share
-
-    # The ONLY earning rail: tool-author mint (compute_tool_mint),
-    # anchored per manifest claim node. Merged BEFORE the gate so a won
-    # charter CON against the anchoring node suppresses it like any
-    # other mint, and before the pool so pool normalization applies.
-    # ``agent_weights`` (stake-style weighting) applies here as it did
-    # to the retired score rail. Sorted iteration keeps the float-add
-    # order canonical. Money only (Decision 2026-07-10): no rep basis is
-    # accumulated — REP is claimed DAO-side on ratified ATN earnings.
-    for node_id in sorted((extra_node_agent_mint or {}).keys()):
-        extra = extra_node_agent_mint[node_id]
-        per_agent = node_agent_mint.setdefault(node_id, {})
-        node_total = 0.0
-        for agent in sorted(extra.keys()):
-            amount = float(extra[agent])
-            if amount <= 0.0:
-                continue
-            weighted = amount * agent_weights.get(agent, 1.0)
-            agent_mint[agent] = agent_mint.get(agent, 0.0) + weighted
-            per_agent[agent] = per_agent.get(agent, 0.0) + weighted
-            node_total += weighted
-        if node_total > 0.0:
-            node_mint[node_id] = node_mint.get(node_id, 0.0) + node_total
-
-    # Output normalization: round all per-agent and per-node values
-    # to `output_decimals` places. This swamps any IEEE 754 jitter
-    # without losing meaningful precision.
-    agent_mint = _round_dict(agent_mint, output_decimals)
-    agent_novelty = _round_dict(agent_novelty, output_decimals)
-    node_mint = _round_dict(node_mint, output_decimals)
-    node_novelty = _round_dict(node_novelty, output_decimals)
-
-    # Re-sort dicts so JSON serialization (and dict equality with
-    # other daemons') is order-stable. dict() in CPython preserves
-    # insertion order, so building from a sorted iterator gives a
-    # canonical layout.
-    agent_mint = dict(sorted(agent_mint.items()))
-    agent_novelty = dict(sorted(agent_novelty.items()))
-    node_mint = dict(sorted(node_mint.items()))
-    node_novelty = dict(sorted(node_novelty.items()))
-
-    total_mint = round(sum(agent_mint.values()), output_decimals)
-    total_novelty = round(sum(agent_novelty.values()), output_decimals)
-
-    result = {
-        "agent_mint": agent_mint,
-        "agent_novelty": agent_novelty,
-        "node_mint": node_mint,
-        "node_novelty": node_novelty,
-        "total_mint": total_mint,
-        "total_novelty": total_novelty,
-        "output_decimals": output_decimals,
-        "gate_applied": False,
-    }
-
-    if apply_gate:
-        # Violator-pays gate: scale each flagged node's per-agent mint
-        # BEFORE aggregating, so suppression falls only on the flagged
-        # node's authors (not uniformly across all agents like
-        # apply_mint_gate's fallback). Combined with the emission pool
-        # below, a winning CON redistributes the violator's mint to
-        # everyone else.
-        node_violation: Dict[str, float] = {}
-        for node_id in sorted(node_agent_mint.keys()):
-            node_violation[node_id] = charter_violation_score(
-                world, node_id, active_charter().ids,
-            )
-        gated_agent_mint = scale_node_agent_mint_by_violation(
-            node_agent_mint, node_violation, gate_strength=gate_strength,
-        )
-        # Recompute the gated per-node mint (for diagnostics + pool
-        # scaling of node_mint), scaling each node by its violation.
-        gated_node_mint: Dict[str, float] = {}
-        for node_id in sorted(node_mint.keys()):
-            v = node_violation.get(node_id, 0.0)
-            scale = max(0.0, 1.0 - gate_strength * v)
-            gm = node_mint[node_id] * scale
-            if gm > 0:
-                gated_node_mint[node_id] = gm
-
-        result["agent_mint"] = dict(sorted(
-            _round_dict(gated_agent_mint, output_decimals).items()
-        ))
-        result["node_mint"] = dict(sorted(
-            _round_dict(gated_node_mint, output_decimals).items()
-        ))
-        result["node_violation"] = dict(sorted(node_violation.items()))
-        result["total_mint"] = round(
-            sum(result["agent_mint"].values()), output_decimals,
-        )
-        result["gate_applied"] = True
-
-    # Fixed-emission normalization — AFTER the gate, so mint suppressed
-    # by debate is redistributed to the surviving contributors. Scaling
-    # runs over sorted keys and is re-rounded, so determinism holds.
-    if emission_pool is not None:
-        result = apply_emission_pool(result, emission_pool)
-        # On-chain conservation (2026-10-12): Substrate caps each epoch's
-        # cumulative claimFor at the integer fee pool, so the
-        # ratified mints are FLOORED to integer base units whose sum never
-        # exceeds it (float rounding could otherwise over-allocate by an
-        # ulp and the last claimer would revert).
-        result["agent_mint"] = floor_mint_to_pool(
-            result.get("agent_mint", {}) or {}, emission_pool)
-        result["agent_mint"] = dict(sorted(
-            _round_dict(result.get("agent_mint", {}), output_decimals).items()
-        ))
-        result["node_mint"] = dict(sorted(
-            _round_dict(result.get("node_mint", {}), output_decimals).items()
-        ))
-        result["total_mint"] = round(
-            sum(result["agent_mint"].values()), output_decimals,
-        )
-
-    logger.info(
-        "federated reconciliation: %d nodes, %d agents, "
-        "total mint %.6f, total novelty %.6f",
-        len(result["node_mint"]),
-        len(result["agent_mint"]),
-        result["total_mint"],
-        result["total_novelty"],
-    )
-    return result
-
-
-def apply_tool_positions(
-    world: World, positions: Dict[str, Dict[str, Any]],
-) -> int:
-    """Write drifted charter heads onto manifest claim nodes (v3 drift).
-
-    For every node whose ``artifact_digest`` appears in ``positions``,
-    the head (first ``len(pos["head"])`` coords) of BOTH coordinate
-    stores is replaced: the per-tendency ``CoordinateClaim.anchor``
-    (what serialize_world / checkpoints read) and the backing
-    ``world.observations`` entry (what the visualization surfaces
-    read). Embedding tails are untouched. Deterministic: purely a
-    function of (world, positions).
-
-    Returns the number of (tendency, node) coordinate writes.
-    """
-    from dataclasses import replace as _dc_replace
-
-    if not positions:
-        return 0
-    updated = 0
-    seen_obs: set = set()
-    for tendency in world.tendencies.values():
-        for node in tendency.tree.all_nodes():
-            digest = getattr(node, "artifact_digest", "") or ""
-            pos = positions.get(digest) if digest else None
-            if not pos:
-                continue
-            head = tuple(float(x) for x in (pos.get("head") or ()))
-            if not head:
-                continue
-            claim = tendency._node_to_claim.get(node.id)
-            if claim is not None and claim.anchor and len(claim.anchor) >= len(head):
-                claim.anchor = head + tuple(claim.anchor)[len(head):]
-                updated += 1
-            obs_id = getattr(node, "observation_id", None)
-            if obs_id and obs_id not in seen_obs:
-                obs = world.observations.get(obs_id)
-                if obs is not None and obs.coords and len(obs.coords) >= len(head):
-                    world.observations[obs_id] = _dc_replace(
-                        obs, coords=head + tuple(obs.coords)[len(head):])
-                    seen_obs.add(obs_id)
-    return updated
-
-
 def federated_epoch_close(
     canonical: CanonicalOrder,
     *,
-    seed_world: Optional[World] = None,
-    bandwidth: float = 1.5,
-    embedding_dim: int = 1024,
-    # v3 (spec Decision 2026-07-08): the violator-pays gate is DORMANT —
-    # debate machinery left the live path, so there are no charter CONs
-    # to price. The machinery stays intact behind the flag for the named
-    # future mitigation; default OFF.
-    apply_gate: bool = False,
-    gate_strength: float = 1.0,
     output_decimals: int = OUTPUT_DECIMALS,
-    equilibrate_rounds: int = 8,
-    equilibrate_tolerance: float = 1e-3,
     emission_pool: Optional[float] = None,
-    pricing: str = "ledger",
     tool_registrations: Optional[Dict[str, Dict[str, str]]] = None,
     agent_owner_map: Optional[Dict[str, str]] = None,
-    voice_weights: Optional[Dict[str, float]] = None,
     tool_rounds: Optional[Dict[str, Any]] = None,
-    tool_positions: Optional[Dict[str, Dict[str, Any]]] = None,
-    # Raw REP share per household (weighs own_share estimates).
+    # Raw REP share per household (weighs reviews).
     rep_shares: Optional[Dict[str, float]] = None,
     # Staked reviews (docs/multi_jurisdiction.md decision 10): the ToolBond
     # review snapshot, read by the caller pinned to the previous anchor
-    # (same snapshot as voice_weights / rep_shares / emission_pool). None =
-    # no ratings (zero heads) and no reviewer shares.
+    # (same snapshot as rep_shares / emission_pool). None = no ratings
+    # (zero heads) and no review rounds.
     review_snapshot: Optional[Dict[str, Any]] = None,
     # Households under a DAO sanction at the same snapshot
     # (docs/accountability.md): their mint is withheld (left unminted, not
-    # passed to others) and their estimates carry no drift weight. Their
-    # reviews are already dropped from the ratings in ``review_snapshot``.
+    # passed to others) and their reviews weigh nothing.
     sanctioned_households: Optional[List[str]] = None,
     # Tools denied at the snapshot (compute_tool_mint).
     denied_tools: Optional[List[str]] = None,
@@ -980,145 +680,24 @@ def federated_epoch_close(
     review_decay: float = REVIEW_DECAY_DEFAULT,
     reviewer_min_rep_bps: int = REVIEWER_MIN_REP_BPS_DEFAULT,
 ) -> Dict[str, Any]:
-    """Run a full federated epoch close given a canonical sequence.
+    """Run a full federated epoch close over a canonical batch sequence.
 
-    Builds a throwaway replay world from a fresh charter (or from the
-    supplied ``seed_world`` if continuing from a prior epoch's
-    authoritative state), replays the canonical batch sequence, and
-    runs federated_reconcile_epoch.
-
-    ``pricing`` selects how per-node scores are derived:
-
-      - ``"ledger"`` (default, post-phase8): replay applies causal
-        events only — NO equilibrate rounds, NO derived-sprout capture.
-        A node's score is the ``net_score`` tree recursion (posts +
-        signed pro/con children). Score moves only when causal events
-        land on/under the node during the epoch. The O(N^2) equilibrate
-        leaves the hot path. Cycle memoization is made deterministic by
-        evaluating net_score in sorted node-id order (see
-        ``snapshot_node_scores_ordered``).
-
-      - ``"equilibrated"``: the pre-phase8 experimental kernel. Replays
-        each batch with per-batch equilibration and captures the
-        derived sprouts it produces, attributing them to the batch's
-        author. Preserved BIT-FOR-BIT for the experimental kernel.
-
-    The returned ``result`` is bit-identical across daemons that
-    received the same canonical sequence — which by 5.3's contract
-    they will, given the same set of batches.
-
-    Notes
-    -----
-
-    Phase 5.4 builds the replay world from a **fresh charter**, which
-    is correct as long as epochs don't carry any persistent state
-    forward. Phase 5.5+ may want to seed from the prior authoritative
-    epoch's snapshot (so cross-epoch lineage works); that's why
-    ``seed_world`` is exposed.
+    A pure function of (canonical events, carry-over, pinned chain
+    inputs): daemons that received the same batches return bit-identical
+    results, and the ``authoritative_payload`` is what the anchor commits.
+    The canonical events matter for their tool registrations
+    (``tool_registered``); everything a mint needs beyond them is carried
+    or read from the chain.
     """
-    if pricing not in ("ledger", "equilibrated"):
-        raise ValueError(f"unknown pricing mode: {pricing!r}")
+    all_events: List[Dict[str, Any]] = []
+    for batch in canonical.ordered_batches:
+        sender_hex = batch.sender_pubkey.hex()
+        for ev in batch.events or []:
+            all_events.append(_annotate_sender(ev, sender_hex))
 
-    if seed_world is None:
-        world = build_charter_world(
-            bandwidth=bandwidth, embedding_dim=embedding_dim,
-        )
-    else:
-        world = seed_world
-
-    snapshots = EpochSnapshots()
-
-    if pricing == "ledger":
-        # Ledger replay: causal events only, no equilibration, no
-        # derived-sprout capture. Snapshots use sorted-order net_score
-        # so co-parented-cycle memoization is deterministic.
-        #
-        # Attribution needs each causal sprout event's node_id to be the
-        # LIVE (content-addressed) id, but the wire carries solver-side
-        # labels. We capture the replay remap and rewrite the events so
-        # ``_events_under_node`` (which matches raw event node_ids
-        # against live descendant ids) attributes to the real author.
-        snapshots.start = snapshot_node_scores_ordered(world)
-        all_events: List[Dict[str, Any]] = []
-        for batch in canonical.ordered_batches:
-            if not batch.events:
-                continue
-            remap: Dict[str, str] = {}
-            apply_events(
-                world, batch.events,
-                equilibrate_after=False, remap_out=remap,
-            )
-            # Build attribution copies with node_id rewritten to the
-            # live id. We do NOT mutate batch.events (the canonical log
-            # is fed downstream to the state-sync tracker verbatim).
-            sender_hex = batch.sender_pubkey.hex()
-            for ev in batch.events:
-                if ev.get("kind") == "sub_claim_sprouted":
-                    live = remap.get(ev.get("node_id", ""))
-                    if live and live != ev.get("node_id"):
-                        ev = dict(ev)
-                        ev["solver_node_id"] = ev.get("node_id")
-                        ev["node_id"] = live
-                ev = _annotate_sender(ev, sender_hex)
-                all_events.append(ev)
-        snapshots.close = snapshot_node_scores_ordered(world)
-    else:
-        # Equilibrated (experimental) kernel — unchanged behavior.
-        snapshots.record_start(world)
-        # Replay each batch as its own apply_events + equilibrate, so
-        # equilibration history matches what would have happened with
-        # in-order live submission.
-        #
-        # Attribution gotcha (Phase 5.4): the gossip wire format carries
-        # only causal events. Reconcile, however, attributes mint by
-        # finding sub_claim_sprouted events under each minting node —
-        # which means it needs the *derived* sprouts that equilibration
-        # produced too. We capture them here and attribute them to the
-        # batch's author, so attribution reproduces deterministically.
-        #
-        # Determinism: cross-tendency discovery and equilibration are
-        # deterministic given world state, so two daemons replaying the
-        # same canonical sequence produce the same derived events.
-        all_events = []
-        for batch in canonical.ordered_batches:
-            # Author of this batch's derived events = whoever signed the
-            # batch. We use sender_pubkey hex as a stable agent identity.
-            # If batch.events carry an explicit author_agent, prefer that
-            # (the daemon may run on behalf of multiple agents).
-            author = _author_for_batch(batch)
-            before_ids = _all_node_ids(world)
-            if batch.events:
-                apply_events(world, batch.events)
-            equilibrate(
-                world,
-                max_rounds=equilibrate_rounds,
-                tolerance=equilibrate_tolerance,
-            )
-            # Capture derived sprouts post-equilibrate, attributed to
-            # this batch's author. The event recorder uses its own
-            # sequence numbering; we offset to keep events globally
-            # unique-ish in the all_events list (reconcile only matches
-            # by node_id and position, not seq).
-            recorder = _EventRecorder(agent_id=author)
-            recorder.sub_claims_after_equilibrate(world, before_ids)
-            derived = [e.to_dict() for e in recorder.events]
-
-            sender_hex = batch.sender_pubkey.hex()
-            all_events.extend(_annotate_sender(ev, sender_hex)
-                              for ev in batch.events)
-            all_events.extend(derived)
-
-        snapshots.record_close(world)
-
-    # Tool substrate: author mint = usage_term (pinned only, v3 —
-    # docs/tool_substrate.md Decision 2026-07-08), anchored on the
-    # manifest's claim node. Pure function of the replayed world +
-    # canonical events + explicitly-passed carry-over registrations,
-    # so the bit-identical guarantee holds.
     sanctioned = sorted({str(h).lower() for h in (sanctioned_households or ())})
     if sanctioned and rep_shares is not None:
-        # No drift weight: a sanctioned household's own_share estimates
-        # move nothing (zero rep share, like any zero-rep household).
+        # A sanctioned household's reviews weigh nothing (zero REP share).
         rep_shares = {h: w for h, w in rep_shares.items()
                       if str(h).lower() not in set(sanctioned)}
     tool_result = compute_tool_mint(
@@ -1140,33 +719,38 @@ def federated_epoch_close(
     # cumulative pool, so the carry can be spent in any later epoch.
     if emission_pool is not None:
         emission_pool = float(emission_pool) + rounds_next["pool_carry"] / ATN_BASE_UNITS
-    # Write the ToolBond-rated charter heads onto the replay world so the
-    # checkpoint (world_cid) and any world reader carry them forward. Coords
-    # never feed scores, so the score snapshots above are unaffected; the
-    # write is a pure function of (pinned snapshot, carry, canonical
-    # events), bit-identical everywhere.
-    apply_tool_positions(world, tool_result["positions_next"])
 
-    result = federated_reconcile_epoch(
-        world, snapshots, all_events,
-        apply_gate=apply_gate,
-        gate_strength=gate_strength,
-        output_decimals=output_decimals,
-        emission_pool=emission_pool,
-        extra_node_agent_mint=tool_result["node_agent"],
-    )
-    # The unpaid part of each concluding tool's share stays unminted.
-    for key in ("agent_mint", "node_mint"):
-        result[key] = {k: v for k, v in (result.get(key) or {}).items()
-                       if k != UNMINTED}
-    if UNMINTED in (result.get("agent_mint") or {}):  # pragma: no cover
-        raise AssertionError("unminted sentinel leaked")
-    result["total_mint"] = round(sum(result["agent_mint"].values()), output_decimals)
-    # Keep tool_mint in the SAME UNITS as agent_mint: when the emission
-    # pool normalized agent mints, scale the per-digest display values
-    # by the identical factor (usage_term stays raw — it's the input
-    # signal, not a payout). Sorted iteration + rounding for the
-    # bit-identical guarantee.
+    # Per-agent mint: every concluding tool's bucket, digest then agent
+    # order. The unpaid part of each tool's share rides as UNMINTED so the
+    # pool split below leaves it unminted.
+    agent_mint: Dict[str, float] = {}
+    node_agent = tool_result["node_agent"]
+    for digest in sorted(node_agent):
+        for agent in sorted(node_agent[digest]):
+            amount = float(node_agent[digest][agent])
+            if amount > 0.0:
+                agent_mint[agent] = agent_mint.get(agent, 0.0) + amount
+    result: Dict[str, Any] = {
+        "agent_mint": dict(sorted(_round_dict(agent_mint, output_decimals).items())),
+        "output_decimals": output_decimals,
+    }
+    if emission_pool is not None:
+        result = apply_emission_pool(result, emission_pool)
+        # On-chain conservation (2026-10-12): Substrate caps each epoch's
+        # cumulative claimFor at the integer fee pool, so the ratified
+        # mints are FLOORED to integer base units whose sum never exceeds
+        # it (float rounding could otherwise over-allocate by an ulp and
+        # the last claimer would revert).
+        result["agent_mint"] = floor_mint_to_pool(
+            result.get("agent_mint", {}) or {}, emission_pool)
+        result["agent_mint"] = dict(sorted(
+            _round_dict(result.get("agent_mint", {}), output_decimals).items()
+        ))
+    result["agent_mint"] = {k: v for k, v in result["agent_mint"].items()
+                            if k != UNMINTED}
+    # Keep tool_mint in the SAME UNITS as agent_mint: when the pool
+    # normalized agent mints, scale the per-digest display values by the
+    # identical factor. Sorted iteration + rounding.
     per_digest = tool_result["per_digest"]
     _pool = result.get("emission_pool")
     _raw_total = float(result.get("raw_mint_total") or 0.0)
@@ -1188,7 +772,7 @@ def federated_epoch_close(
         owners = {str(k).lower(): str(v).lower()
                   for k, v in (agent_owner_map or {}).items()}
         kept: Dict[str, float] = {}
-        for agent in sorted(result.get("agent_mint", {}) or {}):
+        for agent in sorted(result["agent_mint"]):
             amount = result["agent_mint"][agent]
             a = str(agent).lower()
             if owners.get(a, a) in house_set or a in house_set:
@@ -1197,14 +781,13 @@ def federated_epoch_close(
             else:
                 kept[agent] = amount
         result["agent_mint"] = kept
-        result["total_mint"] = round(sum(kept.values()), output_decimals)
     result["sanctioned_households"] = sanctioned
     result["withheld_mint"] = dict(sorted(withheld.items()))
     # The owner wallet claims (Decision 2026-10-27): key each mint by the
     # earning agent's pinned owner, summed per household. An agent with no
     # owner entry (bound after the snapshot, or genesis) stays its own
     # claimant. The per-agent split is kept for diagnostics only.
-    result["agent_mint_by_agent"] = result.get("agent_mint", {}) or {}
+    result["agent_mint_by_agent"] = result["agent_mint"]
     result["agent_mint"] = household_mint(
         result["agent_mint_by_agent"], agent_owner_map, output_decimals)
     # Pool-floored mints are whole base units, so the household sums are
@@ -1230,46 +813,25 @@ def federated_epoch_close(
     result["n_events"] = len(all_events)
     result["scope"] = "federated"
     result["authoritative"] = True
-    result["pricing"] = pricing
 
-    # The on-chain anchor (Phase 5.5) commits the merkle of an
-    # ``authoritative_payload`` dict. Only fields whose keys are
-    # deterministic across daemons can live here. Node ids are now
-    # fully deterministic (content-addressed children; roots are
-    # ``root_<tendency_id>``), but per-node score maps are unbounded
-    # in size, so the chain payload still carries only ``agent_mint``
-    # + ``agent_novelty`` (keyed by user-supplied agent_id) plus
-    # ``epoch_root``. Per-node fields stay in ``result`` for local
-    # diagnostics only.
-    # Charter version hash: the anchored charter this close ran against. A
-    # charter change is a forward-only fork boundary, so the hash belongs in
-    # the authoritative payload (imported lazily to keep the import block small
-    # and avoid a circular import via adapter).
+    # The on-chain anchor commits the merkle of an ``authoritative_payload``
+    # dict: only fields every daemon computes identically live here.
     from .library.charter_version import charter_hash as _charter_hash
 
     result["authoritative_payload"] = {
-        # schema 3 (fees-only, Decision 2026-07-10): MONEY ONLY — the
-        # anchor's mint merkle commits (agent, agent_mint) on a 2-field
-        # leaf. ``agent_rep`` is gone: REP is claimed DAO-side on ratified
-        # ATN earnings, not federation-minted here. (Schema 2 was the v4.1
-        # 3-field agent_rep shape; not reused for this different shape.)
-        # schema 4: + carry_cid (set by FederatedCloseDriver, like
-        # world_cid) committing the next close's carry-over bundle.
-        # schema 5 (Decision 2026-10-26): the encoding also commits
-        # charter_hash and sanctioned_households.
-        # schema 6 (Decision 2026-10-27): agent_mint is keyed by household
-        # claimant (lowercase owner wallet), the leaf claimFor verifies.
-        "schema": 6,
+        # schema 7 (Decision 2026-11-08, the world leaves the system): the
+        # payload drops agent_novelty, total_novelty, gate_applied and
+        # world_cid. agent_mint is keyed by household claimant (lowercase
+        # owner wallet, schema 6), the 2-field leaf claimFor verifies;
+        # carry_cid (set by FederatedCloseDriver) commits the next close's
+        # carry-over bundle; charter_hash and sanctioned_households decide
+        # the mint, so they are committed too.
+        "schema": 7,
         "epoch_root": result["epoch_root"],
         "agent_mint": result["agent_mint"],
-        "agent_novelty": result["agent_novelty"],
         "total_mint": result["total_mint"],
-        "total_novelty": result["total_novelty"],
-        "output_decimals": result.get("output_decimals", output_decimals),
-        "gate_applied": result.get("gate_applied", False),
-        "pricing": pricing,
+        "output_decimals": output_decimals,
         "charter_hash": _charter_hash(),
-        # The sanction list this close ran against (docs/accountability.md).
         "sanctioned_households": result["sanctioned_households"],
         "n_batches": result["n_batches"],
         "n_events": result["n_events"],
@@ -1300,45 +862,19 @@ def household_mint(
 
 
 def _annotate_sender(ev: Dict[str, Any], sender_hex: str) -> Dict[str, Any]:
-    """Stamp the gossip batch's signing key onto a COPY of the events
-    the tool-mint pass reads (tool_used receipts and manifest_meta
-    registration sprouts).
+    """Stamp the gossip batch's signing key onto a COPY of a tool
+    registration event (it rides the registration as ``sender``).
 
-    The AGENT is the only authoritative economic entity; the sender key
-    is transport plumbing used solely for the wire-level dedup in
-    compute_tool_mint (self-attestation via co-hosted sybil agents
-    collapses to nothing). It never enters formula outputs, attribution
-    maps, or any chain surface. Deterministic: canonical batches carry
-    the key, so every daemon stamps identically. batch.events is never
-    mutated (the canonical log flows downstream verbatim).
+    The AGENT is the only authoritative economic entity; the sender key is
+    transport plumbing. It never enters formula outputs or any chain
+    surface. Deterministic: canonical batches carry the key, so every
+    daemon stamps identically. batch.events is never mutated (the
+    canonical log flows downstream verbatim).
     """
-    if ev.get("kind") == "tool_used" or (
-        ev.get("kind") == "sub_claim_sprouted" and ev.get("manifest_meta")
-    ):
+    if ev.get("kind") == "tool_registered" and ev.get("manifest_meta"):
         ev = dict(ev)
         ev["sender"] = sender_hex
     return ev
-
-
-def _author_for_batch(batch) -> str:
-    """Determine which agent_id derived events should be attributed to.
-
-    Preference order:
-      1. The author_agent of the first observation_added event in the
-         batch (the batch was made on behalf of that user-supplied id).
-      2. The sender_pubkey hex (a stable cryptographic identity, used
-         when the batch carries no causal observation events).
-
-    Determinism: every honest daemon picks the same author given the
-    same canonical batch, so derived-event attribution reproduces.
-    """
-    for ev in batch.events:
-        if ev.get("kind") == "observation_added":
-            author = ev.get("author_agent")
-            if author:
-                return str(author)
-    # Fall back: derive a stable identity from the signer.
-    return f"pk:{batch.sender_pubkey.hex()[:16]}"
 
 
 def apply_emission_pool(result: Dict[str, Any], emission_pool: float) -> Dict[str, Any]:
@@ -1351,7 +887,6 @@ def apply_emission_pool(result: Dict[str, Any], emission_pool: float) -> Dict[st
     """
     out = dict(result)
     agent_mint = result.get("agent_mint", {}) or {}
-    node_mint = result.get("node_mint", {}) or {}
     raw_total = sum(agent_mint[a] for a in sorted(agent_mint))
     out["raw_mint_total"] = raw_total
     out["emission_pool"] = float(emission_pool)
@@ -1359,7 +894,6 @@ def apply_emission_pool(result: Dict[str, Any], emission_pool: float) -> Dict[st
         return out
     scale = float(emission_pool) / raw_total
     out["agent_mint"] = {a: agent_mint[a] * scale for a in sorted(agent_mint)}
-    out["node_mint"] = {n: node_mint[n] * scale for n in sorted(node_mint)}
     out["total_mint"] = sum(out["agent_mint"][a] for a in sorted(out["agent_mint"]))
     return out
 

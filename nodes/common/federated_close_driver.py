@@ -8,9 +8,9 @@ The pieces this glues together (all already exist and tested):
   - ``canonical_order(batches)`` — sender-grouped Merkle-rooted
     deterministic ordering. Bit-identical across honest daemons that
     received the same batch set.
-  - ``federated_epoch_close(canonical, ...)`` — replay the canonical
-    sequence on a fresh charter world; produce a result whose
-    ``authoritative_payload`` is bit-identical too.
+  - ``federated_epoch_close(canonical, ...)`` — the review mint and the
+    next carry-over from the canonical events and the pinned chain
+    inputs; its ``authoritative_payload`` is bit-identical too.
 
 The driver also picks **a single submitter** for the on-chain anchor.
 Daemons run hash(epoch_id || canonical_root) modulo the canonical
@@ -44,7 +44,6 @@ from .authoritative_encoding import (
 from .canonical_ordering import canonical_order
 from .event_gossip import EventBatch, EventGossip
 from .federated_reconcile import federated_epoch_close
-from .world_model_substrate.adapter import build_charter_world
 
 
 logger = logging.getLogger(__name__)
@@ -59,13 +58,6 @@ class FederatedCloseResult:
     winner: bytes
     is_winner: bool
     n_batches: int
-    # State sync (task: anchored catch-up). When a canonical tracker
-    # is wired, every daemon computes the same cumulative-canonical-
-    # world checkpoint blob; its cid rides in the authoritative
-    # payload's world_cid field, and the blob itself is published to
-    # the blob resolver by the chain submission driver.
-    world_cid: str = ""
-    world_checkpoint_blob: bytes = b""
     # Verifiable carry-over (payload schema 4). Every daemon computes the
     # same canonical bundle of the three tool maps this close produced
     # (the next close's inputs); its cid rides the payload's carry_cid
@@ -119,42 +111,11 @@ class FederatedCloseDriver:
         self,
         gossip: EventGossip,
         *,
-        bandwidth: float = 1.5,
-        embedding_dim: int = 1024,
-        canonical_tracker: Optional[Any] = None,
-        pricing: str = "ledger",
         tool_registrations_path: Optional[Any] = None,
         tool_rounds_path: Optional[Any] = None,
         tool_positions_path: Optional[Any] = None,
-        canonical_world_path: Optional[Any] = None,
     ):
         self.gossip = gossip
-        self.pricing = pricing
-        self.bandwidth = bandwidth
-        self.embedding_dim = embedding_dim
-        # Optional state_sync.CanonicalWorldTracker. When present, each
-        # close also advances the cumulative canonical world and embeds
-        # its checkpoint cid in the authoritative payload (world_cid).
-        # Must be constructed with the SAME bandwidth/embedding_dim so
-        # the tracker's replay matches the federated kernel.
-        self.canonical_tracker = canonical_tracker
-        # The tracker's latest checkpoint blob, persisted after every close
-        # and restored at boot (Decision 2026-10-26): a tracker rebuilt from
-        # a fresh charter after a restart emits a world_cid no peer shares.
-        self._canonical_world_path: Optional[Path] = (
-            Path(canonical_world_path) if canonical_world_path else None
-        )
-        # True once the tracker holds the network's canonical world: a
-        # restored or chain-fetched checkpoint, or a fresh charter at
-        # genesis. A failed tracker update clears it (its world is then
-        # half-advanced).
-        self._tracker_restored = self._restore_canonical_tracker()
-        self._tracker_failed: Optional[str] = None
-        # Optional zero-arg hook returning a state_sync.CatchUpResult for
-        # the latest anchor's world_cid (None when not retrievable), used
-        # while the tracker has no checkpoint past genesis. Same install
-        # rule as the carry-over: only the epoch observed just before.
-        self.world_source: Optional[Callable[[], Any]] = None
         # Set when the latest voice refresh failed: closing on the previous
         # snapshot would price this epoch on state peers have moved past.
         self._voice_refresh_error: Optional[str] = None
@@ -217,11 +178,10 @@ class FederatedCloseDriver:
         self._tool_registrations: Dict[str, Dict[str, str]] = (
             self._load_tool_registrations()
         )
-        # Vetting carry-over (spec: Vetting section): candidate/greenlit
-        # state + validator bust counts. Same contract as the
-        # registrations map — derived purely from canonical events and
-        # replayed world state, so the on-disk copy is a rebuildable
-        # cache, identical on every honest daemon.
+        # Review-round carry-over (Decision 2026-11-07): each open tool's
+        # ToolBond rounds, the per-epoch review counts and the unminted
+        # pool. Derived purely from prior closes' pinned snapshots, so the
+        # on-disk copy is identical on every honest daemon.
         self._tool_rounds_path: Optional[Path] = (
             Path(tool_rounds_path) if tool_rounds_path else None
         )
@@ -338,7 +298,7 @@ class FederatedCloseDriver:
         self._local_epochs = self._load_local_epochs()
 
     def _in_flight_path(self) -> Optional[Path]:
-        base = self._tool_registrations_path or self._canonical_world_path
+        base = self._tool_registrations_path
         return None if base is None else base.parent / "epoch_in_flight.json"
 
     def _load_in_flight(self) -> Optional[int]:
@@ -367,7 +327,7 @@ class FederatedCloseDriver:
     # ---- pipelined elections: the local epoch chain -------------------
 
     def _local_chain_path(self) -> Optional[Path]:
-        base = self._tool_registrations_path or self._canonical_world_path
+        base = self._tool_registrations_path
         return None if base is None else base.parent / "epoch_chain.json"
 
     def _load_local_epochs(self) -> List[Dict[str, Any]]:
@@ -434,19 +394,11 @@ class FederatedCloseDriver:
 
     def _install_anchored_state(self, anchor_count: int,
                                 anchored: Dict[int, Dict[str, Any]]) -> bool:
-        """Install the carry-over and canonical world of the latest anchor
-        (hash-verified against the chain), as the base of the next close.
-        Returns False while they are not retrievable."""
+        """Install the carry-over of the latest anchor (hash-verified
+        against the chain) as the base of the next close. Returns False
+        while it is not retrievable."""
         if anchor_count == 0:
             self.install_carry_over({k: {} for k in CARRY_KEYS})
-            if self.canonical_tracker is not None:
-                from .state_sync import CanonicalWorldTracker
-                t = self.canonical_tracker
-                self.canonical_tracker = CanonicalWorldTracker(
-                    bandwidth=t.bandwidth, embedding_dim=t.embedding_dim,
-                    equilibrate_rounds=t.equilibrate_rounds,
-                    equilibrate_tolerance=t.equilibrate_tolerance)
-                self._tracker_restored = True
             self._rewind_pending = False
             return True
         head = anchored.get(anchor_count) or {}
@@ -463,18 +415,6 @@ class FederatedCloseDriver:
             logger.info("federated close: anchored carry-over for epoch %s not "
                         "retrievable yet; waiting", head.get("epoch_id"))
             return False
-        if self.canonical_tracker is not None:
-            try:
-                world = self.world_source() if self.world_source else None
-            except Exception as e:
-                logger.warning("federated close: anchored world fetch failed: %s", e)
-                world = None
-            if world is None or str(getattr(world, "epoch_root_hex", "")) != \
-                    str(head.get("root")):
-                logger.info("federated close: anchored world for epoch %s not "
-                            "retrievable yet; waiting", head.get("epoch_id"))
-                return False
-            self._install_world(world)
         self.install_carry_over(fetch.carry)
         self._rewind_pending = False
         logger.info("federated close: installed the anchored state of epoch %s",
@@ -591,90 +531,6 @@ class FederatedCloseDriver:
             self._closed_epoch_number = number
             self._save_in_flight(number, epoch_id)
         return members, epoch_id
-
-    def _restore_canonical_tracker(self) -> bool:
-        """Load the persisted checkpoint into the tracker. Returns True
-        when one was restored."""
-        path = self._canonical_world_path
-        if self.canonical_tracker is None or path is None or not path.exists():
-            return False
-        from .state_sync import CanonicalWorldTracker, decode_world_checkpoint
-        try:
-            blob = path.read_bytes()
-            checkpoint = decode_world_checkpoint(blob)
-            tracker = self.canonical_tracker
-            self.canonical_tracker = CanonicalWorldTracker.from_checkpoint(
-                checkpoint, cid_for_blob(blob),
-                bandwidth=tracker.bandwidth,
-                embedding_dim=tracker.embedding_dim,
-                equilibrate_rounds=tracker.equilibrate_rounds,
-                equilibrate_tolerance=tracker.equilibrate_tolerance,
-            )
-        except Exception as e:
-            logger.error(
-                "canonical world checkpoint unreadable (%s); this daemon "
-                "will not close until it fetches the anchored one", e)
-            return False
-        logger.info("canonical world tracker restored from %s (epoch %s)",
-                    path.name, checkpoint.get("epoch_id"))
-        return True
-
-    def _save_canonical_world(self, blob: bytes) -> None:
-        path = self._canonical_world_path
-        if path is None:
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_bytes(blob)
-            os.replace(tmp, path)
-        except OSError as e:
-            logger.warning("failed to persist canonical world: %s", e)
-
-    def _maybe_join_world(self, prev_root: Optional[str]) -> None:
-        """Install the anchored canonical world when the tracker has none
-        past genesis, under the same rule as the carry-over: the anchor
-        must be the epoch observed immediately before this close."""
-        if (self.canonical_tracker is None or self._tracker_restored
-                or self._chain_at_genesis is not False
-                or self.world_source is None or prev_root is None):
-            return
-        try:
-            result = self.world_source()
-        except Exception as e:
-            logger.warning(
-                "federated close: anchored world fetch failed (observing): %s", e)
-            return
-        if result is None:
-            return
-        if str(getattr(result, "epoch_root_hex", "") or "") != prev_root:
-            logger.warning(
-                "federated close: latest anchored world (epoch %s) is not the "
-                "epoch observed just before this close; observing",
-                getattr(result, "epoch_id", "?"))
-            return
-        self._install_world(result)
-        logger.info("federated close: installed the anchored canonical world "
-                    "(epoch %s)", result.epoch_id)
-
-    def _install_world(self, result: Any) -> None:
-        """Make an anchored, hash-verified world checkpoint the tracker's."""
-        from .state_sync import CanonicalWorldTracker, encode_world_checkpoint
-        tracker = self.canonical_tracker
-        self.canonical_tracker = CanonicalWorldTracker(
-            world=result.world, prev_world_cid=result.world_cid,
-            bandwidth=tracker.bandwidth, embedding_dim=tracker.embedding_dim,
-            equilibrate_rounds=tracker.equilibrate_rounds,
-            equilibrate_tolerance=tracker.equilibrate_tolerance,
-        )
-        blob = encode_world_checkpoint(
-            result.world, epoch_id=result.epoch_id,
-            epoch_root_hex=result.epoch_root_hex,
-            prev_world_cid=result.prev_world_cid)
-        if cid_for_blob(blob) == result.world_cid:
-            self._save_canonical_world(blob)
-        self._tracker_restored = True
-        self._tracker_failed = None
 
     def carry_over_paths(self) -> Dict[str, Optional[Path]]:
         """The on-disk carry-over files every close reads as INPUTS."""
@@ -895,16 +751,6 @@ class FederatedCloseDriver:
         if self._voice_refresh_error:
             blockers.append(
                 "voice-state refresh failed: " + self._voice_refresh_error)
-        if self.canonical_tracker is not None:
-            if self._tracker_failed:
-                blockers.append(
-                    "canonical world tracker failed: " + self._tracker_failed)
-            elif (not self._tracker_restored
-                  and self._chain_at_genesis is not True):
-                why = ("chain has prior anchors"
-                       if self._chain_at_genesis is False
-                       else "genesis status unknown")
-                blockers.append(f"no canonical world checkpoint ({why})")
         return blockers
 
     def _refresh_voice(self, pin: Optional[Dict[str, Any]] = None) -> None:
@@ -1106,7 +952,6 @@ class FederatedCloseDriver:
         if self.enforce_preconditions:
             if join_from_chain:
                 self._maybe_join_from_chain(prev_root)
-                self._maybe_join_world(prev_root)
             blockers = self.participation_blockers()
             if blockers:
                 # Batches are already drained, so they don't leak into
@@ -1133,22 +978,16 @@ class FederatedCloseDriver:
         chain_backed = (self.voice_source is not None
                         and self._chain_at_genesis is False)
 
-        # Replay the canonical sequence on a fresh charter world. This
-        # produces the bit-identical authoritative_payload across
-        # daemons.
+        # The close is a pure function of the canonical events, the
+        # carry-over and the pinned chain inputs: the authoritative_payload
+        # is bit-identical across daemons.
         try:
             close_result = federated_epoch_close(
                 canonical,
-                bandwidth=self.bandwidth,
-                embedding_dim=self.embedding_dim,
-                pricing=self.pricing,
                 tool_registrations=dict(self._tool_registrations),
                 agent_owner_map=dict(self.agent_owner_map),
-                voice_weights=(dict(self.voice_weights or {})
-                               if self.voice_weights or chain_backed else None),
                 emission_pool=self.emission_pool,
                 tool_rounds=dict(self._tool_rounds),
-                tool_positions=dict(self._tool_positions),
                 rep_shares=(dict(self.rep_shares or {})
                             if self.rep_shares or chain_backed else None),
                 review_snapshot=(dict(self.review_snapshot)
@@ -1214,37 +1053,6 @@ class FederatedCloseDriver:
         if _payload is not None:
             _payload["carry_cid"] = carry_cid
 
-        # State sync: advance the cumulative canonical world and embed
-        # its checkpoint cid in the payload BEFORE the payload gets
-        # encoded/anchored. Deterministic across daemons, so the
-        # payload stays consensus-identical.
-        world_cid = ""
-        world_blob = b""
-        if self.canonical_tracker is not None:
-            try:
-                ckpt = self.canonical_tracker.on_close(
-                    epoch_id,
-                    str(close_result.get("epoch_root", "")),
-                    [list(b.events or []) for b in canonical.ordered_batches],
-                )
-                world_cid = ckpt.cid
-                world_blob = ckpt.blob
-                payload = close_result.get("authoritative_payload")
-                if payload is not None:
-                    payload["world_cid"] = world_cid
-                self._save_canonical_world(world_blob)
-                self._tracker_restored = True
-            except Exception as e:
-                # The tracker's world is now half-advanced and this
-                # payload has no world_cid: neither matches any peer.
-                self._tracker_failed = str(e) or type(e).__name__
-                self._tracker_restored = False
-                logger.error(
-                    "canonical world tracker failed (closes blocked until "
-                    "the anchored world is fetched): %s", e, exc_info=True,
-                )
-                return None
-
         senders = self.gossip.known_senders()
         canonical_root = canonical.epoch_root() if hasattr(canonical, "epoch_root") else b""
         winner = pick_submitter(epoch_id, senders, canonical_root)
@@ -1266,8 +1074,6 @@ class FederatedCloseDriver:
             winner=winner or b"",
             is_winner=is_winner,
             n_batches=len(canonical.ordered_batches),
-            world_cid=world_cid,
-            world_checkpoint_blob=world_blob,
             carry_cid=carry_cid,
             carry_bundle_blob=carry_blob,
             snapshot_anchor_count=self.snapshot_anchor_count,

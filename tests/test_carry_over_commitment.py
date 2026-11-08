@@ -1,4 +1,4 @@
-"""Verifiable carry-over commitment (authoritative payload schema 4).
+"""Verifiable carry-over commitment (the authoritative payload's carry_cid).
 
 Each federated close serializes the five tool maps it produced (the next
 close's inputs) into one canonical bundle blob; its cid rides the payload
@@ -50,17 +50,9 @@ def _coords(axis: int = 4) -> List[float]:
 
 def _registration(seq: int) -> Dict[str, Any]:
     return {
-        "kind": "sub_claim_sprouted",
+        "kind": "tool_registered",
         "seq": seq,
         "author_agent": AUTHOR,
-        "tendency_id": "correctness",
-        "parent_id": "solver_root",
-        "node_id": f"tm_{DIGEST[:12]}",
-        "position": "pro",
-        "coords": _coords(),
-        "polarity_axis": _coords(),
-        "content": "tool: does a thing",
-        "author_post": True,
         "artifact_digest": DIGEST,
         "manifest_meta": {"trust_class": "pinned", "author": AUTHOR},
     }
@@ -135,7 +127,6 @@ def _driver(state_dir: Path, voice_source=None, enforce=False) -> FederatedClose
     state_dir.mkdir(parents=True, exist_ok=True)
     d = FederatedCloseDriver(
         gossip=_gossip([]),
-        embedding_dim=EMBED_DIM,
         **{f"{k}_path": state_dir / f"{k}.json" for k in CARRY_KEYS},
     )
     d.enforce_preconditions = enforce
@@ -232,14 +223,11 @@ def test_decode_rejects_non_canonical_or_malformed():
         decode_carry_bundle(b"not json")
 
 
-def test_payload_encodes_carry_cid_charter_and_sanctions_schema_5():
+def test_payload_encodes_carry_cid_charter_and_sanctions():
     payload = {
         "epoch_root": ROOT_B,
         "agent_mint": {"bob": 1.0, "alice": 2.0},
-        "agent_novelty": {},
         "total_mint": 3.0,
-        "total_novelty": 0.0,
-        "world_cid": "aa" * 32,
         "carry_cid": "cc" * 32,
         "charter_hash": "AB" * 32,
         "sanctioned_households": ["0xBEEF", "0xaaaa", "0xbeef"],
@@ -247,11 +235,13 @@ def test_payload_encodes_carry_cid_charter_and_sanctions_schema_5():
     raw = encode_authoritative_payload(
         payload, epoch_id="e1", epoch_root_hex=ROOT_B, prev_epoch_root_hex=ROOT_A)
     decoded = json.loads(raw)
-    assert SCHEMA_VERSION == 6
-    assert decoded["schema"] == 6
+    assert SCHEMA_VERSION == 7
+    assert decoded["schema"] == 7
     assert decoded["carry_cid"] == "cc" * 32
-    assert list(decoded)[-4:] == [
-        "world_cid", "carry_cid", "charter_hash", "sanctioned_households"]
+    assert list(decoded) == [
+        "schema", "epoch_id", "epoch_root", "prev_epoch_root", "agent_mint",
+        "total_mint", "output_decimals", "n_batches", "n_events",
+        "carry_cid", "charter_hash", "sanctioned_households"]
     assert decoded["charter_hash"] == "ab" * 32
     assert decoded["sanctioned_households"] == ["0xaaaa", "0xbeef"]
     # A different sanction list or charter is a different payload hash.
@@ -448,7 +438,7 @@ def test_fetch_reports_anchor_and_carry(network):
         network["chain"]["contract"], network["resolver"])
     assert fetch.status == "ok"
     assert fetch.epoch_id == "e3"
-    assert fetch.payload_schema == 6
+    assert fetch.payload_schema == 7
     assert fetch.carry == {
         k: json.loads(json.dumps(v))
         for k, v in network["always_on"].carry_over_maps().items()
@@ -516,7 +506,7 @@ def test_pre_schema_anchor_keeps_refusing(chain, tmp_path, caplog):
         web3=chain["w3"], contract_abi=chain["abi"],
     )
     anchorer._set_submitter_address(chain["deployer"])
-    close = federated_epoch_close(canonical_order(EPOCHS[1]), embedding_dim=EMBED_DIM)
+    close = federated_epoch_close(canonical_order(EPOCHS[1]))
     close["epoch_id"] = "e_old"
     anchor = anchorer.anchor_close_result(
         close)

@@ -141,14 +141,10 @@ def _anchor_with_mint(chain, mint: Dict[str, float], epoch_id: str):
 
     Money-only (schema 3): no agent_rep."""
     payload = {
-        "schema": 3,
         "epoch_root": "11" * 32,
         "agent_mint": mint,
-        "agent_novelty": {},
         "total_mint": sum(mint.values()),
-        "total_novelty": 0.0,
         "output_decimals": 10,
-        "gate_applied": True,
         "n_batches": 1,
         "n_events": len(mint),
     }
