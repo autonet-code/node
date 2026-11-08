@@ -1004,7 +1004,7 @@ class AutonetBridge:
             # A charter change pinned to the previous anchor halts the
             # close and restarts the daemon onto the new axes.
             self._service.on_charter_change = self._on_charter_changed
-            self._wire_world_epoch_subscriber()
+            self._wire_library_epoch_subscriber()
             self._task = asyncio.create_task(self._run_service())
 
             self.state.status = AutonetStatus.RUNNING
@@ -1443,7 +1443,7 @@ class AutonetBridge:
             except Exception:
                 log.debug("remote manifest pull cycle failed", exc_info=True)
 
-    def _wire_world_epoch_subscriber(self) -> None:
+    def _wire_library_epoch_subscriber(self) -> None:
         """Forward the library service's epoch ticks to the EventBus.
 
         The subscriber runs in the autonet daemon's worker thread; we
@@ -1468,7 +1468,7 @@ class AutonetBridge:
             }
             try:
                 asyncio.run_coroutine_threadsafe(
-                    self._emit("WORLD_EPOCH_CLOSED", payload),
+                    self._emit("LIBRARY_EPOCH_CLOSED", payload),
                     loop,
                 )
             except Exception:
@@ -1505,7 +1505,7 @@ class AutonetBridge:
                 return
             try:
                 asyncio.run_coroutine_threadsafe(
-                    self._emit("WORLD_FEDERATED_CLOSE", payload),
+                    self._emit("LIBRARY_FEDERATED_CLOSE", payload),
                     loop,
                 )
             except Exception:

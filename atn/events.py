@@ -82,9 +82,9 @@ class EventType(Enum):
     AUTONET_STATUS = "autonet.status"
     AUTONET_WALLET = "autonet.wallet"
 
-    # World-model substrate
-    WORLD_EPOCH_CLOSED = "world.epoch_closed"
-    WORLD_FEDERATED_CLOSE = "world.federated_close"
+    # The tool library's epochs: the local epoch tick and the federated close
+    LIBRARY_EPOCH_CLOSED = "library.epoch_closed"
+    LIBRARY_FEDERATED_CLOSE = "library.federated_close"
 
     # Budget
     BUDGET_EXCEEDED = "budget.exceeded"
