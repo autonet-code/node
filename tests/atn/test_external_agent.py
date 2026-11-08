@@ -281,3 +281,115 @@ async def test_external_agents_can_buy_services_by_default(tmp_path):
     granted = set().union(*(_TOOL_CATEGORIES[b] for b in EXTERNAL_DEFAULT_TOOLS))
     assert {"find_services", "request_service", "close_service_channel"} <= granted
     assert "register_service" not in granted
+
+
+# ---------------------------------------------------------------------------
+# Adopted tools are shared across the household's external sessions
+# (Decision 2026-11-09)
+# ---------------------------------------------------------------------------
+
+async def _adopting_daemon(tmp_path):
+    """A daemon with two external sessions and a native agent, fetching from
+    a separate author daemon that published one tool."""
+    from atn.runtime.tool_bond import ToolBondGate
+    from tests.atn.test_tool_store import TestAdoption
+    _author, digest, blobs = await TestAdoption()._publish_on_author_daemon(
+        tmp_path / "net")
+    rt = _runtime(tmp_path / "home")
+    rt.tool_bond_gate = ToolBondGate(rt, checker=lambda d: True)
+
+    async def _fetch(d):
+        return blobs.get_bytes(d)
+    rt.tool_store.blob_fetcher = _fetch
+    await _create_agent(rt, {"id": "cc-a", "provider": "external"})
+    await _create_agent(rt, {"id": "cc-b", "provider": "external"})
+    await _native(rt, "nat")
+    return rt, digest
+
+
+def _names(listing):
+    return {t.get("tool_name") for t in listing.get("tools", [])}
+
+
+@pytest.mark.asyncio
+async def test_a_tool_one_session_adopted_serves_every_external_session(tmp_path):
+    from atn.agent_tools import execute_tool
+    from atn.tool_search import search_tools
+    rt, digest = await _adopting_daemon(tmp_path)
+    store = rt.tool_store
+    first = await execute_tool("adopt_tool", {"digest": digest}, rt, caller_id="cc-a")
+    assert first["origin"] == "adopted" and first["adopted_for"] == "cc-a", first
+    record = store.get(digest)
+
+    # Each session is reminded of what IT adopted.
+    assert _review_due(rt, "cc-a") == {digest: "net_tool"}
+    assert _review_due(rt, "cc-b") == {}
+
+    # The other session sees it, uses it and may review it.
+    assert store.allowed("cc-b", record)
+    listed = await execute_tool("list_tools", {"category": "registered"}, rt,
+                                caller_id="cc-b")
+    assert "net_tool" in _names(listed), listed
+    used = await execute_tool("use_tool", {"name": "net_tool", "arguments": {"x": "hi"}},
+                              rt, caller_id="cc-b")
+    assert used.get("result") == {"echo": "hi"}, used
+    reviewed = await execute_tool(
+        "attest_tools", {"context": "work", "judgments": [
+            {"tool": "net_tool", "ok": True, "axes": {"correctness": 0.5}}]},
+        rt, caller_id="cc-b")
+    assert reviewed.get("attested") == 1 and not reviewed.get("skipped"), reviewed
+    # Reviewed by the household: due for nobody.
+    assert _review_due(rt, "cc-a") == {} and "review_due" not in reviewed
+
+    # Adopting it again is "already installed", not an error, and installs
+    # nothing new: the record stays cc-a's.
+    again = await execute_tool("adopt_tool", {"digest": digest}, rt, caller_id="cc-b")
+    assert "error" not in again, again
+    assert again["already_installed"] is True and again["adopted_for"] == "cc-a"
+    assert again["trust"].startswith("zero trust")
+    assert store.get(digest).local_author == "cc-a"
+    mine = await execute_tool("adopt_tool", {"digest": digest}, rt, caller_id="cc-a")
+    assert mine["already_installed"] is True and "already" in mine["note"]
+
+    # It checks out for the other session too.
+    dest = tmp_path / "cc-b-checkout"
+    out = await execute_tool("adopt_tool", {"digest": digest, "path": str(dest)},
+                             rt, caller_id="cc-b")
+    assert out["checkout"]["path"] == str(dest.resolve()), out
+    assert (dest / "main.py").exists()
+
+    # Search marks it adopted here for the other session.
+    found = await search_tools(rt, "network published tool", 5, caller_id="cc-b")
+    row = next(m for m in found["matches"] if m["digest"] == digest)
+    assert row["household"]["adopted"] is True
+
+
+@pytest.mark.asyncio
+async def test_native_agents_keep_their_lineage_scoping(tmp_path):
+    from atn.agent_tools import execute_tool
+    rt, digest = await _adopting_daemon(tmp_path)
+    store = rt.tool_store
+    await execute_tool("adopt_tool", {"digest": digest}, rt, caller_id="cc-a")
+    record = store.get(digest)
+    # A native agent does not get an external session's adoption...
+    assert not store.allowed("nat", record)
+    listed = await execute_tool("list_tools", {"category": "registered"}, rt,
+                                caller_id="nat")
+    assert "net_tool" not in _names(listed)
+    used = await execute_tool("use_tool", {"name": "net_tool", "arguments": {"x": "hi"}},
+                              rt, caller_id="nat")
+    assert "not available" in used.get("error", ""), used
+    reviewed = await execute_tool(
+        "attest_tools", {"context": "work", "judgments": [
+            {"tool": "net_tool", "ok": True}]}, rt, caller_id="nat")
+    assert reviewed.get("attested") == 0 and reviewed["skipped"], reviewed
+    # ...nor its code.
+    dest = tmp_path / "nat-checkout"
+    out = await execute_tool("adopt_tool", {"digest": digest, "path": str(dest)},
+                             rt, caller_id="nat")
+    assert "checkout" not in out and not dest.exists(), out
+
+    # And a native adopter's tool stays its lineage's.
+    record.local_author = "nat"
+    assert store.allowed("nat", record)
+    assert not store.allowed("cc-a", record) and not store.allowed("cc-b", record)

@@ -3218,9 +3218,16 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
         if err:
             return err
     store = runtime.tool_store
-    if dest is not None and store.get(digest.lower()) is not None:
-        # Already installed: just check it out.
-        return _checked_out(runtime, digest.lower(), dest, {"digest": digest.lower()})
+    existing = store.get(digest.lower())
+    if existing is not None and store.allowed(caller, existing):
+        # Already installed and the caller may use it (its own adoption, or
+        # another external session's: Decision 2026-11-09). Nothing to
+        # install; check it out when asked.
+        if dest is not None:
+            return _checked_out(runtime, existing.digest, dest,
+                                {"digest": existing.digest})
+        if existing.origin == "adopted":
+            return _already_adopted(runtime, existing, caller)
     try:
         proposal = await store.propose_adoption(caller, digest, reason=reason)
     except Exception as exc:
@@ -3243,6 +3250,22 @@ async def _adopt_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]
     if dest is not None and not result.get("error") and result.get("origin") == "adopted":
         return _checked_out(runtime, proposal["digest"], dest, result)
     return result
+
+
+def _already_adopted(runtime: Runtime, record: Any, caller: str) -> dict[str, Any]:
+    """The adopt reply for a tool already installed on this daemon."""
+    from .tool_security import trust_for_digest
+    _tier, trust = trust_for_digest(runtime, record.digest)
+    if record.local_author == caller:
+        note = "you adopted this tool already"
+    else:
+        note = ("another session of this household adopted this tool: it is "
+                "installed for every external session. Use it (use_tool), "
+                "check it out (adopt_tool with path) and review what you use "
+                "(attest_tools)")
+    return {"digest": record.digest, "name": record.name, "origin": "adopted",
+            "author": record.author, "adopted_for": record.local_author,
+            "already_installed": True, "trust": trust, "note": note}
 
 
 def _checked_out(runtime: Runtime, digest: str, dest, result: dict[str, Any]) -> dict[str, Any]:

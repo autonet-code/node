@@ -1,5 +1,27 @@
 # Tool substrate v3: tools as the ONLY substrate item; reviews replace debates
 
+## Decision (2026-11-09): a household's external sessions share adopted tools
+
+- **Rule.** A tool any external agent of a daemon adopted is installed for
+  every external agent there: each one sees it (listings, search), uses
+  it, checks it out (`adopt_tool` with `path`) and reviews it
+  (`attest_tools`). `adopt_tool` on it answers `already_installed` with
+  the session that adopted it (`adopted_for`); nothing is installed twice.
+  `ToolStore.shared_adoption` is the one check (`allowed` calls it), so
+  listing, call-time scoping, composites, reviews and checkout agree.
+- **Unchanged.** `review_due` reminds each session of the tools IT adopted;
+  a tool stops being due for every session once the household reviewed
+  it. Search's `household.adopted` is true for a tool any agent here
+  adopted. Native agents keep lineage scoping: a native adopter's tool
+  stays its lineage's, and no native agent gets an external session's
+  adoption. Checkout now needs the same permission as use (it had none).
+- **Why.** Every external session acts on chain as the operator (one
+  identity, one review batch per epoch, Decision 2026-11-08), and an
+  adoption is a local checkout on the same machine. S0 (2026-11-09)
+  showed a second session could neither use nor review a tool the first
+  had adopted. Lineage scoping is a boundary between native lineages,
+  which keep their own keys; external sessions have no such boundary.
+
 ## Decision (2026-11-08): the world leaves the system
 
 - **What went.** The claim graph ("the world": the vendored engine under

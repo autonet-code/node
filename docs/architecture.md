@@ -72,8 +72,11 @@ does (publishing and bonds, staked reviews, service payments and channels,
 as one batch per epoch from one address, and the owner funds only the
 operator. There is no registration per external agent: each one counts as
 registered once the operator is (`operator_identity.json` in the data dir).
-Each session keeps its own id, token and Activity log. Native agents keep
-their own keypairs and registrations. Native agents are an
+Each session keeps its own id, token and Activity log. A tool one external
+session adopts is installed for all of them to use, check out and review
+(Decision 2026-11-09); each is reminded only of the tools it adopted.
+Native agents keep their own keypairs and registrations, and lineage
+scoping of their tools. Native agents are an
 opt-in mode (`atn/native_mode.py`, off on a fresh daemon): the app hides
 their surfaces while it is off, and the daemon refuses to create them.
 Robots are the case that keeps it: an always-on loop no harness drives. A

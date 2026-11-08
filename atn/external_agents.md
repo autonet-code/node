@@ -114,8 +114,12 @@ fund. Point them to the app when a reply says a step needs the owner.
    processes). Code lives only with the author and adopters: if none is
    online, the install waits and the daemon finishes it once one connects. A
    tool that replaces core built-ins needs the owner's approval in the app.
+   A tool another session of your household adopted is already installed
+   for you: use it, check it out and review it like your own
+   (`adopt_tool` answers `already_installed`).
 3. **Review** after each piece of work (section 3). Replies carry
-   `review_due`: the tools you adopted and haven't reviewed yet.
+   `review_due`: the tools you adopted and your household hasn't reviewed
+   yet.
 
 Reviews are what pay: a tool is paid once, when enough REP has reviewed it,
 and its reviewers are paid then too, whatever their verdict.

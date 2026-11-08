@@ -776,7 +776,9 @@ class ToolStore:
         """True if ``caller_id`` may see/call ``record``.
 
         Owner callers always may. Agents may when they are the author,
-        an ancestor of the author, or explicitly granted by the owner.
+        an ancestor of the author, or explicitly granted by the owner. An
+        external agent also may for a tool any external agent of this
+        daemon adopted (``shared_adoption``).
         """
         from .agent_tools import is_owner_caller
         if is_owner_caller(caller_id):
@@ -788,7 +790,32 @@ class ToolStore:
             return True
         if caller_id in record.grants:
             return True
+        if self.shared_adoption(caller_id, record):
+            return True
         return caller_id in self._ancestors(record.author_id)
+
+    def _is_external(self, agent_id: str | None) -> bool:
+        from .provider_identity import is_external
+        if not agent_id:
+            return False
+        try:
+            defn = self._runtime.get_agent(agent_id)
+        except Exception:  # noqa: BLE001
+            return False
+        return defn is not None and is_external(defn)
+
+    def shared_adoption(self, caller_id: str | None, record: ToolRecord) -> bool:
+        """Adopted tools are shared across the household's external
+        sessions (Decision 2026-11-09, docs/tool_substrate.md): every
+        external session acts on chain as the operator (one identity, one
+        review batch) and an adoption is a checkout on this machine, so a
+        tool one session adopted is installed for all of them to use, check
+        out and review. Native agents keep their lineage scoping: it is a
+        boundary between native lineages, and a native adopter's tools stay
+        its lineage's."""
+        return (record.origin == "adopted"
+                and self._is_external(caller_id)
+                and self._is_external(record.local_author))
 
     def visible_to(self, caller_id: str | None) -> list[ToolRecord]:
         return [r for r in self._records.values() if self.allowed(caller_id, r)]
