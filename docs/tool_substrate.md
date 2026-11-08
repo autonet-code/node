@@ -221,7 +221,8 @@ the network's judgement" and the reviewed own-share of Decision
   (`minilm.py`), run with onnxruntime and tokenizers (mean pool over the
   attention mask, L2 norm). The daemon fetches them on its first run in
   the background (Hugging Face first, then peers that serve them as
-  content-addressed blobs), checks the hashes at every start, and retries
+  content-addressed blobs, found through their DHT provider records like
+  tool blobs), checks the hashes at every start, and retries
   with backoff. Until it loads, results are keyword-only and the reply
   says so with the progress; manifests learned meanwhile are embedded
   once it loads. Each vector records model and revision; others are

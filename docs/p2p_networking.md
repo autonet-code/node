@@ -197,6 +197,13 @@ into `jurisdiction.<id>.bootstrap` by proposal.
 - The daemon's on-disk tool and service blob stores are served as sources
   on the host's single blob handler, so manifests and code a daemon
   published stay fetchable after it restarts.
+- **The search model** (`atn/search_model.py`). Its two pinned files are
+  blobs like any other: a daemon holding them verified serves them from
+  disk and provides their sha256 (`SearchModel.serve_on`, again once the
+  model is ready). A daemon that cannot get them from Hugging Face (or the
+  mirror in `HF_ENDPOINT`) fetches them as above (`peer_fetcher_for`),
+  with 600 s per peer and in all for the 90 MB file, and checks them
+  against the pins.
 
 ## Service calls
 
@@ -227,7 +234,9 @@ stream, same-stream framing (write without closing, read, close).
 - `tests/test_p2p_mesh.py`: both transports, reservations and circuit
   dials, DHT provider fetch over a circuit, gossip after the relayed leg
   closes, no blob forwarding, the mesh dialer, the peer cache, the
-  connection cap, SOCKS5.
+  connection cap, SOCKS5. `tests/test_search_model_mesh.py`: the search
+  model's files provided by a NAT'd holder and fetched by a daemon that
+  joins later, through the DHT record.
 - `scripts/mesh_nat_harness.py`: Docker, two LANs behind NAT gateways
   (iptables MASQUERADE, unsolicited inbound dropped), a public relay, a
   public daemon and an HTTPS-only daemon behind a CONNECT proxy. Checks

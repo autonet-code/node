@@ -13,10 +13,14 @@ with keywords only and says so.
   the model into one) is checked first.
 - **Check**: size and sha256 of each file at every start. A file that fails
   is downloaded again.
-- **Sources**: Hugging Face first (``HTTPS_PROXY`` and friends respected),
-  then peers: the files are content-addressed blobs, so any daemon holding
-  them serves them over the blob protocol (``serve_on``), and the bytes are
-  verified against the pinned hash whoever sent them.
+- **Sources**: Hugging Face first (``HTTPS_PROXY`` and friends respected;
+  ``HF_ENDPOINT`` names a mirror, as for the Hugging Face tools), then
+  peers. The files are content-addressed blobs like any other: a daemon
+  holding them serves them over the blob protocol and provides their
+  sha256 in the DHT (``serve_on``), and a daemon that needs them asks its
+  connections and the providers the DHT names, dialled directly or through
+  a relay circuit (``peer_fetcher_for``). The bytes are verified against
+  the pinned hash whoever sent them.
 - **Failure**: retried with exponential backoff (5 s doubling, capped at 10
   minutes), forever: search keeps working on keywords meanwhile.
 - **Progress**: logged, and emitted as ``search.model_status`` events (the
@@ -51,6 +55,9 @@ from nodes.common.library.minilm import (
 log = logging.getLogger(__name__)
 
 HF_BASE = "https://huggingface.co"
+# A peer fetch: the 90 MB model file from a slow peer, or through a relay
+# circuit, needs minutes (the blob default is 45 s in all).
+PEER_FETCH_TIMEOUT = 600.0
 BACKOFF_BASE = 5.0
 BACKOFF_CAP = 600.0
 # A progress event at most this often, and on every state change.
@@ -101,7 +108,7 @@ class SearchModel:
         models_dir: Optional[Path] = None,
         preinstalled_dir: Optional[Path] = None,
         events: Any = None,
-        hf_base: str = HF_BASE,
+        hf_base: Optional[str] = None,
         transport: Any = None,
         sleep: Optional[Callable[[float], Awaitable[None]]] = None,
         backoff_base: float = BACKOFF_BASE,
@@ -116,7 +123,8 @@ class SearchModel:
             preinstalled_dir = Path(os.environ["ATN_MODEL_DIR"])
         self.preinstalled = Path(preinstalled_dir) if preinstalled_dir else None
         self._events = events
-        self._hf_base = hf_base
+        self._hf_base = (hf_base or os.environ.get("HF_ENDPOINT", "").strip()
+                         or HF_BASE)
         self._transport = transport
         self._sleep = sleep or asyncio.sleep
         self._backoff = (float(backoff_base), float(backoff_cap))
@@ -417,7 +425,7 @@ class SearchModel:
 
     def held_blob_digests(self) -> list[str]:
         """The pinned files this daemon holds verified, by sha256: what it
-        serves to peers and (with a DHT, the p2p-mesh branch) provides."""
+        serves to peers and provides in the DHT."""
         return [f.sha256 for f in self.files if f.sha256 in self._paths]
 
     def blob_bytes(self, digest: str) -> Optional[bytes]:
@@ -432,11 +440,10 @@ class SearchModel:
 
     def serve_on(self, host: Any) -> None:
         """Serve the verified files to peers from ``host`` (the libp2p
-        host), and announce them. On this branch peers find a holder by
-        asking their connections; ``provide_blobs_threadsafe`` (the DHT
-        provider records of the p2p-mesh branch) is called when the host
-        has it, so the files are announced like tool blobs once that
-        branch is in. Called again when the model becomes ready."""
+        ``AutonetHost``) and provide their sha256 in its DHT, like tool
+        blobs: the host keeps re-providing them, so a daemon that needs the
+        model finds this one with ``find_providers``. Called again when the
+        model becomes ready (the files verified since are provided then)."""
         try:
             from nodes.common.blob_resolver import host_blob_server
             host_blob_server(host).add_source(self.blob_bytes)  # deduplicated
@@ -450,6 +457,44 @@ class SearchModel:
                 provide(digests)
             except Exception:  # noqa: BLE001
                 log.debug("providing model blobs failed", exc_info=True)
+
+
+def peer_fetcher_for(host: Any, *, timeout: float = PEER_FETCH_TIMEOUT
+                     ) -> Callable[[str], Awaitable[Optional[bytes]]]:
+    """``SearchModel.peer_fetcher`` on ``host`` (an ``AutonetHost`` running
+    in its own trio thread): the host's network fetch, as for any blob. It
+    asks the connected peers (and those known from capability gossip) and
+    meanwhile the providers ``find_providers`` names in the DHT, dialled
+    directly or through a relay circuit; the first answer whose sha256
+    matches wins. ``timeout`` bounds each peer and the whole fetch. Nothing
+    is kept in the host's memory map: the file goes to disk, and is served
+    from there."""
+    def _get(digest: str) -> Optional[bytes]:
+        token = getattr(host, "_trio_token", None)
+        network = getattr(host, "fetch_blob_from_network", None)
+        if token is None or network is None:
+            return None
+        import trio
+        from nodes.common.blob_resolver import known_peer_ids
+
+        async def _do() -> Optional[bytes]:
+            return await network(digest, peer_ids=known_peer_ids(host),
+                                 timeout_per_peer=timeout, timeout=timeout)
+        try:
+            data = trio.from_thread.run(_do, trio_token=token)
+        except Exception as exc:  # noqa: BLE001 (the fetch is retried)
+            log.debug("search model: peer fetch of %s failed: %s", digest[:12], exc)
+            return None
+        if data:
+            where = getattr(host, "last_fetch_source", "") or "peer"
+            log.info("search model: %s (%d bytes) from a peer found %s",
+                     digest[:12], len(data),
+                     "in the DHT" if where == "dht" else "among its connections")
+        return data
+
+    async def _fetch(digest: str) -> Optional[bytes]:
+        return await asyncio.to_thread(_get, digest)
+    return _fetch
 
 
 # ---------------------------------------------------------------------------

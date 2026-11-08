@@ -1303,29 +1303,20 @@ class AutonetBridge:
 
     def _share_search_model(self, host) -> None:
         """The search model's files are content-addressed blobs: serve the
-        verified ones to peers (now, and again once the model is ready), and
-        let a daemon still fetching them take them from peers when Hugging
-        Face fails (atn/search_model.py). Bytes from a peer are checked
-        against the pinned hashes like any download."""
+        verified ones to peers and provide them in the DHT (now, and again
+        once the model is ready), and let a daemon still fetching them take
+        them from a provider when Hugging Face fails (atn/search_model.py).
+        Bytes from a peer are checked against the pinned hashes like any
+        download."""
         model = getattr(self._runtime, "search_model", None) if self._runtime else None
         if model is None or host is None:
             return
         try:
+            from .search_model import peer_fetcher_for
             model.serve_on(host)
-            model.on_ready(lambda m, _h=host: m.serve_on(_h))
-            from nodes.common.blob_resolver import LibP2PBlobResolver
-            # A 90 MB file: give each peer minutes, not the 10 s default.
-            resolver = LibP2PBlobResolver(host, fetch_timeout=600.0)
-
-            def _get(digest: str, _r=resolver) -> bytes | None:
-                # Not _r.get: that keeps every fetched blob in the host's
-                # memory map, and these files are served from disk.
-                peers = _r._known_peer_ids()
-                return _r._fetch_from_peers(peers, digest) if peers else None
-
-            async def _fetch(digest: str) -> bytes | None:
-                return await asyncio.to_thread(_get, digest)
-            model.peer_fetcher = _fetch
+            if not model.ready:
+                model.on_ready(lambda m, _h=host: m.serve_on(_h))
+            model.peer_fetcher = peer_fetcher_for(host)
         except Exception as e:  # noqa: BLE001
             log.debug("sharing the search model failed: %s", e)
 

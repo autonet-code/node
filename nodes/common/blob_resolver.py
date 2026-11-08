@@ -142,6 +142,33 @@ class HostBlobServer:
         return None
 
 
+def known_peer_ids(host: Any) -> list:
+    """Distinct peers worth asking for a blob: ``host``'s connected peers
+    first, then peers known only from capability gossip. Its own id is
+    skipped."""
+    out: list = []
+    try:
+        out.extend(host.get_connected_peers())
+    except Exception:
+        pass
+    try:
+        caps = host.known_capabilities
+    except Exception:
+        caps = {}
+    for cap in caps.values():
+        pid_str = getattr(cap, "peer_id", "")
+        if pid_str:
+            out.append(pid_str)
+    own = getattr(host, "peer_id", "")
+    seen: set = set()
+    peers = []
+    for pid in out:
+        if pid and pid != own and pid not in seen:
+            seen.add(pid)
+            peers.append(pid)
+    return peers
+
+
 _HOST_SERVER_LOCK = threading.Lock()
 _HOST_SERVER_ATTR = "_autonet_blob_server"
 
@@ -227,29 +254,7 @@ class LibP2PBlobResolver:
             logger.debug("LibP2PBlobResolver: offer of %d blobs failed: %s", len(cids), e)
 
     def _known_peer_ids(self) -> list:
-        """Distinct peers worth asking: connected peers first, then peers
-        known only from capability gossip. Our own id is skipped."""
-        out: list = []
-        try:
-            out.extend(self._host.get_connected_peers())
-        except Exception:
-            pass
-        try:
-            caps = self._host.known_capabilities
-        except Exception:
-            caps = {}
-        for cap in caps.values():
-            pid_str = getattr(cap, "peer_id", "")
-            if pid_str:
-                out.append(pid_str)
-        own = getattr(self._host, "peer_id", "")
-        seen: set = set()
-        peers = []
-        for pid in out:
-            if pid and pid != own and pid not in seen:
-                seen.add(pid)
-                peers.append(pid)
-        return peers
+        return known_peer_ids(self._host)
 
     def _fetch_from_peers(self, peer_ids: list, cid: str) -> Optional[bytes]:
         """Cross-thread bridge: schedule host.fetch_blob_from_peers via the
