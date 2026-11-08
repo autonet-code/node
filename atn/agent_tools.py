@@ -2931,25 +2931,14 @@ async def _use_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _review_due(runtime: Runtime, agent_id: str) -> dict[str, str]:
-    """digest -> name of each tool ``agent_id`` adopted from another
-    household and has not reviewed (Decision 2026-11-08).
-
-    Derived from what the daemon already keeps, so a restart forgets
-    nothing and no extra copy can drift: the tool store's adopted records,
-    the reviews held before registration, and the ToolBond batches on disk,
-    whose status the review driver keeps in step with the chain. A batch
-    forfeited unrevealed never counted, so its tools are due again. Cached
-    until the tool store, the held reviews or the batches change."""
-    store = getattr(runtime, "tool_store", None)
-    if not agent_id or store is None:
-        return {}
+def _household_reviewed(runtime: Runtime) -> set[str]:
+    """Every tool digest this household has reviewed: the reviews held for
+    any agent on this daemon, and those in any batch of its batch store that
+    still counts (not forfeited, not rolled forward). External sessions share
+    the operator's batch, so this is the household's view (Decision
+    2026-11-08). Cached until the held reviews or the batches change."""
     from pathlib import Path
     from .runtime import review_batch
-    defn = runtime.get_agent(agent_id) if hasattr(runtime, "get_agent") else None
-    identity = getattr(defn, "identity", None) if defn else None
-    address = str(getattr(identity, "address", "") or "").lower()
-    adopted = store.adopted_by(agent_id)
     try:
         batches = review_batch.store_for(runtime)
         batch_dir = batches._dir
@@ -2966,20 +2955,48 @@ def _review_due(runtime: Runtime, agent_id: str) -> dict[str, str]:
         except OSError:
             return 0.0
 
-    key = (address, tuple(sorted(r.digest for r in adopted)),
-           mtime(batch_dir), mtime(held_dir))
+    key = (mtime(batch_dir), mtime(held_dir))
+    hit = runtime.__dict__.get("_household_reviewed_cache")
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    reviewed: set[str] = set()
+    for raw in review_batch.all_held_reviews(runtime):
+        reviewed.add(str((raw or {}).get("digest") or "").lower())
+    if batches is not None:
+        for batch in batches.all():
+            if batch.status in ("forfeited", "rolled"):
+                continue
+            reviewed.update(r.digest.lower() for r in batch.reviews)
+    reviewed.discard("")
+    runtime.__dict__["_household_reviewed_cache"] = (key, reviewed)
+    return reviewed
+
+
+def _review_due(runtime: Runtime, agent_id: str) -> dict[str, str]:
+    """digest -> name of each tool ``agent_id`` adopted from another
+    household and the household has not reviewed (Decision 2026-11-08).
+
+    Each agent is reminded of the tools IT adopted (the tool store's
+    adopted records), minus what any agent of the household reviewed
+    (``_household_reviewed``): the reviews held before registration and the
+    ToolBond batches on disk, whose status the review driver keeps in step
+    with the chain. Derived from what the daemon already keeps, so a restart
+    forgets nothing and no extra copy can drift. A batch forfeited
+    unrevealed never counted, so its tools are due again. Cached until the
+    tool store, the held reviews or the batches change."""
+    store = getattr(runtime, "tool_store", None)
+    if not agent_id or store is None:
+        return {}
+    adopted = store.adopted_by(agent_id)
+    if not adopted:
+        return {}
+    reviewed = _household_reviewed(runtime)
+    key = (tuple(sorted(r.digest for r in adopted)),
+           runtime.__dict__.get("_household_reviewed_cache", (None,))[0])
     cache = runtime.__dict__.setdefault("_review_due_cache", {})
     hit = cache.get(agent_id)
     if hit is not None and hit[0] == key:
         return dict(hit[1])
-    reviewed: set[str] = set()
-    for raw in review_batch.held_reviews(runtime, agent_id):
-        reviewed.add(str((raw or {}).get("digest") or "").lower())
-    if batches is not None and address:
-        for batch in batches.all():
-            if batch.agent.lower() != address or batch.status in ("forfeited", "rolled"):
-                continue
-            reviewed.update(r.digest.lower() for r in batch.reviews)
     due = {r.digest: r.name for r in adopted if r.digest.lower() not in reviewed}
     cache[agent_id] = (key, due)
     return dict(due)

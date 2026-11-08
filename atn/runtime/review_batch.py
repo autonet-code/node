@@ -463,6 +463,23 @@ HELD_NOTE_OPERATOR = (
     "operator's balance; your reviews weigh by your household's REP.")
 
 
+def all_held_reviews(runtime: Any) -> list[dict[str, Any]]:
+    """The reviews held for every agent on this daemon."""
+    root = Path(runtime._config.data_dir) / HELD_DIR
+    out: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return out
+    for path in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 (unreadable: nothing held there)
+            continue
+        held = data.get("reviews") if isinstance(data, dict) else None
+        if isinstance(held, list):
+            out.extend(r for r in held if isinstance(r, dict))
+    return out
+
+
 def _held_path(runtime: Any, agent_id: str) -> Path:
     import re
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", agent_id)

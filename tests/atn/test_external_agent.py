@@ -196,3 +196,49 @@ async def test_register_on_chain_says_it_acts_as_the_operator(tmp_path):
     rt.registry.set_operator_registered(True)
     out = await execute_tool("register_on_chain", {}, rt, caller_id="cc")
     assert out["registered_on_chain"] is True
+
+
+@pytest.mark.asyncio
+async def test_review_due_counts_the_households_reviews(tmp_path):
+    """Each agent is reminded of the tools IT adopted, minus what anyone in
+    the household reviewed: reviews held for any agent on this daemon and
+    every batch that still counts (Decision 2026-11-08)."""
+    import os, time
+    from atn.runtime import review_batch
+    from atn.tool_store import ToolRecord
+
+    rt = _runtime(tmp_path)
+    await _create_agent(rt, {"id": "cc-a", "provider": "external"})
+    await _create_agent(rt, {"id": "cc-b", "provider": "external"})
+    nat = await _native(rt, "nat")
+    store = rt.tool_store
+    X, Y, Z = "a" * 64, "b" * 64, "c" * 64
+    store._records[X] = ToolRecord(digest=X, manifest={"name": "word_count"},
+                                   origin="adopted", local_author="cc-a")
+    store._records[Y] = ToolRecord(digest=Y, manifest={"name": "csv_parse"},
+                                   origin="adopted", local_author="cc-b")
+    store._records[Z] = ToolRecord(digest=Z, manifest={"name": "pdf_text"},
+                                   origin="adopted", local_author="nat")
+    assert _review_due(rt, "cc-a") == {X: "word_count"}
+    assert _review_due(rt, "cc-b") == {Y: "csv_parse"}
+    assert _review_due(rt, "nat") == {Z: "pdf_text"}
+
+    # cc-b's session reviews X into the operator's batch: X is no longer
+    # due for cc-a, who adopted it.
+    batches = review_batch.store_for(rt)
+    op = rt.get_agent("cc-b").identity.address
+    batch = batches.add(op, 3, ["correctness"],
+                        review_batch.ReviewEntry(digest=X, axes={"correctness": 0.5}))
+    assert _review_due(rt, "cc-a") == {}
+    # A review held for the native agent counts for the household too.
+    review_batch.hold_reviews(rt, "nat", [{"digest": Y, "axes": {}}])
+    assert _review_due(rt, "cc-b") == {}
+    assert _review_due(rt, "nat") == {Z: "pdf_text"}
+    # Cached until something changes; a forfeited batch never counted.
+    assert rt.__dict__["_review_due_cache"]["cc-a"][1] == {}
+    batch.status = "forfeited"
+    batches.save(batch)
+    later = time.time() + 5
+    os.utime(batches._dir, (later, later))
+    assert _review_due(rt, "cc-a") == {X: "word_count"}
+    assert nat.identity.address != op
