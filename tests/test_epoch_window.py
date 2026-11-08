@@ -214,7 +214,7 @@ class TestSkew:
         ws = MagicMock()
         kp_a, kp_b = Keypair.generate(), Keypair.generate()
         g = EventGossip(rpb_address="r", keypair=kp_a, transport=transport,
-                        world_service=ws)
+                        library=ws)
         g.max_skew_seconds = 60
         g.clock = lambda: 5000.0
         from nodes.common.event_gossip import _sign

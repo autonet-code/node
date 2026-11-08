@@ -1,5 +1,5 @@
 """epoch_history and network_status's epochs_closed report anchored epochs
-(Substrate anchors), never the WorldService's local 60 s projection ticks."""
+(Substrate anchors), never the library service's local 60 s epoch ticks."""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +14,7 @@ def _server(**rpb):
     local = SimpleNamespace(epoch_history=[{"epoch_id": "tick"}] * 9,
                             epochs_recorded=9, epoch_status=lambda: {"running": True})
     autonet = SimpleNamespace(get_status=lambda: {}, _p2p_host=None,
-                              _service=SimpleNamespace(_world_service=local))
+                              _service=SimpleNamespace(_library=local))
     srv = WebSocketBridge.__new__(WebSocketBridge)
     srv.runtime = SimpleNamespace(_config=SimpleNamespace(rpb=cfg), autonet=autonet)
     return srv

@@ -242,13 +242,6 @@ class AutonetBridge:
         if load_selected_jurisdiction(_selection_data_dir()) is not None:
             self.ensure_network_config()
 
-        # Subscribe to execution events for training data feed
-        if self._events:
-            self._events.subscribe(
-                EventType.EXECUTION_COMPLETED,
-                self._on_execution_completed,
-            )
-
         # Runtime back-reference (set by Runtime.__init__)
         self._runtime = None
         # Main event loop, captured at start (charter-change restarts are
@@ -914,20 +907,6 @@ class AutonetBridge:
                 data=data or self.state.to_dict(),
             ))
 
-    async def _on_execution_completed(self, event) -> None:
-        """Handle EXECUTION_COMPLETED events from the EventBus.
-
-        Story 3.2: When an agent execution completes, notify the training
-        service so it knows new training data is available on disk.
-        """
-        data = event.data or {}
-        agent_id = data.get("agent_id", "")
-        execution_id = data.get("execution_id", "")
-        status = data.get("status", "")
-
-        if self._service:
-            self._service.notify_execution(agent_id, execution_id, status)
-
     async def start(self) -> dict[str, Any]:
         """Start the autonet training service.
 
@@ -1018,15 +997,14 @@ class AutonetBridge:
 
             # Create the service. Note: AutonetService.start() blocks,
             # so we create here and start in an executor below. We wire
-            # the WorldService close subscriber BEFORE start so it's
-            # registered when the WorldService gets constructed inside
+            # the epoch close subscriber BEFORE start so it's
+            # registered when the library service gets constructed inside
             # start().
             self._service = AutonetService(self._autonet_config, data_dir=self._data_dir)
             # A charter change pinned to the previous anchor halts the
             # close and restarts the daemon onto the new axes.
             self._service.on_charter_change = self._on_charter_changed
             self._wire_world_epoch_subscriber()
-            self._wire_substrate_identity_resolver()
             self._task = asyncio.create_task(self._run_service())
 
             self.state.status = AutonetStatus.RUNNING
@@ -1036,19 +1014,8 @@ class AutonetBridge:
             # Wire P2P host to the service so training cycles can update gossip
             if self._p2p_host and self._service:
                 self._service._p2p_host = self._p2p_host
-            # Phase 6.4: wire the daemon's WorldService into the ATN
-            # runtime's provider manager so the substrate provider can
-            # probe it. Lazy-resolver: AutonetService creates its
-            # WorldService inside start() (which runs in an executor),
-            # so the resolver pulls the current value at lookup time
-            # rather than capturing a possibly-None reference now.
-            if self._runtime and hasattr(self._runtime, "providers") and self._service:
-                svc_ref = self._service
-                self._runtime.providers._world_service_resolver = (
-                    lambda: getattr(svc_ref, "_world_service", None)
-                )
             # Phase 10.2: wire substrate event-gossip across daemons.
-            # Both the WorldService (constructed inside the executor-run
+            # Both the library service (constructed inside the executor-run
             # nodes-side start()) and the libp2p host (started in its
             # own thread, ready when its trio token is captured) come
             # up asynchronously, so spawn a small kicker that waits for
@@ -1144,7 +1111,7 @@ class AutonetBridge:
 
         The first ``timeout`` seconds poll every ``poll`` seconds. After
         that the wait logs one warning and keeps polling quietly, backing
-        off to ``max_poll``. A slow host or WorldService delays wiring; it
+        off to ``max_poll``. A slow host or library service delays wiring; it
         never cancels it. Returns False only when the service stopped."""
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
@@ -1358,11 +1325,11 @@ class AutonetBridge:
             return None
 
     async def _wire_event_gossip_when_ready(self, timeout: float = 30.0) -> None:
-        """Poll until the WorldService is up and the libp2p host is
+        """Poll until the library service is up and the libp2p host is
         ready, then attach event gossip. Keeps waiting (with backoff,
         one warning) until wired or the service stops.
 
-        WorldService is constructed inside the nodes-side
+        The library service is constructed inside the nodes-side
         ``AutonetService.start()`` (executor-run); the libp2p host's
         trio token is captured inside its own thread. Both are
         asynchronous relative to this coroutine, so we poll briefly.
@@ -1371,16 +1338,16 @@ class AutonetBridge:
         if not service:
             return
         if not await self._wait_until_ready(
-                lambda: (getattr(service, "_world_service", None) is not None
+                lambda: (getattr(service, "_library", None) is not None
                          and self._host_ready()),
-                "event gossip (WorldService and libp2p host)", service,
+                "event gossip (library service and libp2p host)", service,
                 timeout=timeout, poll=0.2):
             return
         host = self._p2p_host
         try:
             ok = service.attach_event_gossip(host)
             if ok:
-                log.info("Event gossip wired into WorldService")
+                log.info("Event gossip wired into the library service")
         except Exception as e:
             log.warning("event gossip attach failed: %s", e)
         self._serve_disk_blobs(host)
@@ -1388,22 +1355,12 @@ class AutonetBridge:
 
         # Tool substrate: tool use is never gossiped (Decision 2026-11-07);
         # manifests still register.
-        world_service = getattr(service, "_world_service", None)
+        library = getattr(service, "_library", None)
         tool_store = getattr(self._runtime, "tool_store", None) if self._runtime else None
-        if world_service is not None and tool_store is not None:
-            def _manifest_sink(manifest: dict, author: str, _ws=world_service) -> None:
-                _ws.submit_tool_manifest(manifest, agent_id=author)
+        if library is not None and tool_store is not None:
+            def _manifest_sink(manifest: dict, author: str, _lib=library) -> None:
+                _lib.submit_tool_manifest(manifest, agent_id=author)
             tool_store.manifest_sink = _manifest_sink
-
-            # Evidence-replay support post (docs/tool_substrate.md —
-            # Evidence): a validator that replays a CON's evidence and
-            # confirms it posts a PRO support sprout under the CON. No
-            # close-side math — the deterministic close prices the post
-            # like any author post.
-            def _support_sink(con_node_id: str, claim: str,
-                              _ws=world_service) -> dict:
-                return _ws.submit_support(con_node_id, claim)
-            tool_store.support_sink = _support_sink
 
             # Network blob fetch (vetting + adoption): digest-verified
             # pull of foreign manifests/code over the libp2p blob
@@ -1444,7 +1401,7 @@ class AutonetBridge:
                             .get("tool_registrations") or {}))
             pushed = tool_store.push_all_manifests(
                 skip=lambda digest: str(digest).lower() in anchored)
-            log.info("ToolStore wired into WorldService rails "
+            log.info("ToolStore wired into the library service "
                      "(%d manifests backfilled)", pushed)
 
             # Network tool DISCOVERY: gossip ingest queues the manifest
@@ -1455,9 +1412,9 @@ class AutonetBridge:
             # so a peer that is slow or offline only delays discovery — it
             # can never stall ingest or fork a close.
             self._manifest_pull_task = asyncio.create_task(
-                self._pull_remote_manifests(world_service, tool_store))
+                self._pull_remote_manifests(library, tool_store))
 
-    async def _pull_remote_manifests(self, world_service, tool_store,
+    async def _pull_remote_manifests(self, library, tool_store,
                                      interval: float = 30.0) -> None:
         """Drain queued remote manifest digests into the discovery index.
 
@@ -1468,7 +1425,7 @@ class AutonetBridge:
         while True:
             try:
                 await asyncio.sleep(interval)
-                digests = world_service.take_pending_remote_manifests(limit=16)
+                digests = library.take_pending_remote_manifests(limit=16)
                 if not digests:
                     continue
                 indexed = 0
@@ -1476,7 +1433,7 @@ class AutonetBridge:
                     manifest = await tool_store.fetch_payload(digest)
                     if not isinstance(manifest, dict):
                         continue
-                    if world_service.index_remote_manifest(manifest):
+                    if library.index_remote_manifest(manifest):
                         indexed += 1
                 if indexed:
                     log.info("indexed %d remote tool manifest(s) for "
@@ -1486,41 +1443,12 @@ class AutonetBridge:
             except Exception:
                 log.debug("remote manifest pull cycle failed", exc_info=True)
 
-    def _wire_substrate_identity_resolver(self) -> None:
-        """Pass an identity resolver to the substrate feed so each
-        work unit is attributed to the actual agent's 0x address
-        rather than collapsed under a single "daemon" author.
-
-        Skips agents without on-chain identity — they have no
-        network impact (no 0x address means no mint attribution).
-        """
-        if not self._service or not self._agent_registry:
-            return
-
-        try:
-            from nodes.common.world_substrate_feed import ResolvedAgentIdentity
-        except ImportError:
-            return
-
-        registry = self._agent_registry
-
-        def _resolve(local_agent_id: str):
-            defn = registry.get_agent(local_agent_id)
-            if defn is None or defn.identity is None:
-                return None
-            return ResolvedAgentIdentity(
-                address=defn.identity.address or "",
-                registered_on_chain=bool(defn.identity.registered_on_chain),
-            )
-
-        self._service.set_substrate_identity_resolver(_resolve)
-
     def _wire_world_epoch_subscriber(self) -> None:
-        """Forward WorldService epoch closes to the EventBus.
+        """Forward the library service's epoch ticks to the EventBus.
 
-        The subscriber runs in the autonet daemon's worker thread (under
-        the WorldService lock); we schedule the actual emit back on the
-        main event loop so async EventBus consumers see it.
+        The subscriber runs in the autonet daemon's worker thread; we
+        schedule the actual emit back on the main event loop so async
+        EventBus consumers see it.
         """
         if not self._service or not self._events:
             return
@@ -1535,8 +1463,6 @@ class AutonetBridge:
                 "rpb_address": record.get("rpb_address"),
                 "closed_at": record.get("closed_at"),
                 "n_events": record.get("n_events", 0),
-                "total_mint": record.get("total_mint", 0.0),
-                "agent_mint": record.get("agent_mint", {}),
                 "authoritative": record.get("authoritative", False),
                 "scope": record.get("scope", "local"),
             }
@@ -1651,51 +1577,10 @@ class AutonetBridge:
                     self.state.status = AutonetStatus.PAUSED
                 elif svc_status.state.value == "running":
                     self.state.status = AutonetStatus.RUNNING
-                # Pull training feed metrics
-                self._sync_training_metrics()
             except Exception:
                 pass  # Service might be between cycles
 
         return self.state.to_dict()
-
-    def _sync_training_metrics(self) -> None:
-        """Pull real-time training metrics into state.
-
-        Substrate-native: the world substrate feed is the live training
-        path (JEPA feed retired).
-        """
-        feed = getattr(self._service, "_world_substrate_feed", None)
-        if not feed:
-            return
-        self.state.pending_events = feed._pending_events
-        self.state.training_segments = getattr(feed, "_last_segment_count", 0)
-        self.state.last_cycle_time = feed._last_cycle_time
-
-        # Per-cycle metrics from the last training run
-        metrics = getattr(feed, "_last_metrics", None)
-        if metrics:
-            loss = metrics.get("loss", 0.0)
-            self.state.training_loss = loss
-            self.state.training_batches = metrics.get("num_batches", 0)
-            self.state.training_cosine_sim = metrics.get("cosine_similarity", 0.0)
-            # Append to loss history if this is a new cycle
-            cycle_count = feed._cycles_completed
-            if cycle_count > len(self.state.loss_history):
-                self.state.loss_history.append(round(loss, 6))
-                if len(self.state.loss_history) > self.state._MAX_LOSS_HISTORY:
-                    self.state.loss_history = self.state.loss_history[-self.state._MAX_LOSS_HISTORY:]
-
-        # Behavioral profile hash
-        profile = getattr(feed, "_profile", None)
-        if profile:
-            profile_hash = getattr(profile, "hash", None)
-            if callable(profile_hash):
-                try:
-                    self.state.profile_hash = profile_hash()
-                except Exception:
-                    pass
-            elif isinstance(profile_hash, str):
-                self.state.profile_hash = profile_hash
 
     def connect_wallet(self, address: str) -> dict[str, Any]:
         """Register a wallet connection (from frontend wallet provider)."""

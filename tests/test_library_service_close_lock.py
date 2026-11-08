@@ -1,9 +1,10 @@
-"""Issue #40: the world lock is never held across a wait on another thread.
+"""Issue #40: the library lock is never held across a wait on another thread.
 
 1. Epoch-close subscribers (the federated close driver: blob fetches over
-   the trio host, web3 reads) used to run under WorldService._lock. The trio
-   thread's gossip ingest calls submit_events, which needs that lock, so a
-   close that fetched a blob while a peer batch arrived froze the daemon.
+   the trio host, web3 reads) must not run under LibraryService._lock. The
+   trio thread's gossip ingest calls submit_events, which needs that lock,
+   so a close that fetched a blob while a peer batch arrived froze the
+   daemon.
 2. epoch_status took the same lock, so the WS handler on the event loop
    waited behind a close doing a synchronous eth_call.
 """
@@ -15,13 +16,12 @@ import time
 
 import trio
 
-from nodes.common.world_service import WorldService
-from tests.test_world_service_epoch import _TOOL_EMBED_DIM, _tool_registration_event
+from nodes.common.library_service import LibraryService
+from tests.test_tool_mint import _registration_event
 
 
 def _svc(tmp_path):
-    return WorldService(rpb_address="0x" + "40" * 20, data_root=tmp_path,
-                        embedding_dim=_TOOL_EMBED_DIM)
+    return LibraryService(rpb_address="0x" + "40" * 20, data_root=tmp_path)
 
 
 def test_close_subscriber_can_wait_on_the_trio_thread_while_it_ingests(tmp_path):
@@ -42,7 +42,7 @@ def test_close_subscriber_can_wait_on_the_trio_thread_while_it_ingests(tmp_path)
             await trio.sleep(0.01)
         # The topic reader ingests a peer batch synchronously on the trio
         # thread, as event gossip does.
-        svc.submit_events([_tool_registration_event()], origin="remote")
+        svc.submit_events([_registration_event()], origin="remote")
         ingested.set()
         while not stop.is_set():
             await trio.sleep(0.01)
@@ -68,13 +68,13 @@ def test_close_subscriber_can_wait_on_the_trio_thread_while_it_ingests(tmp_path)
     closer.join(10)
     deadlocked = closer.is_alive()
     stop.set()
-    assert not deadlocked, "close_epoch held the world lock across a trio fetch"
+    assert not deadlocked, "close_epoch held the library lock across a trio fetch"
     assert fetched == [b"blob"]
     assert ingested.wait(5)
     host.join(5)
 
 
-def test_close_subscribers_run_without_the_world_lock(tmp_path):
+def test_close_subscribers_run_without_the_library_lock(tmp_path):
     svc = _svc(tmp_path)
     seen = []
     svc.subscribe_epoch_closed(lambda rec: seen.append(
@@ -85,7 +85,7 @@ def test_close_subscribers_run_without_the_world_lock(tmp_path):
     assert seen == [("e1", False), ("e2", False)]
 
 
-def test_epoch_status_does_not_wait_for_the_world_lock(tmp_path):
+def test_epoch_status_does_not_wait_for_the_library_lock(tmp_path):
     svc = _svc(tmp_path)
     svc.open_epoch("e1")
     held = threading.Event()
@@ -104,5 +104,5 @@ def test_epoch_status_does_not_wait_for_the_world_lock(tmp_path):
     t.join(2)
     blocked = t.is_alive()
     release.set()
-    assert not blocked, "epoch_status waited on the world lock"
+    assert not blocked, "epoch_status waited on the library lock"
     assert out["epoch_id"] == "e1"

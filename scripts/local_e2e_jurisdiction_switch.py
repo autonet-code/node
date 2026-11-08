@@ -434,20 +434,20 @@ async def ws_call(rt, msg: Dict[str, Any]) -> Dict[str, Any]:
     return resp
 
 
-def world_service_for(rt, tmp_world_root: Path):
-    """The WorldService the autonet bridge's start() would build for this
-    jurisdiction (nodes/service.py _init_world_service), its world root
+def library_for(rt, tmp_world_root: Path):
+    """The LibraryService the autonet bridge's start() would build for this
+    jurisdiction (nodes/service.py _init_library_service), its data root
     pointed at the temp HOME. Same key derivation: start() copies the
     bridge's resolved jurisdiction_key into the node config."""
-    from nodes.common import world_persistence
+    from nodes.common import library_service
     from nodes.common.config import AutonetConfig
     from nodes.service import AutonetService
-    world_persistence._DEFAULT_DATA_ROOT = tmp_world_root
+    library_service._DEFAULT_DATA_ROOT = tmp_world_root
     cfg = AutonetConfig()
     cfg.jurisdiction_key = rt.autonet.state.jurisdiction_key
     svc = AutonetService(cfg, data_dir=str(rt._config.data_dir), configure_logging=False)
-    svc._init_world_service()
-    return svc._world_service
+    svc._init_library_service()
+    return svc._library
 
 
 async def register_root(rt, owner_key: str, peer: bytes) -> Dict[str, Any]:
@@ -599,15 +599,14 @@ async def amain() -> int:
         check(st.substrate_address.lower() == A["substrate"].lower()
               and st.tool_bond_address.lower() == A["tool_bond"].lower()
               and st.rpc_url == RPC_URL, "bridge resolved A's substrate, tool_bond and rpc")
-        ws = world_service_for(rt, world_root)
+        ws = library_for(rt, world_root)
         check(ws.rpb_address == key_a and ws.rpb_address != "default",
-              f"world rpb id is the jurisdiction key ({ws.rpb_address})")
-        world_a_dir = Path(ws._persistence._dir)
+              f"library rpb id is the jurisdiction key ({ws.rpb_address})")
+        world_a_dir = Path(ws.state_dir)
         check(world_a_dir.parent == world_root and world_a_dir.name != "default",
               f"world dir {world_a_dir.name}")
         check(topic_for_rpb(ws.rpb_address) == f"/autonet/world-events/{key_a}",
               "gossip topic keyed by the jurisdiction")
-        ws.snapshot_now()
         (world_a_dir / "e2e_marker").write_text("stage 2", encoding="utf-8")
         ws.shutdown()
         s2.note("key", key_a)
@@ -748,8 +747,8 @@ async def amain() -> int:
         check(view["result"]["current"]["key"] == key_b
               and [r["key"] for r in view["result"]["registered_in"]] == [key_a],
               "autonet_jurisdictions: current B, registered in A")
-        ws = world_service_for(rt, world_root)
-        world_b_dir = Path(ws._persistence._dir)
+        ws = library_for(rt, world_root)
+        world_b_dir = Path(ws.state_dir)
         check(ws.rpb_address == key_b and world_b_dir != world_a_dir, "B gets its own world dir")
         check((world_a_dir / "e2e_marker").exists(), "A's world dir parked, not deleted")
         ws.shutdown()
@@ -800,11 +799,11 @@ async def amain() -> int:
         rec = rt.tool_store.get(adopted)
         check(rec is not None and rec.origin == "adopted", "adopted tool visible again in A")
         check(rt.tool_store.get(authored) is not None, "authored tool still there")
-        ws = world_service_for(rt, world_root)
-        check(Path(ws._persistence._dir) == world_a_dir, "same world dir as stage 2")
+        ws = library_for(rt, world_root)
+        check(Path(ws.state_dir) == world_a_dir, "same world dir as stage 2")
         check((world_a_dir / "e2e_marker").read_text(encoding="utf-8") == "stage 2"
-              and (world_a_dir / "checkpoint.json").exists(),
-              "A's parked substrate data intact (stage 2 checkpoint + marker)")
+              and (world_a_dir / "blobs").is_dir(),
+              "A's parked library data intact (stage 2 blobs + marker)")
         ws.shutdown()
         s6.status = "PASS"
     except Exception as e:

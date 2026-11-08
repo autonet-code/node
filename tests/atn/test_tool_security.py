@@ -486,17 +486,14 @@ class TestProbeContext:
         assert rows[0]["author_context"]["max_other_harm"] is None
 
     async def test_probe_tools_drops_unbonded_network_tools(self, tmp_path):
-        import threading
         rt = _make_runtime(tmp_path)
         rt.tool_bond_client = FakeClient({D1: _st(), D2: _st(bonded=False)})
         manifests = {d: {"kind": "tool_manifest", "name": n, "description": "echo",
                          "author": AUTH, "trust_class": "pinned"}
                      for d, n in ((D1, "one"), (D2, "two"))}
-        ws = SimpleNamespace(
-            _lock=threading.RLock(),
-            _artifact_index=SimpleNamespace(_vectors={d: None for d in manifests}),
-            _blob_store=SimpleNamespace(get_json=manifests.get))
-        rt.autonet = SimpleNamespace(_service=SimpleNamespace(_world_service=ws))
+        lib = SimpleNamespace(artifact_digests=lambda: list(manifests),
+                              blob_json=manifests.get)
+        rt.autonet = SimpleNamespace(_service=SimpleNamespace(_library=lib))
         out = await execute_tool("probe_tools", {"query": "echo", "k": 5}, rt,
                                  caller_id=None)
         assert [m["digest"] for m in out["matches"]] == [D1]

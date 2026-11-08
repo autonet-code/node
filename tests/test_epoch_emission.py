@@ -57,25 +57,6 @@ class TestApplyEmissionPool:
         assert list(r1["agent_mint"]) == sorted(r1["agent_mint"])
 
 
-class TestReconcileEpochPoolParam:
-    def test_reconcile_epoch_accepts_pool(self):
-        """reconcile_epoch(emission_pool=...) normalizes via the helper."""
-        from nodes.common.world_model_substrate.reconcile import (
-            EpochSnapshots,
-            reconcile_epoch,
-        )
-        from nodes.common.world_model_substrate.adapter import build_charter_world
-
-        world = build_charter_world()
-        snaps = EpochSnapshots()
-        snaps.record_start(world)
-        snaps.record_close(world)
-        out = reconcile_epoch(world, snaps, events=[], emission_pool=50.0)
-        # No movement → no mint; pool recorded, no division error.
-        assert out["emission_pool"] == 50.0
-        assert out["total_mint"] == 0.0
-
-
 class TestFederatedPoolDeterminism:
     def test_quiet_epoch_carries_the_whole_pool(self):
         from nodes.common.canonical_ordering import canonical_order
@@ -91,7 +72,7 @@ class TestFederatedPoolDeterminism:
 # Candle close
 # ---------------------------------------------------------------------------
 
-class _FakeWorldService:
+class _FakeLibrary:
     """Minimal stand-in for scheduler tests."""
 
     def __init__(self):
@@ -104,10 +85,10 @@ class _FakeWorldService:
         self._n += 1
         self.current_epoch_id = f"e{self._n}"
 
-    def close_epoch(self, *, apply_gate=True, gate_strength=1.0, cutoff_ts=None):
+    def close_epoch(self, *, cutoff_ts=None):
         self.closed_with.append(cutoff_ts)
         record = {"epoch_id": self.current_epoch_id, "closed_at": 123.0,
-                  "agent_mint": {}, "total_mint": 0.0}
+                  "n_events": 0}
         self.epoch_history.append(record)
         self.current_epoch_id = None
         return record
@@ -116,14 +97,13 @@ class _FakeWorldService:
 class TestCandleScheduler:
     def _scheduler(self, min_s, window_s):
         from nodes.common.epoch_scheduler import EpochScheduler, EpochSchedulerConfig
-        ws = _FakeWorldService()
+        ws = _FakeLibrary()
         sched = EpochScheduler(
             ws,
             config=EpochSchedulerConfig(
                 interval_seconds=1.0,
                 candle_min_seconds=min_s,
                 candle_window_seconds=window_s,
-                apply_gate=False,
             ),
         )
         return ws, sched
@@ -164,7 +144,7 @@ class TestCandleScheduler:
     def test_plain_mode_unaffected(self):
         import time
         from nodes.common.epoch_scheduler import EpochScheduler, EpochSchedulerConfig
-        ws = _FakeWorldService()
+        ws = _FakeLibrary()
         sched = EpochScheduler(ws, config=EpochSchedulerConfig(interval_seconds=60))
         sched._last_open_at = time.time() - 61
         result = sched.maybe_tick()
@@ -172,43 +152,21 @@ class TestCandleScheduler:
         assert ws.closed_with == [None]    # no cutoff in plain mode
 
 
-class TestWorldServiceCandleCutoff:
-    def _service(self, tmp_path, rate=None):
-        from nodes.common.world_service import WorldService
-        return WorldService(
-            rpb_address="candle-test",
-            data_root=tmp_path,
-            embedding_dim=0,
-            epoch_emission_rate=rate,
-        )
-
+class TestLibraryCandleCutoff:
     def test_post_cut_events_roll_forward(self, tmp_path):
         import time
-        svc = self._service(tmp_path)
+        from nodes.common.library_service import LibraryService
+        svc = LibraryService(rpb_address="candle-test", data_root=tmp_path)
         svc.open_epoch("e1")
         with svc._lock:
-            svc._buffer_epoch_events_locked([{"kind": "a"}, {"kind": "b"}, {"kind": "c"}])
+            svc._buffer_locked([{"kind": "a"}, {"kind": "b"}, {"kind": "c"}])
         now = time.time()
         # Backdate the first two events; the third stays "after the cut".
         svc._epoch_event_ts = [now - 100, now - 90, now + 100]
-        record = svc.close_epoch(cutoff_ts=now, apply_gate=False)
+        record = svc.close_epoch(cutoff_ts=now)
         assert record["n_events"] == 2
         # Rolled event seeds the next epoch's buffer.
         svc.open_epoch("e2")
         assert len(svc._epoch_events) == 1
         assert svc._epoch_events[0]["kind"] == "c"
-        hist = svc.epoch_history
-        assert hist[-1]["events_rolled_forward"] == 1
-
-    def test_emission_clock_accrues_remainder(self, tmp_path):
-        import time
-        svc = self._service(tmp_path, rate=1.0)   # 1 token/sec
-        svc.open_epoch("e1")
-        open_clock = svc._emission_clock
-        cut = open_clock + 50          # cut 50s in; "now" is later
-        svc.close_epoch(cutoff_ts=cut, apply_gate=False)
-        # Pool covered exactly [open, cut] and the clock advanced to cut —
-        # the remainder of the window accrues to the next epoch.
-        assert svc._emission_clock == pytest.approx(cut)
-        rec = svc.epoch_history[-1]
-        assert rec["emission_pool"] == pytest.approx(50.0)
+        assert svc.epoch_history[-1]["events_rolled_forward"] == 1

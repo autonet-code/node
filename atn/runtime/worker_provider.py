@@ -47,9 +47,9 @@ log = logging.getLogger(__name__)
 # Provider names that MUST stay in-process (never built worker-side).
 # Kept explicit so a daemon-side routing bug surfaces as a clean refusal here
 # rather than a subtle wrong-provider run. P5 lifted claude_max/bridge out of
-# this set (they now worker-ize); codex_max + the rpb/substrate composites stay.
+# this set (they now worker-ize); codex_max + the rpb composite stay.
 _IN_PROCESS_ONLY = frozenset({
-    "codex_max", "rpb", "substrate",
+    "codex_max", "rpb",
 })
 
 # API provider kinds the worker CAN rebuild locally.

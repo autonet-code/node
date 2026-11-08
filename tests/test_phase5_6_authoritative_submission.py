@@ -17,7 +17,7 @@ This test file is the **architectural successor** to
 
 What this validates:
 
-  1. End-to-end: WorldService close → canonical_order →
+  1. End-to-end: epoch close → canonical_order →
      federated_epoch_close → anchor on Substrate → agent reads anchor
      → fetches blob via resolver → CID-verifies → decodes own share
      → submits on chain.

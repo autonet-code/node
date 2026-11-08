@@ -308,31 +308,30 @@ def index_for(runtime: Any) -> ToolSearchIndex:
     return index
 
 
-def _world_service(runtime: Any) -> Any:
+def _library(runtime: Any) -> Any:
     autonet = getattr(runtime, "autonet", None)
     service = getattr(autonet, "_service", None) if autonet else None
-    return getattr(service, "_world_service", None) if service else None
+    return getattr(service, "_library", None) if service else None
 
 
 def network_manifests(runtime: Any) -> dict[str, dict[str, Any]]:
     """Every manifest in the substrate's discovery index (this daemon's
     published tools and every remote manifest it fetched and verified),
     read from the blob store once per digest."""
-    ws = _world_service(runtime)
-    if ws is None:
+    lib = _library(runtime)
+    if lib is None:
         return {}
     cache: dict[str, Optional[dict[str, Any]]] = runtime.__dict__.setdefault(
         "_tool_search_blob_cache", {})
     try:
-        with ws._lock:
-            digests = list(ws._artifact_index._vectors.keys())
+        digests = lib.artifact_digests()
     except Exception:  # noqa: BLE001
         return {}
     out: dict[str, dict[str, Any]] = {}
     for digest in digests:
         if digest not in cache:
             try:
-                payload = ws._blob_store.get_json(digest)
+                payload = lib.blob_json(digest)
             except Exception:  # noqa: BLE001
                 payload = None
             cache[digest] = payload if is_tool_manifest(payload) else None

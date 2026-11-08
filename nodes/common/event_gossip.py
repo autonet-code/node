@@ -1,22 +1,22 @@
 """Event-batch gossip between daemons (Phase 5.2).
 
-Federation transport for the substrate. Each daemon hosts a
-``WorldService`` whose epoch state is fed by:
+Federation transport for the tool library. Each daemon hosts a
+``LibraryService`` whose epoch buffer is fed by:
 
-  - **Local activity**: agent traces -> WorldSubstrateFeed -> WorldService.
+  - **Local activity**: published tools -> LibraryService.
   - **Peer activity** (this module): EventBatches arriving over a
-    pub/sub topic -> WorldService.submit_events.
+    pub/sub topic -> LibraryService.submit_events.
 
-Content-addressed dedupe means a batch arriving twice (e.g. via
-gossip re-broadcast) is harmless: ``apply_events`` consolidates
-duplicate sprouts via their (anchor, polarity_axis) hash.
+A batch arriving twice (e.g. via gossip re-broadcast) is dropped by the
+content-hash dedupe cache; the close keeps the first registration of a
+digest.
 
 What's in scope here (5.2):
 
   - ``EventBatch`` envelope: rpb, sender_pubkey, batch_seq, events,
     prev_batch_hash, signature.
   - ``EventGossip`` coordinator: publish/subscribe API, signing,
-    verification, dedupe cache, ingest hook into WorldService.
+    verification, dedupe cache, ingest hook into LibraryService.
   - ``Transport`` interface and ``InMemoryTransport`` impl for tests.
 
 What's NOT in scope:
@@ -450,9 +450,9 @@ class EventGossip:
     """Per-daemon event-batch gossip.
 
     Wires:
-      - publish: WorldService observes a local batch -> sign -> publish.
+      - publish: library service observes a local batch -> sign -> publish.
       - subscribe: incoming batch -> verify -> dedupe -> ingest into
-        the local WorldService.
+        the local library service.
     """
 
     def __init__(
@@ -460,7 +460,7 @@ class EventGossip:
         rpb_address: str,
         keypair: Keypair,
         transport: Transport,
-        world_service: Any,
+        library: Any,
         *,
         dedupe_cache_size: int = 4096,
         seq_path: Optional[Any] = None,
@@ -469,7 +469,7 @@ class EventGossip:
         self.rpb_address = rpb_address
         self.keypair = keypair
         self.transport = transport
-        self.world_service = world_service
+        self.library = library
         self.topic = topic_for_rpb(rpb_address)
 
         self._lock = threading.RLock()
@@ -510,10 +510,10 @@ class EventGossip:
         self.transport.subscribe(self.topic, self._on_message)
 
         # Subscribe to local activity so we publish our daemon's events.
-        # The handler bridges WorldService's "events were applied locally"
+        # The handler bridges the library service's "events were applied locally"
         # signal to our publish_events.
-        if hasattr(world_service, "subscribe_local_events"):
-            world_service.subscribe_local_events(self._on_local_events)
+        if hasattr(library, "subscribe_local_events"):
+            library.subscribe_local_events(self._on_local_events)
 
     @property
     def sender_pubkey(self) -> bytes:
@@ -536,7 +536,7 @@ class EventGossip:
     # ------------------------------------------------------------------
 
     def _on_local_events(self, events: List[Dict[str, Any]]) -> None:
-        """WorldService applied a batch locally. Republish to peers."""
+        """The library service took a local batch. Republish to peers."""
         try:
             self.publish_events(events)
         except Exception as e:
@@ -741,20 +741,15 @@ class EventGossip:
         self.batch_log.add(h, ts, data)
 
         # Don't ingest our own published batches: the local
-        # WorldService already has them.
+        # library service already has them.
         if signed.batch.sender_pubkey == self.sender_pubkey:
             return True
 
-        # Ingest into the local WorldService. Use submit_events with
-        # origin="remote" so content-addressed dedupe + persistence +
-        # epoch buffering all apply, but the local-events fan-out
-        # doesn't echo this batch back out.
+        # Ingest into the local library service with origin="remote": the
+        # epoch buffering and discovery queue apply, but the local-events
+        # fan-out doesn't echo this batch back out.
         try:
-            self.world_service.submit_events(
-                signed.batch.events,
-                equilibrate_after=True,
-                origin="remote",
-            )
+            self.library.submit_events(signed.batch.events, origin="remote")
             with self._lock:
                 self._stats.events_ingested += len(signed.batch.events)
         except Exception as e:

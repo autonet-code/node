@@ -65,7 +65,7 @@ class Daemon:
         self.kp = Keypair.generate()
         self.gossip = EventGossip(rpb_address=RPB, keypair=self.kp,
                                   transport=InMemoryTransport(hub, name),
-                                  world_service=MagicMock())
+                                  library=MagicMock())
         self.gossip.clock = lambda: float(_now(w3))
         self.close = FederatedCloseDriver(
             gossip=self.gossip, tool_registrations_path=tmp / f"{name}_regs.json",

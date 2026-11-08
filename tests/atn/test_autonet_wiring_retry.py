@@ -2,7 +2,7 @@
 
 `_wire_event_gossip_when_ready`, `_wire_chain_submission_when_ready` and
 `_wire_peer_attribution_when_ready` used to give up silently after 30 s,
-so a host or WorldService that came up late left the daemon unwired for
+so a host or library service that came up late left the daemon unwired for
 the whole session. They now log one warning and keep polling with
 backoff until wired or the service stops.
 """
@@ -26,7 +26,7 @@ class _FakeHost:
 
 class _FakeService:
     def __init__(self) -> None:
-        self._world_service = object()
+        self._library = object()
         self._federated_close_driver = None
         self.gossip_hosts: list = []
         self.chain_attached = 0

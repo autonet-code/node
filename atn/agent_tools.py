@@ -828,36 +828,6 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
-        name="check_evidence",
-        description=(
-            "Verify an evidence-bearing CON against a pinned tool, then "
-            "optionally back it (validator role — vetting bundle). A CON "
-            "disputing a tool can carry a reproducible failing invocation "
-            "(args + expected result/error). This RE-RUNS the pinned code "
-            "with those args on your own daemon and reports whether the "
-            "failure reproduces. If it does — and you pass the CON's node "
-            "id — you post a support sprout under the CON, lending your "
-            "standing to a dispute you personally reproduced. Evidence "
-            "recruits verification; a non-reproducing invocation recruits "
-            "no one, so your standing is never spent on a claim you could "
-            "not confirm."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "manifest_digest": {"type": "string", "description": "64-hex digest of the disputed pinned tool (must be resolvable locally — adopt or register it first)."},
-                "evidence": {
-                    "type": "object",
-                    "description": "The CON's evidence: {args_json (object or JSON string), expected_error OR expected_digest, actual_digest (optional)}.",
-                    "additionalProperties": True,
-                },
-                "con_node_id": {"type": "string", "description": "CON node id to support if the replay confirms. Omit to only replay (diagnostic)."},
-                "support": {"type": "boolean", "description": "Post a support sprout when confirmed (default true). Set false to replay without backing.", "default": True},
-            },
-            "required": ["manifest_digest", "evidence"],
-        },
-    ),
-    ToolDefinition(
         name="attest_tools",
         description=(
             "Review which registered tools contributed to a piece of work you "
@@ -3341,34 +3311,6 @@ async def _queue_staked_reviews(runtime: Runtime, caller_id: Any,
         return {"queued": 0, "note": f"reviews not queued: {exc}"}
 
 
-async def _check_evidence(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Evidence-replay verify-then-support (docs/tool_substrate.md — Evidence).
-
-    Replays a CON's reproducible failing invocation against the pinned
-    tool locally and, on confirmation, posts a support sprout under the
-    CON. Caller is derived; the replay itself is owner-sanctioned local
-    verification, so scoping is not the replay's concern.
-    """
-    digest = str(input.get("manifest_digest") or "").strip()
-    if not digest:
-        return {"error": "Missing required field: 'manifest_digest'"}
-    evidence = input.get("evidence")
-    if not isinstance(evidence, dict):
-        return {"error": "'evidence' must be an object "
-                         "(args_json + expected_error/expected_digest)"}
-    con_node_id = str(input.get("con_node_id") or "").strip()
-    support = input.get("support")
-    support = True if support is None else bool(support)
-    caller_id = input.get("_caller_id")
-    try:
-        return await runtime.tool_store.check_evidence(
-            caller_id, digest, evidence,
-            con_node_id=con_node_id, support=support,
-        )
-    except Exception as exc:
-        return {"error": str(exc)}
-
-
 async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Record cognitive attestations for a closed work item.
 
@@ -4430,10 +4372,8 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # Vetting is the validator/inspection role (v4.1 gradient trust) —
     # its own case-by-case grant, same doctrine as publishing: reading
     # foreign code and moving a tool's public rating with your reputation
-    # is not implied by authoring or publishing. It also carries the two
-    # evidence-grade validator flow: check_evidence (replay an evidence-CON
-    # and back it, Evidence section).
-    "vetting": {"vet_tool", "check_evidence"},
+    # is not implied by authoring or publishing.
+    "vetting": {"vet_tool"},
     # Adoption (spec: Adoption rail) — the agent may PROPOSE installing
     # network tools; the owner approves per tool. Case-by-case grant:
     # publishing risks reputation, adoption risks the host.
@@ -5675,7 +5615,6 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "register_tool": _register_tool,
     "publish_tool": _publish_tool,
     "vet_tool": _vet_tool,
-    "check_evidence": _check_evidence,
     "adopt_tool": _adopt_tool,
     "attest_tools": _attest_tools,
     "get_history": _get_history,

@@ -3,22 +3,19 @@
 In-process two-daemon scenario validating the full Phase 10 wiring
 end-to-end without exercising the actual ``python -m atn`` CLI:
 
-  - Each daemon has its own ``WorldService`` (separate persistence
-    dir) and its own ``EventGossip``.
+  - Each daemon has its own ``LibraryService`` (separate state dir) and
+    its own ``EventGossip``.
   - The two gossip instances share an ``InMemoryHub`` so signed
     batches propagate between them in-process (no real libp2p).
-  - Each daemon submits observations on behalf of one registered
-    agent (with a 0x address). 10.1's per-agent attribution makes
-    sure mint accrues to the address, not to "daemon".
+  - Each daemon publishes a tool on behalf of one registered agent
+    (with a 0x address).
   - When both daemons close their epoch, each runs the
     ``FederatedCloseDriver``: gather buffered batches → canonical
     order → federated_epoch_close → pick_submitter.
   - Assertion: both daemons compute the same ``authoritative_payload``
     bit-identical and the same ``winner``.
 
-This is what "two daemons grow a substrate together" means at the
-pure-substrate layer — the chain side (10.3b/c/d) is separately
-covered.
+The chain side is covered separately.
 """
 
 from __future__ import annotations
@@ -35,7 +32,8 @@ from nodes.common.event_gossip import (
     Keypair,
 )
 from nodes.common.federated_close_driver import FederatedCloseDriver
-from nodes.common.world_service import WorldService
+from nodes.common.library.tool_manifest import build_tool_manifest
+from nodes.common.library_service import LibraryService
 
 
 def _make_daemon(
@@ -43,46 +41,29 @@ def _make_daemon(
     name: str,
     hub: InMemoryHub,
     rpb: str = "rpb_smoke",
-    embedding_dim: int = 32,
-) -> Tuple[WorldService, EventGossip, FederatedCloseDriver]:
-    """Build a WorldService + EventGossip + FederatedCloseDriver
-    triple sharing the given hub.
-
-    Pinned to the "equilibrated" kernel: this smoke submits
-    observation-only events, which mint via geometric propagation +
-    derived-sprout capture. Ledger mode (the post-phase8 default) scores
-    net_score over causal events only, so observations alone don't move
-    score — that path is exercised by tests/test_ledger_pricing.py.
-    """
-    svc = WorldService(
-        rpb_address=rpb,
-        data_root=tmp_path / name,
-        embedding_dim=embedding_dim,
-        pricing="equilibrated",
-    )
+) -> Tuple[LibraryService, EventGossip, FederatedCloseDriver]:
+    """Build a LibraryService + EventGossip + FederatedCloseDriver triple
+    sharing the given hub."""
+    svc = LibraryService(rpb_address=rpb, data_root=tmp_path / name)
     transport = InMemoryTransport(hub=hub, node_id=name)
     gossip = EventGossip(
         rpb_address=rpb,
         keypair=Keypair.generate(),
         transport=transport,
-        world_service=svc,
+        library=svc,
     )
-    driver = FederatedCloseDriver(
-        gossip=gossip, )
+    driver = FederatedCloseDriver(gossip=gossip)
     return svc, gossip, driver
 
 
-def _submit_obs(svc: WorldService, agent_address: str, label: str, charter_axis: int):
-    """Submit one observation from an agent biased toward one charter
-    axis. Coords are 6-D (post Phase 9 charter expansion) + zeros for
-    the embedding tail."""
-    from world_model.generalized import Observation
-    coords = [0.0] * 6
-    coords[charter_axis] = 0.7
-    # Embedding tail
-    coords += [0.05 * i for i in range(svc.embedding_dim)]
-    obs = Observation(id=f"obs_{label}", coords=tuple(coords), label=label)
-    svc.submit_observation(obs, agent_id=agent_address)
+def _publish_tool(svc: LibraryService, agent_address: str, name: str) -> str:
+    """Publish one tool authored by ``agent_address``."""
+    manifest = build_tool_manifest(
+        name=name, description=f"{name}: does a thing.",
+        input_schema={"type": "object", "properties": {}},
+        author=agent_address, trust_class="pinned", code_digest="c" * 64,
+        created_ts=1780531200)
+    return svc.submit_tool_manifest(manifest, agent_id=agent_address)["manifest_digest"]
 
 
 def test_two_daemons_reach_identical_federated_payload(tmp_path: Path):
@@ -102,19 +83,13 @@ def test_two_daemons_reach_identical_federated_payload(tmp_path: Path):
         # (Real production gets this from a shared scheduler / clock.)
         epoch_id = "smoke_epoch_1"
 
-        # Each daemon's agent submits one observation. The local-events
-        # subscriber wired by EventGossip publishes those events to the
-        # shared hub, which delivers them to the *other* daemon's
-        # gossip instance, which submits them to the other daemon's
-        # WorldService and buffers them for the canonical order.
-        _submit_obs(svc_a, "0xAAA", "alpha_obs_1", charter_axis=0)
-        _submit_obs(svc_b, "0xBBB", "beta_obs_1", charter_axis=2)
-
-        # Allow a brief moment for InMemoryHub delivery (synchronous
-        # but called from the WorldService's local-events thread; we
-        # just need both events visible to both daemons).
-        # InMemoryHub delivers synchronously, so by this point both
-        # daemons should have buffered both batches.
+        # Each daemon's agent publishes one tool. The local-events
+        # subscriber wired by EventGossip publishes the registration to
+        # the shared hub, which delivers it to the *other* daemon's gossip
+        # instance, which buffers it for the canonical order.
+        # InMemoryHub delivers synchronously.
+        dig_a = _publish_tool(svc_a, "0xAAA", "alpha_tool")
+        dig_b = _publish_tool(svc_b, "0xBBB", "beta_tool")
 
         # Close epoch on both daemons (local close — produces a
         # local result with epoch_id).
@@ -151,16 +126,13 @@ def test_two_daemons_reach_identical_federated_payload(tmp_path: Path):
             "disagreement"
         )
 
-        # Both daemons saw the same number of batches in canonical order
-        # (one batch per daemon's submitted observation).
+        # Both daemons saw the same batches in canonical order (one per
+        # published tool) and carry both registrations forward.
         assert fed_a.n_batches == fed_b.n_batches >= 2
-
-        # Observations no longer mint (the mint is tool usage only, since
-        # fa22e32), so the agents are not checked in agent_mint; nothing may
-        # be attributed to a daemon-level placeholder either way.
-        keys = set(payload_a.get("agent_mint", {}).keys())
-        assert "default" not in keys
-        assert "daemon" not in keys
+        regs = fed_a.close_result["tool_registrations"]
+        assert set(regs) == {dig_a, dig_b}
+        assert regs == fed_b.close_result["tool_registrations"]
+        assert fed_a.carry_cid == fed_b.carry_cid
     finally:
         svc_a.shutdown()
         svc_b.shutdown()
@@ -177,8 +149,8 @@ def test_isolated_daemons_dont_cross_contaminate(tmp_path: Path):
     try:
         svc_a.open_epoch()
         svc_b.open_epoch()
-        _submit_obs(svc_a, "0xAAA", "alpha_obs", charter_axis=0)
-        _submit_obs(svc_b, "0xBBB", "beta_obs", charter_axis=1)
+        _publish_tool(svc_a, "0xAAA", "alpha_tool")
+        _publish_tool(svc_b, "0xBBB", "beta_tool")
 
         local_a = svc_a.close_epoch()
         local_b = svc_b.close_epoch()
@@ -193,8 +165,6 @@ def test_isolated_daemons_dont_cross_contaminate(tmp_path: Path):
         # topic.
         assert fed_a is not None
         assert fed_b is not None
-        # (Counted by batches: observations no longer mint, so the
-        # agent_mint keys cannot show it.)
         assert fed_a.n_batches == 1
         assert fed_b.n_batches == 1
         assert (fed_a.close_result["authoritative_payload"]

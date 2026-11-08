@@ -13,7 +13,7 @@ from nodes.common.event_gossip import (
     InMemoryTransport,
     Keypair,
 )
-from nodes.common.world_service import WorldService
+from nodes.common.library_service import LibraryService
 from tests.test_epoch_window import BASE, ROOT, _batch, _Buffer, _driver, _window
 from nodes.common.voice_state import make_epoch_id
 
@@ -21,9 +21,9 @@ RPB = "0x" + "ab" * 20
 
 
 def _peer(hub, tmp_path: Path, name: str, now: float) -> EventGossip:
-    svc = WorldService(rpb_address=RPB, data_root=tmp_path / name)
+    svc = LibraryService(rpb_address=RPB, data_root=tmp_path / name)
     g = EventGossip(rpb_address=RPB, keypair=Keypair.generate(),
-                    transport=InMemoryTransport(hub, node_id=name), world_service=svc)
+                    transport=InMemoryTransport(hub, node_id=name), library=svc)
     g.clock = lambda: now
     g.max_skew_seconds = 60
     return g

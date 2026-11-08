@@ -279,12 +279,6 @@ class ProviderManager:
             "auth_type": "service",
             "models": [],  # The served model is the seller's declaration
         },
-        "substrate": {
-            "name": "World-Model Substrate",
-            "description": "Substrate retrieval + local LLM render. Phase 6 of native integration.",
-            "auth_type": "local",
-            "models": [],
-        },
     }
 
     _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
@@ -325,21 +319,11 @@ class ProviderManager:
         self._bridge_updater: Any = None
         self._bridge_check_task: asyncio.Task | None = None
         self._p2p_host: Any = None  # Set by runtime when P2P is available
-        # Phase 6.4: substrate provider needs the daemon's WorldService
-        # to probe. Two ways to attach it:
-        #   - direct reference: ``self._world_service = svc``
-        #   - lazy resolver: ``self._world_service_resolver = lambda: svc``
-        # The resolver path lets the autonet AutonetBridge wire the
-        # service even though autonet's WorldService is constructed
-        # inside an executor thread (start() blocks). Resolver is
-        # checked first; falls back to the direct reference.
-        self._world_service: Any = None
-        self._world_service_resolver: Any = None
         # Per-agent service binding (docs/services_market.md, 2026-07-26):
         # a bound child pays for its own inference, so building its provider
         # needs the child's OWN wallet key. The manager has no registry
         # reference (it is constructed before/alongside one), so the runtime
-        # injects a resolver — same lazy-injection pattern as _world_service.
+        # injects a resolver (lazy injection).
         # Signature: (agent_id) -> private_key_hex | "" ; and
         # (agent_id) -> 0x address | "" for the client address.
         self._agent_key_resolver: Any = None
@@ -555,8 +539,6 @@ class ProviderManager:
             )
         if provider_name == "service":
             return self._build_service_provider(model)
-        if provider_name == "substrate":
-            return self._build_substrate_provider(model, agent_id)
         if provider_name in self._custom_providers:
             pconfig = self._config.providers.get(provider_name)
             if pconfig and pconfig.base_url:
@@ -696,53 +678,6 @@ class ProviderManager:
         except Exception as exc:  # noqa: BLE001
             log.warning("agent address resolver failed for %s: %s", agent_id, exc)
             return ""
-
-    def _build_substrate_provider(self, model: str, agent_id: str) -> Any:
-        """Build the SubstrateProvider composite.
-
-        Phase 6.4 wiring:
-          - The runtime must have attached a WorldService at
-            ``self._world_service`` (or a resolver) so the substrate
-            provider can probe it.
-          - The renderer is ollama configured for this daemon; the
-            substrate provider feeds the located region into ollama.
-          - ``model`` passed in is the *renderer model* (e.g.
-            "qwen3:4b") — the actual LLM call goes to ollama with
-            this id.
-        """
-        ws = self._resolve_world_service()
-        if ws is None:
-            raise ProviderError(
-                "substrate provider requires a WorldService; "
-                "the runtime hasn't attached one yet"
-            )
-        from ..providers.substrate import SubstrateProvider
-        ollama_defaults = self._PROVIDER_DEFAULTS.get("ollama", {})
-        ollama_pconfig = self._config.providers.get("ollama")
-        renderer = OllamaProvider(
-            base_url=(
-                (ollama_pconfig.base_url if ollama_pconfig else "")
-                or ollama_defaults.get("base_url", "http://localhost:11434")
-            ),
-            default_model=model,
-        )
-        return SubstrateProvider(
-            world_service=ws,
-            renderer=renderer,
-            renderer_model=model,
-        )
-
-    def _resolve_world_service(self) -> Any:
-        """Resolve the WorldService via direct reference or lazy
-        resolver. Resolver wins if set."""
-        if self._world_service_resolver is not None:
-            try:
-                ws = self._world_service_resolver()
-                if ws is not None:
-                    return ws
-            except Exception as e:
-                log.warning("world_service_resolver failed: %s", e)
-        return self._world_service
 
     def _ollama_base_url(self) -> str:
         """Configured ollama base URL, normalized for the NATIVE API: no

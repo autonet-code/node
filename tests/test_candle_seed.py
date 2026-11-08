@@ -127,7 +127,7 @@ def test_seed_reads_anchor_as_of_boundary_block():
 # ---------------------------------------------------------------------------
 
 
-class _StubWorldService:
+class _StubLibrary:
     current_epoch_id = "e_test"
     epoch_history: list = []
 
@@ -140,7 +140,7 @@ class _StubWorldService:
 
 def _scheduler(seed_source):
     sched = EpochScheduler(
-        world_service=_StubWorldService(),
+        library=_StubLibrary(),
         config=EpochSchedulerConfig(
             candle_min_seconds=100.0,
             candle_window_seconds=50.0,

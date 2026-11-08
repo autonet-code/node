@@ -1468,59 +1468,6 @@ class TestEvidenceReplay:
         assert out["confirmed"] is False
         assert "resolvable" in out["error"]
 
-    @pytest.mark.asyncio
-    async def test_check_evidence_verify_then_support(self, tmp_path):
-        """Confirmed replay posts a PRO support sprout under the CON via
-        the wired support_sink; a refuted one posts nothing."""
-        rt = _make_runtime(tmp_path)
-        await _family(rt)
-        res = await self._register_buggy(rt)
-
-        posted: list = []
-
-        def fake_support_sink(con_node_id, claim):
-            posted.append((con_node_id, claim))
-            return {"support_node_id": "pro_x", "target_node_id": con_node_id}
-
-        rt.tool_store.support_sink = fake_support_sink
-
-        # Confirmed evidence → support posted.
-        confirmed = await execute_tool(
-            "check_evidence",
-            {"manifest_digest": res["digest"],
-             "evidence": {"args_json": {"x": ""}, "expected_error": "req"},
-             "con_node_id": "con_abc"},
-            rt, caller_id="sibling")
-        assert confirmed["confirmed"] is True
-        assert confirmed["supported"]["support_node_id"] == "pro_x"
-        assert posted == [("con_abc", posted[0][1])]
-
-        # Refuted evidence → nothing posted.
-        posted.clear()
-        refuted = await execute_tool(
-            "check_evidence",
-            {"manifest_digest": res["digest"],
-             "evidence": {"args_json": {"x": "ok"}, "expected_error": "req"},
-             "con_node_id": "con_def"},
-            rt, caller_id="sibling")
-        assert refuted["confirmed"] is False
-        assert refuted["supported"] is None
-        assert posted == []
-
-    @pytest.mark.asyncio
-    async def test_check_evidence_confirmed_without_sink_posts_nothing(
-            self, tmp_path):
-        rt = _make_runtime(tmp_path)
-        await _family(rt)
-        res = await self._register_buggy(rt)
-        # No support_sink wired, no con_node_id: replay only.
-        out = await rt.tool_store.check_evidence(
-            "sibling", res["digest"],
-            {"args_json": {"x": ""}, "expected_error": "req"})
-        assert out["confirmed"] is True
-        assert out["supported"] is None
-
-
 # ---------------------------------------------------------------------------
 # Registration idempotency + bootstrap hygiene (the 13-copies-per-boot bug:
 # created_ts baked into the manifest defeated content addressing, so every

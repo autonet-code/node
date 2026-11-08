@@ -73,15 +73,9 @@ class AutonetService:
 
         self._data_dir = data_dir  # ATN data dir (~/.atn), passed from AutonetBridge
 
-        # World-model substrate (Phase 2 of native integration).
-        # Long-lived persistent World fed by agent activity. Lives at the
-        # daemon level, one per RPB.
-        self._world_service = None
-        self._world_substrate_feed = None
-        # Identity resolver for the substrate feed. Set before start()
-        # so it's installed when _init_world_substrate_feed runs.
-        # Signature: Callable[[str], Optional[ResolvedAgentIdentity]].
-        self._substrate_identity_resolver: Any = None
+        # The tool library service (epoch tick, event plumbing, search),
+        # one per jurisdiction key.
+        self._library = None
         # Event gossip for substrate federation across daemons.
         # Constructed by attach_event_gossip() after the libp2p host
         # is ready (Phase 10.2).
@@ -102,11 +96,11 @@ class AutonetService:
         # is up. Owns the EpochAnchorer (one) and per-agent
         # AuthoritativeChainSubmitter cache.
         self._chain_submission_driver = None
-        # Phase 3: epoch scheduler ticks the World's reward windows.
+        # The epoch scheduler ticks the library's epochs.
         self._epoch_scheduler = None
-        # Phase 4: external subscribers receive epoch close records.
-        # Installed before start() so they're attached when the
-        # WorldService is constructed.
+        # External subscribers receive epoch close records. Installed
+        # before start() so they're attached when the library service is
+        # constructed.
         self._external_epoch_subscribers: list = []
 
         # Blob store for uploading weight deltas
@@ -153,13 +147,10 @@ class AutonetService:
 
         # Initialize subsystems
         try:
-            # Initialize world-model substrate (always available; feeding
-            # is gated by config and data dir presence).
-            self._init_world_service()
-            if self._world_service is not None:
+            # The tool library service (always available).
+            self._init_library_service()
+            if self._library is not None:
                 self._init_epoch_scheduler()
-            if self._data_dir and self._world_service is not None:
-                self._init_world_substrate_feed()
 
             # Initialize blob store for weight delta uploads
             self._init_blob_store()
@@ -167,8 +158,7 @@ class AutonetService:
             logger.info(
                 f"AutonetService initialized: "
                 f"device={self.config.device}, "
-                f"arch={self.config.model.architecture}, "
-                f"world_substrate={'active' if self._world_substrate_feed else 'disabled'}"
+                f"arch={self.config.model.architecture}"
             )
 
         except Exception as e:
@@ -207,15 +197,14 @@ class AutonetService:
             except Exception as e:
                 logger.error(f"Error in final epoch tick: {e}")
 
-        # Flush + close WorldService so its persistent log is durable.
-        if self._world_service is not None:
+        if self._library is not None:
             try:
                 # Close any epoch the scheduler didn't reach.
-                if self._world_service.current_epoch_id is not None:
-                    self._world_service.close_epoch()
-                self._world_service.shutdown()
+                if self._library.current_epoch_id is not None:
+                    self._library.close_epoch()
+                self._library.shutdown()
             except Exception as e:
-                logger.error(f"Error shutting down WorldService: {e}")
+                logger.error(f"Error shutting down the library service: {e}")
 
         self._state = ServiceState.STOPPED
         uptime = time.time() - self._start_time
@@ -260,21 +249,6 @@ class AutonetService:
         if self._node and hasattr(self._node, "_run_cycle"):
             self._node._run_cycle()
             return
-
-        # World-substrate feed: convert agent traces into substrate
-        # events and feed them into the persistent World. This is the
-        # only training path (JEPA retired).
-        if self._world_substrate_feed:
-            try:
-                substrate_metrics = self._world_substrate_feed.run_cycle()
-                if substrate_metrics:
-                    logger.info(
-                        f"World-substrate cycle {self._cycles}: "
-                        f"units={substrate_metrics.get('units_processed', 0)}, "
-                        f"events={substrate_metrics.get('events_appended', 0)}"
-                    )
-            except Exception as e:
-                logger.warning("World-substrate cycle failed: %s", e)
 
         # Local events held while no peer was subscribed go out now.
         if self._event_gossip is not None:
@@ -328,52 +302,36 @@ class AutonetService:
             # signal handlers can only be set in main thread
             logger.debug("Could not install signal handlers (not main thread?)")
 
-    def _init_world_service(self):
-        """Initialize the persistent World service (Phase 2 native
-        integration). One ``WorldService`` per RPB address; lives at
-        the daemon level for the lifetime of this process.
-
-        The RPB address is currently derived from config (or governance
-        when wired up); for now we use a stable per-host id so each
-        daemon owns exactly one persistent world.
-        """
+    def _init_library_service(self):
+        """Initialize the tool library service: one per jurisdiction key,
+        living for the whole process."""
         try:
-            from .common.world_service import WorldService
+            from .common.library_service import LibraryService
             # The jurisdiction key "<chain_id>:<DAO address>" names the
-            # gossip topic and the world dir, so each jurisdiction's
-            # substrate data is parked under its own key. "default" only
-            # for local, chain-free runs.
+            # gossip topic and the state dir, so each jurisdiction's data
+            # is parked under its own key. "default" only for local,
+            # chain-free runs.
             rpb_address = (getattr(self.config, "jurisdiction_key", "")
                            or "default")
-            # Token-economics knob: tokens minted per second of epoch
-            # duration (fixed-emission). Unset/None = legacy uncapped.
-            emission_rate = getattr(self.config, "epoch_emission_rate", None)
-            self._world_service = WorldService(
-                rpb_address=str(rpb_address),
-                epoch_emission_rate=(
-                    float(emission_rate) if emission_rate is not None else None
-                ),
-            )
+            self._library = LibraryService(rpb_address=str(rpb_address))
             # Attach external subscribers registered before start().
             for handler in self._external_epoch_subscribers:
-                self._world_service.subscribe_epoch_closed(handler)
+                self._library.subscribe_epoch_closed(handler)
             logger.info(
-                "WorldService initialized for rpb=%s (embedding_dim=%d, %d subscribers)",
-                rpb_address,
-                self._world_service.embedding_dim,
-                len(self._external_epoch_subscribers),
+                "Library service initialized for rpb=%s (%d subscribers)",
+                rpb_address, len(self._external_epoch_subscribers),
             )
         except Exception as e:
-            logger.warning("Failed to initialize WorldService: %s", e)
-            self._world_service = None
+            logger.warning("Failed to initialize the library service: %s", e)
+            self._library = None
 
     def add_epoch_close_subscriber(self, handler) -> None:
         """Register a handler that will be invoked on every epoch
-        close. Safe to call before start() — handlers attach to the
-        WorldService when it's constructed in start()."""
+        close. Safe to call before start(): handlers attach to the
+        library service when it's constructed in start()."""
         self._external_epoch_subscribers.append(handler)
-        if self._world_service is not None:
-            self._world_service.subscribe_epoch_closed(handler)
+        if self._library is not None:
+            self._library.subscribe_epoch_closed(handler)
 
     def _init_epoch_scheduler(self):
         """Initialize the wall-clock epoch scheduler for reward windows.
@@ -427,7 +385,7 @@ class AutonetService:
                     logger.warning("chain candle seed unavailable: %s", e)
 
             self._epoch_scheduler = EpochScheduler(
-                world_service=self._world_service,
+                library=self._library,
                 config=EpochSchedulerConfig(
                     interval_seconds=interval,
                     candle_min_seconds=candle_min,
@@ -447,71 +405,18 @@ class AutonetService:
             logger.warning("Failed to initialize epoch scheduler: %s", e)
             self._epoch_scheduler = None
 
-    def _init_world_substrate_feed(self):
-        """Initialize the substrate feed that converts agent traces
-        into substrate events bound for the persistent World."""
-        try:
-            from .common.world_substrate_feed import (
-                WorldSubstrateFeed,
-                WorldSubstrateFeedConfig,
-            )
-            feed_config = WorldSubstrateFeedConfig(
-                data_dir=str(self._data_dir) if self._data_dir else "",
-                agent_id=str(getattr(self.config, "node_id", "daemon")),
-            )
-            feed = WorldSubstrateFeed(
-                config=feed_config,
-                world_service=self._world_service,
-                identity_resolver=self._substrate_identity_resolver,
-            )
-            self._world_substrate_feed = feed
-            logger.info(
-                "World substrate feed initialized (data_dir=%s)",
-                self._data_dir,
-            )
-        except Exception as e:
-            logger.warning("Failed to initialize world substrate feed: %s", e)
-            self._world_substrate_feed = None
-
-    def notify_execution(self, agent_id: str, execution_id: str, status: str) -> None:
-        """Notify the feeds that an agent execution completed.
-
-        Called by AutonetBridge when EXECUTION_COMPLETED events fire.
-        Thread-safe: the feeds' counters are incremented here (from the
-        async event loop thread), and read in _run_cycle() (from the
-        service's blocking thread).
-        """
-        if self._world_substrate_feed:
-            self._world_substrate_feed.notify_execution(agent_id, execution_id, status)
-
-    def set_substrate_identity_resolver(self, resolver: Any) -> None:
-        """Attach an identity resolver to the substrate feed.
-
-        Resolver: ``Callable[[str], Optional[ResolvedAgentIdentity]]``.
-        Called once per agent dir per cycle to map local agent_id ->
-        on-chain identity. Agents without on-chain identity are
-        skipped (their work has no network impact).
-
-        Safe to call before or after start() — stored for the feed
-        to pick up at construction, and forwarded to the feed if it
-        already exists.
-        """
-        self._substrate_identity_resolver = resolver
-        if self._world_substrate_feed is not None:
-            self._world_substrate_feed.set_identity_resolver(resolver)
-
     def attach_event_gossip(self, p2p_host: Any) -> bool:
         """Wire the substrate event-gossip transport over libp2p.
 
         Caller is responsible for waiting until ``p2p_host._ready_event``
         is set (the host's trio loop is up and accepting publishes).
         This method then constructs an ``EventGossip`` per RPB and
-        binds it to the WorldService's local-event stream.
+        binds it to the library service's local-event stream.
 
         Returns True on success, False otherwise.
         """
-        if self._world_service is None:
-            logger.debug("attach_event_gossip: WorldService not yet initialized")
+        if self._library is None:
+            logger.debug("attach_event_gossip: library service not yet initialized")
             return False
         if p2p_host is None:
             logger.debug("attach_event_gossip: no p2p_host")
@@ -533,10 +438,10 @@ class AutonetService:
             keypair = self._load_or_create_gossip_keypair()
             transport = LibP2PTransport(p2p_host)
             self._event_gossip = EventGossip(
-                rpb_address=str(self._world_service.rpb_address),
+                rpb_address=str(self._library.rpb_address),
                 keypair=keypair,
                 transport=transport,
-                world_service=self._world_service,
+                library=self._library,
                 seq_path=(Path(self._data_dir) / "world" / "gossip" / "sender_seq.json"
                           if self._data_dir else None),
                 batch_log_path=(Path(self._data_dir) / "world" / "gossip" / "batches.jsonl"
@@ -544,7 +449,7 @@ class AutonetService:
             )
             logger.info(
                 "Event gossip attached for rpb=%s (sender_pubkey=%s...)",
-                self._world_service.rpb_address,
+                self._library.rpb_address,
                 keypair.public_key.hex()[:16],
             )
             self._init_federated_close_driver()
@@ -586,7 +491,7 @@ class AutonetService:
 
     def _init_federated_close_driver(self) -> None:
         """Construct the federated-close driver and subscribe it to
-        WorldService epoch-close events.
+        library epoch-close events.
 
         Runs after EventGossip is attached. Each local epoch close
         triggers ``driver.run(local_close_result)`` which builds the
@@ -595,23 +500,20 @@ class AutonetService:
         authoritative result. Subscribers (chain submitter, etc.)
         receive the FederatedCloseResult.
         """
-        if self._world_service is None or self._event_gossip is None:
+        if self._library is None or self._event_gossip is None:
             return
         try:
             from .common.federated_close_driver import FederatedCloseDriver
         except Exception as e:
             logger.warning("federated_close_driver import failed: %s", e)
             return
-        # Tool-substrate registration carry-over cache lives next to the
-        # world state (rebuildable from canonical events; see
-        # FederatedCloseDriver). Missing state dir → in-memory only.
+        # The carry-over files live in the library service's state dir.
+        # Missing state dir: in-memory only.
         tool_regs_path = None
         tool_rounds_path = None
         tool_positions_path = None
         try:
-            state_dir = getattr(
-                getattr(self._world_service, "_persistence", None), "_dir", None,
-            )
+            state_dir = getattr(self._library, "state_dir", None)
             if state_dir is not None:
                 tool_regs_path = state_dir / "tool_registrations.json"
                 tool_rounds_path = state_dir / "tool_rounds.json"
@@ -798,8 +700,8 @@ class AutonetService:
                         "federated-close subscriber failed: %s", e, exc_info=True,
                     )
 
-        self._world_service.subscribe_epoch_closed(_on_local_close)
-        logger.info("Federated-close driver wired into WorldService")
+        self._library.subscribe_epoch_closed(_on_local_close)
+        logger.info("Federated-close driver wired into the library service")
 
     def add_federated_close_subscriber(self, handler: Any) -> None:
         """Register a callable invoked with the FederatedCloseResult

@@ -282,10 +282,9 @@ class NodeCapability:
     listen_addrs: List[str] = field(default_factory=list)
     agents: List[Dict] = field(default_factory=list)      # list of AgentAdvertisement dicts
     model_state: Dict = field(default_factory=dict)       # ModelState as dict
-    # Phase 7.4: substrate-backed inference advertisement.
-    # Loose dict so the wire format can evolve. Set when this node
-    # serves /rpb/inference/1.0.0 via SubstrateProvider. Empty dict
-    # means "this node is not advertising inference."
+    # Inference advertisement. Loose dict so the wire format can evolve.
+    # Set when this node serves /rpb/inference/1.0.0. Empty dict means
+    # "this node is not advertising inference."
     # Conventional keys (callers may add others):
     #   - "renderer_model": str  (e.g. "qwen3:4b")
     #   - "price_atn":      int  (ATN per probe, scaled to uint256
@@ -1740,13 +1739,12 @@ class AutonetHost:
 
         Uses the /rpb/inference/1.0.0 protocol. The serving peer dispatches
         the request through whatever handler it registered via
-        ``set_inference_handler`` — typically the substrate-backed handler
-        from Phase 7.3 (substrate locate + local LLM render).
+        ``set_inference_handler``.
 
         Args:
             target_peer_id: Peer ID of the serving peer.
             request: Dict with messages, system, model, max_tokens, tools,
-                temperature. The exact shape SubstrateProvider.send accepts.
+                temperature.
 
         Returns:
             Dict with text, tool_calls, stop_reason, usage, model fields.
@@ -1833,10 +1831,7 @@ class AutonetHost:
         requests.
 
         The handler takes the request dict and returns the response dict
-        (or {"error": "..."}). Phase 7.3 wires the substrate-backed
-        handler from ``nodes.common.substrate_inference_handler``;
-        future phases may install other handlers on top of the same
-        protocol (e.g. the sponsor/dependent flow in Phase 8+)."""
+        (or {"error": "..."}), e.g. the sponsor/dependent flow."""
         self._inference_handler = handler
 
     async def _serve_inference_locally(self, request: dict) -> dict:

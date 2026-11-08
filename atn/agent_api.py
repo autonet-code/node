@@ -47,8 +47,7 @@ _GROUPS: dict[str, tuple[str, ...]] = {
     # external agent checks a tool out (adopt_tool with a path), reads it
     # and runs it in its own sandbox. They stay under "other".
     "tools": ("probe_tools", "list_tools", "adopt_tool",
-              "register_tool", "publish_tool", "attest_tools",
-              "check_evidence"),
+              "register_tool", "publish_tool", "attest_tools"),
     "services": ("find_services", "request_service", "pay_for_service",
                  "close_service_channel", "register_service"),
     # Any transaction from the operator the agent acts as: governance

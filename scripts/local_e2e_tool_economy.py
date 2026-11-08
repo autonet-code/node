@@ -642,23 +642,19 @@ async def amain() -> int:
     tool_digest = ""
     try:
         from atn.agent_tools import execute_tool
-        from nodes.common.world_service import WorldService
+        from nodes.common.library_service import LibraryService
 
-        # Wire a WorldService onto runtime A's tool_store, exactly like
+        # Wire a LibraryService onto runtime A's tool_store, exactly like
         # autonet_service does: manifest_sink -> submit_tool_manifest,
         # event_sink -> submit_events. AND mirror every event into a
         # captured sink for the consensus stage.
-        ws = WorldService(
-            "0xRPBLOCALe2e",
-            data_root=tmp_a / "world",
-            embedding_dim=64,
-        )
+        ws = LibraryService("0xRPBLOCALe2e", data_root=tmp_a / "world")
         store = rt_a.tool_store
         store._embedder = _fake_embedder  # avoid torch subprocess
 
         def _event_sink(ev: dict) -> None:
             captured_events.append(dict(ev))
-            ws.submit_events([ev], equilibrate_after=False)
+            ws.submit_events([ev])
         store.event_sink = _event_sink
 
         def _manifest_sink(manifest: dict, author: str) -> None:
@@ -666,12 +662,8 @@ async def amain() -> int:
             ws.submit_tool_manifest(manifest, agent_id=author)
         store.manifest_sink = _manifest_sink
 
-        # Open an epoch so the manifest's registration sprout events (the
-        # full replayable SubClaimSprouted, coords + author_post +
-        # manifest_meta) get buffered — the tool_used receipts alone don't
-        # carry the registration, and the mint needs it in the canonical
-        # replay to give the claim node standing. We read them back for
-        # Stage 5's canonical batch.
+        # Open an epoch so the manifest's tool_registered event gets
+        # buffered; we read it back for Stage 5's canonical batch.
         ws.open_epoch("e2e-epoch-1")
 
         # author-1 registers a pinned echo tool (always private), then
@@ -742,7 +734,7 @@ async def amain() -> int:
         assert not any("axes" in e for e in captured_events), \
             "review axes no longer ride the consensus rail"
 
-        # Pull the tool_registered events out of the WorldService's epoch
+        # Pull the tool_registered events out of the LibraryService's epoch
         # buffer (the manifest sink routed them there); the tool_used
         # receipts come from the captured event_sink.
         for ev in list(ws._epoch_events):
@@ -781,9 +773,8 @@ async def amain() -> int:
         caller_addr = Web3.to_checksum_address(caller_ident.address)
 
         # Rewrite the string agent ids on the captured events to on-chain
-        # 0x addresses, exactly as the production identity resolver does
-        # (world_substrate_feed.ResolvedAgentIdentity) — so the mint keys
-        # by address and the on-chain merkle proof can be built.
+        # 0x addresses, as the daemon does for registered agents, so the
+        # mint keys by address and the on-chain merkle proof can be built.
         id_to_addr = {"author-1": author_addr, "caller-1": caller_addr}
 
         def _remap(ev: dict) -> dict:
@@ -798,7 +789,7 @@ async def amain() -> int:
                 ev["manifest_meta"] = mm
             return ev
 
-        # Registration sprouts come from the WorldService epoch buffer;
+        # Registrations come from the LibraryService epoch buffer;
         # tool_used receipts come from the captured event_sink. Remap the
         # author/caller string ids to on-chain addresses on both.
         #

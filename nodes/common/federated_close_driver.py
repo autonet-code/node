@@ -102,7 +102,7 @@ def pick_submitter(
 
 
 class FederatedCloseDriver:
-    """Per-daemon driver invoked from the WorldService epoch-close
+    """Per-daemon driver invoked from the library service's epoch-close
     subscriber. Stateless across epochs — each call builds a fresh
     canonical order from the gossip's per-epoch buffer.
     """
@@ -1024,19 +1024,15 @@ class FederatedCloseDriver:
         self._save_tool_rounds()
         self._tool_positions = dict(close_result.get("tool_positions") or {})
         self._save_tool_positions()
-        # These are the AUTHORITATIVE positions: the ToolBond ratings pinned
-        # to the previous anchor (review_snapshot above), which the daemon's
-        # own local projection does not read. Push them onto the live world
-        # so library ranking (infer_artifacts reads the head off the
-        # observation coords) matches consensus.
+        # The economy graph shows this close's registrations, positions
+        # (the ToolBond ratings pinned to the previous anchor) and mint.
         try:
-            world_service = getattr(self.gossip, "world_service", None)
-            applier = getattr(
-                world_service, "apply_federated_tool_positions", None)
-            if applier is not None and self._tool_positions:
-                applier(self._tool_positions)
+            library = getattr(self.gossip, "library", None)
+            noter = getattr(library, "note_federated_close", None)
+            if noter is not None:
+                noter(close_result, epoch_id=epoch_id)
         except Exception as e:
-            logger.warning("applying federated tool positions failed: %s", e)
+            logger.warning("noting the federated close for the economy graph failed: %s", e)
 
         # The agreed epoch id (Decision 2026-10-26): every daemon closing
         # this window names it the same, so they build the same proposal.

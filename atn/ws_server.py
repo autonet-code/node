@@ -227,8 +227,6 @@ SCOPED_INLINE_ALLOWED = frozenset({
     "autonet_status", "epoch_status", "epoch_history", "economy_graph",
     "market_services", "list_services", "service_topics",
     "rpb_state", "network_status", "rpb_agent_training",
-    "rpb_substrate_distribution", "rpb_substrate_nodes",
-    "rpb_substrate_subtree_projection",
 })
 
 # Allowed inline messages that act on ONE agent: a scoped session must name
@@ -785,10 +783,10 @@ class WebSocketBridge:
                 return "", "ambiguous root address"
         return "", f"unknown agent root: {root}"
 
-    def _world_service(self) -> Any:
+    def _library(self) -> Any:
         autonet = getattr(self.runtime, "autonet", None)
         service = getattr(autonet, "_service", None) if autonet else None
-        return getattr(service, "_world_service", None) if service else None
+        return getattr(service, "_library", None) if service else None
 
     async def _anchored_epochs(self, last_n: int = 20) -> dict[str, Any]:
         """The jurisdiction's anchored epochs from Substrate (newest last):
@@ -818,7 +816,7 @@ class WebSocketBridge:
 
     def _tool_reviews_payload(self, digest: str, limit: Any = None, *,
                               include_local: bool = True) -> dict[str, Any]:
-        """Reviews, drifted position and usage for one tool digest.
+        """Reviews, ToolBond position and recent mint for one tool digest.
         Backs the owner `tool_reviews` handler."""
         try:
             limit = int(limit or 50)
@@ -826,15 +824,14 @@ class WebSocketBridge:
             limit = 50
         reviews = (self.runtime.tool_store.recent_attestations(digest, limit=limit)
                    if include_local else [])
-        world_service = self._world_service()
+        library = self._library()
         position: dict[str, Any] = {}
         usage: dict[str, Any] = {}
-        if world_service is not None:
-            eg = world_service.read_economy_graph(last_n_epochs=10)
+        if library is not None:
+            eg = library.read_economy_graph(last_n_epochs=10)
             position = dict(eg.get("positions", {}).get(digest) or {})
-            # Usage/mint economics for the tool window: recent mint
-            # over the window + the last close's per-digest entry
-            # (ok_count, attesters, usage_term, mint).
+            # Mint for the tool window: recent mint over the window + the
+            # last close's per-digest entry (the review mint's split).
             usage = {
                 "recent_mint": float(
                     (eg.get("recent_tool_mint") or {}).get(digest)
@@ -845,10 +842,9 @@ class WebSocketBridge:
             entry = (last.get("tool_mint") or {}).get(digest)
             if isinstance(entry, dict):
                 usage["last_epoch"] = {
-                    "ok_count": entry.get("ok_count", 0),
-                    "attesters": entry.get("attesters", 0),
-                    "usage_term": entry.get("usage_term", 0.0),
-                    "mint": entry.get("mint", 0.0),
+                    k: entry.get(k, 0)
+                    for k in ("mint", "reviewer_mint", "author_mint",
+                              "reviewers", "rating", "weight")
                 }
         return {
             "digest": digest,
@@ -903,10 +899,10 @@ class WebSocketBridge:
         service = getattr(autonet, "_service", None) if autonet else None
         epoch: dict[str, Any] = {"running": False, "epoch_id": None}
         anchored = anchored or {}
-        world_service = self._world_service()
-        if world_service is not None:
+        library = self._library()
+        if library is not None:
             try:
-                epoch = dict(world_service.epoch_status())
+                epoch = dict(library.epoch_status())
                 scheduler = getattr(service, "_epoch_scheduler", None)
                 if scheduler is not None:
                     sched = scheduler.status()
@@ -2147,7 +2143,7 @@ class WebSocketBridge:
         # unused since the rail landed: name + description + interface
         # vocabulary. The tools rail gets semantic discovery through the
         # ArtifactIndex, but that only ingests blob-store artifacts and
-        # requires a running WorldService, while service specs live in the
+        # requires a running library service, while service specs live in the
         # daemon-local store. So embed here with the same underlying
         # embedder — services stay searchable whether or not autonet is on.
         #
@@ -2975,32 +2971,6 @@ class WebSocketBridge:
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}
 
-        # Phase 12.20: substrate nodes — list visualization-ready nodes
-        # (coords, recent_mint, score, parent_id) with optional spatial
-        # binning for low-LOD views. Powers the substrate visualization.
-        # External capsule writers (e.g. the substrate MCP server used by
-        # Claude Code) drop conversation files directly into the agents dir.
-        # This nudge bumps the substrate feed's pending counter so the
-        # capsule counts toward the next ingestion cycle instead of waiting
-        # for unrelated agent executions to cross the threshold.
-        if msg_type == "substrate_feed_nudge":
-            agent_id = str(msg.get("agent_id", "") or "external")
-            autonet = getattr(self.runtime, "autonet", None)
-            service = getattr(autonet, "_service", None) if autonet else None
-            if service is None or not hasattr(service, "notify_execution"):
-                return {"msg_id": msg_id, "ok": False,
-                        "error": "autonet service not running"}
-            try:
-                service.notify_execution(agent_id, "capsule", "completed")
-                return {"msg_id": msg_id, "ok": True, "result": {"nudged": True}}
-            except Exception as exc:
-                return {"msg_id": msg_id, "ok": False, "error": str(exc)}
-
-        # Epoch mechanics observability (EPOCH_OBSERVABILITY_SPEC.md in
-        # atn_web): live status of the open epoch. Combines the
-        # WorldService half (epoch id, buffered events, emission) with
-        # the EpochScheduler half (mode, candle window, T_max, seed
-        # source).
         if msg_type == "network_status":
             # Public summary; the owner's dashboards and the WAN run's
             # telemetry read it here.
@@ -3008,22 +2978,25 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True,
                     "result": self._network_status_payload(anchored)}
 
+        # Live status of the open epoch tick: the library's half (epoch id,
+        # buffered events) with the EpochScheduler's (mode, candle window,
+        # T_max, seed source).
         if msg_type == "epoch_status":
             autonet = getattr(self.runtime, "autonet", None)
             service = getattr(autonet, "_service", None) if autonet else None
-            world_service = getattr(service, "_world_service", None) if service else None
+            library = getattr(service, "_library", None) if service else None
             scheduler = getattr(service, "_epoch_scheduler", None) if service else None
-            if world_service is None:
+            if library is None:
                 # Degrade like economy_graph: a daemon with autonet off is a
                 # normal state, not a fault. Neutral body, ok:true.
                 return {"msg_id": msg_id, "ok": True,
                         "epoch": {"running": False, "epoch_id": None}}
             try:
-                epoch = world_service.epoch_status()
+                epoch = library.epoch_status()
                 if scheduler is not None:
                     sched = scheduler.status()
-                    # World's opened_at wins when both exist (same value
-                    # in practice; the world is the source of truth).
+                    # The library's opened_at wins when both exist (same
+                    # value in practice).
                     sched.pop("opened_at", None)
                     epoch.update(sched)
                 return {"msg_id": msg_id, "ok": True, "epoch": epoch}
@@ -3033,7 +3006,7 @@ class WebSocketBridge:
         # The jurisdiction's anchored epochs (Substrate anchors), newest
         # last: {epochs: [{number, epoch_id, cutoff, closed_at, anchored_at,
         # ...}], total_closed, running, source, reason?}. Not the local
-        # projection ticks (WorldService.epoch_history), which close every
+        # epoch ticks (LibraryService.epoch_history), which close every
         # minute and say nothing about settlement.
         if msg_type == "epoch_history":
             try:
@@ -3062,113 +3035,6 @@ class WebSocketBridge:
             except Exception as exc:
                 return {"msg_id": msg_id, "ok": False, "error": str(exc)}
 
-        # substrate_post_con RETIRED (v3, docs/tool_substrate.md Decision
-        # 2026-07-08): debates left the live path — reviews (attest_tools
-        # per-axis scores) are how the network judges tools now. The
-        # WorldService submit_con/submit_support methods remain only as
-        # the evidence-recording rail behind check_evidence.
-        if msg_type == "substrate_post_con":
-            return {"msg_id": msg_id, "ok": False,
-                    "error": "substrate_post_con was retired (substrate v3): "
-                             "review tools via attest_tools axis scores"}
-
-        if msg_type == "rpb_substrate_nodes":
-            try:
-                max_nodes = int(msg.get("max_nodes", 200))
-                bin_size_raw = msg.get("bin_size")
-                bin_size = float(bin_size_raw) if bin_size_raw is not None else None
-                recent_n = int(msg.get("recent_mint_epochs", 5))
-                # Phase 12.26b — viewport-scoped lazy load. The frontend
-                # passes (region_xy, region_radius) for the visible disk
-                # and/or parent_id when drilled into a subtree.
-                region_xy_raw = msg.get("region_xy")
-                region_xy = None
-                if isinstance(region_xy_raw, (list, tuple)) and len(region_xy_raw) == 2:
-                    try:
-                        region_xy = (float(region_xy_raw[0]), float(region_xy_raw[1]))
-                    except (TypeError, ValueError):
-                        region_xy = None
-                region_radius_raw = msg.get("region_radius")
-                region_radius = (
-                    float(region_radius_raw)
-                    if region_radius_raw is not None else None
-                )
-                parent_id_raw = msg.get("parent_id")
-                parent_id = (
-                    str(parent_id_raw)
-                    if isinstance(parent_id_raw, str) and parent_id_raw else None
-                )
-                autonet = getattr(self.runtime, "autonet", None)
-                service = getattr(autonet, "_service", None) if autonet else None
-                world_service = getattr(service, "_world_service", None) if service else None
-                if world_service is None:
-                    return {"msg_id": msg_id, "ok": True, "result": {
-                        "mode": "nodes", "items": [], "epochs_considered": 0,
-                    }}
-                result = world_service.list_nodes_for_visualization(
-                    max_nodes=max_nodes,
-                    recent_mint_epochs=recent_n,
-                    bin_size=bin_size,
-                    region_xy=region_xy,
-                    region_radius=region_radius,
-                    parent_id=parent_id,
-                )
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        # Per-subtree PCA projection — returns the same shape as
-        # rpb_substrate_nodes (mode="nodes") but restricted to the
-        # transitive descendants of parent_id and projected onto axes
-        # fit on only that subset. Used by zoom-driven exploration:
-        # as the user dives into a cluster, the frontend swaps the
-        # network-level projection for this one.
-        if msg_type == "rpb_substrate_subtree_projection":
-            try:
-                parent_id_raw = msg.get("parent_id")
-                if not isinstance(parent_id_raw, str) or not parent_id_raw:
-                    return {"msg_id": msg_id, "ok": False, "error": "parent_id required"}
-                max_nodes = int(msg.get("max_nodes", 200))
-                recent_n = int(msg.get("recent_mint_epochs", 5))
-                autonet = getattr(self.runtime, "autonet", None)
-                service = getattr(autonet, "_service", None) if autonet else None
-                world_service = getattr(service, "_world_service", None) if service else None
-                if world_service is None:
-                    return {"msg_id": msg_id, "ok": True, "result": {
-                        "mode": "nodes", "items": [], "epochs_considered": 0,
-                        "parent_id": parent_id_raw,
-                    }}
-                result = world_service.compute_subtree_projection(
-                    parent_id_raw,
-                    max_nodes=max_nodes,
-                    recent_mint_epochs=recent_n,
-                )
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
-        # Phase 12.19: substrate distribution — current root scores +
-        # per-root mint over recent epochs. Powers the constellation
-        # visualization. Empty result is fine if autonet isn't running
-        # yet or no epochs have closed.
-        if msg_type == "rpb_substrate_distribution":
-            try:
-                last_n = int(msg.get("last_n_epochs", 10))
-                autonet = getattr(self.runtime, "autonet", None)
-                service = getattr(autonet, "_service", None) if autonet else None
-                world_service = getattr(service, "_world_service", None) if service else None
-                if world_service is None:
-                    return {"msg_id": msg_id, "ok": True, "result": {
-                        "root_scores": {},
-                        "root_mint_recent": {},
-                        "epochs_considered": 0,
-                        "total_mint_recent": 0.0,
-                    }}
-                result = world_service.read_substrate_distribution(last_n_epochs=last_n)
-                return {"msg_id": msg_id, "ok": True, "result": result}
-            except Exception as e:
-                return {"msg_id": msg_id, "ok": False, "error": str(e)}
-
         # Tool-economy graph — registrations + declared-dep DAG
         # + recent per-digest mint (world consensus state), merged with the
         # local tool store (display names) and the service store (asks).
@@ -3179,7 +3045,7 @@ class WebSocketBridge:
                 last_n = int(msg.get("last_n_epochs", 10))
                 autonet = getattr(self.runtime, "autonet", None)
                 service = getattr(autonet, "_service", None) if autonet else None
-                world_service = getattr(service, "_world_service", None) if service else None
+                library = getattr(service, "_library", None) if service else None
 
                 tools = []
                 store = getattr(self.runtime, "tool_store", None)
@@ -3215,16 +3081,16 @@ class WebSocketBridge:
                             "retired": rec.retired,
                         })
 
-                world = (world_service.read_economy_graph(last_n_epochs=last_n)
-                         if world_service is not None else {
-                             "registrations": {},
-                             "recent_tool_mint": {}, "last_epoch": None,
-                             "epochs_considered": 0,
-                         })
+                economy = (library.read_economy_graph(last_n_epochs=last_n)
+                           if library is not None else {
+                               "registrations": {}, "positions": {},
+                               "recent_tool_mint": {}, "last_epoch": None,
+                               "epochs_considered": 0,
+                           })
                 return {"msg_id": msg_id, "ok": True, "result": {
                     "tools": tools,
                     "services": services,
-                    **world,
+                    **economy,
                 }}
             except Exception as e:
                 return {"msg_id": msg_id, "ok": False, "error": str(e)}

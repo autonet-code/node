@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterable
 # Provider ids the daemon knows how to build (ProviderManager._KNOWN_PROVIDERS).
 KNOWN_PROVIDER_IDS = frozenset({
     "claude_max", "codex_max", "anthropic", "gemini", "openai", "deepseek",
-    "ollama", "rpb", "service", "substrate", "jev",
+    "ollama", "rpb", "service", "jev",
 })
 
 # Providers that can only be built with an API key on file.

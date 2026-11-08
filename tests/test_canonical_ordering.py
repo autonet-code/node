@@ -8,9 +8,8 @@ What's tested:
 
   1. Two daemons that received the same batches in **different
      orders** compute the same canonical sequence.
-  2. Replaying the canonical sequence on a fresh charter from each
-     daemon produces a bit-identical world (node count, root score
-     ranking).
+  2. Closing over the canonical sequence from two arrival orders gives
+     the same close (registrations, payload).
   3. A sender with a broken chain (gap or hash mismatch) is dropped
      entirely; honest senders' positions are unaffected.
   4. Empty input produces an empty sequence with a stable epoch_root.
@@ -22,7 +21,6 @@ from __future__ import annotations
 
 import hashlib
 import random
-from pathlib import Path
 from typing import List
 
 import pytest
@@ -36,23 +34,12 @@ from nodes.common.event_gossip import (
     Keypair,
     SignedBatch,
 )
-from nodes.common.world_service import WorldService
-from nodes.common.world_persistence import (
-    PersistenceConfig,
-    WorldPersistence,
-)
-from world_model.generalized import Observation
+from nodes.common.federated_reconcile import federated_epoch_close
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _coord(charter, embed_idx, mag):
-    out = list(charter) + [0.0] * 1024
-    out[4 + embed_idx] = mag
-    return tuple(out)
 
 
 def _make_batch_chain(
@@ -61,18 +48,16 @@ def _make_batch_chain(
     n: int,
     label_prefix: str,
 ) -> List[EventBatch]:
-    """Generate a chain of n linked batches with synthetic events."""
+    """Generate a chain of n linked batches, one tool registration each."""
     chain: List[EventBatch] = []
     prev_hash = b""
     for i in range(1, n + 1):
-        coord = _coord((0.0, 0.0, 0.5, 0.0), embed_idx=i, mag=0.5)
         ev = {
-            "kind": "observation_added",
+            "kind": "tool_registered",
             "seq": 1,
             "author_agent": label_prefix,
-            "obs_id": f"obs_{label_prefix}_{i}",
-            "coords": list(coord),
-            "label": f"{label_prefix}_{i}",
+            "artifact_digest": hashlib.sha256(f"{label_prefix}_{i}".encode()).hexdigest(),
+            "manifest_meta": {"trust_class": "pinned", "author": label_prefix},
         }
         b = EventBatch(
             rpb_address=rpb,
@@ -120,41 +105,17 @@ def test_two_arrival_orders_produce_same_canonical_sequence():
     assert res1.epoch_root() == res2.epoch_root() == res3.epoch_root()
 
 
-def test_canonical_replay_produces_bit_identical_worlds(tmp_path: Path):
-    """Two daemons replay the canonical sequence on a fresh charter
-    and end up with the same node count and same charter ranking."""
+def test_canonical_close_is_identical_across_arrival_orders():
+    """Two daemons close over the same batches received in different
+    orders and get the same close."""
     rpb = "rpb_canon_b"
-    kp_x = Keypair.generate()
-    kp_y = Keypair.generate()
-    chain_x = _make_batch_chain(rpb, kp_x, 2, "xena")
-    chain_y = _make_batch_chain(rpb, kp_y, 3, "yuli")
-
-    canonical = canonical_order(chain_x + chain_y)
-    event_dicts = canonical.event_dicts()
-
-    def _replay(label: str) -> WorldService:
-        svc = WorldService(rpb_address=f"{rpb}_{label}", data_root=tmp_path)
-        # Apply the canonical event sequence directly through
-        # submit_events. Each batch's events + the trailing
-        # __equilibrate__ marker make submit_events run with
-        # equilibrate_after, so the per-batch equilibrate timing
-        # reproduces.
-        for b in canonical.ordered_batches:
-            svc.submit_events(b.events, equilibrate_after=True)
-        return svc
-
-    a = _replay("a")
-    b = _replay("b")
-    try:
-        assert a.stats()["n_nodes"] == b.stats()["n_nodes"], (
-            f"a={a.stats()['n_nodes']}, b={b.stats()['n_nodes']}"
-        )
-        a_rank = sorted(a.read_root_scores(), key=a.read_root_scores().__getitem__)
-        b_rank = sorted(b.read_root_scores(), key=b.read_root_scores().__getitem__)
-        assert a_rank == b_rank
-    finally:
-        a.shutdown()
-        b.shutdown()
+    chain_x = _make_batch_chain(rpb, Keypair.generate(), 2, "xena")
+    chain_y = _make_batch_chain(rpb, Keypair.generate(), 3, "yuli")
+    a = federated_epoch_close(canonical_order(chain_x + chain_y))
+    b = federated_epoch_close(canonical_order(chain_y[::-1] + chain_x))
+    assert a["authoritative_payload"] == b["authoritative_payload"]
+    assert a["tool_registrations"] == b["tool_registrations"]
+    assert len(a["tool_registrations"]) == 5
 
 
 # ---------------------------------------------------------------------------

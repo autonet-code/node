@@ -1,12 +1,8 @@
 """Epoch observability surfaces (EPOCH_OBSERVABILITY_SPEC.md):
 
   - EpochScheduler.status()  — timing half (mode, T_max, seed source)
-  - WorldService.epoch_status() — world half (epoch id, buffer, emission)
+  - LibraryService.epoch_status() — the tick's half (epoch id, buffer)
   - the combined dict the ws `epoch_status` handler assembles
-
-The federated-close push event payload is covered implicitly by
-test_state_sync (FederatedCloseResult fields) — here we only pin the
-service-level halves the ws handlers read.
 """
 
 import time
@@ -14,7 +10,7 @@ import time
 import pytest
 
 from nodes.common.epoch_scheduler import EpochScheduler, EpochSchedulerConfig
-from nodes.common.world_service import WorldService
+from nodes.common.library_service import LibraryService
 
 
 class _StubWS:
@@ -78,37 +74,29 @@ class TestSchedulerStatus:
         assert s["t_max"] is None
 
 
-class TestWorldServiceEpochStatus:
-    def _service(self, tmp_path, rate=None):
-        return WorldService(
-            rpb_address="status-test",
-            data_root=tmp_path,
-            embedding_dim=0,
-            epoch_emission_rate=rate,
-        )
+class TestLibraryEpochStatus:
+    def _service(self, tmp_path):
+        return LibraryService(rpb_address="status-test", data_root=tmp_path)
 
     def test_open_epoch_visible(self, tmp_path):
-        svc = self._service(tmp_path, rate=1.0)
+        svc = self._service(tmp_path)
         svc.open_epoch("e_status_1")
         with svc._lock:
-            svc._buffer_epoch_events_locked([{"kind": "a"}, {"kind": "b"}])
+            svc._buffer_locked([{"kind": "a"}, {"kind": "b"}])
         s = svc.epoch_status()
         assert s["epoch_id"] == "e_status_1"
         assert s["buffered_events"] == 2
         assert s["opened_at"] == pytest.approx(time.time(), abs=5)
-        assert s["emission_rate"] == 1.0
-        assert s["emission_clock"] is not None
         assert s["rpb_address"] == "status-test"
 
     def test_between_epochs(self, tmp_path):
         svc = self._service(tmp_path)
         svc.open_epoch("e_status_2")
-        svc.close_epoch(apply_gate=False)
+        svc.close_epoch()
         s = svc.epoch_status()
         assert s["epoch_id"] is None
         assert s["opened_at"] is None
         assert s["buffered_events"] == 0
-        assert s["emission_rate"] is None
 
     def test_history_survives_restart(self, tmp_path):
         """Closed-epoch records rehydrate from disk on construction —
@@ -116,9 +104,9 @@ class TestWorldServiceEpochStatus:
         almost always render empty."""
         svc = self._service(tmp_path)
         svc.open_epoch("e_persist_1")
-        svc.close_epoch(apply_gate=False)
+        svc.close_epoch()
         svc.open_epoch("e_persist_2")
-        svc.close_epoch(apply_gate=False)
+        svc.close_epoch()
         svc.shutdown()
 
         reborn = self._service(tmp_path)
@@ -128,12 +116,12 @@ class TestWorldServiceEpochStatus:
             reborn.epoch_history[0]["closed_at"]
 
     def test_history_is_capped_in_memory_and_on_disk(self, tmp_path, monkeypatch):
-        import nodes.common.world_service as ws_mod
-        monkeypatch.setattr(ws_mod, "EPOCH_HISTORY_KEEP", 2)
+        import nodes.common.library_service as lib_mod
+        monkeypatch.setattr(lib_mod, "EPOCH_HISTORY_KEEP", 2)
         svc = self._service(tmp_path)
         for i in range(4):
             svc.open_epoch(f"e_cap_{i}")
-            svc.close_epoch(apply_gate=False)
+            svc.close_epoch()
         assert [r["epoch_id"] for r in svc.epoch_history] == ["e_cap_2", "e_cap_3"]
         assert svc.epochs_recorded == 4
         svc.shutdown()
@@ -143,7 +131,7 @@ class TestWorldServiceEpochStatus:
     def test_combined_shape_matches_spec(self, tmp_path):
         """The ws handler merges the two halves; the merged dict must
         cover every field EPOCH_OBSERVABILITY_SPEC.md §2 documents."""
-        svc = self._service(tmp_path, rate=0.5)
+        svc = self._service(tmp_path)
         svc.open_epoch("e_status_3")
         sched = _candle_scheduler()
         sched._last_open_at = svc.epoch_status()["opened_at"]
@@ -156,11 +144,10 @@ class TestWorldServiceEpochStatus:
         for field in (
             "epoch_id", "opened_at", "mode",
             "candle_min_seconds", "candle_window_seconds", "t_max",
-            "interval_seconds", "buffered_events",
-            "emission_rate", "emission_clock", "seed_source",
+            "interval_seconds", "buffered_events", "seed_source",
         ):
             assert field in epoch, field
         assert epoch["mode"] == "candle"
         assert epoch["epoch_id"] == "e_status_3"
-        # T_max derives from the SAME opened_at the world reports.
+        # T_max derives from the SAME opened_at the library reports.
         assert epoch["t_max"] == pytest.approx(epoch["opened_at"] + 150.0)

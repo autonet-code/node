@@ -1,26 +1,20 @@
-"""Phase 5.2 tests: event-batch gossip between daemons.
+"""Event-batch gossip between daemons.
 
 Validates:
-  1. Two daemons same RPB: one submits a work-unit, the other's
-     WorldService picks the events up via gossip and applies them.
-  2. Both worlds end up with the same node count and same root-score
-     ranking (architectural convergence — content-addressed dedupe
-     means even with different equilibration timing, topology aligns).
-  3. Signature verification: a tampered batch is dropped on receive.
-  4. Duplicate suppression: re-broadcasting the same batch ingests
-     once.
-  5. Origin tagging: a remote batch ingested locally does NOT trigger
-     the local-events fan-out (no echo loops).
-  6. Different RPBs are isolated by topic — peer A on RPB1 does not
-     bleed into peer B on RPB2 even if they share a hub.
+  1. Two daemons, same jurisdiction: one publishes a tool, the other's
+     library service receives its tool_registered event via gossip (epoch
+     buffer and discovery queue).
+  2. Signature verification: a tampered batch is dropped on receive.
+  3. Duplicate suppression: re-broadcasting the same batch ingests once.
+  4. Origin tagging: a remote batch ingested locally does NOT trigger the
+     local-events fan-out (no echo loops).
+  5. Different jurisdictions are isolated by topic, even on a shared hub.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
-
-import pytest
+from typing import Tuple
 
 from nodes.common.event_gossip import (
     EventBatch,
@@ -31,8 +25,8 @@ from nodes.common.event_gossip import (
     SignedBatch,
     topic_for_rpb,
 )
-from nodes.common.world_service import WorldService
-from world_model.generalized import Observation
+from nodes.common.library.tool_manifest import build_tool_manifest
+from nodes.common.library_service import LibraryService
 
 
 # ---------------------------------------------------------------------------
@@ -40,28 +34,26 @@ from world_model.generalized import Observation
 # ---------------------------------------------------------------------------
 
 
-def _coord(charter, embed_idx, mag):
-    out = list(charter) + [0.0] * 1024
-    out[4 + embed_idx] = mag
-    return tuple(out)
-
-
-def _obs(label, charter=(0.0, 0.0, 0.0, 0.0), embed_idx=0, mag=0.5):
-    return Observation(
-        id=f"obs_{label}",
-        coords=_coord(charter, embed_idx, mag),
-        label=label,
+def _manifest(name: str, author: str = "0x" + "a1" * 20):
+    return build_tool_manifest(
+        name=name,
+        description=f"{name}: does a thing for the gossip test.",
+        input_schema={"type": "object", "properties": {"x": {"type": "string"}}},
+        author=author,
+        trust_class="pinned",
+        code_digest="c" * 64,
+        created_ts=1780531200,
     )
 
 
-def _peer(rpb: str, hub: InMemoryHub, tmp_path: Path, name: str) -> Tuple[WorldService, EventGossip]:
-    svc = WorldService(rpb_address=rpb, data_root=tmp_path / name)
+def _peer(rpb: str, hub: InMemoryHub, tmp_path: Path, name: str) -> Tuple[LibraryService, EventGossip]:
+    svc = LibraryService(rpb_address=rpb, data_root=tmp_path / name)
     transport = InMemoryTransport(hub, node_id=name)
     gossip = EventGossip(
         rpb_address=rpb,
         keypair=Keypair.generate(),
         transport=transport,
-        world_service=svc,
+        library=svc,
     )
     return svc, gossip
 
@@ -72,43 +64,25 @@ def _peer(rpb: str, hub: InMemoryHub, tmp_path: Path, name: str) -> Tuple[WorldS
 
 
 def test_two_daemons_converge_after_gossip(tmp_path: Path):
-    """Daemon A submits a work unit. Daemon B's WorldService receives
-    the events via gossip and applies them. Both worlds end up with
-    the same topology."""
+    """A publishes a tool; B receives the registration through gossip:
+    the same event in both epoch buffers, and the digest queued on B for
+    discovery."""
     hub = InMemoryHub()
     rpb = "rpb_conv"
     svc_a, gos_a = _peer(rpb, hub, tmp_path, "A")
     svc_b, gos_b = _peer(rpb, hub, tmp_path, "B")
+    svc_a.open_epoch("e1")
+    svc_b.open_epoch("e1")
     try:
-        # B starts cold (charter only). A submits something.
-        before_b_nodes = svc_b.stats()["n_nodes"]
-        svc_a.submit_observation(
-            _obs("intel-1", charter=(0.0, 0.0, 0.6, 0.0)),
-            agent_id="alice",
-        )
-
-        # B should have picked up A's events synchronously through the
-        # in-memory hub (publish→deliver→submit_events).
-        after_b_nodes = svc_b.stats()["n_nodes"]
-        assert after_b_nodes > before_b_nodes, (
-            f"B didn't grow: {before_b_nodes} -> {after_b_nodes}; "
-            f"A had {svc_a.stats()['n_nodes']} nodes"
-        )
-
-        # A and B should have the same node count.
-        assert svc_a.stats()["n_nodes"] == svc_b.stats()["n_nodes"], (
-            f"A={svc_a.stats()['n_nodes']}, B={svc_b.stats()['n_nodes']}"
-        )
-
-        # And the same charter root-score ordering.
-        a_rank = sorted(svc_a.read_root_scores(), key=lambda k: svc_a.read_root_scores()[k])
-        b_rank = sorted(svc_b.read_root_scores(), key=lambda k: svc_b.read_root_scores()[k])
-        assert a_rank == b_rank, f"{a_rank} != {b_rank}"
-
-        # Stats sanity.
+        digest = svc_a.submit_tool_manifest(_manifest("intel_1"), agent_id="alice")["manifest_digest"]
+        assert svc_a.epoch_status()["buffered_events"] == 1
+        assert svc_b.epoch_status()["buffered_events"] == 1
+        assert svc_a._epoch_events == svc_b._epoch_events
+        assert svc_b._epoch_events[0]["kind"] == "tool_registered"
+        assert svc_b.take_pending_remote_manifests() == [digest]
         assert gos_a.stats.batches_published == 1
         assert gos_b.stats.batches_received == 1
-        assert gos_b.stats.events_ingested >= 1
+        assert gos_b.stats.events_ingested == 1
     finally:
         svc_a.shutdown()
         svc_b.shutdown()
@@ -126,28 +100,22 @@ def test_tampered_signature_is_dropped(tmp_path: Path):
         rpb_address=rpb,
         sender_pubkey=gos_a.sender_pubkey,
         batch_seq=999,
-        events=[{"kind": "observation_added", "obs_id": "x", "coords": [0]*1028}],
+        events=[{"kind": "tool_registered", "artifact_digest": "ab" * 32,
+                 "manifest_meta": {"author": "x"}}],
     )
     bogus = SignedBatch(batch=fake_batch, signature=b"\x00" * 64)
 
     try:
-        # Send the bogus batch directly through B's transport.
-        # Use the hub's broadcast helper so B's handler runs.
-        # (Hub.publish is private; do it via a fresh transport.)
         attacker = InMemoryTransport(hub, node_id="attacker")
         attacker.publish(topic_for_rpb(rpb), bogus.to_wire())
 
-        # B's events_ingested counter should NOT have moved if signature
-        # verification dropped the batch. Note: the no-crypto fallback
-        # accepts any signature, so this assertion only holds when
-        # cryptography is installed. The test is conditional.
+        # The no-crypto fallback accepts any signature, so the drop is
+        # only checked when cryptography is installed.
         from nodes.common.event_gossip import _HAVE_ED25519
         if _HAVE_ED25519:
             assert gos_b.stats.batches_invalid_signature == 1, gos_b.stats
             assert gos_b.stats.events_ingested == 0
         else:
-            # Without ed25519, we can't actually drop the batch, so the
-            # test instead verifies the dev-mode fallback IS active.
             assert gos_b.stats.batches_received >= 1
     finally:
         svc_a.shutdown()
@@ -155,25 +123,22 @@ def test_tampered_signature_is_dropped(tmp_path: Path):
 
 
 def test_duplicate_batch_ingested_once(tmp_path: Path):
-    """Re-publishing the same signed batch must not double-apply
-    events. The dedupe cache catches the second arrival."""
+    """Re-publishing the same signed batch must not ingest its events
+    twice. The dedupe cache catches the second arrival."""
     hub = InMemoryHub()
     rpb = "rpb_dup"
     svc_a, gos_a = _peer(rpb, hub, tmp_path, "A")
     svc_b, gos_b = _peer(rpb, hub, tmp_path, "B")
+    svc_b.open_epoch("e1")
     try:
         signed = gos_a.publish_events([
-            {"kind": "observation_added", "seq": 1, "author_agent": "alice",
-             "obs_id": "obs_test", "coords": [0.0]*4 + [0.5] + [0.0]*1023,
-             "label": "test"},
+            {"kind": "tool_registered", "seq": 1, "author_agent": "alice",
+             "artifact_digest": "ab" * 32,
+             "manifest_meta": {"trust_class": "pinned", "author": "alice"}},
         ])
-        first_count = svc_b.stats()["n_nodes"]
-
-        # Replay the exact same signed batch.
+        first_count = svc_b.epoch_status()["buffered_events"]
         gos_a.transport.publish(gos_a.topic, signed.to_wire())
-
-        second_count = svc_b.stats()["n_nodes"]
-        assert second_count == first_count
+        assert svc_b.epoch_status()["buffered_events"] == first_count == 1
         assert gos_b.stats.batches_duplicate >= 1
     finally:
         svc_a.shutdown()
@@ -181,22 +146,15 @@ def test_duplicate_batch_ingested_once(tmp_path: Path):
 
 
 def test_remote_ingest_does_not_re_publish(tmp_path: Path):
-    """When B ingests A's batch, B must NOT republish to the hub —
-    otherwise we get an N^2 storm. Verified by counting publishes
-    on each side."""
+    """When B ingests A's batch, B must NOT republish to the hub
+    (otherwise an N^2 storm). Verified by counting publishes."""
     hub = InMemoryHub()
     rpb = "rpb_loop"
     svc_a, gos_a = _peer(rpb, hub, tmp_path, "A")
     svc_b, gos_b = _peer(rpb, hub, tmp_path, "B")
     try:
-        svc_a.submit_observation(
-            _obs("x", charter=(0.0, 0.0, 0.6, 0.0)),
-            agent_id="alice",
-        )
-
-        # A published exactly once (its own activity).
+        svc_a.submit_tool_manifest(_manifest("x"), agent_id="alice")
         assert gos_a.stats.batches_published == 1
-        # B did NOT publish (it only received).
         assert gos_b.stats.batches_published == 0
     finally:
         svc_a.shutdown()
@@ -204,68 +162,38 @@ def test_remote_ingest_does_not_re_publish(tmp_path: Path):
 
 
 def test_different_rpbs_isolated(tmp_path: Path):
-    """Two daemons on different RPB addresses sharing the same hub
-    must not bleed events between RPBs."""
+    """Two daemons on different jurisdictions sharing the same hub must
+    not bleed events between them."""
     hub = InMemoryHub()
     svc_a, gos_a = _peer("rpb_X", hub, tmp_path, "A")
     svc_b, gos_b = _peer("rpb_Y", hub, tmp_path, "B")
     try:
-        svc_a.submit_observation(_obs("x", charter=(0, 0, 0.6, 0)), agent_id="alice")
-        # B's stats untouched — different topic.
+        svc_a.submit_tool_manifest(_manifest("x"), agent_id="alice")
         assert gos_b.stats.batches_received == 0
         assert gos_b.stats.events_ingested == 0
-        # B's world is still charter-only.
-        assert svc_b.stats()["n_nodes"] == 4 + 1  # 4 charter roots + B's own root tracking
-    except AssertionError:
-        # The 'n_nodes' precondition is loose; the substantive check
-        # is on cross-RPB isolation.
-        assert gos_b.stats.batches_received == 0
-        assert gos_b.stats.events_ingested == 0
+        assert svc_b.take_pending_remote_manifests() == []
     finally:
         svc_a.shutdown()
         svc_b.shutdown()
 
 
 def test_three_daemons_all_converge(tmp_path: Path):
-    """Three daemons, one event each from different agents, all three
-    end up with the same node count and same charter ranking."""
+    """Three daemons, one tool each from different agents: all three
+    buffer the same three registrations."""
     hub = InMemoryHub()
     rpb = "rpb_3"
-    svc_a, _ = _peer(rpb, hub, tmp_path, "A")
-    svc_b, _ = _peer(rpb, hub, tmp_path, "B")
-    svc_c, _ = _peer(rpb, hub, tmp_path, "C")
+    peers = [_peer(rpb, hub, tmp_path, n)[0] for n in ("A", "B", "C")]
+    for svc in peers:
+        svc.open_epoch("e1")
     try:
-        svc_a.submit_observation(
-            _obs("a", charter=(0.6, 0.0, 0.0, 0.0), embed_idx=10),
-            agent_id="alice",
-        )
-        svc_b.submit_observation(
-            _obs("b", charter=(0.0, 0.6, 0.0, 0.0), embed_idx=20),
-            agent_id="bob",
-        )
-        svc_c.submit_observation(
-            _obs("c", charter=(0.0, 0.0, 0.6, 0.0), embed_idx=30),
-            agent_id="carol",
-        )
-
-        a_n, b_n, c_n = (
-            svc_a.stats()["n_nodes"],
-            svc_b.stats()["n_nodes"],
-            svc_c.stats()["n_nodes"],
-        )
-        assert a_n == b_n == c_n, f"diverged: {a_n}, {b_n}, {c_n}"
-
-        # All three daemons see all three agents move charter axes.
-        for svc in (svc_a, svc_b, svc_c):
-            scores = svc.read_root_scores()
-            for axis_id in ("life_precious", "self_preservation", "promotion_of_intelligence"):
-                assert scores[axis_id] > 0, (
-                    f"{svc.rpb_address} didn't move axis {axis_id}: {scores}"
-                )
+        for svc, (name, agent) in zip(peers, [("a", "alice"), ("b", "bob"), ("c", "carol")]):
+            svc.submit_tool_manifest(_manifest(f"tool_{name}"), agent_id=agent)
+        digests = [sorted(e["artifact_digest"] for e in svc._epoch_events) for svc in peers]
+        assert digests[0] == digests[1] == digests[2]
+        assert len(digests[0]) == 3
     finally:
-        svc_a.shutdown()
-        svc_b.shutdown()
-        svc_c.shutdown()
+        for svc in peers:
+            svc.shutdown()
 
 
 class _GatedTransport(InMemoryTransport):
@@ -283,15 +211,15 @@ def test_events_without_peers_wait_and_are_signed_when_sent(tmp_path: Path):
     peers' closes count the same batches."""
     hub = InMemoryHub()
     rpb = "rpb_outbox"
-    svc_a = WorldService(rpb_address=rpb, data_root=tmp_path / "A")
+    svc_a = LibraryService(rpb_address=rpb, data_root=tmp_path / "A")
     gos_a = EventGossip(rpb_address=rpb, keypair=Keypair.generate(),
-                        transport=_GatedTransport(hub, node_id="A"), world_service=svc_a)
+                        transport=_GatedTransport(hub, node_id="A"), library=svc_a)
     svc_b, gos_b = _peer(rpb, hub, tmp_path, "B")
     now = [1000.0]
     gos_a.clock = lambda: now[0]
-    ev = {"kind": "observation_added", "seq": 1, "author_agent": "alice",
-          "obs_id": "obs_held", "coords": [0.0] * 4 + [0.5] + [0.0] * 1023,
-          "label": "held"}
+    ev = {"kind": "tool_registered", "seq": 1, "author_agent": "alice",
+          "artifact_digest": "cd" * 32,
+          "manifest_meta": {"trust_class": "pinned", "author": "alice"}}
     try:
         assert gos_a.publish_events([ev]) is None
         assert gos_a.pending_epoch_batches() == []
@@ -315,16 +243,16 @@ def test_sender_chain_survives_a_restart(tmp_path):
     so peers keep the whole of its epoch."""
     from nodes.common.event_gossip import EventGossip, InMemoryHub, InMemoryTransport, Keypair
 
-    class World:
+    class Library:
         rpb_address = "0x" + "11" * 20
 
     path = tmp_path / "sender_seq.json"
     kp = Keypair.generate()
 
     def daemon():
-        return EventGossip(rpb_address=World.rpb_address, keypair=kp,
+        return EventGossip(rpb_address=Library.rpb_address, keypair=kp,
                            transport=InMemoryTransport(InMemoryHub()),
-                           world_service=World(), seq_path=path)
+                           library=Library(), seq_path=path)
 
     first = daemon()
     a = first._sign_and_publish([{"n": 1}])
@@ -340,16 +268,16 @@ def test_open_epoch_batches_survive_a_restart(tmp_path):
     log for the close and for peers catching up, and a cut last line is fine."""
     from nodes.common.event_gossip import EventGossip, InMemoryHub, InMemoryTransport, Keypair
 
-    class World:
+    class Library:
         rpb_address = "0x" + "22" * 20
 
     path = tmp_path / "batches.jsonl"
     kp = Keypair.generate()
 
     def daemon():
-        return EventGossip(rpb_address=World.rpb_address, keypair=kp,
+        return EventGossip(rpb_address=Library.rpb_address, keypair=kp,
                            transport=InMemoryTransport(InMemoryHub()),
-                           world_service=World(), batch_log_path=path)
+                           library=Library(), batch_log_path=path)
 
     first = daemon()
     a = first._sign_and_publish([{"n": 1}])

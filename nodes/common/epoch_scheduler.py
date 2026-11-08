@@ -1,10 +1,9 @@
-"""Wall-clock scheduler for WorldService epoch boundaries.
+"""Wall-clock scheduler for LibraryService epoch boundaries.
 
-Phase 3 of native world-model integration. Ticks at a fixed wall-clock
-interval; on each tick, closes the current epoch and opens the next.
-The receipt from ``close_epoch`` (per-agent mint, novelty, etc) is
-delivered to a caller-supplied handler — Phase 4 will wire that handler
-to chain reporting.
+Ticks at a fixed wall-clock interval; on each tick, closes the current
+epoch and opens the next. The record from ``close_epoch`` is delivered to
+a caller-supplied handler; the library's close subscribers (the federated
+close driver) run on the same close.
 
 Two ways to run
 ---------------
@@ -38,7 +37,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_INTERVAL_SECONDS = 60.0
 
 
-# A handler takes the result of WorldService.close_epoch and does
+# A handler takes the result of LibraryService.close_epoch and does
 # something with it (chain reporting in Phase 4, in-memory recording
 # for tests, etc).
 EpochResultHandler = Callable[[Dict[str, Any]], None]
@@ -47,8 +46,6 @@ EpochResultHandler = Callable[[Dict[str, Any]], None]
 @dataclass
 class EpochSchedulerConfig:
     interval_seconds: float = _DEFAULT_INTERVAL_SECONDS
-    apply_gate: bool = True
-    gate_strength: float = 1.0
     # If True, the scheduler opens the first epoch on construction so
     # the daemon starts buffering events immediately.
     open_first_epoch_on_start: bool = True
@@ -63,18 +60,18 @@ class EpochSchedulerConfig:
 
 
 class EpochScheduler:
-    """Drives ``WorldService.open_epoch`` / ``close_epoch`` on a clock."""
+    """Drives ``LibraryService.open_epoch`` / ``close_epoch`` on a clock."""
 
     def __init__(
         self,
-        world_service: Any,
+        library: Any,
         config: Optional[EpochSchedulerConfig] = None,
         on_close: Optional[EpochResultHandler] = None,
         candle_seed_source: Optional[Callable[[float], Optional[bytes]]] = None,
     ):
-        if world_service is None:
-            raise ValueError("EpochScheduler requires a world_service")
-        self.world_service = world_service
+        if library is None:
+            raise ValueError("EpochScheduler requires a library service")
+        self.library = library
         self.config = config or EpochSchedulerConfig()
         self._on_close = on_close
         # Optional shared-randomness source for the candle cut (see
@@ -142,7 +139,7 @@ class EpochScheduler:
         grinding becomes a concern.
         """
         import hashlib
-        current_id = str(getattr(self.world_service, "current_epoch_id", "") or "")
+        current_id = str(getattr(self.library, "current_epoch_id", "") or "")
 
         seed: Optional[bytes] = None
         if self._candle_seed_source is not None:
@@ -159,7 +156,7 @@ class EpochScheduler:
         if seed is None:
             prev_id, prev_closed = "", 0.0
             try:
-                history = self.world_service.epoch_history
+                history = self.library.epoch_history
                 if history:
                     prev_id = str(history[-1].get("epoch_id", ""))
                     prev_closed = float(history[-1].get("closed_at", 0.0))
@@ -185,7 +182,7 @@ class EpochScheduler:
 
     def status(self) -> Dict[str, Any]:
         """Scheduler-side half of the epoch_status surface (the
-        WorldService owns the other half). All times are unix seconds.
+        LibraryService owns the other half). All times are unix seconds.
 
         ``t_max`` is when the close fires: in candle mode that's the
         moment the cutoff is DRAWN (the effective end lands earlier,
@@ -244,15 +241,11 @@ class EpochScheduler:
     # ------------------------------------------------------------------
 
     def _open_epoch(self) -> None:
-        self.world_service.open_epoch()
+        self.library.open_epoch()
         self._last_open_at = time.time()
 
     def _tick(self, cutoff_ts: Optional[float] = None) -> Dict[str, Any]:
-        result = self.world_service.close_epoch(
-            apply_gate=self.config.apply_gate,
-            gate_strength=self.config.gate_strength,
-            cutoff_ts=cutoff_ts,
-        )
+        result = self.library.close_epoch(cutoff_ts=cutoff_ts)
         self._n_closed += 1
         if self._on_close is not None:
             try:

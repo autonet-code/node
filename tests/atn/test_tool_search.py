@@ -43,15 +43,14 @@ REMOTE = {
 
 
 def _with_network(rt, manifests):
-    """A world service whose discovery index holds ``manifests`` (remote
+    """A library service whose discovery index holds ``manifests`` (remote
     manifests fetched and verified, as _pull_remote_manifests leaves them)."""
-    ws = SimpleNamespace(
-        _lock=threading.RLock(),
-        _artifact_index=SimpleNamespace(_vectors={d: None for d in manifests}),
-        _blob_store=SimpleNamespace(get_json=lambda d: manifests.get(d)),
+    lib = SimpleNamespace(
+        artifact_digests=lambda: list(manifests),
+        blob_json=lambda d: manifests.get(d),
     )
-    rt.autonet = SimpleNamespace(_service=SimpleNamespace(_world_service=ws))
-    return ws
+    rt.autonet = SimpleNamespace(_service=SimpleNamespace(_library=lib))
+    return lib
 
 
 # Concepts the stub model knows: words of one concept embed alike.

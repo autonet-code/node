@@ -243,9 +243,9 @@ class ToolStore:
         self._parked: list[ToolRecord] = []
         self._blobs: Any = None  # lazy; None until substrate package needed
         self._receipt_seq = 0
-        # Optional sink wired by the autonet bridge when the WorldService
-        # is up: manifest_sink registers the manifest on the verdict layer
-        # (submit_tool_manifest; idempotent, content-addressed by digest).
+        # Optional sink wired by the autonet bridge when the library service
+        # is up: manifest_sink sends the published manifest's
+        # tool_registered event (LibraryService.submit_tool_manifest).
         # Tool use is NOT gossiped (Decision 2026-11-07: the mint reads
         # staked ToolBond review rounds only, and use events would reveal
         # which household used which tool), and since 2026-11-08 it feeds
@@ -266,12 +266,6 @@ class ToolStore:
         # whose author's household the DAO has sanctioned; the owner sees
         # the sanction on the proposal instead (docs/accountability.md).
         self.sanction_check: Any = None
-        # Optional support-post sink (callable: (con_node_id, claim) ->
-        # dict). Wired to WorldService.submit_support so a validator that
-        # replays an evidence-CON and CONFIRMS it can post a PRO support
-        # sprout under the CON in one flow (docs/tool_substrate.md —
-        # Evidence). Absent = replay is diagnostic-only (no support post).
-        self.support_sink: Any = None
         # Adoption proposals (docs/tool_substrate.md — Adoption rail):
         # agent proposes, OWNER approves per-tool. The queue is the one
         # legitimate approval queue in the tool economy.
@@ -2962,54 +2956,6 @@ class ToolStore:
                      "replay matched the expected-correct digest — the CON "
                      "does not reproduce"),
         }
-
-    async def check_evidence(
-        self,
-        caller_id: str | None,
-        manifest_digest: str,
-        evidence: dict[str, Any],
-        *,
-        con_node_id: str = "",
-        support: bool = True,
-    ) -> dict[str, Any]:
-        """Validator verify-then-support flow (docs/tool_substrate.md —
-        Evidence), one call:
-
-          1. REPLAY the CON's evidence against the pinned tool
-             (``replay_evidence``).
-          2. If it CONFIRMS and ``support`` is set and a ``con_node_id``
-             and a wired ``support_sink`` are present, post a normal PRO
-             support sprout under the CON — recruiting the validator's
-             standing behind a dispute they personally reproduced.
-
-        No close-side math changes: the support sprout is priced by the
-        deterministic close exactly like any author post. Evidence
-        recruits verification; it never weights standing directly. When
-        the replay does NOT confirm, nothing is posted — the validator's
-        standing is not spent on a claim they could not reproduce.
-
-        Returns the replay verdict plus, when a support post fired, a
-        ``supported`` block with the new PRO node id.
-        """
-        verdict = await self.replay_evidence(evidence, manifest_digest)
-        out: dict[str, Any] = dict(verdict)
-        out["supported"] = None
-        if not verdict.get("confirmed"):
-            return out
-        if not support or not con_node_id or self.support_sink is None:
-            out["note"] = (str(verdict.get("note") or "")
-                           + " — confirmed; no support posted "
-                           "(support disabled or no CON node / sink)")
-            return out
-        claim = ("reproduced the CON's failing invocation locally "
-                 f"({verdict.get('kind', 'failure')})")
-        try:
-            posted = self.support_sink(con_node_id, claim)
-            out["supported"] = posted
-        except Exception as exc:
-            log.warning("evidence support post failed: %s", exc)
-            out["supported"] = {"error": str(exc)}
-        return out
 
     def attestation_summary(self) -> dict[str, dict[str, Any]]:
         """Per-digest attestation aggregates from ``attestations.jsonl``:
