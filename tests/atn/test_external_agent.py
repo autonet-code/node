@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from atn.agent_tools import _create_agent, _review_due, _use_tool
+from atn.agent_tools import _create_agent, _review_due
 from atn.config import ATNConfig
 from atn.events import EventBus
 from atn.provider_identity import EXTERNAL_PROVIDER, is_external, routing_error
@@ -51,28 +51,44 @@ async def test_external_agent_refuses_a_prompt(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_use_tool_reports_review_due(tmp_path, monkeypatch):
+async def test_review_due_is_adopted_minus_reviewed(tmp_path):
+    """Due = the tools the agent adopted minus those it reviewed, derived
+    from the tool store, held reviews and batches on disk (Decision
+    2026-11-08), so it holds across a restart."""
+    from atn.runtime import review_batch
+    from atn.tool_store import ToolRecord
+
     rt = _runtime(tmp_path)
     await _create_agent(rt, {"id": "cc", "provider": "external"})
+    address = rt.get_agent("cc").identity.address
+    store = rt.tool_store
+    for d, name, origin, who in (("a" * 64, "word_count", "adopted", "cc"),
+                                 ("b" * 64, "csv_parse", "adopted", "cc"),
+                                 ("c" * 64, "mine", "authored", "cc"),
+                                 ("e" * 64, "theirs", "adopted", "other")):
+        store._records[d] = ToolRecord(digest=d, manifest={"name": name},
+                                       origin=origin, local_author=who)
+    assert _review_due(rt, "cc") == {"a" * 64: "word_count", "b" * 64: "csv_parse"}
 
-    async def call_tool(name, arguments, caller_id=None):
-        return {"value": 1}
+    # Held before registration: reviewed.
+    review_batch.hold_reviews(rt, "cc", [{"digest": "a" * 64, "axes": {}}])
+    assert _review_due(rt, "cc") == {"b" * 64: "csv_parse"}
 
-    monkeypatch.setattr(rt.tool_registry, "call_tool", call_tool)
-    monkeypatch.setattr(rt.tool_registry, "get_tool",
-                        lambda name: SimpleNamespace(digest="d" * 64))
-    origin = {"value": "adopted"}
-    monkeypatch.setattr(rt.tool_store, "get",
-                        lambda d: SimpleNamespace(origin=origin["value"]))
-    out = await _use_tool(rt, {"name": "word_count", "_caller_id": "cc"})
-    assert out["review_due"] == ["word_count"]
-    assert _review_due(rt, "cc") == {"d" * 64: "word_count"}
+    # In a ToolBond batch: reviewed; in a forfeited one: due again.
+    batches = review_batch.store_for(rt)
+    entry = review_batch.ReviewEntry(digest="b" * 64, axes={"correctness": 0.5})
+    batch = batches.add(address, 3, ["correctness"], entry)
+    assert _review_due(rt, "cc") == {}
+    batch.status = "forfeited"
+    batches.save(batch)
+    import os, time
+    later = time.time() + 5
+    os.utime(batches._dir, (later, later))
+    assert _review_due(rt, "cc") == {"b" * 64: "csv_parse"}
 
-    # The household's own tools are never due: nobody reviews their own.
-    rt.__dict__["_external_review_due"] = {}
-    origin["value"] = "authored"
-    out = await _use_tool(rt, {"name": "word_count", "_caller_id": "cc"})
-    assert "review_due" not in out
+    # A restart forgets nothing: the cache is gone, the answer is the same.
+    rt.__dict__.pop("_review_due_cache", None)
+    assert _review_due(rt, "cc") == {"b" * 64: "csv_parse"}
 
 
 def test_local_owner_key_is_stable(tmp_path):

@@ -2910,30 +2910,70 @@ async def _use_tool(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     result = await runtime.tool_registry.call_tool(
         name, arguments, caller_id=caller_id,
     )
-    defn = runtime.get_agent(caller_id) if caller_id else None
-    from .provider_identity import is_external
-    if defn is not None and is_external(defn) and isinstance(result, dict):
-        # An external agent's harness gets no injected review turn; it is
-        # told instead which tools it has used since it last reviewed.
-        due = _review_due(runtime, caller_id)
-        tool = runtime.tool_registry.get_tool(name)
-        digest = getattr(tool, "digest", "") if tool is not None else ""
-        record = runtime.tool_store.get(digest) if digest else None
-        # Only another household's tools are reviewable: your own (and your
-        # household's) tools can't be reviewed by you, so they are not due.
-        foreign = record is not None and record.origin == "adopted"
-        if digest and foreign and not result.get("error"):
-            due[digest] = name
-        if due:
-            result = {**result, "review_due": sorted(set(due.values()))}
     return result
 
 
 def _review_due(runtime: Runtime, agent_id: str) -> dict[str, str]:
-    """digest -> tool name an external agent used and has not reviewed since
-    (in memory: a restart forgets it, which costs only the reminder)."""
-    book = runtime.__dict__.setdefault("_external_review_due", {})
-    return book.setdefault(agent_id, {})
+    """digest -> name of each tool ``agent_id`` adopted from another
+    household and has not reviewed (Decision 2026-11-08).
+
+    Derived from what the daemon already keeps, so a restart forgets
+    nothing and no extra copy can drift: the tool store's adopted records,
+    the reviews held before registration, and the ToolBond batches on disk,
+    whose status the review driver keeps in step with the chain. A batch
+    forfeited unrevealed never counted, so its tools are due again. Cached
+    until the tool store, the held reviews or the batches change."""
+    store = getattr(runtime, "tool_store", None)
+    if not agent_id or store is None:
+        return {}
+    from pathlib import Path
+    from .runtime import review_batch
+    defn = runtime.get_agent(agent_id) if hasattr(runtime, "get_agent") else None
+    identity = getattr(defn, "identity", None) if defn else None
+    address = str(getattr(identity, "address", "") or "").lower()
+    adopted = store.adopted_by(agent_id)
+    try:
+        batches = review_batch.store_for(runtime)
+        batch_dir = batches._dir
+    except Exception:  # noqa: BLE001 (no data dir: no batches)
+        batches, batch_dir = None, None
+    try:
+        held_dir = Path(runtime._config.data_dir) / review_batch.HELD_DIR
+    except Exception:  # noqa: BLE001
+        held_dir = None
+
+    def mtime(p) -> float:
+        try:
+            return p.stat().st_mtime if p is not None else 0.0
+        except OSError:
+            return 0.0
+
+    key = (address, tuple(sorted(r.digest for r in adopted)),
+           mtime(batch_dir), mtime(held_dir))
+    cache = runtime.__dict__.setdefault("_review_due_cache", {})
+    hit = cache.get(agent_id)
+    if hit is not None and hit[0] == key:
+        return dict(hit[1])
+    reviewed: set[str] = set()
+    for raw in review_batch.held_reviews(runtime, agent_id):
+        reviewed.add(str((raw or {}).get("digest") or "").lower())
+    if batches is not None and address:
+        for batch in batches.all():
+            if batch.agent.lower() != address or batch.status in ("forfeited", "rolled"):
+                continue
+            reviewed.update(r.digest.lower() for r in batch.reviews)
+    due = {r.digest: r.name for r in adopted if r.digest.lower() not in reviewed}
+    cache[agent_id] = (key, due)
+    return dict(due)
+
+
+def review_due_names(runtime: Runtime, agent_id: str) -> list[str]:
+    """The names of the tools ``agent_id`` has to review, for a reply."""
+    try:
+        return sorted(set(_review_due(runtime, agent_id).values()))
+    except Exception:  # noqa: BLE001 (a reminder never fails a call)
+        log.debug("review_due failed", exc_info=True)
+        return []
 
 
 def _resolve_tool_path(runtime: Runtime, raw_path: str):
@@ -3315,20 +3355,16 @@ async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
         result = runtime.tool_store.attest_usage(caller, judgments, context)
     except Exception as exc:
         return {"error": str(exc)}
-    # Usage receipts stay as they are (they mint); the review half goes on
-    # chain: each judgment's axes / harm / stake become a staked review in
-    # the caller's ToolBond epoch batch (docs/multi_jurisdiction.md 10).
+    # The local log stays on this machine (it only drives review_due); the
+    # review goes on chain: each judgment's axes / harm / stake become a
+    # review in the caller's ToolBond epoch batch, which is what pays.
     reviews = [r for r in (result.pop("_reviews", None) or [])]
     if reviews:
         result["reviews"] = await _queue_staked_reviews(runtime, caller_id, reviews)
     if caller_id and caller != OWNER_AUTHOR:
-        due = runtime.__dict__.get("_external_review_due", {}).get(caller_id)
+        due = review_due_names(runtime, str(caller_id))
         if due:
-            for j in judgments:
-                rec = runtime.tool_store.resolve(str((j or {}).get("tool") or ""))
-                if rec is not None:
-                    due.pop(getattr(rec, "digest", ""), None)
-            result["review_due"] = sorted(set(due.values()))
+            result["review_due"] = due
     return result
 
 

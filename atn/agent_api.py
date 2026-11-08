@@ -292,7 +292,16 @@ class AgentAPI:
         if not resp.get("ok"):
             raise _HTTPError(400, str(resp.get("error") or "failed"),
                              help=f"/commands/{msg_type}")
-        return resp.get("result")
+        result = resp.get("result")
+        if session.root_agent_id and isinstance(result, dict) \
+                and "review_due" not in result:
+            # Every reply reminds the agent of the tools it adopted and has
+            # not reviewed (Decision 2026-11-08).
+            from .agent_tools import review_due_names
+            due = review_due_names(self.bridge.runtime, session.root_agent_id)
+            if due:
+                result = {**result, "review_due": due}
+        return result
 
     async def _create_agent(self, body: dict[str, Any]) -> dict[str, Any]:
         aid = str(body.get("id") or "").strip()

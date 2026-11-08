@@ -874,6 +874,11 @@ class ToolStore:
     def get(self, digest: str) -> ToolRecord | None:
         return self._records.get(digest)
 
+    def adopted_by(self, agent_id: str) -> list[ToolRecord]:
+        """The tools ``agent_id`` adopted from other households."""
+        return [r for r in self._records.values()
+                if r.origin == "adopted" and r.local_author == agent_id]
+
     def resolve(self, name_or_digest: str) -> ToolRecord | None:
         """Resolve by full digest, ``reg_<digest-prefix>``, or manifest
         name (None when the name is ambiguous across records)."""

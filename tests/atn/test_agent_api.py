@@ -230,3 +230,20 @@ def test_listing_notes_and_the_short_command_list(api_run):
         assert "other" not in short["groups"] and "more" in short
         assert "other" in full["groups"]
     api_run(go)
+
+
+def test_every_agent_reply_carries_review_due(api_run):
+    """Each reply to an agent names the tools it adopted and has not
+    reviewed (Decision 2026-11-08), whatever the call was."""
+    async def go(port, bridge):
+        rec = SimpleNamespace(digest="cd" * 32, name="word_count")
+        bridge.runtime.tool_store = SimpleNamespace(
+            adopted_by=lambda aid: [rec] if aid == "ext" else [])
+        s, r = await _request(port, "POST", "/agents/ext/autonet_status", {},
+                              headers=bridge.auth)
+        assert s == 200 and r == {"echo": "autonet_status",
+                                  "review_due": ["word_count"]}
+        # The owner's own calls are not reminded.
+        s, index = await _request(port, "GET", "/")
+        assert "review_due" not in index
+    api_run(go)
