@@ -5,11 +5,9 @@ by the WS handler (interactive clustering) and the boot-time warm-up. Specs
 are content-addressed, so a digest's vector never changes and the cache
 needs no invalidation, only growth.
 
-Why a warm-up exists: embedding a spec is a round trip to the out-of-process
-embed worker, ~0.5s each, and a catalogue can hold hundreds of specs. Paid
-at request time that is a 30-40s first answer, far past the frontend's
-timeout, and the Services page settled on "Everything else" until someone
-tried again. Pre-embedding at boot makes the first real answer instant.
+Why a warm-up exists: a catalogue can hold hundreds of specs, and the
+first answer should not pay for embedding all of them. The runtime runs the
+warm-up once the local search model (atn/search_model.py) is loaded.
 
 Only SEMANTIC vectors are cached. The hashing fallback embedder never
 reaches this module: callers obtain the embedder through
@@ -66,8 +64,8 @@ def embed_services(records: Iterable[Any], embedder) -> tuple[list[Any], list[st
 def warm_service_vectors(store, *, ready_wait: float = 600.0) -> None:
     """Pre-embed the whole live catalogue on a background thread.
 
-    Waits (off the event loop) for the embed worker to come up, then pushes
-    every uncached spec through it under EMBED_LOCK. Any failure is logged
+    Waits (off the event loop) for the search model to load, then embeds
+    every uncached spec under EMBED_LOCK. Any failure is logged
     at debug level: the request path degrades on its own.
     """
     def _warm() -> None:

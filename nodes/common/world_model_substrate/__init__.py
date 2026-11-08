@@ -46,7 +46,6 @@ from .outcomes import (
 )
 from .usefulness_coords import (
     HashingEmbedder,
-    SentenceTransformersEmbedder,
     default_usefulness_embedder,
     coords_for_problem_resolution,
     coords_for_query,
@@ -91,7 +90,6 @@ __all__ = [
     "outcome_from_conversation",
     "outcomes_for_agent_dir",
     "HashingEmbedder",
-    "SentenceTransformersEmbedder",
     "default_usefulness_embedder",
     "coords_for_problem_resolution",
     "coords_for_query",

@@ -1313,6 +1313,34 @@ class AutonetBridge:
             except Exception as e:
                 log.debug("serving disk blobs failed: %s", e)
 
+    def _share_search_model(self, host) -> None:
+        """The search model's files are content-addressed blobs: serve the
+        verified ones to peers (now, and again once the model is ready), and
+        let a daemon still fetching them take them from peers when Hugging
+        Face fails (atn/search_model.py). Bytes from a peer are checked
+        against the pinned hashes like any download."""
+        model = getattr(self._runtime, "search_model", None) if self._runtime else None
+        if model is None or host is None:
+            return
+        try:
+            model.serve_on(host)
+            model.on_ready(lambda m, _h=host: m.serve_on(_h))
+            from nodes.common.blob_resolver import LibP2PBlobResolver
+            # A 90 MB file: give each peer minutes, not the 10 s default.
+            resolver = LibP2PBlobResolver(host, fetch_timeout=600.0)
+
+            def _get(digest: str, _r=resolver) -> bytes | None:
+                # Not _r.get: that keeps every fetched blob in the host's
+                # memory map, and these files are served from disk.
+                peers = _r._known_peer_ids()
+                return _r._fetch_from_peers(peers, digest) if peers else None
+
+            async def _fetch(digest: str) -> bytes | None:
+                return await asyncio.to_thread(_get, digest)
+            model.peer_fetcher = _fetch
+        except Exception as e:  # noqa: BLE001
+            log.debug("sharing the search model failed: %s", e)
+
     def _build_libp2p_blob_resolver(self):
         """Build a LibP2PBlobResolver if the host is up; else None
         (driver falls back to InMemoryBlobResolver)."""
@@ -1356,10 +1384,10 @@ class AutonetBridge:
         except Exception as e:
             log.warning("event gossip attach failed: %s", e)
         self._serve_disk_blobs(host)
+        self._share_search_model(host)
 
-        # Tool substrate: tool use is never gossiped (Decision 2026-11-07).
-        # An attestation's work-item coordinates feed only this daemon's
-        # coverage atlas (retrieval ranking); manifests still register.
+        # Tool substrate: tool use is never gossiped (Decision 2026-11-07);
+        # manifests still register.
         world_service = getattr(service, "_world_service", None)
         tool_store = getattr(self._runtime, "tool_store", None) if self._runtime else None
         if world_service is not None and tool_store is not None:

@@ -141,6 +141,8 @@ class Runtime:
         # Bridge npm-dependency updater loop (providers.bridge_auto_update).
         self._bridge_update_task: asyncio.Task | None = None
         self._model_catalog_task: asyncio.Task | None = None
+        # The local search model (atn/search_model.py), set in start().
+        self.search_model: Any = None
         inject_connector_credentials(self.connectors, self.credential_store)
 
         # Group threads (docs/group_chat.md): shared transcripts several
@@ -817,22 +819,24 @@ class Runtime:
             self._model_catalog_task = asyncio.create_task(
                 self.providers.model_catalog_loop())
 
-        # Spawn the semantic embed worker now, on its own thread, so the
-        # first caller (Services-page topic clustering, substrate coords)
-        # finds the model loaded instead of paying the import + load at
-        # request time. Absent on a standalone atn install (no substrate
-        # package): the callers already degrade on their own.
-        try:
-            from nodes.common.world_model_substrate.usefulness_coords import (
-                warm_usefulness_embedder,
-            )
-            warm_usefulness_embedder()
-            # ...and pre-embed the service catalogue behind it, so the
-            # Services page's first topic clustering answers from cache.
-            from ..service_topics import warm_service_vectors
-            warm_service_vectors(self.service_store)
-        except Exception:                                  # noqa: BLE001
-            log.debug("embed worker warm-up unavailable", exc_info=True)
+        # The local search model (atn/search_model.py): checked, and on the
+        # first run downloaded, in the background while everything else
+        # starts. Search is keyword-only until it loads; then the tool
+        # manifests and the service catalogue learned meanwhile are
+        # embedded. ATN_SEARCH_MODEL=off (tests) skips it.
+        if os.environ.get("ATN_SEARCH_MODEL", "").strip().lower() != "off":
+            try:
+                from ..search_model import SearchModel
+                from .. import tool_search
+                from ..service_topics import warm_service_vectors
+                self.search_model = SearchModel(
+                    self._config.data_dir, events=self.events)
+                self.search_model.on_ready(lambda _m: tool_search.warm(self))
+                self.search_model.on_ready(
+                    lambda _m: warm_service_vectors(self.service_store))
+                self.search_model.start()
+            except Exception:                              # noqa: BLE001
+                log.warning("search model unavailable", exc_info=True)
 
         # Start scheduler loops
         self.scheduler.start()
@@ -1016,6 +1020,9 @@ class Runtime:
             except (asyncio.CancelledError, Exception):  # noqa: B014
                 pass
             self._model_catalog_task = None
+
+        if self.search_model is not None:
+            await self.search_model.stop()
 
         # Close active cognitive-mode providers
         for provider in list(self.providers._active_providers.values()):

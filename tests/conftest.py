@@ -27,6 +27,9 @@ os.environ["KEYSTORE_DIR"] = _SESSION_KEYSTORE
 # Most tests exercise native agents; a fresh daemon has them off
 # (atn/native_mode.py). Tests of the mode itself clear this.
 os.environ.setdefault("ATN_NATIVE_AGENTS", "1")
+# A test daemon never downloads the search model (atn/search_model.py);
+# search runs keyword-only unless a test installs a model.
+os.environ.setdefault("ATN_SEARCH_MODEL", "off")
 
 
 def _repoint(module, base: str) -> None:

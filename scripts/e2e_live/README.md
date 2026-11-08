@@ -81,7 +81,7 @@ Everything is also written to `<state>/state.json`, together with the logs (`dae
 **Provider isolation**
 - `ATN_DISABLE_PROVIDER_AUTODETECT=1` stops the daemon from probing the Claude Max and Codex bridges. Without it, the harness daemon adopted this machine's Claude Max login even with its home redirected.
 - `up` fails if a subscription provider is active.
-- `ATN_USEFULNESS_EMBEDDER=hashing` avoids downloading an embedding model into the empty home. `ATN_AUTO_UPDATE=0` is also set.
+- `ATN_USEFULNESS_EMBEDDER=hashing` and `ATN_SEARCH_MODEL=off` avoid downloading the search model into the empty home (search runs keyword-only). `ATN_AUTO_UPDATE=0` is also set.
 
 **App side** (`atn_web/integration_test/live/live_harness.dart`)
 - Refuses a `DAEMON_WS` that is missing, not loopback, or on 7700/7701/7710.

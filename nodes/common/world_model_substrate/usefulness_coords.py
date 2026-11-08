@@ -1,33 +1,30 @@
 """Usefulness coordinate space.
 
 Maps (problem, resolution) text into a coordinate vector that the
-substrate uses to locate work in the graph. The choice of embedder
-is pluggable: sentence-transformers is the simplest concrete starter
-but the same interface accepts any model that produces a fixed-size
-vector for a string.
+substrate uses to locate work in the graph.
 
-Two backends provided:
+Backends:
 
-  SentenceTransformersEmbedder
-    Uses sentence-transformers/all-MiniLM-L6-v2 (384 dim) by default.
-    Soft import: if sentence-transformers isn't installed, raises a
-    clear error instead of crashing at module load.
+  The local search model (``minilm.py``)
+    all-MiniLM-L6-v2 over onnxruntime, fetched and verified by the daemon
+    (atn/search_model.py). Its 384-dim output is reduced to the world's
+    embedding width by a fixed random projection (``ProjectedEmbedder``).
 
   HashingEmbedder
-    Deterministic fallback. Hashes word n-grams into a fixed-size
-    sparse vector. Cheap, no dependencies, much weaker semantics
-    but works for tests and bootstrapping.
+    Deterministic word-trigram hashing. For tests (``ATN_USEFULNESS_EMBEDDER
+    =hashing``), and for world coords authored while the model is still
+    being fetched.
 
-A factory `default_usefulness_embedder()` returns the best available
-(prefers sentence-transformers, falls back to hashing).
+Tool SEARCH does not use this module: it embeds with the full 384-dim
+model in the daemon's own index (atn/tool_search.py, Decision 2026-11-08).
+What remains here authors the embedding tail of the world's coordinates.
 
 Reduction
 ---------
 
-The raw embedding (~384 dims) is too high to use directly as graph
-coordinates. We reduce to a small number of dims via random
-projection (Johnson-Lindenstrauss preserves distances approximately).
-The substrate uses 16D by default.
+The raw embedding (384 dims) is reduced to the world's embedding width by
+random projection (Johnson-Lindenstrauss preserves distances
+approximately).
 """
 
 from __future__ import annotations
@@ -37,7 +34,7 @@ import logging
 import math
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -65,8 +62,8 @@ class HashingEmbedder:
     into one of `dim` buckets, count frequencies. L2-normalize the
     result. Distances reflect rough topical overlap.
 
-    Cheap, dependency-free. Good enough for testing and for early
-    bootstrapping when sentence-transformers isn't available.
+    Cheap, dependency-free. For tests, and for world coords authored
+    before the search model is loaded.
     """
 
     dim: int = DEFAULT_DIM
@@ -111,255 +108,55 @@ def _l2_normalize(vec: List[float]) -> Tuple[float, ...]:
 
 
 # ---------------------------------------------------------------------------
-# Sentence-transformers embedder (soft dependency)
+# The local search model, projected to the world's embedding width
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class SentenceTransformersEmbedder:
-    """Embedder backed by sentence-transformers.
+class ProjectedEmbedder:
+    """The loaded search model (``minilm.shared()``) reduced to ``dim``
+    dimensions by a fixed Gaussian projection (seeded, so every daemon uses
+    the same matrix), then L2-normalized."""
 
-    Lazy-imports the model on first call. Reduces output via random
-    projection to `dim`-dimensional coords.
-    """
-
-    dim: int = DEFAULT_DIM
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
-    seed: int = 42
-    _model: Any = field(default=None, init=False, repr=False)
-    _projection: Any = field(default=None, init=False, repr=False)
-
-    def _ensure_model(self) -> None:
-        if self._model is not None:
-            return
-        try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
-        except ImportError as e:
-            raise RuntimeError(
-                "sentence-transformers not installed. Install it or use "
-                "HashingEmbedder as a dependency-free fallback."
-            ) from e
-        self._model = SentenceTransformer(self.model_name)
-        embed_dim = self._model.get_sentence_embedding_dimension()
-        # Random projection from embed_dim -> self.dim
-        rng = random.Random(self.seed)
-        self._projection = [
-            [rng.gauss(0.0, 1.0 / math.sqrt(self.dim)) for _ in range(embed_dim)]
-            for _ in range(self.dim)
-        ]
-
-    def __call__(self, text: str) -> Tuple[float, ...]:
-        if not text:
-            return tuple([0.0] * self.dim)
-        self._ensure_model()
-        emb = self._model.encode(text, convert_to_numpy=False)
-        emb_list = list(emb)
-        # Project
-        out = []
-        for row in self._projection:
-            s = 0.0
-            for r, v in zip(row, emb_list):
-                s += r * float(v)
-            out.append(s)
-        return _l2_normalize(out)
-
-
-# ---------------------------------------------------------------------------
-# Subprocess embedder (default): torch never enters the daemon process
-# ---------------------------------------------------------------------------
-
-
-class SubprocessEmbedder:
-    """Embeds via an out-of-process worker (embed_worker.py).
-
-    Rationale: importing sentence_transformers/torch from a daemon
-    worker thread has WEDGED on Windows — the import deadlocks during
-    extension-DLL initialization (loader-lock interaction) and poisons
-    the import machinery for every other thread. A repro matrix
-    (2026-06-11) shows the same import is reliable on the main thread
-    of a fresh process across asyncio/trio/thread contexts, so the
-    structural fix is to keep torch out of the daemon process
-    entirely.
-
-    Behavior: the worker is spawned lazily; ``ready_within`` reports
-    whether the model finished loading. Calls have a per-request
-    timeout; a dead or timed-out worker raises and is restarted at
-    most once per call. Thread-safe via a lock (the substrate feed is
-    single-threaded; the lock is cheap insurance).
-    """
-
-    def __init__(
-        self,
-        dim: int = DEFAULT_DIM,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
-        backend: str = "st",
-        request_timeout: float = 60.0,
-    ):
+    def __init__(self, model: Any, dim: int = DEFAULT_DIM, seed: int = 42):
+        import numpy as np
+        self.model = model
         self.dim = dim
-        self.model_name = model_name
-        self.backend = backend
-        self.request_timeout = request_timeout
-        self._proc = None
-        self._ready = False
-        self._lock = None  # created lazily (threading import kept local)
-        # Worker stdout lines, pumped by ONE reader thread per process (see
-        # _ensure_proc). A caller that stops waiting never loses a line.
-        self._lines = None
-        self._reader = None
-        # Overridable for tests that stand in a scripted worker.
-        self.worker_path = None
-
-    def _ensure_proc(self):
-        import subprocess
-        import sys as _sys
-        import threading
-        from pathlib import Path
-        if self._lock is None:
-            self._lock = threading.RLock()
-        if self._proc is not None and self._proc.poll() is None:
-            return self._proc
-        import os
-        import queue
-        worker = self.worker_path or (
-            Path(__file__).resolve().parent / "embed_worker.py")
-        env = dict(os.environ)
-        # Keep the model libraries quiet. Progress bars and load reports are
-        # chatter that must never share a pipe with the line protocol.
-        env.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-        env.setdefault("TRANSFORMERS_VERBOSITY", "error")
-        env.setdefault("TOKENIZERS_PARALLELISM", "false")
-        self._proc = subprocess.Popen(
-            [_sys.executable, "-u", str(worker), str(self.dim),
-             self.model_name, self.backend],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            env=env,
-        )
-        self._ready = False
-        # ONE reader thread for the life of the process. Every line the
-        # worker writes lands in the queue, so a caller that gives up waiting
-        # (ready_within timing out during a slow model load) never loses it:
-        # the READY line is still queued for the next caller. The previous
-        # design spawned a fresh readline thread per wait; a wait that timed
-        # out left that thread blocked on the pipe, and when READY finally
-        # arrived the orphan consumed it into a list nobody read. Every later
-        # wait then blocked on a line that never came, and the embedder
-        # reported "not ready" for the rest of the daemon's life after one
-        # slow boot (observed 2026-09-10: 30s stall per Services-page load,
-        # hashing fallback, junk clusters).
-        lines = queue.Queue()
-        proc = self._proc
-
-        def _pump() -> None:
-            try:
-                for line in proc.stdout:
-                    lines.put(line)
-            except Exception:
-                pass
-            lines.put(None)  # sentinel: worker exited
-
-        self._lines = lines
-        self._reader = threading.Thread(
-            target=_pump, name="embed-worker-reader", daemon=True)
-        self._reader.start()
-        return self._proc
-
-    def _next_line(self, timeout: float):
-        """Next worker stdout line within ``timeout``; None on timeout/exit."""
-        import queue
-        try:
-            return self._lines.get(timeout=max(0.0, timeout))
-        except queue.Empty:
-            return None
-
-    def ready_within(self, timeout: float) -> bool:
-        """Spawn (if needed) and wait up to ``timeout`` for the READY
-        line. Non-blocking beyond the timeout: the worker keeps
-        loading and a later call can find it ready."""
-        import json as _json
-        import time as _time
-        self._ensure_proc()
-        if self._ready:
-            return True
-        deadline = _time.monotonic() + timeout
-        while True:
-            # Bounded per-get so a SECOND concurrent waiter (boot warm-up
-            # and a request at once) notices when the first one consumed
-            # the READY line, instead of waiting on the queue until its
-            # own deadline for a line that will never come.
-            if self._ready:
-                return True
-            remaining = deadline - _time.monotonic()
-            if remaining <= 0:
-                return False
-            line = self._next_line(min(remaining, 0.25))
-            if line is None:
-                if self._proc is None or self._proc.poll() is not None:
-                    return False  # the worker exited
-                continue  # just a poll tick; keep waiting
-            try:
-                obj = _json.loads(line)
-            except Exception:
-                continue  # stray non-protocol output; keep waiting
-            if isinstance(obj, dict) and "ready" in obj:
-                self._ready = bool(obj.get("ready"))
-                return self._ready
+        rng = random.Random(seed)
+        width = int(getattr(model, "dim", 384))
+        self._projection = np.asarray(
+            [[rng.gauss(0.0, 1.0 / math.sqrt(max(dim, 1))) for _ in range(width)]
+             for _ in range(dim)], dtype=np.float64)
 
     def __call__(self, text: str) -> Tuple[float, ...]:
-        import json as _json
-        import threading
+        if self.dim <= 0:
+            return ()
         if not text:
             return tuple([0.0] * self.dim)
-        if self._lock is None:
-            self._lock = threading.RLock()
-        with self._lock:
-            proc = self._ensure_proc()
-            if not self._ready and not self.ready_within(self.request_timeout):
-                raise RuntimeError("embed worker not ready")
-            proc.stdin.write(_json.dumps({"text": text}) + "\n")
-            proc.stdin.flush()
-
-            line = self._next_line(self.request_timeout)
-            if not line:
-                # Wedged or dead worker: kill so the next call respawns.
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                self._proc = None
-                self._ready = False
-                raise RuntimeError("embed worker timed out")
-            resp = _json.loads(line)
-            if "error" in resp:
-                raise RuntimeError(f"embed worker error: {resp['error']}")
-            return tuple(float(v) for v in resp["coords"])
-
-    def close(self) -> None:
-        if self._proc is not None:
-            try:
-                self._proc.stdin.close()
-                self._proc.terminate()
-            except Exception:
-                pass
-            self._proc = None
-            self._ready = False
+        import numpy as np
+        emb = np.asarray(self.model(text), dtype=np.float64)
+        return _l2_normalize([float(v) for v in self._projection @ emb])
 
 
-_subprocess_embedder: Optional[SubprocessEmbedder] = None
+_projected: dict = {}
 
 
-def _shared_subprocess_embedder(dim: int) -> SubprocessEmbedder:
-    """One worker per daemon process (model load is ~20s; per-batch
-    spawning would dominate)."""
-    global _subprocess_embedder
-    if _subprocess_embedder is None or _subprocess_embedder.dim != dim:
-        if _subprocess_embedder is not None:
-            _subprocess_embedder.close()
-        _subprocess_embedder = SubprocessEmbedder(dim=dim)
-    return _subprocess_embedder
+def _projected_embedder(dim: int):
+    """The shared projected embedder for ``dim``, or None while the search
+    model is not loaded."""
+    from . import minilm
+    model = minilm.shared()
+    if model is None:
+        return None
+    hit = _projected.get(dim)
+    if hit is None or hit.model is not model:
+        hit = ProjectedEmbedder(model, dim=dim)
+        _projected[dim] = hit
+    return hit
+
+
+def _hashing_forced() -> bool:
+    import os
+    return os.environ.get("ATN_USEFULNESS_EMBEDDER", "").lower() == "hashing"
 
 
 # ---------------------------------------------------------------------------
@@ -367,127 +164,35 @@ def _shared_subprocess_embedder(dim: int) -> SubprocessEmbedder:
 # ---------------------------------------------------------------------------
 
 
-_ST_IMPORT_TIMEOUT_SECONDS = 30.0
-_st_import_thread = None
-
-
-def _import_st_async() -> "threading.Thread":
-    """Start (once) a background import of sentence_transformers.
-
-    The import is heavy (~30s cold: torch + transformers) and has been
-    observed to WEDGE indefinitely when first triggered from a daemon
-    worker thread (loader-lock interaction). Running it on a dedicated
-    thread lets callers wait with a timeout instead of blocking the
-    feed cycle forever; once it lands in sys.modules every later call
-    is instant.
-    """
-    import threading
-    global _st_import_thread
-    if _st_import_thread is None:
-        def _do_import() -> None:
-            try:
-                import sentence_transformers  # type: ignore  # noqa: F401
-            except Exception:
-                pass
-        _st_import_thread = threading.Thread(
-            target=_do_import, name="st-embedder-import", daemon=True,
-        )
-        _st_import_thread.start()
-    return _st_import_thread
-
-
 def default_usefulness_embedder(dim: int = DEFAULT_DIM):
-    """Return the best available embedder.
+    """The embedder for world coords at width ``dim``. Never blocks.
 
-    Default: SubprocessEmbedder — semantic embeddings from an
-    out-of-process worker, so torch never enters the daemon process
-    (in-process imports have deadlocked on Windows worker threads).
-    Falls back to HashingEmbedder for the current batch while the
-    worker's model is still loading; later batches upgrade.
-
-    ``ATN_USEFULNESS_EMBEDDER`` overrides:
-      hashing     dependency-free hashing embedder, no subprocess
-      inprocess   legacy in-process sentence-transformers (background
-                  import + timeout fallback) — for platforms where
-                  the in-process import is known safe
-      subprocess  explicit default
+    The local search model projected to ``dim`` once it is loaded; until
+    then (the first run downloads it) the hashing embedder. Tests force
+    hashing with ``ATN_USEFULNESS_EMBEDDER=hashing``.
 
     Embedder choice is NOT consensus-relevant: coords are computed by
     the authoring daemon and serialized into the event payload, so
     replays reproduce them regardless of the replayer's embedder.
     """
-    import os
-    import sys
-    choice = os.environ.get("ATN_USEFULNESS_EMBEDDER", "subprocess").lower()
-
-    if choice == "hashing":
+    if _hashing_forced():
         return HashingEmbedder(dim=dim)
-
-    if choice == "inprocess":
-        if "sentence_transformers" in sys.modules:
-            return SentenceTransformersEmbedder(dim=dim)
-        thread = _import_st_async()
-        thread.join(timeout=_ST_IMPORT_TIMEOUT_SECONDS)
-        if "sentence_transformers" in sys.modules:
-            return SentenceTransformersEmbedder(dim=dim)
-        logger.warning(
-            "sentence_transformers not ready after %.0fs — using hashing "
-            "embedder for this batch (will upgrade when the import lands)",
-            _ST_IMPORT_TIMEOUT_SECONDS,
-        )
-        return HashingEmbedder(dim=dim)
-
-    # Default: out-of-process worker.
-    embedder = _shared_subprocess_embedder(dim)
-    if embedder.ready_within(_ST_IMPORT_TIMEOUT_SECONDS):
-        return embedder
-    logger.warning(
-        "embed worker not ready after %.0fs — using hashing embedder "
-        "for this batch (worker keeps loading; later batches upgrade)",
-        _ST_IMPORT_TIMEOUT_SECONDS,
-    )
-    return HashingEmbedder(dim=dim)
-
-
-def warm_usefulness_embedder(dim: int = DEFAULT_DIM) -> None:
-    """Spawn the embed worker now, on a background thread, so the first real
-    caller (Services-page clustering, substrate coords) finds the model loaded
-    instead of paying the import + load at request time. No-op unless the
-    subprocess embedder is the configured choice."""
-    import os
-    import threading
-    choice = os.environ.get("ATN_USEFULNESS_EMBEDDER", "subprocess").lower()
-    if choice != "subprocess":
-        return
-
-    def _warm() -> None:
-        try:
-            _shared_subprocess_embedder(dim).ready_within(600.0)
-        except Exception:
-            logger.debug("embed worker warm-up failed", exc_info=True)
-
-    threading.Thread(target=_warm, name="embed-worker-warmup",
-                     daemon=True).start()
+    return _projected_embedder(dim) or HashingEmbedder(dim=dim)
 
 
 def usefulness_embedder_if_ready(dim: int = DEFAULT_DIM, wait: float = 0.0):
-    """The SEMANTIC embedder when it is ready within ``wait`` seconds, else
-    None. For interactive callers that would rather answer "not yet" than
-    block a request on a model load or silently degrade to hashing coords
-    (which cluster nothing meaningfully). ``default_usefulness_embedder``
-    keeps its blocking, always-returns contract for the feed path."""
-    import os
-    import sys
-    choice = os.environ.get("ATN_USEFULNESS_EMBEDDER", "subprocess").lower()
-    if choice == "hashing":
+    """The SEMANTIC embedder when the search model is loaded within
+    ``wait`` seconds, else None: for interactive callers that would rather
+    answer "not yet" than cluster on hashing coords."""
+    import time
+    if _hashing_forced():
         return HashingEmbedder(dim=dim)
-    if choice == "inprocess":
-        if "sentence_transformers" in sys.modules:
-            return SentenceTransformersEmbedder(dim=dim)
-        _import_st_async()
-        return None
-    embedder = _shared_subprocess_embedder(dim)
-    return embedder if embedder.ready_within(wait) else None
+    deadline = time.monotonic() + max(0.0, wait)
+    while True:
+        emb = _projected_embedder(dim)
+        if emb is not None or time.monotonic() >= deadline:
+            return emb
+        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
 
 
 # ---------------------------------------------------------------------------
@@ -568,12 +273,9 @@ def verify_claim_coords(
         dim = len(tail) or DEFAULT_DIM
 
     candidates = [("hashing", HashingEmbedder(dim=dim))]
-    try:
-        semantic = default_usefulness_embedder(dim=dim)
-        if not isinstance(semantic, HashingEmbedder):
-            candidates.append(("semantic", semantic))
-    except Exception:
-        pass
+    semantic = _projected_embedder(dim)
+    if semantic is not None:
+        candidates.append(("semantic", semantic))
 
     best_backend, best_cos = "", -1.0
     for name, embedder in candidates:

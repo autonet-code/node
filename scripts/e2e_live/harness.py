@@ -406,6 +406,7 @@ def daemon_env(home: Path) -> Dict[str, str]:
     # Hash-based usefulness coords: deterministic, and no sentence-embedding
     # model download into the empty redirected home.
     env["ATN_USEFULNESS_EMBEDDER"] = "hashing"
+    env["ATN_SEARCH_MODEL"] = "off"
     # Only the providers config.yaml names: no Claude Max / Codex bridge
     # probe adopting this machine's subscription logins.
     env["ATN_DISABLE_PROVIDER_AUTODETECT"] = "1"
