@@ -110,6 +110,13 @@ class EventType(Enum):
     # failed | expired), plus result | error | note.
     TOOL_ADOPTION = "tool.adoption"
 
+    # The local search model (atn/search_model.py): its download, check and
+    # load. Emitted on each state change and every few percent of a download.
+    # data: the `search_model_status` result (state, ready, bytes_done,
+    # bytes_total, percent, source, files, attempt, retry_in, error) plus
+    # status, a one-line summary for the terminal.
+    SEARCH_MODEL_STATUS = "search.model_status"
+
     # Security (stub — full monitor is the security track)
     SECURITY_ALARM = "security.alarm"
     # Secret-access audit trail (names-only; see runtime/secret_audit.py).

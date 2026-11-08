@@ -20,6 +20,10 @@ mss>=9.0.0
 # numpy>=1.24.0
 # scipy>=1.10.0
 
+# Local tool search (the search model, atn/search_model.py)
+onnxruntime>=1.17
+tokenizers>=0.15
+
 # P2P networking
 libp2p>=0.6.0
 trio>=0.22.0

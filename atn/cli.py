@@ -49,6 +49,7 @@ _EVENT_STYLE: dict[EventType, tuple[str, str]] = {
     EventType.MESSAGE_POSTED:       ("dim cyan",     "m"),
     EventType.MESSAGE_DRAINED:      ("dim",          "d"),
     EventType.SCHEDULE_TRIGGERED:   ("dim yellow",   "t"),
+    EventType.SEARCH_MODEL_STATUS:  ("cyan",         "s"),
 }
 
 
@@ -75,8 +76,26 @@ def _format_event(event: Event) -> str:
     return f"[dim]{ts}[/] [{style}]{symbol} {etype:<26}[/]  {detail}"
 
 
+_search_model_printed: tuple = ()
+
+
+def _search_model_line_due(event: Event) -> bool:
+    """The search model's download emits progress about every second; the
+    terminal shows its state changes and every tenth of the download."""
+    global _search_model_printed
+    data = event.data or {}
+    key = (data.get("state"), int(float(data.get("percent") or 0) // 10)
+           if data.get("state") == "downloading" else 0)
+    if key == _search_model_printed:
+        return False
+    _search_model_printed = key
+    return True
+
+
 async def _print_event(event: Event) -> None:
     """Event handler that prints each event to the console."""
+    if event.type == EventType.SEARCH_MODEL_STATUS and not _search_model_line_due(event):
+        return
     console.print(_format_event(event))
 
 

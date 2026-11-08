@@ -68,9 +68,14 @@ dependencies = [
     # Substrate engine math: numpy is imported UNGUARDED at module level on the
     # live federated-close path — nodes/common/world_model_substrate/reconcile.py
     # does `from world_model.generalized import World`, whose __init__ pulls
-    # equilibrate.py (`import numpy as np`). Also coverage.py / artifact_index.py
-    # (daemon-local retrieval). Pure-Python wheels, cheap. Must be core.
+    # equilibrate.py (`import numpy as np`). Also artifact_index.py and the
+    # tool search index (daemon-local retrieval). Must be core.
     "numpy>=1.24.0",
+    # Local tool search (Decision 2026-11-08, atn/search_model.py): the
+    # daemon runs all-MiniLM-L6-v2 itself, no torch. onnxruntime runs the
+    # pinned ONNX graph, tokenizers its tokenizer.json.
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
 ]
 # Note: the substrate runtime needs the world-model engine. It's
 # vendored under nodes/common/world_model_substrate/_engine/ so
