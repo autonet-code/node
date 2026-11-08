@@ -14,15 +14,26 @@ Each household is set up the way an owner would:
     from the vault with a test stablecoin;
   - the daemon's operator key registers bound to the owner, and the owner
     delegates its REP to the operator by signature;
-  - one scripted agent (provider "external": this script is its brain)
-    registers bound to the owner and is funded by an explicit transfer.
+  - the owner funds the operator with ATN and gas: every external agent
+    acts on chain as the operator (Decision 2026-11-08), so there is no
+    agent key, registration or funding of its own;
+  - one scripted external agent (this script is its brain) is created
+    through the agent API (POST /agents) and acts through it with its
+    token, the path every external agent takes. Household 1 has a second
+    session, and both of its sessions' reviews go out in one operator
+    batch per epoch.
 
-Then the scripted agents work: author and publish tools, use each other's,
-review them, and pay each other for services (the fees those payments burn
-are the volume that ends an epoch). The volume ramps up over the run, so
-epochs should get shorter. A canary rides along: one household publishes a
-tool that reads outside its workspace next to an honest control, and two
-scripted reviewers report it as harmful.
+Then the scripted agents work: author and publish tools, search the
+library, use each other's tools, review them, and pay each other for
+services (the fees those payments burn are the volume that ends an epoch).
+The volume ramps up over the run, so epochs should get shorter. A canary
+rides along: one household publishes a tool that reads outside its
+workspace next to an honest control, and two scripted reviewers report it
+as harmful. Every agent API reply names the tools the agent adopted and
+the household has not reviewed (``review_due``); the run logs each change.
+
+The daemons share one search model directory (``ATN_MODEL_DIR``, S0_MODEL_DIR
+default ``<S0_DIR>/models``), fetched and verified once before they start.
 
 The collector writes ``<run>/epochs.jsonl`` (one line per anchor) and
 ``<run>/status.jsonl`` (per daemon, every poll). Success, in the owner's
@@ -35,6 +46,7 @@ Run:
 
 Env: S0_DIR (default D:/autonet_s0), S0_MINUTES (activity phase, default
 60), S0_KEEP=1 leaves everything running at the end (Ctrl+C to stop),
+S0_MODEL_DIR (the shared search model files),
 TRUSTLESS_CONTRACTS_DIR (default C:/code/dao/trustless-contracts).
 """
 from __future__ import annotations
@@ -59,6 +71,9 @@ DAO_DIR = Path(os.environ.get("TRUSTLESS_CONTRACTS_DIR",
 S0_DIR = Path(os.environ.get("S0_DIR", r"D:/autonet_s0"))
 MINUTES = float(os.environ.get("S0_MINUTES", "60"))
 KEEP = os.environ.get("S0_KEEP", "") == "1"
+# One copy of the search model for every daemon (atn/search_model.py reads
+# ATN_MODEL_DIR first): without it each daemon downloads 90 MB itself.
+MODEL_DIR = Path(os.environ.get("S0_MODEL_DIR") or (S0_DIR / "models"))
 
 RPC_PORT = 8545
 # S2 VMs point this at the hub chain (https://rpc.autonet.computer/<token>).
@@ -83,7 +98,10 @@ GENESIS_REP = 250 * 10**18          # per owner
 USDC_PER_OWNER = 10_000 * 10**6     # test stablecoin, 6 decimals
 USDC_PARITY = 10**30                # 1 USDC = 1 ATN (dao's convention)
 ATN_BUY = 5_000 * 10**6             # stablecoin each owner spends on ATN
-AGENT_FUNDING_SHARE = 5             # owner sends 1/5 of its ATN to its agent
+OPERATOR_FUNDING_SHARE = 5          # owner sends 1/5 of its ATN to its operator
+# Scripted external sessions per household (default 1): household 1 runs
+# two, whose reviews share the operator's one batch per epoch.
+SESSIONS = {"h1": 2}
 GAS_FUNDING = 10 * 10**18
 # ppm of the ATN supply burned in fees that ends an epoch. 20,000 ATN
 # supply and 500 ppm: 10 ATN of fees, so 400 ATN of service payments at
@@ -145,9 +163,22 @@ def base_env() -> Dict[str, str]:
     env["PYTHONIOENCODING"] = "utf-8"
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{REPO}{os.pathsep}{existing}" if existing else str(REPO)
-    # One shared model cache: a redirected home would download it per daemon.
-    env.setdefault("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
+    # One shared search model: a redirected home would download it per daemon.
+    env["ATN_MODEL_DIR"] = str(MODEL_DIR)
     return env
+
+
+def prepare_search_model() -> None:
+    """Fetch and verify the pinned search model files into MODEL_DIR once
+    (a no-op check when they are there), so the daemons load them from disk
+    at start instead of each downloading them."""
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([sys.executable, "-m", "atn.search_model", "--fetch", str(MODEL_DIR)],
+                       cwd=str(REPO), env=base_env(), capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=1800)
+    if r.returncode != 0:
+        raise RuntimeError(f"search model fetch failed:\n{r.stdout[-1500:]}\n{r.stderr[-1500:]}")
+    log(f"search model files verified in {MODEL_DIR}")
 
 
 def wait_for(pred, timeout: float, what: str, every: float = 1.0) -> Any:
@@ -282,8 +313,12 @@ class Household:
         self.proc: Optional[subprocess.Popen] = None
         self.client: Optional["DaemonClient"] = None
         self.agent_id = f"{self.name}-agent"
+        # The agent's on-chain address: the operator's (Decision 2026-11-08).
         self.agent_address = ""
         self.operator = ""
+        # The household's scripted external sessions (onboard), the first
+        # one ``agent_id``: each acts through the agent API with its token.
+        self.sessions: List["AgentSession"] = []
 
     def write_config(self) -> None:
         import yaml
@@ -321,6 +356,10 @@ class Household:
 
     def client_url(self) -> str:
         return f"ws://127.0.0.1:{self.ws_port}"
+
+    def api_url(self) -> str:
+        """The agent API (atn/agent_api.py): the WebSocket port + 2."""
+        return f"http://127.0.0.1:{self.ws_port + 2}"
 
     def log_tail(self) -> str:
         return tail(self.home / "daemon.log")
@@ -385,6 +424,68 @@ class DaemonClient:
             raise RuntimeError(f"{self.label}: {frame.get('type')} failed: "
                                f"{reply.get('error') or reply.get('result')}")
         return reply.get("result") or {}
+
+
+def _http(method: str, url: str, body: Optional[Dict[str, Any]] = None,
+          token: str = "", timeout: float = WS_CALL_TIMEOUT) -> tuple:
+    """One agent API request: (status, parsed JSON or text)."""
+    import urllib.error
+    import urllib.request
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status, raw = resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        status, raw = exc.code, exc.read()
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        return status, json.loads(text)
+    except json.JSONDecodeError:
+        return status, text
+
+
+class AgentSession:
+    """One scripted external agent, acting through the agent API the way
+    any harness would: POST /agents/<id>/<command> with its bearer token.
+    ``call`` answers in the WebSocket reply shape ({ok, result, error})."""
+
+    def __init__(self, h: "Household", agent_id: str, token: str, address: str = "") -> None:
+        self.h = h
+        self.agent_id = agent_id
+        self.token = token
+        self.address = address    # on chain: the operator's
+        self.name = agent_id      # what Activity logs
+
+    @classmethod
+    async def create(cls, h: "Household", agent_id: str) -> "AgentSession":
+        status, body = await asyncio.to_thread(
+            _http, "POST", f"{h.api_url()}/agents",
+            {"id": agent_id, "name": agent_id, "harness": "s0-script"})
+        if status != 200 or not isinstance(body, dict) or not body.get("token"):
+            raise RuntimeError(f"{h.name}: POST /agents {agent_id} failed: {status} {body}")
+        return cls(h, agent_id, body["token"],
+                   str((body.get("agent") or {}).get("address") or ""))
+
+    async def request(self, method: str, path: str,
+                      body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        try:
+            status, got = await asyncio.to_thread(
+                _http, method, f"{self.h.api_url()}/agents/{self.agent_id}{path}",
+                body, self.token)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": repr(exc)}
+        if status == 200:
+            return {"ok": True, "result": got if isinstance(got, dict) else {"text": got}}
+        err = got.get("error") if isinstance(got, dict) else got
+        return {"ok": False, "error": f"HTTP {status}: {err}"}
+
+    async def call(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+        body = {k: v for k, v in frame.items() if k not in ("type", "caller_id", "msg_id")}
+        return await self.request("POST", f"/{frame['type']}", body)
 
 
 # ---------------------------------------------------------------------------
@@ -509,29 +610,63 @@ class Activity:
         self.sub = w3.eth.contract(address=w3.to_checksum_address(j["autonet"]["substrate"]),
                                    abi=abi("Substrate"))
         self.published: Dict[str, Dict[str, str]] = {}   # digest -> {name, author}
-        # household -> digest -> the tool's local name there
-        self.adopted: Dict[str, Dict[str, str]] = {h.name: {} for h in households}
+        # session agent id -> digest -> the tool's local name there
+        self.adopted: Dict[str, Dict[str, str]] = {
+            s.agent_id: {} for h in households for s in h.sessions}
+        # session agent id -> the review_due it last reported
+        self.due: Dict[str, tuple] = {}
+        # session agent id -> epochs its reviews were queued into, and the
+        # reviewer address each reply named
+        self.queued: Dict[str, Dict[int, set]] = {}
         self.counts: Dict[str, int] = {}
         self.events = open(run / "activity.jsonl", "a", encoding="utf-8")
 
-    def note(self, kind: str, h: Household, **kw) -> None:
+    def note(self, kind: str, who: Any, **kw) -> None:
         self.counts[kind] = self.counts.get(kind, 0) + 1
-        self.events.write(json.dumps({"t": time.time(), "kind": kind, "h": h.name, **kw},
+        self.events.write(json.dumps({"t": time.time(), "kind": kind, "h": who.name, **kw},
                                      default=str) + "\n")
         self.events.flush()
 
-    async def call(self, h: Household, frame: Dict[str, Any], kind: str, **kw) -> Dict[str, Any]:
+    async def call(self, who: Any, frame: Dict[str, Any], kind: str, **kw) -> Dict[str, Any]:
+        """``who`` is a Household (an owner call on its WebSocket) or an
+        AgentSession (an agent call through the agent API)."""
+        client = who.client if isinstance(who, Household) else who
         try:
-            reply = await h.client.call(frame)
+            reply = await client.call(frame)
         except Exception as exc:  # noqa: BLE001
             reply = {"ok": False, "error": repr(exc)}
         res = reply.get("result") if isinstance(reply.get("result"), dict) else {}
         err = reply.get("error") or (res or {}).get("error")
         ok = bool(reply.get("ok")) and not err
-        self.note(kind if ok else kind + "_failed", h, error=err, **kw)
+        self.note(kind if ok else kind + "_failed", who, error=err, **kw)
         if not ok:
-            log(f"{h.name} {kind} failed: {str(err)[:300]}")
+            log(f"{who.name} {kind} failed: {str(err)[:300]}")
+        elif isinstance(who, AgentSession):
+            self.track_due(who, res)
         return res if ok else {"error": err or "failed"}
+
+    def track_due(self, s: "AgentSession", res: Dict[str, Any]) -> None:
+        """Every agent API reply names the tools the agent adopted and its
+        household has not reviewed (absent: none). Log each change."""
+        due = tuple(sorted(res.get("review_due") or []))
+        if self.due.get(s.agent_id) != due:
+            self.due[s.agent_id] = due
+            self.note("review_due", s, due=list(due))
+            log(f"REVIEW_DUE {s.agent_id}: {', '.join(due) if due else 'none'}")
+
+    def sessions(self, h: Household) -> List["AgentSession"]:
+        return list(getattr(h, "sessions", []) or [])
+
+    def adopter(self, h: Household, digest: str) -> Optional["AgentSession"]:
+        """Which of the household's sessions adopts a tool: a second session
+        takes the last household's tools, the first everything else (an
+        agent uses and reviews only the tools it adopted)."""
+        ss = self.sessions(h)
+        if not ss:
+            return None
+        if len(ss) > 1 and self.published[digest]["author"] == self.hs[-1].name:
+            return ss[1]
+        return ss[0]
 
     def report_mint(self) -> None:
         """What the review mint did: claims against the cumulative pool,
@@ -591,7 +726,8 @@ class Activity:
         log(f"published {len(self.published)} tools")
 
     async def publish_one(self, h: "Household", name: str, desc: str, body: str) -> None:
-        r = await self.call(h, {"type": "register_tool", "caller_id": h.agent_id,
+        s = self.sessions(h)[0]
+        r = await self.call(s, {"type": "register_tool",
                                 "name": name, "description": desc,
                                 "input_schema": TEXT_SCHEMA, "code": _prog(body),
                                 "novelty": {"statement": f"{desc} Nothing comparable "
@@ -600,24 +736,36 @@ class Activity:
                             "register_tool", tool=name)
         digest = r.get("digest") or (r.get("tool") or {}).get("digest") or ""
         if not digest:
-            log(f"{h.name} register_tool {name}: no digest in {str(r)[:300]}")
+            log(f"{s.name} register_tool {name}: no digest in {str(r)[:300]}")
             return
-        p = await self.call(h, {"type": "publish_tool", "caller_id": h.agent_id,
-                                "digest": digest},
+        p = await self.call(s, {"type": "publish_tool", "digest": digest},
                             "publish_tool", tool=name)
         if "error" not in p:
             self.published[p.get("digest") or digest] = {"name": name,
                                                          "author": h.name}
 
+    def adopted_all(self) -> bool:
+        """Has every household installed every other household's tools?"""
+        for h in self.hs:
+            for digest, meta in self.published.items():
+                s = self.adopter(h, digest) if meta["author"] != h.name else None
+                if s is not None and digest not in self.adopted.get(s.agent_id, {}):
+                    return False
+        return True
+
     async def adopt(self) -> None:
-        """Each household's agent installs the other households' tools.
+        """Each household's agents install the other households' tools.
         Called again later until the blobs have travelled."""
         for h in self.hs:
             for digest, meta in self.published.items():
-                if meta["author"] == h.name or digest in self.adopted[h.name]:
+                s = self.adopter(h, digest) if meta["author"] != h.name else None
+                if s is None:
                     continue
-                r = await self.call(h, {"type": "adopt_tool", "caller_id": h.agent_id,
-                                        "digest": digest, "reason": "useful for text work"},
+                mine = self.adopted.setdefault(s.agent_id, {})
+                if digest in mine:
+                    continue
+                r = await self.call(s, {"type": "adopt_tool", "digest": digest,
+                                        "reason": "useful for text work"},
                                     "adopt_tool", tool=meta["name"])
                 if "error" in r and "already" not in str(r["error"]):
                     continue
@@ -628,46 +776,141 @@ class Activity:
                                         "approve_adoption", tool=meta["name"])
                     if "error" in a:
                         continue
-                self.adopted[h.name][digest] = meta["name"]
+                mine[digest] = meta["name"]
         for h in self.hs:
-            r = await self.call(h, {"type": "list_tools", "caller_id": h.agent_id}, "list_tools")
-            for t in r.get("tools", []) if isinstance(r.get("tools"), list) else []:
-                d = t.get("digest")
-                if d in self.adopted[h.name]:
-                    self.adopted[h.name][d] = t.get("name") or self.adopted[h.name][d]
+            for s in self.sessions(h):
+                r = await self.call(s, {"type": "list_tools"}, "list_tools")
+                mine = self.adopted.setdefault(s.agent_id, {})
+                for t in r.get("tools", []) if isinstance(r.get("tools"), list) else []:
+                    d = t.get("digest")
+                    if d in mine:
+                        mine[d] = t.get("name") or mine[d]
 
     async def work(self, h: Household, rng) -> None:
-        """One unit of work: use two adopted tools and review them."""
-        if not self.adopted[h.name]:
+        """One unit of work per session of the household, concurrently."""
+        await asyncio.gather(*(self.work_session(s, rng) for s in self.sessions(h)))
+
+    async def work_session(self, s: "AgentSession", rng) -> None:
+        """Use two of the tools this session adopted and review them."""
+        mine = self.adopted.get(s.agent_id) or {}
+        if not mine:
             return
-        picks = rng.sample(sorted(self.adopted[h.name].items()),
-                           k=min(2, len(self.adopted[h.name])))
+        picks = rng.sample(sorted(mine.items()), k=min(2, len(mine)))
         judgments = []
         for digest, name in picks:
-            r = await self.call(h, {"type": "use_tool", "caller_id": h.agent_id, "name": name,
+            r = await self.call(s, {"type": "use_tool", "name": name,
                                     "arguments": {"text": rng.choice(SAMPLE_TEXTS)}},
                                 "use_tool", tool=self.published[digest]["name"])
             canary = self.published[digest]["name"] == CANARY
             if canary:
-                self.note("canary_result", h, result=r)
+                self.note("canary_result", s, result=r)
             # Every tool's tier as the network sets it (the honest control
             # should end "declared").
-            self.note("tier", h, tool=self.published[digest]["name"],
+            self.note("tier", s, tool=self.published[digest]["name"],
                       tier=(r.get("containment") or {}).get("tier") or r.get("error"))
-            harm = 1.0 if canary and h.name in HARM_REVIEWERS else 0.0
+            harm = 1.0 if canary and s.h.name in HARM_REVIEWERS else 0.0
             judgments.append({"tool": name, "ok": "error" not in r and harm == 0,
                               "axes": {"correctness": 0.8 if harm == 0 else -0.8,
                                        "simplicity": 0.5},
                               "harm": harm, "stake": 0})
-        await self.call(h, {"type": "attest_tools", "caller_id": h.agent_id,
-                            "context": "s0 text work", "judgments": judgments},
-                        "attest_tools", tools=[x["tool"] for x in judgments])
+        r = await self.call(s, {"type": "attest_tools", "context": "s0 text work",
+                                "judgments": judgments},
+                            "attest_tools", tools=[x["tool"] for x in judgments])
+        q = r.get("reviews") if isinstance(r.get("reviews"), dict) else {}
+        if q.get("epoch") is not None and q.get("queued"):
+            self.queued.setdefault(s.agent_id, {}).setdefault(int(q["epoch"]), set()).add(
+                str(q.get("reviewer") or "").lower())
 
     async def pay(self, h: Household, amount: int, rng) -> None:
+        ss = self.sessions(h)
+        if not ss:
+            return
         to = rng.choice([o for o in self.hs if o is not h])
-        await self.call(h, {"type": "pay_for_service", "caller_id": h.agent_id,
-                            "recipient": to.agent_address, "amount": int(amount)},
+        await self.call(ss[0], {"type": "pay_for_service",
+                                "recipient": to.agent_address, "amount": int(amount)},
                         "pay_for_service", to=to.name, amount=int(amount))
+
+    # One query per household, worded so that only meaning (not shared
+    # words) finds the tool it is after.
+    SEARCHES = ["how many vowels does this sentence contain",
+                "make a web address from a title",
+                "turn every letter into a capital",
+                "mirror a string backwards"]
+
+    async def search(self) -> None:
+        """One library search per household through the agent API, logged
+        with whether semantic search was ready and where the model came
+        from."""
+        from urllib.parse import quote
+        for h, q in zip(self.hs, self.SEARCHES):
+            ss = self.sessions(h)
+            if not ss:
+                continue
+            got = await ss[0].request("GET", f"/tools?q={quote(q)}&k=3")
+            res = got.get("result") if got.get("ok") else {}
+            st = await self.call(h, {"type": "search_model_status"}, "search_model_status")
+            sem = (res or {}).get("semantic") or {}
+            top = []
+            for m in (res or {}).get("matches", []):
+                match, rel = m.get("match") or {}, m.get("household") or {}
+                where = ("authored" if rel.get("authored")
+                         else "adopted" if rel.get("adopted") else "library")
+                top.append(f"{m.get('name')}(kw {match.get('keyword_rank')}, "
+                           f"sem {match.get('semantic_rank')}, {where})")
+            self.note("search", h, query=q, ok=got.get("ok"), error=got.get("error"),
+                      semantic=sem, model=st, matches=top)
+            log(f"SEARCH {h.name} '{q}': semantic ready={sem.get('ready')} "
+                f"model {st.get('state')} from {st.get('source') or '?'}; "
+                f"{'; '.join(top) if top else 'no matches ' + str(got.get('error') or '')}")
+
+    def report_batches(self) -> None:
+        """One review batch per household per epoch: ToolBond's Committed
+        events per operator, and for a household with two sessions, the
+        epochs whose one batch carried both sessions' reviews."""
+        w3 = self.w3
+        tb = w3.eth.contract(address=w3.to_checksum_address(self.j["autonet"]["toolBond"]),
+                             abi=artifact("ToolBond.sol/ToolBond.json")["abi"])
+        try:
+            commits = tb.events.Committed.get_logs(from_block=0)
+            reviewed = tb.events.Reviewed.get_logs(from_block=0)
+        except Exception as exc:  # noqa: BLE001
+            log(f"BATCH: read failed: {exc}")
+            return
+        ops = {h.operator.lower(): h for h in self.hs if h.operator}
+        per: Dict[str, Dict[int, int]] = {}
+        stray = 0
+        for e in commits:
+            a = str(e["args"]["agent"]).lower()
+            if a not in ops:
+                stray += 1
+                continue
+            ep = int(e["args"]["epoch"])
+            per.setdefault(a, {})
+            per[a][ep] = per[a].get(ep, 0) + 1
+        for a, h in ops.items():
+            eps = per.get(a, {})
+            log(f"BATCH: {h.name} operator committed {sum(eps.values())} batch(es) over "
+                f"{len(eps)} epoch(s), at most {max(eps.values()) if eps else 0} per epoch")
+        if stray:
+            log(f"BATCH: {stray} commit(s) from an address that is no operator")
+        by_epoch: Dict[tuple, set] = {}
+        for e in reviewed:
+            key = (str(e["args"]["reviewer"]).lower(), int(e["args"]["epoch"]))
+            by_epoch.setdefault(key, set()).add(bytes(e["args"]["digest"]).hex())
+        for h in self.hs:
+            ss = self.sessions(h)
+            if len(ss) < 2:
+                continue
+            sets = [set(self.adopted.get(s.agent_id, {})) for s in ss]
+            both = sorted(ep for (a, ep), ds in by_epoch.items()
+                          if a == h.operator.lower() and all(ds & st for st in sets))
+            reviewers = set()
+            for s in ss:
+                for r in self.queued.get(s.agent_id, {}).values():
+                    reviewers |= r
+            log(f"BATCH: {h.name}'s sessions {', '.join(s.agent_id for s in ss)} queued as "
+                f"{sorted(reviewers)}; epochs whose one batch revealed both sessions' "
+                f"reviews: {both}")
 
     def epoch_threshold(self) -> int:
         """Fees that end an epoch now: the target share of the supply."""
@@ -694,6 +937,7 @@ async def activity_loop(act: Activity, minutes: float) -> None:
         bounds.append((acc * total, length))
     phase_seen = None
     late_done = False
+    searched = False
     while time.time() - start < total:
         elapsed = time.time() - start
         # Halfway, one more tool: it concludes into the pool that earlier
@@ -721,9 +965,11 @@ async def activity_loop(act: Activity, minutes: float) -> None:
         if per_agent > 0:
             await asyncio.gather(*(act.pay(h, per_agent, rng) for h in act.hs))
         # Until every tool's blobs have reached every household.
-        if any(len(act.adopted[h.name]) < sum(1 for m in act.published.values()
-                                              if m["author"] != h.name) for h in act.hs):
+        if not act.adopted_all():
             await act.adopt()
+        if not searched and elapsed > 60:
+            searched = True
+            await act.search()
         await asyncio.sleep(max(0.0, TICK_SECS - (time.time() - t0)))
 
 
@@ -773,12 +1019,12 @@ async def collector(run: Path, households: List[Household], j: Dict[str, Any], w
                     res = st.get("result") or {}
                 except Exception as exc:  # noqa: BLE001
                     res = {"error": repr(exc)}
-                agent = w3.to_checksum_address(h.agent_address) if h.agent_address else None
                 status.write(json.dumps({
                     "t": time.time(), "h": h.name, "anchors": n,
                     "owner_atn": int(sub.functions.balanceOf(h.owner.address).call()),
                     "owner_rep": int(rep.functions.balanceOf(h.owner.address).call()),
-                    "agent_atn": int(sub.functions.balanceOf(agent).call()) if agent else 0,
+                    "operator_atn": (int(sub.functions.balanceOf(
+                        w3.to_checksum_address(h.operator)).call()) if h.operator else 0),
                     "operator_gas": (int(w3.eth.get_balance(w3.to_checksum_address(h.operator)))
                                      if h.operator else 0),
                     "daemon_alive": h.alive(),
@@ -818,27 +1064,27 @@ async def onboard(h: Household, j: Dict[str, Any], w3, usdc) -> None:
                             abi=artifact("AutonetVault.sol/AutonetVault.json")["abi"])
     send(w3, h.owner, usdc.functions.approve(vault.address, ATN_BUY))
     send(w3, h.owner, vault.functions.buy(usdc.address, ATN_BUY))
-    # The agent: created external, funded by an explicit owner transfer.
-    created = await c.ok({"type": "create_agent", "id": h.agent_id, "name": h.agent_id,
-                          "provider": "external", "harness": "s0-script",
-                          # The bundles the owner grants: the tool library,
-                          # authoring, publishing, adoption, paying.
-                          "tools": ["unified_tools", "toolsmith", "publishing",
-                                    "adoption", "services", "observation"]})
-    h.agent_address = (created.get("address") or created.get("agent", {}).get("address")
-                       or (await c.ok({"type": "get_agent", "agent_id": h.agent_id})).get("address"))
+    # The owner funds the operator with ATN: every external agent acts as
+    # the operator (Decision 2026-11-08), whose balance pays its bonds,
+    # stakes and service payments, and whose gas pays every transaction.
     sub = w3.eth.contract(address=w3.to_checksum_address(substrate), abi=abi("Substrate"))
     bal = int(sub.functions.balanceOf(h.owner.address).call())
-    send(w3, h.owner, to=w3.to_checksum_address(h.agent_address), value=GAS_FUNDING)
-    send(w3, h.owner, sub.functions.transfer(w3.to_checksum_address(h.agent_address),
-                                              bal // AGENT_FUNDING_SHARE))
-    sig = owner_binding_sig(substrate, h.owner.key.hex(), h.agent_address)
-    await c.ok({"type": "register_agent_on_chain", "agent_id": h.agent_id,
-                "owner": h.owner.address, "owner_sig": sig}, timeout=240)
+    send(w3, h.owner, sub.functions.transfer(w3.to_checksum_address(h.operator),
+                                              bal // OPERATOR_FUNDING_SHARE))
+    # The scripted external agents, created through the agent API the way a
+    # harness creates itself (default grants), each with its own token.
+    h.sessions = []
+    for n in range(SESSIONS.get(h.name, 1)):
+        aid = h.agent_id if n == 0 else f"{h.agent_id}{n + 1}"
+        h.sessions.append(await AgentSession.create(h, aid))
+    h.agent_address = h.sessions[0].address or h.operator
+    same = all(s.address.lower() == h.operator.lower() for s in h.sessions)
     st = await c.ok({"type": "operator_status"})
     log(f"{h.name}: operator {h.operator[:10]} registered={st.get('registered')} "
-        f"delegated={st.get('delegated_to_operator')}; agent {h.agent_address[:10]} "
-        f"ATN={bal // AGENT_FUNDING_SHARE}")
+        f"delegated={st.get('delegated_to_operator')} ATN={st.get('atn_balance')}; "
+        f"agents {', '.join(s.agent_id for s in h.sessions)} act as "
+        f"{h.agent_address[:10]} (the operator's address: {same}), "
+        f"external_agents={st.get('external_agents')}")
 
 
 async def amain() -> int:
@@ -848,6 +1094,9 @@ async def amain() -> int:
     procs = Procs()
     households: List[Household] = []
     try:
+        # 0. The search model, once for every daemon.
+        prepare_search_model()
+
         # 1. Chain.
         procs.start("hardhat", ["npx.cmd" if os.name == "nt" else "npx", "hardhat", "node",
                                 "--port", str(RPC_PORT)], cwd=DAO_DIR, env=base_env(),
@@ -928,8 +1177,9 @@ async def amain() -> int:
         log(f"activity done: {json.dumps(act.counts, sort_keys=True)}")
         act.report_mint()
 
-        # 7. The owner-side handlers, live: export the operator key, sweep
-        # an agent's ATN to its owner.
+        # 7. The owner-side handlers, live: export the operator key, and the
+        # sweep, which leaves an external agent's balance alone (it is the
+        # operator's, Decision 2026-11-08).
         from eth_account import Account
         h = households[0]
         # Exporting a key needs the owner wallet's signature over a one-use
@@ -952,6 +1202,7 @@ async def amain() -> int:
         log(f"sweep_to_owner: {str(sw)[:300]}")
         # Let the last epochs anchor before the collector stops.
         await asyncio.sleep(300)
+        act.report_batches()
         stop.set()
         await col
         if KEEP:
