@@ -63,11 +63,11 @@ Seven stages, each verified:
    mint-counting usage). Two validators then `vet_tool` it: they first
    read the pinned code back, then attest a pass verdict with a report.
    Under v4.1 (vet gate retired) a vet is an INSPECTION REVIEW: it drifts
-   position but mints nothing and gates nothing. A `WorldService` is wired
-   to the tool_store's `manifest_sink`/`event_sink` exactly like
+   position but mints nothing and gates nothing. A `LibraryService` is
+   wired to the tool_store's `manifest_sink`/`event_sink` exactly like
    `atn/autonet_service.py` does; the tool_used receipts are captured off
-   the event sink and the registration sprout is read from the
-   WorldService epoch buffer.
+   the event sink and the `tool_registered` event is read from the
+   LibraryService epoch buffer.
 5. **Consensus**: the REAL federated close. Registration sprouts (author
    signing key) and receipts (caller signing key) become canonical
    `EventBatch` chains, driven through `FederatedCloseDriver.run()` with a
@@ -126,8 +126,10 @@ These are the composition frictions found while wiring the loop
 end-to-end. None block the loop (the script works around each), but each
 is a real observation about where the pieces don't yet click cleanly.
 
-1. **Registration sprout carries `author_post=False` → zero-standing tool
-   mint.** `WorldService.submit_tool_manifest` emits the registration
+1. (Gone 2026-11-08: the registration is one `tool_registered` event, there
+   is no claim node or standing, and the review mint pays from ToolBond
+   rounds; kept for the record.) **Registration sprout carries
+   `author_post=False` → zero-standing tool mint.** `WorldService.submit_tool_manifest` emits the registration
    `SubClaimSprouted` with `author_post=False`. In the default
    **ledger-pricing** federated close (no equilibration), the manifest
    claim node then has zero `net_score` standing, so
@@ -149,7 +151,7 @@ is a real observation about where the pieces don't yet click cleanly.
 2. **Tool registration events don't reach the `event_sink`.** Only
    `tool_used` receipts flow through `tool_store.event_sink`; the manifest
    registration goes through `manifest_sink → submit_tool_manifest`, whose
-   sprout lands in the WorldService's epoch buffer, not the sink. So a
+   event lands in the LibraryService's epoch buffer, not the sink. So a
    consumer that only taps `event_sink` (the natural place to collect
    "everything for the epoch batch") is missing the registration and gets
    an empty mint. The script reads registration events out of
@@ -162,9 +164,9 @@ is a real observation about where the pieces don't yet click cleanly.
    `agent_mint` by that string. But `mint_merkle` only admits keys that
    parse as 0x addresses (the contract can only verify `msg.sender`), so a
    string-keyed mint has **no on-chain claim path**: it silently drops at
-   the merkle-leaf stage. Production bridges this with
-   `world_substrate_feed.ResolvedAgentIdentity` (local id → 0x). The script
-   replicates that remap explicitly before building the canonical batches.
+   the merkle-leaf stage. Production uses the agent's 0x address as the
+   author. The script remaps explicitly before building the canonical
+   batches.
    The seam: nothing in the tool-mint path itself enforces or documents
    that the author field must be an address by the time it reaches the
    anchor; it's an implicit contract between the feed resolver and the
@@ -406,7 +408,7 @@ is reachable from such a session.
    It needs a pipe that stays open.
 
 8. **The port LISTENS before the runtime finishes booting** (~10s to
-   listen, heavy numpy/world_model imports after). An early connect is
+   listen, heavy numpy imports after). An early connect is
    accepted and then hangs, so the client retries the whole handshake and
    proves liveness with a real `snapshot` round trip rather than trusting
    the TCP accept.

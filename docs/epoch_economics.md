@@ -168,7 +168,7 @@ retroactively drawn cutoff don't count).
 Implementation state (2026-06-11):
 - Local daemon path DONE: `EpochScheduler` candle mode
   (`candle_min_seconds`/`candle_window_seconds`; `_draw_candle_cut`),
-  `WorldService.close_epoch(cutoff_ts=...)` partitions the buffered
+  `LibraryService.close_epoch(cutoff_ts=...)` partitions the buffered
   events at the cut, rolls post-cut events into the next epoch's
   buffer, and runs the emission clock to the cutoff so the window
   remainder accrues forward. Local seed: hash of (prev epoch id,
@@ -224,20 +224,3 @@ flag-day redeploy: it wipes registrations and anchors, so it is bundled
 with a deliberate reset (`scripts/deploy_substrate.js` +
 publish_network_config.py + indexer restart per the shadownet runbook).
 
-## Startup replay cost (known debt, separate from economics)
-
-`WorldPersistence.try_restore` replays the full event log through
-per-batch equilibration; profiling (py-spy, 2026-06-10) shows the time
-goes to pure-Python distance math in the vendored engine
-(`coordinate_frame._euclid_sq` via `novelty.measure`). A 3MB log takes
-1h+. Constraints on fixes:
-- The engine is vendored (`world_model/VENDORED.md`), so fix upstream
-  (c:\code\world-model), then re-vendor.
-- Replay is consensus-relevant: float summation ORDER matters for the
-  bit-identical federated close. Naive numpy vectorization reorders
-  sums, so verify bit-equality on a recorded log before adopting.
-- Alternatives: exact-value memoization of pairwise distances
-  (bit-safe by construction), and a verified world-snapshot
-  round-trip (content-addressed node ids may have removed the
-  ephemeral-UUID blocker noted in world_persistence.py's docstring;
-  verify with serialize→deserialize→score-compare on a real log).

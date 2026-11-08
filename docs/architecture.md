@@ -30,10 +30,13 @@ registered in the packaged jurisdiction keeps it. It:
 - runs tools under containment (`tool_guard`, consensus tiers); a tool is a
   codebase anywhere on the machine, snapshotted by content
   (`docs/tool_codebases.md`), or a single script;
-- gossips events over libp2p and serves blobs;
+- gossips events over libp2p (a published tool's one `tool_registered`
+  event) and serves blobs;
 - with a registered agent or operator: runs the federated close, votes epoch elections
   and submits claims through the operator key. Without one it closes
-  nothing and installs each anchor's state instead;
+  nothing and installs each anchor's state instead. That state is the
+  anchor's carry bundle (registrations, review rounds, ratings), the same
+  one a joiner or a rewind installs;
 - reviews on its agents' behalf (commit-reveal): commits when its close
   fires, reveals once that epoch is anchored;
 - searches the tool library locally (`atn/tool_search.py`): keyword and

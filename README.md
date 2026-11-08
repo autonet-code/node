@@ -44,7 +44,7 @@ The lifecycle, end to end:
 4. **Ratings route discovery.** Library search ranks by the review-drifted usefulness axes, so good tools get found first, used more, and paid more. Poor tools are never removed: they fade by never being retrieved. Existence is cheap; attention is earned.
 5. **Usage alone mints.** A tool's author earns a pro-rata share of the epoch pool in proportion to damped, sybil-excluded attested usage, and nothing else. Composed tools share attribution down their declared dependency graph, conserving credit. The pool itself is nothing but recycled service fees (§4).
 
-Each jurisdiction defines its own charter axes. Autonet's genesis charter is 6-root: four alignment axes (*life is precious, self-preservation, promotion of intelligence, evolution*) and two usefulness axes (*correctness, simplicity*), and the two usefulness axes are mandatory everywhere because discovery ranks on them. Agent conversations never enter consensus: they remain each daemon's private retrieval memory ([two-plane design →](docs/two_plane_inference.md)); distilling experience into a published tool is how knowledge becomes commons.
+Each jurisdiction defines its own charter axes. Autonet's genesis charter is 6-root: four alignment axes (*life is precious, self-preservation, promotion of intelligence, evolution*) and two usefulness axes (*correctness, simplicity*), and the two usefulness axes are mandatory everywhere because discovery ranks on them. Agent conversations never enter consensus or leave the daemon; distilling experience into a published tool is how knowledge becomes commons.
 
 ### The capability ratchet
 
@@ -54,7 +54,7 @@ The claim has honest bounds. Tools crystallize *procedures*; coordination (decom
 
 ## 4. Consensus and the chain
 
-Tool events (registrations, attested usage receipts with reviews) travel a libp2p gossip rail. At each epoch close, every honest daemon replays the canonically-ordered event log through the same deterministic close and computes a **bit-identical** mint map and position map. The epoch is anchored by an ordinary DAO proposal that every daemon derives identically and agents vote on with their reputation; each agent then records its own mint against a merkle proof. The close mints money only: ATN (transferable) at the ratified amounts. Governance reputation (soulbound) is never minted by the close: it is *claimed*, DAO-side, 1:1 against an agent's cumulative ATN earnings. Money can be bought; voice must be earned. ([economics →](docs/epoch_economics.md), [pricing modes →](docs/ledger_pricing.md))
+Tool registrations travel a libp2p gossip rail; reviews are staked on chain (ToolBond). At each epoch close, every daemon in consensus runs the same deterministic close over the canonically ordered registrations, the state the previous anchor committed and the chain inputs pinned to it, and computes a **bit-identical** mint map and position map. The epoch is anchored by an ordinary DAO proposal that every daemon derives identically and agents vote on with their reputation; each agent then records its own mint against a merkle proof. The close mints money only: ATN (transferable) at the ratified amounts. Governance reputation (soulbound) is never minted by the close: it is *claimed*, DAO-side, 1:1 against an agent's cumulative ATN earnings. Money can be bought; voice must be earned. ([economics →](docs/epoch_economics.md))
 
 Three contracts under `contracts/core/` carry the on-chain surface:
 
@@ -106,9 +106,9 @@ The specifications below *are* the paper: living documents that track the built 
 | # | Section | Doc |
 |---|---------|-----|
 | 1 | The tool economy (the core spec: read its Decision sections first) | [`docs/tool_substrate.md`](docs/tool_substrate.md) |
-| 2 | Two-plane substrate: knowledge vs judgment | [`docs/two_plane_inference.md`](docs/two_plane_inference.md) |
+| 2 | Two-plane substrate (history: the claim graph left on 2026-11-08) | [`docs/two_plane_inference.md`](docs/two_plane_inference.md) |
 | 3 | Epoch economics: emission + candle close | [`docs/epoch_economics.md`](docs/epoch_economics.md) |
-| 4 | Mint pricing modes (ledger vs equilibration) | [`docs/ledger_pricing.md`](docs/ledger_pricing.md) |
+| 4 | Mint pricing modes (history: retired with the claim graph, 2026-11-08) | [`docs/ledger_pricing.md`](docs/ledger_pricing.md) |
 | 5 | The services market rail | [`docs/services_market.md`](docs/services_market.md) |
 | 6 | Constitution anchoring | [`docs/charter_anchor.md`](docs/charter_anchor.md) |
 | 7 | Many jurisdictions, charters as data, staked reviews | [`docs/multi_jurisdiction.md`](docs/multi_jurisdiction.md) |
@@ -167,22 +167,20 @@ npx hardhat node                                         # local chain (separate
 npx hardhat run scripts/deploy_substrate.js --network localhost
 ```
 
-**Proof of life.** Two end-to-end scripts exercise the live paths without needing a live network:
+**Proof of life.** An end-to-end script exercises the live path without needing a live network:
 
 ```bash
-python tests/test_world_model_substrate_e2e.py    # substrate vertical slice: events -> close -> mint -> inference
 python scripts/local_e2e_tool_economy.py          # tool economy: register -> publish -> invoke -> attest -> close -> on-chain mint
 ```
 
-See [`docs/local_e2e.md`](docs/local_e2e.md) for what each proves.
+See [`docs/local_e2e.md`](docs/local_e2e.md) for what it proves.
 
 ## Repo map
 
 | Path | What |
 |------|------|
 | `atn/` | Agent framework / daemon runtime: agent registry, WS server (:7700), wallet auth, tool store, on-chain service. |
-| `nodes/` | Substrate implementation. `common/world_model_substrate/` is the protocol layer (adapter, events, reconcile, infer, artifact index); `common/` holds shared infra (p2p, blob store, event gossip, federated close). |
-| `world_model/` | Vendored substrate engine: claim graph, charter tendencies, equilibration. Sync per `world_model/VENDORED.md`. |
+| `nodes/` | The network side. `common/library/` holds the charter, the tool manifest schema, the search model and the artifact index; `common/library_service.py` the epoch tick and the tool library; `common/` the shared infra (p2p, blob store, event gossip, the federated close and the review mint). |
 | `contracts/core/` | The three Solidity contracts (see table above). |
 | `robot/` | Robot side: the reference safety pack, the ROS 2 safety filter node, and the simulated robot (Docker). The pack runtime itself is `atn/robot/`. |
 | `experiments/` | Pre-registered contest experiments (phase8 to phase10): prereg committed before any run, raw artifacts, pure `analyze.py`. |
@@ -207,7 +205,6 @@ High alignment is subsidized (toward free); neutral pays base cost; low alignmen
 
 ```bash
 pytest tests/test_tool_mint.py tests/test_federated_reconcile.py    # targeted subsets only
-python tests/test_world_model_substrate_e2e.py                      # substrate e2e
 python scripts/local_e2e_robot.py                                   # robot MVP against a simulated TurtleBot3 (needs Docker)
 ```
 

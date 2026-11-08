@@ -1,5 +1,45 @@
 # Tool substrate v3: tools as the ONLY substrate item; reviews replace debates
 
+## Decision (2026-11-08): the world leaves the system
+
+- **What went.** The claim graph ("the world": the vendored engine under
+  `world_model/`, the protocol layer `nodes/common/world_model_substrate/`,
+  `WorldService`, its event log and snapshots, the canonical world tracker
+  and its checkpoints). The system is the tool library, epochs, anchors,
+  ToolBond reviews and the review mint; what the paper calls the
+  substrate is the tool library (a DAG of codebases), not this engine.
+- **The close** (`federated_epoch_close`) replays nothing. It reads the
+  canonical events' tool registrations, the carry-over and the chain
+  inputs pinned to the previous anchor, and runs the review mint
+  (`compute_tool_mint`), whose buckets are keyed by digest.
+- **One registration event.** A published tool gossips one
+  `tool_registered` event: `{kind, seq, author_agent, artifact_digest,
+  manifest_meta}` with `manifest_meta` = trust_class, author, deps and
+  `version_of` when set (`library/tool_manifest.registration_event`). No
+  observation, no claim sprout, no coordinates. At boot a daemon re-sends
+  only registrations no anchor holds yet.
+- **What an anchor commits.** Payload schema 7: epoch id and roots, the
+  mint map and total, output decimals, batch and event counts,
+  `carry_cid`, charter hash and sanctioned households. `agent_novelty`,
+  `total_novelty`, `gate_applied` and `world_cid` are gone. The carry
+  bundle (registrations, review rounds, positions) is the whole anchored
+  state: a joiner, a follower and a rewind install it and nothing else.
+- **The daemon.** `LibraryService` (`nodes/common/library_service.py`)
+  replaces `WorldService`: the epoch tick, the event plumbing to and from
+  the gossip, the artifact index and blob store (search), the discovery
+  queue for remote manifests, and the latest close's registrations,
+  positions and per-tool mint for the economy graph. Work units, the
+  substrate MCP capsules, the native "substrate" model provider, the
+  `rpb_substrate_*` surfaces and `check_evidence` went with it.
+- **Why.** Nothing read the world since reviews replaced debates
+  (2026-07-08): mint, ratings and containment come from ToolBond, search
+  from the local index, and the close's state was already in the carry
+  bundle. The world only added cost and risk: every daemon equilibrated
+  a growing claim graph each close (the reason for `detmath`), a joiner
+  waited for its checkpoint, and once the embedding left the
+  registration every tool's claim node collided on one id (node ids are
+  hashed from the coordinates).
+
 ## Decision (2026-11-08): tool search is local, in relevance order
 
 - **Search is local to each daemon** (`atn/tool_search.py`). Every query
@@ -35,12 +75,10 @@
   the batches on disk). Unbonded and denied tools stay excluded.
 - **No embedding in consensus.** The registration event should carry only
   the charter axes: nothing in the close reads the embedding tail, and
-  the author's embedder output has no place in consensus. **Not built
-  yet**: a sprout's node id is content-addressed from its coords and
-  polarity axis only, so without the tail every tool registration lands
-  on one node (seen in a world built at `embedding_dim=0`). Until that is
-  settled the tail stays, authored with the same model projected to 64
-  dims (hashing until it loads).
+  the author's embedder output has no place in consensus. **Done** by
+  the removal of the world (Decision 2026-11-08 above): the
+  `tool_registered` event carries no coordinates at all, so there are no
+  node ids to collide.
 - **Why.** Ranking by rating sank niche tools and lifted rated ones above
   better matches; agents can weigh the metadata themselves. Search needs
   no consensus, so each daemon can run the same pinned model on its own
@@ -688,7 +726,8 @@ fired, and the proposer from each daemon's own list of senders.
    all-or-nothing and a failure blocks; `blockchain.deploy_block` (registry
    key `deploy_block`, 0 = search, which now raises on a failed read)
    starts every log scan; payload schema 5 commits `charter_hash` and
-   `sanctioned_households`.
+   `sanctioned_households`. (Superseded 2026-11-08: the world, its tracker
+   and `world_cid` left the system; `detmath` went with the engine.)
 
 **Items 1-3 BUILT** (same branch), with these specifics:
 - The epoch id is `epoch-<n>-<16 hex of anchor n-1's root>-<cutoff>`. The
@@ -1841,6 +1880,10 @@ don't transfer.
 
 ## Evidence-replay CON (ratified 2026-07-05; BUILT same day)
 
+Removed 2026-11-08 with the world: CONs left the live path on
+2026-07-08, and `check_evidence` with its support post went on
+2026-11-08 (Decision at the top). `ToolStore.replay_evidence` remains.
+
 Phase 10 (docs/phase10_results.md) REFUTED the claim that executable
 ground truth makes debate *decisively* better than prose (the pre-
 registered bar), so evidence is NOT sold as the thing prose lacks. But
@@ -1892,6 +1935,12 @@ jurisdiction's trustless projects already fund work. The design history is
 in git (the 2026-07-05 "Verifier trials" section and the contract NatSpec).
 
 ## Consensus mechanics (v3)
+
+Superseded in part 2026-11-08 (the world leaves the system, at the top):
+`ToolUsed` is not gossiped (since 2026-11-07), the registration is one
+`tool_registered` event without coordinates, the payload is schema 7
+without `world_cid`, and the carry bundle is fetched with
+`anchored_state.fetch_carry_over_from_chain`.
 
 - `ToolUsed` consensus event: caller-attested, gossiped, epoch-
   buffered, graph-neutral (replay skips it). Now optionally carries

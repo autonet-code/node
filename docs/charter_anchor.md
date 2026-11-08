@@ -24,22 +24,22 @@ into config fields `charter_hash` / `charter_uri`.
 
 The 6-root alignment vocabulary: four alignment axes (`life_precious`,
 `self_preservation`, `promotion_of_intelligence`, `evolution`) plus two
-usefulness axes (`correctness`, `simplicity`). It lives off-chain as the
-`CHARTER` constant in `nodes/common/world_model_substrate/adapter.py`,
-materialized into every daemon's world by `build_charter_world()`. It is the
-coordinate basis every historical claim is embedded in. The registry keys
-anchor only WHICH version is canonical, not its content.
+usefulness axes (`correctness`, `simplicity`). It lives off-chain as
+`DEFAULT_CHARTER` in `nodes/common/library/charter.py` (the active charter
+is the jurisdiction's, read from its Registry). Its axes are the ones
+reviews score and ratings are kept on. The registry keys anchor only WHICH
+version is canonical, not its content.
 
 ## Forward-only
 
 A charter change is a forward-only fork boundary: changing the roots changes
-the meaning of every historical alignment coordinate, and bit-identical replay
-cannot survive re-basing history. A new version takes effect at an epoch
+the meaning of every rating already kept on the old axes, and a close cannot
+mix the two. A new version takes effect at an epoch
 boundary, old epochs stay under the old version, and there is no rollback.
 
 ## Daemon side: detection first
 
-- `nodes/common/world_model_substrate/charter_version.py`: `charter_payload()`,
+- `nodes/common/library/charter_version.py`: `charter_payload()`,
   `charter_bytes()` (canonical JSON), `charter_hash()` (sha256 hex).
 - `federated_epoch_close`'s payload carries `charter_hash`.
 - `atn/on_chain.py: verify_charter(expected_hash, uri="")` is pure (no chain

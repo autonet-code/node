@@ -73,7 +73,7 @@ Home users need no network setup. With no `announce_addrs`:
   (`--jurisdiction <chain_id>:<DAO>`) so gossip crosses it between peers that
   are not connected to each other, relays and caches blobs on disk,
   keeps the state blobs daemons offer it after each close (anchor payload,
-  carry-over, world checkpoint, agent mints, over
+  carry-over, agent mints, over
   `/autonet/blob-offer/1.0.0`; it fetches what it lacks from the offerer),
   so a joiner can install the anchored state when every daemon that
   computed it is offline (issue #44), forwards service calls one hop, and answers reachability checks. No close, no chain, no agents, no model. It
@@ -156,6 +156,6 @@ stream, same-stream framing (write without closing, read, close).
 - Hole punching (py-libp2p ships DCUtR) and circuit relay v2 are not used. NAT'd daemons cannot
   dial each other directly; gossip, blobs and service calls go through
   reachable peers.
-- Blobs held only in the in-memory resolver map (world checkpoints, carry
-  bundles) are not persisted, so a daemon that restarts cannot serve the
+- Blobs held only in the in-memory resolver map (carry bundles) are not
+  persisted, so a daemon that restarts cannot serve the
   ones it published before the restart. Peers that fetched them can.
