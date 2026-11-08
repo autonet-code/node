@@ -20,7 +20,13 @@ directly where they can, gossip and fetch blobs. Code:
   a direct TCP one by hole punching; the relayed leg closes after a minute.
 - **A Kademlia DHT** runs on every daemon and relay. It finds peers (a
   lookup for a random key each few mesh rounds names peers we did not
-  know) and blob providers (below).
+  know) and blob providers (below). A peer we fail to dial leaves the
+  routing table, so a dead relay does not stall lookups.
+- **Gossip** (GossipSub) rides the same links. A pubsub stream that ran on
+  a connection that closed while the peer stays connected another way (a
+  relayed leg DCUtR replaced, or whose relay went down) is reopened on a
+  live connection; py-libp2p kept the dead stream and gossip to that peer
+  stopped.
 - **The mesh loop** (every 15 s) keeps the relay reservations, feeds every
   new connection to the DHT, remembers connected peers in the peer cache,
   and dials towards `target_peers` (8) from capability gossip, the DHT
@@ -219,8 +225,17 @@ stream, same-stream framing (write without closing, read, close).
 ## Proof
 
 - `tests/test_p2p_mesh.py`: both transports, reservations and circuit
-  dials, DHT provider fetch over a circuit, no blob forwarding, the mesh
-  dialer, the peer cache, the connection cap, SOCKS5.
+  dials, DHT provider fetch over a circuit, gossip after the relayed leg
+  closes, no blob forwarding, the mesh dialer, the peer cache, the
+  connection cap, SOCKS5.
+- `scripts/mesh_nat_harness.py`: Docker, two LANs behind NAT gateways
+  (iptables MASQUERADE, unsolicited inbound dropped), a public relay, a
+  public daemon and an HTTPS-only daemon behind a CONNECT proxy. Checks
+  hole-punched NAT'd to NAT'd links (the remote end is the other NAT's
+  public address), tool blobs found through the DHT, gossip and fetches
+  with the relay stopped, the proxied daemon working through the relay,
+  and a restart rejoining through the peer cache. Recorded output:
+  `experiments/mesh_nat/harness_output.txt`.
 
 ## Not covered
 
