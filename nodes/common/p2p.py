@@ -500,7 +500,7 @@ class _ConnNotifee:
         self._host._on_connected(conn)
 
     async def disconnected(self, network, conn) -> None:
-        pass
+        self._host._on_disconnected(conn)
 
     async def listen(self, network, multiaddr) -> None:
         pass
@@ -984,6 +984,12 @@ class AutonetHost:
             done = in_flight[key] = trio.Event()
             try:
                 return await _dial(peer_id)
+            except Exception:
+                # Kademlia drops peers that do not answer: without this a
+                # dead peer (a relay that went down, a daemon reachable only
+                # through it) stalls every lookup until the hourly refresh.
+                self._dht_forget(peer_id)
+                raise
             finally:
                 in_flight.pop(key, None)
                 done.set()
@@ -1089,6 +1095,35 @@ class AutonetHost:
             return
         nursery.start_soon(self._after_connect, pid)
 
+    def _on_disconnected(self, conn: Any) -> None:
+        """A connection closed: if our pubsub stream to that peer ran on it
+        and the peer is still connected another way, reopen the stream on
+        a live connection now; a peer we reached only through a relay
+        leaves the DHT routing table when its last connection goes."""
+        nursery = self._nursery
+        try:
+            pid = conn.muxed_conn.peer_id
+        except Exception:
+            return
+        if nursery is None:
+            return
+
+        try:
+            relayed = all(p2p_mesh.is_circuit(a) for a in conn.get_transport_addresses())
+        except Exception:
+            relayed = False
+
+        async def reopen() -> None:
+            await trio.sleep(0)   # let the swarm drop the closed connection
+            if self._pubsub is not None and self._drop_stale_pubsub_stream(pid):
+                await self._nudge_pubsub_peer(pid)
+            if relayed and not self._host.get_network().get_connections(pid):
+                # Reachable only through a relay that is gone: out of the
+                # routing table until it connects again, so lookups do not
+                # wait on it.
+                self._dht_forget(pid)
+        nursery.start_soon(reopen)
+
     async def _after_connect(self, pid: Any) -> None:
         await trio.sleep(1.5)  # identify fills the peerstore protocols
         if pid not in self._host.get_connected_peers():
@@ -1109,6 +1144,14 @@ class AutonetHost:
             return True
         cap = self._known_capabilities.get(str(pid))
         return bool(cap and "relay" in (cap.roles or []))
+
+    def _dht_forget(self, pid: Any) -> None:
+        if self._dht is None:
+            return
+        try:
+            self._dht.routing_table.remove_peer(pid)
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _dht_add(self, pid: Any) -> None:
         if self._dht is None:
@@ -1641,10 +1684,12 @@ class AutonetHost:
 
         Runs every 2s for the lifetime of the host nursery.
         """
-        import trio
         while True:
             try:
                 if self._pubsub is not None and self._host is not None:
+                    for pid in list(self._pubsub.peers.keys()):
+                        if self._drop_stale_pubsub_stream(pid):
+                            self.logger.debug(f"pubsub stream to {pid} moved off a closed connection")
                     connected = list(self._host.get_connected_peers())
                     known = set(self._pubsub.peers.keys())
                     for pid in connected:
@@ -1656,6 +1701,36 @@ class AutonetHost:
             except Exception as e:
                 self.logger.debug(f"_reconcile_pubsub_peers iter: {e}")
             await trio.sleep(2.0)
+
+    def _drop_stale_pubsub_stream(self, pid: Any) -> bool:
+        """Forget our pubsub stream to ``pid`` when the connection it ran
+        on has closed while another connection to the peer lives on (a
+        relayed connection that DCUtR replaced with a direct one, or one
+        whose relay went down). py-libp2p keeps the dead stream as long as
+        the peer is connected at all, so gossip to that peer stopped. The
+        caller opens a new stream on a live connection. Subscriptions the
+        peer told us about are kept."""
+        ps = self._pubsub
+        stream = ps.peers.get(pid) if ps is not None else None
+        if stream is None:
+            return False
+        muxed = getattr(stream, "muxed_conn", None)
+        live = [c.muxed_conn for c in self._host.get_network().get_connections(pid)
+                if not getattr(c, "is_closed", False) and getattr(c, "muxed_conn", None) is not None]
+        if muxed is None or not live or any(m is muxed for m in live):
+            return False
+        ps.peers.pop(pid, None)
+        queue = getattr(ps, "peer_queues", {}).pop(pid, None)
+        if queue is not None:
+            try:
+                queue.close()
+            except Exception:
+                pass
+        try:
+            ps.router.remove_peer(pid)
+        except Exception:
+            pass
+        return True
 
     async def _nudge_pubsub_peer(self, peer_id: Any) -> None:
         """Manually invoke pubsub's new-peer handler.

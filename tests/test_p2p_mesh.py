@@ -140,7 +140,7 @@ async def test_natd_peer_reserves_and_is_reached_through_the_circuit():
         assert await _until(lambda: c.peer_id not in a.get_connected_peers() or True)
         a._known_capabilities[c.peer_id] = c._capability
         assert await a.reach_peer(c.peer_id, timeout=20)
-        assert a.connection_kinds()[c.peer_id] == ["relayed"]
+        assert "relayed" in a.connection_kinds()[c.peer_id]
         # Service calls ride the circuit directly (no forwarding hop).
         c.set_service_handler(lambda msg: _echo(msg))
         reply = await a.request_service(c.peer_id, {"msg_id": "m1", "x": 1}, timeout=20)
@@ -149,6 +149,39 @@ async def test_natd_peer_reserves_and_is_reached_through_the_circuit():
 
 async def _echo(msg):
     return {"msg_id": msg.get("msg_id"), "echo": msg.get("x")}
+
+
+@trio_test
+async def test_gossip_survives_the_relayed_connection_closing():
+    """a first reaches c through the relay, so their pubsub streams run on
+    the relayed connection; a direct one is added (as DCUtR does) and the
+    relayed one closes. Gossip must move to the direct connection (the
+    harness caught it stopping: py-libp2p kept the dead stream)."""
+    topic = "/autonet/world-events/mesh-test"
+    relay = _host("relay", relay_hop=True)
+    a = _host("nat-a", advertise_listen_addrs=False, mesh_interval=0)
+    c = _host("nat-c", advertise_listen_addrs=False, mesh_interval=0)
+    got = []
+    async with relay.run(), a.run(), c.run():
+        await _natd_pair(relay, a, c)
+        await c.subscribe_topic(topic, lambda _t, d: got.append(d))
+        await a.subscribe_topic(topic, lambda _t, _d: None)
+        a._known_capabilities[c.peer_id] = c._capability
+        assert await a.reach_peer(c.peer_id, timeout=20)
+        assert "relayed" in a.connection_kinds()[c.peer_id]
+        swarm = a._host.get_network()
+        relayed = list(swarm.get_connections(c._host.get_id()))
+        tcp = next(x for x in c._host.get_transport_addrs() if not p2p_mesh.is_ws(x))
+        await swarm.dial_addr(tcp, c._host.get_id())
+        assert await _until(lambda: "direct" in a.connection_kinds().get(c.peer_id, []), 10)
+        for conn in relayed:
+            await conn.close()
+        assert await _until(lambda: a.connection_kinds().get(c.peer_id) == ["direct"], 10)
+        with trio.fail_after(20):
+            while not got:
+                await a.publish_topic(topic, b"after-the-relay-leg")
+                await trio.sleep(0.5)
+        assert got[-1] == b"after-the-relay-leg"
 
 
 @trio_test
@@ -174,7 +207,9 @@ async def test_blob_found_through_dht_providers_and_fetched_over_a_circuit():
             got = await a.fetch_blob_from_network(cid)
         assert got == blob
         assert a.last_fetch_source == "dht"
-        assert set(a.connection_kinds().get(c.peer_id)) == {"relayed"}
+        # Over the circuit, or a direct link if DCUtR already upgraded it
+        # (on loopback the observed address is dialable).
+        assert c.peer_id in a.connection_kinds()
 
 
 @trio_test
