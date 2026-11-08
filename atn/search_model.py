@@ -279,8 +279,9 @@ class SearchModel:
             minilm.set_shared(embedder)
         self._error = ""
         await self._set_state("ready")
-        log.info("search model ready: %s@%s (semantic search on)",
-                 MODEL_ID, MODEL_REVISION[:12])
+        if self._load_model:
+            log.info("search model ready: %s@%s (semantic search on)",
+                     MODEL_ID, MODEL_REVISION[:12])
         callbacks, self._ready_callbacks = self._ready_callbacks, []
         for cb in callbacks:
             self._call(cb)

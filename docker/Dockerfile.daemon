@@ -10,6 +10,8 @@
 # State lives on ONE volume at /data/atn (the daemon's ~/.atn: config.yaml,
 # keystore, vault, agents, world state, carry-over files). The image's
 # ~/.atn is a symlink to it, so the root filesystem can stay read-only.
+# The search model is part of the image (/opt/atn/models, ATN_MODEL_DIR);
+# the daemon only checks its hashes at start.
 #
 # Ports: only one leaves the container.
 #   AUTONET_P2P_PORT (4001) - libp2p event gossip / blob transfer.
@@ -63,6 +65,12 @@ COPY world_model/ world_model/
 RUN pip install --upgrade pip setuptools wheel \
     && pip install .
 
+# The local search model (atn/search_model.py): downloaded and checked
+# against its pinned sha256 hashes here, so a container starts with semantic
+# search on instead of fetching 90 MB on its first run. The build fails if a
+# hash does not match.
+RUN python -m atn.search_model --fetch /opt/atn/models
+
 # ---- runtime stage ----
 FROM python:3.11-slim-bookworm
 
@@ -80,6 +88,7 @@ RUN groupadd --system --gid ${ATN_UID} atn \
     && ln -s /data/atn /home/atn/.atn
 
 COPY --from=build /opt/venv /opt/venv
+COPY --from=build /opt/atn/models /opt/atn/models
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
@@ -89,6 +98,7 @@ ENV PATH=/opt/venv/bin:$PATH \
     ATN_DATA_DIR=/data/atn \
     XDG_CACHE_HOME=/tmp/cache \
     ATN_AUTO_UPDATE=0 \
+    ATN_MODEL_DIR=/opt/atn/models \
     AUTONET_P2P_PORT=4001
 
 VOLUME ["/data/atn"]
