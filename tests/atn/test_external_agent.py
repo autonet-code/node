@@ -96,3 +96,103 @@ def test_local_owner_key_is_stable(tmp_path):
     k1 = rt.registry.local_owner_key()
     k2 = rt.registry.local_owner_key()
     assert k1 == k2 and k1.startswith("0x") and len(k1) == 66
+
+
+# ---------------------------------------------------------------------------
+# External agents act as the operator (Decision 2026-11-08)
+# ---------------------------------------------------------------------------
+
+def _operator_address(rt) -> str:
+    from eth_account import Account
+    return Account.from_key(rt.registry.daemon_operator_key()).address
+
+
+async def _native(rt, agent_id):
+    from atn.models import AgentDefinition, AgentMode
+    defn = AgentDefinition(id=agent_id, name=agent_id, mode=AgentMode.COGNITIVE,
+                           system_prompt="x", cognitive_model="claude-sonnet-5")
+    await rt.register_agent(defn)
+    return rt.get_agent(agent_id)
+
+
+@pytest.mark.asyncio
+async def test_external_agents_are_the_operator_native_ones_are_not(tmp_path):
+    rt = _runtime(tmp_path)
+    op = _operator_address(rt)
+    a = await _create_agent(rt, {"id": "cc-a", "provider": "external"})
+    b = await _create_agent(rt, {"id": "cc-b", "provider": "external"})
+    assert a["address"] == b["address"] == op and a["acts_as_operator"] is True
+    # Both sessions sign with the operator key, and share one identity.
+    key = rt.registry.daemon_operator_key()
+    assert rt.registry.get_agent_key("cc-a") == rt.registry.get_agent_key("cc-b") == key
+    assert rt.get_agent("cc-a").identity is rt.get_agent("cc-b").identity
+    # No keypair of their own: no identity file.
+    assert not (rt._config.agents_dir / "cc-a" / "identity.json").exists()
+    # A native agent keeps its own keypair.
+    nat = await _native(rt, "nat")
+    assert nat.identity.address != op
+    assert rt.registry.get_agent_key("nat") != key
+    assert (rt._config.agents_dir / "nat" / "identity.json").exists()
+    # The operator's address names no single agent.
+    assert rt.registry.get_agent_id_by_address(op) is None
+    assert rt.registry.get_agent_id_by_address(nat.identity.address) == "nat"
+    # It is advertised once.
+    ads = [ad["address"] for ad in rt.registry.build_agent_advertisements()]
+    assert ads.count(op) == 1
+
+
+@pytest.mark.asyncio
+async def test_registration_is_the_operators_and_persists(tmp_path):
+    rt = _runtime(tmp_path)
+    await _create_agent(rt, {"id": "cc-a", "provider": "external"})
+    await _create_agent(rt, {"id": "cc-b", "provider": "external"})
+    assert not rt.get_agent("cc-a").identity.registered_on_chain
+    rt.registry.set_operator_registered(True, "0xreg")
+    assert rt.get_agent("cc-a").identity.registered_on_chain
+    assert rt.get_agent("cc-b").identity.registered_on_chain
+    # persist_identity of an external agent writes the operator's file,
+    # never the operator key under the agent's vault name.
+    rt.registry.persist_identity("cc-a")
+    assert (rt._config.data_dir / "operator_identity.json").exists()
+    assert not (rt._config.agents_dir / "cc-a" / "identity.json").exists()
+
+    # A restart reads it back.
+    from atn.loader import load_agents_dir
+    rt2 = _runtime(tmp_path)
+    defns, _errors = load_agents_dir(rt2._config.agents_dir)
+    for defn in defns:
+        await rt2.register_agent(defn, legacy=True)
+    assert rt2.get_agent("cc-b").identity.registered_on_chain
+    assert rt2.get_agent("cc-b").identity.address == _operator_address(rt2)
+
+
+@pytest.mark.asyncio
+async def test_an_older_external_key_is_ignored(tmp_path):
+    """An external agent from an older build had its own keypair: it now
+    resolves to the operator, and its old file does no harm."""
+    import json as _json
+    from eth_account import Account
+    rt = _runtime(tmp_path)
+    old = Account.create()
+    folder = rt._config.agents_dir / "old-cc"
+    folder.mkdir(parents=True)
+    (folder / "identity.json").write_text(_json.dumps({
+        "address": old.address, "public_key": old.address,
+        "private_key": old.key.hex(), "registered_on_chain": True}))
+    await _create_agent(rt, {"id": "old-cc", "provider": "external"})
+    assert rt.get_agent("old-cc").identity.address == _operator_address(rt)
+    assert rt.registry.get_agent_key("old-cc") == rt.registry.daemon_operator_key()
+
+
+@pytest.mark.asyncio
+async def test_register_on_chain_says_it_acts_as_the_operator(tmp_path):
+    from atn.agent_tools import execute_tool
+    rt = _runtime(tmp_path)
+    await _create_agent(rt, {"id": "cc", "provider": "external"})
+    out = await execute_tool("register_on_chain", {}, rt, caller_id="cc")
+    assert "error" not in out, out
+    assert out["acts_as_operator"] is True and out["registered_on_chain"] is False
+    assert "operator" in out["note"]
+    rt.registry.set_operator_registered(True)
+    out = await execute_tool("register_on_chain", {}, rt, caller_id="cc")
+    assert out["registered_on_chain"] is True

@@ -155,6 +155,11 @@ class AgentRegistry:
         self._wallet_manager = AgentWalletManager()
         # Agent private keys: agent_id -> private_key_hex (parent holds child's key)
         self._agent_keys: dict[str, str] = {}
+        # The operator's identity, one object shared by every external agent
+        # (Decision 2026-11-08): made on first use, see operator_identity().
+        self._operator_identity: Any = None
+        self._operator_signing_key: str = ""
+        self._operator_checked: float = 0.0
         # Optional live-injection hook for child->parent completion pushes.
         # Wired by the Runtime to SessionManager.send_agent_message-style
         # delivery: async (parent_id, text) -> bool (True if injected into a
@@ -230,6 +235,12 @@ class AgentRegistry:
     def persist_identity(self, agent_id: str) -> None:
         """Re-save the identity file for an agent (e.g. after registration flag changes)."""
         defn = self._agents.get(agent_id)
+        if defn is not None and self.is_operator_identity(defn.identity):
+            # An external agent acts as the operator: its registration is
+            # the operator's, and the operator key never goes under an
+            # agent's vault name.
+            self._save_operator_identity()
+            return
         key = self._agent_keys.get(agent_id, "")
         if defn and defn.identity and key:
             self._save_identity(agent_id, defn.identity, key)
@@ -705,7 +716,25 @@ class AgentRegistry:
         # non-empty system_prompt used to leave prompt-less agents — e.g. ones
         # provisioned deterministically via the Add-Agent form — with no
         # identity, so they could never register on-chain.
-        if defn.identity is None:
+        #
+        # An external agent is the exception (Decision 2026-11-08): it makes
+        # no keypair. On chain it IS the household's operator, so its
+        # identity is the operator's (one object, shared by every external
+        # session) and the daemon signs its actions with the operator key.
+        # A key an older build made for it stays unused in the vault.
+        from ..provider_identity import is_external
+        if is_external(defn):
+            try:
+                defn.identity = self.operator_identity()
+                self._agent_keys[defn.id] = self._operator_signing_key
+            except Exception as exc:  # noqa: BLE001 (no vault: no chain actions)
+                log.warning("External agent %s has no operator identity: %s",
+                            defn.id, exc)
+                defn.identity = None
+            else:
+                defn.wallet = self._wallet_manager.create_wallet(
+                    agent_id=defn.id, address=defn.identity.address)
+        elif defn.identity is None:
             loaded = self._load_identity(defn.id)
             if loaded:
                 identity, private_key = loaded
@@ -841,10 +870,15 @@ class AgentRegistry:
     def build_agent_advertisements(self) -> list[dict]:
         """Build p2p AgentAdvertisement dicts for all agents with identity."""
         ads = []
+        seen: set[str] = set()
         for aid, defn in self._agents.items():
             identity = defn.identity
             if not identity or not identity.address:
                 continue
+            # External sessions share the operator's address: advertise it once.
+            if identity.address.lower() in seen:
+                continue
+            seen.add(identity.address.lower())
             parent_addr = ""
             if defn.parent_id:
                 parent = self._agents.get(defn.parent_id)
@@ -907,6 +941,141 @@ class AgentRegistry:
         ks.put_secret(self.OPERATOR_SECRET, key)
         return key
 
+    # ------------------------------------------------------------------
+    # The operator as the external agents' identity (Decision 2026-11-08)
+    # ------------------------------------------------------------------
+
+    OPERATOR_IDENTITY_FILE = "operator_identity.json"
+
+    def daemon_operator_key(self) -> str:
+        """The key the operator signs with: the configured daemon key
+        (``autonet.private_key``), else the vault-held operator key. The
+        same key anchors, votes and claims (ws_server._operator_key)."""
+        configured = getattr(getattr(self._config, "autonet", None),
+                             "private_key", "") or ""
+        return configured or self.operator_key()
+
+    def _operator_identity_path(self) -> Path:
+        return Path(self._config.data_dir) / self.OPERATOR_IDENTITY_FILE
+
+    def operator_identity(self) -> Any:
+        """The operator's identity, shared by every external agent: one
+        object, so its registration flag is the same for all of them. Its
+        per-jurisdiction registrations persist in operator_identity.json."""
+        if self._operator_identity is not None:
+            return self._operator_identity
+        from eth_account import Account
+        from ..models import AgentIdentity
+        key = self.daemon_operator_key()
+        address = Account.from_key(key).address
+        identity = AgentIdentity(public_key=address, address=address)
+        try:
+            data = json.loads(self._operator_identity_path().read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 (none yet, or unreadable)
+            data = {}
+        same_key = (isinstance(data, dict)
+                    and str(data.get("address") or "").lower() == address.lower())
+        regs = data.get("registrations") if same_key else None
+        if isinstance(regs, dict):
+            identity.registrations = dict(regs)
+        jur = getattr(self, "jurisdiction", "")
+        if jur:
+            if jur in identity.registrations:
+                identity.registered_on_chain = True
+                identity.registration_tx = identity.registrations.get(jur)
+        elif same_key and data.get("registered_on_chain"):
+            # No jurisdiction key (a bare test or dev setup): the flag itself.
+            identity.registered_on_chain = True
+            identity.registration_tx = data.get("registration_tx")
+        self._operator_signing_key = key
+        self._operator_identity = identity
+        return identity
+
+    def is_operator_identity(self, identity: Any) -> bool:
+        return identity is not None and identity is self._operator_identity
+
+    def acts_as_operator(self, agent_id: str) -> bool:
+        """Does this agent act on chain as the operator (an external one)?"""
+        defn = self._agents.get(agent_id)
+        return defn is not None and self.is_operator_identity(defn.identity)
+
+    def _save_operator_identity(self) -> None:
+        identity = self._operator_identity
+        if identity is None:
+            return
+        jur = getattr(self, "jurisdiction", "")
+        regs = dict(identity.registrations or {})
+        if jur:
+            if identity.registered_on_chain:
+                regs[jur] = identity.registration_tx
+            else:
+                regs.pop(jur, None)
+        identity.registrations = regs
+        path = self._operator_identity_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"address": identity.address,
+                                   "registered_on_chain": identity.registered_on_chain,
+                                   "registration_tx": identity.registration_tx,
+                                   "registrations": regs}, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+
+    def set_operator_registered(self, registered: bool, tx: str | None = None) -> None:
+        """Record whether the operator is registered in this jurisdiction,
+        which is whether every external agent is."""
+        identity = self.operator_identity()
+        if bool(identity.registered_on_chain) == bool(registered) and (
+                not registered or not tx or identity.registration_tx == tx):
+            return
+        identity.registered_on_chain = bool(registered)
+        if registered:
+            identity.registration_tx = tx or identity.registration_tx
+        else:
+            identity.registration_tx = None
+        self._save_operator_identity()
+        log.info("Operator %s registered in this jurisdiction: %s",
+                 identity.address, bool(registered))
+
+    async def refresh_operator_registration(self, svc: Any = None,
+                                            min_interval_s: float = 60.0) -> bool:
+        """Read the operator's registration from Substrate when the flag
+        says unregistered (the owner may have registered it from another
+        surface), at most once per ``min_interval_s``. Only once an external
+        agent made the operator identity. Returns the flag. Never raises."""
+        import time as _time
+        identity = self._operator_identity
+        if identity is None:
+            return False
+        if identity.registered_on_chain:
+            return True
+        now = _time.monotonic()
+        if self._operator_checked and now - self._operator_checked < min_interval_s:
+            return False
+        self._operator_checked = now
+        try:
+            if svc is None:
+                from ..on_chain import OnChainService
+                svc = OnChainService(getattr(self._config, "autonet", None)
+                                     or getattr(self._config, "rpb", None))
+            if not svc.available:
+                return False
+            if hasattr(svc, "_get_web3"):
+                import asyncio
+
+                def _read() -> bool:   # off the event loop: an RPC round trip
+                    w3 = svc._get_web3()
+                    return bool(svc._get_contract(w3).functions.isRegistered(
+                        w3.to_checksum_address(identity.address)).call())
+                registered = await asyncio.to_thread(_read)
+            else:
+                registered = await svc.is_registered(identity.address)
+            if registered:
+                self.set_operator_registered(True)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("operator registration read failed: %s", exc)
+        return bool(identity.registered_on_chain)
+
     def get_agent_key(self, agent_id: str) -> str | None:
         """Get the private key for an agent (parent holds child's key)."""
         return self._agent_keys.get(agent_id)
@@ -918,15 +1087,25 @@ class AgentRegistry:
         lowercase). The only existing direction is agent_id -> identity.address
         (build_agent_advertisements); this is the inverse, used to turn a
         signed-challenge signer address back into the agent it roots at.
-        Linear scan — fleets are tens of agents, not thousands."""
+        Linear scan — fleets are tens of agents, not thousands.
+
+        The operator's address names no agent: every external session
+        shares it, so it can't stand for any one of them."""
         if not address:
             return None
         target = address.lower()
         for aid, defn in self._agents.items():
             ident = defn.identity
+            if self.is_operator_identity(ident):
+                continue
             if ident and ident.address and ident.address.lower() == target:
                 return aid
         return None
+
+    def is_operator_address(self, address: str) -> bool:
+        identity = self._operator_identity
+        return bool(address) and identity is not None and \
+            str(identity.address).lower() == str(address).lower()
 
     def get_subtree_ids(self, root_id: str) -> set[str]:
         """The set of agent ids in root_id's subtree: {root} ∪ descendants.

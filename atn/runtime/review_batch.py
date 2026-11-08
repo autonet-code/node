@@ -454,6 +454,13 @@ HELD_NOTE = (
     "(the owner connects a wallet in the Autonet app and approves your "
     "registration). To earn from a review it also needs a stake, any "
     "amount of ATN; your reviews weigh by your household's REP.")
+# An external agent's reviews go out from the operator (Decision 2026-11-08).
+HELD_NOTE_OPERATOR = (
+    "held: you review as this household's operator, which is not registered "
+    "yet. This review is kept and submitted to the open round once it is "
+    "(the owner registers the operator in the Autonet app, Household). To "
+    "earn from a review it also needs a stake, any amount of ATN from the "
+    "operator's balance; your reviews weigh by your household's REP.")
 
 
 def _held_path(runtime: Any, agent_id: str) -> Path:
@@ -569,7 +576,12 @@ async def queue_reviews(runtime: Any, agent_id: str,
     The agent must be registered on chain with a daemon-held key (the batch
     is committed with its key), and ToolBond must be reachable to read the
     epoch. Reviews carrying no charter axis score and no harm are skipped:
-    ToolBond would refund them as uninformative."""
+    ToolBond would refund them as uninformative.
+
+    An external agent's identity is the operator's (Decision 2026-11-08),
+    so its reviews land in the operator's batch: every external session of
+    the household fills one batch per epoch, and a second review of a tool
+    replaces the first (``ReviewBatchStore.add``)."""
     from nodes.common.world_model_substrate.charter import active_charter
 
     out: dict[str, Any] = {"queued": 0, "epoch": None, "skipped": []}
@@ -578,12 +590,16 @@ async def queue_reviews(runtime: Any, agent_id: str,
     defn = runtime.get_agent(agent_id) if agent_id else None
     identity = getattr(defn, "identity", None) if defn else None
     address = str(getattr(identity, "address", "") or "")
+    check = getattr(getattr(runtime, "registry", None), "is_operator_identity", None)
+    as_operator = bool(check(identity)) if callable(check) and identity is not None else False
+    if as_operator:
+        out["reviewer"] = address
     if not address or not getattr(identity, "registered_on_chain", False):
         if defn is None:
             out["note"] = "no such agent; nothing was queued"
             return out
         out["held"] = hold_reviews(runtime, agent_id, reviews)
-        out["note"] = HELD_NOTE
+        out["note"] = HELD_NOTE_OPERATOR if as_operator else HELD_NOTE
         return out
     client = client_for(runtime)
     if not client.available():

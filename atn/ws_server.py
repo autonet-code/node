@@ -2959,7 +2959,10 @@ class WebSocketBridge:
                 # only — this whole message type is in KEY_LOCAL_ONLY_MESSAGES,
                 # and we re-assert session.local as defense-in-depth. The key is
                 # never returned over the remote listener.
-                if result.get("success") and session.local:
+                # Never for an external agent: its key is the operator's, which
+                # only the owner-signed export_operator_key hands out.
+                if result.get("success") and session.local \
+                        and not self.runtime.registry.acts_as_operator(agent_id):
                     key = self.runtime.registry.get_agent_key(agent_id)
                     if key:
                         result["private_key"] = key
@@ -3001,7 +3004,10 @@ class WebSocketBridge:
             if not agent_id:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id'"}
             agent_def = self.runtime.registry.get_agent(agent_id)
-            if agent_def and agent_def.identity:
+            # An external agent's registration is the operator's, read from
+            # chain (register_operator, operator_status), never asserted.
+            if agent_def and agent_def.identity \
+                    and not self.runtime.registry.is_operator_identity(agent_def.identity):
                 agent_def.identity.registered_on_chain = True
                 if tx_hash:
                     agent_def.identity.registration_tx = tx_hash
@@ -3441,6 +3447,10 @@ class WebSocketBridge:
                     for defn, _status in self.runtime.list_agents():
                         ident = getattr(defn, "identity", None)
                         addr = (getattr(ident, "address", "") or "")
+                        # External agents act as the operator, whose binding
+                        # is operator_status's: no row of their own.
+                        if self.runtime.registry.is_operator_identity(ident):
+                            continue
                         if addr:
                             local.append((
                                 defn.id,
@@ -3817,6 +3827,11 @@ class WebSocketBridge:
             agent_id = msg.get("agent_id", "")
             if not agent_id:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'agent_id' field"}
+            if self.runtime.registry.acts_as_operator(agent_id):
+                return {"msg_id": msg_id, "ok": False,
+                        "error": f"'{agent_id}' is an external agent: it acts as "
+                                 "the operator and has no key of its own "
+                                 "(export_operator_key exports the operator's)"}
             key = self.runtime.registry.get_agent_key(agent_id)
             if not key:
                 return {"msg_id": msg_id, "ok": False,
@@ -5389,6 +5404,20 @@ class WebSocketBridge:
 
         identity = agent_def.identity
 
+        if self.runtime.registry.is_operator_identity(identity):
+            # An external agent acts as the operator (Decision 2026-11-08):
+            # registering it is registering the operator, once per household.
+            if identity.registered_on_chain:
+                return {"success": True, "acts_as_operator": True,
+                        "already_registered": True,
+                        "agent_address": identity.address,
+                        "operator": identity.address}
+            result = await self._handle_register_operator(
+                owner=owner, owner_sig=owner_sig, self_owned=self_owned)
+            result["acts_as_operator"] = True
+            result["agent_address"] = identity.address
+            return result
+
         # Substrate-native registration flow (Phase 12):
         #
         # The agent has its own keypair generated at agent creation time
@@ -5575,9 +5604,10 @@ class WebSocketBridge:
 
     def _operator_key(self) -> str:
         """The key the daemon anchors, votes and claims with: the configured
-        daemon key, else the vault-held operator key."""
+        daemon key, else the vault-held operator key. External agents sign
+        with the same key (AgentRegistry.daemon_operator_key)."""
         configured = getattr(self.runtime.autonet.config, "private_key", "") or ""
-        return configured or self.runtime.registry.operator_key()
+        return configured or self.runtime.registry.daemon_operator_key()
 
     async def _operator_status(self) -> dict[str, Any]:
         """Operator address, whether it is registered and bound to which
@@ -5609,6 +5639,8 @@ class WebSocketBridge:
                 "bound_owner": sub.functions.agentOwner(addr).call(),
                 "binding_nonce": int(sub.functions.bindingNonce(addr).call()),
                 "gas_balance_wei": int(w3.eth.get_balance(addr)),
+                # External agents stake and bond from it (Decision 2026-11-08).
+                "atn_balance": int(sub.functions.balanceOf(addr).call()),
             }
             # How many claim/vote transactions the balance still covers at
             # today's gas price (a claim costs well under this per-tx
@@ -5633,6 +5665,14 @@ class WebSocketBridge:
             return r
 
         out.update(await self._offload(_reads))
+        # Every external agent acts as the operator: its registration is theirs.
+        from .provider_identity import is_external
+        out["external_agents"] = sorted(
+            d.id for d, _s in self.runtime.list_agents() if is_external(d))
+        try:
+            self.runtime.registry.set_operator_registered(bool(out.get("registered")))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("operator flag not synced: %s", exc)
         return out
 
     async def _submit_delegation(self, nonce: int, expiry: int,
@@ -5688,12 +5728,21 @@ class WebSocketBridge:
         op_key = self._operator_key()
         wanted = set(agent_ids) if isinstance(agent_ids, list) and agent_ids else None
         agents = []
+        operator_rows: list[dict[str, Any]] = []
         for defn, _status in self.runtime.list_agents():
             ident = getattr(defn, "identity", None)
             addr = getattr(ident, "address", "") or ""
             key = self.runtime.registry.get_agent_key(defn.id)
-            if addr and key and (wanted is None or defn.id in wanted):
-                agents.append((defn.id, addr, key))
+            if not (addr and key and (wanted is None or defn.id in wanted)):
+                continue
+            if self.runtime.registry.is_operator_identity(ident):
+                # An external agent's balance is the operator's, which pays
+                # the household's stakes, bonds and gas: not swept.
+                operator_rows.append({"agent_id": defn.id, "address": addr,
+                                      "skipped": "acts as the operator; its "
+                                                 "balance funds stakes and gas"})
+                continue
+            agents.append((defn.id, addr, key))
         fallback_owner = getattr(config, "owner_wallet", "") or ""
 
         async def _sweep() -> list[dict[str, Any]]:
@@ -5754,7 +5803,7 @@ class WebSocketBridge:
                 out.append(row)
             return out
 
-        return {"swept": await self._offload(lambda: _sweep())}
+        return {"swept": await self._offload(lambda: _sweep()) + operator_rows}
 
     async def _handle_register_operator(self, owner: str = "", owner_sig: str = "",
                                         self_owned: bool = False) -> dict[str, Any]:
@@ -5809,6 +5858,12 @@ class WebSocketBridge:
         ))
         if result.get("success"):
             result["operator"] = address
+            # Every external agent acts as the operator: now registered too.
+            try:
+                self.runtime.registry.set_operator_registered(
+                    True, result.get("tx_hash"))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("operator flag not recorded: %s", exc)
         return result
 
     def _imported_sessions(self) -> dict[str, str]:

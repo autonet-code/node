@@ -14,6 +14,13 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   address). Agents and the daemon's operator key are bound to it; the
   operator proposes and votes with REP the owner delegates to it. No automatic delegation; a delegate
   who doesn't vote loses delegators, not REP.
+- **External agents act as the operator** (Decision 2026-11-08): every
+  external session's tools, bonds, stakes, reviews and payments come from
+  the operator's address and balance. So a household reviews as one batch
+  per epoch (no second review of a tool that ToolBond would weigh at zero),
+  and the owner funds only the operator: ATN for stakes and bonds, the
+  native token for gas. Native agents keep their own addresses and spend
+  only their own balances.
 - **Reward pools** (decided 2026-11-06, being built): a passive income pool
   on REP balance and a delegate pool paid only to delegates whose weight
   received from others reaches a DAO-set share of all REP (default 1%), each

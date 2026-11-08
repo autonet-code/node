@@ -82,10 +82,14 @@ class AgentDirectoryPublisher:
             return
         reg = self.runtime.registry
         published = 0
+        seen: set[str] = set()
         for defn, _status in reg.list_agents():
             ident = getattr(defn, "identity", None)
             if not ident or not ident.address:
                 continue
+            if ident.address.lower() in seen:
+                continue            # external agents share the operator's slot
+            seen.add(ident.address.lower())
             if not getattr(ident, "registered_on_chain", False):
                 continue            # only registered agents have an on-chain slot
             key = reg.get_agent_key(defn.id)

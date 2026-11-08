@@ -387,6 +387,17 @@ async def _publish_staked(runtime: Any, record: Any) -> dict[str, Any]:
         defn = runtime.get_agent(local_author)
         identity = getattr(defn, "identity", None) if defn else None
         address = str(getattr(identity, "address", "") or "")
+        check = getattr(getattr(runtime, "registry", None), "is_operator_identity", None)
+        as_operator = bool(check(identity)) if callable(check) and identity is not None else False
+        if as_operator and not getattr(identity, "registered_on_chain", False):
+            # An external agent publishes as the household's operator
+            # (Decision 2026-11-08): the operator signs and funds the bond.
+            return {"error": f"you publish as this household's operator "
+                             f"({address}), which is not registered on chain "
+                             "yet. Ask the owner to register the operator in "
+                             "the Autonet app (Household) and to fund it with "
+                             "ATN for the tool's stake and with gas. Then "
+                             "publish again; nothing else to redo."}
         if not address or not getattr(identity, "registered_on_chain", False):
             return {"error": f"agent '{local_author}' is not registered on chain "
                              "yet. Publishing needs it: ask the owner to "

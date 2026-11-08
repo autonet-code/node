@@ -1254,10 +1254,15 @@ class AutonetBridge:
                 svc = OnChainService(self.config)
                 if not svc.available:
                     return False
-                addr = Account.from_key(registry.operator_key()).address
+                key_of = getattr(registry, "daemon_operator_key", None) \
+                    or registry.operator_key
+                addr = Account.from_key(key_of()).address
                 w3 = svc._get_web3()
                 operator_live["value"] = bool(
                     svc._get_contract(w3).functions.isLive(addr).call())
+                if operator_live["value"] and hasattr(registry, "set_operator_registered"):
+                    # External agents act as the operator: registered too.
+                    registry.set_operator_registered(True)
             except Exception as e:
                 log.debug("operator registration check failed: %s", e)
             return operator_live["value"]

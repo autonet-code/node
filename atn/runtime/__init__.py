@@ -672,8 +672,11 @@ class Runtime:
 
     def _channel_key_for(self, provider: str) -> str | None:
         """The key that closes a channel as ``provider``: the serving agent's
-        own key, or the daemon's owner key for an owner-authored service."""
+        own key, the operator key for an external agent's service, or the
+        daemon's owner key for an owner-authored service."""
         addr = str(provider or "").lower()
+        if self.registry.is_operator_address(provider):
+            return self.registry.daemon_operator_key() or None
         agent_id = self.registry.get_agent_id_by_address(provider)
         if agent_id:
             return self.registry.get_agent_key(agent_id) or None

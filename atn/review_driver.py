@@ -2,7 +2,10 @@
 
 Walks every hosted agent's review batches through ToolBond's epoch rounds
 (trustless-contracts ToolBond 448023a; batches and chain calls live in
-atn/runtime/review_batch.py):
+atn/runtime/review_batch.py). Batches are keyed by the reviewer's address,
+and every external agent reviews as the operator (Decision 2026-11-08), so
+the household's external sessions share one batch per epoch, committed,
+revealed and claimed with the operator key:
 
 1. COMMIT. When the epoch's federated close fires on this daemon
    (``on_local_close``, hooked from the autonet bridge's federated-close
@@ -161,6 +164,15 @@ class ReviewDriver:
         epoch = await client.current_epoch()
         if epoch is None:
             return done
+        try:
+            # External agents act as the operator: once the owner registers
+            # it (from any surface), their held reviews can go out.
+            refresh = getattr(getattr(self._runtime, "registry", None),
+                              "refresh_operator_registration", None)
+            if callable(refresh):
+                await refresh()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("review driver: operator registration not read: %s", exc)
         try:
             from .runtime.review_batch import flush_held_reviews
             held = await flush_held_reviews(self._runtime)

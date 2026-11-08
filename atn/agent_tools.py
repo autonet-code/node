@@ -52,6 +52,13 @@ def is_owner_caller(caller_id: str | None) -> bool:
     return caller_id in (None, "", OWNER_ID)
 
 
+def _is_operator_identity(runtime: Any, identity: Any) -> bool:
+    """Is ``identity`` the operator's, i.e. its agent an external one that
+    acts on chain as the household's operator (Decision 2026-11-08)?"""
+    check = getattr(getattr(runtime, "registry", None), "is_operator_identity", None)
+    return bool(check(identity)) if callable(check) else False
+
+
 log = logging.getLogger(__name__)
 
 
@@ -1294,7 +1301,10 @@ _TOOLS: list[ToolDefinition] = [
             "sends the transaction with the child's stored key. A top-level "
             "agent (one with no parent, which an external agent usually is) "
             "cannot register itself: the owner approves it in the Autonet app "
-            "with their wallet. Returns the transaction hash on success."
+            "with their wallet. Returns the transaction hash on success. An "
+            "external agent has nothing to register: it acts as the "
+            "household's operator, and the reply says whether that is "
+            "registered."
         ),
         input_schema={
             "type": "object",
@@ -1761,6 +1771,9 @@ async def _get_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
         result["agent_address"] = defn.identity.address
         result["lineage_hash"] = defn.identity.lineage_hash
         result["registration_tx"] = defn.identity.registration_tx
+        if _is_operator_identity(runtime, defn.identity):
+            # On chain this agent is the household's operator.
+            result["acts_as_operator"] = True
         # Live on-chain check if not already known to be registered
         if not defn.identity.registered_on_chain:
             try:
@@ -2161,9 +2174,12 @@ EXTERNAL_DEFAULT_TOOLS = ["unified_tools", "toolsmith", "publishing",
 
 async def _create_external_agent(runtime: Runtime, input: dict[str, Any],
                                  caller_id: str | None) -> dict[str, Any]:
-    """An agent driven by an outside harness (atn/external_agents.md). It
-    gets a key in the vault and an identity like any agent, but no model and
-    no loop: the harness acts as it by naming it as caller_id."""
+    """An agent driven by an outside harness (atn/external_agents.md). No
+    model and no loop: the harness acts as it by naming it as caller_id. It
+    makes no keypair (Decision 2026-11-08): on chain it acts as the
+    household's operator, so its address is the operator's, the daemon signs
+    its actions with the operator key, and it is registered once the
+    operator is. Each session keeps its own id, token and Activity log."""
     from .provider_identity import EXTERNAL_PROVIDER
     if input.get("prompt") or input.get("steps") or input.get("schedule"):
         return {"error": "an external agent runs in its harness: no prompt, "
@@ -2193,7 +2209,9 @@ async def _create_external_agent(runtime: Runtime, input: dict[str, Any],
         return {"error": str(exc)}
     ident = getattr(defn, "identity", None)
     return {"agent_id": aid, "status": "registered", "external": True,
-            "address": getattr(ident, "address", "") or "", "tools": tools}
+            "address": getattr(ident, "address", "") or "", "tools": tools,
+            "acts_as_operator": True,
+            "registered_on_chain": bool(getattr(ident, "registered_on_chain", False))}
 
 
 async def _create_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
@@ -5033,6 +5051,26 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
         return {"error": f"Agent '{agent_id}' not found."}
     if not defn.identity:
         return {"error": f"Agent '{agent_id}' has no identity (no system prompt?)."}
+    if _is_operator_identity(runtime, defn.identity):
+        # Decision 2026-11-08: an external agent acts on chain as the
+        # household's operator; there is no registration of its own.
+        await runtime.registry.refresh_operator_registration(min_interval_s=0)
+        registered = bool(defn.identity.registered_on_chain)
+        return {
+            "agent_id": agent_id, "acts_as_operator": True,
+            "agent_address": defn.identity.address,
+            "registered_on_chain": registered,
+            "note": ("You act on chain as this household's operator "
+                     f"({defn.identity.address}); there is nothing to register "
+                     "for you alone. " + (
+                         "The operator is registered, so you can publish and "
+                         "your reviews go on chain." if registered else
+                         "The operator is not registered yet: the owner "
+                         "registers it in the Autonet app (Household, "
+                         "operator), funds it with ATN for stakes and bonds "
+                         "and with gas, and delegates their REP to it. Until "
+                         "then your reviews are held and submitted once it "
+                         "is registered."))}
     if defn.identity.registered_on_chain:
         return {"error": f"Agent '{agent_id}' is already registered on-chain.",
                 "agent_address": defn.identity.address}

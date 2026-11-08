@@ -195,6 +195,11 @@ class SnapshotBuilder:
                 agent_info["agent_address"] = defn.identity.address
             if defn.identity and defn.identity.registered_on_chain:
                 agent_info["registered_on_chain"] = True
+            # An external agent acts on chain as the operator: its address
+            # and registration are the operator's (Decision 2026-11-08).
+            _is_op = getattr(self.registry, "is_operator_identity", None)
+            if callable(_is_op) and _is_op(defn.identity):
+                agent_info["acts_as_operator"] = True
             # Marketplace inference binding (docs/services_market.md,
             # 2026-07-26): the substrate this agent thinks on, bought by its
             # parent and paid for out of the agent's OWN wallet. Surfaced next
