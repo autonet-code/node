@@ -219,6 +219,13 @@ class ToolStore:
         # which household used which tool), and since 2026-11-08 it feeds
         # no ranking either: search orders by relevance alone.
         self.manifest_sink: Any = None
+        # Optional blob announcer (callable: list of digests -> None,
+        # blocking, bounded; wired to the libp2p host's DHT provide). A
+        # published tool's manifest and code are announced BEFORE its
+        # registration event is sent, so peers that react to the event can
+        # find a holder; adopted tools are announced too (every holder
+        # serves). docs/p2p_networking.md, "Blobs".
+        self.blob_announcer: Any = None
         # Optional network blob fetch (async callable: digest -> bytes
         # or None). Wired to the libp2p blob resolver when the autonet
         # host is up; lets validators vet (and later adopt) manifests
@@ -502,12 +509,9 @@ class ToolStore:
                  name, trust_class, "code" if code_digest else connector_id,
                  "published" if publish else "private", author, digest[:16])
         if record.published and self.manifest_sink is not None:
-            try:
-                # Consensus author (0x) — same identity the sprout's
-                # author_agent and manifest_meta carry.
-                self.manifest_sink(manifest, consensus_author)
-            except Exception as exc:
-                log.warning("manifest sink failed for %s: %s", name, exc)
+            # Consensus author (0x): same identity the tool_registered
+            # event's author_agent and manifest_meta carry.
+            self._register_published(digest, manifest, consensus_author, name)
         return {"digest": digest, "manifest": manifest,
                 "published": record.published}
 
@@ -702,12 +706,71 @@ class ToolStore:
                 record.published_in.discard(self._jurisdiction)
         self._persist()
         if record.published and self.manifest_sink is not None:
-            try:
-                self.manifest_sink(record.manifest, record.author)
-            except Exception as exc:
-                log.warning("manifest sink failed for %s: %s",
-                            record.name, exc)
+            self._register_published(record.digest, record.manifest, record.author,
+                                     record.name)
         return True
+
+    @staticmethod
+    def blob_digests(digest: str, manifest: dict[str, Any]) -> list[str]:
+        """The blobs a peer needs to run a tool: its manifest and code."""
+        out = [str(digest)]
+        code = str(manifest.get("code_digest") or "")
+        if code:
+            out.append(code)
+        return out
+
+    def held_blob_digests(self) -> list[str]:
+        """Every tool blob this daemon holds and serves (published and
+        adopted tools), for the host's provider records."""
+        out: list[str] = []
+        try:
+            blobs = self._blob_store()
+        except RuntimeError:
+            return out
+        for record in self._records.values():
+            if not (record.published or record.origin == "adopted"):
+                continue
+            for d in self.blob_digests(record.digest, record.manifest):
+                if d not in out and blobs.get_bytes(d) is not None:
+                    out.append(d)
+        return out
+
+    def _announce(self, digests: list[str]) -> None:
+        if self.blob_announcer is None or not digests:
+            return
+        try:
+            self.blob_announcer(list(digests))
+        except Exception as exc:  # noqa: BLE001 - announcing is best effort
+            log.debug("blob announce failed: %s", exc)
+
+    def _register_published(self, digest: str, manifest: dict[str, Any],
+                            author: str, name: str) -> None:
+        """Send a published tool's registration (manifest_sink), its blobs
+        announced first when an announcer is wired. With a running event
+        loop the announce runs in a worker thread and the registration
+        follows it, so the caller is not held up; without one, inline."""
+        def register() -> None:
+            try:
+                self.manifest_sink(manifest, author)
+            except Exception as exc:
+                log.warning("manifest sink failed for %s: %s", name, exc)
+        if self.blob_announcer is None:
+            register()
+            return
+        digests = self.blob_digests(digest, manifest)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            self._announce(digests)
+            register()
+            return
+
+        async def announce_then_register() -> None:
+            await asyncio.to_thread(self._announce, digests)
+            register()
+        loop.create_task(announce_then_register())
 
     def push_all_manifests(self, skip: Any = None) -> int:
         """Re-submit every PUBLISHED manifest through manifest_sink.
@@ -2091,6 +2154,13 @@ class ToolStore:
         log.info("adoption approved: %s (%s) for %s, %d dependencies",
                  record.name, digest[:16], record.local_author,
                  len(deps_installed))
+        # Every holder serves: announce the adopted blobs (not awaited).
+        adopted = [x for d, p in members for x in self.blob_digests(d, p)]
+        if self.blob_announcer is not None and adopted:
+            try:
+                asyncio.get_running_loop().run_in_executor(None, self._announce, adopted)
+            except RuntimeError:
+                self._announce(adopted)
         return {"digest": digest, "name": record.name,
                 "origin": "adopted", "author": record.author,
                 "adopted_for": record.local_author,

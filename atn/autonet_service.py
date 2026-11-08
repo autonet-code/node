@@ -1397,6 +1397,19 @@ class AutonetBridge:
                 if service_store is not None:
                     service_store.blob_fetcher = _fetch
 
+            # DHT provider records (docs/p2p_networking.md, "Blobs"): a
+            # published tool's manifest and code are provided before its
+            # registration is gossiped, adopted ones once installed, and
+            # every tool blob we hold now (the host re-provides them).
+            p2p = self._p2p_host
+            if p2p is not None and hasattr(p2p, "provide_blobs_blocking"):
+                tool_store.blob_announcer = (
+                    lambda digests, _h=p2p: _h.provide_blobs_blocking(digests, timeout=15.0))
+                try:
+                    p2p.provide_blobs_threadsafe(tool_store.held_blob_digests())
+                except Exception:  # noqa: BLE001
+                    log.debug("providing held tool blobs failed", exc_info=True)
+
             # A new peer may hold code an approved adoption is waiting for
             # (#46): the retry loop watches the connected set.
             def _peers() -> list[str]:
