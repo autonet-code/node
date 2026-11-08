@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Tuple
+from typing import Tuple
 
 import pytest
 
@@ -34,16 +34,14 @@ from nodes.common.authoritative_submitter import (
 from nodes.common.blob_resolver import InMemoryBlobResolver
 from nodes.common.canonical_ordering import canonical_order
 from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
-from nodes.common.event_gossip import EventBatch, Keypair
-from nodes.common.federated_reconcile import (
-    VOICE_EPSILON,
-    federated_epoch_close,
-)
+from nodes.common.federated_reconcile import VOICE_EPSILON
 from nodes.common.voice_state import read_voice_state
 from tests.substrate_chain_helpers import (
     deploy_substrate,
     register_bound,
+    reviewed_close,
     seed_pool,
+    tool_registration_batch,
 )
 
 SUBSTRATE_JSON = Path(
@@ -101,53 +99,11 @@ def _register_agent(w3: Web3, contract, agent_addr: str, seed: str) -> None:
 _DIGEST = "ef" * 32
 
 
-def _coords6() -> List[float]:
-    out = [0.0] * (6 + 1024)
-    out[4] = 0.8
-    out[6 + 3] = 0.5
-    return out
-
-
-def _one_batch(rpb: str, ev: dict, kp: Keypair, seq: int) -> EventBatch:
-    return EventBatch(
-        rpb_address=rpb, sender_pubkey=kp.public_key, batch_seq=seq,
-        events=[ev], prev_batch_hash=b"",
-        timestamp=1_700_000_000.0 + seq,
-    )
-
-
-def _tool_batches(rpb: str, author_addr: str,
-                  digest: str = _DIGEST) -> List[EventBatch]:
-    """v3 mint fixture: mint is TOOL-USAGE only — a registration (author =
-    the chain agent address) plus attested receipts from third-party
-    callers. voice_weights=None here (local regime), so mint is per-fleet
-    log1p; the on-chain ATN it settles is what these tests read back."""
-    reg = {
-        "kind": "tool_registered",
-        "seq": 1,
-        "author_agent": author_addr,
-        "artifact_digest": digest,
-        "manifest_meta": {"trust_class": "pinned", "author": author_addr},
-    }
-    def _receipt(caller, seq):
-        return {
-            "kind": "tool_used", "seq": seq, "author_agent": caller,
-            "manifest_digest": digest, "tool_author": author_addr,
-            "receipt_digest": f"r{seq:02d}" * 8, "ok": True,
-            "fee_atn": 0.0, "attested": True, "score": 0.8,
-        }
-    return [
-        _one_batch(rpb, reg, Keypair.generate(), 1),
-        _one_batch(rpb, _receipt("caller-1", 1), Keypair.generate(), 1),
-        _one_batch(rpb, _receipt("caller-2", 2), Keypair.generate(), 1),
-    ]
-
-
 def _anchor_epoch(fx, agent_ids, epoch_id: str, rpb: str):
-    """Close + anchor an epoch (tool mint to agent_ids[0]); returns
-    (close_result, resolver)."""
-    batches = _tool_batches(rpb, agent_ids[0], digest=_DIGEST)
-    result = federated_epoch_close(canonical_order(batches))
+    """Close + anchor an epoch (tool mint to agent_ids[0], whose tool's
+    review round concludes in it); returns (close_result, resolver)."""
+    batches = [tool_registration_batch(rpb, agent_ids[0], _DIGEST)]
+    result = reviewed_close(canonical_order(batches))
     result["epoch_id"] = epoch_id
     anchorer = EpochAnchorer(
         config=EpochAnchorerConfig(epoch_anchor_address=fx["addr"]),
