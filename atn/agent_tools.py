@@ -912,27 +912,26 @@ _TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="probe_tools",
         description=(
-            "Search the network tool library semantically before building "
-            "something yourself or asking for a grant. Search is UNFILTERED: "
-            "a niche tool surfaces on topic match regardless of its score, "
-            "and good ratings only lift it higher — so read the trust "
-            "picture on each match to price risk yourself. Each match "
-            "carries digest, name, description, author, 'rating' and the "
-            "charter position ('axes'), plus 'review_mass' (the share of "
-            "REP behind the settled scores, per axis in 'mass'). Ratings "
-            "come from staked reviews settled on chain (ToolBond) by REP "
-            "weight. Read it like this: high 'rating' with high "
-            "'review_mass' = trusted by earned voice; 'review_mass' near "
-            "zero = nobody has reviewed it yet, inspect it (vet_tool) or "
-            "verify before trusting; a bad (negative) rating or a high "
-            "'harm' (0 safe .. 1 malicious, with 'harm_mass' REP behind it) "
-            "= avoid or verify. There is no vetted flag: how much backing "
-            "is enough is your call. Only staked tools are listed: 'bonded' "
-            "(null = chain unreachable), 'stake', the live 'chain_rating' "
-            "per axis, and 'author_context' (author REP, their other tools "
-            "and the highest harm among them). Author context informs, it "
-            "does not rank. Use the digest with adopt_tool (if granted) or "
-            "ask your owner to grant/adopt it."
+            "Search the tool library before building something yourself. "
+            "Every query runs a keyword search and a search by meaning over "
+            "every tool this daemon knows (its own, adopted, and every "
+            "published tool it fetched), merged into one list in RELEVANCE "
+            "order: ratings never move a tool up or down, so read each "
+            "match's metadata to price the risk yourself. Each match: "
+            "digest, name, description, author, 'score' (relevance) and "
+            "'match' (its keyword and semantic ranks); 'chain_rating' (the "
+            "settled score per charter axis, -1..1) with 'rating_mass' (the "
+            "REP behind each); 'harm' (0 safe .. 1 malicious) with "
+            "'harm_mass'; 'bonded' (null = chain unreachable) and 'stake'; "
+            "'author_context' (author REP, their other tools, the highest "
+            "harm among them); and 'household': whether this household "
+            "adopted it, authored it, and reviewed it ('review' holds our "
+            "own scores and harm). No REP behind a rating = nobody has "
+            "reviewed it: inspect it (vet_tool) before trusting. Only "
+            "bonded tools are listed. When 'semantic.ready' is false the "
+            "search model is still downloading: results are keyword "
+            "matches only and 'semantic.note' says how far it got. Use the "
+            "digest with adopt_tool."
         ),
         input_schema={
             "type": "object",
@@ -2968,40 +2967,10 @@ def _household_reviewed(runtime: Runtime) -> set[str]:
     any agent on this daemon, and those in any batch of its batch store that
     still counts (not forfeited, not rolled forward). External sessions share
     the operator's batch, so this is the household's view (Decision
-    2026-11-08). Cached until the held reviews or the batches change."""
-    from pathlib import Path
-    from .runtime import review_batch
-    try:
-        batches = review_batch.store_for(runtime)
-        batch_dir = batches._dir
-    except Exception:  # noqa: BLE001 (no data dir: no batches)
-        batches, batch_dir = None, None
-    try:
-        held_dir = Path(runtime._config.data_dir) / review_batch.HELD_DIR
-    except Exception:  # noqa: BLE001
-        held_dir = None
-
-    def mtime(p) -> float:
-        try:
-            return p.stat().st_mtime if p is not None else 0.0
-        except OSError:
-            return 0.0
-
-    key = (mtime(batch_dir), mtime(held_dir))
-    hit = runtime.__dict__.get("_household_reviewed_cache")
-    if hit is not None and hit[0] == key:
-        return hit[1]
-    reviewed: set[str] = set()
-    for raw in review_batch.all_held_reviews(runtime):
-        reviewed.add(str((raw or {}).get("digest") or "").lower())
-    if batches is not None:
-        for batch in batches.all():
-            if batch.status in ("forfeited", "rolled"):
-                continue
-            reviewed.update(r.digest.lower() for r in batch.reviews)
-    reviewed.discard("")
-    runtime.__dict__["_household_reviewed_cache"] = (key, reviewed)
-    return reviewed
+    2026-11-08). Same source as the search's household fields
+    (``tool_search.household_reviews``), cached the same way."""
+    from .tool_search import household_reviews
+    return set(household_reviews(runtime))
 
 
 def _review_due(runtime: Runtime, agent_id: str) -> dict[str, str]:
@@ -3024,7 +2993,7 @@ def _review_due(runtime: Runtime, agent_id: str) -> dict[str, str]:
         return {}
     reviewed = _household_reviewed(runtime)
     key = (tuple(sorted(r.digest for r in adopted)),
-           runtime.__dict__.get("_household_reviewed_cache", (None,))[0])
+           runtime.__dict__.get("_household_reviews_cache", (None,))[0])
     cache = runtime.__dict__.setdefault("_review_due_cache", {})
     hit = cache.get(agent_id)
     if hit is not None and hit[0] == key:
@@ -3436,164 +3405,22 @@ async def _attest_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 
 
 async def _probe_tools(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
-    """Agent-facing library search (v3): semantic retrieval over published
-    tool manifests, ranked by review-drifted ratings. Falls back to a
-    substring match over the local store when the substrate is down."""
+    """Agent-facing library search (Decision 2026-11-08, atn/tool_search.py):
+    keyword + semantic over every manifest this daemon holds, in relevance
+    order, each match carrying its ratings, harm, bond state, author context
+    and this household's relation to it. Scoped to the REAL caller: an agent
+    never learns the names of private tools it may not call (owner surfaces
+    pass no caller and see every record)."""
     query = str(input.get("query") or "").strip()
     if not query:
         return {"error": "Missing required field: 'query'"}
     try:
-        k = max(1, min(int(input.get("k") or 8), 25))
+        k = max(1, min(int(input.get("k") or 8), 50))
     except (TypeError, ValueError):
         k = 8
-
-    matches: list[dict[str, Any]] = []
-    source = "local"
-    try:
-        autonet = getattr(runtime, "autonet", None)
-        service = getattr(autonet, "_service", None) if autonet else None
-        world_service = getattr(service, "_world_service", None) if service else None
-        if world_service is not None:
-            from nodes.common.world_model_substrate.tool_manifest import (
-                is_tool_manifest,
-            )
-            # v4.1 trust picture: join review mass from
-            # the economy graph so each match carries how much earned voice
-            # is behind its score (same close state the tool_reviews /
-            # economy_graph surfaces read — no new close read invented).
-            eg = _economy_graph_snapshot(world_service)
-            positions = eg.get("positions", {})
-            result = world_service.infer_artifacts(query, k=max(k * 3, 12))
-            for art in result.get("artifacts", []):
-                payload = art.get("payload")
-                if not is_tool_manifest(payload):
-                    continue
-                digest = art.get("digest", "")
-                matches.append(_trust_row(
-                    digest, payload,
-                    score=art.get("final", 0.0),
-                    rating=art.get("rating", 0.0),
-                    axes=art.get("axes", []),
-                    positions=positions,
-                    tool_store=runtime.tool_store,
-                ))
-                # Headroom: the bond pass below drops unbonded tools.
-                if len(matches) >= k * 2:
-                    break
-            source = "substrate"
-            # Decision 2026-10-13: unstaked tools leave the economy; each
-            # row gains bond/verdict state and author context (REP, other
-            # tools, past slashes). Context only, the order is unchanged.
-            from .tool_security import annotate_probe_rows
-            matches = (await annotate_probe_rows(runtime, matches))[:k]
-    except Exception as exc:
-        log.debug("probe_tools substrate path failed: %s", exc)
-    if not matches:
-        # Scoped to the REAL caller (not the owner identity): an agent must
-        # not learn the names of tools it may not call. Owner surfaces pass
-        # caller_id=None and still see everything.
-        matches = local_tool_matches(
-            runtime.tool_store, query, k,
-            caller_id=input.get("_caller_id"),
-        )
-        source = "local"
-    return {"matches": matches, "source": source}
-
-
-def local_tool_matches(
-    tool_store: Any,
-    query: str,
-    k: int,
-    *,
-    caller_id: str | None = None,
-) -> list[dict[str, Any]]:
-    """Substrate-free ranked fallback for probe_tools.
-
-    Scores each visible record by how many query words (len > 2) appear in
-    its name or description and returns the best ``k``, highest first. The
-    old all-words conjunction meant any natural-language query ("summarize
-    a web page") matched nothing; ranking degrades gracefully instead.
-    """
-    words = [w for w in query.lower().split() if len(w) > 2]
-    if not words:
-        words = query.lower().split()
-    scored: list[tuple[int, dict[str, Any]]] = []
-    for record in tool_store.visible_to(caller_id):
-        if record.name.startswith("atn_"):
-            continue  # the daemon's own harness modules, not library tools
-        hay = f"{record.name} {record.manifest.get('description', '')}".lower()
-        score = sum(1 for w in words if w in hay)
-        if not score:
-            continue
-        scored.append((score, {
-            "digest": record.digest,
-            "name": record.name,
-            "description": record.manifest.get("description", ""),
-            "author": record.author,
-            "trust_class": record.trust_class,
-            "score": score / len(words),
-            "rating": 0.0,
-            "axes": [],
-            "mass": [],
-            "review_mass": 0.0,
-        }))
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [row for _, row in scored[:k]]
-
-
-def _economy_graph_snapshot(world_service: Any) -> dict[str, Any]:
-    """Best-effort economy-graph read for the probe trust picture; an
-    empty dict on any failure keeps probe_tools working without it."""
-    try:
-        return world_service.read_economy_graph(last_n_epochs=10) or {}
-    except Exception as exc:  # noqa: BLE001 — trust picture is additive
-        log.debug("probe_tools economy graph read failed: %s", exc)
-        return {}
-
-
-def _trust_row(
-    digest: str,
-    payload: dict[str, Any],
-    *,
-    score: Any,
-    rating: Any,
-    axes: Any,
-    positions: dict[str, Any],
-    tool_store: Any,
-) -> dict[str, Any]:
-    """One probe_tools match enriched with the v4.1 trust picture:
-    review mass (how much earned voice is behind the score) and author
-    household when resolvable locally."""
-    pos = positions.get(digest) or {}
-    mass = [float(x) for x in (pos.get("mass") or [])]
-    author = payload.get("author", "")
-    row: dict[str, Any] = {
-        "digest": digest,
-        "name": payload.get("name", ""),
-        "description": payload.get("description", ""),
-        "author": author,
-        "trust_class": payload.get("trust_class", ""),
-        "score": score,
-        "rating": rating,
-        "axes": axes,
-        # Trust picture (v4.1): mass = per-axis review weight behind the
-        # drifted score; review_mass = its peak (zero = nobody has
-        # reviewed — inspect before trusting).
-        "mass": mass,
-        "review_mass": max(mass) if mass else 0.0,
-    }
-    household = _resolve_household(tool_store, author)
-    if household:
-        row["author_household"] = household
-    return row
-
-
-def _resolve_household(tool_store: Any, author: str) -> str:
-    """Author household from local state when available; empty otherwise.
-    Households are close-side aggregation — locally we can only surface
-    the author's own address, so this stays best-effort and never fails
-    the probe."""
-    return ""
+    from .tool_search import search_tools
+    return await search_tools(runtime, query, k,
+                              caller_id=input.get("_caller_id"))
 
 
 # ---------------------------------------------------------------------------

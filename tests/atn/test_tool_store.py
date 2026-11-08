@@ -339,14 +339,9 @@ class TestResolutionAndExecution:
         # No gossip rail on the store at all.
         assert not hasattr(rt.tool_store, "event_sink")
         assert not hasattr(rt.tool_store, "receipt_signer")
-        sunk: list = []
-        rt.tool_store.coverage_sink = lambda *a, **k: sunk.append(a)
-
         await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="parent")
         await rt.tool_registry.call_tool("echo_tool", {"x": "2"}, caller_id="child")
 
-        # Mechanical receipts touch nothing outside the local ledger.
-        assert sunk == []
         rows = list(rt.tool_store._iter_receipts())
         assert [r["caller"] for r in rows] == ["parent", "child"]
         assert rows[0]["tool_author"] == "child"
@@ -403,26 +398,16 @@ class TestResolutionAndExecution:
 # ---------------------------------------------------------------------------
 
 
-def _fake_embedder(text):
-    """Deterministic, dependency-free stand-in for the usefulness embedder
-    so tests never spawn the torch subprocess worker."""
-    return (0.1, 0.2, 0.3) if text else ()
-
-
 class TestAttestation:
     @pytest.mark.asyncio
     async def test_attest_end_to_end_records_locally(self, tmp_path):
-        """An attestation is recorded locally and feeds the local coverage
-        atlas; nothing is gossiped (Decision 2026-11-07)."""
+        """An attestation is recorded locally; nothing is gossiped
+        (Decision 2026-11-07) and nothing feeds ranking (2026-11-08)."""
         rt = _make_runtime(tmp_path)
         await _family(rt)
         res = await _register_echo(rt)  # author = child
         store = rt.tool_store
-        store._embedder = _fake_embedder  # avoid heavy embedder
-
-        sunk: list = []
-        store.coverage_sink = lambda digest, coords, ts: sunk.append(
-            (digest, coords, ts))
+        assert not hasattr(store, "coverage_sink")
 
         out = await execute_tool(
             "attest_tools",
@@ -432,11 +417,6 @@ class TestAttestation:
             rt, caller_id="child",
         )
         assert out == {"attested": 1, "skipped": []}
-        assert len(sunk) == 1
-        digest, coords, ts = sunk[0]
-        assert digest == res["digest"]
-        assert coords == [0.1, 0.2, 0.3]
-        assert ts > 0
         rows = list(store._iter_attestations())
         assert len(rows) == 1
         row = rows[0]
@@ -452,10 +432,6 @@ class TestAttestation:
         await _family(rt)
         await _register_echo(rt)  # author = child
         store = rt.tool_store
-        store._embedder = _fake_embedder
-
-        sunk: list = []
-        store.coverage_sink = lambda *a: sunk.append(a)
 
         out = await execute_tool(
             "attest_tools",
@@ -468,7 +444,6 @@ class TestAttestation:
         errs = {s["tool"]: s["error"] for s in out["skipped"]}
         assert "lineage" in errs["echo_tool"]
         assert "not found" in errs["nonexistent"]
-        assert sunk == []  # nothing recorded for a wholly-skipped batch
         assert list(store._iter_attestations()) == []
 
     @pytest.mark.asyncio
@@ -477,7 +452,6 @@ class TestAttestation:
         await _family(rt)
         await _register_echo(rt)
         store = rt.tool_store
-        store._embedder = _fake_embedder
 
         await execute_tool(
             "attest_tools",
@@ -499,7 +473,6 @@ class TestAttestation:
         await _family(rt)
         res = await _register_echo(rt)
         store = rt.tool_store
-        store._embedder = _fake_embedder
 
         store.attest_usage(
             "child", [{"tool": "echo_tool", "ok": True, "score": 0.8}],
@@ -523,7 +496,6 @@ class TestAttestation:
         await _family(rt)
         await _register_echo(rt)
         store = rt.tool_store
-        store._embedder = _fake_embedder
 
         await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="child")
         rows = list(store._iter_receipts())
@@ -537,7 +509,6 @@ class TestAttestation:
         await _family(rt)
         await _register_echo(rt)
         store = rt.tool_store
-        store._embedder = _fake_embedder
 
         await rt.tool_registry.call_tool("echo_tool", {"x": "1"}, caller_id="child")
         store.attest_usage(
@@ -551,24 +522,6 @@ class TestAttestation:
         # Seq counter spans both tiers on reload — no collision after restart.
         reloaded = ToolStore(rt, rt._config.data_dir / "tools")
         assert reloaded._receipt_seq == 3
-
-    @pytest.mark.asyncio
-    async def test_degrades_without_embedder(self, tmp_path):
-        """If the embedder is unavailable, problem_coords is [] and the
-        attestation still records — never crashes the agent."""
-        rt = _make_runtime(tmp_path)
-        await _family(rt)
-        await _register_echo(rt)
-        store = rt.tool_store
-        store._embedder = lambda text: (_ for _ in ()).throw(RuntimeError("no torch"))
-
-        sunk: list = []
-        store.coverage_sink = lambda *a: sunk.append(a)
-
-        out = store.attest_usage(
-            "child", [{"tool": "echo_tool", "ok": True}], "work item")
-        assert out["attested"] == 1
-        assert sunk == []  # no coordinates, no coverage point
 
 
 # ---------------------------------------------------------------------------
@@ -1694,47 +1647,12 @@ class TestOrphanPublishGate:
         assert rt.tool_store.set_published(new["digest"], True)
 
 
-class TestProbeTrustPicture:
-    """v4.1 probe_tools trust picture: each match joins review mass
-    from the economy graph so agents can price risk."""
-
-    def test_trust_row_joins_mass(self):
-        from atn.agent_tools import _trust_row
-
-        digest = "ab" * 32
-        payload = {"name": "t", "description": "d", "author": "0xAuthor",
-                   "trust_class": "pinned"}
-        positions = {digest: {"mass": [0.0, 2.0, 5.0, 0.0, 3.0, 1.0]}}
-        row = _trust_row(
-            digest, payload, score=0.8, rating=0.6, axes=[0.1] * 6,
-            positions=positions, tool_store=None,
-        )
-        assert row["mass"] == [0.0, 2.0, 5.0, 0.0, 3.0, 1.0]
-        assert row["review_mass"] == 5.0        # peak per-axis mass
-        assert "inspections" not in row         # vetting carry-over is gone
-        assert row["rating"] == 0.6
-        assert "author_household" not in row    # empty → omitted
-
-    def test_trust_row_unreviewed_tool_reads_zero(self):
-        from atn.agent_tools import _trust_row
-
-        digest = "cd" * 32
-        payload = {"name": "u", "description": "d", "author": "0xA",
-                   "trust_class": "pinned"}
-        row = _trust_row(
-            digest, payload, score=0.3, rating=0.0, axes=[],
-            positions={}, tool_store=None,
-        )
-        # No position → the "nobody reviewed it" signal.
-        assert row["mass"] == []
-        assert row["review_mass"] == 0.0
-
-
-class TestProbeToolsLocalFallback:
-    """The substrate-free fallback: ranked partial match, scoped to the
-    REAL caller. The old all-words conjunction meant a natural-language
-    query ("summarize a web page") returned nothing, and visible_to(None)
-    leaked every private tool on the daemon to any calling agent.
+class TestProbeToolsKeywordSearch:
+    """Keyword search over the local store (atn/tool_search.py; the model
+    is never loaded in tests): ranked partial match, scoped to the REAL
+    caller. An all-words conjunction would return nothing for a natural-
+    language query ("summarize a web page"), and visible_to(None) would
+    leak every private tool on the daemon to any calling agent.
     """
 
     @pytest.mark.asyncio
@@ -1747,12 +1665,12 @@ class TestProbeToolsLocalFallback:
         res = await execute_tool(
             "probe_tools", {"query": "summarize a web page"},
             rt, caller_id="child")
-        assert res["source"] == "local"
+        assert res["semantic"]["ready"] is False
         assert [m["name"] for m in res["matches"]] == ["summarize_page"]
         assert res["matches"][0]["score"] > 0
 
     @pytest.mark.asyncio
-    async def test_fallback_is_scoped_to_the_caller(self, tmp_path):
+    async def test_search_is_scoped_to_the_caller(self, tmp_path):
         rt = _make_runtime(tmp_path)
         await _family(rt)
         await _register_echo(rt, caller_id="child", name="summarize_page")

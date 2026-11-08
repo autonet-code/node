@@ -398,7 +398,6 @@ async def test_attest_tools_gossips_nothing(tmp_path):
     composition estimate and the review, the store has no gossip rail."""
     from atn.agent_tools import execute_tool
     from tests.atn.test_tool_store import (
-        _fake_embedder,
         _family,
         _make_runtime,
         _register_echo,
@@ -406,7 +405,6 @@ async def test_attest_tools_gossips_nothing(tmp_path):
     rt = _make_runtime(tmp_path)
     await _family(rt)
     await _register_echo(rt)
-    rt.tool_store._embedder = _fake_embedder
     assert not hasattr(rt.tool_store, "event_sink")
     out = await execute_tool(
         "attest_tools",

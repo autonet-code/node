@@ -485,19 +485,20 @@ class TestProbeContext:
         assert rows[0]["author_context"]["rep"] == str(5 * 10**18)
         assert rows[0]["author_context"]["max_other_harm"] is None
 
-    async def test_probe_tools_substrate_path(self, tmp_path):
+    async def test_probe_tools_drops_unbonded_network_tools(self, tmp_path):
+        import threading
         rt = _make_runtime(tmp_path)
         rt.tool_bond_client = FakeClient({D1: _st(), D2: _st(bonded=False)})
-        arts = [{"digest": d, "final": 1.0, "rating": 0.0, "axes": [],
-                 "payload": {"kind": "tool_manifest", "name": n, "description": "d",
-                             "author": AUTH, "trust_class": "pinned"}}
-                for d, n in ((D1, "one"), (D2, "two"))]
-        ws = SimpleNamespace(infer_artifacts=lambda q, k: {"artifacts": arts},
-                             read_economy_graph=lambda last_n_epochs: {})
+        manifests = {d: {"kind": "tool_manifest", "name": n, "description": "echo",
+                         "author": AUTH, "trust_class": "pinned"}
+                     for d, n in ((D1, "one"), (D2, "two"))}
+        ws = SimpleNamespace(
+            _lock=threading.RLock(),
+            _artifact_index=SimpleNamespace(_vectors={d: None for d in manifests}),
+            _blob_store=SimpleNamespace(get_json=manifests.get))
         rt.autonet = SimpleNamespace(_service=SimpleNamespace(_world_service=ws))
         out = await execute_tool("probe_tools", {"query": "echo", "k": 5}, rt,
                                  caller_id=None)
-        assert out["source"] == "substrate"
         assert [m["digest"] for m in out["matches"]] == [D1]
         assert out["matches"][0]["bonded"] is True
 

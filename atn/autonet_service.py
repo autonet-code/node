@@ -1363,11 +1363,6 @@ class AutonetBridge:
         world_service = getattr(service, "_world_service", None)
         tool_store = getattr(self._runtime, "tool_store", None) if self._runtime else None
         if world_service is not None and tool_store is not None:
-            def _coverage(digest: str, coords: list, ts: int,
-                          _ws=world_service) -> None:
-                _ws.record_tool_coverage(digest, coords, ts=ts)
-            tool_store.coverage_sink = _coverage
-
             def _manifest_sink(manifest: dict, author: str, _ws=world_service) -> None:
                 _ws.submit_tool_manifest(manifest, agent_id=author)
             tool_store.manifest_sink = _manifest_sink

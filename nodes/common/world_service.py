@@ -66,7 +66,6 @@ from .world_persistence import (
 )
 from .blob_store import BlobStore
 from .world_model_substrate.artifact_index import ArtifactIndex
-from .world_model_substrate.coverage import CoverageIndex
 
 
 logger = logging.getLogger(__name__)
@@ -307,16 +306,6 @@ class WorldService:
             self._blob_store,
             index_path=state_dir / "artifact_index.jsonl",
             dim=embedding_dim,
-        )
-        # Tool substrate: the demonstrated-coverage atlas (density plane).
-        # Attested tool_used receipts contribute their problem_coords so
-        # retrieval can rank a manifest by the LOCAL DENSITY of where it
-        # has actually served (docs/tool_substrate.md "Retrieval:
-        # density, not centroid"). Same derived-daemon-local doctrine as
-        # the ArtifactIndex: rebuildable, never gossiped, never anchored,
-        # never touches epoch-close determinism.
-        self._coverage_index = CoverageIndex(
-            index_path=state_dir / "coverage_index.jsonl",
         )
         # Tool discovery across the network: manifest digests seen on
         # REMOTE tool-registration events whose payload this daemon does
@@ -622,15 +611,6 @@ class WorldService:
 
             # Buffer for the open epoch, if any.
             self._buffer_epoch_events_locked(events)
-
-            # Tool substrate: feed attested tool_used receipts into the
-            # demonstrated-coverage atlas. Runs for BOTH local emission
-            # and remote gossip ingest (both call submit_events) — the
-            # coverage index is derived, daemon-local state, so ingesting
-            # remote receipts here cannot affect epoch-close determinism.
-            # ingest_event self-filters (kind/attested/problem_coords).
-            for ev in events:
-                self._coverage_index.ingest_event(ev)
 
             # Remote tool registrations: note the manifest digests this
             # daemon does not hold, so the discovery index can catch up
@@ -1026,18 +1006,6 @@ class WorldService:
                 "rounds": 0,
             }
 
-    def record_tool_coverage(
-        self, manifest_digest: str, coords: Any, *, ts: int = 0,
-    ) -> bool:
-        """Add one attested coverage point to this daemon's coverage atlas.
-
-        Tool use is not gossiped (Decision 2026-11-07), so an attestation
-        reaches the atlas here instead of through ``submit_events``.
-        Daemon-local derived state: never gossiped, never anchored."""
-        with self._lock:
-            return self._coverage_index.add_point(
-                manifest_digest, coords, attested=True, ts=int(ts or 0))
-
     def submit_tool_manifest(
         self,
         manifest: Dict[str, Any],
@@ -1114,37 +1082,25 @@ class WorldService:
 
     def infer_artifacts(
         self, query_text: str, k: int = 5, render: bool = False,
-        embedder: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Two-plane inference: retrieve artifacts by embedding similarity
-        and re-rank by claim-graph standing (docs/two_plane_inference.md,
-        section 4).
+        (docs/two_plane_inference.md, section 4). Work units re-rank by
+        claim-graph standing; tool manifests rank by similarity alone and
+        carry their charter head as metadata (Decision 2026-11-08). Tool
+        SEARCH does not come through here: atn/tool_search.py.
 
         Returns the ``_infer_artifacts`` result dict (mode="artifacts").
         When ``render=True``, returns ``{"result": <that dict>, "context":
         render_context(result)}`` instead (docs/ledger_pricing.md Change 3).
-
-        ``embedder`` overrides the query-side embedder — it MUST match
-        the embedder that produced the attested ``problem_coords`` for
-        the coverage-density blend to compare like with like (tests
-        inject HashingEmbedder; production uses the shared default on
-        both sides).
         """
         with self._lock:
             from .world_model_substrate.infer import _infer_artifacts, render_context
-            # Query vector in the SAME coordinate space as attested
-            # problem_coords (coords_for_text: charter head + embedding
-            # tail), so the coverage-density blend compares like with
-            # like. Advisory/daemon-local — off the epoch-close path.
-            query_vec = self.coords_for_text(query_text, embedder=embedder)
             result = _infer_artifacts(
                 {"text": query_text},
                 world=self._world,
                 artifact_index=self._artifact_index,
                 blob_store=self._blob_store,
                 k=k,
-                coverage_index=self._coverage_index,
-                query_vec=query_vec,
             )
             if render:
                 return {"result": result, "context": render_context(result)}

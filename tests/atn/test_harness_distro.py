@@ -45,10 +45,6 @@ async def _register_agent(rt, agent_id, parent_id=None):
     return defn
 
 
-def _fake_embedder(text):
-    return (0.1, 0.2, 0.3) if text else ()
-
-
 ECHO_CODE = (
     "import sys, json\n"
     "args = json.load(sys.stdin)\n"
@@ -124,7 +120,6 @@ class TestHarnessDistroBootstrap:
         rt = _make_runtime(tmp_path)
         await _register_agent(rt, "child")
         store = rt.tool_store
-        store._embedder = _fake_embedder
 
         # An agent-authored tool to attest against.
         res = await execute_tool(
@@ -152,7 +147,6 @@ class TestHarnessDistroBootstrap:
         rt = _make_runtime(tmp_path)
         store = rt.tool_store
         store.active_loadout = ""  # simulate a store with no distro
-        store._embedder = _fake_embedder
 
         # register directly (no agent needed; owner author "user").
         res = store.register(

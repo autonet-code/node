@@ -242,17 +242,14 @@ class ToolStore:
         # and unusable until the daemon switches back to that jurisdiction.
         self._parked: list[ToolRecord] = []
         self._blobs: Any = None  # lazy; None until substrate package needed
-        self._embedder: Any = None  # lazy usefulness embedder; injectable for tests
         self._receipt_seq = 0
-        # Optional sinks wired by the autonet bridge when the WorldService
-        # is up. Tool use is NOT gossiped (Decision 2026-11-07: the mint
-        # reads staked ToolBond review rounds only, and use events would
-        # reveal which household used which tool): coverage_sink feeds an
-        # attestation's problem_coords to the daemon-local coverage atlas
-        # (callable: digest, coords, ts), nothing leaves the machine.
-        # manifest_sink registers the manifest on the verdict layer
+        # Optional sink wired by the autonet bridge when the WorldService
+        # is up: manifest_sink registers the manifest on the verdict layer
         # (submit_tool_manifest; idempotent, content-addressed by digest).
-        self.coverage_sink: Any = None
+        # Tool use is NOT gossiped (Decision 2026-11-07: the mint reads
+        # staked ToolBond review rounds only, and use events would reveal
+        # which household used which tool), and since 2026-11-08 it feeds
+        # no ranking either: search orders by relevance alone.
         self.manifest_sink: Any = None
         # Optional network blob fetch (async callable: digest -> bytes
         # or None). Wired to the libp2p blob resolver when the autonet
@@ -1737,23 +1734,6 @@ class ToolStore:
     # Cognitive attestation (docs/tool_substrate.md — two receipt tiers)
     # ------------------------------------------------------------------
 
-    def _usefulness_embedder(self):
-        """Lazy usefulness embedder (dim=1024), cached on the instance.
-
-        Injectable for tests: pre-set ``self._embedder`` to skip the heavy
-        subprocess/torch worker. Returns None if the substrate package is
-        unavailable — callers must degrade to ``problem_coords=[]``."""
-        if self._embedder is not None:
-            return self._embedder
-        try:
-            from nodes.common.world_model_substrate.usefulness_coords import (
-                default_usefulness_embedder,
-            )
-        except ImportError:
-            return None
-        self._embedder = default_usefulness_embedder(dim=1024)
-        return self._embedder
-
     def attest_usage(
         self,
         caller_id: str | None,
@@ -1771,29 +1751,16 @@ class ToolStore:
         "harm"?, "stake"?, "own_share"?, "note"?}``. Each
         tool is resolved via ``self.resolve`` and scoping-checked; a tool the
         caller may not use (or can't resolve) is skipped and reported, never
-        failing the batch. ``context_text`` (the work item) is embedded ONCE
-        into ``problem_coords``; if the substrate package is unavailable the
-        rows still record locally with ``problem_coords=[]`` — never crash the
-        agent.
+        failing the batch. ``context_text`` (the work item) is kept with the
+        review blob.
 
         Nothing is gossiped (docs/multi_jurisdiction.md decision 10;
         Decision 2026-11-07: the mint reads staked ToolBond review rounds,
         so a use event would only reveal which household used which tool).
         Each judgment's axes / harm / stake come back under ``_reviews`` for
         the caller to queue as a staked ToolBond review; the local
-        attestation row keeps them for history, the UI and ``review_due``;
-        the work item's coordinates feed the local coverage atlas."""
+        attestation row keeps them for history, the UI and ``review_due``."""
         caller = caller_id if caller_id else OWNER_AUTHOR
-
-        # Embed the work-item context once. Degrade to [] if the substrate
-        # package (embedder or blob store) is unavailable — never crash.
-        problem_coords: list[float] = []
-        embedder = self._usefulness_embedder()
-        if embedder is not None and context_text:
-            try:
-                problem_coords = [float(v) for v in embedder(context_text)]
-            except Exception as exc:
-                log.warning("attest_usage embed failed: %s", exc)
 
         try:
             blobs: Any = self._blob_store()
@@ -1921,12 +1888,6 @@ class ToolStore:
 
             with self._attestations_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row) + "\n")
-
-            if self.coverage_sink is not None and problem_coords:
-                try:
-                    self.coverage_sink(record.digest, list(problem_coords), ts)
-                except Exception as exc:
-                    log.warning("coverage sink failed: %s", exc)
 
             attested += 1
             if axes or harm is not None:

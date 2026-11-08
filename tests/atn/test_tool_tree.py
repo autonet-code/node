@@ -236,12 +236,12 @@ async def test_publish_reauthors_a_tool_registered_before_the_agent(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_search_leaves_out_the_harness_modules(tmp_path):
-    from atn.agent_tools import local_tool_matches
     rt = _make_runtime(tmp_path)
     await _family(rt)
     await execute_tool("register_tool", {"path": str(_codebase(tmp_path / "g"))},
                        rt, caller_id="child")
-    names = [m["name"] for m in local_tool_matches(rt.tool_store, "greets shell profile", 10)]
+    out = await execute_tool("probe_tools", {"query": "greets shell profile", "k": 10}, rt)
+    names = [m["name"] for m in out["matches"]]
     assert "greet" in names and not any(n.startswith("atn_") for n in names)
 
 

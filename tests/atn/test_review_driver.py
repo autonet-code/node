@@ -19,7 +19,7 @@ from nodes.common.world_model_substrate.charter import (
     Charter, DEFAULT_CHARTER, active_charter, set_active_charter,
 )
 from tests.atn.test_tool_store import (
-    _fake_embedder, _family, _make_runtime, _register_echo,
+    _family, _make_runtime, _register_echo,
 )
 
 E18 = 10 ** 18
@@ -103,7 +103,6 @@ async def _reviewer(tmp_path, *, on_chain=True):
     rt = _make_runtime(tmp_path)
     await _family(rt)
     res = await _register_echo(rt)          # author = child
-    rt.tool_store._embedder = _fake_embedder
     defn = rt.get_agent("parent")
     defn.identity.registered_on_chain = on_chain
     rt.review_bond_client = bond = FakeBond()

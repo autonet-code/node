@@ -42,26 +42,6 @@ from .tool_manifest import is_tool_manifest
 
 
 # ---------------------------------------------------------------------------
-# Density-blend constants (tool substrate, docs/tool_substrate.md
-# "Retrieval: density, not centroid"). ADVISORY and daemon-local: these
-# are retrieval-ranking knobs, never consensus inputs, so they iterate
-# freely (docs/two_plane_inference.md constraints). Named at module level
-# so a sim / experiment can sweep them.
-# ---------------------------------------------------------------------------
-
-# For a tool manifest with ANY demonstrated coverage, the retrieval
-# score blends the manifest's CLAIMED cosine (what the author says the
-# tool does) with the LOCAL DENSITY of its attested coverage cloud near
-# the query (what the tool has ACTUALLY served). Equal weight: usage
-# proposes and disposes on even footing with the ask. Cold-start
-# manifests (no coverage) fall back to pure claimed cosine.
-COVERAGE_CLAIMED_WEIGHT = 0.5
-COVERAGE_DENSITY_WEIGHT = 0.5
-# Top-k nearest coverage points used to score local density.
-COVERAGE_DENSITY_K = 5
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -250,37 +230,24 @@ def _infer_artifacts(
     artifact_index: Any,
     blob_store: Any,
     k: int = 5,
-    coverage_index: Any = None,
-    query_vec: Any = None,
 ) -> Dict[str, Any]:
-    """Retrieve artifacts by embedding similarity, re-ranked by graph standing.
+    """Retrieve artifacts by embedding similarity.
 
     See ``docs/two_plane_inference.md`` section 4. The claim graph is a
-    verdict layer: artifacts are retrieved from the embedding index and
-    re-priced by the net_score of the PRO/CON claim nodes that reference
-    each artifact digest.
-
-    Tool-manifest density blend (docs/tool_substrate.md "Retrieval:
-    density, not centroid"): when ``coverage_index`` is provided and a
-    candidate whose payload is a tool manifest HAS demonstrated coverage,
-    its cosine term becomes a blend of the CLAIMED cosine and the LOCAL
-    DENSITY of its attested coverage cloud near ``query_vec``. Manifests
-    with NO coverage (cold start) and all non-manifest artifacts keep the
-    original pure-claimed-cosine behavior byte-for-byte. ``query_vec`` is
-    the query embedded in the same coordinate space as the stored
-    ``problem_coords`` (supplied by the WorldService caller, which owns
-    ``coords_for_text``); if it is None the density path is skipped.
+    verdict layer: work-unit artifacts are retrieved from the embedding
+    index and re-priced by the net_score of the PRO/CON claim nodes that
+    reference each artifact digest. Tool manifests rank by similarity
+    alone (Decision 2026-11-08: relevance order, ratings are metadata):
+    ``rating`` and ``axes`` (the charter head) are reported, never
+    multiplied in. Tool search proper lives in atn/tool_search.py.
     """
     query = _query_text(input_data)
 
     candidates = artifact_index.search(query, k=k * 3)
     by_digest = _artifact_standing(world)
 
-    use_coverage = coverage_index is not None and query_vec is not None
-
-    # Usefulness axes of the charter head (v3 ratings lift): correctness
-    # and simplicity, resolved by id so a charter reorder can't silently
-    # skew ranking.
+    # Usefulness axes of the charter head, resolved by id so a charter
+    # reorder can't silently skew the reported rating.
     _axis_by_id = active_charter().axis_index
     _useful_axes = [_axis_by_id[a] for a in ("correctness", "simplicity")
                     if a in _axis_by_id]
@@ -289,43 +256,18 @@ def _infer_artifacts(
     for digest, cosine in candidates:
         claim_nodes = by_digest.get(digest, [])
         standing = _standing_of(claim_nodes)
-
-        # Retrieval base score: pure claimed cosine by default. For a
-        # tool manifest WITH demonstrated coverage, blend claimed cosine
-        # with local density of its attested problem-coords cloud —
-        # floored at the claimed cosine: coverage can only LIFT a tool
-        # (demonstrated usage near the query), never sink it below its
-        # claimed position. Penalizing claimed-high/demonstrated-
-        # elsewhere manifests (the SEO case) is a live design question
-        # for the sims, not something to back into via blend arithmetic
-        # on sparse atlases.
-        base = cosine
         payload = blob_store.get_json(digest)
         manifest = is_tool_manifest(payload)
-        if use_coverage and manifest and coverage_index.has(digest):
-            density = coverage_index.density(
-                query_vec, digest, k=COVERAGE_DENSITY_K
-            )
-            base = max(cosine, (
-                COVERAGE_CLAIMED_WEIGHT * cosine
-                + COVERAGE_DENSITY_WEIGHT * min(1.0, density)
-            ))
 
-        # v3 re-rank (docs/two_plane_inference.md Addendum 2026-07-08):
-        # tool manifests are lifted by their REVIEW-DRIFTED usefulness
-        # axes (correctness, simplicity) instead of debate standing;
-        # everything else keeps the legacy standing term, which is a
-        # no-op (×1.0) for artifacts without claim nodes — i.e. work
-        # units rank by pure cosine post-v3.
         rating = 0.0
         head: List[float] = []
         if manifest:
             head = _tool_head(world, claim_nodes)
             if head and _useful_axes:
                 rating = sum(head[i] for i in _useful_axes) / len(_useful_axes)
-            final = base * (1.0 + math.tanh(rating))
+            final = cosine
         else:
-            final = base * (1.0 + math.tanh(standing))
+            final = cosine * (1.0 + math.tanh(standing))
         claims = sorted(
             (
                 {
@@ -434,8 +376,6 @@ def infer_with_world_model(
     artifact_index: Optional[Any] = None,
     blob_store: Optional[Any] = None,
     k: int = 5,
-    coverage_index: Optional[Any] = None,
-    query_vec: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Run inference. Three modes auto-selected unless overridden:
 
@@ -476,7 +416,6 @@ def infer_with_world_model(
             )
         return _infer_artifacts(
             input_data, world, artifact_index, blob_store, k=k,
-            coverage_index=coverage_index, query_vec=query_vec,
         )
     else:
         raise ValueError(f"unknown inference mode: {mode!r}")

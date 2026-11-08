@@ -223,6 +223,7 @@ SCOPED_INLINE_ALLOWED = frozenset({
     "agent_activity",
     # Public network and library reads (no owner state, no authority).
     "probe_tools", "tool_reviews", "tool_surface", "list_registered_tools",
+    "search_model_status",
     "autonet_status", "epoch_status", "epoch_history", "economy_graph",
     "market_services", "list_services", "service_topics",
     "rpb_state", "network_status", "rpb_agent_training",
@@ -1916,78 +1917,31 @@ class WebSocketBridge:
             return {"msg_id": msg_id, "ok": True, "result": result}
 
         if msg_type == "probe_tools":
-            # The inference probe as the Tools screen's search: semantic
-            # retrieval over manifests (embedding + standing + coverage)
-            # when the substrate is up; graceful degradation to a plain
-            # substring match over the local store when it isn't.
+            # The Tools screen's library search: the same search the agents
+            # use (atn/tool_search.py), keyword + semantic, relevance order,
+            # metadata on each match. The owner sees every record; a scoped
+            # session (an agent, e.g. through the agent API) only what its
+            # root agent may call.
             query = str(msg.get("query") or "").strip()
-            k = int(msg.get("k") or 12)
             if not query:
                 return {"msg_id": msg_id, "ok": False, "error": "Missing 'query' field"}
-            matches = []
-            source = "local"
             try:
-                autonet = getattr(self.runtime, "autonet", None)
-                service = getattr(autonet, "_service", None) if autonet else None
-                world_service = getattr(service, "_world_service", None) if service else None
-                if world_service is not None:
-                    from nodes.common.world_model_substrate.tool_manifest import (
-                        is_tool_manifest,
-                    )
-                    # v4.1 trust picture: join review mass from the
-                    # economy graph (same close state the
-                    # tool_reviews / economy_graph surfaces read).
-                    try:
-                        eg = world_service.read_economy_graph(last_n_epochs=10) or {}
-                    except Exception:
-                        eg = {}
-                    positions = eg.get("positions", {})
-                    result = world_service.infer_artifacts(query, k=max(k * 3, 12))
-                    for art in result.get("artifacts", []):
-                        payload = art.get("payload")
-                        if not is_tool_manifest(payload):
-                            continue
-                        if str(payload.get("name") or "").startswith("atn_"):
-                            continue  # the daemon's harness modules
-                        digest = art.get("digest", "")
-                        pos = positions.get(digest) or {}
-                        mass = [float(x) for x in (pos.get("mass") or [])]
-                        matches.append({
-                            "digest": digest,
-                            "name": payload.get("name", ""),
-                            "description": payload.get("description", ""),
-                            "author": payload.get("author", ""),
-                            "trust_class": payload.get("trust_class", ""),
-                            "score": art.get("final", 0.0),
-                            # v3: review-drifted rating + charter head
-                            # replace debate standing.
-                            "rating": art.get("rating", 0.0),
-                            "axes": art.get("axes", []),
-                            # v4.1 trust picture (see probe_tools tool desc):
-                            # per-axis review mass and its peak.
-                            "mass": mass,
-                            "review_mass": max(mass) if mass else 0.0,
-                        })
-                        if len(matches) >= k * 2:
-                            break
-                    source = "substrate"
-                    # Decision 2026-10-13: drop unstaked tools; add bond /
-                    # verdict state and author context (same pass as the
-                    # agent-facing probe_tools).
-                    from .tool_security import annotate_probe_rows
-                    matches = (await annotate_probe_rows(self.runtime, matches))[:k]
-            except Exception as exc:
-                log.debug("probe_tools substrate path failed: %s", exc)
-            if not matches:
-                # Owner surface: caller_id=None sees every visible record.
-                # Ranked (not all-words conjunction) so a natural-language
-                # query still returns its best partial matches.
-                from .agent_tools import local_tool_matches
-                matches = local_tool_matches(
-                    self.runtime.tool_store, query, k, caller_id=None)
-                source = "local"
+                k = max(1, min(int(msg.get("k") or 12), 50))
+            except (TypeError, ValueError):
+                k = 12
+            caller = (getattr(session, "root_agent_id", None)
+                      if getattr(session, "scope_ids", None) is not None else None)
+            from .tool_search import search_tools
+            result = await search_tools(self.runtime, query, k, caller_id=caller)
+            return {"msg_id": msg_id, "ok": True, "result": result}
+
+        # The local search model's download / check / load
+        # (atn/search_model.py); `search.model_status` events carry the same
+        # dict as it changes.
+        if msg_type == "search_model_status":
+            from .search_model import status_for
             return {"msg_id": msg_id, "ok": True,
-                    "result": {"matches": matches, "source": source}}
+                    "result": status_for(self.runtime)}
 
         if msg_type == "set_tool_enabled":
             digest = msg.get("digest", "")
@@ -2216,16 +2170,9 @@ class WebSocketBridge:
                 return {"msg_id": msg_id, "ok": True,
                         "result": {"hits": [], "clusters": []}}
 
-            # The semantic embedder, or "not yet". This used to call
-            # default_usefulness_embedder(), which BLOCKS the event loop up
-            # to 30s waiting for the embed worker and then hands back a
-            # hashing embedder whose coords cluster nothing meaningfully.
-            # That stall serialised every other request on the connection,
-            # tripped the frontend's 15s timeout (the page fell back to
-            # "Everything else" for the session) and starved keepalive
-            # pings. Now: a short, off-loop readiness check; while the
-            # worker is still loading the answer is `pending` and the
-            # frontend asks again shortly.
+            # The semantic embedder, or "not yet": while the search model
+            # is still being fetched (atn/search_model.py) the answer is
+            # `pending` and the frontend asks again shortly.
             _pending = {"msg_id": msg_id, "ok": True,
                         "result": {"hits": [], "clusters": [],
                                    "indexed": 0, "pending": True}}
@@ -2240,8 +2187,8 @@ class WebSocketBridge:
                 return _pending
 
             # Vectors come from the process-wide cache in service_topics
-            # (pre-filled at boot by warm_service_vectors); only what is
-            # still missing goes through the worker here, on a thread.
+            # (pre-filled by warm_service_vectors once the model loads);
+            # only what is still missing is embedded here, on a thread.
             from . import service_topics as _st
             query = str(msg.get("query") or "").strip()
 
