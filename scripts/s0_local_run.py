@@ -876,6 +876,10 @@ class Activity:
             res = got.get("result") if got.get("ok") else {}
             st = await self.call(h, {"type": "search_model_status"}, "search_model_status")
             sem = (res or {}).get("semantic") or {}
+            # Where the model files came from: the download source while one
+            # runs, else each verified file's ("disk" from ATN_MODEL_DIR).
+            source = st.get("source") or "+".join(sorted(
+                {f.get("source") or "?" for f in st.get("files") or []})) or "?"
             top = []
             for m in (res or {}).get("matches", []):
                 match, rel = m.get("match") or {}, m.get("household") or {}
@@ -886,7 +890,7 @@ class Activity:
             self.note("search", h, query=q, ok=got.get("ok"), error=got.get("error"),
                       semantic=sem, model=st, matches=top)
             log(f"SEARCH {h.name} '{q}': semantic ready={sem.get('ready')} "
-                f"model {st.get('state')} from {st.get('source') or '?'}; "
+                f"model {st.get('state')} from {source}; "
                 f"{'; '.join(top) if top else 'no matches ' + str(got.get('error') or '')}")
 
     def report_batches(self) -> None:
@@ -1201,7 +1205,6 @@ async def amain() -> int:
         await act.adopt()
         await activity_loop(act, MINUTES)
         log(f"activity done: {json.dumps(act.counts, sort_keys=True)}")
-        act.report_mint()
 
         # 7. The owner-side handlers, live: export the operator key, and the
         # sweep, which leaves an external agent's balance alone (it is the
@@ -1226,8 +1229,10 @@ async def amain() -> int:
         sw = await act.call(h, {"type": "sweep_to_owner", "agent_ids": [h.agent_id]},
                             "sweep_to_owner")
         log(f"sweep_to_owner: {str(sw)[:300]}")
-        # Let the last epochs anchor before the collector stops.
+        # Let the last epochs anchor before the collector stops: the late
+        # tool's rounds usually conclude after the activity ends.
         await asyncio.sleep(300)
+        act.report_mint()
         act.report_batches()
         stop.set()
         await col
