@@ -237,7 +237,7 @@ def _dir_blob_getter(dirs: List[Path]):
 
 
 def load_chain_source(contract: Any, blob_source: Any, label: str) -> SourceCarry:
-    from nodes.common.state_sync import fetch_carry_over_from_chain
+    from nodes.common.anchored_state import fetch_carry_over_from_chain
 
     fetch = fetch_carry_over_from_chain(contract, blob_source)
     if fetch.status != "ok":

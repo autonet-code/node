@@ -25,7 +25,7 @@ from nodes.common.federated_reconcile import (
 from nodes.common.voice_state import tool_review_snapshot_from_logs
 from nodes.common.world_model_substrate.adapter import build_charter_world
 from nodes.common.world_model_substrate.aggregate import apply_events
-from nodes.common.world_model_substrate.charter import DEFAULT_CHARTER
+from nodes.common.library.charter import DEFAULT_CHARTER
 from nodes.common.world_model_substrate.events import ToolUsed
 from nodes.common.world_model_substrate.tool_usage import tool_usage_from_events
 

@@ -555,7 +555,7 @@ def read_tool_review_snapshot(
     from web3 import Web3
 
     if axis_ids is None:
-        from .world_model_substrate.charter import active_charter
+        from .library.charter import active_charter
         axis_ids = list(active_charter().ids)
     contract = w3.eth.contract(
         address=Web3.to_checksum_address(tool_bond_address),

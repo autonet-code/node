@@ -2364,7 +2364,7 @@ def verify_charter(expected_hash: str, uri: str = "") -> dict[str, Any]:
     Returns ``{match, local_hash, chain_hash, uri}``; ``match`` is None when
     the jurisdiction publishes no charter.
     """
-    from nodes.common.world_model_substrate.charter_version import charter_hash
+    from nodes.common.library.charter_version import charter_hash
 
     local = charter_hash()
     chain = _norm_hash(expected_hash)

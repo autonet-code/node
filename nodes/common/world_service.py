@@ -49,7 +49,7 @@ from .world_model_substrate.adapter import (
 )
 from .world_model_substrate.aggregate import apply_events
 from .world_model_substrate.events import snapshot_node_scores
-from .world_model_substrate.charter import active_charter
+from .library.charter import active_charter
 from .world_model_substrate.mint_gate import (
     apply_mint_gate,
     charter_violation_score,
@@ -65,7 +65,7 @@ from .world_persistence import (
     WorldPersistence,
 )
 from .blob_store import BlobStore
-from .world_model_substrate.artifact_index import ArtifactIndex
+from .library.artifact_index import ArtifactIndex
 
 
 logger = logging.getLogger(__name__)
@@ -700,7 +700,7 @@ class WorldService:
         daemon-local ArtifactIndex — never the claim graph, never the
         epoch buffer — so it cannot affect close determinism.
         """
-        from .world_model_substrate.tool_manifest import is_tool_manifest
+        from .library.tool_manifest import is_tool_manifest
 
         if not is_tool_manifest(manifest):
             return None
@@ -1025,11 +1025,11 @@ class WorldService:
         the digest, so re-submitting the same manifest dedups instead
         of double-sprouting.
         """
-        from .world_model_substrate.tool_manifest import (
+        from .library.tool_manifest import (
             manifest_embedding_text,
             validate_manifest,
         )
-        from .world_model_substrate.usefulness_coords import (
+        from .library.usefulness_coords import (
             default_usefulness_embedder,
         )
 
@@ -1426,7 +1426,7 @@ class WorldService:
         non-degenerate.
         """
         n_dims = active_charter().n_dims
-        from .world_model_substrate.usefulness_coords import (
+        from .library.usefulness_coords import (
             coords_for_query,
             default_usefulness_embedder,
         )

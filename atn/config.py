@@ -716,7 +716,7 @@ def charter_text_error(text: str) -> tuple[bool, str]:
     axes, docs/multi_jurisdiction.md decision 5): valid compact JSON, at
     least one axis, distinct ids, and the mandatory correctness and
     simplicity axes."""
-    from nodes.common.world_model_substrate.charter import (
+    from nodes.common.library.charter import (
         DEFAULT_CHARTER,
         Charter,
     )

@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from nodes.common.world_model_substrate import minilm
-from nodes.common.world_model_substrate.minilm import MiniLMEmbedder
+from nodes.common.library import minilm
+from nodes.common.library.minilm import MiniLMEmbedder
 
 
 class StubTokenizer:

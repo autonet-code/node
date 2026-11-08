@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from nodes.common.world_model_substrate.charter import (
+from nodes.common.library.charter import (
     DEFAULT_CHARTER,
     MAX_AXES,
     Charter,
@@ -149,7 +149,7 @@ def test_hash_is_sha256_of_text():
 
 
 def test_charter_hash_follows_active_charter(seven_axis):
-    from nodes.common.world_model_substrate.charter_version import (
+    from nodes.common.library.charter_version import (
         charter_hash, charter_payload)
     assert "0x" + charter_hash() == seven_axis.hash
     assert charter_payload()["n_dims"] == 7

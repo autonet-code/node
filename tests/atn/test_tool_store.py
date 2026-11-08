@@ -788,7 +788,7 @@ class TestAdoption:
     def _signed(author: str, signer_key: bytes, pubkey: str | None = None):
         from eth_account import Account
         from eth_account.messages import encode_defunct
-        from nodes.common.world_model_substrate.tool_manifest import (
+        from nodes.common.library.tool_manifest import (
             canonical_manifest_bytes,
         )
         m = {"kind": "tool_manifest", "name": "t", "author": author,

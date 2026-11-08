@@ -1783,7 +1783,7 @@ class WebSocketBridge:
             client = client_for(self.runtime)
 
             async def _bond_view(d: str) -> dict:
-                from nodes.common.world_model_substrate.charter import active_charter
+                from nodes.common.library.charter import active_charter
                 from .tool_security import rating_view
                 rec = self.runtime.tool_store.resolve(d)
                 reader = getattr(client, "rating", None)
@@ -1896,7 +1896,7 @@ class WebSocketBridge:
             if len(d) != 64 or any(c not in "0123456789abcdef" for c in d):
                 return {"msg_id": msg_id, "ok": False,
                         "error": "digest must be a 64-hex manifest digest"}
-            from nodes.common.world_model_substrate.charter import active_charter
+            from nodes.common.library.charter import active_charter
             from .tool_security import client_for, rating_view
             client = client_for(self.runtime)
             reader = getattr(client, "rating", None)
@@ -2157,7 +2157,7 @@ class WebSocketBridge:
         # are DERIVED, and named after the fact from their members.
         if msg_type == "service_topics":
             try:
-                from nodes.common.world_model_substrate.usefulness_coords import (
+                from nodes.common.library.usefulness_coords import (
                     coords_for_query, usefulness_embedder_if_ready,
                 )
                 import numpy as _np

@@ -44,7 +44,7 @@ def embed_services(records: Iterable[Any], embedder) -> tuple[list[Any], list[st
     """
     import numpy as np
     from .service_spec import service_embedding_text
-    from nodes.common.world_model_substrate.usefulness_coords import coords_for_query
+    from nodes.common.library.usefulness_coords import coords_for_query
 
     vecs: list[Any] = []
     digests: list[str] = []
@@ -70,7 +70,7 @@ def warm_service_vectors(store, *, ready_wait: float = 600.0) -> None:
     """
     def _warm() -> None:
         try:
-            from nodes.common.world_model_substrate.usefulness_coords import (
+            from nodes.common.library.usefulness_coords import (
                 usefulness_embedder_if_ready,
             )
             embedder = usefulness_embedder_if_ready(DIM, ready_wait)

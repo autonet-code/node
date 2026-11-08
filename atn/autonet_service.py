@@ -43,7 +43,7 @@ class AutonetStatus(str, Enum):
 
 def _charter_axes() -> list[dict[str, str]]:
     try:
-        from nodes.common.world_model_substrate.charter import active_charter
+        from nodes.common.library.charter import active_charter
         return [{"id": i, "thesis": t} for i, t in active_charter().axes]
     except Exception:
         return []
@@ -407,7 +407,7 @@ class AutonetBridge:
         every charter root, coordinate head and the close's axis set come
         from it. No charter text (pre-2026-10-17 deploys) keeps the
         built-in DEFAULT_CHARTER."""
-        from nodes.common.world_model_substrate.charter import (
+        from nodes.common.library.charter import (
             DEFAULT_CHARTER,
             Charter,
             set_active_charter,

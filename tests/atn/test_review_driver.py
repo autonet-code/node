@@ -15,7 +15,7 @@ from atn.runtime.review_batch import (
     STAGE_COOLING, STAGE_DONE, STAGE_NONE, STAGE_OPEN, ReviewBatchStore,
     ReviewEntry, commitment_of, store_for,
 )
-from nodes.common.world_model_substrate.charter import (
+from nodes.common.library.charter import (
     Charter, DEFAULT_CHARTER, active_charter, set_active_charter,
 )
 from tests.atn.test_tool_store import (

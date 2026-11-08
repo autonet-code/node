@@ -599,7 +599,7 @@ async def queue_reviews(runtime: Any, agent_id: str,
     so its reviews land in the operator's batch: every external session of
     the household fills one batch per epoch, and a second review of a tool
     replaces the first (``ReviewBatchStore.add``)."""
-    from nodes.common.world_model_substrate.charter import active_charter
+    from nodes.common.library.charter import active_charter
 
     out: dict[str, Any] = {"queued": 0, "epoch": None, "skipped": []}
     if not reviews:

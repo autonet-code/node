@@ -443,7 +443,7 @@ async def amain() -> int:
     s1 = board.stage(1, "chain up (scratch compile + hardhat node + deploy)")
     log("Stage 1: chain up")
     try:
-        from nodes.common.world_model_substrate.charter import DEFAULT_CHARTER
+        from nodes.common.library.charter import DEFAULT_CHARTER
         cli = _find_hardhat_cli()
         build_scratch_project()
         compile_scratch(cli)
@@ -735,7 +735,7 @@ async def amain() -> int:
     s8 = board.stage(8, "toolRating / toolHarm readable (daemon client + WS)")
     log("Stage 8: ratings")
     try:
-        from nodes.common.world_model_substrate.charter import active_charter
+        from nodes.common.library.charter import active_charter
         ids = list(active_charter().ids)
         rating = await ToolBondClient(rt_b).rating(clean, ids)
         corr = rating["axes"]["correctness"]

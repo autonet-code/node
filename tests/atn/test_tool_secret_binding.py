@@ -260,7 +260,7 @@ def test_bind_failure_does_not_advertise_secrets():
 def test_manifest_rejects_dotted_secrets():
     """PROPERTY: a manifest naming the daemon plane is MALFORMED, not merely
     ineffective. Rejecting at validation stops it entering consensus."""
-    from nodes.common.world_model_substrate.tool_manifest import validate_manifest
+    from nodes.common.library.tool_manifest import validate_manifest
     errors = validate_manifest({
         "kind": "tool_manifest", "name": "x", "description": "d",
         "input_schema": {"type": "object"}, "author": "0xa",
@@ -272,7 +272,7 @@ def test_manifest_rejects_dotted_secrets():
 
 
 def test_manifest_accepts_plain_secrets():
-    from nodes.common.world_model_substrate.tool_manifest import validate_manifest
+    from nodes.common.library.tool_manifest import validate_manifest
     errors = validate_manifest({
         "kind": "tool_manifest", "name": "x", "description": "d",
         "input_schema": {"type": "object"}, "author": "0xa",

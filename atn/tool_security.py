@@ -296,7 +296,7 @@ async def publish_with_stake(runtime: Any, record: Any, *,
     the claim is inside the signed manifest, so the published tool is a NEW
     digest, returned as ``digest`` (with ``replaces_private`` naming the
     retired original), on failure too so a retry targets the new one."""
-    from nodes.common.world_model_substrate.tool_manifest import (
+    from nodes.common.library.tool_manifest import (
         normalize_novelty,
     )
 
@@ -348,7 +348,7 @@ def unpublished_dependencies_error(store: Any, record: Any) -> str:
 
 
 async def _publish_staked(runtime: Any, record: Any) -> dict[str, Any]:
-    from nodes.common.world_model_substrate.tool_manifest import (
+    from nodes.common.library.tool_manifest import (
         publish_novelty_errors,
     )
     from .tool_store import OWNER_AUTHOR
@@ -475,7 +475,7 @@ async def _bond_view(client: Any, digest: str) -> Optional[dict[str, Any]]:
     st = dict(st)
     reader = getattr(client, "rating", None)
     if reader is not None:
-        from nodes.common.world_model_substrate.charter import active_charter
+        from nodes.common.library.charter import active_charter
         try:
             st["rating"] = await reader(digest, list(active_charter().ids))
         except Exception as exc:  # noqa: BLE001 (the rating is context)

@@ -39,7 +39,7 @@ from nodes.common.event_gossip import (
     SignedBatch, _sign,
 )
 from nodes.common.federated_close_driver import FederatedCloseDriver
-from nodes.common.state_sync import fetch_carry_over_from_chain
+from nodes.common.anchored_state import fetch_carry_over_from_chain
 from nodes.common.voice_state import _anchor_cutoff, read_voice_state
 from tests.substrate_chain_helpers import (
     account_key,

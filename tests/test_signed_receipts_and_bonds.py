@@ -10,7 +10,7 @@ from eth_account import Account
 from nodes.common.federated_reconcile import compute_tool_mint
 from nodes.common.tool_receipts import sign_receipt, verified_receipts
 from nodes.common.voice_state import tool_review_snapshot_from_logs
-from nodes.common.world_model_substrate.charter import DEFAULT_CHARTER
+from nodes.common.library.charter import DEFAULT_CHARTER
 from tests.test_staked_tool_close import _agent_totals, _world
 from tests.test_tool_mint import DIGEST, _receipt_event
 

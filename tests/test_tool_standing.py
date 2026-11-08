@@ -11,12 +11,12 @@ from __future__ import annotations
 import pytest
 
 from nodes.common.world_service import WorldService
-from nodes.common.world_model_substrate.tool_manifest import build_tool_manifest
+from nodes.common.library.tool_manifest import build_tool_manifest
 from nodes.common.world_model_substrate.tool_standing import (
     all_manifest_standings,
     manifest_standing,
 )
-from nodes.common.world_model_substrate.usefulness_coords import HashingEmbedder
+from nodes.common.library.usefulness_coords import HashingEmbedder
 
 EMBED_DIM = 64
 

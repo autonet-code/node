@@ -38,8 +38,8 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from nodes.common.world_model_substrate import minilm
-from nodes.common.world_model_substrate.minilm import (
+from nodes.common.library import minilm
+from nodes.common.library.minilm import (
     MODEL_FILE,
     MODEL_FILES,
     MODEL_ID,

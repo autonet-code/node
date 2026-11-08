@@ -235,7 +235,7 @@ def _submit_observation(
 ) -> int:
     """Build an Observation with [charter_head | usefulness_tail] and
     submit it directly. Returns the event count applied (usually 1)."""
-    from nodes.common.world_model_substrate.usefulness_coords import (  # noqa: WPS433
+    from nodes.common.library.usefulness_coords import (  # noqa: WPS433
         default_usefulness_embedder,
         coords_for_problem_resolution,
     )

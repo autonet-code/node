@@ -5744,7 +5744,7 @@ def review_axes_text() -> str:
     """The active charter's axes, harm and stake, as the review tools
     describe them (docs/multi_jurisdiction.md decisions 5 and 10)."""
     try:
-        from nodes.common.world_model_substrate.charter import active_charter
+        from nodes.common.library.charter import active_charter
         axes = active_charter().axes
     except Exception:  # noqa: BLE001 (standalone atn install)
         return ""

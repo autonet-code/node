@@ -347,7 +347,7 @@ class ToolStore:
         is supplied here (or stamped later by ``restamp_novelty``).
         ``version_of`` must name a predecessor by the SAME author.
         """
-        from nodes.common.world_model_substrate.tool_manifest import (
+        from nodes.common.library.tool_manifest import (
             build_tool_manifest, normalize_novelty,
         )
 
@@ -615,7 +615,7 @@ class ToolStore:
         on it. Deterministic: re-stamping the same claim reuses the record.
         Returns ``{"digest", "manifest", "replaced"}`` or raises ValueError.
         """
-        from nodes.common.world_model_substrate.tool_manifest import (
+        from nodes.common.library.tool_manifest import (
             normalize_novelty, validate_manifest,
         )
         return self._restamp(digest, {"novelty": normalize_novelty(novelty)},
@@ -639,7 +639,7 @@ class ToolStore:
 
     def _restamp(self, digest: str, updates: dict[str, Any],
                  what: str) -> dict[str, Any]:
-        from nodes.common.world_model_substrate.tool_manifest import (
+        from nodes.common.library.tool_manifest import (
             validate_manifest,
         )
         record = self._records.get(digest)
@@ -1993,7 +1993,7 @@ class ToolStore:
                             "code to come online"}
 
         payload = await self.fetch_payload(digest)
-        from nodes.common.world_model_substrate.tool_manifest import (
+        from nodes.common.library.tool_manifest import (
             is_tool_manifest,
         )
         if payload is None or not is_tool_manifest(payload):
@@ -2079,7 +2079,7 @@ class ToolStore:
         checked like a proposal: fetchable manifest, pinned, author not
         sanctioned (agent callers). Returns ``(bundle, None)`` or
         ``([], {"error": ...})`` naming the dependency that failed."""
-        from nodes.common.world_model_substrate.tool_manifest import (
+        from nodes.common.library.tool_manifest import (
             is_tool_manifest,
         )
         from .runtime.shell_provider import core_claims
@@ -2276,7 +2276,7 @@ class ToolStore:
         signature not wrong, not denied by the network.
         Returns ``(payload, None)`` or ``(None, reason)``."""
         payload = await self.fetch_payload(digest)
-        from nodes.common.world_model_substrate.tool_manifest import (
+        from nodes.common.library.tool_manifest import (
             is_tool_manifest,
         )
         if payload is None or not is_tool_manifest(payload):
@@ -2539,7 +2539,7 @@ class ToolStore:
         try:
             from eth_account import Account
             from eth_account.messages import encode_defunct
-            from nodes.common.world_model_substrate.tool_manifest import (
+            from nodes.common.library.tool_manifest import (
                 canonical_manifest_bytes,
             )
             recovered = Account.recover_message(
@@ -2685,7 +2685,7 @@ class ToolStore:
             c in "0123456789abcdef" for c in tool_ref
         ):
             payload = await self.fetch_payload(tool_ref)
-            from nodes.common.world_model_substrate.tool_manifest import (
+            from nodes.common.library.tool_manifest import (
                 is_tool_manifest,
             )
             if payload is not None and is_tool_manifest(payload):
@@ -3150,7 +3150,7 @@ class ToolStore:
         try:
             from eth_account import Account
             from eth_account.messages import encode_defunct
-            from nodes.common.world_model_substrate.tool_manifest import (
+            from nodes.common.library.tool_manifest import (
                 canonical_manifest_bytes,
             )
             signed = Account.sign_message(

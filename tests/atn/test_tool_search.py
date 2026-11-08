@@ -17,7 +17,7 @@ from atn.agent_tools import execute_tool
 from atn.runtime import review_batch
 from atn.tool_search import ToolSearchIndex, bm25_ranking, rrf_merge, search_tools
 from atn.tool_store import ToolRecord
-from nodes.common.world_model_substrate import minilm
+from nodes.common.library import minilm
 
 from tests.atn.test_tool_security import (
     AUTH, FakeClient, _make_runtime, _rating, _st,

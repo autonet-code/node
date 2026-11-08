@@ -20,13 +20,13 @@ from pathlib import Path
 import pytest
 
 from nodes.common.blob_store import BlobStore
-from nodes.common.world_model_substrate.artifact_index import ArtifactIndex
+from nodes.common.library.artifact_index import ArtifactIndex
 from nodes.common.world_model_substrate.events import (
     SubClaimSprouted,
     event_from_dict,
 )
 from nodes.common.world_model_substrate.outcomes import Outcome
-from nodes.common.world_model_substrate.usefulness_coords import HashingEmbedder
+from nodes.common.library.usefulness_coords import HashingEmbedder
 from nodes.common.world_model_substrate.usefulness_training import (
     train_world_model_on_usefulness,
 )

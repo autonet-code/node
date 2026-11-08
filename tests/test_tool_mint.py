@@ -23,7 +23,7 @@ from nodes.common.federated_reconcile import (
 )
 from nodes.common.world_model_substrate.adapter import N_DIMS, build_charter_world
 from nodes.common.world_model_substrate.aggregate import apply_events
-from nodes.common.world_model_substrate.charter import DEFAULT_CHARTER
+from nodes.common.library.charter import DEFAULT_CHARTER
 
 EMBED_DIM = 1024
 DIGEST = "ab" * 32

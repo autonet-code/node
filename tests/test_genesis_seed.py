@@ -26,7 +26,7 @@ from nodes.common.authoritative_encoding import (
     encode_carry_bundle,
 )
 from nodes.common.governed_anchor import anchor_description
-from nodes.common.state_sync import fetch_carry_over_from_chain
+from nodes.common.anchored_state import fetch_carry_over_from_chain
 from tests.test_carry_over_commitment import _driver, _run
 
 _SPEC = importlib.util.spec_from_file_location(

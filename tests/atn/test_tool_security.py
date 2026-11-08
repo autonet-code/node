@@ -20,7 +20,7 @@ from atn.runtime.tool_bond import DEV_OVERRIDE_ENV, ToolBondGate
 from atn.tool_security import (
     RunOptIns, annotate_probe_rows, publish_with_stake, run_clearance,
 )
-from nodes.common.world_model_substrate.tool_manifest import (
+from nodes.common.library.tool_manifest import (
     novelty_errors, publish_novelty_errors, states_nothing_comparable,
     validate_manifest,
 )

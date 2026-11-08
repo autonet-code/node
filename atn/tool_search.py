@@ -41,8 +41,8 @@ from typing import Any, Callable, Iterable, Optional
 
 import numpy as np
 
-from nodes.common.world_model_substrate import minilm
-from nodes.common.world_model_substrate.tool_manifest import (
+from nodes.common.library import minilm
+from nodes.common.library.tool_manifest import (
     is_tool_manifest,
     manifest_embedding_text,
 )

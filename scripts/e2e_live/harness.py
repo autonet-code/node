@@ -58,7 +58,7 @@ for p in (str(REPO), str(HERE.parent)):
 # Reuse the cross-daemon E2E's proven pieces (isolated config writer, home
 # redirect env, the WS client, owner-bound registration) rather than fork them.
 import local_e2e_cross_daemon_inference as xd  # noqa: E402
-from nodes.common.world_model_substrate.charter_version import charter_hash  # noqa: E402
+from nodes.common.library.charter_version import charter_hash  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Parameters
@@ -464,7 +464,7 @@ def seed_adoptable_tool(home: Path) -> str:
     author) plus its code into the daemon's tool blob store, without
     registering it. Returns the manifest digest."""
     from nodes.common.blob_store import BlobStore
-    from nodes.common.world_model_substrate.tool_manifest import (
+    from nodes.common.library.tool_manifest import (
         build_tool_manifest,
     )
     blobs = BlobStore(data_dir=str(home / ".atn" / "tools" / "blobs"))

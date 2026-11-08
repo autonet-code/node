@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 
 from nodes.common.blob_store import BlobStore
-from nodes.common.world_model_substrate.artifact_index import ArtifactIndex
-from nodes.common.world_model_substrate.usefulness_coords import HashingEmbedder
+from nodes.common.library.artifact_index import ArtifactIndex
+from nodes.common.library.usefulness_coords import HashingEmbedder
 from nodes.common.world_model_substrate.infer import (
     _infer_artifacts,
     infer_with_world_model,

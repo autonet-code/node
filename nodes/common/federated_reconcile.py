@@ -43,7 +43,7 @@ from .world_model_substrate.adapter import (
     build_charter_world,
 )
 from .world_model_substrate.aggregate import apply_events
-from .world_model_substrate.charter import active_charter
+from .library.charter import active_charter
 from .world_model_substrate.mint_gate import (
     charter_violation_score,
 )
@@ -441,7 +441,7 @@ def compute_tool_mint(
     Attestations (tool_used receipts) no longer count anywhere: nothing
     can observe a household's private use.
     """
-    from .world_model_substrate.tool_manifest import TRUST_PINNED
+    from .library.tool_manifest import TRUST_PINNED
     from .world_model_substrate.infer import _artifact_standing
 
     known_regs: Dict[str, Dict[str, str]] = dict(registrations or {})
@@ -1255,7 +1255,7 @@ def federated_epoch_close(
     # charter change is a forward-only fork boundary, so the hash belongs in
     # the authoritative payload (imported lazily to keep the import block small
     # and avoid a circular import via adapter).
-    from .world_model_substrate.charter_version import charter_hash as _charter_hash
+    from .library.charter_version import charter_hash as _charter_hash
 
     result["authoritative_payload"] = {
         # schema 3 (fees-only, Decision 2026-07-10): MONEY ONLY — the

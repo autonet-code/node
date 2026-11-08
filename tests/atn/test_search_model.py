@@ -11,7 +11,7 @@ import pytest
 
 from atn.events import EventBus, EventType
 from atn.search_model import SearchModel, backoff_delay, file_url, status_for
-from nodes.common.world_model_substrate.minilm import ModelFile
+from nodes.common.library.minilm import ModelFile
 
 A = b"model bytes " * 5000          # 60 kB
 B = b'{"tokenizer": true}'
@@ -204,7 +204,7 @@ def test_backoff_doubles_and_caps():
 
 
 def test_urls_name_the_pinned_revision():
-    from nodes.common.world_model_substrate.minilm import MODEL_FILE
+    from nodes.common.library.minilm import MODEL_FILE
     assert file_url(MODEL_FILE) == (
         "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/"
         "1110a243fdf4706b3f48f1d95db1a4f5529b4d41/onnx/model.onnx")

@@ -14,7 +14,7 @@ import hashlib
 import json
 
 from nodes.common.world_model_substrate.adapter import CHARTER
-from nodes.common.world_model_substrate.charter_version import (
+from nodes.common.library.charter_version import (
     charter_bytes,
     charter_hash,
     charter_payload,
@@ -55,7 +55,7 @@ def test_hash_is_deterministic():
 def test_hash_is_sha256_of_registry_text():
     """The hash is sha256 of the active charter's exact registry bytes
     (compact JSON), so it equals the Registry's charter hash."""
-    from nodes.common.world_model_substrate.charter import active_charter
+    from nodes.common.library.charter import active_charter
 
     text = active_charter().text
     assert charter_bytes() == text.encode("utf-8")

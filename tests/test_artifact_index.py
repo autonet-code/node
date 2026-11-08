@@ -14,8 +14,8 @@ import numpy as np
 import pytest
 
 from nodes.common.blob_store import BlobStore
-from nodes.common.world_model_substrate.artifact_index import ArtifactIndex
-from nodes.common.world_model_substrate.usefulness_coords import HashingEmbedder
+from nodes.common.library.artifact_index import ArtifactIndex
+from nodes.common.library.usefulness_coords import HashingEmbedder
 
 
 DIM = 64

@@ -10,7 +10,7 @@ payment, receipt-gated reviews). It rides the same sha256-addressed blob
 rail as tool manifests.
 
 This module is the atn-side analogue of
-``nodes.common.world_model_substrate.tool_manifest``, but deliberately
+``nodes.common.library.tool_manifest``, but deliberately
 carries NO ``nodes.*`` dependency: ``canonical_service_bytes`` is
 implemented locally so the ATN daemon can build/validate/sign a spec on
 a standalone install. Identity is the digest; a revision is a NEW spec

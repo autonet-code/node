@@ -774,7 +774,7 @@ class AutonetService:
             # it is attached after this driver.
             def _carry_source():
                 from web3 import Web3
-                from .common.state_sync import (
+                from .common.anchored_state import (
                     CarryOverFetch,
                     fetch_carry_over_from_chain,
                 )

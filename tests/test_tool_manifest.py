@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 from nodes.common.blob_store import BlobStore
-from nodes.common.world_model_substrate.artifact_index import ArtifactIndex
-from nodes.common.world_model_substrate.tool_manifest import (
+from nodes.common.library.artifact_index import ArtifactIndex
+from nodes.common.library.tool_manifest import (
     TOOL_MANIFEST_KIND,
     build_tool_manifest,
     canonical_manifest_bytes,
@@ -23,7 +23,7 @@ from nodes.common.world_model_substrate.tool_manifest import (
     manifest_lineage,
     validate_manifest,
 )
-from nodes.common.world_model_substrate.usefulness_coords import HashingEmbedder
+from nodes.common.library.usefulness_coords import HashingEmbedder
 
 
 DIM = 64

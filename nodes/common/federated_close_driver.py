@@ -317,7 +317,7 @@ class FederatedCloseDriver:
         # False when it has anchors, None when unknown.
         self._chain_at_genesis: Optional[bool] = None
         # Joiner bootstrap (payload schema 4): zero-arg hook returning a
-        # state_sync.CarryOverFetch for the latest anchor (wired by the
+        # anchored_state.CarryOverFetch for the latest anchor (wired by the
         # host from chain read access + the blob resolver). Consulted
         # only while carry-over files are missing past genesis; the
         # daemon observes (refuses to close) until it yields a verified
@@ -1016,7 +1016,7 @@ class FederatedCloseDriver:
         text = self.pinned_charter_text
         if not text:
             return False
-        from .world_model_substrate.charter import active_charter
+        from .library.charter import active_charter
 
         active = active_charter()
         if text == active.text:

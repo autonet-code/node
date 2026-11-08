@@ -114,7 +114,7 @@ def test_adoption_refused_for_agents_and_flagged_for_the_owner(tmp_path):
         return manifest
     store.fetch_payload = fetch
 
-    import nodes.common.world_model_substrate.tool_manifest as tm
+    import nodes.common.library.tool_manifest as tm
     orig = tm.is_tool_manifest
     tm.is_tool_manifest = lambda p: True
     try:

@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 from nodes.common.authoritative_encoding import decode_carry_bundle
 from nodes.common.event_gossip import EventBatch, EventGossip, Keypair
 from nodes.common.federated_close_driver import FederatedCloseDriver
-from nodes.common.state_sync import CarryOverFetch
+from nodes.common.anchored_state import CarryOverFetch
 
 CARRY = [
     "tool_registrations",

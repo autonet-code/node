@@ -123,7 +123,7 @@ def test_custom_charter_accepted():
 
 
 def test_install_charter_sets_active_charter():
-    from nodes.common.world_model_substrate.charter import (
+    from nodes.common.library.charter import (
         DEFAULT_CHARTER, active_charter, set_active_charter)
     custom = json.dumps({"axes": [{"id": "kindness", "thesis": "c"},
                                   {"id": "correctness", "thesis": "a"},

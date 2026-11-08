@@ -368,7 +368,7 @@ def network(chain, tmp_path):
 
 
 def test_joiner_fetches_verifies_installs_and_closes_identically(network, tmp_path):
-    from nodes.common.state_sync import fetch_carry_over_from_chain
+    from nodes.common.anchored_state import fetch_carry_over_from_chain
 
     contract = network["chain"]["contract"]
     resolver = network["resolver"]
@@ -402,7 +402,7 @@ def test_joiner_refuses_bundle_when_anchor_lags(network, tmp_path, caplog):
     """The always-on daemon closes epoch 4 but the winner never anchors it:
     the latest anchor (3) is stale relative to the joiner's next close (5),
     so the joiner must not install it."""
-    from nodes.common.state_sync import fetch_carry_over_from_chain
+    from nodes.common.anchored_state import fetch_carry_over_from_chain
 
     contract = network["chain"]["contract"]
     resolver = network["resolver"]
@@ -427,7 +427,7 @@ def test_joiner_skips_epoch_peers_already_anchored(network, tmp_path):
     """Peers anchor epoch 4 before the joiner runs its own close of 4: the
     latest bundle is epoch 4's OUTPUT, so the joiner must not close 4 on
     it; it joins at 5 and matches the always-on daemon."""
-    from nodes.common.state_sync import fetch_carry_over_from_chain
+    from nodes.common.anchored_state import fetch_carry_over_from_chain
 
     contract = network["chain"]["contract"]
     resolver = network["resolver"]
@@ -442,7 +442,7 @@ def test_joiner_skips_epoch_peers_already_anchored(network, tmp_path):
 
 
 def test_fetch_reports_anchor_and_carry(network):
-    from nodes.common.state_sync import fetch_carry_over_from_chain
+    from nodes.common.anchored_state import fetch_carry_over_from_chain
 
     fetch = fetch_carry_over_from_chain(
         network["chain"]["contract"], network["resolver"])
@@ -456,7 +456,7 @@ def test_fetch_reports_anchor_and_carry(network):
 
 
 def test_tampered_bundle_is_rejected(network, tmp_path, caplog):
-    from nodes.common.state_sync import fetch_carry_over_from_chain
+    from nodes.common.anchored_state import fetch_carry_over_from_chain
 
     contract = network["chain"]["contract"]
     real = network["resolver"]
@@ -485,7 +485,7 @@ def test_tampered_bundle_is_rejected(network, tmp_path, caplog):
 
 def test_joiner_observes_until_bundle_retrievable(network, tmp_path):
     from nodes.common.blob_resolver import InMemoryBlobResolver
-    from nodes.common.state_sync import fetch_carry_over_from_chain
+    from nodes.common.anchored_state import fetch_carry_over_from_chain
 
     contract = network["chain"]["contract"]
     real = network["resolver"]
@@ -509,7 +509,7 @@ def test_pre_schema_anchor_keeps_refusing(chain, tmp_path, caplog):
     from nodes.common.canonical_ordering import canonical_order
     from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
     from nodes.common.federated_reconcile import federated_epoch_close
-    from nodes.common.state_sync import fetch_carry_over_from_chain
+    from nodes.common.anchored_state import fetch_carry_over_from_chain
 
     anchorer = EpochAnchorer(
         config=EpochAnchorerConfig(epoch_anchor_address=chain["addr"]),
@@ -541,7 +541,7 @@ def test_pre_schema_anchor_keeps_refusing(chain, tmp_path, caplog):
 
 def test_fetch_genesis_status(chain):
     from nodes.common.blob_resolver import InMemoryBlobResolver
-    from nodes.common.state_sync import fetch_carry_over_from_chain
+    from nodes.common.anchored_state import fetch_carry_over_from_chain
 
     assert fetch_carry_over_from_chain(
         chain["contract"], InMemoryBlobResolver()).status == "genesis"

@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 import sys
 
-from nodes.common.world_model_substrate.usefulness_coords import (
+from nodes.common.library.usefulness_coords import (
     HashingEmbedder,
     coords_for_problem_resolution,
     coords_for_query,
