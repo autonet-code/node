@@ -42,6 +42,7 @@ from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
 from nodes.common.event_gossip import EventBatch, Keypair
 from nodes.common.federated_reconcile import federated_epoch_close
 from nodes.common.voice_state import read_voice_state
+from tests.substrate_chain_helpers import deploy_substrate
 
 SUBSTRATE_JSON = Path(
     "C:/code/autonet/artifacts/contracts/core/Substrate.sol/Substrate.json")
@@ -55,20 +56,9 @@ def _load_substrate() -> Tuple[list, str]:
 
 
 def _deploy(w3: Web3, deployer: str, abi: list, bytecode: str) -> str:
-    contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx = contract.constructor(
-        deployer,  # treasury
-        "0x0000000000000000000000000000000000000000",  # vaultMinter (off)
-        deployer,  # governor (anchors directly)
-        "0x0000000000000000000000000000000000000000",  # anchorer (none)
-        bytes(32),  # genesisRoot (none)
-        "Test ATN",
-        "REPATN",
-    ).transact(
-        {"from": deployer, "gas": 8_000_000})
-    receipt = w3.eth.wait_for_transaction_receipt(tx)
-    assert receipt.status == 1
-    return receipt.contractAddress
+    # The deployer is treasury and governor (anchors directly); no vault
+    # minter, anchorer or genesis.
+    return deploy_substrate(w3, abi, bytecode, deployer, vault_minter=_ZERO)
 
 
 _ZERO = "0x0000000000000000000000000000000000000000"
@@ -250,22 +240,8 @@ class TestOwnerBindingRoundTrip:
 _DIGEST = "ef" * 32
 
 
-def _coords6() -> List[float]:
-    out = [0.0] * (6 + 1024)
-    out[4] = 0.8
-    out[6 + 3] = 0.5
-    return out
-
-
-def _one_batch(rpb: str, ev: dict, kp: Keypair, seq: int) -> EventBatch:
-    return EventBatch(
-        rpb_address=rpb, sender_pubkey=kp.public_key, batch_seq=seq,
-        events=[ev], prev_batch_hash=b"",
-        timestamp=1_700_000_000.0 + seq,
-    )
-
-
 def _tool_batches(rpb: str, author_addr: str) -> List[EventBatch]:
+    """One tool registration: all the close needs to anchor an epoch."""
     reg = {
         "kind": "tool_registered",
         "seq": 1,
@@ -273,26 +249,11 @@ def _tool_batches(rpb: str, author_addr: str) -> List[EventBatch]:
         "artifact_digest": _DIGEST,
         "manifest_meta": {"trust_class": "pinned", "author": author_addr},
     }
-
-    def _vet(vetter, seq):
-        return {"kind": "tool_used", "seq": seq, "author_agent": vetter,
-                "manifest_digest": _DIGEST, "tool_author": author_addr,
-                "receipt_digest": f"v{seq:02d}" * 8, "ok": True,
-                "fee_atn": 0.0, "vet": True}
-
-    def _receipt(caller, seq):
-        return {"kind": "tool_used", "seq": seq, "author_agent": caller,
-                "manifest_digest": _DIGEST, "tool_author": author_addr,
-                "receipt_digest": f"r{seq:02d}" * 8, "ok": True,
-                "fee_atn": 0.0, "attested": True, "score": 0.8}
-
-    return [
-        _one_batch(rpb, reg, Keypair.generate(), 1),
-        _one_batch(rpb, _vet("vetter-1", 1), Keypair.generate(), 1),
-        _one_batch(rpb, _vet("vetter-2", 1), Keypair.generate(), 1),
-        _one_batch(rpb, _receipt("caller-1", 1), Keypair.generate(), 1),
-        _one_batch(rpb, _receipt("caller-2", 2), Keypair.generate(), 1),
-    ]
+    return [EventBatch(
+        rpb_address=rpb, sender_pubkey=Keypair.generate().public_key,
+        batch_seq=1, events=[reg], prev_batch_hash=b"",
+        timestamp=1_700_000_001.0,
+    )]
 
 
 class TestVoiceStateOwnerMap:
