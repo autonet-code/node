@@ -377,14 +377,21 @@ class Household:
 
 
 class DaemonClient:
-    """The privileged local listener: pre-authed as the owner."""
+    """The privileged local listener: pre-authed as the owner.
+
+    A reader task takes every frame as it arrives and hands each reply to
+    its call by msg_id. The daemon pushes events to every local client (the
+    agents' Activity among them), so a client that reads only inside its
+    own calls backs up while idle, stops answering the server's pings and
+    is dropped."""
 
     def __init__(self, url: str, label: str) -> None:
         self.url = url
         self.label = label
         self._ws: Any = None
         self._seq = 0
-        self._lock = asyncio.Lock()
+        self._pending: Dict[str, "asyncio.Future"] = {}
+        self._reader: Optional["asyncio.Task"] = None
 
     async def connect(self, timeout: float = DAEMON_BOOT_TIMEOUT) -> None:
         import websockets
@@ -394,29 +401,48 @@ class DaemonClient:
             try:
                 self._ws = await websockets.connect(self.url, open_timeout=15, ping_interval=20,
                                                     ping_timeout=120, max_size=None)
+                self._reader = asyncio.create_task(self._read(self._ws))
                 await self.call({"type": "snapshot"}, timeout=45.0)
                 return
             except Exception as exc:  # noqa: BLE001
                 last = exc
+                if self._reader is not None:
+                    self._reader.cancel()
                 self._ws = None
                 await asyncio.sleep(2.0)
         raise RuntimeError(f"{self.label} never answered at {self.url}: {last!r}")
 
-    async def call(self, frame: Dict[str, Any], *, timeout: float = WS_CALL_TIMEOUT) -> Dict[str, Any]:
-        async with self._lock:
-            self._seq += 1
-            msg_id = f"{self.label}-{self._seq}"
-            await self._ws.send(json.dumps({**frame, "msg_id": msg_id}))
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                raw = await asyncio.wait_for(self._ws.recv(), timeout=max(1.0, deadline - time.time()))
+    async def _read(self, ws: Any) -> None:
+        err: BaseException = ConnectionError(f"{self.label}: connection closed")
+        try:
+            async for raw in ws:
                 try:
                     msg = json.loads(raw)
                 except (TypeError, json.JSONDecodeError):
                     continue
-                if isinstance(msg, dict) and msg.get("msg_id") == msg_id:
-                    return msg
-            raise TimeoutError(f"{self.label}: no reply to {frame.get('type')}")
+                if isinstance(msg, dict):
+                    fut = self._pending.pop(str(msg.get("msg_id") or ""), None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(msg)
+        except Exception as exc:  # noqa: BLE001
+            err = exc
+        for fut in list(self._pending.values()):
+            if not fut.done():
+                fut.set_exception(err)
+        self._pending.clear()
+
+    async def call(self, frame: Dict[str, Any], *, timeout: float = WS_CALL_TIMEOUT) -> Dict[str, Any]:
+        self._seq += 1
+        msg_id = f"{self.label}-{self._seq}"
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[msg_id] = fut
+        try:
+            await self._ws.send(json.dumps({**frame, "msg_id": msg_id}))
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"{self.label}: no reply to {frame.get('type')}") from None
+        finally:
+            self._pending.pop(msg_id, None)
 
     async def ok(self, frame: Dict[str, Any], **kw) -> Dict[str, Any]:
         reply = await self.call(frame, **kw)
