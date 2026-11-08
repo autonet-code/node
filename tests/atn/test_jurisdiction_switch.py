@@ -201,7 +201,8 @@ def test_published_and_adopted_records_follow_the_jurisdiction(tmp_path):
 
 
 def test_check_jurisdiction(monkeypatch):
-    from nodes.common.world_model_substrate.adapter import CHARTER
+    from nodes.common.library.charter import DEFAULT_CHARTER
+    CHARTER = DEFAULT_CHARTER.entries()
     v1 = json.dumps({"axes": [{"id": c["id"], "thesis": c["thesis"]} for c in CHARTER]}, separators=(",", ":"))
     contracts = {"dao": "0xDAOB", "timelock": "0x71", "rep_token": "0x2E9",
                  "tool_bond": "0xB0", "substrate": "0x5B", "charter": v1}

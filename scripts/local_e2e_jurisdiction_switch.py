@@ -551,7 +551,8 @@ async def amain() -> int:
         check(w3.eth.chain_id == CHAIN_ID, f"chain id {CHAIN_ID} on port {PORT}")
         log("deploying the jurisdiction suite + DAOs A, B, C and registry D...")
         daos = deploy_daos(cli, owner)
-        from nodes.common.world_model_substrate.adapter import CHARTER
+        from nodes.common.library.charter import DEFAULT_CHARTER
+        CHARTER = DEFAULT_CHARTER.entries()
         v1 = json.dumps({"axes": [{"id": c["id"], "thesis": c["thesis"]} for c in CHARTER]},
                         separators=(",", ":"))
         for name in ("A", "B"):

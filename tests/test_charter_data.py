@@ -137,9 +137,9 @@ class TestFromText:
 def test_default_text_is_v1_json():
     assert DEFAULT_CHARTER.text == V1_TEXT
     assert Charter.from_text(V1_TEXT) == DEFAULT_CHARTER
-    from nodes.common.world_model_substrate.adapter import CHARTER, N_DIMS
-    assert [(c["id"], c["thesis"]) for c in CHARTER] == list(DEFAULT_CHARTER.axes)
-    assert N_DIMS == 6
+    assert [(c["id"], c["thesis"]) for c in DEFAULT_CHARTER.entries()] == \
+        list(DEFAULT_CHARTER.axes)
+    assert DEFAULT_CHARTER.n_dims == 6
 
 
 def test_hash_is_sha256_of_text():
@@ -157,68 +157,6 @@ def test_charter_hash_follows_active_charter(seven_axis):
 
 def test_default_is_active_by_default():
     assert active_charter() is DEFAULT_CHARTER
-
-
-# ---------------------------------------------------------------------------
-# World, scorer, drift under a custom charter
-# ---------------------------------------------------------------------------
-
-
-def test_custom_charter_world_has_seven_roots(seven_axis):
-    from nodes.common.world_model_substrate.adapter import build_charter_world
-    world = build_charter_world(embedding_dim=4)
-    assert list(world.tendencies.keys()) == list(seven_axis.ids)
-    for i, tid in enumerate(seven_axis.ids):
-        anchor = world.tendencies[tid].anchor
-        assert len(anchor) == 7 + 4
-        assert anchor[i] == 1.0 and sum(anchor) == 1.0
-
-
-def test_score_turn_sized_to_charter(seven_axis):
-    from nodes.common.world_model_substrate.score_turn import score_turn
-    turn = {"content": "rm -rf / without backup, delete everything, force push"}
-    set_active_charter(DEFAULT_CHARTER)
-    v1 = score_turn(turn)
-    set_active_charter(seven_axis)
-    seven = score_turn(turn)
-    assert len(v1) == 6 and len(seven) == 7
-    assert seven[1] == 0.0                      # unknown axis abstains
-    by_id = dict(zip(seven_axis.ids, seven))
-    for i, aid in enumerate(DEFAULT_CHARTER.ids):
-        assert by_id[aid] == v1[i]               # known axes unchanged
-
-
-def test_turn_to_observation_sized_to_charter(seven_axis):
-    from nodes.common.world_model_substrate.adapter import turn_to_observation
-    obs = turn_to_observation({"correctness_impact": 0.5, "kindness_impact": 0.25})
-    assert len(obs.coords) == 7
-    assert obs.coords[seven_axis.axis_index["correctness"]] == 0.5
-    assert obs.coords[seven_axis.axis_index["kindness"]] == 0.25
-
-
-def test_llm_score_turn_sized_to_charter(seven_axis):
-    import asyncio
-
-    from nodes.common.world_model_substrate.llm_score_turn import llm_score_turn
-
-    class _Resp:
-        text = json.dumps({"life_precious": 1, "self_preservation": 0,
-                           "promotion_of_intelligence": 0, "evolution": -1,
-                           "correctness": 1, "simplicity": 0})
-
-    class _Prov:
-        name = "fake"
-
-        async def send(self, **kw):
-            return _Resp()
-
-    out = asyncio.run(llm_score_turn({"content": "x"}, _Prov(), n_samples=1))
-    assert len(out) == 7
-    by_id = dict(zip(seven_axis.ids, out))
-    assert by_id["kindness"] == 0.0
-    assert by_id["life_precious"] == 1.0
-    assert by_id["evolution"] == -1.0
-    assert by_id["correctness"] == 1.0
 
 
 DIGEST = "ab" * 32

@@ -12,7 +12,9 @@ from atn.config import (
     RPBConfig, _parse_registry_data, epoch_rules_error, jurisdiction_key,
     missing_prerequisites,
 )
-from nodes.common.world_model_substrate.adapter import CHARTER
+from nodes.common.library.charter import DEFAULT_CHARTER
+
+CHARTER = DEFAULT_CHARTER.entries()
 
 V1 = json.dumps({"axes": [{"id": c["id"], "thesis": c["thesis"]} for c in CHARTER]},
                 separators=(",", ":"))

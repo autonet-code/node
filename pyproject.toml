@@ -65,11 +65,8 @@ dependencies = [
     "libp2p>=0.6.0,<0.7",
     "trio>=0.22.0",
     "miniupnpc>=2.0",
-    # Substrate engine math: numpy is imported UNGUARDED at module level on the
-    # live federated-close path — nodes/common/world_model_substrate/reconcile.py
-    # does `from world_model.generalized import World`, whose __init__ pulls
-    # equilibrate.py (`import numpy as np`). Also artifact_index.py and the
-    # tool search index (daemon-local retrieval). Must be core.
+    # numpy is imported at module level by the artifact index and the tool
+    # search index (daemon-local retrieval). Must be core.
     "numpy>=1.24.0",
     # Local tool search (Decision 2026-11-08, atn/search_model.py): the
     # daemon runs all-MiniLM-L6-v2 itself, no torch. onnxruntime runs the
@@ -77,10 +74,6 @@ dependencies = [
     "onnxruntime>=1.17",
     "tokenizers>=0.15",
 ]
-# Note: the substrate runtime needs the world-model engine. It's
-# vendored under nodes/common/world_model_substrate/_engine/ so
-# `pip install autonet-computer` works without external git deps.
-# Source of truth: github.com/autonet-code/world-model (master).
 
 [project.urls]
 Homepage = "https://autonet.computer"
@@ -146,7 +139,7 @@ atn = "atn.cli:main"
 atn-vault-setup = "atn.vault_setup:main"
 
 [tool.setuptools.packages.find]
-include = ["atn*", "nodes*", "bridge", "world_model*"]
+include = ["atn*", "nodes*", "bridge"]
 
 [tool.setuptools.package-data]
 # The network registry (chain addresses + public RPC), pinned per release.

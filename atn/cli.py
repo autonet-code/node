@@ -634,8 +634,8 @@ async def run_cli() -> None:
         console.print("[red]Failed to acquire daemon lock.[/]")
         sys.exit(1)
 
-    # Warm heavy native imports (numpy / sounddevice via voice_service, and
-    # the world_model embedding stack) on the MAIN thread before any
+    # Warm heavy native imports (numpy / sounddevice via voice_service) on
+    # the MAIN thread before any
     # background asyncio executor thread can touch them. numpy's
     # _core.multiarray init is not safe to run first-time from a worker
     # thread while the main thread holds the import lock — doing so wedges

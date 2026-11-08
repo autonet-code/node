@@ -2,7 +2,7 @@
 
 Tool search is local to each daemon (docs/tool_substrate.md). It needs one
 model, all-MiniLM-L6-v2 pinned to a revision of its official repo
-(``nodes/common/world_model_substrate/minilm.py`` holds the pins). On the
+(``nodes/common/library/minilm.py`` holds the pins). On the
 first run the daemon downloads the two files in the background while
 everything else starts normally; until the model is loaded, search answers
 with keywords only and says so.

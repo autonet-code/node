@@ -771,7 +771,6 @@ async def amain() -> int:
         from nodes.common.event_gossip import EventBatch, Keypair
         from nodes.common.federated_reconcile import federated_epoch_close
         from nodes.common.voice_state import read_tool_review_snapshot, read_voice_state
-        from nodes.common.world_model_substrate.adapter import N_DIMS
 
         b1 = substrate.functions.getAnchor(1).call()[7]
         before = read_tool_review_snapshot(w3, bond.address, b1)
@@ -786,8 +785,6 @@ async def amain() -> int:
         check(set(snap["rounds"]) == {clean, malware}, "both rounds finalized in the e1..e2 window")
 
         author = agents["author-1"]
-        coords = [0.0] * (N_DIMS + 1024)
-        coords[4], coords[N_DIMS + 3] = 0.8, 0.5
         registration = {
             "kind": "tool_registered",
             "seq": 1,

@@ -3,8 +3,7 @@ epoch redesign.
 
   - a failed voice refresh blocks the close instead of reusing old state;
   - log scans start at the configured deployment block, and a failed read
-    while searching for it raises instead of starting the scan late;
-  - the kernels use platform-independent exp/log.
+    while searching for it raises instead of starting the scan late.
 
 (Address case and the payload encoding are covered in test_tool_mint.py
 and test_carry_over_commitment.py.)
@@ -20,7 +19,6 @@ import pytest
 
 from nodes.common.event_gossip import EventBatch, EventGossip, Keypair
 from nodes.common.federated_close_driver import FederatedCloseDriver
-from world_model.generalized import detmath
 
 
 def _event(seq: int, agent: str):
@@ -113,32 +111,3 @@ class TestDeployBlock:
         w3.eth.get_code.side_effect = get_code
         with pytest.raises(ValueError):
             voice_state._deployment_block(w3, "0xdead")
-
-
-class TestDetMath:
-    def test_close_to_libm(self):
-        rng = random.Random(7)
-        for _ in range(20000):
-            x = rng.uniform(-50, 50)
-            assert detmath.exp(x) == pytest.approx(math.exp(x), rel=5e-16)
-            y = rng.uniform(1e-9, 1e9)
-            assert detmath.log(y) == pytest.approx(math.log(y), rel=5e-16,
-                                                   abs=1e-300)
-        for n in range(1000):
-            assert detmath.log1p(n) == pytest.approx(math.log1p(n), rel=5e-16)
-
-    def test_bits_are_fixed(self):
-        # Built from IEEE basic operations only, so these bits are the same
-        # on every platform; a change here is a consensus change.
-        assert detmath.exp(0.5).hex() == "0x1.a61298e1e069cp+0"
-        assert detmath.exp(-3.75).hex() == "0x1.81509354f0d29p-6"
-        assert detmath.log(10.0).hex() == "0x1.26bb1bbb55516p+1"
-        assert detmath.log1p(7).hex() == "0x1.0a2b23f3bab73p+1"
-
-    def test_edges(self):
-        assert detmath.exp(-800.0) == 0.0
-        with pytest.raises(OverflowError):
-            detmath.exp(710.0)
-        with pytest.raises(ValueError):
-            detmath.log(0.0)
-        assert detmath.log1p(1e-20) == 1e-20

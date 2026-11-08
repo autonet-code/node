@@ -61,7 +61,6 @@ COPY pyproject.toml README.md LICENSE ./
 COPY atn/ atn/
 COPY nodes/ nodes/
 COPY bridge/ bridge/
-COPY world_model/ world_model/
 RUN pip install --upgrade pip setuptools wheel \
     && pip install .
 

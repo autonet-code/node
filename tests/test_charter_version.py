@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from nodes.common.world_model_substrate.adapter import CHARTER
+from nodes.common.library.charter import DEFAULT_CHARTER
 from nodes.common.library.charter_version import (
     charter_bytes,
     charter_hash,
@@ -65,9 +65,9 @@ def test_hash_is_sha256_of_registry_text():
 
 
 def test_hash_derived_from_same_constant():
-    """The payload roots are drawn from adapter.CHARTER, not a duplicate."""
+    """The payload roots are drawn from the active charter, not a duplicate."""
     payload_ids = [r["id"] for r in charter_payload()["roots"]]
-    charter_ids = sorted((e["id"] for e in CHARTER))
+    charter_ids = sorted((e["id"] for e in DEFAULT_CHARTER.entries()))
     assert sorted(payload_ids) == charter_ids
 
 

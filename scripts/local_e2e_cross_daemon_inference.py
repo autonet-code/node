@@ -198,7 +198,7 @@ PROBE_PROMPT = (
 
 # Timeouts. A cold local model loads for ~20s and a real agent turn adds the
 # framework's own overhead, so these are deliberately generous.
-DAEMON_BOOT_TIMEOUT = 180.0   # daemon boot: heavy imports (numpy, world_model)
+DAEMON_BOOT_TIMEOUT = 180.0   # daemon boot: heavy imports (numpy)
 INFERENCE_TIMEOUT = 300.0     # the agent turn: pay + dial + cold model load
 WS_CALL_TIMEOUT = 240.0       # a single WS round trip that may drive inference
 

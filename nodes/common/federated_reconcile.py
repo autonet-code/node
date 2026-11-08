@@ -58,22 +58,6 @@ REVIEWER_SHARE_BPS_DEFAULT = 4000
 ATN_BASE_UNITS = 1_000_000   # 6 decimals: 1 ATN = 1e6 base units
 BPS = 10_000
 
-# Vetting pipeline (docs/tool_substrate.md, Vetting section). A published
-# manifest enters the CANDIDATE pool: visible, debatable, NOT mint-
-# eligible. GREENLIGHT = affirmative vets from distinct fleets whose
-# summed weights reach VET_QUORUM; validators then earn a conserved
-# royalty slice of the tool's mint for VET_ROYALTY_EPOCHS closes — the
-# royalty IS the stake: a post-greenlight charter bust (violation ≥
-# VET_BUST_THRESHOLD on the manifest's claim node) zeroes the remaining
-# royalty and permanently discounts each validator's future vet weight
-# (weight = 1/(1+busts) — slashing without a staking contract).
-# PROVISIONAL VALUES: quorum/share/epochs/threshold are economic
-# parameters pending sim sweep + user blessing (sims/tool_economy).
-VET_QUORUM = 2.0
-VET_ROYALTY_SHARE = 0.1
-VET_ROYALTY_EPOCHS = 8
-VET_BUST_THRESHOLD = 0.5
-
 # Household voice (docs/tool_substrate.md, Decision 2026-07-08 addendum,
 # voice SOURCE = reputation not balance per the same-day "ATN = money,
 # reputation = voice" decision). A "household" is the economic identity

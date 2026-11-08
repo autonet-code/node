@@ -8,7 +8,7 @@ and every remote manifest it fetched and verified) and merges them:
   property names (name words count twice);
 - **semantic**: cosine between the query and each manifest embedded with
   the local search model (all-MiniLM-L6-v2, full 384 dims,
-  ``nodes/common/world_model_substrate/minilm.py``).
+  ``nodes/common/library/minilm.py``).
 
 The two ranked lists merge by reciprocal rank fusion (``RRF_K``); ties
 break on the digest, so the order is a pure function of the query and the
