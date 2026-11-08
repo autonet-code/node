@@ -96,7 +96,6 @@ def main() -> int:
         env = {
             "ATN_JURISDICTION_REGISTRY": j["dao"]["registry"],
             "ATN_JURISDICTION_RPC": f"https://{RPC_HOST}/{token}",
-            "AUTONET_P2P_TRANSPORT": "ws",
         }
         (run / "vm_env.json").write_text(json.dumps(env, indent=1), encoding="utf-8")
         (run / "summary.json").write_text(json.dumps(

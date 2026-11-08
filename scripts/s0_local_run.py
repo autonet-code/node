@@ -352,9 +352,9 @@ class Household:
         env["KEYSTORE_DIR"] = str(self.home / ".atn" / "keystore")
         env["ATN_JURISDICTION_REGISTRY"] = registry
         env["ATN_JURISDICTION_RPC"] = RPC_URL
-        env["AUTONET_P2P_PORT"] = str(self.p2p_port)
+        env["AUTONET_P2P_PORT"] = str(self.p2p_port)          # WebSocket
+        env["AUTONET_P2P_TCP_PORT"] = str(self.p2p_port + 100)  # TCP
         env["AUTONET_P2P_HOST"] = "127.0.0.1"
-        env["AUTONET_P2P_TRANSPORT"] = "ws"
         # Not ATN_DISABLE_PROVIDER_AUTODETECT: that test gate also stops the
         # review driver, so no review would ever reach ToolBond.
         return env
@@ -1331,7 +1331,7 @@ async def amain() -> int:
         relay_dir = run / "relay"
         relay_dir.mkdir()
         relay_args = [sys.executable, "-m", "nodes.relay", "--port", str(RELAY_PORT),
-                      "--host", "127.0.0.1", "--transport", "ws", "--no-upnp",
+                      "--host", "127.0.0.1", "--no-upnp",
                       "--data-dir", str(relay_dir)]
         probe = procs.start("relay-probe", relay_args + ["--jurisdiction", "31337:0x0"],
                             cwd=REPO, env=base_env(), log_path=run / "relay_probe.log")
