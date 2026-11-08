@@ -242,3 +242,13 @@ async def test_review_due_counts_the_households_reviews(tmp_path):
     os.utime(batches._dir, (later, later))
     assert _review_due(rt, "cc-a") == {X: "word_count"}
     assert nat.identity.address != op
+
+
+@pytest.mark.asyncio
+async def test_external_agents_can_buy_services_by_default(tmp_path):
+    """The operator pays (Decision 2026-11-08), so buying a service is on by
+    default; selling one is a separate grant."""
+    from atn.agent_tools import _TOOL_CATEGORIES, EXTERNAL_DEFAULT_TOOLS
+    granted = set().union(*(_TOOL_CATEGORIES[b] for b in EXTERNAL_DEFAULT_TOOLS))
+    assert {"find_services", "request_service", "close_service_channel"} <= granted
+    assert "register_service" not in granted

@@ -2192,9 +2192,12 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 
 # What an external agent may call unless its creator says otherwise: the
 # tool library (probe, use, review), authoring, publishing, adoption
-# proposals and its own registration. Money beyond its own stakes stays out.
+# proposals, its own registration, and buying services (find, request,
+# close a channel; Decision 2026-11-08: the operator pays). Selling a
+# service (register_service) stays a separate grant.
 EXTERNAL_DEFAULT_TOOLS = ["unified_tools", "toolsmith", "publishing",
-                          "adoption", "identity", "transactions"]
+                          "adoption", "identity", "transactions",
+                          "services_buy"]
 
 # What every external agent may call whatever its bundles: it acts as the
 # household's operator, and this is how it takes part in governance.
@@ -4628,6 +4631,9 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # invoke with the proof). Kept off the progressive surface.
     "services": {"find_services", "register_service",
                  "pay_for_service", "request_service", "close_service_channel"},
+    # The buying half alone, granted to external agents by default.
+    "services_buy": {"find_services", "pay_for_service", "request_service",
+                     "close_service_channel"},
     # User-memory bundle: read + write the dossier (USER.md). One grant —
     # an agent trusted to know the user is trusted to keep the record
     # current. Assignable to ANY agent; nothing about it is Kevin-specific.
