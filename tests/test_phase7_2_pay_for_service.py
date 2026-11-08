@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Tuple
 
 import pytest
 
@@ -37,12 +37,12 @@ from nodes.common.authoritative_submitter import (
 from nodes.common.blob_resolver import InMemoryBlobResolver
 from nodes.common.canonical_ordering import canonical_order
 from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
-from nodes.common.event_gossip import EventBatch, Keypair
-from nodes.common.federated_reconcile import federated_epoch_close
 from tests.substrate_chain_helpers import (
     deploy_substrate,
     register_bound,
+    reviewed_close,
     seed_pool,
+    tool_registration_batch,
 )
 
 
@@ -68,12 +68,6 @@ def _register_agent(w3: Web3, contract, agent_addr: str, lineage_seed: str) -> N
     assert receipt.status == 1, f"registerAgentBound failed: {receipt}"
 
 
-def _coord(charter, embed_idx, mag):
-    out = list(charter) + [0.0] * 1024
-    out[4 + embed_idx] = mag
-    return tuple(out)
-
-
 def _fee_parts(amount: int) -> Tuple[int, int, int]:
     """(fee, burned, to_treasury) for a gross payment — mirrors the
     contract's integer math (SERVICE_FEE_BPS=250, FEE_TREASURY_BPS=5000)."""
@@ -82,58 +76,17 @@ def _fee_parts(amount: int) -> Tuple[int, int, int]:
     return fee, fee - to_treasury, to_treasury
 
 
-def _make_chain(rpb: str, agent_id: str) -> List[EventBatch]:
-    """v3 mint fixture (mint = tool usage only): the agent authors a
-    pinned tool that gets vetted (distinct-fleet greenlight) and used
-    by third-party attesting callers. Observation events alone no
-    longer mint anything."""
-    digest = "72" * 32
-    coords = [0.0] * (6 + 1024)
-    coords[4] = 0.8
-    coords[6 + 3] = 0.5
-    reg = {
-        "kind": "tool_registered",
-        "seq": 1,
-        "author_agent": agent_id,
-        "artifact_digest": digest,
-        "manifest_meta": {"trust_class": "pinned", "author": agent_id},
-    }
-    def _vet(vetter, seq):
-        return {
-            "kind": "tool_used", "seq": seq, "author_agent": vetter,
-            "manifest_digest": digest, "tool_author": agent_id,
-            "receipt_digest": f"v{seq:02d}" * 8, "ok": True,
-            "fee_atn": 0.0, "vet": True,
-        }
-    def _receipt(caller, seq):
-        return {
-            "kind": "tool_used", "seq": seq, "author_agent": caller,
-            "manifest_digest": digest, "tool_author": agent_id,
-            "receipt_digest": f"r{seq:02d}" * 8, "ok": True,
-            "fee_atn": 0.0, "attested": True, "score": 0.8,
-        }
-    def _one(ev):
-        return EventBatch(
-            rpb_address=rpb, sender_pubkey=Keypair.generate().public_key,
-            batch_seq=1, events=[ev], prev_batch_hash=b"",
-            timestamp=1_700_000_000.0,
-        )
-    return [
-        _one(reg),
-        _one(_vet("vetter-1", 1)), _one(_vet("vetter-2", 1)),
-        _one(_receipt("caller-1", 1)), _one(_receipt("caller-2", 2)),
-    ]
-
-
 def _give_agent_some_atn(chain_fixture, agent_id: str, agent_addr: str) -> int:
     """Run a federated close + anchor + submit so the agent gets ATN.
     Returns the ATN balance the agent now holds."""
     w3 = chain_fixture["w3"]
     deployer = chain_fixture["deployer"]
     rpb = "rpb_72_seed"
-    batches = _make_chain(rpb, agent_id)
-    canonical = canonical_order(batches)
-    result = federated_epoch_close(canonical)
+    # The agent authors a pinned tool whose review round concludes in this
+    # close: the review mint (Decision 2026-11-07) pays the author.
+    canonical = canonical_order(
+        [tool_registration_batch(rpb, agent_id, "72" * 32)])
+    result = reviewed_close(canonical)
     epoch_id = "e_72_seed"
     result["epoch_id"] = epoch_id
 
