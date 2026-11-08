@@ -1604,7 +1604,30 @@ class AutonetBridge:
             except Exception:
                 pass  # Service might be between cycles
 
-        return self.state.to_dict()
+        out = self.state.to_dict()
+        out["p2p"] = self.p2p_status()
+        return out
+
+    def p2p_status(self) -> dict[str, Any]:
+        """This daemon's libp2p host: peer id, transport, DHT mode, relay
+        reservations and the kind of each connection per peer ("direct" or
+        "relayed"), {} before the host is up. The host runs in its own
+        thread, so a read that races a change returns what it has."""
+        host = self._p2p_host
+        if host is None:
+            return {}
+        out: dict[str, Any] = {"peer_id": "", "transport": "", "dht_mode": "",
+                               "reservations": [], "connections": {}}
+        for key, read in (("peer_id", lambda: host.peer_id),
+                          ("transport", lambda: getattr(host, "_transport", "")),
+                          ("dht_mode", lambda: host.dht_mode),
+                          ("reservations", lambda: list(host.reservations)),
+                          ("connections", lambda: host.connection_kinds())):
+            try:
+                out[key] = read()
+            except Exception:  # noqa: BLE001 (best effort)
+                pass
+        return out
 
     def connect_wallet(self, address: str) -> dict[str, Any]:
         """Register a wallet connection (from frontend wallet provider)."""
