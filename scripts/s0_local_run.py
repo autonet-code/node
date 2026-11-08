@@ -644,6 +644,10 @@ class Activity:
         # session agent id -> epochs its reviews were queued into, and the
         # reviewer address each reply named
         self.queued: Dict[str, Dict[int, set]] = {}
+        # session agent id -> what it did with tools ANOTHER session of its
+        # household adopted (Decision 2026-11-09: they are shared)
+        self.shared: Dict[str, Dict[str, Any]] = {}
+        self.shared_checked = False
         self.counts: Dict[str, int] = {}
         self.events = open(run / "activity.jsonl", "a", encoding="utf-8")
 
@@ -685,8 +689,9 @@ class Activity:
 
     def adopter(self, h: Household, digest: str) -> Optional["AgentSession"]:
         """Which of the household's sessions adopts a tool: a second session
-        takes the last household's tools, the first everything else (an
-        agent uses and reviews only the tools it adopted)."""
+        takes the last household's tools, the first everything else. Each
+        session uses and reviews every tool the household's sessions
+        adopted (Decision 2026-11-09)."""
         ss = self.sessions(h)
         if not ss:
             return None
@@ -816,17 +821,74 @@ class Activity:
         """One unit of work per session of the household, concurrently."""
         await asyncio.gather(*(self.work_session(s, rng) for s in self.sessions(h)))
 
+    def household_tools(self, s: "AgentSession") -> Dict[str, Dict[str, str]]:
+        """digest -> {name, adopted_by} for every tool any session of the
+        household adopted."""
+        out: Dict[str, Dict[str, str]] = {}
+        for o in self.sessions(s.h):
+            for digest, name in (self.adopted.get(o.agent_id) or {}).items():
+                out.setdefault(digest, {"name": name, "adopted_by": o.agent_id})
+        return out
+
+    def note_shared(self, s: "AgentSession", key: str, tool: str, err: Any = None) -> None:
+        st = self.shared.setdefault(s.agent_id, {"used": 0, "use_failed": 0, "reviewed": 0,
+                                                 "review_skipped": 0, "tools": set(),
+                                                 "errors": {}})
+        st[key] += 1
+        st["tools"].add(tool)
+        if err:
+            st["errors"][str(err)[:120]] = st["errors"].get(str(err)[:120], 0) + 1
+
+    async def check_shared(self) -> None:
+        """Once every tool is adopted: each second session lists, and adopts
+        again, a tool the household's first session adopted."""
+        for h in self.hs:
+            ss = self.sessions(h)
+            if len(ss) < 2:
+                continue
+            first, second = ss[0], ss[1]
+            theirs = sorted(self.adopted.get(first.agent_id) or {})
+            if not theirs:
+                continue
+            listed = await self.call(second, {"type": "list_tools",
+                                              "category": "registered"}, "list_tools")
+            seen = {t.get("digest") for t in listed.get("tools", [])
+                    if isinstance(listed.get("tools"), list)}
+            digest = theirs[0]
+            r = await self.call(second, {"type": "adopt_tool", "digest": digest,
+                                         "reason": "already ours"}, "adopt_tool",
+                                tool=self.published[digest]["name"])
+            log(f"SHARED: {second.agent_id} lists {len(seen & set(theirs))}/{len(theirs)} "
+                f"of {first.agent_id}'s adopted tools; adopt_tool "
+                f"{self.published[digest]['name']} -> already_installed="
+                f"{r.get('already_installed')} adopted_for={r.get('adopted_for')} "
+                f"error={r.get('error')}")
+
+    def report_shared(self) -> None:
+        for sid, st in sorted(self.shared.items()):
+            log(f"SHARED: {sid} used tools another session adopted {st['used']} time(s) "
+                f"({st['use_failed']} failed), reviewed them {st['reviewed']} time(s) "
+                f"({st['review_skipped']} skipped); tools {sorted(st['tools'])}; "
+                f"errors {st['errors'] or 'none'}")
+        if not self.shared:
+            log("SHARED: no session used a tool another session adopted")
+
     async def work_session(self, s: "AgentSession", rng) -> None:
-        """Use two of the tools this session adopted and review them."""
-        mine = self.adopted.get(s.agent_id) or {}
-        if not mine:
+        """Use two of the tools the household adopted and review them."""
+        pool = self.household_tools(s)
+        if not pool:
             return
-        picks = rng.sample(sorted(mine.items()), k=min(2, len(mine)))
+        picks = rng.sample(sorted((d, m["name"]) for d, m in pool.items()),
+                           k=min(2, len(pool)))
         judgments = []
         for digest, name in picks:
             r = await self.call(s, {"type": "use_tool", "name": name,
                                     "arguments": {"text": rng.choice(SAMPLE_TEXTS)}},
                                 "use_tool", tool=self.published[digest]["name"])
+            if pool[digest]["adopted_by"] != s.agent_id:
+                failed = "error" in r
+                self.note_shared(s, "use_failed" if failed else "used",
+                                 self.published[digest]["name"], r.get("error"))
             canary = self.published[digest]["name"] == CANARY
             if canary:
                 self.note("canary_result", s, result=r)
@@ -842,6 +904,12 @@ class Activity:
         r = await self.call(s, {"type": "attest_tools", "context": "s0 text work",
                                 "judgments": judgments},
                             "attest_tools", tools=[x["tool"] for x in judgments])
+        skipped = {str(x.get("tool")): x.get("error") for x in r.get("skipped") or []
+                   if isinstance(x, dict)}
+        for digest, name in picks:
+            if pool[digest]["adopted_by"] != s.agent_id and "error" not in r:
+                self.note_shared(s, "review_skipped" if name in skipped else "reviewed",
+                                 self.published[digest]["name"], skipped.get(name))
         q = r.get("reviews") if isinstance(r.get("reviews"), dict) else {}
         if q.get("epoch") is not None and q.get("queued"):
             self.queued.setdefault(s.agent_id, {}).setdefault(int(q["epoch"]), set()).add(
@@ -997,6 +1065,9 @@ async def activity_loop(act: Activity, minutes: float) -> None:
         # Until every tool's blobs have reached every household.
         if not act.adopted_all():
             await act.adopt()
+        elif not act.shared_checked:
+            act.shared_checked = True
+            await act.check_shared()
         if not searched and elapsed > 60:
             searched = True
             await act.search()
@@ -1234,6 +1305,7 @@ async def amain() -> int:
         await asyncio.sleep(300)
         act.report_mint()
         act.report_batches()
+        act.report_shared()
         stop.set()
         await col
         if KEEP:
