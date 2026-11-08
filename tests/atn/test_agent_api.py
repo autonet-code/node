@@ -86,6 +86,9 @@ def test_index_guide_and_commands(api_run):
         # Running tools inside the daemon is for its own agents.
         assert "use_tool" not in names and "vet_tool" not in names
         assert "export_agent_key" not in names and "create_agent" not in names
+        # Any transaction from the operator the agent acts as (2026-11-08).
+        assert [c["name"] for c in cmds["groups"]["chain"]] == ["send_transaction"]
+        assert "export_operator_key" not in names
         s, one = await _request(port, "GET", "/commands/use_tool")
         assert s == 200 and one["input_schema"]["type"] == "object"
         s, _ = await _request(port, "GET", "/commands/nope")

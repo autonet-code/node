@@ -1,23 +1,28 @@
 """External agents act on chain as the household's operator (Decision
-2026-11-08): they publish, bond and review with the operator key, and their
-reviews merge into the operator's one batch per epoch.
+2026-11-08): they publish, bond, review and send transactions with the
+operator key, their reviews merge into the operator's one batch per epoch,
+and every operator transaction draws its nonce from one manager.
 
-No chain: ToolBond and the review client are stubs throughout."""
+No chain: ToolBond, the review client and web3 are stubs throughout."""
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
+from eth_account import Account
+from hexbytes import HexBytes
 
 from atn.agent_tools import _create_agent, execute_tool
 from atn.runtime.review_batch import (
     HELD_NOTE_OPERATOR, flush_held_reviews, queue_reviews, store_for,
 )
-from tests.atn.test_external_agent import _operator_address, _runtime
+from tests.atn.test_external_agent import _native, _operator_address, _runtime
 from tests.atn.test_review_driver import FakeBond
 from tests.atn.test_tool_security import NOVEL, SCHEMA, ECHO, FakeClient
 
 D1, D2, D3 = "a1" * 32, "b2" * 32, "c3" * 32
+TARGET = "0x" + "12" * 20
 
 
 @pytest.fixture(autouse=True)
@@ -172,9 +177,123 @@ async def test_sessions_sign_one_voucher_at_a_time(tmp_path, monkeypatch):
     assert book.get(_operator_address(rt), provider)["cumulative"] == 200
 
 
+# ---------------------------------------------------------------------------
+# send_transaction
+# ---------------------------------------------------------------------------
+
+class _Eth:
+    def __init__(self, count=7):
+        self.count = count
+        self.sent: list[bytes] = []
+        self.status = 1
+        self.estimate_error = None
+        self.gas_price = 10 ** 9
+        self.chain_id = 31337
+        self._lock = threading.Lock()
+
+    def estimate_gas(self, tx):
+        if self.estimate_error:
+            raise self.estimate_error
+        return 50_000
+
+    def get_transaction_count(self, address, block="latest"):
+        return self.count        # an RPC that never sees the sends
+
+    def send_raw_transaction(self, raw):
+        with self._lock:
+            self.sent.append(bytes(raw))
+        return HexBytes(b"\x01" * 32)
+
+    def wait_for_transaction_receipt(self, tx_hash, timeout=120):
+        from web3.datastructures import AttributeDict
+        return AttributeDict({"status": self.status, "blockNumber": 42, "gasUsed": 41_000})
+
+    def call(self, tx, block=None):
+        raise ValueError("execution reverted: NotAuthor")
+
+
+class _W3:
+    def __init__(self, count=7):
+        self.eth = _Eth(count)
+
+    @staticmethod
+    def to_checksum_address(a):
+        from web3 import Web3
+        return Web3.to_checksum_address(a)
+
+
+def _decoded(raw: bytes) -> tuple[str, int]:
+    """(sender, nonce) of a signed legacy transaction."""
+    import rlp
+    return Account.recover_transaction(raw), int.from_bytes(rlp.decode(raw)[0], "big")
+
+
 def _bridge(rt):
     from atn.ws_server import WebSocketBridge
     return WebSocketBridge(rt)
+
+
+class TestSendTransaction:
+    async def test_signs_as_the_operator_and_lands_in_activity(self, tmp_path):
+        from atn.ws_auth import ClientSession
+        rt = await _externals(tmp_path, "cc", registered=False)
+        rt.tx_web3 = w3 = _W3()
+        bridge = _bridge(rt)
+        owner = ClientSession(local=True, authed=True, owner=True)
+        data = "0x12345678" + "00" * 32
+        resp = await bridge._handle_message({
+            "type": "send_transaction", "caller_id": "cc", "to": TARGET,
+            "data": data, "value": 5, "_note": "vote For on proposal 7"}, owner)
+        assert resp["ok"], resp
+        r = resp["result"]
+        assert r["status"] == 1 and r["block"] == 42 and r["gas_used"] == 41_000
+        assert r["tx_hash"] and "revert_reason" not in r
+        op = _operator_address(rt)
+        assert r["from"] == op and r["selector"] == "0x12345678" and r["value"] == "5"
+        assert _decoded(w3.eth.sent[0]) == (op, 7)
+        (entry,) = bridge._activity_log().read("cc")
+        assert entry["tool"] == "send_transaction" and entry["ok"]
+        assert entry["note"] == "vote For on proposal 7"
+        assert TARGET in entry["result"] and "0x12345678" in entry["result"]
+
+        # The next one takes the next nonce though the RPC lags.
+        out = await execute_tool("send_transaction", {"to": TARGET}, rt, caller_id="cc")
+        assert out["status"] == 1 and _decoded(w3.eth.sent[1]) == (op, 8)
+
+    async def test_reverts_and_refusals(self, tmp_path):
+        rt = await _externals(tmp_path, "cc")
+        rt.tx_web3 = w3 = _W3()
+        w3.eth.status = 0
+        out = await execute_tool("send_transaction", {
+            "to": TARGET, "data": "0xdeadbeef", "gas": 90_000}, rt, caller_id="cc")
+        assert out["status"] == 0 and "NotAuthor" in out["revert_reason"]
+        # Without a gas limit, a call that would revert is not sent.
+        w3.eth.estimate_error = ValueError("execution reverted: TooEarly")
+        out = await execute_tool("send_transaction", {"to": TARGET, "data": "0xdeadbeef"},
+                                 rt, caller_id="cc")
+        assert "TooEarly" in out["error"] and "0xdeadbeef" in out["error"]
+        assert len(w3.eth.sent) == 1
+        # Bad input never reaches the chain.
+        for bad in ({"to": "0x12"}, {"to": TARGET, "data": "0xabc"},
+                    {"to": TARGET, "value": -1}):
+            assert "error" in await execute_tool("send_transaction", bad, rt,
+                                                 caller_id="cc")
+        # Native agents and the owner surface are refused.
+        await _native(rt, "nat")
+        out = await execute_tool("send_transaction", {"to": TARGET}, rt, caller_id="nat")
+        assert "external agents" in out["error"]
+        out = await execute_tool("send_transaction", {"to": TARGET}, rt, caller_id="")
+        assert "external agents" in out["error"]
+        assert len(w3.eth.sent) == 1
+
+    async def test_granted_to_every_external_agent(self, tmp_path):
+        rt = _runtime(tmp_path)
+        await _create_agent(rt, {"id": "narrow", "provider": "external",
+                                 "tools": ["unified_tools"]})
+        rt.tx_web3 = _W3()
+        out = await execute_tool("send_transaction", {"to": TARGET}, rt,
+                                 caller_id="narrow")
+        assert out.get("status") == 1, out
 
 
 # ---------------------------------------------------------------------------
@@ -223,3 +342,38 @@ class TestWsSurface:
         resp = await bridge._handle_message({"type": "export_agent_key",
                                              "agent_id": "cc"}, local)
         assert not resp["ok"] and "export_operator_key" in resp["error"]
+
+
+# ---------------------------------------------------------------------------
+# One nonce manager for every operator transaction
+# ---------------------------------------------------------------------------
+
+def test_operator_paths_never_share_a_nonce(tmp_path):
+    """Agent transactions and the ToolBond path (stakes, bonds, reviews)
+    run concurrently from the operator key against an RPC that lags: the
+    shared per-address nonce manager hands each its own nonce."""
+    from atn.agent_tools import _send_operator_tx
+    from atn.runtime.tool_bond import ToolBondClient
+
+    key = Account.create().key.hex()
+    w3 = _W3(count=20)
+
+    class _Func:
+        def estimate_gas(self, tx):
+            return 100_000
+
+        def build_transaction(self, tx):
+            return {**tx, "to": w3.to_checksum_address(TARGET), "data": "0x", "value": 0}
+
+    bond_client = ToolBondClient(None)
+    acct = Account.from_key(key)
+    jobs = [lambda: _send_operator_tx(w3, key, TARGET, "0x", 0, None, 31337)
+            for _ in range(4)]
+    jobs += [lambda: bond_client._send(w3, acct, _Func(), 100_000) for _ in range(4)]
+    threads = [threading.Thread(target=j) for j in jobs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    nonces = sorted(_decoded(raw)[1] for raw in w3.eth.sent)
+    assert nonces == list(range(20, 28))

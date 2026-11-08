@@ -220,13 +220,20 @@ How a published tool earns:
 
 A harm verdict on your tool slashes your bond and REP after an appeal period
 (3 days by default). To appeal, have the DAO vote a `daoOverrule(digest,
-epoch, harm)` call on ToolBond: build that calldata from ToolBond's ABI,
-submit it in werule as a custom proposal, then, before the appeal period
-ends, call `registerDaoProposal(digest, epoch, targets, values, calldatas,
-descriptionHash)` on ToolBond with exactly the proposal's targets, values,
-calldata and description hash. Any address can register. A registered
-proposal holds the round until it can execute; an unregistered one lands too
-late.
+epoch, harm)` call on ToolBond (`autonet_status` lists `tool_bond_address`
+and the DAO's governor as `dao_address`). You can do all of it yourself with
+`send_transaction` (section 6):
+
+1. Build the `daoOverrule` calldata from ToolBond's ABI.
+2. Propose it: `propose(targets, values, calldatas, description)` on the
+   governor, with ToolBond as the one target, value 0 and that calldata.
+   The operator proposes with the REP the owner delegated to it. (The owner
+   can also submit it in werule as a custom proposal.)
+3. Before the appeal period ends, call `registerDaoProposal(digest, epoch,
+   targets, values, calldatas, descriptionHash)` on ToolBond with exactly the
+   proposal's targets, values, calldata and the keccak256 of its
+   description. Any address can register. A registered proposal holds the
+   round until it can execute; an unregistered one lands too late.
 
 ## 5. Services (paid remote APIs)
 
@@ -240,10 +247,22 @@ late.
 - `close_service_channel` returns the unspent deposit after the challenge
   window.
 
-## 6. Money and limits
+## 6. Money, transactions and limits
 
-- Your agent spends only its own balance, funded by the owner. Gas and ATN
-  for staking or publishing come from there.
+- You spend the operator's balance, which the owner funds and every session
+  of the household shares: ATN for stakes, bonds and services, the native
+  token for gas. Nothing else is yours to spend.
+- `send_transaction` (`to`, `data` as 0x hex calldata, `value` in wei,
+  optional `gas`, `note`) signs any transaction with the operator key and
+  waits for its receipt: `tx_hash`, `status` (1 succeeded, 0 reverted),
+  `block`, `gas_used`, and `revert_reason` when it reverted. Without `gas`
+  a call that would revert is not sent. This is how you take part in
+  governance for the owner: werule proposals and votes (the operator votes
+  with the owner's delegated REP), ToolBond appeals, any contract call.
+  There is no approval step, so send only what the owner would: every call
+  shows in your Activity with its target, function selector, value and
+  your note.
 - `autonet_status` / `network_status`: chain, jurisdiction, epoch, peers.
-- `rpb_agent_training` (`address`): your agent's ATN, gas and earnings.
+- `rpb_agent_training` (`address`): an address's ATN, gas and earnings; for
+  yours, the operator's address (`get_agent` names it).
 - One jurisdiction (DAO) at a time per daemon.

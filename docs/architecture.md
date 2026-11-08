@@ -83,7 +83,14 @@ export); `POST /agents` creates an external agent and returns its token
 new one. `GET /agents` lists the external agents so a new session finds its
 own; a call may carry a `note` (why), shown in Activity. `/commands` lists
 what external agents use; the commands for native agents are behind
-`?all=1`. `GET /guide` serves
+`?all=1`. `send_transaction` (to, calldata, value, optional gas and note)
+signs any transaction with the operator key, waits for the receipt and
+returns its status, block, gas used and revert reason: how an agent takes
+part in governance for the owner (werule proposals and votes, ToolBond
+appeals). No approval step, since the operator is an accepted hot wallet;
+Activity records each one's target, selector, value and note. It is for
+external agents only; native agents and the owner surface are refused.
+`export_operator_key` stays off this API. `GET /guide` serves
 `atn/external_agents.md`, the whole manual. Refuses browser requests
 (`Origin`) and non-localhost `Host`. (It replaced the MCP proxy, deleted
 2026-11-02: an MCP server has to load when a session starts.)

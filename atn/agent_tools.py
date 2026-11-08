@@ -1315,6 +1315,31 @@ _TOOLS: list[ToolDefinition] = [
         },
     ),
     ToolDefinition(
+        name="send_transaction",
+        description=(
+            "Sign and send any transaction from this household's operator, "
+            "which an external agent acts as on chain: a werule proposal or "
+            "vote, ToolBond registerDaoProposal for an appeal, any contract "
+            "call. The daemon signs it with the operator key, waits for the "
+            "receipt and returns tx_hash, status (1 succeeded, 0 reverted), "
+            "block, gas_used and revert_reason when it reverted. Gas is paid "
+            "from the operator's balance. The owner sees every call in your "
+            "Activity: target, function selector, value and your note. For "
+            "external agents only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "The 0x address called (a contract, or a wallet for a plain transfer)."},
+                "data": {"type": "string", "description": "Calldata as 0x hex, built from the contract's ABI (default 0x: none)."},
+                "value": {"type": "integer", "description": "Native token sent, in wei (default 0; a decimal string also works)."},
+                "gas": {"type": "integer", "description": "Gas limit (default: estimated, plus 20%). With one given, a call that would revert is still sent."},
+                "note": {"type": "string", "description": "Why you send it, shown to the owner."},
+            },
+            "required": ["to"],
+        },
+    ),
+    ToolDefinition(
         name="compact_agent",
         description=(
             "Compact a target agent's conversation to free context (§15). "
@@ -2169,7 +2194,11 @@ async def _update_agent(runtime: Runtime, input: dict[str, Any]) -> dict[str, An
 # tool library (probe, use, review), authoring, publishing, adoption
 # proposals and its own registration. Money beyond its own stakes stays out.
 EXTERNAL_DEFAULT_TOOLS = ["unified_tools", "toolsmith", "publishing",
-                          "adoption", "identity"]
+                          "adoption", "identity", "transactions"]
+
+# What every external agent may call whatever its bundles: it acts as the
+# household's operator, and this is how it takes part in governance.
+_EXTERNAL_ALWAYS_GRANTED = frozenset({"send_transaction"})
 
 
 async def _create_external_agent(runtime: Runtime, input: dict[str, Any],
@@ -4588,6 +4617,10 @@ _TOOL_CATEGORIES: dict[str, set[str]] = {
     # agent knowing its own budget (get_usage / get_my_budget_status).
     "metering": {"metering_report"},
     "identity": {"register_on_chain"},
+    # Any transaction from the operator (Decision 2026-11-08). Granted to
+    # every external agent whatever its bundles (execute_tool); refused
+    # to native agents by the executor.
+    "transactions": {"send_transaction"},
     # Services rail (docs/services_market.md): its own case-by-case bundle.
     # find_services is read-only discovery; register_service authors a paid
     # remote API under the agent's key; pay_for_service + request_service are
@@ -5157,6 +5190,142 @@ async def _register_on_chain(runtime: Runtime, input: dict[str, Any]) -> dict[st
 
 
 # ---------------------------------------------------------------------------
+# Any transaction from the operator (Decision 2026-11-08)
+# ---------------------------------------------------------------------------
+
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def _revert_text(exc: Exception) -> str:
+    """What a node said about a revert: the message, plus the raw revert
+    data when the message doesn't carry it (custom errors)."""
+    text = str(exc) or type(exc).__name__
+    data = getattr(exc, "data", None)
+    if isinstance(data, (bytes, bytearray)):
+        data = "0x" + bytes(data).hex()
+    if isinstance(data, str) and data and data not in text:
+        text = f"{text} (data {data})"
+    return text[:500]
+
+
+def _send_operator_tx(w3: Any, key: str, to: str, data: str, value: int,
+                      gas: int | None, chain_id: int) -> dict[str, Any]:
+    """Sign and send one transaction, wait for its receipt. Runs off the
+    event loop. The nonce comes from the per-address nonce manager every
+    operator transaction shares (consensus, publishing, reviews)."""
+    from eth_account import Account
+    from nodes.common.tx_nonce import next_nonce
+    acct = Account.from_key(key)
+    call: dict[str, Any] = {"from": acct.address, "to": w3.to_checksum_address(to),
+                            "data": data, "value": int(value)}
+    if gas is None:
+        try:
+            gas = int(int(w3.eth.estimate_gas(call)) * 12 // 10)
+        except Exception as exc:  # noqa: BLE001 (a revert shows up here first)
+            return {"error": f"would revert, not sent: {_revert_text(exc)}"}
+    tx = {**call, "gas": int(gas), "gasPrice": int(w3.eth.gas_price),
+          "chainId": int(chain_id or w3.eth.chain_id),
+          "nonce": next_nonce(w3, acct.address)}
+    signed = acct.sign_transaction(tx)
+    raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+    tx_hash = w3.eth.send_raw_transaction(raw)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+    status = int(receipt["status"])
+    out: dict[str, Any] = {
+        "tx_hash": tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash),
+        "status": status, "block": int(receipt["blockNumber"]),
+        "gas_used": int(receipt["gasUsed"])}
+    if status != 1:
+        # Replay it at its block for the reason.
+        try:
+            w3.eth.call(call, int(receipt["blockNumber"]))
+            out["revert_reason"] = "reverted without a reason"
+        except Exception as exc:  # noqa: BLE001
+            out["revert_reason"] = _revert_text(exc)
+    return out
+
+
+async def _send_transaction(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
+    """An external agent's transaction, signed with the operator key. No
+    approval step: the owner accepted the operator as a hot wallet. Every
+    call lands in the session's Activity log (target, selector, value and
+    note: the result leads with them). Refused for native agents and the
+    owner surface: a native agent's loop has no free-form signer."""
+    caller_id = input.get("_caller_id")
+    if caller_id is None or is_owner_caller(caller_id):
+        return {"error": "send_transaction is for external agents (they act "
+                         "as the household's operator); the owner sends "
+                         "from their own wallet"}
+    defn = runtime.get_agent(caller_id)
+    if defn is None:
+        return {"error": f"Agent '{caller_id}' not found."}
+    from .provider_identity import is_external
+    if not is_external(defn) or not _is_operator_identity(runtime, defn.identity):
+        return {"error": "send_transaction is for external agents, which act "
+                         "as the household's operator; a native agent signs "
+                         "only through the daemon's own commands"}
+
+    to = str(input.get("to") or "").strip()
+    if not (to.startswith("0x") and len(to) == 42 and set(to[2:]) <= _HEX):
+        return {"error": "'to' must be a 0x address (40 hex digits)"}
+    data = str(input.get("data") or "0x").strip()
+    if not data.startswith("0x"):
+        data = "0x" + data
+    if len(data) % 2 or not set(data[2:]) <= _HEX:
+        return {"error": "'data' must be hex calldata (0x followed by whole bytes)"}
+    try:
+        raw_value = input.get("value", 0)
+        if isinstance(raw_value, bool):
+            raise ValueError
+        value = int(raw_value, 0) if isinstance(raw_value, str) else int(raw_value or 0)
+        if value < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return {"error": "'value' must be a non-negative integer (wei)"}
+    gas = input.get("gas")
+    if gas is not None:
+        try:
+            gas = int(gas)
+            if gas <= 0 or isinstance(input.get("gas"), bool):
+                raise ValueError
+        except (TypeError, ValueError):
+            return {"error": "'gas' must be a positive integer"}
+
+    selector = data[:10] if len(data) >= 10 else ""
+    shown: dict[str, Any] = {"to": to, "selector": selector, "value": str(value)}
+    if input.get("note"):
+        shown["note"] = str(input["note"])[:500]
+    what = f"send_transaction to {to}" + (f" ({selector})" if selector else "")
+
+    key = runtime.registry.get_agent_key(caller_id) or ""
+    if not key:
+        return {"error": f"{what}: no operator key on this daemon"}
+    w3 = getattr(runtime, "tx_web3", None)          # tests pre-set a stub
+    chain_id = 0
+    cfg = getattr(runtime._config, "rpb", None)
+    if w3 is None:
+        rpc_url = str(getattr(cfg, "rpc_url", "") or "")
+        if not rpc_url:
+            return {"error": f"{what}: no chain configured on this daemon "
+                             "(join a jurisdiction first)"}
+        from web3 import Web3
+        w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
+    chain_id = int(getattr(cfg, "chain_id", 0) or 0)
+    try:
+        res = await asyncio.to_thread(_send_operator_tx, w3, key, to, data,
+                                      value, gas, chain_id)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{what}: {_revert_text(exc)}"}
+    if res.get("error"):
+        return {"error": f"{what}: {res['error']}"}
+    from eth_account import Account
+    log.info("send_transaction by %s as the operator: to=%s selector=%s value=%s "
+             "status=%s tx=%s", caller_id, to, selector or "-", value,
+             res.get("status"), res.get("tx_hash"))
+    return {**shown, "from": Account.from_key(key).address, **res}
+
+
+# ---------------------------------------------------------------------------
 # Manual compaction (§15)
 # ---------------------------------------------------------------------------
 
@@ -5701,6 +5870,7 @@ _EXECUTORS: dict[str, ToolExecutor] = {
     "get_children_status": _get_children_status,
     # On-chain
     "register_on_chain": _register_on_chain,
+    "send_transaction": _send_transaction,
     # Services rail (docs/services_market.md)
     "find_services": _find_services,
     "register_service": _register_service,
@@ -5855,6 +6025,9 @@ async def execute_tool(
         # the gate binds the owner's choice, it does not invent one.
         defn = runtime.get_agent(caller_id)
         granted = resolve_tool_grant(list(defn.tools) if defn else [])
+        if name in _EXTERNAL_ALWAYS_GRANTED and defn is not None \
+                and getattr(defn, "provider", None) == "external":
+            granted = None
         if granted is not None and name not in granted:
             log.warning("blocked ungranted tool %r by caller %s", name, caller_id)
             return {"error": f"Tool '{name}' is not granted to agent "

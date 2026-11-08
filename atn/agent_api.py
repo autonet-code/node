@@ -51,10 +51,13 @@ _GROUPS: dict[str, tuple[str, ...]] = {
               "check_evidence"),
     "services": ("find_services", "request_service", "pay_for_service",
                  "close_service_channel", "register_service"),
+    # Any transaction from the operator the agent acts as: governance
+    # (werule proposals and votes, ToolBond appeals), any contract call.
+    "chain": ("send_transaction",),
     "agent": ("get_agent", "get_my_budget_status", "get_usage",
               "register_on_chain", "get_history"),
 }
-_GROUP_ORDER = ("tools", "services", "network", "agent", "other")
+_GROUP_ORDER = ("tools", "services", "chain", "network", "agent", "other")
 
 # Network reads answered by the daemon itself, not tool definitions.
 _NETWORK_READS: dict[str, dict[str, Any]] = {

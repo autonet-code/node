@@ -266,6 +266,8 @@ async def test():
         "get_latest_thought", "get_children_status",
         # Budgets & chain
         "get_my_budget_status", "register_on_chain", "metering_report",
+        # Any transaction from the operator, external agents only
+        "send_transaction",
         # Manual compaction (spec §15)
         "compact_agent",
         # Group threads (docs/group_chat.md)

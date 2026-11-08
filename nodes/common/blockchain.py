@@ -8,6 +8,8 @@ import logging
 from typing import Any, Dict, Optional
 from dataclasses import dataclass
 
+from .tx_nonce import next_nonce
+
 logger = logging.getLogger(__name__)
 
 
@@ -142,7 +144,7 @@ class BlockchainInterface:
             func = getattr(contract.functions, function_name)
             tx = func(*args).build_transaction({
                 'from': self.account.address,
-                'nonce': self.web3.eth.get_transaction_count(self.account.address),
+                'nonce': next_nonce(self.web3, self.account.address),
                 'gas': gas_limit,
                 'gasPrice': self.web3.eth.gas_price,
                 'chainId': self.chain_id,
