@@ -3779,6 +3779,16 @@ async def _pay_for_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     )
 
 
+def _channel_lock(runtime: Runtime, payer: str, provider: str) -> asyncio.Lock:
+    """The lock that serializes vouchers on one (payer, provider) channel."""
+    locks = runtime.__dict__.setdefault("_channel_locks", {})
+    key = (str(payer or "").lower(), str(provider or "").lower())
+    lock = locks.get(key)
+    if lock is None:
+        lock = locks[key] = asyncio.Lock()
+    return lock
+
+
 async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:
     """Consumer cross-daemon call: send a service_request with the payment
     proof to the provider (libp2p by its on-chain peer id, else its on-chain
@@ -3837,34 +3847,41 @@ async def _request_service(runtime: Runtime, input: dict[str, Any]) -> dict[str,
     if not ask.get("active"):
         return {"error": "that service is retired"}
     amount = int(ask.get("ask_amount") or 0)
-    voucher = None
-    book = getattr(runtime, "channel_book", None)
-    if amount > 0:
-        if not payer_key or not client_addr:
-            return {"error": "paying for a service needs an agent with its own "
-                             "key (call as an agent, not the owner)"}
-        smc = ServiceMarketClient(runtime._config.rpb)
-        if not smc.channel_available or book is None:
-            return {"error": "PaymentChannel not configured on this daemon"}
-        try:
-            deposit = int(input.get("deposit") or 0)
-        except (TypeError, ValueError):
-            return {"error": "deposit must be an integer (ATN base units)"}
-        voucher = await voucher_for(book, smc, payer_key, client_addr,
-                                    provider_address, amount, deposit)
-        if voucher.get("error"):
-            return voucher
-    reply = await service_client.request_service(
-        runtime._config.rpb, provider_address, service_id, payload,
-        request_id=service_client.new_request_id(),
-        client_address=client_addr, payer_key=payer_key, voucher=voucher)
-    if voucher is not None and reply.get("delivered"):
-        book.commit(client_addr, provider_address,
-                    voucher["channel_id"], voucher["cumulative_amount"])
-    if voucher is not None:
-        reply["paid"] = amount if reply.get("delivered") else 0
-        reply["channel_id"] = voucher["channel_id"]
-    return reply
+    # Every external session pays from the operator's one channel per
+    # provider (Decision 2026-11-08): one voucher at a time, or two
+    # requests would sign the same running total.
+    import contextlib
+    guard = (_channel_lock(runtime, client_addr, provider_address)
+             if amount > 0 else contextlib.nullcontext())
+    async with guard:
+        voucher = None
+        book = getattr(runtime, "channel_book", None)
+        if amount > 0:
+            if not payer_key or not client_addr:
+                return {"error": "paying for a service needs an agent with its own "
+                                 "key (call as an agent, not the owner)"}
+            smc = ServiceMarketClient(runtime._config.rpb)
+            if not smc.channel_available or book is None:
+                return {"error": "PaymentChannel not configured on this daemon"}
+            try:
+                deposit = int(input.get("deposit") or 0)
+            except (TypeError, ValueError):
+                return {"error": "deposit must be an integer (ATN base units)"}
+            voucher = await voucher_for(book, smc, payer_key, client_addr,
+                                        provider_address, amount, deposit)
+            if voucher.get("error"):
+                return voucher
+        reply = await service_client.request_service(
+            runtime._config.rpb, provider_address, service_id, payload,
+            request_id=service_client.new_request_id(),
+            client_address=client_addr, payer_key=payer_key, voucher=voucher)
+        if voucher is not None and reply.get("delivered"):
+            book.commit(client_addr, provider_address,
+                        voucher["channel_id"], voucher["cumulative_amount"])
+        if voucher is not None:
+            reply["paid"] = amount if reply.get("delivered") else 0
+            reply["channel_id"] = voucher["channel_id"]
+        return reply
 
 
 async def _close_service_channel(runtime: Runtime, input: dict[str, Any]) -> dict[str, Any]:

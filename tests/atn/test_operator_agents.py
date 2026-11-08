@@ -5,6 +5,8 @@ reviews merge into the operator's one batch per epoch.
 No chain: ToolBond and the review client are stubs throughout."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from atn.agent_tools import _create_agent, execute_tool
@@ -117,6 +119,57 @@ class TestReviews:
         (batch,) = store_for(rt).all()
         assert batch.agent == _operator_address(rt)
         assert [r.digest for r in batch.reviews] == [D1]
+
+
+# ---------------------------------------------------------------------------
+# Services: the household's sessions share the operator's channel
+# ---------------------------------------------------------------------------
+
+async def test_sessions_sign_one_voucher_at_a_time(tmp_path, monkeypatch):
+    """Two sessions paying the same provider at once use the operator's one
+    channel: each request's voucher carries its own running total."""
+    from atn import agent_tools, on_chain, service_client
+    from atn.service_channels import ChannelBook
+    from tests.atn.test_service_channels import FakeMarket
+
+    rt = _runtime(tmp_path)
+    for aid in ("cc-a", "cc-b"):
+        await _create_agent(rt, {"id": aid, "provider": "external",
+                                 "tools": ["services"]})
+    rt.channel_book = book = ChannelBook(tmp_path / "channels.json")
+    market = FakeMarket()
+
+    class Market(FakeMarket):
+        channel_available = True
+
+        def __init__(self, cfg):
+            self.__dict__ = market.__dict__
+
+    async def ask(cfg, provider, service_id):
+        return {"active": True, "ask_amount": 100}
+
+    sent = []
+
+    async def request(cfg, provider, service_id, payload, **kw):
+        sent.append(kw["voucher"]["cumulative_amount"])
+        await asyncio.sleep(0.01)          # the provider takes a moment
+        return {"delivered": True, "result": {}}
+
+    async def clear(runtime, address, what):
+        return None
+
+    monkeypatch.setattr(on_chain, "ServiceMarketClient", Market)
+    monkeypatch.setattr(service_client, "lookup_service_ask", ask)
+    monkeypatch.setattr(service_client, "request_service", request)
+    monkeypatch.setattr(agent_tools, "_sanctioned", clear)
+    provider = "0x" + "56" * 20
+    args = {"provider_address": provider, "service_id": "s", "payload": {}}
+    out = await asyncio.gather(
+        execute_tool("request_service", args, rt, caller_id="cc-a"),
+        execute_tool("request_service", args, rt, caller_id="cc-b"))
+    assert [o["paid"] for o in out] == [100, 100], out
+    assert sorted(sent) == [100, 200] and len(market.opened) == 1
+    assert book.get(_operator_address(rt), provider)["cumulative"] == 200
 
 
 def _bridge(rt):
