@@ -21,8 +21,6 @@ from nodes.common.federated_reconcile import (
     compute_tool_mint,
     federated_epoch_close,
 )
-from nodes.common.world_model_substrate.adapter import build_charter_world
-from nodes.common.world_model_substrate.aggregate import apply_events
 from nodes.common.library.charter import DEFAULT_CHARTER
 
 from tests.test_tool_mint import AUTHOR, DIGEST, EMBED_DIM, _batches, _registration_event
@@ -33,12 +31,6 @@ R1, R2, R3 = ("0x" + c * 20 for c in ("a1", "b2", "c3"))
 AXES = list(DEFAULT_CHARTER.ids)
 REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
 SHARES = {R1: 0.3, R2: 0.2, R3: 0.1, AUTHOR.lower(): 0.4}
-
-
-def _world():
-    world = build_charter_world(embedding_dim=EMBED_DIM)
-    apply_events(world, [_registration_event(1)], equilibrate_after=False)
-    return world
 
 
 def _rev(who: str, acc: Any = E18) -> Dict[str, Any]:
@@ -70,7 +62,7 @@ def _totals(out: Dict[str, Any]) -> Dict[str, float]:
 
 def _mint(rounds, *, state=None, gate=None, **kw):
     return compute_tool_mint(
-        _world(), [], registrations=kw.pop("regs", REGS),
+        [], registrations=kw.pop("regs", REGS),
         rep_shares=kw.pop("shares", SHARES), review_snapshot=_snap(rounds, **kw.pop("snap", {})),
         tool_rounds=state, mint_gate=gate, **kw)
 
@@ -91,7 +83,7 @@ class TestConclusion:
         assert again["node_agent"] == {}
 
     def test_attestations_count_for_nothing(self):
-        out = compute_tool_mint(_world(), [], registrations=REGS, rep_shares=SHARES)
+        out = compute_tool_mint([], registrations=REGS, rep_shares=SHARES)
         assert out["per_digest"] == {}
 
     def test_below_gate_carries_then_concludes(self):

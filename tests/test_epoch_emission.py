@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from nodes.common.world_model_substrate.reconcile import apply_emission_pool
+from nodes.common.federated_reconcile import apply_emission_pool
 
 
 def _result(agent_mint, node_mint=None):

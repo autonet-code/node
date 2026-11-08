@@ -11,7 +11,7 @@ from nodes.common.federated_reconcile import compute_tool_mint
 from nodes.common.tool_receipts import sign_receipt, verified_receipts
 from nodes.common.voice_state import tool_review_snapshot_from_logs
 from nodes.common.library.charter import DEFAULT_CHARTER
-from tests.test_staked_tool_close import _agent_totals, _world
+from tests.test_staked_tool_close import _agent_totals
 from tests.test_tool_mint import DIGEST, _receipt_event
 
 DOMAIN = "31337:0x" + "da" * 20
@@ -53,7 +53,7 @@ def _bonded(author=AUTHOR, stake=100, unbonding=False):
 
 
 def _mint(snapshot, **kw):
-    return compute_tool_mint(_world(), [], registrations=REGS, rep_shares=SHARES,
+    return compute_tool_mint([], registrations=REGS, rep_shares=SHARES,
                              review_snapshot=snapshot, **kw)
 
 
@@ -144,7 +144,7 @@ def test_a_tool_mints_only_once_it_breaks_through():
 
     def mint(gate):
         return _agent_totals(compute_tool_mint(
-            _world(), [], registrations=REGS, review_snapshot=_bonded(),
+            [], registrations=REGS, review_snapshot=_bonded(),
             rep_shares=shares, mint_gate=gate))
     assert mint(None).get(AUTHOR, 0) > 0
     # 2 reviewers with 2% of REP, 2 of 98 holders: passes 1% / 0.5%...

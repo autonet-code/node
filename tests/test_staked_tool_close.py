@@ -23,8 +23,6 @@ from nodes.common.federated_reconcile import (
     federated_epoch_close,
 )
 from nodes.common.voice_state import tool_review_snapshot_from_logs
-from nodes.common.world_model_substrate.adapter import build_charter_world
-from nodes.common.world_model_substrate.aggregate import apply_events
 from nodes.common.library.charter import DEFAULT_CHARTER
 from nodes.common.world_model_substrate.events import ToolUsed
 from nodes.common.world_model_substrate.tool_usage import tool_usage_from_events
@@ -32,7 +30,6 @@ from nodes.common.world_model_substrate.tool_usage import tool_usage_from_events
 from tests.test_tool_mint import (
     AUTHOR,
     DIGEST,
-    EMBED_DIM,
     _batches,
     _receipt_event,
     _registration_event,
@@ -47,13 +44,6 @@ E18 = 10 ** 18
 SUPPLY = 1000 * E18
 AXES = list(DEFAULT_CHARTER.ids)
 CI = AXES.index("correctness")
-
-
-def _world(*events):
-    world = build_charter_world(embedding_dim=EMBED_DIM)
-    apply_events(world, list(events) or [_registration_event(1)],
-                 equilibrate_after=False)
-    return world
 
 
 def _rev(who: str, stake: int, acc: Any = E18, axes=("correctness",), harm=False):
@@ -97,7 +87,7 @@ class TestRatingsArePositions:
                       "harm": {"sum": 400 * 25 * E18, "mass": 400 * E18}}}
 
     def test_head_mass_and_harm_from_the_snapshot(self):
-        out = compute_tool_mint(_world(), [], registrations=REGS,
+        out = compute_tool_mint([], registrations=REGS,
                                 review_snapshot={"supply": SUPPLY, "tools": self.TOOLS})
         pos = out["positions_next"][DIGEST]
         si = AXES.index("simplicity")
@@ -110,7 +100,7 @@ class TestRatingsArePositions:
         assert all(pos["head"][i] == 0.0 for i in range(len(AXES)) if i not in (CI, si))
 
     def test_unrated_tool_sits_at_zero_head_and_mass(self):
-        out = compute_tool_mint(_world(), [], registrations=REGS)
+        out = compute_tool_mint([], registrations=REGS)
         pos = out["positions_next"][DIGEST]
         assert pos == {"head": [0.0] * len(AXES), "mass": [0.0] * len(AXES),
                        "harm": 0.0, "harm_mass": 0.0}
@@ -120,12 +110,12 @@ class TestRatingsArePositions:
         the position: ToolBond is the single source of ratings."""
         ev = _receipt_event(1, "caller-1")
         ev["axes"] = {"correctness": 1.0}
-        out = compute_tool_mint(_world(), [ev], registrations=REGS,
+        out = compute_tool_mint([ev], registrations=REGS,
                                 rep_shares={"caller-1": 1.0})
         assert out["positions_next"][DIGEST]["head"][CI] == 0.0
 
     def test_no_credibility_or_review_book_in_the_output(self):
-        out = compute_tool_mint(_world(), _receipts(), registrations=REGS)
+        out = compute_tool_mint(_receipts(), registrations=REGS)
         assert "credibility_next" not in out and "tool_review_book_next" not in out
         kp = Keypair.generate()
         close = federated_epoch_close(canonical_order(
@@ -299,8 +289,7 @@ class TestSuccessorCarry:
                    "version_of": DIGEST},
         }
         return compute_tool_mint(
-            _world(), [], registrations=regs,
-            positions=copy.deepcopy(self.PRED_POS),
+            [], registrations=regs,
             review_snapshot={"supply": SUPPLY,
                              "tools": copy.deepcopy(tools or self.PRED_RATING)},
         )
@@ -351,12 +340,8 @@ class TestDeterminism:
         rep = {"c1": 0.2, "c2": 0.1, "c3": 0.05, "c4": 0.3}
 
         def run(evs, snapshot, pos, shares):
-            world = _world(
-                _registration_event(1, digest=DEP, author="dep-author", axis=2),
-                _registration_event(2, digest=DIGEST, deps=DEP, axis=4),
-            )
-            return compute_tool_mint(world, evs, registrations=regs,
-                                     review_snapshot=snapshot, positions=pos,
+            return compute_tool_mint(evs, registrations=regs,
+                                     review_snapshot=snapshot,
                                      rep_shares=shares)
 
         want = run(events, snap, positions, rep)

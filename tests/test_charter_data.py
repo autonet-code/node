@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import pytest
 
@@ -223,41 +223,21 @@ def test_llm_score_turn_sized_to_charter(seven_axis):
 
 DIGEST = "ab" * 32
 AUTHOR = "toolsmith"
-EMBED_DIM = 8
-
-
-def _registration(n_dims: int) -> Dict[str, Any]:
-    coords = [0.0] * (n_dims + EMBED_DIM)
-    coords[n_dims + 3] = 0.5
-    return {
-        "kind": "sub_claim_sprouted", "seq": 1, "author_agent": AUTHOR,
-        "tendency_id": "correctness", "parent_id": "solver_root",
-        "node_id": f"tm_{DIGEST[:12]}", "position": "pro",
-        "coords": coords, "polarity_axis": coords,
-        "content": "tool: does a thing", "author_post": True,
-        "artifact_digest": DIGEST, "observation_id": "tm_" + DIGEST[:16],
-        "manifest_meta": {"trust_class": "pinned", "author": AUTHOR},
-    }
 
 
 def test_ratings_under_custom_charter(seven_axis):
     """Positions follow the active charter's axes: a ToolBond rating on a
     custom axis lands in its slot, an axis outside the charter is dropped,
-    and a carried 6-length (v1) position is replaced by the 7-axis one."""
+    and the position has the 7-axis length."""
     from nodes.common.federated_reconcile import compute_tool_mint
-    from nodes.common.world_model_substrate.adapter import build_charter_world
-    from nodes.common.world_model_substrate.aggregate import apply_events
 
-    world = build_charter_world(embedding_dim=EMBED_DIM)
-    apply_events(world, [_registration(7)], equilibrate_after=False)
     regs = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
     snap = {"supply": 100, "tools": {DIGEST: {
         "axes": {"kindness": {"sum": 60 * 10, "mass": 10},
                  "correctness": {"sum": 80 * 20, "mass": 20},
                  "honesty": {"sum": 50, "mass": 1}},
         "harm": {"sum": 0, "mass": 0}}}}
-    out = compute_tool_mint(world, [], registrations=regs, review_snapshot=snap,
-                            positions={DIGEST: {"head": [0.1] * 6, "mass": [2.0] * 6}})
+    out = compute_tool_mint([], registrations=regs, review_snapshot=snap)
     pos = out["positions_next"][DIGEST]
     assert len(pos["head"]) == 7 and len(pos["mass"]) == 7
     k = seven_axis.axis_index["kindness"]

@@ -98,15 +98,13 @@ def _snap(sum_: int, mass: int, axis: str = "correctness") -> Dict[str, Any]:
 
 class TestPositionsFromRatings:
     def test_new_tool_enters_at_zero(self):
-        world = _world_with_registration()
-        out = compute_tool_mint(world, [], registrations=REGS)
+        out = compute_tool_mint([], registrations=REGS)
         pos = out["positions_next"][DIGEST]
         assert pos["head"] == [0.0] * N_DIMS
         assert pos["mass"] == [0.0] * N_DIMS
 
     def test_rating_sets_scored_axis_only(self):
-        world = _world_with_registration()
-        out = compute_tool_mint(world, [], registrations=REGS,
+        out = compute_tool_mint([], registrations=REGS,
                                 review_snapshot=_snap(80 * 300, 300))
         pos = out["positions_next"][DIGEST]
         # correctness is axis_index 4 (adapter CHARTER order).
@@ -117,17 +115,14 @@ class TestPositionsFromRatings:
                 assert pos["head"][i] == 0.0 and pos["mass"][i] == 0.0
 
     def test_gossip_review_axes_do_not_drift(self):
-        world = _world_with_registration()
         out = compute_tool_mint(
-            world, [_receipt(1, "caller-1", axes={"correctness": 0.8})],
+            [_receipt(1, "caller-1", axes={"correctness": 0.8})],
             registrations=REGS)
         assert out["positions_next"][DIGEST]["head"] == [0.0] * N_DIMS
 
     def test_carried_head_is_replaced_by_the_rating(self):
-        world = _world_with_registration()
-        carried = {DIGEST: {"head": [0.1] * N_DIMS, "mass": [5.0] * N_DIMS}}
-        out = compute_tool_mint(world, [_receipt(1, "caller-1")],
-                                registrations=REGS, positions=carried,
+        out = compute_tool_mint([_receipt(1, "caller-1")],
+                                registrations=REGS,
                                 review_snapshot=_snap(-40 * 10, 10))
         pos = out["positions_next"][DIGEST]
         assert pos["head"][4] == pytest.approx(-0.4)

@@ -2499,10 +2499,9 @@ class WorldService:
 
         result["score_agent_mint"] = result.pop("agent_mint", {})
         tool_result = compute_tool_mint(
-            self._world, events,
+            events,
             registrations=dict(self._tool_registrations),
             tool_rounds=dict(self._tool_rounds),
-            positions=dict(self._tool_positions),
         )
         self._tool_registrations = dict(tool_result["registrations_next"])
         self._tool_rounds = dict(tool_result.get("tool_rounds_next") or {})

@@ -21,8 +21,7 @@ from nodes.common.federated_reconcile import (
     compute_tool_mint,
     federated_epoch_close,
 )
-from nodes.common.world_model_substrate.adapter import N_DIMS, build_charter_world
-from nodes.common.world_model_substrate.aggregate import apply_events
+from nodes.common.world_model_substrate.adapter import N_DIMS
 from nodes.common.library.charter import DEFAULT_CHARTER
 
 EMBED_DIM = 1024
@@ -193,16 +192,11 @@ class TestToolMintClose:
 
 
 class TestComputeToolMint:
-    def _world(self):
-        world = build_charter_world(embedding_dim=EMBED_DIM)
-        apply_events(world, [_registration_event(1)], equilibrate_after=False)
-        return world
-
     REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
 
     def test_carried_registration_attributes(self):
         """A round concluding in a later epoch attributes through the carried map."""
-        out = compute_tool_mint(self._world(), [], registrations=self.REGS,
+        out = compute_tool_mint([], registrations=self.REGS,
                                 rep_shares=SHARES, review_snapshot=_snap())
         assert out["per_digest"][DIGEST]["author"] == AUTHOR
         assert out["per_digest"][DIGEST]["mint"] > 0
@@ -211,13 +205,12 @@ class TestComputeToolMint:
     def test_carried_registration_wins_over_reregistration(self):
         rereg = _registration_event(1)
         rereg["manifest_meta"] = {"trust_class": "pinned", "author": "mallory"}
-        out = compute_tool_mint(self._world(), [rereg], registrations=self.REGS,
+        out = compute_tool_mint([rereg], registrations=self.REGS,
                                 rep_shares=SHARES, review_snapshot=_snap())
         assert out["per_digest"][DIGEST]["author"] == AUTHOR
 
     def test_review_without_any_registration_mints_nothing(self):
-        world = build_charter_world(embedding_dim=EMBED_DIM)
-        out = compute_tool_mint(world, [], rep_shares=SHARES, review_snapshot=_snap())
+        out = compute_tool_mint([], rep_shares=SHARES, review_snapshot=_snap())
         assert out["per_digest"] == {}
         assert out["registrations_next"] == {}
 

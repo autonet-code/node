@@ -398,12 +398,10 @@ def _tool_rating(entry: Optional[Dict[str, Any]], axis_ids: List[str]) -> float:
 
 
 def compute_tool_mint(
-    world: World,
     events: List[Dict[str, Any]],
     *,
     registrations: Optional[Dict[str, Dict[str, str]]] = None,
     agent_owner_map: Optional[Dict[str, str]] = None,
-    positions: Optional[Dict[str, Dict[str, Any]]] = None,
     rep_shares: Optional[Dict[str, float]] = None,
     review_snapshot: Optional[Dict[str, Any]] = None,
     tool_rounds: Optional[Dict[str, Any]] = None,
@@ -442,7 +440,6 @@ def compute_tool_mint(
     can observe a household's private use.
     """
     from .library.tool_manifest import TRUST_PINNED
-    from .world_model_substrate.infer import _artifact_standing
 
     known_regs: Dict[str, Dict[str, str]] = dict(registrations or {})
     reg_events = [
@@ -456,7 +453,6 @@ def compute_tool_mint(
         if ev.get("sender"):
             meta.setdefault("sender", str(ev["sender"]))
         known_regs.setdefault(ev["artifact_digest"], meta)
-    by_digest = _artifact_standing(world)
 
     owner_map_all = _lower_map(agent_owner_map or {}, values=True)
     rep_map = _lower_map(rep_shares) if rep_shares is not None else None
@@ -593,10 +589,7 @@ def compute_tool_mint(
         t["concluded"] = True
         if weight <= 0.0:
             continue
-        nodes = by_digest.get(digest, [])
-        node_id = (sorted({n.id for n in nodes})[0] if nodes
-                   else f"tool:{digest}")
-        bucket = node_agent.setdefault(node_id, {})
+        bucket = node_agent.setdefault(digest, {})
 
         # Reviewers: their share whatever the verdict, by accuracy x decay.
         rev_w: Dict[str, float] = {}
@@ -641,7 +634,6 @@ def compute_tool_mint(
         if rest > 0:
             bucket[UNMINTED] = bucket.get(UNMINTED, 0.0) + rest
         per_digest[digest] = {
-            "node_id": node_id,
             "author": author,
             "trust_class": TRUST_PINNED,
             "weight": weight,
@@ -873,7 +865,6 @@ def federated_reconcile_epoch(
     # by debate is redistributed to the surviving contributors. Scaling
     # runs over sorted keys and is re-rounded, so determinism holds.
     if emission_pool is not None:
-        from .world_model_substrate.reconcile import apply_emission_pool
         result = apply_emission_pool(result, emission_pool)
         # On-chain conservation (2026-10-12): Substrate caps each epoch's
         # cumulative claimFor at the integer fee pool, so the
@@ -1131,10 +1122,9 @@ def federated_epoch_close(
         rep_shares = {h: w for h, w in rep_shares.items()
                       if str(h).lower() not in set(sanctioned)}
     tool_result = compute_tool_mint(
-        world, all_events,
+        all_events,
         registrations=tool_registrations,
         agent_owner_map=agent_owner_map,
-        positions=tool_positions,
         rep_shares=rep_shares,
         review_snapshot=review_snapshot,
         tool_rounds=tool_rounds,
@@ -1349,6 +1339,29 @@ def _author_for_batch(batch) -> str:
                 return str(author)
     # Fall back: derive a stable identity from the signer.
     return f"pk:{batch.sender_pubkey.hex()[:16]}"
+
+
+def apply_emission_pool(result: Dict[str, Any], emission_pool: float) -> Dict[str, Any]:
+    """Normalize a close's mints to shares of the epoch's pool.
+
+    Deterministic given (result, pool): values are scaled in sorted-key
+    order, so every daemon computes the same map. ``emission_pool`` must
+    come from canonical data (the burned fees read pinned to the previous
+    anchor, plus the carried pool), never from a daemon-local clock.
+    """
+    out = dict(result)
+    agent_mint = result.get("agent_mint", {}) or {}
+    node_mint = result.get("node_mint", {}) or {}
+    raw_total = sum(agent_mint[a] for a in sorted(agent_mint))
+    out["raw_mint_total"] = raw_total
+    out["emission_pool"] = float(emission_pool)
+    if raw_total <= 0:
+        return out
+    scale = float(emission_pool) / raw_total
+    out["agent_mint"] = {a: agent_mint[a] * scale for a in sorted(agent_mint)}
+    out["node_mint"] = {n: node_mint[n] * scale for n in sorted(node_mint)}
+    out["total_mint"] = sum(out["agent_mint"][a] for a in sorted(out["agent_mint"]))
+    return out
 
 
 def floor_mint_to_pool(

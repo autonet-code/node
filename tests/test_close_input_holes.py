@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from nodes.common.federated_reconcile import compute_tool_mint
 from tests.test_signed_receipts_and_bonds import R1, R2, _snap
-from tests.test_staked_tool_close import _world
 from tests.test_tool_mint import DIGEST
 
 AUTHOR = "0x" + "a0" * 20
@@ -16,7 +15,7 @@ REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
 
 
 def _weight(**kw):
-    out = compute_tool_mint(_world(), [], registrations=REGS,
+    out = compute_tool_mint([], registrations=REGS,
                             review_snapshot=_snap(), **kw)
     return (out["per_digest"].get(DIGEST) or {}).get("weight", 0.0)
 
