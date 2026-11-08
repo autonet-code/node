@@ -52,7 +52,9 @@ class ArtifactIndex:
     ):
         self.blob_store = blob_store
         self.dim = dim
-        self.embedder = embedder if embedder is not None else default_usefulness_embedder(dim=dim)
+        # None = the default embedder, resolved per call: it is the hashing
+        # embedder until the search model loads, then the model.
+        self.embedder = embedder
         self.index_path: Optional[Path] = Path(index_path) if index_path is not None else None
 
         # digest -> np.array(embedding); insertion order preserved (py3.7+).
@@ -187,7 +189,8 @@ class ArtifactIndex:
         return str(payload.get("text") or "")
 
     def _embed(self, text: str) -> np.ndarray:
-        return np.asarray(self.embedder(text), dtype=np.float64)
+        embedder = self.embedder or default_usefulness_embedder(dim=self.dim)
+        return np.asarray(embedder(text), dtype=np.float64)
 
     def _ensure_matrix(self) -> Tuple[np.ndarray, List[str]]:
         if self._matrix is None:
