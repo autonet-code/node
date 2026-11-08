@@ -245,6 +245,35 @@ async def test_review_due_counts_the_households_reviews(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_review_due_clears_when_the_batch_dir_mtime_stands_still(tmp_path):
+    """On exFAT a directory's mtime never moves when a file inside changes
+    (S0 2026-11-09: review_due never cleared on D:). Every write to the
+    batches or held reviews invalidates the cache whatever the filesystem."""
+    import os
+    from atn.runtime import review_batch
+    from atn.tool_store import ToolRecord
+
+    rt = _runtime(tmp_path)
+    await _create_agent(rt, {"id": "cc", "provider": "external"})
+    op = rt.get_agent("cc").identity.address
+    X, Y = "a" * 64, "b" * 64
+    for d, name in ((X, "word_count"), (Y, "csv_parse")):
+        rt.tool_store._records[d] = ToolRecord(digest=d, manifest={"name": name},
+                                               origin="adopted", local_author="cc")
+    batches = review_batch.store_for(rt)
+    batches.add(op, 1, ["correctness"],
+                review_batch.ReviewEntry(digest=X, axes={"correctness": 0.5}))
+    frozen = os.stat(batches._dir).st_mtime
+    assert _review_due(rt, "cc") == {Y: "csv_parse"}
+    # The next epoch's batch, and the directory's mtime pinned as exFAT
+    # leaves it.
+    batches.add(op, 2, ["correctness"],
+                review_batch.ReviewEntry(digest=Y, axes={"correctness": 0.5}))
+    os.utime(batches._dir, (frozen, frozen))
+    assert _review_due(rt, "cc") == {}
+
+
+@pytest.mark.asyncio
 async def test_external_agents_can_buy_services_by_default(tmp_path):
     """The operator pays (Decision 2026-11-08), so buying a service is on by
     default; selling one is a separate grant."""

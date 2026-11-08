@@ -366,7 +366,10 @@ def household_reviews(runtime: Any) -> dict[str, dict[str, Any]]:
     forward). External sessions share the operator's batch, so this is the
     household's view. Each value: ``axes``, ``harm``, ``state`` ("held" or
     the batch status, "pending" before commit) and ``epoch``. Cached until
-    the held reviews or the batches change."""
+    the held reviews or the batches change: every write to them bumps
+    ``review_batch.writes()`` (the directories' mtimes stay in the key for
+    anything written from outside, but alone they miss changes on exFAT and
+    within their timestamp resolution)."""
     from .runtime import review_batch
     try:
         batches = review_batch.store_for(runtime)
@@ -384,7 +387,7 @@ def household_reviews(runtime: Any) -> dict[str, dict[str, Any]]:
         except OSError:
             return 0.0
 
-    key = (mtime(batch_dir), mtime(held_dir))
+    key = (review_batch.writes(), mtime(batch_dir), mtime(held_dir))
     hit = runtime.__dict__.get("_household_reviews_cache")
     if hit is not None and hit[0] == key:
         return hit[1]

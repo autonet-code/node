@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -38,6 +39,25 @@ NO_HARM = 255            # uint8 sentinel: no harm score
 MAX_AXES = 16
 
 REVIEW_INPUT_TYPE = "(bytes32,bytes,uint8,uint256,bytes32)"
+
+# Counts every write to the batch store and the held reviews in this
+# process, so a cache of what they hold (tool_search.household_reviews,
+# behind review_due) knows when to read them again. A directory's mtime
+# can't tell: exFAT and FAT never update it when a file inside changes, and
+# on any filesystem two writes within its timestamp resolution look alike.
+_writes = 0
+_writes_lock = threading.Lock()
+
+
+def writes() -> int:
+    """How many batch or held-review writes this process has made."""
+    return _writes
+
+
+def _wrote() -> None:
+    global _writes
+    with _writes_lock:
+        _writes += 1
 
 
 def _fn(name: str, inputs: list, outputs: list = (), mutability: str = "nonpayable") -> dict[str, Any]:
@@ -242,6 +262,7 @@ class ReviewBatchStore:
         d = {**asdict(batch), "reviews": [asdict(r) for r in batch.reviews]}
         tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
         os.replace(tmp, p)
+        _wrote()
 
     def add(self, agent: str, epoch: int, axis_ids: list[str], entry: ReviewEntry) -> EpochBatch:
         """Queue a review for this epoch. A batch already committed is
@@ -509,6 +530,7 @@ def hold_reviews(runtime: Any, agent_id: str,
     tmp.write_text(json.dumps({"agent_id": agent_id, "reviews": held}),
                    encoding="utf-8")
     os.replace(tmp, path)
+    _wrote()
     return len(held)
 
 
@@ -526,6 +548,7 @@ async def flush_held_reviews(runtime: Any) -> int:
             continue
         if not isinstance(data, dict) or not data.get("reviews"):
             path.unlink(missing_ok=True)
+            _wrote()
             continue
         agent_id = str(data.get("agent_id") or "")
         defn = runtime.get_agent(agent_id) if agent_id else None
@@ -540,6 +563,7 @@ async def flush_held_reviews(runtime: Any) -> int:
         if out.get("epoch") is not None:
             queued += int(out.get("queued") or 0)
             path.unlink(missing_ok=True)
+            _wrote()
             log.info("submitted %d held review(s) of %s", out.get("queued"), agent_id)
     return queued
 
