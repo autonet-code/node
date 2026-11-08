@@ -251,3 +251,35 @@ async def test_register_on_chain_explains_the_owner_step(tmp_path):
     await _family(rt)
     out = await execute_tool("register_on_chain", {}, rt, caller_id="grandparent")
     assert "error" in out and "'agent_id'" not in out["error"]
+
+def test_snapshot_follows_gitignore(tmp_path):
+    root = _codebase(tmp_path / "a")
+    (root / ".gitignore").write_text(".env\nbuild/\n*.tmp\n!keep.tmp\n")
+    (root / ".env").write_text("SECRET=1")
+    (root / "build").mkdir()
+    (root / "build" / "out.py").write_text("x")
+    (root / "a.tmp").write_text("x")
+    (root / "keep.tmp").write_text("x")
+    (root / "pkg" / ".gitignore").write_text("local.py\n")
+    (root / "pkg" / "local.py").write_text("x")
+    files = tool_tree.list_files(root, ["*.log"])
+    assert ".env" not in files and "a.tmp" not in files
+    assert not any(f.startswith("build/") for f in files)
+    assert "pkg/local.py" not in files
+    assert "keep.tmp" in files and ".gitignore" in files
+
+
+def test_snapshot_follows_gitignore_above_the_tool(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".gitignore").write_text("*.env\ntools/greet/scratch/\n")
+    root = repo / "tools" / "greet"
+    root.mkdir(parents=True)
+    (root / "main.py").write_text("print('{}')")
+    (root / "prod.env").write_text("SECRET=1")
+    (root / "scratch").mkdir()
+    (root / "scratch" / "x.py").write_text("x")
+    (root / tool_tree.MANIFEST_FILE).write_text(json.dumps({
+        "name": "g", "description": "d", "input_schema": SCHEMA,
+        "entrypoint": "main.py"}))
+    assert tool_tree.list_files(root) == [tool_tree.MANIFEST_FILE, "main.py"]

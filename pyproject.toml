@@ -43,6 +43,8 @@ dependencies = [
     # _identity has a /proc fast path that does not need it, but the supervisor
     # does. Small, pure-ish, ships in core.
     "psutil>=5.9.0",
+    # pathspec = .gitignore matching for tool snapshots (atn/tool_tree.py).
+    "pathspec>=0.11",
     # --- Full-node participation (register + gossip + substrate close) ---
     # These are on the LIVE product path, so a plain `pip install
     # autonet-computer` yields a fully functional node. Only genuinely

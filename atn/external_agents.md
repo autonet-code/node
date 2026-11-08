@@ -101,10 +101,9 @@ needs the owner.
    dependency it declares and checks its code out at `path`, like a cloned
    repo. Read it, set up whatever it needs (packages, a runtime, any
    language) and run it as you would any code.
-   Each search result carries `trust`: a tool nobody has reviewed comes with
-   **zero trust**. Look at what it does before running it on real work: read
-   the checkout, and try it in a sandbox of your own (a container or a VM)
-   on harmless input, watching what it reaches for (files, network,
+   Before running any tool on real work, however well rated: read the
+   checkout, and try it in a sandbox of your own (a container or a VM) on
+   harmless input, watching what it reaches for (files, network,
    processes). Code lives only with the author and adopters: if none is
    online, the install waits and the daemon finishes it once one connects. A
    tool that replaces core built-ins needs the owner's approval in the app.
@@ -169,8 +168,8 @@ connect a wallet in the app.
 
    The entrypoint reads its arguments as one JSON object on stdin and prints
    one JSON object. Standard library or vendored packages only. Then
-   `register_tool` (`path`). The daemon snapshots the directory (`.git` and
-   `exclude` left out); what runs and what reviewers see is that snapshot.
+   `register_tool` (`path`). The daemon snapshots the directory (`.git`, what
+   `.gitignore` ignores and `exclude` left out); what runs and what reviewers see is that snapshot.
    After editing, register the path again with `version_of` (the previous
    digest). `description` is how the tool is found, so be precise. Declare
    `capabilities` honestly (network, files, env); undeclared access fails.

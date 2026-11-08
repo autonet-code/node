@@ -76,26 +76,94 @@ def _excluded(rel: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(rel, p) for p in patterns)
 
 
+GITIGNORE_FILE = ".gitignore"
+
+
+def _gitignore_spec(path: Path):
+    """The patterns of the ``.gitignore`` at ``path``, or None."""
+    if not path.is_file():
+        return None
+    import pathspec
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    return pathspec.GitIgnoreSpec.from_lines(lines)
+
+
+def _outer_gitignores(root: Path) -> list[tuple[str, Any]]:
+    """The ``.gitignore`` files above ``root`` that git would apply to it:
+    those between the work tree's top (the nearest ancestor holding
+    ``.git``) and ``root``'s parent, top first, each with ``root``'s path
+    relative to it. None when ``root`` is not inside a git work tree."""
+    if (root / ".git").exists():
+        return []
+    chain = []
+    for anc in root.parents:
+        chain.append(anc)
+        if (anc / ".git").exists():
+            break
+    else:
+        return []
+    out = []
+    for anc in reversed(chain):
+        spec = _gitignore_spec(anc / GITIGNORE_FILE)
+        if spec is not None:
+            out.append((root.relative_to(anc).as_posix(), spec))
+    return out
+
+
+def _git_ignored(rel: str, is_dir: bool, specs: list[tuple[str, Any]]) -> bool:
+    """Whether git would ignore ``rel`` (relative to the tool's root) under
+    ``specs``, (base, spec) pairs outermost first. A base is the directory
+    of a ``.gitignore`` inside the root, or, marked ``@``, the root's path
+    relative to a ``.gitignore`` above it. A deeper file's matching pattern
+    overrides a shallower one's, and a later pattern overrides an earlier
+    one, as in git."""
+    verdict = None
+    for base, spec in specs:
+        if base.startswith("@"):            # an outer file: prefix the path
+            path = f"{base[1:]}/{rel}" if base[1:] else rel
+        elif base:
+            if not rel.startswith(base + "/"):
+                continue
+            path = rel[len(base) + 1:]
+        else:
+            path = rel
+        res = spec.check_file(path + "/" if is_dir else path)
+        if res.include is not None:
+            verdict = res.include
+    return bool(verdict)
+
+
 def list_files(root: Path, exclude: list[str] | None = None, *,
                strict: bool = False) -> list[str]:
     """Relative paths (forward slashes, sorted) of the files a snapshot
-    holds: everything under ``root`` except ``.git``, caches and the
-    manifest's ``exclude`` globs. Symlinks are refused. ``strict`` excludes
-    nothing (checking an extracted snapshot: any extra file fails it)."""
+    holds: everything under ``root`` except ``.git``, caches, what the
+    ``.gitignore`` files leave out (those inside ``root``, and those above
+    it up to the top of its git work tree) and the manifest's ``exclude``
+    globs. Symlinks are refused. ``strict`` excludes nothing (checking an
+    extracted snapshot: any extra file fails it)."""
     root = Path(root)
     patterns = () if strict else (
         _ALWAYS_EXCLUDED + tuple(str(p) for p in (exclude or [])))
+    specs: list[tuple[str, Any]] = [] if strict else [
+        ("@" + base, spec) for base, spec in _outer_gitignores(root.resolve())]
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         rel_dir = "" if rel_dir == "." else rel_dir
+        if not strict:
+            spec = _gitignore_spec(Path(dirpath) / GITIGNORE_FILE)
+            if spec is not None:
+                specs.append((rel_dir, spec))
         keep = []
         for d in sorted(dirnames):
             rel = f"{rel_dir}/{d}" if rel_dir else d
             full = Path(dirpath) / d
             if full.is_symlink():
                 raise TreeError(f"symlinks are not allowed in a tool: {rel}")
-            if not _excluded(rel, patterns):
+            if not _excluded(rel, patterns) and not _git_ignored(rel, True, specs):
                 keep.append(d)
         dirnames[:] = keep
         for f in filenames:
@@ -103,7 +171,7 @@ def list_files(root: Path, exclude: list[str] | None = None, *,
             full = Path(dirpath) / f
             if full.is_symlink():
                 raise TreeError(f"symlinks are not allowed in a tool: {rel}")
-            if not _excluded(rel, patterns):
+            if not _excluded(rel, patterns) and not _git_ignored(rel, False, specs):
                 out.append(rel)
     out.sort()
     if len(out) > MAX_FILES:
