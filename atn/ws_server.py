@@ -3348,10 +3348,17 @@ class WebSocketBridge:
                 _scale = 1_000_000.0  # chain units are ATN x 1e6
                 local_names: dict[str, str] = {}
                 try:
+                    reg = self.runtime.registry
                     for defn, _status in self.runtime.list_agents():
                         ident = getattr(defn, "identity", None)
                         addr = (getattr(ident, "address", "") or "").lower()
-                        if addr:
+                        if not addr:
+                            continue
+                        if reg.is_operator_identity(ident):
+                            # External sessions share the operator's address
+                            # (Decision 2026-11-08): one row, named for it.
+                            local_names[addr] = "Operator"
+                        elif addr not in local_names:
                             local_names[addr] = (
                                 getattr(defn, "name", "") or defn.id)
                 except Exception:
@@ -3632,9 +3639,23 @@ class WebSocketBridge:
                 # daemon-held address — no special-case for the root
                 # agent or the connected wallet.
                 local_meta = {}
-                for defn in self.runtime.registry._agents.values():
+                reg = self.runtime.registry
+                sessions: list[str] = []
+                for defn in reg._agents.values():
                     if defn.identity and defn.identity.address:
                         addr = defn.identity.address.lower()
+                        if reg.is_operator_identity(defn.identity):
+                            # External sessions share the operator's address
+                            # (Decision 2026-11-08): one row, named for it.
+                            sessions.append(defn.name or defn.id)
+                            local_meta[addr] = {
+                                "display_name": "Operator",
+                                "display_description": "acts for: " + ", ".join(sessions),
+                                "agent_type": "operator",
+                                "model": "",
+                                "is_online": True,
+                            }
+                            continue
                         local_meta[addr] = {
                             "display_name": defn.name,
                             "display_description": defn.description,
