@@ -52,9 +52,14 @@ Run:
     python scripts/s0_local_run.py                 # full run
     S0_MINUTES=20 python scripts/s0_local_run.py   # shorter activity phase
 
+The households in S0_MODEL_FROM_PEERS (default h4) get neither that
+directory nor Hugging Face: their model comes from the others, found
+through DHT provider records. The run logs each daemon's connections
+(direct or relayed, per peer) after onboarding and at the end.
+
 Env: S0_DIR (default D:/autonet_s0), S0_MINUTES (activity phase, default
 60), S0_KEEP=1 leaves everything running at the end (Ctrl+C to stop),
-S0_MODEL_DIR (the shared search model files),
+S0_MODEL_DIR (the shared search model files), S0_MODEL_FROM_PEERS,
 TRUSTLESS_CONTRACTS_DIR (default C:/code/dao/trustless-contracts).
 """
 from __future__ import annotations
@@ -82,6 +87,10 @@ KEEP = os.environ.get("S0_KEEP", "") == "1"
 # One copy of the search model for every daemon (atn/search_model.py reads
 # ATN_MODEL_DIR first): without it each daemon downloads 90 MB itself.
 MODEL_DIR = Path(os.environ.get("S0_MODEL_DIR") or (S0_DIR / "models"))
+# Households that get the search model from peers only (no ATN_MODEL_DIR,
+# Hugging Face unreachable): comma-separated names, "" for none.
+MODEL_FROM_PEERS = {n.strip() for n in os.environ.get("S0_MODEL_FROM_PEERS", "h4").split(",")
+                    if n.strip()}
 
 RPC_PORT = 8545
 # S2 VMs point this at the hub chain (https://rpc.autonet.computer/<token>).
@@ -355,6 +364,12 @@ class Household:
         env["AUTONET_P2P_PORT"] = str(self.p2p_port)          # WebSocket
         env["AUTONET_P2P_TCP_PORT"] = str(self.p2p_port + 100)  # TCP
         env["AUTONET_P2P_HOST"] = "127.0.0.1"
+        if self.name in MODEL_FROM_PEERS:
+            # No shared copy and Hugging Face unreachable: the search model
+            # can only come from the households that hold it, found through
+            # their DHT provider records.
+            env.pop("ATN_MODEL_DIR", None)
+            env["HF_ENDPOINT"] = "http://127.0.0.1:9"
         # Not ATN_DISABLE_PROVIDER_AUTODETECT: that test gate also stops the
         # review driver, so no review would ever reach ToolBond.
         return env
@@ -1141,6 +1156,37 @@ async def drain(act: Activity, cap_s: float = 900.0) -> None:
         f"{'concluded' if LATE_TOOL[0] in act.concluded else 'not concluded'}")
 
 
+async def report_p2p(households: List["Household"], relay_peer: str, when: str) -> bool:
+    """Each daemon's libp2p connections (autonet_status "p2p"), by peer
+    name: direct or relayed. True when every daemon has a direct connection
+    to every other daemon."""
+    st: Dict[str, Dict[str, Any]] = {}
+    for h in households:
+        try:
+            res = await h.client.ok({"type": "autonet_status"})
+        except Exception as exc:  # noqa: BLE001
+            res = {"error": repr(exc)}
+        st[h.name] = res.get("p2p") or {}
+    names = {p["peer_id"]: n for n, p in st.items() if p.get("peer_id")}
+    names[relay_peer] = "relay"
+    mesh = True
+    for h in households:
+        p = st[h.name]
+        conns = p.get("connections") or {}
+        links = ", ".join(f"{names.get(pid, pid[:12])}={'+'.join(sorted(set(k)))}"
+                          for pid, k in sorted(conns.items(), key=lambda kv: names.get(kv[0], kv[0])))
+        log(f"P2P {when} {h.name} {str(p.get('peer_id'))[:16]} [{p.get('transport')}, "
+            f"dht {p.get('dht_mode')}, reservations {len(p.get('reservations') or [])}]: "
+            f"{links or 'no connections'}")
+        for o in households:
+            if o is h:
+                continue
+            if "direct" not in conns.get(st[o.name].get("peer_id", ""), []):
+                mesh = False
+    log(f"P2P {when}: every daemon directly connected to every other: {mesh}")
+    return mesh
+
+
 # ---------------------------------------------------------------------------
 # Collector
 # ---------------------------------------------------------------------------
@@ -1374,6 +1420,7 @@ async def amain() -> int:
                 raise
 
         log("all households onboarded")
+        await report_p2p(households, peer, "after onboarding")
 
         # 6. Work, watched by the collector.
         stop = asyncio.Event()
@@ -1417,6 +1464,7 @@ async def amain() -> int:
         act.report_verdicts()
         act.report_batches()
         act.report_shared()
+        await report_p2p(households, peer, "at the end")
         stop.set()
         await col
         if KEEP:
