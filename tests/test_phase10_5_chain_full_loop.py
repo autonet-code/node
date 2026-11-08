@@ -25,6 +25,7 @@ What's validated:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -50,13 +51,14 @@ from nodes.common.chain_submission_driver import (
 from nodes.common.epoch_anchorer import EpochAnchorer, EpochAnchorerConfig
 from nodes.common.event_gossip import EventBatch, Keypair
 from nodes.common.federated_close_driver import FederatedCloseResult
-from nodes.common.federated_reconcile import federated_epoch_close
 from nodes.common.mint_merkle import scale_mint
 from tests.substrate_chain_helpers import (
     account_key,
     deploy_substrate,
     register_bound,
+    reviewed_close,
     seed_pool,
+    tool_registration_batch,
 )
 
 
@@ -107,62 +109,13 @@ def chain():
     }
 
 
-def _make_chain(
-    rpb: str, kp: Keypair, agent_id: str, charter_axis: int, n: int = 2,
-) -> List[EventBatch]:
-    """v3 mint fixture (mint = tool usage only): each agent authors a
-    pinned tool (digest derived from the agent id), vetted by a
-    distinct fleet and used by third-party attesting callers.
-    Observation events alone no longer mint."""
-    import hashlib
-
+def _make_chain(rpb: str, kp: Keypair, agent_id: str) -> List[EventBatch]:
+    """Each agent authors a pinned tool (digest derived from the agent
+    id), its registration riding the agent's keypair; ``reviewed_close``
+    concludes its review round so the author mints (Decision 2026-11-07)."""
     digest = hashlib.sha256(f"tool-{agent_id}".encode()).hexdigest()
-    coords = [0.0] * (6 + 1024)
-    coords[4] = 0.8
-    coords[6 + (charter_axis % 1024)] = 0.5
-    reg = {
-        "kind": "tool_registered",
-        "seq": 1,
-        "author_agent": agent_id,
-        "artifact_digest": digest,
-        "manifest_meta": {"trust_class": "pinned", "author": agent_id},
-    }
-
-    def _vet(vetter):
-        return {
-            "kind": "tool_used", "seq": 1, "author_agent": vetter,
-            "manifest_digest": digest, "tool_author": agent_id,
-            "receipt_digest": hashlib.sha256(
-                f"vet-{agent_id}-{vetter}".encode()).hexdigest(),
-            "ok": True, "fee_atn": 0.0, "vet": True,
-        }
-
-    def _receipt(caller):
-        return {
-            "kind": "tool_used", "seq": 1, "author_agent": caller,
-            "manifest_digest": digest, "tool_author": agent_id,
-            "receipt_digest": hashlib.sha256(
-                f"use-{agent_id}-{caller}".encode()).hexdigest(),
-            "ok": True, "fee_atn": 0.0, "attested": True, "score": 0.8,
-        }
-
-    events = [reg, _vet("vetter-1"), _vet("vetter-2"),
-              _receipt("caller-1"), _receipt("caller-2")]
-    # Registration rides this agent's keypair; every vet/receipt gets
-    # its own wire identity (the wire-level dedup would otherwise zero
-    # the mint).
-    chain = [EventBatch(
-        rpb_address=rpb, sender_pubkey=kp.public_key, batch_seq=1,
-        events=[events[0]], prev_batch_hash=b"",
-        timestamp=1_700_000_000.0,
-    )]
-    for ev in events[1:]:
-        chain.append(EventBatch(
-            rpb_address=rpb, sender_pubkey=Keypair.generate().public_key,
-            batch_seq=1, events=[ev], prev_batch_hash=b"",
-            timestamp=1_700_000_000.0,
-        ))
-    return chain
+    return [tool_registration_batch(rpb, agent_id, digest,
+                                    sender=kp.public_key)]
 
 
 def _build_federated_close_result(
@@ -174,13 +127,10 @@ def _build_federated_close_result(
     """Build a real federated close result + the canonical sender list."""
     senders = [Keypair.generate() for _ in agent_addrs]
     batches: List[EventBatch] = []
-    # Assign each agent a different charter axis so they create
-    # distinct contested regions (otherwise reconcile attributes
-    # the contested node to the latest writer only).
-    for axis_idx, (kp, aid) in enumerate(zip(senders, agent_addrs)):
-        batches.extend(_make_chain(rpb, kp, aid, charter_axis=axis_idx, n=2))
+    for kp, aid in zip(senders, agent_addrs):
+        batches.extend(_make_chain(rpb, kp, aid))
     canonical = canonical_order(batches)
-    close_result = federated_epoch_close(canonical)
+    close_result = reviewed_close(canonical)
     close_result["epoch_id"] = epoch_id
     sender_pubkeys = [s.public_key for s in senders]
     fed = FederatedCloseResult(
@@ -211,14 +161,12 @@ def test_winner_drives_anchor_and_each_agent_mint_lands(chain):
         is_winner=True,
     )
     payload_mint = fed.close_result["authoritative_payload"]["agent_mint"]
-    # Federated close may produce mint for only some of the agents
-    # given how few synthetic events we built; we only assert the
-    # ones with positive mint land correctly on chain.
-    # Schema 6: claimants keyed lowercase (no owner map => each agent is
-    # its own household).
+    # Every agent authored a tool whose review round concluded, so every
+    # agent mints. Claimants keyed lowercase (no owner map => each agent
+    # is its own household).
     minting_addrs = [a for a in agent_addrs
                      if payload_mint.get(a.lower(), 0.0) > 0]
-    assert minting_addrs, f"no agent got positive mint: {payload_mint}"
+    assert minting_addrs == agent_addrs, f"mint map: {payload_mint}"
 
     # Build the chain submission driver wired to eth_tester.
     # Use the existing _build_anchorer escape-hatch by passing an
