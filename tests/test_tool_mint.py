@@ -91,16 +91,31 @@ AXES = list(DEFAULT_CHARTER.ids)
 SHARES = {R1: 0.3, R2: 0.2}
 
 
+def tool_cells(*, correctness: float = 1.0, simplicity: float = 1.0,
+               novelty: float = 1.0, malware: float = 0.0, value: float = 1.0,
+               mass: int = E18, axes: Any = None) -> Dict[str, Any]:
+    """A tool's (or round's) review cells in the snapshot shape: every
+    fixed field and every charter axis at the given mean, ``mass`` REP
+    behind each (Decision 2026-11-09). ``malware`` is the yes share."""
+    def cell(v: float) -> Dict[str, int]:
+        return {"sum": int(round(v * 100)) * mass, "mass": mass}
+    return {"fields": {"correctness": cell(correctness),
+                       "simplicity": cell(simplicity),
+                       "novelty": cell(novelty), "malware": cell(malware)},
+            "axes": {a: cell(value) for a in (AXES if axes is None else axes)}}
+
+
+def review(who: str, acc: Any = E18) -> Dict[str, Any]:
+    return {"reviewer": who, "accuracy": acc}
+
+
 def _snap(digest: str = DIGEST, *, reviewers=(R1, R2)) -> Dict[str, Any]:
-    """One concluding round for ``digest`` at rating 1.0."""
-    revs = [{"reviewer": r, "stake": 0, "accuracy": E18,
-             "axes": ["correctness"], "harm": False} for r in reviewers]
+    """One concluding round for ``digest``, every field rated at the top."""
     return {
         "supply": 1000 * E18, "reviewer_share_bps": 4000,
-        "tools": {digest: {"axes": {a: {"sum": 100 * E18, "mass": E18} for a in AXES},
-                           "harm": {"sum": 0, "mass": 0}}},
+        "tools": {digest: tool_cells()},
         "rounds": {digest: [{"epoch": 1, "supply": 1000 * E18,
-                             "prior_mass": {}, "reviews": revs}]},
+                             "reviews": [review(r) for r in reviewers]}]},
     }
 
 
@@ -199,29 +214,37 @@ class TestComputeToolMint:
 
 
 class TestCompositionFanOut:
-    """Composition shares over the declared-dep DAG
-    (docs/tool_substrate.md — Composition rule 3)."""
+    """Composition shares over the declared-dep DAG (Decision 2026-11-09):
+    each tool keeps its novelty N, its dependencies split 1 - N."""
 
     def test_shares_split_and_recursion(self):
         from nodes.common.federated_reconcile import _composition_shares
         deps_of = {"root": ["d1", "d2"], "d1": ["d3"], "d2": [], "d3": []}
-        shares = _composition_shares("root", deps_of)
-        assert shares["root"] == pytest.approx(0.7)
-        assert shares["d2"] == pytest.approx(0.15)
-        assert shares["d1"] == pytest.approx(0.15 * 0.7)
-        assert shares["d3"] == pytest.approx(0.15 * 0.3)
+        own = {"root": 0.6, "d1": 0.25}
+        shares = _composition_shares("root", deps_of, lambda d: own.get(d, 0.0))
+        assert shares["root"] == pytest.approx(0.6)
+        assert shares["d2"] == pytest.approx(0.2)            # a leaf keeps all
+        assert shares["d1"] == pytest.approx(0.2 * 0.25)
+        assert shares["d3"] == pytest.approx(0.2 * 0.75)
         assert sum(shares.values()) == pytest.approx(1.0)
+
+    def test_root_without_dependencies_keeps_its_novelty(self):
+        from nodes.common.federated_reconcile import _composition_shares
+        shares = _composition_shares("root", {"root": []}, lambda d: 0.3)
+        assert shares == {"root": pytest.approx(0.3)}
 
     def test_cycle_and_missing_dep_forfeit(self):
         from nodes.common.federated_reconcile import _composition_shares
         # Cycle: d1 declares root back — that share is forfeited.
-        shares = _composition_shares("root", {"root": ["d1"], "d1": ["root"]})
+        shares = _composition_shares("root", {"root": ["d1"], "d1": ["root"]},
+                                     lambda d: 0.7)
         assert shares["root"] == pytest.approx(0.7)
         assert shares["d1"] == pytest.approx(0.3 * 0.7)
         assert sum(shares.values()) < 1.0
         # Missing dep (declared, never registered): forfeits, never
         # redistributes to siblings.
-        shares = _composition_shares("root", {"root": ["dx", "d2"], "d2": []})
+        shares = _composition_shares("root", {"root": ["dx", "d2"], "d2": []},
+                                     lambda d: 0.7)
         assert shares["root"] == pytest.approx(0.7)
         assert shares["d2"] == pytest.approx(0.15)
         assert "dx" not in shares
@@ -277,7 +300,7 @@ class TestDriverCarryOver:
 #   DELETED: R4 supply-pegged beta cap, R6 rep/ATN split (mint is money only)
 #   DELETED 2026-10-17 (docs/multi_jurisdiction.md decision 10): R5
 #             reversal-aware credibility and gossip review drift; ratings
-#             come from ToolBond. rep_shares weighs own_share only.
+#             come from ToolBond.
 # ---------------------------------------------------------------------------
 
 

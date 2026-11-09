@@ -1,8 +1,8 @@
-"""Staked reviews at the federated close (docs/multi_jurisdiction.md
-decision 10): positions are the ToolBond ratings and successor rating
-carry. (The mint paid from concluded rounds is in test_review_mint.py.) Plus the pure ToolBond log fold that
-builds the pinned review snapshot, and determinism of all of it under input
-reordering.
+"""Reviews at the federated close: the carried ratings are ToolBond's plain
+means (Decision 2026-11-09) with successor rating carry. (The mint paid from
+concluded rounds is in test_review_mint.py.) Plus the pure ToolBond log fold
+that builds the pinned review snapshot, and determinism of all of it under
+input reordering.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ from tests.test_tool_mint import (
     _batches,
     _receipt_event,
     _registration_event,
+    review,
+    tool_cells,
 )
 
 DEP = "cc" * 32
@@ -44,18 +46,15 @@ AXES = list(DEFAULT_CHARTER.ids)
 CI = AXES.index("correctness")
 
 
-def _rev(who: str, stake: int, acc: Any = E18, axes=("correctness",), harm=False):
-    return {"reviewer": who, "stake": stake, "accuracy": acc,
-            "axes": list(axes), "harm": harm}
+def _rev(who: str, acc: Any = E18) -> Dict[str, Any]:
+    return review(who, acc)
 
 
 def _snapshot(reviews: List[Dict[str, Any]], *, digest: str = DIGEST,
-              bps: Any = 4000, prior: Any = None,
-              tools: Any = None) -> Dict[str, Any]:
+              bps: Any = 4000, tools: Any = None) -> Dict[str, Any]:
     snap: Dict[str, Any] = {
         "supply": SUPPLY, "tools": tools or {},
-        "rounds": {digest: [{"epoch": 1, "supply": SUPPLY,
-                             "prior_mass": prior or {}, "reviews": reviews}]},
+        "rounds": {digest: [{"epoch": 1, "supply": SUPPLY, "reviews": reviews}]},
     }
     if bps is not None:
         snap["reviewer_share_bps"] = bps
@@ -75,42 +74,39 @@ def _receipts(n: int = 2) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Positions are the ToolBond ratings
+# 2. The carried ratings are the ToolBond means
 # ---------------------------------------------------------------------------
 
 
-class TestRatingsArePositions:
-    TOOLS = {DIGEST: {"axes": {"correctness": {"sum": 300 * 90 * E18, "mass": 300 * E18},
-                               "simplicity": {"sum": -100 * 20 * E18, "mass": 100 * E18}},
-                      "harm": {"sum": 400 * 25 * E18, "mass": 400 * E18}}}
+class TestRatings:
+    TOOLS = {DIGEST: tool_cells(correctness=0.9, simplicity=0.2, novelty=0.4,
+                                malware=0.25, value=-0.2, mass=300 * E18)}
 
-    def test_head_mass_and_harm_from_the_snapshot(self):
+    def test_means_and_mass_from_the_snapshot(self):
         out = compute_tool_mint([], registrations=REGS,
                                 review_snapshot={"supply": SUPPLY, "tools": self.TOOLS})
-        pos = out["positions_next"][DIGEST]
-        si = AXES.index("simplicity")
-        assert pos["head"][CI] == pytest.approx(0.9)
-        assert pos["head"][si] == pytest.approx(-0.2)
-        assert pos["mass"][CI] == pytest.approx(0.3)
-        assert pos["mass"][si] == pytest.approx(0.1)
-        assert pos["harm"] == pytest.approx(0.25)
-        assert pos["harm_mass"] == pytest.approx(0.4)
-        assert all(pos["head"][i] == 0.0 for i in range(len(AXES)) if i not in (CI, si))
+        r = out["ratings_next"][DIGEST]
+        assert r["correctness"] == pytest.approx(0.9)
+        assert r["simplicity"] == pytest.approx(0.2)
+        assert r["novelty"] == pytest.approx(0.4)
+        assert r["malware"] == pytest.approx(0.25)
+        assert r["value"] == pytest.approx(-0.2)
+        assert r["axes"][AXES[0]] == pytest.approx(-0.2)
+        assert r["mass"] == pytest.approx(0.3)
 
-    def test_unrated_tool_sits_at_zero_head_and_mass(self):
+    def test_unrated_tool_has_no_means(self):
         out = compute_tool_mint([], registrations=REGS)
-        pos = out["positions_next"][DIGEST]
-        assert pos == {"head": [0.0] * len(AXES), "mass": [0.0] * len(AXES),
-                       "harm": 0.0, "harm_mass": 0.0}
+        r = out["ratings_next"][DIGEST]
+        assert r["correctness"] is None and r["axes"] == {} and r["mass"] == 0.0
 
     def test_gossip_review_axes_move_nothing(self):
-        """Axis scores on a tool_used event (an old daemon) no longer drift
-        the position: ToolBond is the single source of ratings."""
+        """Axis scores on a tool_used event (an old daemon) rate nothing:
+        ToolBond is the single source of ratings."""
         ev = _receipt_event(1, "caller-1")
-        ev["axes"] = {"correctness": 1.0}
+        ev["axes"] = {AXES[0]: 1.0}
         out = compute_tool_mint([ev], registrations=REGS,
                                 rep_shares={"caller-1": 1.0})
-        assert out["positions_next"][DIGEST]["head"][CI] == 0.0
+        assert out["ratings_next"][DIGEST]["axes"] == {}
 
     def test_no_credibility_or_review_book_in_the_output(self):
         out = compute_tool_mint(_receipts(), registrations=REGS)
@@ -119,13 +115,14 @@ class TestRatingsArePositions:
         close = federated_epoch_close(canonical_order(
             _batches([_registration_event(1)] + _receipts(), kp)), emission_pool=1.0)
         assert "tool_credibility" not in close and "tool_review_book" not in close
+        assert "tool_positions" not in close
 
-    def test_close_writes_ratings_on_the_world(self):
+    def test_close_returns_the_ratings(self):
         kp = Keypair.generate()
         close = federated_epoch_close(
             canonical_order(_batches([_registration_event(1)] + _receipts(), kp)),
             emission_pool=1.0, review_snapshot={"supply": SUPPLY, "tools": self.TOOLS})
-        assert close["tool_positions"][DIGEST]["head"][CI] == pytest.approx(0.9)
+        assert close["tool_ratings"][DIGEST]["correctness"] == pytest.approx(0.9)
 
 
 # ---------------------------------------------------------------------------
@@ -276,9 +273,7 @@ class TestReviewSnapshotFold:
 
 
 class TestSuccessorCarry:
-    PRED_POS = {DIGEST: {"head": [0.0] * 6, "mass": [0.0] * 6}}
-    PRED_RATING = {DIGEST: {"axes": {"correctness": {"sum": 50 * E18, "mass": E18}},
-                            "harm": {"sum": 0, "mass": 0}}}
+    PRED_RATING = {DIGEST: tool_cells(correctness=0.5)}
 
     def _run(self, succ_author: str, tools: Any = None):
         regs = {
@@ -294,22 +289,18 @@ class TestSuccessorCarry:
 
     def test_same_author_inherits_rating(self):
         out = self._run(AUTHOR)
-        succ = out["positions_next"][SUCC]
-        assert succ["head"][CI] == pytest.approx(0.5)
-        assert out["positions_next"][DIGEST]["head"][CI] == pytest.approx(0.5)
+        assert out["ratings_next"][SUCC]["correctness"] == pytest.approx(0.5)
+        assert out["ratings_next"][DIGEST]["correctness"] == pytest.approx(0.5)
 
     def test_successor_with_its_own_rating_keeps_it(self):
-        tools = {**self.PRED_RATING,
-                 SUCC: {"axes": {"correctness": {"sum": -20 * E18, "mass": E18}},
-                        "harm": {"sum": 0, "mass": 0}}}
+        tools = {**self.PRED_RATING, SUCC: tool_cells(correctness=-0.2)}
         out = self._run(AUTHOR, tools)
-        assert out["positions_next"][SUCC]["head"][CI] == pytest.approx(-0.2)
+        assert out["ratings_next"][SUCC]["correctness"] == pytest.approx(-0.2)
 
     def test_other_author_inherits_nothing(self):
         out = self._run("someone-else")
-        succ = out["positions_next"][SUCC]
-        assert succ["head"] == [0.0] * 6
-        assert succ["mass"] == [0.0] * 6
+        succ = out["ratings_next"][SUCC]
+        assert succ["correctness"] is None and succ["mass"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -327,22 +318,21 @@ class TestDeterminism:
         events = [_receipt_event(1, "c1"), _receipt_event(3, "c3"),
                   _receipt_event(4, "c1", digest=SUCC), _receipt_event(5, "c4", digest=DEP)]
         snap = {"reviewer_share_bps": 2500, "supply": SUPPLY,
-                "tools": {DIGEST: {"axes": {"correctness": {"sum": 7 * E18, "mass": E18},
-                                            "simplicity": {"sum": 3 * E18, "mass": E18}},
-                                   "harm": {"sum": 5, "mass": 1}}},
-                "rounds": {DIGEST: [{"epoch": 1, "supply": SUPPLY, "prior_mass": {},
+                "tools": {DIGEST: tool_cells(correctness=0.07, novelty=0.3),
+                          DEP: tool_cells(malware=0.2)},
+                "rounds": {DIGEST: [{"epoch": 1, "supply": SUPPLY,
                                      "reviews": [_rev(AUD_A, 7), _rev(AUD_B, 3)]}],
-                           DEP: [{"epoch": 1, "supply": SUPPLY, "prior_mass": {},
+                           DEP: [{"epoch": 1, "supply": SUPPLY,
                                   "reviews": [_rev(AUD_B, 1)]}]}}
-        positions = {DIGEST: {"head": [0.0] * 6, "mass": [0.0] * 6}}
-        rep = {"c1": 0.2, "c2": 0.1, "c3": 0.05, "c4": 0.3}
+        rep = {"c1": 0.2, "c2": 0.1, "c3": 0.05, "c4": 0.3,
+               AUD_A: 0.1, AUD_B: 0.2}
 
-        def run(evs, snapshot, pos, shares):
+        def run(evs, snapshot, shares):
             return compute_tool_mint(evs, registrations=regs,
                                      review_snapshot=snapshot,
                                      rep_shares=shares)
 
-        want = run(events, snap, positions, rep)
+        want = run(events, snap, rep)
         rng = random.Random(11)
         for _ in range(4):
             evs = events[:]
@@ -350,17 +340,18 @@ class TestDeterminism:
             snap2 = copy.deepcopy(snap)
             snap2["rounds"] = dict(reversed(list(snap2["rounds"].items())))
             snap2["tools"] = {d: {"axes": dict(reversed(list(e["axes"].items()))),
-                                  "harm": e["harm"]}
-                              for d, e in snap2["tools"].items()}
+                                  "fields": dict(reversed(list(e["fields"].items())))}
+                              for d, e in reversed(list(snap2["tools"].items()))}
             rep2 = dict(reversed(list(rep.items())))
-            got = run(evs, snap2, copy.deepcopy(positions), rep2)
+            got = run(evs, snap2, rep2)
             assert got == want
 
     def test_close_bit_identical_across_batch_order(self):
         kp_a, kp_c = Keypair.generate(), Keypair.generate()
         batches = _batches([_registration_event(1)], kp_a) + _batches(
             [_receipt_event(1, "c1"), _receipt_event(2, "c2")], kp_c)
-        snap = _snapshot([_rev(AUD_A, 5), _rev(AUD_B, 2)])
+        snap = _snapshot([_rev(AUD_A, 5), _rev(AUD_B, 2)],
+                         tools={DIGEST: tool_cells(novelty=0.4)})
         r1 = federated_epoch_close(canonical_order(batches), emission_pool=3.0,
                                    review_snapshot=snap)
         shuffled = batches[:]
@@ -368,7 +359,7 @@ class TestDeterminism:
         r2 = federated_epoch_close(canonical_order(shuffled), emission_pool=3.0,
                                    review_snapshot=copy.deepcopy(snap))
         assert r1["authoritative_payload"] == r2["authoritative_payload"]
-        assert r1["tool_positions"] == r2["tool_positions"]
+        assert r1["tool_ratings"] == r2["tool_ratings"]
 
 
 # ---------------------------------------------------------------------------

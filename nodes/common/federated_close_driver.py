@@ -113,7 +113,7 @@ class FederatedCloseDriver:
         *,
         tool_registrations_path: Optional[Any] = None,
         tool_rounds_path: Optional[Any] = None,
-        tool_positions_path: Optional[Any] = None,
+        tool_ratings_path: Optional[Any] = None,
     ):
         self.gossip = gossip
         # Set when the latest voice refresh failed: closing on the previous
@@ -186,16 +186,16 @@ class FederatedCloseDriver:
             Path(tool_rounds_path) if tool_rounds_path else None
         )
         self._tool_rounds: Dict[str, Any] = self._load_tool_rounds()
-        # v3 position-drift carry-over (spec Decision 2026-07-08):
-        # digest -> {"head": [n_dims], "mass": [n_dims]}: the mint-weighted review
-        # centroid state. Same contract as registrations/vetting: derived
-        # purely from canonical events, the on-disk copy is a rebuildable
-        # cache, identical on every honest daemon.
-        self._tool_positions_path: Optional[Path] = (
-            Path(tool_positions_path) if tool_positions_path else None
+        # Ratings carry-over (Decision 2026-11-09): digest -> the plain
+        # per-field means of its ToolBond rating pinned to the previous
+        # anchor (federated_reconcile.tool_rating). Derived purely from
+        # prior closes' pinned snapshots; the on-disk copy is a cache,
+        # identical on every honest daemon.
+        self._tool_ratings_path: Optional[Path] = (
+            Path(tool_ratings_path) if tool_ratings_path else None
         )
-        self._tool_positions: Dict[str, Dict[str, Any]] = (
-            self._load_tool_positions()
+        self._tool_ratings: Dict[str, Dict[str, Any]] = (
+            self._load_tool_ratings()
         )
         # Owner-rooted damper exclusion (spec: Owner-rooted registration):
         # agent id -> owner wallet, sourced from chain owner-binding data
@@ -234,8 +234,7 @@ class FederatedCloseDriver:
         # voice_source refresh. None (no chain source / no ToolBond) = zero
         # ratings and no reviewer shares.
         self.review_snapshot: Optional[Dict[str, Any]] = None
-        # REP total supply at the same pin (containment tiers weigh review
-        # mass against it, atn/tool_security.py).
+        # REP total supply at the same pin.
         self.rep_supply: int = 0
         # The jurisdiction's charter text pinned to the snapshot anchor
         # (docs/multi_jurisdiction.md decision 5), read by the same
@@ -246,9 +245,6 @@ class FederatedCloseDriver:
         # (docs/accountability.md), by the same voice_source refresh. Their
         # mint is withheld and their estimates carry no drift weight.
         self.sanctioned_households: List[str] = []
-        # Containment thresholds pinned with the voice state: tools they
-        # deny mint nothing.
-        self.containment_params: Optional[Dict[str, float]] = None
         # Breakthrough gate pinned with the voice state (None = off).
         self.mint_gate: Optional[tuple] = None
         # (review_decay, reviewer_min_rep_bps), pinned like mint_gate.
@@ -537,7 +533,7 @@ class FederatedCloseDriver:
         return {
             "tool_registrations": self._tool_registrations_path,
             "tool_rounds": self._tool_rounds_path,
-            "tool_positions": self._tool_positions_path,
+            "tool_ratings": self._tool_ratings_path,
         }
 
     def carry_over_maps(self) -> Dict[str, Any]:
@@ -545,7 +541,7 @@ class FederatedCloseDriver:
         return {
             "tool_registrations": self._tool_registrations,
             "tool_rounds": self._tool_rounds,
-            "tool_positions": self._tool_positions,
+            "tool_ratings": self._tool_ratings,
         }
 
     def install_carry_over(self, carry: Dict[str, Any]) -> None:
@@ -565,11 +561,11 @@ class FederatedCloseDriver:
         self._save_tool_registrations()
         self._tool_rounds = dict(carry["tool_rounds"])
         self._save_tool_rounds()
-        self._tool_positions = dict(carry["tool_positions"])
-        self._save_tool_positions()
+        self._tool_ratings = dict(carry["tool_ratings"])
+        self._save_tool_ratings()
         self._tool_registrations = self._load_tool_registrations()
         self._tool_rounds = self._load_tool_rounds()
-        self._tool_positions = self._load_tool_positions()
+        self._tool_ratings = self._load_tool_ratings()
 
     def seed_marker_path(self) -> Optional[Path]:
         """Marker recording the installed genesis seed (its carry_cid),
@@ -795,8 +791,6 @@ class FederatedCloseDriver:
             if "charter_text" in state:
                 text = state.get("charter_text")
                 updates["pinned_charter_text"] = str(text) if text else None
-            if isinstance(state.get("containment_params"), dict):
-                updates["containment_params"] = dict(state["containment_params"])
             if isinstance(state.get("mint_gate"), (list, tuple)) and len(state["mint_gate"]) == 2:
                 updates["mint_gate"] = (int(state["mint_gate"][0]), int(state["mint_gate"][1]))
             if isinstance(state.get("review_params"), (list, tuple)) and len(state["review_params"]) == 2:
@@ -822,35 +816,13 @@ class FederatedCloseDriver:
                 self.gossip, "max_skew_seconds"):
             self.gossip.max_skew_seconds = float(self.epoch_window["skew"])
 
-    def _denied_tools(self) -> Optional[List[str]]:
-        """Tools the pinned snapshot denies (None without one)."""
-        if self.review_snapshot is None:
-            return None
-        from .containment import CONTAINMENT_DEFAULTS, denied_digests
-        return denied_digests(self.review_snapshot, int(self.rep_supply or 0),
-                              self.containment_params or dict(CONTAINMENT_DEFAULTS))
-
-    def security_standing(self, digest: str, *,
-                          include_cooling: bool = True) -> Optional[Dict[str, Any]]:
-        """A tool's settled harm at the pinned snapshot, for containment
-        tiers: ``{harm_sum, harm_mass, supply}`` or None when unknown. The
-        same pinned read on every daemon, so tiers agree network-wide.
-        Harm still in its appeal window counts (Decision 2026-10-27):
-        containment is reversible, so it does not wait out the appeal.
-        ``include_cooling=False`` gives the final verdict only (discovery
-        hides a tool once its harm is past appeal)."""
-        snap = self.review_snapshot or {}
+    def tool_rating(self, digest: str) -> Optional[Dict[str, Any]]:
+        """A tool's rating as of the latest close (plain means,
+        ``federated_reconcile.tool_rating``), or None when this daemon has
+        none for it. The same anchored state on every daemon."""
         key = str(digest).lower().removeprefix("0x")
-        tools = snap.get("tools") or {}
-        tool = tools.get(key) or tools.get(str(digest)) or {}
-        cooling = ((snap.get("cooling_harm") or {}).get(key) or {}
-                   if include_cooling else {})
-        if not tool and not cooling:
-            return None
-        harm = tool.get("harm") or {}
-        return {"harm_sum": int(harm.get("sum") or 0) + int(cooling.get("sum") or 0),
-                "harm_mass": int(harm.get("mass") or 0) + int(cooling.get("mass") or 0),
-                "supply": int(self.rep_supply or 0)}
+        entry = self._tool_ratings.get(key)
+        return dict(entry) if isinstance(entry, dict) else None
 
     def _charter_changed(self) -> bool:
         """True when the jurisdiction's pinned charter differs from the
@@ -993,7 +965,6 @@ class FederatedCloseDriver:
                 review_snapshot=(dict(self.review_snapshot)
                                  if self.review_snapshot else None),
                 sanctioned_households=list(self.sanctioned_households),
-                denied_tools=self._denied_tools(),
                 mint_gate=self.mint_gate,
                 review_decay=float(self.review_params[0]),
                 reviewer_min_rep_bps=int(self.review_params[1]),
@@ -1022,10 +993,10 @@ class FederatedCloseDriver:
         self._save_tool_registrations()
         self._tool_rounds = dict(close_result.get("tool_rounds") or {})
         self._save_tool_rounds()
-        self._tool_positions = dict(close_result.get("tool_positions") or {})
-        self._save_tool_positions()
-        # The economy graph shows this close's registrations, positions
-        # (the ToolBond ratings pinned to the previous anchor) and mint.
+        self._tool_ratings = dict(close_result.get("tool_ratings") or {})
+        self._save_tool_ratings()
+        # The economy graph shows this close's registrations, ratings
+        # (ToolBond's, pinned to the previous anchor) and mint.
         try:
             library = getattr(self.gossip, "library", None)
             noter = getattr(library, "note_federated_close", None)
@@ -1208,8 +1179,8 @@ class FederatedCloseDriver:
         except OSError as e:
             logger.warning("failed to persist tool rounds state: %s", e)
 
-    def _load_tool_positions(self) -> Dict[str, Dict[str, Any]]:
-        path = self._tool_positions_path
+    def _load_tool_ratings(self) -> Dict[str, Dict[str, Any]]:
+        path = self._tool_ratings_path
         if path is None or not path.exists():
             return {}
         try:
@@ -1218,21 +1189,21 @@ class FederatedCloseDriver:
                 return {str(k): dict(v) for k, v in data.items()
                         if isinstance(v, dict)}
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("tool positions cache unreadable (%s); starting "
-                           "empty — it rebuilds from canonical events", e)
+            logger.warning("tool ratings cache unreadable (%s); starting "
+                           "empty: the next close rebuilds it", e)
         return {}
 
-    def _save_tool_positions(self) -> None:
-        path = self._tool_positions_path
+    def _save_tool_ratings(self) -> None:
+        path = self._tool_ratings_path
         if path is None:
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")
             tmp.write_text(
-                json.dumps(dict(sorted(self._tool_positions.items()))),
+                json.dumps(dict(sorted(self._tool_ratings.items()))),
                 encoding="utf-8",
             )
             os.replace(tmp, path)
         except OSError as e:
-            logger.warning("failed to persist tool positions: %s", e)
+            logger.warning("failed to persist tool ratings: %s", e)

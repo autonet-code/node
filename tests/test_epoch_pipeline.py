@@ -136,7 +136,7 @@ def test_a_different_winner_rewinds_and_recloses():
     d.carry_source = lambda: SimpleNamespace(
         status="ok", epoch_id=chain["anchors"][0]["epoch_id"],
         carry={"tool_registrations": {}, "tool_rounds": {},
-               "tool_positions": {}})
+               "tool_ratings": {}})
     re2 = d.run({})
     assert re2 is not None and re2.epoch_number == 2
     assert re2.parent_root == other_root
@@ -166,7 +166,7 @@ def test_a_daemon_with_no_registered_agent_follows_and_closes_nothing():
     d.carry_source = lambda: (installed.append(1), SimpleNamespace(
         status="ok", epoch_id=chain["anchors"][0]["epoch_id"],
         carry={"tool_registrations": {}, "tool_rounds": {},
-               "tool_positions": {}}))[1]
+               "tool_ratings": {}}))[1]
     assert d.run({}) is None and installed == [1]
     assert [x.batch_seq for x in buf.pending_epoch_batches()] == [2]
     d.run({})

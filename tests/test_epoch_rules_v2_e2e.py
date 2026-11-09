@@ -70,7 +70,7 @@ class Daemon:
         self.close = FederatedCloseDriver(
             gossip=self.gossip, tool_registrations_path=tmp / f"{name}_regs.json",
             tool_rounds_path=tmp / f"{name}_vet.json",
-            tool_positions_path=tmp / f"{name}_pos.json")
+            tool_ratings_path=tmp / f"{name}_ratings.json")
         self.close.clock = lambda: float(_now(w3))
         self.close.voice_source = lambda pin=None: read_voice_state(
             sub.address, web3=w3, rep_token_address=rep.address,

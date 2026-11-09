@@ -39,11 +39,11 @@ _SPEC.loader.exec_module(seedmod)
 ZERO = "00" * 32
 
 
-def _carry(regs=None, positions=None, manifests=None, busts=None) -> Dict[str, Any]:
+def _carry(regs=None, ratings=None, manifests=None, busts=None) -> Dict[str, Any]:
     return {
         "tool_registrations": regs or {},
         "tool_rounds": {"manifests": manifests or {}, "busts": busts or {}},
-        "tool_positions": positions or {},
+        "tool_ratings": ratings or {},
     }
 
 
@@ -101,16 +101,16 @@ def _post_seed(contract, blobs, carry, chain_id=31337):
 
 def test_merge_union_first_wins_and_reports_conflicts():
     a = _carry(regs={"d1": {"author": "x"}, "d2": {"author": "a"}},
-               positions={"d1": {"head": [0.1], "mass": [1.0]}},
+               ratings={"d1": {"correctness": 0.1, "axes": {"a": 0.1}, "mass": 1.0}},
                manifests={"d1": {"greenlit": True}}, busts={"v": 1})
     b = _carry(regs={"d2": {"author": "b"}, "d3": {"author": "c"},
                      "d1": {"author": "x"}},
-               positions={"d3": {"head": [0.2], "mass": [2.0]}},
+               ratings={"d3": {"correctness": 0.2, "axes": {"a": 0.2}, "mass": 2.0}},
                manifests={"d1": {"greenlit": False}}, busts={"v": 2, "w": 1})
     m = seedmod.merge_carry([_src("A", a), _src("B", b)])
     assert list(m.carry["tool_registrations"]) == ["d1", "d2", "d3"]
     assert m.carry["tool_registrations"]["d2"] == {"author": "a"}
-    assert set(m.carry["tool_positions"]) == {"d1", "d3"}
+    assert set(m.carry["tool_ratings"]) == {"d1", "d3"}
     assert m.carry["tool_rounds"]["manifests"]["d1"] == {"greenlit": True}
     assert m.carry["tool_rounds"]["busts"] == {"v": 1, "w": 1}
     got = {(c["map"], c["key"], c["kept"], c["dropped"]) for c in m.conflicts}

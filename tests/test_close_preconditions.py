@@ -26,7 +26,7 @@ from nodes.common.anchored_state import CarryOverFetch
 CARRY = [
     "tool_registrations",
     "tool_rounds",
-    "tool_positions",
+    "tool_ratings",
 ]
 
 
@@ -103,12 +103,12 @@ def test_refuses_missing_carry_over_after_genesis(tmp_path, caplog):
 
 def test_refuses_partial_carry_over(tmp_path):
     _write_all(tmp_path)
-    (tmp_path / "tool_positions.json").unlink()
+    (tmp_path / "tool_ratings.json").unlink()
     d = _driver(tmp_path, voice_state=ANCHORED)
     assert d.run({"epoch_id": "e2"}) is None
     d._refresh_voice()
     assert d.participation_blockers() == [
-        "missing carry-over files (chain has prior anchors): tool_positions"
+        "missing carry-over files (chain has prior anchors): tool_ratings"
     ]
 
 
@@ -189,7 +189,7 @@ def test_joiner_installs_verified_carry_and_closes(tmp_path):
     for k in CARRY:
         assert (me_dir / f"{k}.json").exists()
     assert me.participation_blockers() == []
-    assert me._tool_positions == peer._tool_positions
+    assert me._tool_ratings == peer._tool_ratings
     assert me._tool_rounds == peer._tool_rounds
 
 

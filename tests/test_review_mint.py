@@ -1,11 +1,13 @@
-"""Tool mint from staked reviews (Decision 2026-11-07).
+"""Tool mint from reviews (Decisions 2026-11-07 and 2026-11-09).
 
 A tool is paid once, when its ToolBond rounds conclude: its reviewers clear
 the breakthrough gate. Its share of the pool is the REP behind its reviews
 (REP / n per household per epoch); reviewers take the reviewer share
-whatever the verdict, split by accuracy among households above the REP
-minimum; the author takes the rest scaled by the rating, fanned over the
-dependencies; anything unpaid stays unminted and the pool carries over.
+whatever the scores, split by accuracy among households above the REP
+minimum; the author side is the rest x V x C x S, of which the author keeps
+N and the dependencies split 1 - N; a malware verdict leaves the author side
+unpaid, also for composites using the tool; anything unpaid stays unminted
+and the pool carries over.
 """
 
 from __future__ import annotations
@@ -20,36 +22,39 @@ from nodes.common.federated_reconcile import (
     UNMINTED,
     compute_tool_mint,
     federated_epoch_close,
+    tool_rating,
+    tool_score,
 )
 from nodes.common.library.charter import DEFAULT_CHARTER
 
-from tests.test_tool_mint import AUTHOR, DIGEST, EMBED_DIM, _batches, _registration_event
+from tests.test_tool_mint import (
+    AUTHOR, DIGEST, _batches, _registration_event, review, tool_cells,
+)
 
 E18 = 10 ** 18
 DEP = "cc" * 32
+DEP2 = "ee" * 32
 R1, R2, R3 = ("0x" + c * 20 for c in ("a1", "b2", "c3"))
 AXES = list(DEFAULT_CHARTER.ids)
 REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
 SHARES = {R1: 0.3, R2: 0.2, R3: 0.1, AUTHOR.lower(): 0.4}
+COMPOSITE_REGS = {DIGEST: {"trust_class": "pinned", "author": AUTHOR, "deps": DEP},
+                  DEP: {"trust_class": "pinned", "author": "depsmith"}}
 
 
 def _rev(who: str, acc: Any = E18) -> Dict[str, Any]:
-    return {"reviewer": who, "stake": 0, "accuracy": acc,
-            "axes": ["correctness"], "harm": False}
+    return review(who, acc)
 
 
-def _snap(rounds: Dict[str, List[Dict[str, Any]]], *, rating: float = 1.0,
-          tools: Any = None) -> Dict[str, Any]:
-    t = tools if tools is not None else {
-        d: {"axes": {a: {"sum": int(rating * 100 * E18), "mass": E18} for a in AXES},
-            "harm": {"sum": 0, "mass": 0}} for d in rounds}
+def _snap(rounds: Dict[str, List[Dict[str, Any]]], *, tools: Any = None,
+          **cells: Any) -> Dict[str, Any]:
+    t = tools if tools is not None else {d: tool_cells(**cells) for d in rounds}
     return {"supply": 1000 * E18, "reviewer_share_bps": 4000, "tools": t,
             "rounds": rounds}
 
 
 def _round(epoch: int, *reviews) -> Dict[str, Any]:
-    return {"epoch": epoch, "supply": 1000 * E18, "prior_mass": {},
-            "reviews": list(reviews)}
+    return {"epoch": epoch, "supply": 1000 * E18, "reviews": list(reviews)}
 
 
 def _totals(out: Dict[str, Any]) -> Dict[str, float]:
@@ -63,7 +68,8 @@ def _totals(out: Dict[str, Any]) -> Dict[str, float]:
 def _mint(rounds, *, state=None, gate=None, **kw):
     return compute_tool_mint(
         [], registrations=kw.pop("regs", REGS),
-        rep_shares=kw.pop("shares", SHARES), review_snapshot=_snap(rounds, **kw.pop("snap", {})),
+        rep_shares=kw.pop("shares", SHARES),
+        review_snapshot=kw.pop("snapshot", None) or _snap(rounds, **kw.pop("snap", {})),
         tool_rounds=state, mint_gate=gate, **kw)
 
 
@@ -110,20 +116,61 @@ class TestConclusion:
         assert out["per_digest"] == {}   # 1 of 4 holders < 50%
 
 
-class TestShares:
-    def test_reviewer_paid_whatever_the_verdict(self):
-        out = _mint({DIGEST: [_round(1, _rev(R1))]}, snap={"rating": -0.5})
-        tot = _totals(out)
+class TestScore:
+    """Author side = 60% x V x C x S (Decision 2026-11-09)."""
+
+    def _author(self, **cells):
+        out = _mint({DIGEST: [_round(1, _rev(R1))]}, snap=cells)
+        return _totals(out), out
+
+    def test_reviewer_paid_whatever_the_scores(self):
+        tot, _ = self._author(correctness=-0.5)
         assert tot[R1] == pytest.approx(0.3 * 0.4)
         assert AUTHOR not in tot
         assert tot[UNMINTED] == pytest.approx(0.3 * 0.6)
 
-    def test_author_scaled_by_rating(self):
-        out = _mint({DIGEST: [_round(1, _rev(R1))]}, snap={"rating": 0.5})
-        tot = _totals(out)
+    def test_correctness_scales_the_author_side(self):
+        tot, _ = self._author(correctness=0.5)
         assert tot[AUTHOR] == pytest.approx(0.3 * 0.6 * 0.5)
         assert tot[UNMINTED] == pytest.approx(0.3 * 0.6 * 0.5)
 
+    def test_simplicity_has_a_floor_of_half(self):
+        tot, _ = self._author(simplicity=0.0)
+        assert tot[AUTHOR] == pytest.approx(0.3 * 0.6 * 0.5)
+        tot, _ = self._author(simplicity=0.5)
+        assert tot[AUTHOR] == pytest.approx(0.3 * 0.6 * 0.75)
+
+    def test_charter_value_is_one_factor(self):
+        tot, _ = self._author(value=0.5)
+        assert tot[AUTHOR] == pytest.approx(0.3 * 0.6 * 0.5)
+        tot, _ = self._author(value=-0.2)
+        assert AUTHOR not in tot
+
+    def test_value_is_the_mean_over_all_axes_together(self):
+        cells = tool_cells()
+        cells["axes"][AXES[0]] = {"sum": -100 * E18, "mass": E18}
+        rating = tool_rating(cells, AXES, 1000 * E18)
+        assert rating["value"] == pytest.approx((len(AXES) - 2) / len(AXES))
+        assert tool_score(rating) == pytest.approx(rating["value"])
+
+    def test_the_factors_multiply(self):
+        tot, out = self._author(correctness=0.8, simplicity=0.5, value=0.5)
+        score = 0.5 * 0.8 * 0.75
+        assert out["per_digest"][DIGEST]["score"] == pytest.approx(score)
+        assert tot[AUTHOR] == pytest.approx(0.3 * 0.6 * score)
+
+    def test_scores_never_change_the_tools_share(self):
+        a = _mint({DIGEST: [_round(1, _rev(R1))]}, snap={"correctness": 0.1})
+        b = _mint({DIGEST: [_round(1, _rev(R1))]}, snap={"correctness": 1.0})
+        assert a["per_digest"][DIGEST]["weight"] == b["per_digest"][DIGEST]["weight"]
+
+    def test_novelty_without_dependencies_leaves_the_rest_unminted(self):
+        tot, _ = self._author(novelty=0.25)
+        assert tot[AUTHOR] == pytest.approx(0.3 * 0.6 * 0.25)
+        assert tot[UNMINTED] == pytest.approx(0.3 * 0.6 * 0.75)
+
+
+class TestShares:
     def test_split_by_accuracy_alone(self):
         out = _mint({DIGEST: [_round(1, _rev(R1, E18), _rev(R2, E18 // 3))]})
         tot = _totals(out)
@@ -150,27 +197,108 @@ class TestShares:
 
 
 class TestComposition:
-    def test_author_side_fans_to_dependency(self):
-        regs = {DIGEST: {"trust_class": "pinned", "author": AUTHOR, "deps": DEP},
-                DEP: {"trust_class": "pinned", "author": "depsmith"}}
-        out = _mint({DIGEST: [_round(1, _rev(R1))]}, regs=regs)
+    def test_author_keeps_novelty_dependencies_split_the_rest(self):
+        snap = _snap({DIGEST: [_round(1, _rev(R1))]},
+                     tools={DIGEST: tool_cells(novelty=0.6)})
+        out = _mint(None, regs=COMPOSITE_REGS, snapshot=snap)
         tot = _totals(out)
         side = 0.3 * 0.6
-        assert tot[AUTHOR] == pytest.approx(side * 0.7)
-        assert tot["depsmith"] == pytest.approx(side * 0.3)
+        assert tot[AUTHOR] == pytest.approx(side * 0.6)
+        assert tot["depsmith"] == pytest.approx(side * 0.4)
 
-    def test_denial_passes_up_to_composites(self):
+    def test_unrated_composite_dependency_keeps_the_default(self):
         regs = {DIGEST: {"trust_class": "pinned", "author": AUTHOR, "deps": DEP},
-                DEP: {"trust_class": "pinned", "author": "depsmith"}}
-        out = _mint({DIGEST: [_round(1, _rev(R1))]}, regs=regs, denied_tools=[DEP])
-        assert out["per_digest"] == {}
+                DEP: {"trust_class": "pinned", "author": "depsmith", "deps": DEP2},
+                DEP2: {"trust_class": "pinned", "author": "leafsmith"}}
+        snap = _snap({DIGEST: [_round(1, _rev(R1))]},
+                     tools={DIGEST: tool_cells(novelty=0.5)})
+        tot = _totals(_mint(None, regs=regs, snapshot=snap))
+        side = 0.3 * 0.6
+        assert tot["depsmith"] == pytest.approx(side * 0.5 * 0.7)
+        assert tot["leafsmith"] == pytest.approx(side * 0.5 * 0.3)
+
+    def test_a_badly_rated_dependency_still_gets_its_part(self):
+        snap = _snap({DIGEST: [_round(1, _rev(R1))]},
+                     tools={DIGEST: tool_cells(novelty=0.5),
+                            DEP: tool_cells(correctness=-1.0, value=-1.0)})
+        tot = _totals(_mint(None, regs=COMPOSITE_REGS, snapshot=snap))
+        assert tot["depsmith"] == pytest.approx(0.3 * 0.6 * 0.5)
+
+
+class TestMalware:
+    def test_verdict_leaves_the_author_side_unpaid(self):
+        out = _mint({DIGEST: [_round(1, _rev(R1), _rev(R2))]}, snap={"malware": 0.6})
+        tot = _totals(out)
+        assert AUTHOR not in tot
+        assert tot[R1] == pytest.approx(0.5 * 0.4 * 0.5)
+        assert tot[UNMINTED] == pytest.approx(0.5 * 0.6)
+        assert out["per_digest"][DIGEST]["malware"] is True
+
+    def test_half_is_not_more_than_half(self):
+        out = _mint({DIGEST: [_round(1, _rev(R1))]}, snap={"malware": 0.5})
+        assert out["per_digest"][DIGEST]["malware"] is False
+        assert _totals(out)[AUTHOR] == pytest.approx(0.3 * 0.6)
+
+    def test_composites_using_a_malware_tool_are_unpaid(self):
+        # DEP concluded earlier with a malware verdict.
+        state = {"tools": {DEP: {"concluded": True, "rounds": []}}}
+        snap = _snap({DIGEST: [_round(2, _rev(R1))]},
+                     tools={DIGEST: tool_cells(), DEP: tool_cells(malware=0.9)})
+        out = _mint(None, regs=COMPOSITE_REGS, snapshot=snap, state=state)
+        tot = _totals(out)
+        assert AUTHOR not in tot and "depsmith" not in tot
+        assert tot[R1] == pytest.approx(0.3 * 0.4)
+        assert out["per_digest"][DIGEST]["malware"] is True
+
+    def test_a_dependencys_flags_count_once_its_reviewers_clear_the_gate(self):
+        # DEP's own flags come from too little REP to conclude: no verdict.
+        gate = (2500, 0)
+        snap = _snap({DIGEST: [_round(1, _rev(R1))], DEP: [_round(1, _rev(R3))]},
+                     tools={DIGEST: tool_cells(), DEP: tool_cells(malware=1.0)})
+        out = _mint(None, regs=COMPOSITE_REGS, snapshot=snap, gate=gate)
+        assert out["per_digest"][DIGEST]["malware"] is False
+        assert _totals(out)[AUTHOR] > 0
+
+    def test_a_dependency_too_slashed_to_be_paid_still_has_its_verdict(self):
+        # DEP's bond fell below the minimum, so DEP itself never concludes,
+        # but its reviewers cleared the gate: composites using it are unpaid.
+        snap = _snap({DIGEST: [_round(1, _rev(R1))], DEP: [_round(1, _rev(R2))]},
+                     tools={DIGEST: tool_cells(), DEP: tool_cells(malware=1.0)})
+        snap["bonds"] = {DIGEST: {"author": AUTHOR.lower(), "stake": 10},
+                         DEP: {"author": "depsmith", "stake": 1}}
+        snap["min_stake"] = 5
+        out = _mint(None, regs=COMPOSITE_REGS, snapshot=snap)
+        assert DEP not in out["per_digest"]
+        assert out["per_digest"][DIGEST]["malware"] is True
+
+
+class TestRatingsCarry:
+    def test_ratings_are_plain_means(self):
+        cells = tool_cells(correctness=0.9, simplicity=0.4, novelty=0.3,
+                           malware=0.25, value=0.5, mass=300 * E18)
+        out = _mint({DIGEST: [_round(1, _rev(R1))]}, snapshot=_snap(
+            {DIGEST: [_round(1, _rev(R1))]}, tools={DIGEST: cells}))
+        r = out["ratings_next"][DIGEST]
+        assert r["correctness"] == pytest.approx(0.9)
+        assert r["simplicity"] == pytest.approx(0.4)
+        assert r["novelty"] == pytest.approx(0.3)
+        assert r["malware"] == pytest.approx(0.25)
+        assert r["value"] == pytest.approx(0.5)
+        assert r["axes"] == {a: pytest.approx(0.5) for a in AXES}
+        assert r["mass"] == pytest.approx(0.3)
+
+    def test_unrated_tool_has_no_means(self):
+        out = compute_tool_mint([], registrations=REGS)
+        assert out["ratings_next"][DIGEST] == {
+            "correctness": None, "simplicity": None, "novelty": None,
+            "malware": None, "axes": {}, "value": None, "mass": 0.0}
 
 
 class TestCloseCarry:
     def test_unminted_remainder_carries_into_next_pool(self):
         kp = Keypair.generate()
         canonical = canonical_order(_batches([_registration_event(1)], kp))
-        snap = _snap({DIGEST: [_round(1, _rev(R1))]}, rating=0.0)
+        snap = _snap({DIGEST: [_round(1, _rev(R1))]}, correctness=0.0)
         out = federated_epoch_close(
             canonical, emission_pool=10.0,
             tool_registrations=REGS, rep_shares=SHARES, review_snapshot=snap)

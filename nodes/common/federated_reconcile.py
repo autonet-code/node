@@ -2,11 +2,11 @@
 
 Every daemon that closes an epoch runs ``federated_epoch_close`` over the
 same canonical batch sequence (``canonical_ordering``), the carry-over the
-previous anchor committed (registrations, review rounds, positions) and the
+previous anchor committed (registrations, review rounds, ratings) and the
 chain inputs pinned to that anchor (REP shares, the ToolBond review
 snapshot, the fee pool, sanctions). The only mint rail is the review mint
-(``compute_tool_mint``, Decision 2026-11-07). Two guarantees make the
-output bit-identical:
+(``compute_tool_mint``, Decisions 2026-11-07 and 2026-11-09). Two
+guarantees make the output bit-identical:
 
   1. **Deterministic iteration order**. Float addition is
      non-associative, so every sum runs over sorted keys (digest, then
@@ -21,7 +21,7 @@ output bit-identical:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .canonical_ordering import CanonicalOrder
 from .library.charter import active_charter
@@ -35,25 +35,20 @@ logger = logging.getLogger(__name__)
 # IEEE 754 jitter (~15 significant figures).
 OUTPUT_DECIMALS = 10
 
-# Composition fan-out (docs/tool_substrate.md, Composition section):
-# one attestation of a composite carries total weight 1 — the root
-# keeps ROOT_SHARE, the remainder splits equally among declared deps,
-# recursively to MAX_DEPTH. Cycles and unregistered deps FORFEIT their
-# share (total may be < 1, never > 1): conservation of attestation.
+# Composition fan-out (Decision 2026-11-09): of a concluding tool's author
+# side the author keeps the tool's novelty mean N; its declared
+# dependencies split 1 - N equally, each composite dependency again keeping
+# its own N, recursively to COMPOSITE_MAX_DEPTH. Without dependencies the
+# 1 - N stays unminted (a copy earns nothing). Cycles and unregistered deps
+# FORFEIT their part (total <= 1, never > 1). COMPOSITE_ROOT_SHARE is the
+# share an unrated composite dependency keeps.
 COMPOSITE_ROOT_SHARE = 0.7
 COMPOSITE_MAX_DEPTH = 4
-# Reviewed composition split (Decision 2026-10-13 §9): COMPOSITE_ROOT_SHARE
-# is now only the DEFAULT. Attestations may carry ``own_share`` in [0,1]
-# (how much of a composite's value is its own logic vs its declared deps); a
-# composite's root share is the rep-share-weighted running mean of those
-# estimates, carried in its ``tool_positions`` entry as ``own_share: {sum,
-# mass}``. No own_share estimates => the default.
 
-# Reviewer share of a tool's mint (docs/multi_jurisdiction.md decision 10):
-# the reviewers of the tool's rounds finalized since the previous anchor
-# split this share by stake x accuracy x novelty; the author keeps the rest
-# (100% when no such round has a weighted reviewer). The live value is
-# ToolBond ``reviewerShareBps``, read pinned into the review snapshot.
+# Reviewer share of a concluding tool's pool share: its reviewers split it
+# by accuracy, whatever the scores; the author side is the rest. The live
+# value is ToolBond ``reviewerShareBps``, read pinned into the review
+# snapshot.
 REVIEWER_SHARE_BPS_DEFAULT = 4000
 ATN_BASE_UNITS = 1_000_000   # 6 decimals: 1 ATN = 1e6 base units
 BPS = 10_000
@@ -122,34 +117,41 @@ VOICE_EPSILON = 0.0
 def _composition_shares(
     root: str,
     deps_of: Dict[str, List[str]],
+    own_share: Callable[[str], float],
     *,
-    root_share: float = COMPOSITE_ROOT_SHARE,
     max_depth: int = COMPOSITE_MAX_DEPTH,
-    root_shares: Optional[Dict[str, float]] = None,
 ) -> Dict[str, float]:
-    """Split one unit of attestation weight over a declared-dep DAG.
+    """Split one unit of a concluding tool's author side over its
+    declared-dependency DAG (Decision 2026-11-09).
 
-    ``root_shares`` (digest -> reviewed own share in [0,1]) overrides
-    ``root_share`` per composite at every level of the recursion: a
-    composite dep keeps ITS reviewed share of whatever reaches it.
+    Each tool keeps ``own_share(digest)`` (its novelty mean) of what reaches
+    it and splits the rest equally among its declared dependencies, to
+    ``max_depth``. A dependency without dependencies of its own (or at
+    ``max_depth``) keeps everything that reaches it; the root without
+    dependencies keeps its own share and the rest is forfeited. Cycles and
+    unregistered dependencies forfeit their part, never redistributed to
+    siblings, so padding with dead dependencies only burns the padder's own
+    pay.
 
     Pure + deterministic (sorted recursion over consensus-carried
     declarations). Returns {digest: weight} with sum <= 1.0.
     """
     shares: Dict[str, float] = {}
-    reviewed = root_shares or {}
+
+    def _keep(digest: str) -> float:
+        return max(0.0, min(1.0, float(own_share(digest))))
 
     def _spread(digest: str, weight: float, depth: int, path: frozenset) -> None:
         declared = [d for d in deps_of.get(digest, []) if d]
-        if not declared or depth >= max_depth:
+        if not declared:
+            keep = _keep(digest) if depth == 0 else 1.0
+            shares[digest] = shares.get(digest, 0.0) + weight * keep
+            return
+        if depth >= max_depth:
             shares[digest] = shares.get(digest, 0.0) + weight
             return
-        own = max(0.0, min(1.0, float(reviewed.get(digest, root_share))))
+        own = _keep(digest)
         shares[digest] = shares.get(digest, 0.0) + weight * own
-        # Split by the FULL declared count; shares of cyclic or
-        # unregistered deps are forfeited, never redistributed to
-        # siblings (conservation: total <= 1, gaming by padding with
-        # dead deps only burns the padder's own credit).
         child_w = weight * (1.0 - own) / len(declared)
         for dep in sorted(declared):
             if dep in path or dep not in deps_of:
@@ -160,32 +162,62 @@ def _composition_shares(
     return shares
 
 
+def _int(v: Any, default: int = 0) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cells(raw: Any, names: Optional[Tuple[str, ...]] = None) -> Dict[str, Dict[str, int]]:
+    """``{name: {"sum", "mass"}}`` with integer values, sorted; cells with no
+    mass dropped; with ``names``, only those names are kept."""
+    out: Dict[str, Dict[str, int]] = {}
+    for name, cell in sorted((raw or {}).items()) if isinstance(raw, dict) else ():
+        if names is not None and name not in names:
+            continue
+        if isinstance(cell, dict) and _int(cell.get("mass")) > 0:
+            out[str(name)] = {"sum": _int(cell.get("sum")),
+                              "mass": _int(cell.get("mass"))}
+    return out
+
+
 def _normalize_review_snapshot(
     snapshot: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Canonicalize the ToolBond review snapshot (docs/multi_jurisdiction.md
-    decision 10; read by voice_state.read_tool_review_snapshot pinned to the
-    previous anchor, the close only consumes it).
+    """Canonicalize the ToolBond review snapshot (read by
+    voice_state.read_tool_review_snapshot pinned to the previous anchor; the
+    close only consumes it).
 
-    Shape: {"reviewer_share_bps": int, "supply": int (REP at the snapshot),
-    "tools": {digest: {"axes": {axis_id: {"sum", "mass"}}, "harm": {"sum",
-    "mass"}}}, "rounds": {digest: [{"epoch", "supply", "prior_mass",
-    "reviews": [{"reviewer", "stake", "accuracy", "axes", "harm"}]}]}}.
-    Integers stay integers (REP and ATN base units; sums are REP x score in
-    -100..100 units, so a mean is sum / mass / 100). Digests lose any 0x,
-    addresses are lowercased, bps clamps to [0, BPS], garbage is dropped.
+    Shape (Decision 2026-11-09)::
+
+      {"reviewer_share_bps": int, "supply": int (REP at the snapshot),
+       "tools": {digest: {"fields": {field: {"sum", "mass"}},
+                          "axes": {axis_id: {"sum", "mass"}}}},
+       "rounds": {digest: [{"epoch", "supply",
+                            "fields": {...}, "axes": {...},
+                            "reviews": [{"reviewer", "accuracy"}]}]},
+       "bonds": {digest: {"author", "stake", "unbonding"}}, "min_stake": int}
+
+    ``fields`` are the fixed review fields (``review_fields.REVIEW_FIELDS``)
+    and ``axes`` the charter axes. A tool's cells cover every round
+    finalized at the snapshot; a round's cells cover that round alone; both
+    count an unscored charter axis at the Registry default with the review's
+    weight, so every valid review adds its weight to every cell's mass. Sums
+    are REP x value in hundredths (correctness and axes -100..100,
+    simplicity and novelty 0..100, malware 0 or 100), so a mean is sum /
+    mass / 100 and malware's is the share of the reviewing REP that said
+    yes. ``rounds`` holds the rounds finalized since the anchor before the
+    snapshot; a review's ``accuracy`` is 1e18-scaled, None when
+    uninformative. Integers stay integers, digests lose any 0x, addresses
+    are lowercased, bps clamps to [0, BPS], garbage is dropped.
     """
+    from .library.review_fields import REVIEW_FIELDS
+
     out: Dict[str, Any] = {"reviewer_share_bps": REVIEWER_SHARE_BPS_DEFAULT,
                            "supply": 0, "tools": {}, "rounds": {}}
     if not snapshot:
         return out
-
-    def _int(v: Any, default: int = 0) -> int:
-        try:
-            return int(v)
-        except (TypeError, ValueError):
-            return default
-
     out["reviewer_share_bps"] = max(0, min(BPS, _int(
         snapshot.get("reviewer_share_bps"), REVIEWER_SHARE_BPS_DEFAULT)))
     out["supply"] = max(0, _int(snapshot.get("supply")))
@@ -193,16 +225,9 @@ def _normalize_review_snapshot(
     for digest, entry in sorted((snapshot.get("tools") or {}).items()):
         if not isinstance(entry, dict):
             continue
-        axes = {}
-        for axis_id, cell in sorted((entry.get("axes") or {}).items()):
-            if isinstance(cell, dict) and _int(cell.get("mass")) > 0:
-                axes[str(axis_id)] = {"sum": _int(cell.get("sum")),
-                                      "mass": _int(cell.get("mass"))}
-        harm = entry.get("harm") or {}
         tools[str(digest).lower().removeprefix("0x")] = {
-            "axes": axes,
-            "harm": {"sum": max(0, _int(harm.get("sum"))),
-                     "mass": max(0, _int(harm.get("mass")))},
+            "fields": _cells(entry.get("fields"), REVIEW_FIELDS),
+            "axes": _cells(entry.get("axes")),
         }
     out["tools"] = dict(sorted(tools.items()))
     rounds: Dict[str, List[Dict[str, Any]]] = {}
@@ -218,16 +243,13 @@ def _normalize_review_snapshot(
                 acc = v.get("accuracy")
                 revs.append({
                     "reviewer": str(v["reviewer"]).lower(),
-                    "stake": max(0, _int(v.get("stake"))),
                     "accuracy": None if acc is None else max(0, min(10 ** 18, _int(acc))),
-                    "axes": sorted(str(a) for a in (v.get("axes") or [])),
-                    "harm": bool(v.get("harm")),
                 })
             norm_rs.append({
                 "epoch": _int(rnd.get("epoch")),
                 "supply": max(0, _int(rnd.get("supply"))),
-                "prior_mass": {str(k): max(0, _int(m)) for k, m in
-                               sorted((rnd.get("prior_mass") or {}).items())},
+                "fields": _cells(rnd.get("fields"), REVIEW_FIELDS),
+                "axes": _cells(rnd.get("axes")),
                 "reviews": revs,
             })
         if norm_rs:
@@ -249,34 +271,64 @@ def _normalize_review_snapshot(
     return out
 
 
-def tool_rating_position(entry: Optional[Dict[str, Any]], axis_ids: List[str],
-                         supply: int) -> Dict[str, Any]:
-    """A ToolBond rating as the close's tool position: per charter axis
-    head = sum / mass / 100 (the REP-weighted mean, -1..1) and mass = REP
-    mass / REP supply; harm the same way (0..1). Unrated axes sit at 0 with
-    0 mass."""
-    head: List[float] = []
-    mass: List[float] = []
+def _cell_mean(cell: Optional[Dict[str, Any]]) -> Optional[float]:
+    """sum / mass / 100, or None when no REP is behind the cell."""
+    m = _int((cell or {}).get("mass"))
+    if m <= 0:
+        return None
+    return _int((cell or {}).get("sum")) / m / 100.0
+
+
+def tool_rating(entry: Optional[Dict[str, Any]], axis_ids: List[str],
+                supply: int) -> Dict[str, Any]:
+    """A tool's settled ToolBond rating as plain means (Decision
+    2026-11-09): each fixed field's REP-weighted mean (correctness -1..1,
+    simplicity and novelty 0..1), ``malware`` the share of the reviewing REP
+    that said yes, ``axes`` each charter axis's mean, ``value`` the mean over
+    all charter axes together, and ``mass`` the REP behind the rating as a
+    share of REP supply. None = nobody has rated it."""
+    fields = (entry or {}).get("fields") or {}
     axes = (entry or {}).get("axes") or {}
+
+    def r(x: Optional[float]) -> Optional[float]:
+        return None if x is None else round(x, 9)
+
+    axis_means: Dict[str, float] = {}
+    a_sum = a_mass = 0
     for axis_id in axis_ids:
-        cell = axes.get(axis_id) or {}
-        m = int(cell.get("mass") or 0)
-        head.append(round(int(cell.get("sum") or 0) / m / 100.0, 9) if m > 0 else 0.0)
-        mass.append(round(m / supply, 9) if supply > 0 else 0.0)
-    harm = (entry or {}).get("harm") or {}
-    hm = int(harm.get("mass") or 0)
+        cell = axes.get(axis_id)
+        mean = _cell_mean(cell)
+        if mean is None:
+            continue
+        axis_means[axis_id] = round(mean, 9)
+        a_sum += _int(cell.get("sum"))
+        a_mass += _int(cell.get("mass"))
+    mass = max((_int(c.get("mass")) for c in fields.values()), default=0)
     return {
-        "head": head,
-        "mass": mass,
-        "harm": round(int(harm.get("sum") or 0) / hm / 100.0, 9) if hm > 0 else 0.0,
-        "harm_mass": round(hm / supply, 9) if supply > 0 else 0.0,
+        "correctness": r(_cell_mean(fields.get("correctness"))),
+        "simplicity": r(_cell_mean(fields.get("simplicity"))),
+        "novelty": r(_cell_mean(fields.get("novelty"))),
+        "malware": r(_cell_mean(fields.get("malware"))),
+        "axes": axis_means,
+        "value": r(a_sum / a_mass / 100.0) if a_mass > 0 else None,
+        "mass": round(mass / supply, 9) if supply > 0 else 0.0,
     }
+
+
+def tool_score(rating: Dict[str, Any]) -> float:
+    """The factor on a tool's author side: V x C x S (Decision 2026-11-09).
+    C = correctness mean, V = the charter axes' mean together, each with
+    negatives counted as 0; S = 0.5 + 0.5 x simplicity mean."""
+    c = max(0.0, min(1.0, float(rating.get("correctness") or 0.0)))
+    v = max(0.0, min(1.0, float(rating.get("value") or 0.0)))
+    s = 0.5 + 0.5 * max(0.0, min(1.0, float(rating.get("simplicity") or 0.0)))
+    return round(v * c * s, 12)
 
 
 UNMINTED = "~unminted"
 """Sentinel recipient for the part of a concluding tool's share that pays
-nobody (the author's unpaid rating remainder, forfeited dependency shares,
-a reviewer share with no eligible reviewer). It is normalized with the rest
+nobody (the author side's unpaid rest, forfeited dependency parts, a
+reviewer share with no eligible reviewer). It is normalized with the rest
 so every tool's share of the pool is fixed by its REP alone, then dropped
 before the claim tree: that ATN stays unminted and carries over."""
 
@@ -334,22 +386,6 @@ def _normalize_tool_rounds(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
-def _tool_rating(entry: Optional[Dict[str, Any]], axis_ids: List[str]) -> float:
-    """A tool's rating in [0, 1] for the author's part: the mean over the
-    rated charter axes of the REP-weighted mean score (-1..1), negative
-    clipped to 0. Unrated = 0."""
-    axes = (entry or {}).get("axes") or {}
-    means = []
-    for axis_id in axis_ids:
-        cell = axes.get(axis_id) or {}
-        m = int(cell.get("mass") or 0)
-        if m > 0:
-            means.append(int(cell.get("sum") or 0) / m / 100.0)
-    if not means:
-        return 0.0
-    return round(max(0.0, min(1.0, sum(means) / len(means))), 12)
-
-
 def compute_tool_mint(
     events: List[Dict[str, Any]],
     *,
@@ -358,13 +394,12 @@ def compute_tool_mint(
     rep_shares: Optional[Dict[str, float]] = None,
     review_snapshot: Optional[Dict[str, Any]] = None,
     tool_rounds: Optional[Dict[str, Any]] = None,
-    denied_tools: Optional[List[str]] = None,
     sanctioned_households: Optional[List[str]] = None,
     mint_gate: Optional[Tuple[int, int]] = None,
     review_decay: float = REVIEW_DECAY_DEFAULT,
     reviewer_min_rep_bps: int = REVIEWER_MIN_REP_BPS_DEFAULT,
 ) -> Dict[str, Any]:
-    """Tool mint from staked reviews (Decision 2026-11-07).
+    """Tool mint from reviews (Decisions 2026-11-07 and 2026-11-09).
 
     A tool is paid once, in the close where its review rounds CONCLUDE.
     Each close adds the ToolBond rounds finalized in its window to the
@@ -378,20 +413,25 @@ def compute_tool_mint(
     At conclusion the tool's share of the pool is its REP weight W: the sum
     over its reviews of the reviewing household's REP share / n (n = the
     reviews that household made in that epoch, so reviewing many tools
-    never multiplies a household's REP) x the round's decay.
-      - reviewers: reviewer_share_bps of W, whatever the verdict, split by
+    never multiplies a household's REP) x the round's decay. The ratings
+    never change W.
+      - reviewers: reviewer_share_bps of W, whatever the scores, split by
         accuracy x decay among reviewers whose household holds at least
         ``reviewer_min_rep_bps`` of REP (any REP when 0);
-      - author side: the rest of W x the tool's rating (0..1), fanned over
-        its declared dependencies (composite keeps COMPOSITE_ROOT_SHARE);
-      - everything else goes to UNMINTED and stays unminted.
-    Excluded: denied tools and every tool depending on one (transitively),
-    unbonded tools, unpinned tools, the author's own household as a
-    reviewer, sanctioned households in the gate and in W.
-
-    Attestations (tool_used receipts) no longer count anywhere: nothing
-    can observe a household's private use.
+      - author side: the rest of W x the tool's score V x C x S
+        (``tool_score``). The author keeps N (the novelty mean) of it; the
+        declared dependencies split 1 - N (``_composition_shares``); with
+        none, 1 - N stays unminted;
+      - malware: when more than half the REP that reviewed the tool says
+        malware, or any tool it depends on (transitively) has that verdict,
+        the author side is unpaid. A dependency's verdict counts once its
+        own reviewers clear the gate;
+      - everything unpaid goes to UNMINTED and stays unminted.
+    Not paid at all: unbonded tools and unpinned tools (they never
+    conclude). Not counted: the author's own household as a reviewer,
+    sanctioned households in the gate and in W.
     """
+    from .library.review_fields import MALWARE_VERDICT_SHARE
     from .library.tool_manifest import TRUST_PINNED
 
     known_regs: Dict[str, Dict[str, str]] = dict(registrations or {})
@@ -424,18 +464,6 @@ def compute_tool_mint(
         for d, m in known_regs.items()
     }
 
-    # Denial passes up the dependency chain: a composite of a denied tool
-    # can't be fetched whole, so it is denied too (its author is not
-    # slashed for it).
-    denied = {str(d).lower().removeprefix("0x") for d in (denied_tools or ())}
-    changed = True
-    while changed:
-        changed = False
-        for digest in sorted(deps_of):
-            if digest not in denied and any(d in denied for d in deps_of[digest]):
-                denied.add(digest)
-                changed = True
-
     sanctioned = {str(h).lower() for h in (sanctioned_households or ())}
     rev_snap = _normalize_review_snapshot(review_snapshot)
     reviewer_bps = int(rev_snap["reviewer_share_bps"])
@@ -443,11 +471,15 @@ def compute_tool_mint(
     min_stake = int(rev_snap.get("min_stake") or 0)
     state = _normalize_tool_rounds(tool_rounds)
     decay = max(0.0, min(1.0, float(review_decay)))
+    axis_ids = list(active_charter().ids)
+    supply = int(rev_snap["supply"])
+    ratings: Dict[str, Dict[str, Any]] = {
+        d: tool_rating(e, axis_ids, supply) for d, e in rev_snap["tools"].items()}
 
     def _bonded_author(digest: str) -> str:
         """The tool's payable author, or '' when it can't be paid."""
         meta = known_regs.get(digest)
-        if meta is None or digest in denied:
+        if meta is None:
             return ""
         if str(meta.get("trust_class") or "") != TRUST_PINNED:
             return ""
@@ -459,6 +491,11 @@ def compute_tool_mint(
                 return ""
             author = b["author"]
         return author
+
+    def _author_house(digest: str) -> str:
+        b = (bonds or {}).get(digest)
+        author = (b or {}).get("author") or (known_regs.get(digest) or {}).get("author") or ""
+        return _household(author) if author else ""
 
     # 1. Older rounds of every open tool fade by one step.
     for digest in sorted(state["tools"]):
@@ -506,19 +543,8 @@ def compute_tool_mint(
     n_holders = sum(1 for v in (rep_map or {}).values() if float(v) > 0)
     min_share = reviewer_min_rep_bps / BPS
 
-    # 3. Conclusions.
-    per_digest: Dict[str, Dict[str, Any]] = {}
-    node_agent: Dict[str, Dict[str, float]] = {}
-    _charter = active_charter()
-    axis_ids = list(_charter.ids)
-    for digest in sorted(state["tools"]):
-        t = state["tools"][digest]
-        if t["concluded"] or not t["rounds"]:
-            continue
-        author = _bonded_author(digest)
-        if not author:
-            continue
-        author_house = _household(author)
+    def _weigh(t: Dict[str, Any], author_house: str) -> Tuple[bool, float]:
+        """(conclusive, REP weight W) of an open tool's carried rounds."""
         house_rep: Dict[str, float] = {}
         weight = 0.0
         for rnd in t["rounds"]:
@@ -535,16 +561,62 @@ def compute_tool_mint(
             gate_rep = sum(house_rep[h] for h in sorted(house_rep))
             if (gate_rep * BPS < gate_rep_bps
                     or len(house_rep) * BPS < gate_houses_bps * n_holders):
-                continue   # not conclusive yet: carried to the next close
+                return False, weight
         elif not house_rep:
+            return False, weight
+        return True, round(weight, 12)
+
+    def _malware(digest: str) -> bool:
+        """The tool's malware verdict: more than half its reviewing REP says
+        malware, once its reviewers have cleared the gate."""
+        share = (ratings.get(digest) or {}).get("malware")
+        if share is None or share <= MALWARE_VERDICT_SHARE:
+            return False
+        t = state["tools"].get(digest)
+        if t is None:
+            return False
+        if t["concluded"]:
+            return True
+        return bool(t["rounds"]) and _weigh(t, _author_house(digest))[0]
+
+    def _uses_malware(root: str) -> bool:
+        seen: set = set()
+        stack = [root]
+        while stack:
+            d = stack.pop()
+            if d in seen:
+                continue
+            seen.add(d)
+            if _malware(d):
+                return True
+            stack.extend(x for x in deps_of.get(d, []) if x in deps_of)
+        return False
+
+    def _own_share(digest: str) -> float:
+        n = (ratings.get(digest) or {}).get("novelty")
+        return COMPOSITE_ROOT_SHARE if n is None else float(n)
+
+    # 3. Conclusions.
+    per_digest: Dict[str, Dict[str, Any]] = {}
+    node_agent: Dict[str, Dict[str, float]] = {}
+    for digest in sorted(state["tools"]):
+        t = state["tools"][digest]
+        if t["concluded"] or not t["rounds"]:
             continue
-        weight = round(weight, 12)
+        author = _bonded_author(digest)
+        if not author:
+            continue
+        author_house = _household(author)
+        conclusive, weight = _weigh(t, author_house)
+        if not conclusive:
+            continue   # not conclusive yet: carried to the next close
+        malware = _uses_malware(digest)
         t["concluded"] = True
         if weight <= 0.0:
             continue
         bucket = node_agent.setdefault(digest, {})
 
-        # Reviewers: their share whatever the verdict, by accuracy x decay.
+        # Reviewers: their share whatever the scores, by accuracy x decay.
         rev_w: Dict[str, float] = {}
         for rnd in t["rounds"]:
             for v in rnd["reviews"]:
@@ -571,18 +643,21 @@ def compute_tool_mint(
                 if a != UNMINTED:
                     reviewer_paid += part
 
-        # Author side, scaled by the rating, fanned over the dependencies.
-        rating = _tool_rating(rev_snap["tools"].get(digest), axis_ids)
-        author_side = (weight - reviewer_pool) * rating
+        # Author side: the rest x the tool's score, the author keeping N and
+        # the dependencies splitting 1 - N. Nothing on a malware verdict.
+        rating = ratings.get(digest) or tool_rating(None, axis_ids, supply)
+        score = 0.0 if malware else tool_score(rating)
+        author_side = (weight - reviewer_pool) * score
         author_paid = 0.0
-        shares = _composition_shares(digest, deps_of)
-        for target in sorted(shares):
-            recipient = author if target == digest else _bonded_author(target)
-            part = author_side * shares[target]
-            if not recipient or part <= 0:
-                continue
-            bucket[recipient] = bucket.get(recipient, 0.0) + part
-            author_paid += part
+        if author_side > 0:
+            shares = _composition_shares(digest, deps_of, _own_share)
+            for target in sorted(shares):
+                recipient = author if target == digest else _bonded_author(target)
+                part = author_side * shares[target]
+                if not recipient or part <= 0:
+                    continue
+                bucket[recipient] = bucket.get(recipient, 0.0) + part
+                author_paid += part
         rest = weight - reviewer_paid - author_paid - bucket.get(UNMINTED, 0.0)
         if rest > 0:
             bucket[UNMINTED] = bucket.get(UNMINTED, 0.0) + rest
@@ -590,16 +665,18 @@ def compute_tool_mint(
             "author": author,
             "trust_class": TRUST_PINNED,
             "weight": weight,
-            "rating": rating,
+            "score": score,
+            "novelty": rating.get("novelty"),
+            "malware": malware,
             "reviewers": len([a for a in rev_w if a != UNMINTED]),
             "reviewer_mint": round(reviewer_paid, 12),
             "author_mint": round(author_paid, 12),
             "mint": round(reviewer_paid + author_paid, 12),
         }
 
-    # Ratings as positions (decision 10), unchanged: the ToolBond-settled
-    # REP-weighted mean per charter axis; a same-author successor with no
-    # rating of its own shows its predecessor's.
+    # Ratings as plain means (Decision 2026-11-09): the ToolBond-settled
+    # REP-weighted mean per field and per charter axis; a same-author
+    # successor with no rating of its own shows its predecessor's.
     successor_of: Dict[str, str] = {}
     for digest in sorted(known_regs):
         meta = known_regs[digest]
@@ -607,14 +684,13 @@ def compute_tool_mint(
         pred_meta = known_regs.get(pred) if pred and pred != digest else None
         if pred_meta is not None and str(pred_meta.get("author") or "") == str(meta.get("author") or ""):
             successor_of[digest] = pred
-    supply = int(rev_snap["supply"])
-    positions_next: Dict[str, Dict[str, Any]] = {}
+    ratings_next: Dict[str, Dict[str, Any]] = {}
     for digest in sorted(known_regs):
         entry = rev_snap["tools"].get(digest)
         pred = successor_of.get(digest)
         if entry is None and pred is not None:
             entry = rev_snap["tools"].get(pred)
-        positions_next[digest] = tool_rating_position(entry, axis_ids, supply)
+        ratings_next[digest] = tool_rating(entry, axis_ids, supply)
 
     # Concluded tools need only their flag from here on.
     for digest in sorted(state["tools"]):
@@ -632,7 +708,7 @@ def compute_tool_mint(
         "node_agent": {k: dict(sorted(v.items()))
                        for k, v in sorted(node_agent.items())},
         "registrations_next": dict(sorted(known_regs.items())),
-        "positions_next": positions_next,
+        "ratings_next": ratings_next,
         "tool_rounds_next": state,
     }
 
@@ -647,17 +723,14 @@ def federated_epoch_close(
     tool_rounds: Optional[Dict[str, Any]] = None,
     # Raw REP share per household (weighs reviews).
     rep_shares: Optional[Dict[str, float]] = None,
-    # Staked reviews (docs/multi_jurisdiction.md decision 10): the ToolBond
-    # review snapshot, read by the caller pinned to the previous anchor
+    # Reviews (Decision 2026-11-09): the ToolBond review snapshot, read by the caller pinned to the previous anchor
     # (same snapshot as rep_shares / emission_pool). None = no ratings
-    # (zero heads) and no review rounds.
+    # and no review rounds.
     review_snapshot: Optional[Dict[str, Any]] = None,
     # Households under a DAO sanction at the same snapshot
     # (docs/accountability.md): their mint is withheld (left unminted, not
     # passed to others) and their reviews weigh nothing.
     sanctioned_households: Optional[List[str]] = None,
-    # Tools denied at the snapshot (compute_tool_mint).
-    denied_tools: Optional[List[str]] = None,
     # Breakthrough gate (compute_tool_mint).
     mint_gate: Optional[Tuple[int, int]] = None,
     # Carried rounds fade per close; reviewer pay needs this much REP.
@@ -691,7 +764,6 @@ def federated_epoch_close(
         rep_shares=rep_shares,
         review_snapshot=review_snapshot,
         tool_rounds=tool_rounds,
-        denied_tools=denied_tools,
         sanctioned_households=sanctioned,
         mint_gate=mint_gate,
         review_decay=review_decay,
@@ -791,7 +863,7 @@ def federated_epoch_close(
             minted_raw / ATN_BASE_UNITS, pool_raw / ATN_BASE_UNITS,
             rounds_next["pool_carry"] / ATN_BASE_UNITS)
     result["tool_rounds"] = rounds_next
-    result["tool_positions"] = tool_result["positions_next"]
+    result["tool_ratings"] = tool_result["ratings_next"]
     result["epoch_root"] = canonical.epoch_root().hex()
     result["n_batches"] = len(canonical.ordered_batches)
     result["n_events"] = len(all_events)

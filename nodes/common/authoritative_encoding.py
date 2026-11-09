@@ -263,13 +263,13 @@ def decode_agent_mint_blob(blob: bytes) -> Dict[str, float]:
 CARRY_BUNDLE_SCHEMA = 1
 
 # The maps a federated close produces and the next close consumes. Order is
-# documentation only: the bundle serializes with sorted keys. (The v4.1
-# tool_credibility and tool_review_book maps left with staked reviews,
-# docs/multi_jurisdiction.md decision 10: ratings are read from ToolBond.)
+# documentation only: the bundle serializes with sorted keys. Ratings are
+# read from ToolBond; ``tool_ratings`` keeps each tool's plain means as of
+# the close (Decision 2026-11-09), for followers and joiners to show.
 CARRY_KEYS: Tuple[str, ...] = (
     "tool_registrations",
     "tool_rounds",
-    "tool_positions",
+    "tool_ratings",
 )
 
 
@@ -292,8 +292,8 @@ def encode_carry_bundle(carry: Dict[str, Any], *, epoch_id: str) -> bytes:
     Floats are emitted as Python's shortest round-trip ``repr`` (NOT the
     payload's fixed 10-decimal form): the joiner must load the EXACT
     values an always-on daemon holds, or its next close would drift. The
-    close already rounds them (positions to 9 places, own_share sums to
-    10), so the repr is short and stable. NaN/Inf are rejected.
+    close already rounds them (ratings to 9 places, round state to 12), so
+    the repr is short and stable. NaN/Inf are rejected.
     """
     missing = [k for k in CARRY_KEYS if not isinstance(carry.get(k), dict)]
     if missing:

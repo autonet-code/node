@@ -14,7 +14,7 @@ One per jurisdiction key (``rpb_address``). It holds:
     and out as one ``tool_registered`` event;
   - the blob store and the daemon-local artifact index (search), and the
     queue of remote manifests whose blobs discovery still has to fetch;
-  - the latest federated close's registrations, positions and per-tool
+  - the latest federated close's registrations, ratings and per-tool
     mint (``note_federated_close``), which the economy graph reads.
 
 Nothing here is consensus state: the close's inputs live with the driver
@@ -37,7 +37,6 @@ from typing import Any, Dict, List, Optional
 
 from .blob_store import BlobStore
 from .library.artifact_index import ArtifactIndex
-from .library.charter import active_charter
 from .library.usefulness_coords import DEFAULT_DIM
 
 logger = logging.getLogger(__name__)
@@ -133,7 +132,7 @@ class LibraryService:
 
         # The latest federated close, for the economy graph.
         self._registrations: Dict[str, Dict[str, str]] = {}
-        self._positions: Dict[str, Dict[str, Any]] = {}
+        self._ratings: Dict[str, Dict[str, Any]] = {}
         self._closes: List[Dict[str, Any]] = []
         self._load_economy()
         self._load_epoch_history()
@@ -355,17 +354,17 @@ class LibraryService:
 
     def note_federated_close(self, close_result: Dict[str, Any], *,
                              epoch_id: str = "") -> None:
-        """Keep the latest federated close's registrations, positions and
+        """Keep the latest federated close's registrations, ratings and
         per-tool mint for the economy graph."""
         regs = close_result.get("tool_registrations")
-        positions = close_result.get("tool_positions")
+        ratings = close_result.get("tool_ratings")
         with self._lock:
             if isinstance(regs, dict):
                 self._registrations = {str(k): dict(v) for k, v in regs.items()
                                        if isinstance(v, dict)}
-            if isinstance(positions, dict):
-                self._positions = {str(k): dict(v) for k, v in positions.items()
-                                   if isinstance(v, dict)}
+            if isinstance(ratings, dict):
+                self._ratings = {str(k): dict(v) for k, v in ratings.items()
+                                 if isinstance(v, dict)}
             self._closes.append({
                 "epoch_id": str(epoch_id or close_result.get("epoch_id") or ""),
                 "closed_at": time.time(),
@@ -379,14 +378,15 @@ class LibraryService:
         """The tool-economy graph from the latest federated closes.
 
         Returns ``{registrations: {digest: {author, trust_class, deps}},
-        recent_tool_mint: {digest: float}, positions: {digest: {head, mass,
-        rating}}, last_epoch: {epoch_id, closed_at, total_mint, tool_mint}
-        | None, epochs_considered: int}``. ``positions`` are the ToolBond
-        ratings per charter axis; ``rating`` is the mean of the correctness
-        and simplicity heads.
+        recent_tool_mint: {digest: float}, ratings: {digest: rating},
+        last_epoch: {epoch_id, closed_at, total_mint, tool_mint} | None,
+        epochs_considered: int}``. A rating is the ToolBond means as of the
+        latest close (``federated_reconcile.tool_rating``: correctness,
+        simplicity, novelty, malware share, charter ``axes`` and their
+        ``value``, ``mass``) plus ``score``, the factor on the tool's author
+        side (V x C x S).
         """
-        axis_by_id = active_charter().axis_index
-        useful = [axis_by_id[a] for a in ("correctness", "simplicity") if a in axis_by_id]
+        from .federated_reconcile import tool_score
         with self._lock:
             registrations = {
                 digest: {
@@ -396,16 +396,8 @@ class LibraryService:
                 }
                 for digest, meta in self._registrations.items()
             }
-            positions = {}
-            for digest, pos in self._positions.items():
-                head = [float(x) for x in (pos.get("head") or [])]
-                rating = (sum(head[i] for i in useful if i < len(head)) / len(useful)
-                          if head and useful else 0.0)
-                positions[digest] = {
-                    "head": head,
-                    "mass": [float(x) for x in (pos.get("mass") or [])],
-                    "rating": round(rating, 9),
-                }
+            ratings = {digest: {**r, "score": tool_score(r)}
+                       for digest, r in self._ratings.items()}
             recent = list(self._closes[-last_n_epochs:]) if last_n_epochs > 0 else []
         recent_mint: Dict[str, float] = {}
         for record in recent:
@@ -421,7 +413,7 @@ class LibraryService:
         return {
             "registrations": registrations,
             "recent_tool_mint": recent_mint,
-            "positions": positions,
+            "ratings": ratings,
             "last_epoch": None if last is None else {
                 "epoch_id": last.get("epoch_id"),
                 "closed_at": last.get("closed_at"),
@@ -543,14 +535,14 @@ class LibraryService:
             return
         if isinstance(data, dict):
             self._registrations = dict(data.get("registrations") or {})
-            self._positions = dict(data.get("positions") or {})
+            self._ratings = dict(data.get("ratings") or {})
             self._closes = list(data.get("closes") or [])[-CLOSES_KEEP:]
 
     def _save_economy(self) -> None:
         try:
             _write_json_atomic(self._economy_path, {
                 "registrations": self._registrations,
-                "positions": self._positions,
+                "ratings": self._ratings,
                 "closes": self._closes,
             })
         except Exception as e:  # noqa: BLE001

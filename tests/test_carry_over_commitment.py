@@ -163,7 +163,7 @@ def test_two_daemons_produce_identical_bundle(tmp_path):
         assert _payload_bytes(fa) == _payload_bytes(fb)
     # The fixture actually exercises the carried maps.
     carry = decode_carry_bundle(fa.carry_bundle_blob)["carry"]
-    assert carry["tool_registrations"] and carry["tool_positions"]
+    assert carry["tool_registrations"] and carry["tool_ratings"]
     assert set(carry) == set(CARRY_KEYS)
     assert "tool_credibility" not in carry and "tool_review_book" not in carry
 
@@ -184,13 +184,13 @@ def test_bundle_bytes_ignore_key_insertion_order(tmp_path):
 
 def test_bundle_round_trips_exact_floats():
     carry = {k: {} for k in CARRY_KEYS}
-    carry["tool_positions"] = {DIGEST: {"head": [0.1 + 0.2, -0.0, 1e-9],
-                                        "mass": [1.0, 2.5, 3.0]}}
+    carry["tool_ratings"] = {DIGEST: {"correctness": 0.1 + 0.2, "malware": -0.0,
+                                      "axes": {"a": 1e-9}, "mass": 2.5}}
     carry["tool_rounds"] = {"h": 0.123456789}
     blob = encode_carry_bundle(carry, epoch_id="e9")
     out = decode_carry_bundle(blob)
     assert out["epoch_id"] == "e9"
-    assert out["carry"]["tool_positions"][DIGEST]["head"][0] == 0.1 + 0.2
+    assert out["carry"]["tool_ratings"][DIGEST]["correctness"] == 0.1 + 0.2
     assert out["carry"] == carry
 
 
@@ -367,7 +367,7 @@ def test_joiner_fetches_verifies_installs_and_closes_identically(network, tmp_pa
     joiner.carry_source = lambda: fetch_carry_over_from_chain(contract, resolver)
     # Booting mid-network: observe one epoch (3) before joining.
     assert _run(joiner, 3) is None
-    assert not (joiner_dir / "tool_positions.json").exists()
+    assert not (joiner_dir / "tool_ratings.json").exists()
 
     fed_on = _run(network["always_on"], 4)
     fed_join = _run(joiner, 4)

@@ -164,28 +164,22 @@ AUTHOR = "toolsmith"
 
 
 def test_ratings_under_custom_charter(seven_axis):
-    """Positions follow the active charter's axes: a ToolBond rating on a
-    custom axis lands in its slot, an axis outside the charter is dropped,
-    and the position has the 7-axis length."""
+    """Ratings follow the active charter's axes: a ToolBond rating on a
+    custom axis is kept, an axis outside the charter is dropped, and the
+    value is the mean over the charter's axes together."""
     from nodes.common.federated_reconcile import compute_tool_mint
 
     regs = {DIGEST: {"trust_class": "pinned", "author": AUTHOR}}
     snap = {"supply": 100, "tools": {DIGEST: {
         "axes": {"kindness": {"sum": 60 * 10, "mass": 10},
-                 "correctness": {"sum": 80 * 20, "mass": 20},
                  "honesty": {"sum": 50, "mass": 1}},
-        "harm": {"sum": 0, "mass": 0}}}}
+        "fields": {"correctness": {"sum": 80 * 20, "mass": 20}}}}}
     out = compute_tool_mint([], registrations=regs, review_snapshot=snap)
-    pos = out["positions_next"][DIGEST]
-    assert len(pos["head"]) == 7 and len(pos["mass"]) == 7
-    k = seven_axis.axis_index["kindness"]
-    c = seven_axis.axis_index["correctness"]
-    assert pos["head"][k] == pytest.approx(0.6)
-    assert pos["head"][c] == pytest.approx(0.8)
-    assert pos["mass"][k] == pytest.approx(0.1) and pos["mass"][c] == pytest.approx(0.2)
-    for i in range(7):
-        if i not in (k, c):
-            assert pos["head"][i] == 0.0 and pos["mass"][i] == 0.0
+    r = out["ratings_next"][DIGEST]
+    assert r["axes"] == {"kindness": pytest.approx(0.6)}
+    assert r["value"] == pytest.approx(0.6)
+    assert r["correctness"] == pytest.approx(0.8)
+    assert r["mass"] == pytest.approx(0.2)
 
 
 # ---------------------------------------------------------------------------

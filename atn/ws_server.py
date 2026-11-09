@@ -816,7 +816,7 @@ class WebSocketBridge:
 
     def _tool_reviews_payload(self, digest: str, limit: Any = None, *,
                               include_local: bool = True) -> dict[str, Any]:
-        """Reviews, ToolBond position and recent mint for one tool digest.
+        """Reviews, ToolBond rating and recent mint for one tool digest.
         Backs the owner `tool_reviews` handler."""
         try:
             limit = int(limit or 50)
@@ -825,11 +825,11 @@ class WebSocketBridge:
         reviews = (self.runtime.tool_store.recent_attestations(digest, limit=limit)
                    if include_local else [])
         library = self._library()
-        position: dict[str, Any] = {}
+        rating: dict[str, Any] = {}
         usage: dict[str, Any] = {}
         if library is not None:
             eg = library.read_economy_graph(last_n_epochs=10)
-            position = dict(eg.get("positions", {}).get(digest) or {})
+            rating = dict(eg.get("ratings", {}).get(digest) or {})
             # Mint for the tool window: recent mint over the window + the
             # last close's per-digest entry (the review mint's split).
             usage = {
@@ -844,12 +844,13 @@ class WebSocketBridge:
                 usage["last_epoch"] = {
                     k: entry.get(k, 0)
                     for k in ("mint", "reviewer_mint", "author_mint",
-                              "reviewers", "rating", "weight")
+                              "reviewers", "score", "novelty", "malware",
+                              "weight")
                 }
         return {
             "digest": digest,
             "reviews": reviews,
-            "position": position,
+            "rating": rating,
             "usage": usage,
         }
 
@@ -3083,7 +3084,7 @@ class WebSocketBridge:
 
                 economy = (library.read_economy_graph(last_n_epochs=last_n)
                            if library is not None else {
-                               "registrations": {}, "positions": {},
+                               "registrations": {}, "ratings": {},
                                "recent_tool_mint": {}, "last_epoch": None,
                                "epochs_considered": 0,
                            })

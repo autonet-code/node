@@ -511,27 +511,24 @@ class AutonetService:
         # Missing state dir: in-memory only.
         tool_regs_path = None
         tool_rounds_path = None
-        tool_positions_path = None
+        tool_ratings_path = None
         try:
             state_dir = getattr(self._library, "state_dir", None)
             if state_dir is not None:
                 tool_regs_path = state_dir / "tool_registrations.json"
                 tool_rounds_path = state_dir / "tool_rounds.json"
-                # Positions carry the own_share estimates, a close INPUT.
-                # A daemon that restarts without them closes against an
-                # empty prior while its peers carry the accumulated one
-                # (a deterministic fork). Same rebuildable-cache contract
-                # as the registration map above.
-                tool_positions_path = state_dir / "tool_positions.json"
+                # The ratings are part of the anchored carry bundle, so a
+                # restart keeps them like the other two maps.
+                tool_ratings_path = state_dir / "tool_ratings.json"
         except Exception:
             tool_regs_path = None
             tool_rounds_path = None
-            tool_positions_path = None
+            tool_ratings_path = None
         self._federated_close_driver = FederatedCloseDriver(
             gossip=self._event_gossip,
             tool_registrations_path=tool_regs_path,
             tool_rounds_path=tool_rounds_path,
-            tool_positions_path=tool_positions_path,
+            tool_ratings_path=tool_ratings_path,
         )
         # Refuse (log + skip) any close this daemon can't compute
         # identically to its peers: no chain read access below, or no

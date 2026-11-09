@@ -2,7 +2,7 @@
 
 ``LibraryService.read_economy_graph`` reads the latest federated closes:
 the anchored registrations with their declared-dep DAG, the ToolBond
-ratings as positions, and the recent per-digest mint. Drives the real
+ratings as plain means, and the recent per-digest mint. Drives the real
 path: two published tools -> a federated close over their
 tool_registered events -> ``note_federated_close`` -> read.
 """
@@ -16,6 +16,7 @@ from nodes.common.event_gossip import EventBatch, Keypair
 from nodes.common.federated_reconcile import federated_epoch_close
 from nodes.common.library.tool_manifest import build_tool_manifest
 from nodes.common.library_service import LibraryService
+from tests.test_tool_mint import tool_cells
 
 AUTHOR = "author-1"
 E18 = 10 ** 18
@@ -53,10 +54,8 @@ def economy(tmp_path):
     dep = svc.submit_tool_manifest(_manifest("dep_tool"), agent_id=AUTHOR)["manifest_digest"]
     comp = svc.submit_tool_manifest(
         _manifest("composite_tool", dependencies=[dep]), agent_id=AUTHOR)["manifest_digest"]
-    snap = {"supply": 100 * E18, "tools": {comp: {
-        "axes": {"correctness": {"sum": 80 * 10 * E18, "mass": 10 * E18},
-                 "simplicity": {"sum": 40 * 10 * E18, "mass": 10 * E18}},
-        "harm": {"sum": 0, "mass": 0}}}}
+    snap = {"supply": 100 * E18, "tools": {comp: tool_cells(
+        correctness=0.8, simplicity=0.4, value=0.5, mass=10 * E18)}}
     close = _close_over(events, review_snapshot=snap)
     svc.note_federated_close(close, epoch_id="ep-econ-1")
     return svc, dep, comp
@@ -71,12 +70,13 @@ class TestReadEconomyGraph:
         assert eg["registrations"][comp]["deps"] == [dep]
         assert eg["registrations"][dep]["deps"] == []
 
-    def test_positions_are_the_toolbond_ratings(self, economy):
+    def test_ratings_are_the_toolbond_means(self, economy):
         svc, dep, comp = economy
-        pos = svc.read_economy_graph()["positions"]
-        assert len(pos[comp]["head"]) == 6 and len(pos[comp]["mass"]) == 6
-        assert pos[comp]["rating"] == pytest.approx((0.8 + 0.4) / 2)
-        assert pos[dep]["head"] == [0.0] * 6 and pos[dep]["rating"] == 0.0
+        ratings = svc.read_economy_graph()["ratings"]
+        assert ratings[comp]["correctness"] == pytest.approx(0.8)
+        assert ratings[comp]["mass"] == pytest.approx(0.1)
+        assert ratings[comp]["score"] == pytest.approx(0.5 * 0.8 * 0.7)
+        assert ratings[dep]["correctness"] is None and ratings[dep]["score"] == 0.0
 
     def test_recent_mint_and_last_epoch(self, economy):
         svc, dep, comp = economy
@@ -100,7 +100,7 @@ class TestReadEconomyGraph:
         assert svc.read_economy_graph() == {
             "registrations": {},
             "recent_tool_mint": {},
-            "positions": {},
+            "ratings": {},
             "last_epoch": None,
             "epochs_considered": 0,
         }
