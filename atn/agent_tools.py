@@ -172,12 +172,14 @@ _NOVELTY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Required to publish. What is NEW about this tool versus what already "
-        "exists (search probe_tools first). Reviewers score this claim on "
-        "correctness: a copy with no real difference, or a claim that omits "
-        "an obvious neighbour, fails. Performance claims ('twice as fast as "
-        "X') count and are checked the same way."),
+        "exists (search probe_tools first). It points reviewers to what you "
+        "compared the tool with; it is not what they score. They judge "
+        "novelty themselves, against everything that already exists in the "
+        "library or outside it, so a copy or a thin wrapper rates low "
+        "whatever the claim says. Performance claims ('twice as fast as X') "
+        "are part of what correctness checks."),
     "properties": {
-        "statement": {"type": "string", "description": "What is new, concretely, compared with the prior art."},
+        "statement": {"type": "string", "description": "What is new, concretely, compared with what already exists."},
         "prior_art": {"type": "array", "items": {"type": "string"},
                       "description": "64-hex digests of the closest existing tools. May be empty only if the statement says outright that nothing comparable exists."},
     },
@@ -761,7 +763,8 @@ _TOOLS: list[ToolDefinition] = [
             "on-chain); the stake stands behind the tool and is slashed if "
             "more than half the REP reviewing it says malware. A novelty "
             "claim is required: search "
-            "probe_tools first and name the closest existing tools. Passing "
+            "probe_tools first and name the closest existing tools (reviewers "
+            "judge novelty themselves, not by the claim). Passing "
             "`novelty` here on a tool registered without it re-stamps the "
             "manifest, so the published digest is NEW (returned as `digest`)."
         ),
@@ -817,7 +820,7 @@ _TOOLS: list[ToolDefinition] = [
                 "report": {"type": "string", "description": "Required with a review: what you checked, what you found."},
                 "correctness": {"type": "number", "description": "Required, -1..1: it works and is good at what it claims."},
                 "simplicity": {"type": "number", "description": "Required, 0..1: how simple it is for what it does."},
-                "novelty": {"type": "number", "description": "Required, 0..1: how much of its value is new beyond its dependencies and the prior art it names."},
+                "novelty": {"type": "number", "description": "Required, 0..1: how much of its value is actually new beyond its dependencies and everything that already exists, in the library or outside it. Judge it yourself (search probe_tools and beyond); the author's novelty claim and the prior art it names are not the measure."},
                 "malware": {"type": "boolean", "description": "Required: true only for malicious code (see the review text below); a destructive bug is correctness, not malware."},
                 "evidence": {"type": "string", "description": "Required with malware true: what the code does, with a pointer into it (file and line numbers, or the quoted code)."},
                 "axes": {
@@ -851,7 +854,7 @@ _TOOLS: list[ToolDefinition] = [
                             "tool": {"type": "string", "description": "Tool name, digest, or reg_ prefix."},
                         "correctness": {"type": "number", "description": "Required, -1..1: it works and is good at what it claims."},
                         "simplicity": {"type": "number", "description": "Required, 0..1: how simple it is for what it does."},
-                        "novelty": {"type": "number", "description": "Required, 0..1: how much of its value is new beyond its dependencies and the prior art it names."},
+                        "novelty": {"type": "number", "description": "Required, 0..1: how much of its value is actually new beyond its dependencies and everything that already exists, in the library or outside it. Judge it yourself (search probe_tools and beyond); the author's novelty claim and the prior art it names are not the measure."},
                         "malware": {"type": "boolean", "description": "Required: true only for malicious code (see the review text below); a destructive bug is correctness, not malware."},
                         "evidence": {"type": "string", "description": "Required with malware true: what the code does, with a pointer into it (file and line numbers, or the quoted code)."},
                         "axes": {
@@ -5730,7 +5733,10 @@ def review_axes_text() -> str:
     return (
         " REVIEW: every review carries correctness (-1..1), simplicity "
         "(0..1), novelty (0..1) and malware (true or false); one missing "
-        "any is refused. Malware means malicious code: " + MALWARE_DEFINITION
+        "any is refused. Novelty is what you find actually new beyond the "
+        "tool's dependencies and everything that already exists, in the "
+        "library or outside it; the author's novelty claim is not the "
+        "measure. Malware means malicious code: " + MALWARE_DEFINITION
         + ". Any system, not only the one running it; a destructive bug is "
         "correctness, not malware. A malware flag needs evidence: what the "
         "code does, with a pointer into it (line numbers or the quoted "

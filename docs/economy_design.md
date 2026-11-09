@@ -118,7 +118,9 @@ default the DAO can change; changing any rule needs the owner's sign-off.
 - **Every review carries four fixed fields**, the same in every
   jurisdiction; one missing any is invalid: **correctness** (-1..1),
   **simplicity** (0..1), **novelty** (0..1, how much of the tool's value
-  is new beyond its dependencies and the prior art it names) and
+  is actually new beyond its dependencies and everything that already
+  exists, in the library or outside it, as the reviewer finds it; not
+  whether the author's novelty claim is right) and
   **malware** (yes or no, NIST SP 800-53 Rev. 5 "malicious code": software
   or firmware intended to perform an unauthorized process with adverse
   impact on the confidentiality, integrity or availability of a system,
@@ -212,8 +214,9 @@ default the DAO can change; changing any rule needs the owner's sign-off.
   declared capabilities (net, fs, spawn, env, secrets) are part of the
   claim reviewers check.
 - **Novelty claim required to publish**: what is new and the closest
-  existing tools. Reviewers score novelty against it, so copies and thin
-  wrappers keep almost nothing.
+  existing tools. It points reviewers to what the author compared the tool
+  with; they judge novelty themselves, against everything that exists, so
+  copies and thin wrappers keep almost nothing whatever the claim says.
 - **ToolBond**: an author stake behind every tool; reviews are
   commit-reveal, weighted by household REP; a malware verdict slashes
   the bond and burns REP by the share that said yes.

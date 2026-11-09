@@ -9,8 +9,11 @@ the network's judgement" and the reviewed own-share of Decision
 
 - **Fixed review fields**, the same in every jurisdiction, all required (a
   review missing one is invalid): correctness (-1..1), simplicity (0..1),
-  novelty (0..1, how much of the tool's value is new beyond its
-  dependencies and the prior art it names), malware (yes or no, NIST SP
+  novelty (0..1, how much of the tool's value is actually new beyond its
+  dependencies and everything that already exists, in the library or
+  outside it, as the reviewer finds it; the author's novelty claim only
+  points reviewers to what the author compared, it is not the measure),
+  malware (yes or no, NIST SP
   800-53 Rev. 5 "malicious code", any system; a destructive bug is
   correctness). correctness and simplicity leave the charter: the charter
   holds only the DAO's values (the default keeps its four axes), each
@@ -1054,7 +1057,10 @@ published and discoverable, but nodes do not run it by default.
    stake persists across epochs, so there is always something behind a
    tool, including malware nobody has run yet.
 2. **Novelty claim on every publish.** The author states what is new,
-   naming the closest existing tools found via `probe_tools`. Reviewers
+   naming the closest existing tools found via `probe_tools`. (Superseded
+   2026-11-09: novelty is a review field of its own, the actual novelty the
+   reviewer finds against everything that exists, not a check of the
+   claim.) Reviewers
    score the claim on `correctness`; a copy with no real difference, or a
    claim that omits an obvious neighbour, fails it. Performance claims
    ("twice as fast") are part of the value proposition and checked the

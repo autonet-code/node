@@ -6,8 +6,10 @@ all required (a review missing one is invalid):
   - ``correctness`` -1..1: the tool works and is good at what it claims.
   - ``simplicity``   0..1: a nice-to-have; its factor in the tool's score
     runs from half (least simple) to full (simplest).
-  - ``novelty``      0..1: how much of the tool's value is new beyond its
-    dependencies and the prior art it names.
+  - ``novelty``      0..1: how much of the tool's value is actually new
+    beyond its dependencies and everything that already exists, in the
+    library or outside it, as the reviewer finds it (not whether the
+    author's novelty claim is right).
   - ``malware``      yes or no, by NIST SP 800-53 Rev. 5 "malicious code".
 
 The charter axes are separate: the DAO's values, each optional per review.
