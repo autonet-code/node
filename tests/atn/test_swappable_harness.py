@@ -308,8 +308,9 @@ async def test_attestation_carries_the_agents_own_loadout(tmp_path):
                          input_schema={"type": "object"}, author="a1",
                          code="print(1)")
     store.get(res["digest"]).grants.add("a2")
-    store.attest_usage("a1", [{"tool": res["digest"], "ok": True}], "ctx")
-    store.attest_usage("a2", [{"tool": res["digest"], "ok": True}], "ctx")
+    review = {"correctness": 1.0, "simplicity": 1.0, "novelty": 1.0, "malware": False}
+    store.attest_usage("a1", [{"tool": res["digest"], **review}], "ctx")
+    store.attest_usage("a2", [{"tool": res["digest"], **review}], "ctx")
     loadouts = [r.get("loadout") for r in store._iter_attestations()]
     assert loadouts[0] == fork
     assert loadouts[-1] == store.active_loadout
@@ -427,8 +428,6 @@ async def test_bonded_swap_runs_and_leaves_signed_evidence(tmp_path, monkeypatch
     rt.get_agent("worker").loadout = fork
     seen: list[str] = []
     rt.tool_bond_gate = ToolBondGate(rt, checker=lambda d: seen.append(d) or True)
-    # A core swap needs its declared spawn: reviewed safe by the network.
-    rt.tool_store.security_standing_provider = lambda d: {"harm_sum": 0, "harm_mass": 100, "supply": 1000}
 
     out = await rt.engine.route_tool_call("bash", {"command": "echo hi"}, "worker")
     assert out == {"output": "swapped:echo hi", "exit_code": 0}
@@ -448,10 +447,10 @@ async def test_bonded_swap_runs_and_leaves_signed_evidence(tmp_path, monkeypatch
     assert body["tool_digest"] == digest and body["replaces"] == "bash"
     assert body["input"] == {"command": "echo hi"}
     assert "swapped:echo hi" in body["output"]
-    kinds = {o["kind"] for o in body["observations"]}
-    assert {"file", "spawn"} <= kinds, body["observations"]
-    assert any(o.get("path", "").endswith("scratch.txt")
-               for o in body["observations"] if o["kind"] == "file")
+    # No audit hook since Decision 2026-11-09: the record is the call's
+    # input and output only, and says so.
+    assert "observations" not in body and body["version"] == 2
+    assert "observes nothing" in body["capture_limits"]
     if ev["sig"]:
         from eth_account import Account
         from eth_account.messages import encode_defunct

@@ -141,7 +141,7 @@ def test_atn_shell_manifest_declares_what_it_provides():
 
     assert set(caps.get("provides") or []) == set(SHELL_TOOL_EXECUTORS)
     # A shell bundle needs all three by definition. Declaring honestly is the
-    # point -- and is also exactly why tool_guard cannot contain it.
+    # point: reviewers check the code against it; nothing contains it.
     assert caps.get("net") and caps.get("fs") and caps.get("spawn")
 
 
