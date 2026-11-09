@@ -955,8 +955,12 @@ async def amain() -> int:
         check(not c["malware"] and close_to(c["score"], want_score, 1e-9),
               f"upper_case score V x C x S = {c['score']:.6f} "
               f"(V {want_v:.3f}, C {want_c:.3f}, S {want_s:.3f})")
-        check(close_to(c["author_mint"], c["weight"] * 0.6 * want_score * want_n, 1e-9),
-              f"author side x N {want_n:.2f}: {c['author_mint']:.6f} of weight {c['weight']:.6f}")
+        # Each concluding tool's share of the pool is its weight (the REP
+        # behind its reviews) over all of theirs.
+        share = pool * c["weight"] / sum(tm[d]["weight"] for d in tools.values())
+        check(close_to(c["author_mint"], share * 0.6 * want_score * want_n, 1e-6),
+              f"author side x N {want_n:.2f}: {c['author_mint']:.6f} ATN of the tool's "
+              f"{share:.6f}")
         check(c["reviewers"] == 2, "upper_case pays both reviewers")
         for k in ("mal_a", "mal_b"):
             m = tm[tools[k]]
@@ -1129,15 +1133,17 @@ async def amain() -> int:
             0.5 + 0.5 * hundredths_mean([(300, 0.5), (200, 0.6)]))
         n_b = hundredths_mean([(300, 0.4), (200, 0.5)])
         check(close_to(mb["score"], want, 1e-9)
-              and close_to(mb["author_mint"], mb["weight"] * want * n_b, 1e-9),
+              and close_to(mb["author_mint"], close2["emission_pool"] * want * n_b, 1e-6),
               f"released by its score {mb['score']:.4f}, the author keeping N {n_b:.2f}")
         t2 = close2["tool_rounds"]["tools"]
         check("held" not in t2[tools["mal_a"]] and "held" not in t2[tools["mal_b"]],
               "nothing waits any more (lower_case's author side stays unminted)")
         check(close2["concluded"] == {}, "no new conclusion")
         am2 = close2["agent_mint"]
-        check(set(am2) == {agents["author-1"].lower()},
-              f"the author is paid from the carried pool ({carry / ATN:.6f} ATN carried in)")
+        check(close_to(close2["emission_pool"], pool2 + carry / ATN, 1e-9),
+              f"its pool: {pool2} ATN burned since (the bond share's fee) + "
+              f"{carry / ATN:.6f} carried in")
+        check(set(am2) == {agents["author-1"].lower()}, "only the author is paid")
         blob = encode_agent_mint_blob(am2)
         cid = resolver.put(blob)
         prev_root = substrate.functions.latestEpochRoot().call().hex()

@@ -929,7 +929,9 @@ def federated_epoch_close(
         per_digest = {
             d: {**e, "mint": round(e["mint"] * _scale, output_decimals),
                 "reviewer_mint": round(e.get("reviewer_mint", 0.0) * _scale,
-                                       output_decimals)}
+                                       output_decimals),
+                "author_mint": round(e.get("author_mint", 0.0) * _scale,
+                                     output_decimals)}
             for d, e in sorted(per_digest.items())
         }
     # Sanctions: withhold the mint of every agent whose household is

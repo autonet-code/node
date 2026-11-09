@@ -357,6 +357,20 @@ class TestCloseCarry:
         assert nothing["agent_mint"] == {}
         assert nothing["tool_rounds"]["pool_carry"] == 7_000_000
 
+    def test_tool_mint_is_in_pool_units(self):
+        """The close's per-tool mint, reviewer mint and author mint are all
+        in ATN, the units of agent_mint (the app shows them side by side)."""
+        kp = Keypair.generate()
+        canonical = canonical_order(_batches([_registration_event(1)], kp))
+        snap = _snap({DIGEST: [_round(1, _rev(R1))]})
+        out = federated_epoch_close(
+            canonical, emission_pool=10.0,
+            tool_registrations=REGS, rep_shares=SHARES, review_snapshot=snap)
+        e = out["tool_mint"][DIGEST]
+        assert e["reviewer_mint"] == pytest.approx(4.0)
+        assert e["author_mint"] + e["reviewer_mint"] == pytest.approx(e["mint"])
+        assert e["mint"] == pytest.approx(sum(out["agent_mint"].values()), abs=1e-5)
+
     def test_deterministic(self):
         a = _mint({DIGEST: [_round(1, _rev(R1), _rev(R2))]})
         b = _mint({DIGEST: [_round(1, _rev(R2), _rev(R1))]})
